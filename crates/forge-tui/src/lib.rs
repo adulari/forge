@@ -7,6 +7,10 @@ use std::io::{IsTerminal, Write};
 
 use forge_types::SideEffect;
 
+pub mod app;
+mod tui;
+pub use tui::TuiPresenter;
+
 /// Things the core wants to show the user as a turn progresses.
 #[derive(Debug, Clone)]
 pub enum PresenterEvent {
