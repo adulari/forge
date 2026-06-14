@@ -45,6 +45,9 @@ pub enum PresenterEvent {
     Cost {
         session_total_usd: f64,
     },
+    /// A proposed file change, emitted by core BEFORE the write is confirmed/applied so the
+    /// user reviews the diff before answering the permission prompt.
+    Diff(forge_types::FileDiff),
     Done {
         final_text: String,
     },
@@ -115,6 +118,11 @@ impl Presenter for HeadlessPresenter {
             }
             PresenterEvent::Cost { session_total_usd } => {
                 println!("  $ session total: ${session_total_usd:.4}");
+            }
+            PresenterEvent::Diff(diff) => {
+                // Plain unified-diff text for scripting/pipes (no ANSI).
+                print!("{}", render::diff_to_plain(&diff));
+                let _ = std::io::stdout().flush();
             }
             // The final answer was already streamed via AssistantText; Done is a
             // lifecycle marker, so the headless renderer needs no extra output here.

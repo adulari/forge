@@ -1,10 +1,34 @@
 //! The core coding tools shipped in v0.1.
 
 use async_trait::async_trait;
-use forge_types::SideEffect;
+use forge_types::{DiffKind, FileDiff, SideEffect};
 use serde_json::{json, Value};
 
 use crate::{str_arg, Tool, ToolError};
+
+/// Map a file extension to a syntax-highlighting language token (best-effort; unknown
+/// extensions pass through and fall back to plain highlighting downstream).
+fn lang_from_path(path: &str) -> Option<String> {
+    let ext = std::path::Path::new(path).extension()?.to_str()?;
+    let tok = match ext {
+        "rs" => "rust",
+        "py" => "python",
+        "ts" | "tsx" => "typescript",
+        "js" | "mjs" | "cjs" | "jsx" => "javascript",
+        "go" => "go",
+        "toml" => "toml",
+        "json" => "json",
+        "md" | "markdown" => "markdown",
+        "sh" | "bash" => "bash",
+        "yaml" | "yml" => "yaml",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        other => other,
+    };
+    Some(tok.to_string())
+}
 
 /// Read a UTF-8 text file. Read-only — never prompts for permission.
 pub struct ReadFileTool;
@@ -63,6 +87,25 @@ impl Tool for WriteFileTool {
         tokio::fs::write(path, content).await?;
         Ok(format!("wrote {} bytes to {path}", content.len()))
     }
+
+    async fn preview(&self, args: &Value) -> Option<FileDiff> {
+        let path = str_arg(args, "path").ok()?;
+        let content = str_arg(args, "content").ok()?;
+        let old = tokio::fs::read_to_string(path).await.ok();
+        let kind = if old.is_some() {
+            DiffKind::Modified
+        } else {
+            DiffKind::Created
+        };
+        Some(FileDiff {
+            path: path.to_string(),
+            kind,
+            old,
+            new: Some(content.to_string()),
+            lang: lang_from_path(path),
+            binary: false,
+        })
+    }
 }
 
 /// Replace exactly one occurrence of `old` with `new` in a file. Mutates the workspace.
@@ -110,6 +153,27 @@ impl Tool for EditFileTool {
         let updated = content.replacen(old, new, 1);
         tokio::fs::write(path, &updated).await?;
         Ok(format!("edited {path} (1 replacement)"))
+    }
+
+    async fn preview(&self, args: &Value) -> Option<FileDiff> {
+        let path = str_arg(args, "path").ok()?;
+        let old = str_arg(args, "old").ok()?;
+        let new = str_arg(args, "new").ok()?;
+        let content = tokio::fs::read_to_string(path).await.ok()?;
+        // Mirror run()'s exactly-one-occurrence rule; otherwise skip the diff and let run()
+        // surface the real error.
+        if content.matches(old).count() != 1 {
+            return None;
+        }
+        let updated = content.replacen(old, new, 1);
+        Some(FileDiff {
+            path: path.to_string(),
+            kind: DiffKind::Modified,
+            old: Some(content),
+            new: Some(updated),
+            lang: lang_from_path(path),
+            binary: false,
+        })
     }
 }
 
