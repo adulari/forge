@@ -23,7 +23,7 @@ forge-tools = { path = "crates/forge-tools", version = "0.1.0" }
 forge-tui = { path = "crates/forge-tui", version = "0.1.0" }
 
 # External (pinned to current stable as of 2026-06; see ADRs)
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "fs", "process", "io-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "fs", "process", "io-util", "time"] }
 async-trait = "0.1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

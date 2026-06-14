@@ -49,7 +49,7 @@ pub struct RoutingDecision {
 }
 
 /// A routing strategy. Implement this to add a new classifier (e.g. an LLM-based one).
-pub trait Router {
+pub trait Router: Send {
     fn route(&self, prompt: &str, budget: BudgetState) -> RoutingDecision;
 }
 

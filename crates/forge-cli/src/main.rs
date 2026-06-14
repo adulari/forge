@@ -171,11 +171,11 @@ fn sessions() -> Result<()> {
     Ok(())
 }
 
-/// Build a ready session, either fresh or resumed, wiring all subsystems.
-fn build_session(
+/// Build a session around a caller-provided presenter, wiring all subsystems.
+fn build_session_with(
+    presenter: Box<dyn Presenter>,
     mock: bool,
     mode: Option<Mode>,
-    tui: bool,
     resume: Option<String>,
 ) -> Result<Session> {
     // Make any keyring-stored provider keys visible to the provider client.
@@ -187,7 +187,6 @@ fn build_session(
     }
 
     let store = open_store()?;
-
     let provider: Box<dyn Provider> = if mock {
         Box::new(MockProvider)
     } else {
@@ -195,14 +194,6 @@ fn build_session(
     };
     let router = Box::new(HeuristicRouter::new(config.clone()));
     let tools = ToolRegistry::with_core_tools();
-    let presenter: Box<dyn Presenter> = if tui && std::io::stdout().is_terminal() {
-        Box::new(TuiPresenter::new().context("initializing TUI")?)
-    } else {
-        if tui {
-            eprintln!("forge: --tui needs an interactive terminal; falling back to plain output");
-        }
-        Box::new(HeadlessPresenter::default())
-    };
 
     match resume {
         Some(prefix) => {
@@ -216,6 +207,24 @@ fn build_session(
                 .context("starting session")
         }
     }
+}
+
+/// Build a session with the default surface (TUI on a tty, else plain).
+fn build_session(
+    mock: bool,
+    mode: Option<Mode>,
+    tui: bool,
+    resume: Option<String>,
+) -> Result<Session> {
+    let presenter: Box<dyn Presenter> = if tui && std::io::stdout().is_terminal() {
+        Box::new(TuiPresenter::new().context("initializing TUI")?)
+    } else {
+        if tui {
+            eprintln!("forge: --tui needs an interactive terminal; falling back to plain output");
+        }
+        Box::new(HeadlessPresenter::default())
+    };
+    build_session_with(presenter, mock, mode, resume)
 }
 
 async fn run(
@@ -257,14 +266,17 @@ fn chat_action(line: &str) -> ChatAction {
 }
 
 async fn chat(mock: bool, mode: Option<Mode>, resume: Option<String>, plain: bool) -> Result<()> {
-    // Default to the interactive TUI on a real terminal; fall back to plain lines otherwise.
-    let tui = !plain && std::io::stdout().is_terminal();
-    let mut session = build_session(mock, mode, tui, resume)?;
-    if !tui && std::io::stdin().is_terminal() {
-        println!("forge chat — type a task and press enter; /quit to exit");
+    // Default to the interactive (animated) TUI on a real terminal.
+    if !plain && std::io::stdout().is_terminal() {
+        return run_chat_tui(mock, mode, resume).await;
     }
 
-    // Input comes from the attached surface (stdin for headless, key events for TUI).
+    // Plain line mode: read prompts from stdin.
+    let mut session =
+        build_session_with(Box::new(HeadlessPresenter::default()), mock, mode, resume)?;
+    if std::io::stdin().is_terminal() {
+        println!("forge chat — type a task and press enter; /quit to exit");
+    }
     while let Some(line) = session.read_line() {
         match chat_action(&line) {
             ChatAction::Quit => break,
@@ -276,6 +288,84 @@ async fn chat(mock: bool, mode: Option<Mode>, resume: Option<String>, plain: boo
                     .context("running agent turn")?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Animated TUI chat loop: renders at ~16fps, runs each turn on a task so a spinner
+/// ticks (and streamed tokens flow) while the model works.
+async fn run_chat_tui(mock: bool, mode: Option<Mode>, resume: Option<String>) -> Result<()> {
+    use forge_tui::{handle_key, App, ChannelPresenter, InputOutcome, KeyKind, Line, Tui, UiMsg};
+    use std::time::Duration;
+
+    let (tx, rx) = std::sync::mpsc::channel::<UiMsg>();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let session = build_session_with(Box::new(ChannelPresenter::new(tx)), mock, mode, resume)?;
+    let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+
+    let mut tui = Tui::new().context("initializing TUI")?;
+    let mut app = App::default();
+    let mut busy = false;
+    let mut pending: Option<std::sync::mpsc::Sender<bool>> = None;
+
+    loop {
+        app.busy = busy;
+        tui.draw(&app);
+
+        if let Some(key) = tui.poll_key().context("reading input")? {
+            if let Some(reply) = pending.take() {
+                // Answering a permission prompt.
+                let yes = matches!(
+                    key,
+                    KeyKind::Char('y') | KeyKind::Char('Y') | KeyKind::Enter
+                );
+                let _ = reply.send(yes);
+                app.prompt = None;
+            } else if busy {
+                if matches!(key, KeyKind::Esc) {
+                    break;
+                }
+            } else {
+                match handle_key(&mut app.input, key) {
+                    InputOutcome::Submit(line) => {
+                        app.lines.push(Line::User(line.clone()));
+                        app.done = false;
+                        app.tick = 0;
+                        busy = true;
+                        let s = session.clone();
+                        let dt = done_tx.clone();
+                        tokio::spawn(async move {
+                            let _ = s.lock().await.run_turn(&line).await;
+                            let _ = dt.send(());
+                        });
+                    }
+                    InputOutcome::Quit => break,
+                    InputOutcome::Editing => {}
+                }
+            }
+        }
+
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                UiMsg::Event(e) => app.apply(e),
+                UiMsg::Permission {
+                    tool,
+                    side_effect,
+                    reply,
+                } => {
+                    app.prompt = Some(format!("allow {tool} ({side_effect:?})"));
+                    pending = Some(reply);
+                }
+            }
+        }
+
+        if busy && done_rx.try_recv().is_ok() {
+            busy = false;
+        }
+        if busy {
+            app.tick = app.tick.wrapping_add(1);
+        }
+        tokio::time::sleep(Duration::from_millis(60)).await;
     }
     Ok(())
 }
