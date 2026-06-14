@@ -27,7 +27,8 @@ const MAX_TIMEOUT_SECS: u64 = 600;
 const CAPTURE_CAP: usize = 1 << 20; // 1 MiB
 /// Bytes of combined output handed back to the model (token budget).
 const MODEL_BUDGET: usize = 8 * 1024;
-/// Grace period between SIGTERM and SIGKILL on timeout.
+/// Grace period between SIGTERM and SIGKILL on timeout (Unix process-group kill).
+#[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
 pub struct ShellTool;
