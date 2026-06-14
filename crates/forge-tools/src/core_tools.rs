@@ -65,43 +65,6 @@ impl Tool for WriteFileTool {
     }
 }
 
-/// Execute a shell command and capture its output. Highest-risk tool.
-pub struct ShellTool;
-
-#[async_trait]
-impl Tool for ShellTool {
-    fn name(&self) -> &str {
-        "shell"
-    }
-    fn description(&self) -> &str {
-        "Run a shell command and return its combined stdout/stderr and exit status."
-    }
-    fn side_effect(&self) -> SideEffect {
-        SideEffect::Shell
-    }
-    fn schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": { "command": { "type": "string" } },
-            "required": ["command"]
-        })
-    }
-    async fn run(&self, args: &Value) -> Result<String, ToolError> {
-        let command = str_arg(args, "command")?;
-        let output = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .output()
-            .await?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Ok(format!(
-            "exit={}\n{stdout}{stderr}",
-            output.status.code().unwrap_or(-1)
-        ))
-    }
-}
-
 /// Replace exactly one occurrence of `old` with `new` in a file. Mutates the workspace.
 pub struct EditFileTool;
 
