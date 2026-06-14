@@ -133,12 +133,10 @@ impl App {
                     rationale,
                 })
             }
-            // A complete (non-streamed) assistant message: commit the whole block.
+            // A complete (non-streamed) assistant message: render markdown into scrollback.
             PresenterEvent::AssistantText(text) => {
                 self.flush.push(header_line("⚒ forge", ORANGE));
-                for l in text.lines() {
-                    self.flush.push(body_line(l));
-                }
+                self.flush.extend(crate::render::markdown_to_lines(&text));
                 self.flush.push(TextLine::default());
             }
             PresenterEvent::AssistantDelta(delta) => {
@@ -146,19 +144,16 @@ impl App {
                     self.flush.push(header_line("⚒ forge", ORANGE));
                     self.streaming_active = true;
                 }
+                // Accumulate the whole reply; it's rendered as markdown on AssistantDone so
+                // multi-line blocks (lists, code fences) stay whole. The growing tail shows
+                // live (plain) in the preview. (Per-block streaming finalize is a follow-up.)
                 self.streaming.push_str(&delta);
-                // Flush every completed (newline-terminated) line to scrollback; keep only
-                // the trailing partial line live in the preview.
-                while let Some(nl) = self.streaming.find('\n') {
-                    let line: String = self.streaming.drain(..=nl).collect();
-                    self.flush.push(body_line(line.trim_end_matches('\n')));
-                }
             }
             PresenterEvent::AssistantDone => {
                 if self.streaming_active {
                     let rest = std::mem::take(&mut self.streaming);
                     if !rest.is_empty() {
-                        self.flush.push(body_line(&rest));
+                        self.flush.extend(crate::render::markdown_to_lines(&rest));
                     }
                     self.flush.push(TextLine::default());
                     self.streaming_active = false;
@@ -501,25 +496,45 @@ mod tests {
     }
 
     #[test]
-    fn completed_lines_flush_partial_stays_live() {
+    fn streaming_accumulates_and_shows_live_until_done() {
         let mut app = App::default();
         app.apply(PresenterEvent::AssistantDelta("first line\nsecond ".into()));
-        // The completed line + the header are queued; the partial stays live.
-        let queued = flush_text(&mut app);
-        assert!(queued.contains("⚒ forge"), "header flushed on first delta");
-        assert!(queued.contains("first line"), "completed line flushed");
-        assert_eq!(app.streaming, "second ", "partial line kept live");
-        assert!(screen(&app).contains("second"), "partial shown in preview");
+        // The header is queued on the first delta; the body accumulates live (rendered as
+        // markdown only on Done, so multi-line blocks stay whole).
+        assert!(
+            flush_text(&mut app).contains("⚒ forge"),
+            "header flushed on first delta"
+        );
+        assert_eq!(
+            app.streaming, "first line\nsecond ",
+            "reply accumulates live"
+        );
+        assert!(screen(&app).contains("second"), "tail shown in preview");
         assert!(screen(&app).contains('▌'), "cursor shown while streaming");
     }
 
     #[test]
-    fn assistant_done_flushes_remaining_partial() {
+    fn assistant_done_renders_reply_to_scrollback() {
         let mut app = App::default();
         app.apply(PresenterEvent::AssistantDelta("committed text".into()));
         app.apply(PresenterEvent::AssistantDone);
         assert!(app.streaming.is_empty(), "streaming buffer cleared");
         assert!(flush_text(&mut app).contains("committed text"));
+    }
+
+    #[test]
+    fn assistant_markdown_is_rendered_not_literal() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::AssistantDelta(
+            "## Plan\n\n- do **it**\n".into(),
+        ));
+        app.apply(PresenterEvent::AssistantDone);
+        let text = flush_text(&mut app);
+        assert!(
+            text.contains("Plan") && !text.contains("##"),
+            "heading rendered: {text:?}"
+        );
+        assert!(text.contains("• do it"), "bullet + stripped bold: {text:?}");
     }
 
     #[test]
