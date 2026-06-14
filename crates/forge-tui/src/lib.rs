@@ -9,6 +9,7 @@ use forge_types::SideEffect;
 
 pub mod app;
 mod driver;
+mod render;
 mod tui;
 pub use app::{banner_lines, handle_key, App, InputOutcome, KeyKind};
 pub use driver::{ChannelPresenter, Tui, UiMsg};
