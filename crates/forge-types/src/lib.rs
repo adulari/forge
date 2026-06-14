@@ -192,6 +192,29 @@ pub struct PermissionRule {
     pub reason: Option<String>,
 }
 
+/// What kind of change a [`FileDiff`] represents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiffKind {
+    Created,
+    Modified,
+    Deleted,
+}
+
+/// A proposed file change, computed *before* a write tool runs so the human can review it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileDiff {
+    pub path: String,
+    pub kind: DiffKind,
+    /// Prior on-disk content (`None` for a created file).
+    pub old: Option<String>,
+    /// Proposed new content (`None` for a deleted file).
+    pub new: Option<String>,
+    /// Language token inferred from the extension; drives diff-body highlighting.
+    pub lang: Option<String>,
+    /// True → don't attempt a textual diff (non-UTF-8 target).
+    pub binary: bool,
+}
+
 /// A new opaque identifier (UUID v4) as a string.
 pub fn new_id() -> String {
     Uuid::new_v4().to_string()

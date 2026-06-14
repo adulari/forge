@@ -1227,6 +1227,7 @@ dependencies = [
  "forge-types",
  "pulldown-cmark",
  "ratatui",
+ "similar",
  "syntect",
 ]
 
