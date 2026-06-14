@@ -48,6 +48,8 @@ pub trait Presenter {
     fn emit(&mut self, event: PresenterEvent);
     /// Ask the user to confirm a side-effecting tool. Returns true to allow.
     fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> bool;
+    /// Read the next prompt line from the user. `None` means quit / end-of-input.
+    fn read_line(&mut self) -> Option<String>;
 }
 
 /// Plain line-based renderer for non-interactive use.
@@ -117,5 +119,17 @@ impl Presenter for HeadlessPresenter {
             return false;
         }
         matches!(line.trim(), "y" | "Y" | "yes")
+    }
+
+    fn read_line(&mut self) -> Option<String> {
+        if self.interactive {
+            print!("› ");
+            let _ = std::io::stdout().flush();
+        }
+        let mut line = String::new();
+        match std::io::stdin().read_line(&mut line) {
+            Ok(0) | Err(_) => None, // EOF or read error -> end
+            Ok(_) => Some(line),
+        }
     }
 }
