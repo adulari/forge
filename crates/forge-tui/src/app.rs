@@ -462,7 +462,10 @@ mod tests {
 
     #[test]
     fn statusline_shows_model_and_cost() {
-        let mut app = App { cost_usd: 0.0042, ..Default::default() };
+        let mut app = App {
+            cost_usd: 0.0042,
+            ..Default::default()
+        };
         app.apply(PresenterEvent::Routing {
             tier: "standard".into(),
             model: "openai::gpt-4o-mini".into(),
