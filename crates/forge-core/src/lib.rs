@@ -358,6 +358,14 @@ impl Session {
             args: args_json.clone(),
         });
 
+        // For a file-mutating tool, show the proposed change BEFORE the permission gate so
+        // the user reviews a diff instead of approving a blind write.
+        if side_effect == forge_types::SideEffect::Write {
+            if let Some(diff) = tool.preview(&call.args).await {
+                self.presenter.emit(PresenterEvent::Diff(diff));
+            }
+        }
+
         let allowed =
             match permission::decide(self.mode, side_effect, &call.name, &call.args, &self.rules) {
                 PermissionDecision::Allow => true,

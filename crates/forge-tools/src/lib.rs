@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use forge_types::SideEffect;
+use forge_types::{FileDiff, SideEffect};
 use serde_json::Value;
 
 mod core_tools;
@@ -32,6 +32,13 @@ pub trait Tool: Send + Sync {
     /// JSON Schema for the arguments object (advertised to the model).
     fn schema(&self) -> Value;
     async fn run(&self, args: &Value) -> Result<String, ToolError>;
+
+    /// Compute the proposed change *without touching disk*, for diff-review before the write
+    /// is confirmed. Returns `None` for tools that don't mutate files, or when a preview
+    /// can't be produced (the real error then surfaces from `run`). Default: no preview.
+    async fn preview(&self, _args: &Value) -> Option<FileDiff> {
+        None
+    }
 }
 
 /// Holds the available tools, looked up by name during the agent loop.
@@ -94,6 +101,29 @@ mod tests {
         ] {
             assert!(r.get(name).is_some(), "missing tool: {name}");
         }
+    }
+
+    #[tokio::test]
+    async fn write_file_preview_new_path_is_created_kind() {
+        let path = std::env::temp_dir().join(format!("forge-prev-{}.txt", forge_types::new_id()));
+        let args = serde_json::json!({ "path": path.to_str().unwrap(), "content": "hi there" });
+        let diff = WriteFileTool
+            .preview(&args)
+            .await
+            .expect("preview for a write");
+        assert_eq!(diff.kind, forge_types::DiffKind::Created);
+        assert!(diff.old.is_none(), "no prior content for a new file");
+        assert_eq!(diff.new.as_deref(), Some("hi there"));
+        // preview must NOT create the file.
+        assert!(!path.exists(), "preview is side-effect-free");
+    }
+
+    #[tokio::test]
+    async fn read_only_tool_has_no_preview() {
+        assert!(ReadFileTool
+            .preview(&serde_json::json!({"path":"x"}))
+            .await
+            .is_none());
     }
 
     #[test]

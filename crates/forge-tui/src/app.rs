@@ -167,6 +167,10 @@ impl App {
                 self.flush.push(tool_result_line(&name, ok, &summary))
             }
             PresenterEvent::Cost { session_total_usd } => self.cost_usd = session_total_usd,
+            PresenterEvent::Diff(diff) => {
+                self.flush.extend(crate::render::diff_to_lines(&diff));
+                self.flush.push(TextLine::default());
+            }
             PresenterEvent::Done { .. } => self.done = true,
         }
     }

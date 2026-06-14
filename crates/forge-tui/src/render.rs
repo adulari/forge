@@ -1,15 +1,18 @@
 //! Pure rendering helpers: turn model output into styled ratatui [`Line`]s. Free of terminal
-//! I/O so it's unit-testable on strings. Currently: markdown → lines (syntax highlighting of
-//! fenced code and diff rendering land in follow-up increments).
+//! I/O so it's unit-testable on strings: `markdown_to_lines` (markdown → styled lines),
+//! `highlight_code` (syntect syntax highlighting), and `diff_to_lines`/`diff_to_plain`
+//! (a `similar`-based unified diff for review-before-apply).
 //!
 //! `pulldown-cmark` is *total* (it degrades malformed markdown to literal text and never
 //! panics), so this renderer never drops content or crashes on bad input.
 
 use std::sync::OnceLock;
 
+use forge_types::{DiffKind, FileDiff};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use similar::{ChangeTag, TextDiff};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -17,8 +20,13 @@ use syntect::parsing::SyntaxSet;
 // Palette — mirrors crate::app so rendered markdown belongs to the same TUI.
 const ORANGE: Color = Color::Rgb(255, 145, 60);
 const DIM: Color = Color::Rgb(110, 110, 120);
+const OKGREEN: Color = Color::Rgb(120, 210, 140);
+const ERRRED: Color = Color::Rgb(240, 110, 110);
 const CODEFG: Color = Color::Rgb(205, 205, 215);
 const CODEBG: Color = Color::Rgb(40, 40, 48);
+
+/// Cap on rendered changed lines before truncating (keeps a huge diff from flooding scrollback).
+const MAX_DIFF_LINES: usize = 500;
 
 /// The base indent every rendered line carries (matches the plain `body_line` convention).
 const INDENT: &str = "  ";
@@ -69,6 +77,126 @@ pub fn highlight_code(lang: &str, lines: &[String]) -> Vec<Vec<Span<'static>>> {
             Err(_) => vec![Span::styled(line.clone(), Style::default().fg(CODEFG))],
         })
         .collect()
+}
+
+fn diff_header(diff: &FileDiff) -> String {
+    let kind = match diff.kind {
+        DiffKind::Created => "new file",
+        DiffKind::Modified => "modified",
+        DiffKind::Deleted => "deleted",
+    };
+    format!("{INDENT}✎ {} ({kind})", diff.path)
+}
+
+/// Render a proposed file change as a styled unified diff (path header, `@@` hunks, `+`/`-`/
+/// context gutters, syntax-highlighted bodies). Binary targets show a one-line summary.
+pub fn diff_to_lines(diff: &FileDiff) -> Vec<Line<'static>> {
+    let mut out = vec![Line::from(Span::styled(
+        diff_header(diff),
+        Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+    ))];
+
+    if diff.binary {
+        let o = diff.old.as_ref().map(|s| s.len()).unwrap_or(0);
+        let n = diff.new.as_ref().map(|s| s.len()).unwrap_or(0);
+        out.push(Line::from(Span::styled(
+            format!("{INDENT}binary file ({o} → {n} bytes)"),
+            Style::default().fg(DIM),
+        )));
+        return out;
+    }
+
+    let old = diff.old.as_deref().unwrap_or("");
+    let new = diff.new.as_deref().unwrap_or("");
+    let lang = diff.lang.as_deref().unwrap_or("");
+    let td = TextDiff::from_lines(old, new);
+    let gutter =
+        |sym: &str, c: Color| Span::styled(format!("{INDENT}{sym} "), Style::default().fg(c));
+    let mut emitted = 0usize;
+
+    for group in td.grouped_ops(3) {
+        let (Some(first), Some(last)) = (group.first(), group.last()) else {
+            continue;
+        };
+        let os = first.old_range().start;
+        let oe = last.old_range().end;
+        let ns = first.new_range().start;
+        let ne = last.new_range().end;
+        out.push(Line::from(Span::styled(
+            format!(
+                "{INDENT}@@ -{},{} +{},{} @@",
+                os + 1,
+                oe - os,
+                ns + 1,
+                ne - ns
+            ),
+            Style::default().fg(ORANGE),
+        )));
+        for op in group {
+            for change in td.iter_changes(&op) {
+                if emitted >= MAX_DIFF_LINES {
+                    out.push(Line::from(Span::styled(
+                        format!("{INDENT}… (diff truncated — full change in the tool result)"),
+                        Style::default().fg(DIM),
+                    )));
+                    return out;
+                }
+                emitted += 1;
+                let text = change.value().trim_end_matches('\n').to_string();
+                let (sym, color) = match change.tag() {
+                    ChangeTag::Delete => ("-", ERRRED),
+                    ChangeTag::Insert => ("+", OKGREEN),
+                    ChangeTag::Equal => (" ", DIM),
+                };
+                let mut line = vec![gutter(sym, color)];
+                // highlight the body; context/added stay readable, deletions tinted red.
+                let body = highlight_code(lang, &[text]);
+                if change.tag() == ChangeTag::Delete {
+                    let joined: String = body
+                        .into_iter()
+                        .flatten()
+                        .map(|s| s.content.into_owned())
+                        .collect();
+                    line.push(Span::styled(joined, Style::default().fg(ERRRED)));
+                } else {
+                    line.extend(body.into_iter().flatten());
+                }
+                out.push(Line::from(line));
+            }
+        }
+    }
+    if emitted == 0 {
+        out.push(Line::from(Span::styled(
+            format!("{INDENT}(no textual changes)"),
+            Style::default().fg(DIM),
+        )));
+    }
+    out
+}
+
+/// Plain unified-diff text (no ANSI) for the headless/piped path.
+pub fn diff_to_plain(diff: &FileDiff) -> String {
+    let mut s = format!("{}\n", diff_header(diff).trim_start());
+    if diff.binary {
+        s.push_str("  binary file (not shown)\n");
+        return s;
+    }
+    let td = TextDiff::from_lines(
+        diff.old.as_deref().unwrap_or(""),
+        diff.new.as_deref().unwrap_or(""),
+    );
+    for change in td.iter_all_changes() {
+        let sym = match change.tag() {
+            ChangeTag::Delete => "-",
+            ChangeTag::Insert => "+",
+            ChangeTag::Equal => " ",
+        };
+        s.push_str(&format!("{sym} {}", change.value()));
+    }
+    if !s.ends_with('\n') {
+        s.push('\n');
+    }
+    s
 }
 
 /// Render a markdown document to styled lines, indented to match the conversation body.
@@ -413,5 +541,76 @@ mod tests {
         let t = text_of(&out);
         assert!(t.contains("python"), "language label on the fence: {t:?}");
         assert!(t.contains("print('hi')"), "code preserved");
+    }
+
+    #[test]
+    fn diff_modified_has_gutters_and_hunk_header() {
+        let diff = FileDiff {
+            path: "src/a.rs".into(),
+            kind: DiffKind::Modified,
+            old: Some("let x = 1;\n".into()),
+            new: Some("let x = 2;\n".into()),
+            lang: Some("rust".into()),
+            binary: false,
+        };
+        let t = text_of(&diff_to_lines(&diff));
+        assert!(
+            t.contains("src/a.rs") && t.contains("modified"),
+            "header: {t:?}"
+        );
+        assert!(t.contains("@@"), "hunk header: {t:?}");
+        assert!(t.contains("- ") && t.contains("+ "), "+/- gutters: {t:?}");
+        assert!(
+            t.contains("x = 1") && t.contains("x = 2"),
+            "both versions shown"
+        );
+    }
+
+    #[test]
+    fn diff_created_file_is_all_additions() {
+        let diff = FileDiff {
+            path: "new.txt".into(),
+            kind: DiffKind::Created,
+            old: None,
+            new: Some("hello\nworld\n".into()),
+            lang: None,
+            binary: false,
+        };
+        let t = text_of(&diff_to_lines(&diff));
+        assert!(t.contains("new file"), "new-file header: {t:?}");
+        assert!(t.contains("+ hello") && t.contains("+ world"));
+    }
+
+    #[test]
+    fn diff_binary_shows_summary_only() {
+        let diff = FileDiff {
+            path: "img.png".into(),
+            kind: DiffKind::Modified,
+            old: Some("ab".into()),
+            new: Some("abcd".into()),
+            lang: None,
+            binary: true,
+        };
+        let t = text_of(&diff_to_lines(&diff));
+        assert!(t.contains("binary file"), "{t:?}");
+        assert!(!t.contains("@@"), "no textual diff for binary");
+    }
+
+    #[test]
+    fn diff_to_plain_is_ansi_free_unified_text() {
+        let diff = FileDiff {
+            path: "a.txt".into(),
+            kind: DiffKind::Modified,
+            old: Some("one\ntwo\n".into()),
+            new: Some("one\nTWO\n".into()),
+            lang: None,
+            binary: false,
+        };
+        let s = diff_to_plain(&diff);
+        assert!(
+            s.contains("- two") && s.contains("+ TWO"),
+            "plain diff: {s:?}"
+        );
+        assert!(!s.contains('\u{1b}'), "no ANSI escapes");
     }
 }
