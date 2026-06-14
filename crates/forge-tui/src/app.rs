@@ -60,6 +60,10 @@ pub struct App {
     pub input: String,
     /// The assistant reply currently streaming in (committed to `lines` when done).
     pub streaming: String,
+    /// True while a turn is running (drives the thinking spinner).
+    pub busy: bool,
+    /// Animation tick, advanced by the render loop while busy.
+    pub tick: usize,
 }
 
 /// A keystroke, decoupled from crossterm so input handling is testable.
@@ -182,8 +186,8 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(TextLine::from(left)), cols[0]);
 
     let mut right = Vec::new();
-    if !app.streaming.is_empty() {
-        let f = SPINNER[app.streaming.chars().count() % SPINNER.len()];
+    if app.busy {
+        let f = SPINNER[app.tick % SPINNER.len()];
         right.push(Span::styled(format!("{f} "), Style::default().fg(ORANGE)));
     }
     if let Some(r) = &app.routing {
@@ -486,5 +490,23 @@ mod tests {
         let text = screen(&app);
         assert!(text.contains("you"));
         assert!(text.contains("my own task"));
+    }
+
+    #[test]
+    fn busy_shows_a_spinner_frame() {
+        // SPINNER[2] == "⠹"; the header animates while a turn runs.
+        let app = App {
+            busy: true,
+            tick: 2,
+            ..Default::default()
+        };
+        assert!(screen(&app).contains('⠹'), "spinner frame shown when busy");
+    }
+
+    #[test]
+    fn idle_shows_no_spinner() {
+        let app = App::default();
+        let text = screen(&app);
+        assert!(!text.contains('⠹') && !text.contains('⠙'));
     }
 }

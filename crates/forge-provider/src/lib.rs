@@ -43,10 +43,10 @@ impl ModelResponse {
 }
 
 /// A sink for streamed assistant text deltas (lets the UI animate tokens as they arrive).
-pub type TextSink<'a> = dyn FnMut(&str) + 'a;
+pub type TextSink<'a> = dyn FnMut(&str) + Send + 'a;
 
 /// A model backend. Implement this trait (and nothing in the core) to add a provider.
-#[async_trait(?Send)]
+#[async_trait]
 pub trait Provider: Send + Sync {
     /// Run one completion against `model` given the transcript and the available tools.
     /// Streamed text is delivered to `on_text` as it arrives; the full text is also

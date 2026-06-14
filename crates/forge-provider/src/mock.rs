@@ -21,7 +21,7 @@ fn stream_words(text: &str, on_text: &mut TextSink<'_>) {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Provider for MockProvider {
     async fn complete(
         &self,

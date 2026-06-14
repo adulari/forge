@@ -8,7 +8,10 @@ use std::io::{IsTerminal, Write};
 use forge_types::SideEffect;
 
 pub mod app;
+mod driver;
 mod tui;
+pub use app::{handle_key, App, InputOutcome, KeyKind, Line};
+pub use driver::{ChannelPresenter, Tui, UiMsg};
 pub use tui::TuiPresenter;
 
 /// Things the core wants to show the user as a turn progresses.
@@ -48,7 +51,7 @@ pub enum PresenterEvent {
 
 /// A rendering + interaction surface. Implementors decide how to display events and how
 /// to obtain a permission decision from the user.
-pub trait Presenter {
+pub trait Presenter: Send {
     fn emit(&mut self, event: PresenterEvent);
     /// Ask the user to confirm a side-effecting tool. Returns true to allow.
     fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> bool;
