@@ -1,7 +1,7 @@
 //! The `forge` binary: parse arguments, load config, wire the subsystems behind their
 //! traits, and drive one agent turn. This is the thin composition root (ADR-0002).
 
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::IsTerminal;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -44,7 +44,7 @@ enum Command {
         #[arg(long)]
         resume: Option<String>,
     },
-    /// Start an interactive multi-turn chat session (reads prompts from stdin).
+    /// Start an interactive multi-turn chat session.
     Chat {
         /// Use the offline deterministic mock provider.
         #[arg(long)]
@@ -55,6 +55,9 @@ enum Command {
         /// Resume an existing session by id.
         #[arg(long)]
         resume: Option<String>,
+        /// Render the interactive ratatui TUI.
+        #[arg(long)]
+        tui: bool,
     },
     /// List past sessions (newest first).
     Sessions,
@@ -95,7 +98,12 @@ async fn main() -> Result<()> {
             tui,
             resume,
         } => run(prompt.join(" "), mock, mode, tui, resume).await,
-        Command::Chat { mock, mode, resume } => chat(mock, mode, resume).await,
+        Command::Chat {
+            mock,
+            mode,
+            resume,
+            tui,
+        } => chat(mock, mode, resume, tui).await,
         Command::Sessions => sessions(),
     }
 }
@@ -195,6 +203,10 @@ async fn run(
         .run_turn(&prompt)
         .await
         .context("running agent turn")?;
+    // In the TUI, hold the final frame until the user quits (Esc / Ctrl-C).
+    if tui {
+        let _ = session.read_line();
+    }
     Ok(())
 }
 
@@ -214,26 +226,14 @@ fn chat_action(line: &str) -> ChatAction {
     }
 }
 
-async fn chat(mock: bool, mode: Option<Mode>, resume: Option<String>) -> Result<()> {
-    // TUI chat (input box) is a planned follow-up; chat reads prompts from stdin.
-    let mut session = build_session(mock, mode, false, resume)?;
-
-    let stdin = std::io::stdin();
-    let interactive = stdin.is_terminal();
-    if interactive {
+async fn chat(mock: bool, mode: Option<Mode>, resume: Option<String>, tui: bool) -> Result<()> {
+    let mut session = build_session(mock, mode, tui, resume)?;
+    if !tui && std::io::stdin().is_terminal() {
         println!("forge chat — type a task and press enter; /quit to exit");
     }
 
-    let mut handle = stdin.lock();
-    loop {
-        if interactive {
-            print!("› ");
-            std::io::stdout().flush().ok();
-        }
-        let mut line = String::new();
-        if handle.read_line(&mut line)? == 0 {
-            break; // EOF
-        }
+    // Input comes from the attached surface (stdin for headless, key events for TUI).
+    while let Some(line) = session.read_line() {
         match chat_action(&line) {
             ChatAction::Quit => break,
             ChatAction::Skip => continue,

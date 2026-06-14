@@ -46,6 +46,47 @@ pub struct App {
     pub done: bool,
     /// A pending permission question shown while the TUI blocks on the user's y/n.
     pub prompt: Option<String>,
+    /// The current input-line buffer (shown in the input bar during chat).
+    pub input: String,
+}
+
+/// A keystroke, decoupled from crossterm so input handling is testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyKind {
+    Char(char),
+    Backspace,
+    Enter,
+    Esc,
+}
+
+/// The result of feeding a keystroke to the input line.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InputOutcome {
+    Editing,
+    Submit(String),
+    Quit,
+}
+
+/// Apply one keystroke to the input buffer (pure; no terminal I/O).
+pub fn handle_key(input: &mut String, key: KeyKind) -> InputOutcome {
+    match key {
+        KeyKind::Char(c) => {
+            input.push(c);
+            InputOutcome::Editing
+        }
+        KeyKind::Backspace => {
+            input.pop();
+            InputOutcome::Editing
+        }
+        KeyKind::Enter => {
+            if input.trim().is_empty() {
+                InputOutcome::Editing
+            } else {
+                InputOutcome::Submit(std::mem::take(input))
+            }
+        }
+        KeyKind::Esc => InputOutcome::Quit,
+    }
 }
 
 impl App {
@@ -80,11 +121,13 @@ impl App {
 
 /// Draw the whole UI for the current state.
 pub fn render(frame: &mut Frame, app: &App) {
-    // status box: 2 border rows + routing + cost + per-warning + optional prompt + done hint.
+    // status box: 2 border rows + routing + cost + per-warning + optional prompt + done hint
+    // + optional input bar.
     let status_h = 4u16
         .saturating_add(app.warnings.len().min(u16::MAX as usize) as u16)
         .saturating_add(app.prompt.is_some() as u16)
-        .saturating_add(app.done as u16);
+        .saturating_add(app.done as u16)
+        .saturating_add(!app.input.is_empty() as u16);
     let areas = Layout::vertical([
         Constraint::Length(1),        // header
         Constraint::Min(1),           // conversation
@@ -205,6 +248,13 @@ fn render_status(frame: &mut Frame, area: ratatui::layout::Rect, app: &App) {
         )));
     }
 
+    if !app.input.is_empty() {
+        lines.push(TextLine::from(vec![
+            Span::styled("› ", Style::default().fg(FORGE_ORANGE).bold()),
+            Span::raw(app.input.clone()),
+        ]));
+    }
+
     let block = Block::bordered()
         .title(" Model Mesh ")
         .border_style(Style::default().fg(FORGE_ORANGE));
@@ -286,5 +336,60 @@ mod tests {
             "approaching daily budget cap".into(),
         ));
         assert!(screen(&app).contains("approaching daily budget cap"));
+    }
+
+    #[test]
+    fn typing_a_char_appends_and_keeps_editing() {
+        let mut buf = String::new();
+        assert_eq!(
+            handle_key(&mut buf, KeyKind::Char('h')),
+            InputOutcome::Editing
+        );
+        assert_eq!(
+            handle_key(&mut buf, KeyKind::Char('i')),
+            InputOutcome::Editing
+        );
+        assert_eq!(buf, "hi");
+    }
+
+    #[test]
+    fn backspace_removes_last_char() {
+        let mut buf = "abc".to_string();
+        assert_eq!(
+            handle_key(&mut buf, KeyKind::Backspace),
+            InputOutcome::Editing
+        );
+        assert_eq!(buf, "ab");
+    }
+
+    #[test]
+    fn enter_submits_and_clears_buffer() {
+        let mut buf = "do it".to_string();
+        assert_eq!(
+            handle_key(&mut buf, KeyKind::Enter),
+            InputOutcome::Submit("do it".into())
+        );
+        assert_eq!(buf, "", "buffer cleared after submit");
+    }
+
+    #[test]
+    fn enter_on_empty_buffer_keeps_editing() {
+        let mut buf = "   ".to_string();
+        assert_eq!(handle_key(&mut buf, KeyKind::Enter), InputOutcome::Editing);
+    }
+
+    #[test]
+    fn esc_quits() {
+        let mut buf = "whatever".to_string();
+        assert_eq!(handle_key(&mut buf, KeyKind::Esc), InputOutcome::Quit);
+    }
+
+    #[test]
+    fn input_bar_renders_when_present() {
+        let app = App {
+            input: "fix the bug".to_string(),
+            ..Default::default()
+        };
+        assert!(screen(&app).contains("› fix the bug"));
     }
 }
