@@ -10,9 +10,9 @@ use forge_types::SideEffect;
 use serde_json::Value;
 
 mod core_tools;
-pub use core_tools::{
-    EditFileTool, ListDirTool, ReadFileTool, SearchTool, ShellTool, WriteFileTool,
-};
+mod shell;
+pub use core_tools::{EditFileTool, ListDirTool, ReadFileTool, SearchTool, WriteFileTool};
+pub use shell::ShellTool;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {

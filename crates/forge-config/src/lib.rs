@@ -121,7 +121,36 @@ pub fn builtin_deny_rules() -> Vec<PermissionRule> {
     vec![
         deny(
             "shell",
-            &["rm -rf /", "rm -rf ~", "rm -rf /*", ":(){ :|:& };:"],
+            &[
+                // catastrophic filesystem / disk
+                "rm -rf /",
+                "rm -rf ~",
+                "rm -rf /*",
+                ":(){ :|:& };:",
+                "dd of=/dev/*",
+                "mkfs*",
+                "mkfs.*",
+                // remote-to-shell pipe (matched against the raw command line)
+                "*| sh",
+                "*|sh",
+                "*| bash",
+                "*|bash",
+                "*| zsh",
+                "*|zsh",
+                // secret-file reads via common verbs
+                "cat *.env",
+                "cat *.pem",
+                "cat *id_rsa*",
+                "cat *id_ed25519*",
+                "cat */.ssh/*",
+                "cat *.aws/credentials*",
+                "cat *.git-credentials*",
+                "less *.env",
+                "head *.env",
+                "tail *.env",
+                "cp *.env *",
+                "cp */.ssh/* *",
+            ],
         ),
         deny("read_file", &secrets),
         deny("list_dir", &secrets),
