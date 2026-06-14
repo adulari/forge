@@ -1,6 +1,7 @@
 //! The `forge` binary: parse arguments, load config, wire the subsystems behind their
 //! traits, and drive one agent turn. This is the thin composition root (ADR-0002).
 
+use std::io::IsTerminal;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -10,7 +11,7 @@ use forge_mesh::HeuristicRouter;
 use forge_provider::{GenAiProvider, MockProvider, Provider};
 use forge_store::Store;
 use forge_tools::ToolRegistry;
-use forge_tui::HeadlessPresenter;
+use forge_tui::{HeadlessPresenter, Presenter, TuiPresenter};
 use forge_types::PermissionMode;
 
 #[derive(Parser)]
@@ -36,6 +37,9 @@ enum Command {
         /// Override the permission mode for this run.
         #[arg(long, value_enum)]
         mode: Option<Mode>,
+        /// Render the interactive ratatui TUI instead of plain line output.
+        #[arg(long)]
+        tui: bool,
     },
 }
 
@@ -67,11 +71,16 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Command::Run { prompt, mock, mode } => run(prompt.join(" "), mock, mode).await,
+        Command::Run {
+            prompt,
+            mock,
+            mode,
+            tui,
+        } => run(prompt.join(" "), mock, mode, tui).await,
     }
 }
 
-async fn run(prompt: String, mock: bool, mode: Option<Mode>) -> Result<()> {
+async fn run(prompt: String, mock: bool, mode: Option<Mode>, tui: bool) -> Result<()> {
     if prompt.trim().is_empty() {
         anyhow::bail!("empty prompt — usage: forge run \"<your task>\"");
     }
@@ -92,7 +101,14 @@ async fn run(prompt: String, mock: bool, mode: Option<Mode>) -> Result<()> {
     };
     let router = Box::new(HeuristicRouter::new(config.clone()));
     let tools = ToolRegistry::with_core_tools();
-    let presenter = Box::new(HeadlessPresenter::default());
+    let presenter: Box<dyn Presenter> = if tui && std::io::stdout().is_terminal() {
+        Box::new(TuiPresenter::new().context("initializing TUI")?)
+    } else {
+        if tui {
+            eprintln!("forge: --tui needs an interactive terminal; falling back to plain output");
+        }
+        Box::new(HeadlessPresenter::default())
+    };
 
     let cwd = std::env::current_dir()?.display().to_string();
     let mut session = Session::start(store, provider, router, tools, presenter, config, &cwd)

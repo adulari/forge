@@ -9,3 +9,5 @@ repository.workspace = true
 
 [dependencies]
 forge-types.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
