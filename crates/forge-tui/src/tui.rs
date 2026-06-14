@@ -5,7 +5,7 @@
 
 use std::io::{self, Stdout};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -14,7 +14,7 @@ use forge_types::SideEffect;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
-use crate::app::{self, App};
+use crate::app::{self, handle_key, App, InputOutcome, KeyKind};
 use crate::{Presenter, PresenterEvent};
 
 pub struct TuiPresenter {
@@ -49,21 +49,6 @@ impl TuiPresenter {
         let _ = self.terminal.draw(|f| app::render(f, app));
     }
 
-    fn wait_for_quit(&self) {
-        loop {
-            match event::read() {
-                Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => match k.code {
-                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc | KeyCode::Enter => {
-                        break
-                    }
-                    _ => {}
-                },
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        }
-    }
-
     fn restore(&mut self) -> io::Result<()> {
         disable_raw_mode()?;
         execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -80,13 +65,8 @@ impl Drop for TuiPresenter {
 
 impl Presenter for TuiPresenter {
     fn emit(&mut self, event: PresenterEvent) {
-        let is_done = matches!(event, PresenterEvent::Done { .. });
         self.app.apply(event);
         self.draw();
-        // Hold the final frame so the user can read it, then let the turn return.
-        if is_done {
-            self.wait_for_quit();
-        }
     }
 
     fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> bool {
@@ -108,5 +88,37 @@ impl Presenter for TuiPresenter {
         self.app.prompt = None;
         self.draw();
         allowed
+    }
+
+    fn read_line(&mut self) -> Option<String> {
+        self.app.input.clear();
+        self.draw();
+        loop {
+            match event::read() {
+                Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
+                    let key = match k.code {
+                        // Ctrl-C quits, like a shell.
+                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                            KeyKind::Esc
+                        }
+                        KeyCode::Char(c) => KeyKind::Char(c),
+                        KeyCode::Backspace => KeyKind::Backspace,
+                        KeyCode::Enter => KeyKind::Enter,
+                        KeyCode::Esc => KeyKind::Esc,
+                        _ => continue,
+                    };
+                    match handle_key(&mut self.app.input, key) {
+                        InputOutcome::Editing => self.draw(),
+                        InputOutcome::Submit(line) => {
+                            self.draw();
+                            return Some(line);
+                        }
+                        InputOutcome::Quit => return None,
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => return None,
+            }
+        }
     }
 }

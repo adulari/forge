@@ -138,6 +138,11 @@ impl Session {
         &self.id
     }
 
+    /// Read the next user prompt from the attached surface. `None` ends the session.
+    pub fn read_line(&mut self) -> Option<String> {
+        self.presenter.read_line()
+    }
+
     fn next_seq(&mut self) -> i64 {
         let n = self.seq;
         self.seq += 1;
@@ -344,6 +349,9 @@ mod tests {
         }
         fn confirm(&mut self, _tool: &str, _side_effect: SideEffect) -> bool {
             false
+        }
+        fn read_line(&mut self) -> Option<String> {
+            None
         }
     }
 
