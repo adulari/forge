@@ -64,7 +64,7 @@ fn to_genai_tool(spec: &ToolSpec) -> Tool {
         .with_schema(spec.schema.clone())
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Provider for GenAiProvider {
     async fn complete(
         &self,
