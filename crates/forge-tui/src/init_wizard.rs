@@ -39,8 +39,11 @@ pub struct BridgeItem {
 }
 
 /// Everything the composition root (forge-cli) feeds the wizard.
+#[derive(Default)]
 pub struct WizardInput {
     pub providers: Vec<ProviderItem>,
+    /// Search-API providers (e.g. `brave`) for the `web_search` tool — their own section.
+    pub search: Vec<ProviderItem>,
     pub bridges: Vec<BridgeItem>,
 }
 
@@ -54,10 +57,12 @@ pub struct WizardOutcome {
     pub cancelled: bool,
 }
 
-/// A focusable row: a provider key field, a bridge plan chooser, or the Finish button.
+/// A focusable row: a provider key field, a search-key field, a bridge plan chooser, or the
+/// Finish button.
 #[derive(Clone, Copy, PartialEq)]
 enum Row {
     Provider(usize),
+    Search(usize),
     Bridge(usize),
     Finish,
 }
@@ -67,10 +72,12 @@ struct State {
     input: WizardInput,
     /// Entered key per provider (empty = leave as-is / skip).
     keys: Vec<String>,
+    /// Entered key per search provider (empty = leave as-is / skip).
+    search_keys: Vec<String>,
     /// Selected plan index per bridge.
     plan_sel: Vec<Option<usize>>,
     cursor: usize,
-    /// True while typing into the focused provider's key field.
+    /// True while typing into the focused key field (provider or search).
     editing: bool,
     /// Reveal animation 0.0→1.0.
     anim: f32,
@@ -81,10 +88,12 @@ struct State {
 impl State {
     fn new(input: WizardInput) -> Self {
         let keys = vec![String::new(); input.providers.len()];
+        let search_keys = vec![String::new(); input.search.len()];
         let plan_sel = vec![None; input.bridges.len()];
         Self {
             input,
             keys,
+            search_keys,
             plan_sel,
             cursor: 0,
             editing: false,
@@ -94,12 +103,22 @@ impl State {
         }
     }
 
-    /// The full focusable row list: providers, then installed bridges, then Finish.
+    /// The full focusable row list: providers, search keys, installed bridges, then Finish.
     fn rows(&self) -> Vec<Row> {
         let mut r: Vec<Row> = (0..self.input.providers.len()).map(Row::Provider).collect();
+        r.extend((0..self.input.search.len()).map(Row::Search));
         r.extend((0..self.input.bridges.len()).map(Row::Bridge));
         r.push(Row::Finish);
         r
+    }
+
+    /// The focused editable key field (a provider or search-provider key), if any.
+    fn key_field_mut(&mut self) -> Option<&mut String> {
+        match self.focused() {
+            Row::Provider(i) => self.keys.get_mut(i),
+            Row::Search(i) => self.search_keys.get_mut(i),
+            _ => None,
+        }
     }
 
     fn focused(&self) -> Row {
@@ -121,7 +140,7 @@ impl State {
     /// Enter: start/stop editing a provider key, cycle nothing on a bridge, or finish.
     fn enter(&mut self) {
         match self.focused() {
-            Row::Provider(_) => self.editing = !self.editing,
+            Row::Provider(_) | Row::Search(_) => self.editing = !self.editing,
             Row::Bridge(i) => {
                 // Enter advances the plan selection (wraps), a quick way to pick without digits.
                 let n = self.input.bridges[i].plans.len();
@@ -146,8 +165,8 @@ impl State {
 
     fn push_char(&mut self, c: char) {
         if self.editing {
-            if let Row::Provider(i) = self.focused() {
-                self.keys[i].push(c);
+            if let Some(field) = self.key_field_mut() {
+                field.push(c);
             }
         } else if c.is_ascii_digit() {
             self.digit(c.to_digit(10).unwrap());
@@ -156,8 +175,8 @@ impl State {
 
     fn backspace(&mut self) {
         if self.editing {
-            if let Row::Provider(i) = self.focused() {
-                self.keys[i].pop();
+            if let Some(field) = self.key_field_mut() {
+                field.pop();
             }
         }
     }
@@ -190,6 +209,7 @@ impl State {
             .providers
             .iter()
             .zip(&self.keys)
+            .chain(self.input.search.iter().zip(&self.search_keys))
             .filter(|(_, k)| !k.is_empty())
             .map(|(p, k)| (p.id.clone(), k.clone()))
             .collect();
@@ -283,11 +303,29 @@ fn render(f: &mut Frame, state: &State) {
 
     lines.push(section("Providers", USER));
     for (vi, row) in rows.iter().enumerate().take(revealed) {
-        let selected = vi == state.cursor;
-        match row {
-            Row::Provider(i) => lines.push(provider_line(state, *i, selected)),
-            Row::Bridge(_) => {}
-            Row::Finish => {}
+        if let Row::Provider(i) = row {
+            let p = &state.input.providers[*i];
+            lines.push(key_line(
+                p,
+                &state.keys[*i],
+                vi == state.cursor,
+                state.editing,
+            ));
+        }
+    }
+    if !state.input.search.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section("Search (web_search key)", WARNYEL));
+        for (vi, row) in rows.iter().enumerate().take(revealed) {
+            if let Row::Search(i) = row {
+                let p = &state.input.search[*i];
+                lines.push(key_line(
+                    p,
+                    &state.search_keys[*i],
+                    vi == state.cursor,
+                    state.editing,
+                ));
+            }
         }
     }
     if !state.input.bridges.is_empty() {
@@ -329,10 +367,9 @@ fn marker(selected: bool) -> &'static str {
     }
 }
 
-fn provider_line(state: &State, i: usize, selected: bool) -> Line<'static> {
-    let p = &state.input.providers[i];
-    let editing = selected && state.editing;
-    let key = &state.keys[i];
+/// Render one key field (a provider or a search provider) — they look identical.
+fn key_line(p: &ProviderItem, key: &str, selected: bool, state_editing: bool) -> Line<'static> {
+    let editing = selected && state_editing;
     let value = if editing {
         format!("{}▌", "•".repeat(key.len()))
     } else if !key.is_empty() {
@@ -414,6 +451,11 @@ mod tests {
                     had_key: true,
                 },
             ],
+            search: vec![ProviderItem {
+                id: "brave".into(),
+                label: "Brave Search".into(),
+                had_key: false,
+            }],
             bridges: vec![BridgeItem {
                 prefix: "claude-cli".into(),
                 plans: vec![
@@ -425,12 +467,30 @@ mod tests {
     }
 
     #[test]
-    fn rows_are_providers_then_bridges_then_finish() {
+    fn rows_are_providers_then_search_then_bridges_then_finish() {
         let s = State::new(input());
         let rows = s.rows();
         assert!(matches!(rows[0], Row::Provider(0)));
-        assert!(matches!(rows[2], Row::Bridge(0)));
-        assert!(matches!(rows[3], Row::Finish));
+        assert!(matches!(rows[2], Row::Search(0)));
+        assert!(matches!(rows[3], Row::Bridge(0)));
+        assert!(matches!(rows[4], Row::Finish));
+    }
+
+    #[test]
+    fn typing_a_search_key_collects_it() {
+        let mut s = State::new(input());
+        s.move_down(); // Provider(1)
+        s.move_down(); // Search(0)
+        assert!(matches!(s.focused(), Row::Search(0)));
+        s.enter(); // start editing
+        for c in "brave-key".chars() {
+            s.push_char(c);
+        }
+        s.enter(); // commit
+        let out = s.outcome();
+        assert!(out
+            .keys
+            .contains(&("brave".to_string(), "brave-key".to_string())));
     }
 
     #[test]
@@ -454,7 +514,8 @@ mod tests {
     #[test]
     fn digit_selects_a_bridge_plan() {
         let mut s = State::new(input());
-        // Move to the bridge row (index 2).
+        // Move to the bridge row (providers ×2, search ×1, then the bridge at index 3).
+        s.move_down();
         s.move_down();
         s.move_down();
         assert!(matches!(s.focused(), Row::Bridge(0)));
