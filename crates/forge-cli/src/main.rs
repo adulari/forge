@@ -284,7 +284,7 @@ async fn spawn_assay(
     let config = forge_config::load().unwrap_or_default();
     let pricing = forge_mesh::pricing::Pricing::from_config(&config);
     let store = open_store()?;
-    let cat = discover_catalog().await;
+    let cat = discover_catalog(&config).await;
     if cat.is_empty() {
         app.note("assay: no models available — `forge auth <provider>` or run ollama");
         return Ok(None);
@@ -478,7 +478,7 @@ pub(crate) fn build_provider_and_router(
 /// auto-discovery routing: query each provider that has a key (plus keyless local `ollama`) for
 /// its model list, with a short per-provider timeout, and skip any that error. Cheap providers
 /// usually number 1–3, so this runs sequentially at session start (cached for the process).
-async fn discover_catalog() -> forge_mesh::ModelCatalog {
+async fn discover_catalog(config: &forge_config::Config) -> forge_mesh::ModelCatalog {
     use std::time::Duration;
     let mut models = Vec::new();
     // Keyless local first, then every key-holding provider.
@@ -498,8 +498,26 @@ async fn discover_catalog() -> forge_mesh::ModelCatalog {
     // Always-available subscription bridges (claude-cli/codex-cli) if their CLI is installed.
     // They don't rate-limit like the free API tiers, so the mesh can rely on them — and being
     // $0 subscriptions they rank first (prefer_subscription), so routing reaches a working model
-    // instead of erroring out when metered providers are throttled.
-    models.extend(forge_provider::available_bridge_models());
+    // instead of erroring out when metered providers are throttled. Each installed bridge
+    // contributes its bare default id PLUS one id per model alias (config override, else the
+    // bridge's built-in defaults) so the mesh can size each turn (haiku/mini ↔ opus) instead of
+    // seeing a single model. A stale alias just benches itself via failover — never a hard error.
+    for k in forge_provider::CliKind::all()
+        .into_iter()
+        .filter(|k| k.available())
+    {
+        let prefix = k.prefix();
+        models.push(k.default_model_id());
+        match config.mesh.bridge_models.get(prefix) {
+            Some(custom) if !custom.is_empty() => {
+                models.extend(custom.iter().map(|m| format!("{prefix}::{m}")));
+            }
+            _ => models.extend(k.default_models().iter().map(|m| format!("{prefix}::{m}"))),
+        }
+    }
+    // Dedup while preserving discovery order (a provider could list the same id twice).
+    let mut seen = std::collections::HashSet::new();
+    models.retain(|m| seen.insert(m.clone()));
     forge_mesh::ModelCatalog::new(models)
 }
 
@@ -508,7 +526,7 @@ async fn discover_catalog() -> forge_mesh::ModelCatalog {
 async fn models(probe: bool) -> Result<()> {
     forge_config::inject_provider_keys();
     let config = forge_config::load().unwrap_or_default();
-    let cat = discover_catalog().await;
+    let cat = discover_catalog(&config).await;
     if cat.is_empty() {
         println!(
             "no models discovered — set a provider key (`forge auth <provider>`) or run ollama"
@@ -548,7 +566,9 @@ async fn models(probe: bool) -> Result<()> {
                 tags.push("free".into());
             }
             if m.cost > f64::EPSILON {
-                tags.push(format!("~${:.4}/turn", m.cost));
+                tags.push(format!("paid ~${:.4}/turn", m.cost));
+            } else if m.paid {
+                tags.push("paid".into());
             }
             if benched.is_benched(&m.id) {
                 tags.push("benched".into());
@@ -651,7 +671,7 @@ async fn build_session_with(
     // Auto-discovery: build a live model catalog so the mesh routes to the best usable model
     // (docs/features/auto-discovery-mesh.md). Skipped for the offline mock and when disabled.
     let catalog = if !mock && config.mesh.auto_discover {
-        Some(discover_catalog().await)
+        Some(discover_catalog(&config).await)
     } else {
         None
     };
@@ -1414,7 +1434,9 @@ fn models_for_provider(
                         badges.push("free".into());
                     }
                     if m.cost > f64::EPSILON {
-                        badges.push(format!("~${:.4}/turn", m.cost));
+                        badges.push(format!("paid ~${:.4}/turn", m.cost));
+                    } else if m.paid {
+                        badges.push("paid".into()); // metered gateway model, price unknown
                     }
                     if benched.is_benched(&m.id) {
                         badges.push("benched".into());
