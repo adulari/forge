@@ -14,15 +14,17 @@ use forge_types::{
 };
 use serde::Deserialize;
 
-/// Which model to use per Mesh tier (resolved by the caller from config/catalog).
+/// Candidate models per Mesh tier, best-first (resolved by the caller from the health-filtered
+/// catalog). A critic tries them in order, benching any that rate-limit / go down and failing over
+/// to the next — so one dead model no longer wipes out a whole tier's critics.
 #[derive(Debug, Clone)]
 pub struct TierModels {
-    pub trivial: String,
-    pub complex: String,
+    pub trivial: Vec<String>,
+    pub complex: Vec<String>,
 }
 
 impl TierModels {
-    fn for_category(&self, c: FindingCategory) -> &str {
+    fn chain_for(&self, c: FindingCategory) -> &[String] {
         match c.tier() {
             TaskTier::Trivial => &self.trivial,
             _ => &self.complex,
@@ -54,7 +56,10 @@ struct Verdict {
 }
 
 /// Run the critic crew over `source` (the bundled scope content) and return a ranked report.
-/// `provider`/`pricing` are shared; critics + verifiers run concurrently.
+/// `provider`/`pricing`/`store` are shared; critics + verifiers run concurrently, each failing
+/// over down its tier's model chain (benching dead models to `store`) so a rate-limited model
+/// doesn't skip the whole tier.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_assay(
     scope: AssayScope,
     source: Arc<str>,
@@ -62,6 +67,8 @@ pub async fn run_assay(
     models: TierModels,
     provider: Arc<dyn Provider>,
     pricing: Arc<Pricing>,
+    store: Arc<forge_store::Store>,
+    cooldown: std::time::Duration,
 ) -> AssayReport {
     let models = Arc::new(models);
     let mut cost = 0.0;
@@ -71,16 +78,25 @@ pub async fn run_assay(
     //    attributable regardless of completion order.
     let mut critic_handles = Vec::new();
     for lens in lenses {
-        let (provider, source, pricing, models) = (
+        let (provider, source, pricing, models, store) = (
             provider.clone(),
             source.clone(),
             pricing.clone(),
             models.clone(),
+            store.clone(),
         );
         critic_handles.push(tokio::spawn(async move {
-            let model = models.for_category(lens).to_string();
             let msgs = critic_messages(lens, &source);
-            match complete_text(&provider, &pricing, &model, &msgs).await {
+            match complete_with_failover(
+                &provider,
+                &pricing,
+                &store,
+                models.chain_for(lens),
+                cooldown,
+                &msgs,
+            )
+            .await
+            {
                 Ok((text, c)) => (lens, Ok(parse_candidates(&text)), c),
                 Err(e) => (lens, Err(e), 0.0),
             }
@@ -103,11 +119,24 @@ pub async fn run_assay(
     //    candidates are dropped; survivors keep the verifier's confidence.
     let mut verify_handles = Vec::new();
     for (lens, cand) in candidates {
-        let (provider, pricing, models) = (provider.clone(), pricing.clone(), models.clone());
+        let (provider, pricing, models, store) = (
+            provider.clone(),
+            pricing.clone(),
+            models.clone(),
+            store.clone(),
+        );
         verify_handles.push(tokio::spawn(async move {
-            let model = models.for_category(lens).to_string();
             let msgs = verifier_messages(lens, &cand);
-            let (verdict, c) = match complete_text(&provider, &pricing, &model, &msgs).await {
+            let (verdict, c) = match complete_with_failover(
+                &provider,
+                &pricing,
+                &store,
+                models.chain_for(lens),
+                cooldown,
+                &msgs,
+            )
+            .await
+            {
                 Ok((text, c)) => (parse_verdict(&text), c),
                 Err(_) => (None, 0.0),
             };
@@ -146,21 +175,40 @@ pub async fn run_assay(
     report
 }
 
-/// One model call returning its text + the priced cost (read-only, no tools, no streaming use).
-async fn complete_text(
+/// Try each model in `chain` (best-first) until one answers; returns its text + priced cost.
+/// A retryable failure (rate-limit / unavailable / auth) benches that model in `store` and falls
+/// over to the next — the same model-health failover the agent loop uses (model-health-failover).
+/// `Err` only when the whole chain is exhausted (carries the last failure reason).
+async fn complete_with_failover(
     provider: &Arc<dyn Provider>,
     pricing: &Pricing,
-    model: &str,
+    store: &forge_store::Store,
+    chain: &[String],
+    cooldown: std::time::Duration,
     messages: &[Message],
 ) -> Result<(String, f64), String> {
-    let mut sink = |_ev: StreamEvent| {};
-    match provider.complete(model, messages, &[], &mut sink).await {
-        Ok(r) => {
-            let cost = pricing.cost_for(model, r.usage.input_tokens, r.usage.output_tokens);
-            Ok((r.content, cost))
-        }
-        Err(e) => Err(e.reason().to_string()),
+    if chain.is_empty() {
+        return Err("no usable model for this tier".to_string());
     }
+    let mut sink = |_ev: StreamEvent| {};
+    let mut last = String::from("no usable model");
+    for model in chain {
+        match provider.complete(model, messages, &[], &mut sink).await {
+            Ok(r) => {
+                let cost = pricing.cost_for(model, r.usage.input_tokens, r.usage.output_tokens);
+                return Ok((r.content, cost));
+            }
+            Err(e) => {
+                last = e.reason().to_string();
+                // Bench retryable failures so other critics + later runs route around them.
+                if e.is_retryable() {
+                    let _ = store.bench_for(model, e.cooldown(cooldown), e.reason());
+                }
+                // Try the next candidate in the chain.
+            }
+        }
+    }
+    Err(last)
 }
 
 const CRITIC_MARKER: &str = "ASSAY-CRITIC";
@@ -333,11 +381,93 @@ mod tests {
         Arc::new(Pricing::from_config(&forge_config::Config::default()))
     }
 
+    fn store() -> Arc<forge_store::Store> {
+        Arc::new(forge_store::Store::open_in_memory().unwrap())
+    }
+
     fn models() -> TierModels {
         TierModels {
-            trivial: "mock::cheap".into(),
-            complex: "mock::frontier".into(),
+            trivial: vec!["mock::cheap".into()],
+            complex: vec!["mock::frontier".into()],
         }
+    }
+
+    /// A provider that rate-limits any model in `bad`, and otherwise plays critic (a correctness
+    /// finding) + verifier (uphold). Used to exercise per-critic model failover.
+    struct FailoverProvider {
+        bad: std::collections::HashSet<String>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for FailoverProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut EventSink<'_>,
+        ) -> Result<ModelResponse, ProviderError> {
+            if self.bad.contains(model) {
+                return Err(ProviderError::RateLimited {
+                    message: "429".into(),
+                    retry_after: Some(std::time::Duration::from_secs(30)),
+                });
+            }
+            let sys = messages
+                .iter()
+                .find(|m| m.role == forge_types::Role::System)
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+            let content = if sys.contains(VERIFIER_MARKER) {
+                r#"{"verdict":"uphold","confidence":"high"}"#
+            } else if sys.contains(CRITIC_MARKER) {
+                r#"[{"severity":"high","file":"a.rs","line":1,"title":"bug","why":"w","fix":"f","effort":"small"}]"#
+            } else {
+                "[]"
+            };
+            Ok(ModelResponse {
+                content: content.into(),
+                tool_calls: vec![],
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn critic_fails_over_when_its_model_is_rate_limited() {
+        // The first complex-tier model 429s; the critic must fall over to the next and still
+        // produce a finding (the bug the user hit: one dead model skipped the whole tier).
+        let provider = Arc::new(FailoverProvider {
+            bad: ["bad::model".to_string()].into_iter().collect(),
+        });
+        let st = store();
+        let report = run_assay(
+            AssayScope::Repo,
+            Arc::from("fn main() {}"),
+            vec![FindingCategory::Correctness], // complex tier
+            TierModels {
+                trivial: vec![],
+                complex: vec!["bad::model".into(), "good::model".into()],
+            },
+            provider,
+            pricing(),
+            st.clone(),
+            std::time::Duration::from_secs(60),
+        )
+        .await;
+
+        assert_eq!(
+            report.findings.len(),
+            1,
+            "failed over to a live model instead of skipping the tier: {report:?}"
+        );
+        assert!(
+            report.skipped_lenses.is_empty(),
+            "nothing skipped after failover: {report:?}"
+        );
+        assert!(
+            st.current_benched().unwrap().is_benched("bad::model"),
+            "the rate-limited model was benched"
+        );
     }
 
     #[tokio::test]
@@ -356,6 +486,8 @@ mod tests {
             models(),
             provider,
             pricing(),
+            store(),
+            std::time::Duration::from_secs(60),
         )
         .await;
 
@@ -385,6 +517,8 @@ mod tests {
             models(),
             provider,
             pricing(),
+            store(),
+            std::time::Duration::from_secs(60),
         )
         .await;
 

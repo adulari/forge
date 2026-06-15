@@ -321,6 +321,7 @@ impl Session {
     ) -> Result<(), CoreError> {
         let pricing = Arc::new(self.pricing.clone());
         let lenses = forge_types::FindingCategory::crew().to_vec();
+        let cooldown = std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
         let mut report = assay::run_assay(
             forge_types::AssayScope::Repo,
             source,
@@ -328,6 +329,8 @@ impl Session {
             models,
             Arc::clone(&self.provider),
             pricing,
+            Arc::clone(&self.store),
+            cooldown,
         )
         .await;
         if let Ok(run_id) = self
@@ -2198,8 +2201,8 @@ mod tests {
             .assay(
                 Arc::from("fn main() {}"),
                 assay::TierModels {
-                    trivial: "m".into(),
-                    complex: "m".into(),
+                    trivial: vec!["m".into()],
+                    complex: vec!["m".into()],
                 },
                 false, // analysis-only
             )

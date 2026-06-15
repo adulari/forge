@@ -291,14 +291,22 @@ async fn spawn_assay(
     }
     // Route critics around rate-limited / benched models, like the agent loop does.
     let benched = store.current_benched().unwrap_or_default();
-    let pick = |tier| {
-        cat.ranked_for(tier, &pricing, 8)
+    // Build a CHAIN per tier (ranked, health-filtered): the crew tries them in order and fails
+    // over when one rate-limits, instead of giving up on a single dead model.
+    let chain = |tier| {
+        let mut models: Vec<String> = cat
+            .ranked_for(tier, &pricing, 8)
             .into_iter()
-            .find(|m| !benched.is_benched(m))
-            .or_else(|| config.model_for(tier).map(String::from))
-            .unwrap_or_default()
+            .filter(|m| !benched.is_benched(m))
+            .collect();
+        if models.is_empty() {
+            if let Some(m) = config.model_for(tier) {
+                models.push(m.to_string());
+            }
+        }
+        models
     };
-    let (trivial, complex) = (pick(TaskTier::Trivial), pick(TaskTier::Complex));
+    let (trivial, complex) = (chain(TaskTier::Trivial), chain(TaskTier::Complex));
     if trivial.is_empty() && complex.is_empty() {
         app.note(
             "assay: every model is rate-limited/benched — try /mode or `forge models --probe`",
