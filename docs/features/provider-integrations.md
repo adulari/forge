@@ -450,8 +450,13 @@ content (last-resort) rather than an empty success.
 - [ ] **B:** all negative paths return clear errors, never hang/panic (AC-B4–B6); timeout
       kills the process group.
 - [ ] **B:** boundary test proves no credential file/env is read or set (AC-B7).
-- [ ] **B:** one-time ToS/discretion notice on first use (AC-B8); docs carry the honest ToS
-      analysis (§B-ToS).
+- [x] **B:** one-time ToS/discretion notice on first use (AC-B8) — emitted via `tracing::warn!`
+      on the first CLI-bridge dispatch (`DispatchProvider`); surfacing it as a TUI
+      `PresenterEvent::Warning` is a follow-up (the provider has no presenter handle). Docs
+      carry the honest ToS analysis (§B-ToS).
+- [x] **B verified live:** `tests/cli_bridge_live.rs` round-trips real `claude` (2.1.177) and
+      `codex` (0.130.0) — text streamed, usage captured, cost $0, no tool calls. Gated behind
+      `FORGE_CLI_BRIDGE_TESTS=1 -- --ignored` (needs an authenticated CLI; consumes quota).
 - [ ] Existing provider contract tests + workspace tests stay green (no regression on the
       three current providers).
 - [ ] `forge auth` help + README/docs list the new providers and the CLI-bridge opt-in.

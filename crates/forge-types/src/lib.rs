@@ -100,7 +100,7 @@ pub struct ToolCall {
 }
 
 /// Token counts and computed cost for one provider call.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
