@@ -299,13 +299,39 @@ fn init() -> Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("`forge init` is interactive — run it in a terminal");
     }
-    // Build the wizard inputs from what Forge knows: every key-based provider (with a friendly
-    // label + whether a key is already stored) and every INSTALLED CLI bridge (with its plans).
+    let outcome =
+        forge_tui::init_wizard::run(wizard_input()).context("running the setup wizard")?;
+    if outcome.cancelled {
+        println!("Setup cancelled — run `forge init` anytime.");
+        return Ok(());
+    }
+    let path = apply_wizard_outcome(&outcome)?;
+    println!("✓ Setup saved to {}", path.display());
+    println!(
+        "  {} key(s) stored · {} bridge plan(s) recorded.",
+        outcome.keys.len(),
+        outcome.plans.len()
+    );
+    println!("  The mesh routes across these by task tier + cost. Try `forge models`.");
+    Ok(())
+}
+
+/// Build the config-wizard inputs from what Forge knows: key-based model providers, search-API
+/// providers (for `web_search`), and every INSTALLED CLI bridge (with its subscription plans).
+/// Shared by `forge init` and the in-chat `/config` command.
+fn wizard_input() -> forge_tui::WizardInput {
     let providers = forge_config::known_key_providers()
         .map(|p| forge_tui::ProviderItem {
             id: p.to_string(),
             label: provider_label(p).to_string(),
             had_key: forge_config::has_api_key(p),
+        })
+        .collect();
+    let search = forge_config::known_search_providers()
+        .map(|p| forge_tui::ProviderItem {
+            id: p.to_string(),
+            label: forge_config::search_provider_label(p).to_string(),
+            had_key: forge_config::has_search_key(p),
         })
         .collect();
     let bridges = forge_provider::CliKind::all()
@@ -319,28 +345,25 @@ fn init() -> Result<()> {
                 .collect(),
         })
         .collect();
-
-    let outcome = forge_tui::init_wizard::run(forge_tui::WizardInput { providers, bridges })
-        .context("running the setup wizard")?;
-    if outcome.cancelled {
-        println!("Setup cancelled — run `forge init` anytime.");
-        return Ok(());
+    forge_tui::WizardInput {
+        providers,
+        search,
+        bridges,
     }
+}
 
-    // Keys → OS keyring (never the config file, ADR-0007); plans → user config.
+/// Persist a wizard outcome: keys → OS keyring (ADR-0007), plans → user config; then inject
+/// both into this process's env so a running session picks them up immediately. Returns the
+/// config path. Shared by `forge init` and `/config`.
+fn apply_wizard_outcome(outcome: &forge_tui::WizardOutcome) -> Result<std::path::PathBuf> {
     for (provider, key) in &outcome.keys {
         forge_config::store_api_key(provider, key)
             .with_context(|| format!("storing {provider} key"))?;
     }
     let path = forge_config::write_subscriptions(&outcome.plans).context("writing config")?;
-    println!("✓ Setup saved to {}", path.display());
-    println!(
-        "  {} provider key(s) stored · {} bridge plan(s) recorded.",
-        outcome.keys.len(),
-        outcome.plans.len()
-    );
-    println!("  The mesh routes across these by task tier + cost. Try `forge models`.");
-    Ok(())
+    forge_config::inject_provider_keys();
+    forge_config::inject_search_keys();
+    Ok(path)
 }
 
 fn open_store() -> Result<Store> {
@@ -1414,6 +1437,24 @@ async fn dispatch_command(
         // `/models` opens the interactive model browser: a provider list (with global counts in
         // the heading) that drills into each provider's models on Enter; Esc steps back.
         CommandAction::ListModels => open_models_root(session, app).await?,
+        // `/config` launches the animated setup wizard full-screen (reconfigure mode): set
+        // provider + search API keys and bridge plans, then return to chat. Keys are stored +
+        // injected live so the current session picks them up without a restart.
+        CommandAction::Config => {
+            let outcome = tui
+                .run_fullscreen(|| forge_tui::init_wizard::run(wizard_input()))
+                .map_err(|e| anyhow::anyhow!("config wizard: {e}"))?;
+            if outcome.cancelled {
+                app.note("config cancelled");
+            } else {
+                apply_wizard_outcome(&outcome)?;
+                app.note(&format!(
+                    "✓ config saved — {} key(s), {} bridge plan(s)",
+                    outcome.keys.len(),
+                    outcome.plans.len()
+                ));
+            }
+        }
         // `/undo` and `/checkpoints` both open the same interactive picker over the per-turn
         // checkpoints — pick any past message to rewind (chat + files) to. Enter acts in
         // picker_accept.

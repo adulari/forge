@@ -564,6 +564,30 @@ pub fn known_search_providers() -> impl Iterator<Item = &'static str> {
     SEARCH_ENV_VARS.iter().map(|(name, _)| *name)
 }
 
+/// Whether a search-API key is configured (env var or keyring) for `provider`. Unlike
+/// [`has_api_key`], this checks the `SEARCH_ENV_VARS` table (search keys are not model
+/// providers, so `has_api_key` would wrongly treat them as keyless).
+pub fn has_search_key(provider: &str) -> bool {
+    let Some((_, var)) = SEARCH_ENV_VARS.iter().find(|(n, _)| *n == provider) else {
+        return false;
+    };
+    if std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false) {
+        return true;
+    }
+    keyring::Entry::new(KEYRING_SERVICE, provider)
+        .and_then(|e| e.get_password())
+        .map(|k| !k.is_empty())
+        .unwrap_or(false)
+}
+
+/// A human label + hint for a search provider, shown in `forge init` / `/config`.
+pub fn search_provider_label(provider: &str) -> &'static str {
+    match provider {
+        "brave" => "Brave Search (web_search) — metered, ~$0.005/query",
+        _ => "Web search API key",
+    }
+}
+
 /// Export keyring-stored search keys into the environment so the `web_search` tool (which
 /// reads `BRAVE_API_KEY`) sees them. Mirrors [`inject_provider_keys`]; best-effort.
 pub fn inject_search_keys() {
