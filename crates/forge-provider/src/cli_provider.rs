@@ -263,6 +263,15 @@ fn build_args(
             "exec".into(),
             "--json".into(),
             "--skip-git-repo-check".into(),
+            // Isolate codex's tool surface to ONLY Forge's MCP server: don't load the user's
+            // ~/.codex/config.toml, which can register extra MCP servers (e.g. a personal
+            // brave-search) that would let codex search/act OUTSIDE Forge's gate. Without this,
+            // codex used the user's own search MCP instead of Forge's web_search. Auth still
+            // comes from CODEX_HOME (per the flag's contract); we re-supply everything Forge
+            // needs via the -c overrides below. (claude's path is already isolated via
+            // --strict-mcp-config + --tools "".) `--search` is intentionally never passed, so
+            // codex's native Responses web_search stays off too.
+            "--ignore-user-config".into(),
             "--sandbox".into(),
             "read-only".into(),
             "-c".into(),
@@ -1246,6 +1255,11 @@ mod tests {
         assert!(joined.contains("approval_policy=\"never\""));
         // reasoning summaries on so codex emits reasoning items (streamed thinking).
         assert!(joined.contains("model_reasoning_summary"));
+        // Isolate codex from the user's ~/.codex/config.toml so its only tool surface is
+        // Forge's MCP server (no personal brave-search / extra MCP servers escaping the gate).
+        assert!(args.contains(&"--ignore-user-config".to_string()));
+        // Native web search must stay off — Forge's web_search is the only search path.
+        assert!(!args.contains(&"--search".to_string()));
         assert_eq!(args.last().unwrap(), "do a thing");
         assert!(!args.contains(&"--model".to_string()));
     }
