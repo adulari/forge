@@ -204,6 +204,24 @@ impl Tui {
         }
         Ok(None)
     }
+
+    /// Run a full-screen takeover (e.g. the `/config` wizard) that owns its own alternate
+    /// screen + raw mode and restores them on exit. Afterwards the chat's raw mode is back
+    /// off and the alt-screen excursion left the inline cursor stale, so re-enter raw mode and
+    /// rebuild the inline viewport. The conversation scrollback above is untouched.
+    pub fn run_fullscreen<T>(&mut self, f: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        let out = f();
+        enable_raw_mode()?;
+        let backend = CrosstermBackend::new(io::stdout());
+        self.terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(LIVE_H),
+            },
+        )?;
+        let _ = self.terminal.clear();
+        out
+    }
 }
 
 impl Drop for Tui {
