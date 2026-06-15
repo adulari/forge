@@ -471,6 +471,9 @@ pub enum SideEffect {
     Write,
     /// Executes arbitrary shell commands.
     Shell,
+    /// Reaches the network (web fetch/search) — distinct from a local read: egress can
+    /// leak context or hit internal hosts, so it is gated separately from `ReadOnly`.
+    Network,
 }
 
 /// Outcome of a permission check.

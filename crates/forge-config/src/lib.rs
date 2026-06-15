@@ -555,6 +555,30 @@ const PROVIDER_ENV_VARS: &[(&str, &str)] = &[
     ("cerebras", "CEREBRAS_API_KEY"), // no native genai adapter — custom endpoint resolver
 ];
 
+// Search-API providers for the `web_search` tool. Kept separate from PROVIDER_ENV_VARS so
+// they never enter model discovery / the mesh — they authenticate a tool, not a model.
+const SEARCH_ENV_VARS: &[(&str, &str)] = &[("brave", "BRAVE_API_KEY")];
+
+/// Search providers Forge can authenticate (`forge auth brave`).
+pub fn known_search_providers() -> impl Iterator<Item = &'static str> {
+    SEARCH_ENV_VARS.iter().map(|(name, _)| *name)
+}
+
+/// Export keyring-stored search keys into the environment so the `web_search` tool (which
+/// reads `BRAVE_API_KEY`) sees them. Mirrors [`inject_provider_keys`]; best-effort.
+pub fn inject_search_keys() {
+    for (provider, var) in SEARCH_ENV_VARS {
+        if std::env::var(var).is_ok() {
+            continue;
+        }
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, provider) {
+            if let Ok(key) = entry.get_password() {
+                std::env::set_var(var, key);
+            }
+        }
+    }
+}
+
 /// The conventional environment variable for a provider's API key, if it needs one.
 fn env_var_for(provider: &str) -> Option<&'static str> {
     PROVIDER_ENV_VARS
