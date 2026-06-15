@@ -353,6 +353,8 @@ enum Parsed {
         resets_at: Option<i64>,
         fraction: Option<f64>,
     },
+    /// Codex's `thread.started` id — keys the session rollout file we read its quota from.
+    Thread(String),
     /// Authoritative final answer (Claude's `result.result`); used if nothing streamed.
     Final(String),
     Error(String),
@@ -384,6 +386,103 @@ fn quota_status_from(
         return QuotaStatus::Warning;
     }
     QuotaStatus::Ok
+}
+
+/// Build a codex [`QuotaHint`] from its session rollout JSONL (the file the TUI's usage bar reads;
+/// `exec --json` omits it from stdout). Scans for the LAST `token_count` event carrying
+/// `rate_limits` and takes the *stricter* of the primary (5h) / secondary (weekly) windows. The
+/// reset is normalised to epoch secs. ToS-safe: we read codex's own session log, never its token.
+fn codex_quota_from_rollout(jsonl: &str, provider: &str) -> Option<forge_types::QuotaHint> {
+    // Last wins — the most recent snapshot in the turn.
+    let rl = jsonl.lines().rev().find_map(|line| {
+        let v: Value = serde_json::from_str(line.trim()).ok()?;
+        let p = v.get("payload").unwrap_or(&v);
+        if p.get("type").and_then(Value::as_str) != Some("token_count") {
+            return None;
+        }
+        p.get("rate_limits").filter(|r| r.is_object()).cloned()
+    })?;
+
+    let window = |key: &str| {
+        rl.get(key).and_then(|w| {
+            let used = w.get("used_percent").and_then(Value::as_f64)?;
+            let resets = w.get("resets_at").and_then(Value::as_i64);
+            let mins = w.get("window_minutes").and_then(Value::as_i64).unwrap_or(0);
+            Some((used, resets, mins))
+        })
+    };
+    // Pick whichever window is closer to its limit.
+    let stricter = [window("primary"), window("secondary")]
+        .into_iter()
+        .flatten()
+        .max_by(|a, b| a.0.total_cmp(&b.0))?;
+    let (used_percent, resets_at, window_minutes) = stricter;
+
+    let reached = rl
+        .get("rate_limit_reached_type")
+        .map(|t| !t.is_null())
+        .unwrap_or(false);
+    let fraction = used_percent / 100.0;
+    let status = if reached {
+        forge_types::QuotaStatus::Exhausted
+    } else {
+        // Reuse the same thresholds as the Claude path (≥98% over, ≥80% near).
+        quota_status_from("", false, Some(fraction))
+    };
+    let label = match window_minutes {
+        300 => "five_hour".to_string(),
+        10080 => "weekly".to_string(),
+        m if m > 0 => format!("{m}m"),
+        _ => String::new(),
+    };
+    Some(forge_types::QuotaHint {
+        provider: provider.to_string(),
+        window: label,
+        status,
+        resets_at,
+        fraction_used: Some(fraction),
+    })
+}
+
+/// `${CODEX_HOME:-~/.codex}/sessions`, where codex writes its rollout files.
+fn codex_sessions_dir() -> Option<std::path::PathBuf> {
+    if let Some(h) = std::env::var_os("CODEX_HOME") {
+        return Some(std::path::PathBuf::from(h).join("sessions"));
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".codex")
+            .join("sessions"),
+    )
+}
+
+/// Find the rollout file for a codex thread (`rollout-<ts>-<thread_id>.jsonl`) under the sessions
+/// dir (organised `YYYY/MM/DD/`). Bounded recursion; returns the first match.
+fn find_codex_rollout(thread_id: &str) -> Option<std::path::PathBuf> {
+    fn search(dir: &std::path::Path, suffix: &str, depth: u8) -> Option<std::path::PathBuf> {
+        if depth == 0 {
+            return None;
+        }
+        let mut subdirs = Vec::new();
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                subdirs.push(path);
+            } else if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with(suffix))
+            {
+                return Some(path);
+            }
+        }
+        subdirs
+            .into_iter()
+            .find_map(|d| search(&d, suffix, depth - 1))
+    }
+    let dir = codex_sessions_dir()?;
+    search(&dir, &format!("-{thread_id}.jsonl"), 5)
 }
 
 fn usage_from(v: &Value) -> Usage {
@@ -649,6 +748,14 @@ fn parse_codex_line(line: &str) -> Vec<Parsed> {
                 _ => Vec::new(),
             }
         }
+        // The session id — its rollout file (~/.codex/sessions/.../rollout-*-<id>.jsonl) carries
+        // the `token_count.rate_limits` snapshot the TUI's usage bar shows, which `exec --json`
+        // omits from stdout. `complete` reads it post-turn for quota-aware routing (L3).
+        Some("thread.started") => v
+            .get("thread_id")
+            .and_then(Value::as_str)
+            .map(|id| vec![Parsed::Thread(id.to_string())])
+            .unwrap_or_default(),
         Some("turn.completed") => v
             .get("usage")
             .map(usage_from)
@@ -753,6 +860,8 @@ impl Provider for CliProvider {
         let mut final_text: Option<String> = None;
         let mut usage = Usage::default();
         let mut quota: Option<forge_types::QuotaHint> = None;
+        // Codex's quota lives in its session rollout file, keyed by this id (read after the turn).
+        let mut codex_thread: Option<String> = None;
         let mut in_band_error: Option<String> = None;
         // tool_use id → name, so a later tool_result can be labelled.
         let mut tool_names: std::collections::HashMap<String, String> =
@@ -796,6 +905,7 @@ impl Provider for CliProvider {
                                         fraction_used: fraction,
                                     });
                                 }
+                                Parsed::Thread(id) => codex_thread = Some(id),
                                 Parsed::Final(f) => final_text = Some(f),
                                 Parsed::Error(e) => in_band_error = Some(e),
                             }
@@ -840,6 +950,18 @@ impl Provider for CliProvider {
 
         let status = child.wait().await.ok();
         let stderr_text = err_task.await.unwrap_or_default();
+
+        // Codex doesn't stream its quota (unlike Claude's `rate_limit_event`); read the snapshot
+        // from the session rollout file it just wrote, keyed by the thread id (L3, ToS-safe).
+        if self.kind == CliKind::Codex && quota.is_none() {
+            if let Some(tid) = &codex_thread {
+                if let Some(path) = find_codex_rollout(tid) {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        quota = codex_quota_from_rollout(&text, self.kind.prefix());
+                    }
+                }
+            }
+        }
 
         if let Some(e) = in_band_error {
             return Err(ProviderError::Request(format!(
@@ -1261,6 +1383,53 @@ mod tests {
     }
 
     #[test]
+    fn codex_thread_started_is_captured() {
+        let line =
+            r#"{"type":"thread.started","thread_id":"019eccdc-9390-72d2-b798-5134cceb95fe"}"#;
+        assert_eq!(
+            parse_codex_line(line),
+            vec![Parsed::Thread(
+                "019eccdc-9390-72d2-b798-5134cceb95fe".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn codex_rollout_quota_reads_the_stricter_window() {
+        use forge_types::QuotaStatus;
+        // Real shape captured from ~/.codex/sessions/.../rollout-*.jsonl. Primary (5h) is closer to
+        // its limit than secondary (weekly), so it governs.
+        let jsonl = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":85.0,"window_minutes":300,"resets_at":1781571092},"secondary":{"used_percent":4.0,"window_minutes":10080,"resets_at":1782087619},"plan_type":"plus","rate_limit_reached_type":null}}}"#;
+        let q = codex_quota_from_rollout(jsonl, "codex-cli").expect("a quota hint");
+        assert_eq!(q.provider, "codex-cli");
+        assert_eq!(q.window, "five_hour");
+        assert_eq!(q.status, QuotaStatus::Warning); // 85% ≥ 80%
+        assert_eq!(q.resets_at, Some(1781571092));
+        assert!((q.fraction_used.unwrap() - 0.85).abs() < 1e-9);
+    }
+
+    #[test]
+    fn codex_rollout_quota_exhausted_when_a_limit_was_reached() {
+        use forge_types::QuotaStatus;
+        let jsonl = r#"{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.0,"window_minutes":300,"resets_at":1},"rate_limit_reached_type":"primary"}}}"#;
+        let q = codex_quota_from_rollout(jsonl, "codex-cli").unwrap();
+        assert_eq!(q.status, QuotaStatus::Exhausted);
+    }
+
+    #[test]
+    fn codex_rollout_quota_ok_for_low_usage() {
+        use forge_types::QuotaStatus;
+        // The literal real capture (≈1% used) → Ok, last snapshot wins over an earlier one.
+        let jsonl = "{\"payload\":{\"type\":\"token_count\",\"rate_limits\":{\"primary\":{\"used_percent\":50.0,\"window_minutes\":300,\"resets_at\":1}}}}\n{\"timestamp\":\"x\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":null,\"rate_limits\":{\"limit_id\":\"codex\",\"primary\":{\"used_percent\":1.0,\"window_minutes\":300,\"resets_at\":1781571092},\"secondary\":{\"used_percent\":1.0,\"window_minutes\":10080,\"resets_at\":1782087619},\"plan_type\":\"plus\",\"rate_limit_reached_type\":null}}}";
+        let q = codex_quota_from_rollout(jsonl, "codex-cli").unwrap();
+        assert_eq!(q.status, QuotaStatus::Ok);
+        assert!(
+            (q.fraction_used.unwrap() - 0.01).abs() < 1e-9,
+            "last snapshot wins"
+        );
+    }
+
+    #[test]
     fn claude_error_result_is_surfaced() {
         let line = r#"{"type":"result","is_error":true,"api_error_status":"overloaded"}"#;
         assert!(parse_claude_line(line).contains(&Parsed::Error("overloaded".into())));
@@ -1345,7 +1514,7 @@ mod tests {
 
     #[test]
     fn codex_lifecycle_lines_are_ignored() {
-        assert!(parse_codex_line(r#"{"type":"thread.started","thread_id":"x"}"#).is_empty());
+        // `thread.started` is now captured for the quota lookup (see codex_thread_started_*).
         assert!(parse_codex_line(r#"{"type":"turn.started"}"#).is_empty());
     }
 
