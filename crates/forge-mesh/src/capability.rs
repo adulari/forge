@@ -53,6 +53,12 @@ fn quality_class(id: &str) -> u8 {
     }
 }
 
+/// Whether a model id reads as frontier-class (top quality prior) — used to count "frontier"
+/// models in the `/models` overview. Same family heuristic the router ranks by.
+pub fn is_frontier(id: &str) -> bool {
+    quality_class(id) == 3
+}
+
 /// Coarse speed class — roughly the inverse of size (3 = fastest small model).
 fn speed_class(id: &str) -> u8 {
     match quality_class(id) {
