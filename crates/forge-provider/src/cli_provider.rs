@@ -13,10 +13,16 @@
 //!   permission gate. The Forge harness on the subscription model.
 //! - **text**: claude runs as its own agent with its own tools (`--permission-mode acceptEdits`).
 //!
+//! codex harness (RFC Phase 3) works the same way via codex's own MCP wiring: the Forge MCP
+//! server is registered with `-c mcp_servers.forge.*` and its tools auto-approved
+//! (`default_tools_approval_mode="approve"`). codex keeps a `read-only` sandbox, so its own
+//! shell can only do read-only recon — every write/side-effect can only go through Forge's
+//! gated mcp__forge tools.
+//!
 //! Either way Forge parses the rich event stream — thinking/reasoning, tool activity, answer
-//! text — surfacing each as a [`StreamEvent`]. codex always runs as its own read-only agent
-//! (Forge-tool MCP for codex is Phase 3). Each turn is a fresh invocation. Subscription-billed,
-//! so usage costs $0 against Forge's USD budget. Forge never reads/transmits the CLI's auth.
+//! text — surfacing each as a [`StreamEvent`]. Each turn is a fresh invocation. Subscription-
+//! billed, so usage costs $0 against Forge's USD budget. Forge never reads/transmits the CLI's
+//! auth.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -76,9 +82,9 @@ pub struct CliProvider {
     kind: CliKind,
     binary: String,
     timeout: Duration,
-    /// Harness mode (RFC cli-bridge-full-harness Phase 2): claude runs Forge's tools via the
+    /// Harness mode (RFC cli-bridge-full-harness): the CLI runs Forge's tools via the
     /// `forge mcp-serve` MCP server under Forge's permission gate. When false, the CLI runs as
-    /// its own agent with its own tools (Phase 1). Only claude supports harness today.
+    /// its own agent with its own tools. Both claude (Phase 2) and codex (Phase 3) support it.
     harness: bool,
 }
 
@@ -176,8 +182,40 @@ fn build_args(
             "--permission-mode".into(),
             "acceptEdits".into(),
         ],
-        // codex harness (Forge-tool MCP) is Phase 3; for now codex runs read-only as its own agent.
-        (CliKind::Codex, _) => vec![
+        // Codex harness (RFC Phase 3): serve Forge's tools to codex over MCP, gated by Forge's
+        // permission engine. The sandbox stays `read-only`, so codex's OWN shell can only do
+        // read-only recon — every write/side-effect can only go through Forge's mcp__forge
+        // tools (which run in `forge mcp-serve` under `permission::decide`). We do NOT use
+        // `--dangerously-bypass-approvals-and-sandbox` (it would unsandbox codex's shell).
+        //
+        // Two non-obvious flags, verified live against codex 0.130.0:
+        // - `mcp_servers.forge.default_tools_approval_mode="approve"`: codex exec auto-cancels
+        //   MCP tool calls non-interactively (openai/codex#16685); "approve" is the only value
+        //   that lets them through ("auto" still cancels).
+        // - `model_reasoning_summary="detailed"`: makes codex emit `reasoning` items so Forge
+        //   can stream the model's thinking (otherwise only a token count is reported).
+        (CliKind::Codex, true) => vec![
+            "exec".into(),
+            "--json".into(),
+            "--skip-git-repo-check".into(),
+            "--sandbox".into(),
+            "read-only".into(),
+            "-c".into(),
+            "approval_policy=\"never\"".into(),
+            "-c".into(),
+            "model_reasoning_summary=\"detailed\"".into(),
+            "-c".into(),
+            format!(
+                "mcp_servers.forge.command={}",
+                serde_json::Value::String(forge_exe.to_string())
+            ),
+            "-c".into(),
+            "mcp_servers.forge.args=[\"mcp-serve\"]".into(),
+            "-c".into(),
+            "mcp_servers.forge.default_tools_approval_mode=\"approve\"".into(),
+        ],
+        // Phase-1 text mode: codex as its own read-only agent, no Forge tools.
+        (CliKind::Codex, false) => vec![
             "exec".into(),
             "--json".into(),
             "--skip-git-repo-check".into(),
@@ -366,22 +404,115 @@ fn tool_result_summary(content: Option<&Value>) -> String {
     one_line.chars().take(120).collect()
 }
 
-/// Parse one Codex `exec --json` (JSONL) line. Reasoning-item schema is best-effort.
+fn codex_item_id(item: Option<&Value>) -> String {
+    item.and_then(|i| i.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+fn codex_item_text(item: Option<&Value>) -> Option<String> {
+    item.and_then(|i| i.get("text"))
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
+fn codex_tool_started(item: Option<&Value>) -> Parsed {
+    Parsed::ToolStarted {
+        id: codex_item_id(item),
+        name: item
+            .and_then(|i| i.get("tool"))
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+            .to_string(),
+        args: item
+            .and_then(|i| i.get("arguments"))
+            .map(|a| a.to_string())
+            .unwrap_or_default(),
+    }
+}
+
+fn codex_command_started(item: Option<&Value>) -> Parsed {
+    Parsed::ToolStarted {
+        id: codex_item_id(item),
+        name: "shell".to_string(),
+        args: item
+            .and_then(|i| i.get("command"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    }
+}
+
+/// Parse one Codex `exec --json` (JSONL) line into zero or more items. Handles agent text,
+/// reasoning summaries, `mcp_tool_call` (Forge's tools) and `command_execution` (codex's own
+/// read-only shell). Field-tolerant: unknown shapes are ignored so CLI drift degrades gracefully.
 fn parse_codex_line(line: &str) -> Vec<Parsed> {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
         return Vec::new();
     };
     match v.get("type").and_then(Value::as_str) {
+        // A tool call begins (mcp__forge tool or codex's own read-only shell).
+        Some("item.started") => {
+            let item = v.get("item");
+            match item.and_then(|i| i.get("type")).and_then(Value::as_str) {
+                Some("mcp_tool_call") => vec![codex_tool_started(item)],
+                Some("command_execution") => vec![codex_command_started(item)],
+                _ => Vec::new(),
+            }
+        }
         Some("item.completed") => {
             let item = v.get("item");
             let kind = item.and_then(|i| i.get("type")).and_then(Value::as_str);
-            let text = item
-                .and_then(|i| i.get("text"))
-                .and_then(Value::as_str)
-                .map(str::to_string);
-            match (kind, text) {
-                (Some("agent_message"), Some(t)) => vec![Parsed::Text(t)],
-                (Some("reasoning"), Some(t)) => vec![Parsed::Reasoning(t)],
+            let id = || codex_item_id(item);
+            match kind {
+                Some("agent_message") => codex_item_text(item)
+                    .map(Parsed::Text)
+                    .into_iter()
+                    .collect(),
+                Some("reasoning") => codex_item_text(item)
+                    .map(Parsed::Reasoning)
+                    .into_iter()
+                    .collect(),
+                Some("mcp_tool_call") => {
+                    let ok = item.and_then(|i| i.get("status")).and_then(Value::as_str)
+                        != Some("failed");
+                    let summary = item
+                        .and_then(|i| i.get("error"))
+                        .and_then(|e| e.get("message"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| {
+                            item.and_then(|i| i.get("tool"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .unwrap_or_default();
+                    vec![Parsed::ToolFinished {
+                        id: id(),
+                        ok,
+                        summary,
+                    }]
+                }
+                Some("command_execution") => {
+                    let ok = item
+                        .and_then(|i| i.get("exit_code"))
+                        .and_then(Value::as_i64)
+                        == Some(0);
+                    let summary = item
+                        .and_then(|i| i.get("command"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .chars()
+                        .take(120)
+                        .collect();
+                    vec![Parsed::ToolFinished {
+                        id: id(),
+                        ok,
+                        summary,
+                    }]
+                }
                 _ => Vec::new(),
             }
         }
@@ -414,7 +545,8 @@ impl Provider for CliProvider {
         &self,
         model: &str,
         messages: &[Message],
-        _tools: &[ToolSpec], // Phase 1: the CLI uses its OWN tools (Forge-tool MCP bridge is Phase 2)
+        _tools: &[ToolSpec], // harness mode serves Forge's tools via `forge mcp-serve`, which
+        // builds its own registry — not from this param; text mode uses the CLI's own tools.
         on_event: &mut EventSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
         let prompt = render_prompt(messages);
@@ -646,14 +778,38 @@ mod tests {
     }
 
     #[test]
-    fn codex_args_put_prompt_last_and_are_read_only() {
+    fn codex_harness_args_wire_forge_mcp_and_approve_tools() {
         let args = build_args(CliKind::Codex, "", "do a thing", true, "/bin/forge");
         assert_eq!(args[0], "exec");
         assert!(args.contains(&"--json".to_string()));
+        // Sandbox stays read-only: codex's OWN shell can't write, so every write/side-effect
+        // can only go through Forge's gated mcp__forge tools.
         assert!(args.contains(&"read-only".to_string()));
+        // NEVER bypass the sandbox/approvals — that would unsandbox codex's own shell.
+        assert!(!args.iter().any(|a| a.contains("dangerously-bypass")));
+        // Forge MCP server wired via -c overrides, and its tools auto-approved ("approve",
+        // not "auto" — verified live against codex 0.130: "auto" still cancels).
+        let joined = args.join(" ");
+        assert!(joined.contains("mcp_servers.forge.command=\"/bin/forge\""));
+        assert!(joined.contains("mcp_servers.forge.args=[\"mcp-serve\"]"));
+        assert!(joined.contains("mcp_servers.forge.default_tools_approval_mode=\"approve\""));
+        // approval_policy never so codex doesn't block on stdin prompts headless.
+        assert!(joined.contains("approval_policy=\"never\""));
+        // reasoning summaries on so codex emits reasoning items (streamed thinking).
+        assert!(joined.contains("model_reasoning_summary"));
         assert_eq!(args.last().unwrap(), "do a thing");
-        // no --model when bare model is empty
         assert!(!args.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn codex_text_mode_is_a_plain_read_only_agent() {
+        let args = build_args(CliKind::Codex, "", "do a thing", false, "/bin/forge");
+        assert_eq!(args[0], "exec");
+        assert!(args.contains(&"--json".to_string()));
+        assert!(args.contains(&"read-only".to_string()));
+        // text mode does NOT wire the Forge MCP server.
+        assert!(!args.join(" ").contains("mcp_servers.forge"));
+        assert_eq!(args.last().unwrap(), "do a thing");
     }
 
     #[test]
@@ -754,6 +910,58 @@ mod tests {
         assert_eq!(
             parse_codex_line(reasoning),
             vec![Parsed::Reasoning("thinking".into())]
+        );
+    }
+
+    #[test]
+    fn codex_mcp_tool_call_round_trips_started_and_finished() {
+        let started = r#"{"type":"item.started","item":{"id":"item_2","type":"mcp_tool_call","server":"forge","tool":"read_file","arguments":{"path":"Cargo.toml"},"status":"in_progress"}}"#;
+        match &parse_codex_line(started)[0] {
+            Parsed::ToolStarted { id, name, args } => {
+                assert_eq!(id, "item_2");
+                assert_eq!(name, "read_file");
+                assert!(args.contains("Cargo.toml"));
+            }
+            other => panic!("expected ToolStarted, got {other:?}"),
+        }
+        let done = r#"{"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call","server":"forge","tool":"read_file","status":"completed"}}"#;
+        assert_eq!(
+            parse_codex_line(done),
+            vec![Parsed::ToolFinished {
+                id: "item_2".into(),
+                ok: true,
+                summary: "read_file".into()
+            }]
+        );
+        let failed = r#"{"type":"item.completed","item":{"id":"item_3","type":"mcp_tool_call","server":"forge","tool":"write_file","status":"failed","error":{"message":"denied by Forge permission policy: write_file"}}}"#;
+        assert_eq!(
+            parse_codex_line(failed),
+            vec![Parsed::ToolFinished {
+                id: "item_3".into(),
+                ok: false,
+                summary: "denied by Forge permission policy: write_file".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn codex_command_execution_round_trips_as_shell_tool() {
+        let started = r#"{"type":"item.started","item":{"id":"item_7","type":"command_execution","command":"rg foo","status":"in_progress"}}"#;
+        match &parse_codex_line(started)[0] {
+            Parsed::ToolStarted { name, args, .. } => {
+                assert_eq!(name, "shell");
+                assert!(args.contains("rg foo"));
+            }
+            other => panic!("expected ToolStarted, got {other:?}"),
+        }
+        let done = r#"{"type":"item.completed","item":{"id":"item_7","type":"command_execution","command":"rg foo","exit_code":0,"status":"completed"}}"#;
+        assert_eq!(
+            parse_codex_line(done),
+            vec![Parsed::ToolFinished {
+                id: "item_7".into(),
+                ok: true,
+                summary: "rg foo".into()
+            }]
         );
     }
 
