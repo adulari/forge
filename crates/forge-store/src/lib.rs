@@ -690,6 +690,173 @@ pub struct SessionSummary {
     pub preview: Option<String>,
 }
 
+// ---- Lattice: code-intelligence graph (code-intelligence.md) ----
+
+/// A persisted source-file row in the Lattice graph.
+#[derive(Debug, Clone)]
+pub struct LatticeFileRow {
+    pub id: String,
+    pub repo_root: String,
+    pub rel_path: String,
+    pub lang: String,
+    pub content_hash: String,
+    pub parse_status: String,
+}
+
+/// A persisted symbol node.
+#[derive(Debug, Clone)]
+pub struct LatticeNodeRow {
+    pub id: String,
+    pub file_id: String,
+    pub kind: String,
+    pub name: String,
+    pub qualname: Option<String>,
+    pub signature: Option<String>,
+    pub span_start: i64,
+    pub span_end: i64,
+    pub line_start: i64,
+}
+
+/// A persisted relationship edge.
+#[derive(Debug, Clone)]
+pub struct LatticeEdgeRow {
+    pub id: String,
+    pub src_id: String,
+    pub dst_id: String,
+    pub kind: String,
+    pub unresolved_name: Option<String>,
+}
+
+impl Store {
+    /// The stored content hash for a file, or `None` if it hasn't been indexed — the
+    /// incremental-update gate (skip files whose hash is unchanged).
+    pub fn lattice_file_hash(&self, repo_root: &str, rel_path: &str) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        let hash = conn
+            .query_row(
+                "SELECT content_hash FROM lattice_file WHERE repo_root = ?1 AND rel_path = ?2",
+                (repo_root, rel_path),
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
+        Ok(hash)
+    }
+
+    /// Insert or replace a file's row and its symbol nodes + edges atomically: the file's prior
+    /// nodes are deleted first (cascading their edges), so re-indexing is idempotent.
+    pub fn replace_lattice_file(
+        &self,
+        file: &LatticeFileRow,
+        nodes: &[LatticeNodeRow],
+        edges: &[LatticeEdgeRow],
+    ) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        tx.execute(
+            "INSERT INTO lattice_file (id, repo_root, rel_path, lang, content_hash, parse_status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(id) DO UPDATE SET
+                content_hash = excluded.content_hash,
+                lang = excluded.lang,
+                parse_status = excluded.parse_status,
+                indexed_at = strftime('%s','now')",
+            (
+                &file.id,
+                &file.repo_root,
+                &file.rel_path,
+                &file.lang,
+                &file.content_hash,
+                &file.parse_status,
+            ),
+        )?;
+        // Replace the file's symbols (FK ON DELETE CASCADE clears their edges too).
+        tx.execute("DELETE FROM lattice_node WHERE file_id = ?1", (&file.id,))?;
+        for n in nodes {
+            tx.execute(
+                "INSERT INTO lattice_node
+                   (id, file_id, kind, name, qualname, signature, span_start, span_end, line_start)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    n.id,
+                    n.file_id,
+                    n.kind,
+                    n.name,
+                    n.qualname,
+                    n.signature,
+                    n.span_start,
+                    n.span_end,
+                    n.line_start,
+                ],
+            )?;
+        }
+        for e in edges {
+            tx.execute(
+                "INSERT INTO lattice_edge (id, src_id, dst_id, kind, unresolved_name)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![e.id, e.src_id, e.dst_id, e.kind, e.unresolved_name],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Symbols whose name contains `query` (case-insensitive), best-first: exact name, then
+    /// prefix, then substring; capped at `limit`.
+    pub fn lattice_nodes_by_name(&self, query: &str, limit: usize) -> Result<Vec<LatticeNodeRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.file_id, n.kind, n.name, n.qualname, n.signature,
+                    n.span_start, n.span_end, n.line_start,
+                    CASE
+                        WHEN lower(n.name) = lower(?1) THEN 0
+                        WHEN lower(n.name) LIKE lower(?1) || '%' THEN 1
+                        ELSE 2
+                    END AS rank
+             FROM lattice_node n
+             WHERE lower(n.name) LIKE '%' || lower(?1) || '%'
+             ORDER BY rank, length(n.name), n.name
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(rusqlite::params![query, limit as i64], |r| {
+                Ok(LatticeNodeRow {
+                    id: r.get(0)?,
+                    file_id: r.get(1)?,
+                    kind: r.get(2)?,
+                    name: r.get(3)?,
+                    qualname: r.get(4)?,
+                    signature: r.get(5)?,
+                    span_start: r.get(6)?,
+                    span_end: r.get(7)?,
+                    line_start: r.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// The `rel_path` of an indexed file by its id (for rendering a node's location).
+    pub fn lattice_file_path(&self, file_id: &str) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        Ok(conn
+            .query_row(
+                "SELECT rel_path FROM lattice_file WHERE id = ?1",
+                (file_id,),
+                |r| r.get::<_, String>(0),
+            )
+            .ok())
+    }
+
+    /// `(files, nodes, edges)` row counts — the `forge lattice status` summary.
+    pub fn lattice_counts(&self) -> Result<(i64, i64, i64)> {
+        let conn = self.lock()?;
+        let files = conn.query_row("SELECT COUNT(*) FROM lattice_file", [], |r| r.get(0))?;
+        let nodes = conn.query_row("SELECT COUNT(*) FROM lattice_node", [], |r| r.get(0))?;
+        let edges = conn.query_row("SELECT COUNT(*) FROM lattice_edge", [], |r| r.get(0))?;
+        Ok((files, nodes, edges))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

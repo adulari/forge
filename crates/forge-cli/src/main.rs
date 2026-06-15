@@ -105,6 +105,27 @@ enum Command {
         #[command(subcommand)]
         cmd: Option<McpCmd>,
     },
+    /// Lattice — native code-intelligence graph (tree-sitter + SQLite). Build it, then query.
+    Lattice {
+        #[command(subcommand)]
+        op: LatticeOp,
+    },
+}
+
+#[derive(Subcommand)]
+enum LatticeOp {
+    /// (Re)index the working directory into the graph — incremental by file content hash.
+    Update {
+        /// Root to index (default: current directory).
+        path: Option<String>,
+    },
+    /// Find symbols by name (case-insensitive); prints kind, location, and signature.
+    Query {
+        /// Symbol name or fragment.
+        query: String,
+    },
+    /// Show index counts (files, symbols, edges).
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -223,7 +244,51 @@ async fn main() -> Result<()> {
         Command::Init => init(),
         Command::Mcp { cmd } => mcp_cmd(cmd).await,
         Command::McpServe => mcp_serve::run().await,
+        Command::Lattice { op } => lattice_cmd(op),
     }
+}
+
+/// `forge lattice <op>` — build / query / inspect the code-intelligence graph.
+fn lattice_cmd(op: LatticeOp) -> Result<()> {
+    let config = forge_config::load().context("loading configuration")?;
+    if !config.lattice.enabled {
+        println!("lattice is disabled (set [lattice] enabled = true)");
+        return Ok(());
+    }
+    let store = std::sync::Arc::new(open_store()?);
+    let cwd = std::env::current_dir()?;
+    match op {
+        LatticeOp::Update { path } => {
+            let root = path.map(std::path::PathBuf::from).unwrap_or(cwd);
+            let lat = forge_index::Lattice::new(store, &root);
+            let stats = lat.update().map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!(
+                "⌬ lattice updated — {} file(s) indexed, {} skipped, {} symbol(s)",
+                stats.files_indexed, stats.files_skipped, stats.symbols
+            );
+        }
+        LatticeOp::Query { query } => {
+            let lat = forge_index::Lattice::new(store, &cwd);
+            let hits = lat.query(&query, 20).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if hits.is_empty() {
+                println!("no symbols match '{query}' — run `forge lattice update` first?");
+            } else {
+                for h in hits {
+                    let sig = h.signature.unwrap_or_else(|| h.name.clone());
+                    println!("{:<8} {}:{}  {}", h.kind, h.rel_path, h.line, sig);
+                }
+            }
+        }
+        LatticeOp::Status => {
+            let lat = forge_index::Lattice::new(store, &cwd);
+            let s = lat.status().map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!(
+                "⌬ lattice — {} file(s), {} symbol(s), {} edge(s)",
+                s.files, s.nodes, s.edges
+            );
+        }
+    }
+    Ok(())
 }
 
 fn auth(provider: &str) -> Result<()> {

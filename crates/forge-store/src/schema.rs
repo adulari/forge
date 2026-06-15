@@ -123,4 +123,43 @@ CREATE TABLE IF NOT EXISTS session_tasks (
     tasks_json TEXT NOT NULL,          -- JSON array of {title, status}
     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
+
+-- Lattice: native code-intelligence graph (code-intelligence.md), in the SAME db as sessions.
+-- One row per indexed source file; content_hash gates incremental re-parsing.
+CREATE TABLE IF NOT EXISTS lattice_file (
+    id           TEXT PRIMARY KEY,      -- stable: repo_root || 0x00 || rel_path
+    repo_root    TEXT NOT NULL,
+    rel_path     TEXT NOT NULL,
+    lang         TEXT NOT NULL,         -- "rust" | … | "unsupported"
+    content_hash TEXT NOT NULL,         -- SHA-256; the incremental-update key
+    parse_status TEXT NOT NULL,         -- "ok" | "skipped" | "error"
+    indexed_at   INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE(repo_root, rel_path)
+);
+
+-- One row per symbol/definition.
+CREATE TABLE IF NOT EXISTS lattice_node (
+    id          TEXT PRIMARY KEY,       -- repo-namespaced SymbolId
+    file_id     TEXT NOT NULL REFERENCES lattice_file(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,          -- function|method|struct|enum|trait|impl|const|module|type
+    name        TEXT NOT NULL,
+    qualname    TEXT,
+    signature   TEXT,
+    span_start  INTEGER NOT NULL,
+    span_end    INTEGER NOT NULL,
+    line_start  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lnode_name ON lattice_node(name);
+CREATE INDEX IF NOT EXISTS idx_lnode_file ON lattice_node(file_id);
+
+-- One row per relationship (PR1 emits `contains`; resolved call/ref edges come later).
+CREATE TABLE IF NOT EXISTS lattice_edge (
+    id              TEXT PRIMARY KEY,
+    src_id          TEXT NOT NULL REFERENCES lattice_node(id) ON DELETE CASCADE,
+    dst_id          TEXT NOT NULL REFERENCES lattice_node(id) ON DELETE CASCADE,
+    kind            TEXT NOT NULL,      -- defines|calls|imports|impls|references|contains
+    unresolved_name TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ledge_src ON lattice_edge(src_id, kind);
+CREATE INDEX IF NOT EXISTS idx_ledge_dst ON lattice_edge(dst_id, kind);
 "#;
