@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use forge_core::Session;
 use forge_mesh::HeuristicRouter;
-use forge_provider::{GenAiProvider, MockProvider, Provider};
+use forge_provider::{DispatchProvider, MockProvider, Provider};
 use forge_store::Store;
 use forge_tools::ToolRegistry;
 use forge_tui::{HeadlessPresenter, Presenter, TuiPresenter};
@@ -197,7 +197,9 @@ fn build_session_with(
     let provider: Box<dyn Provider> = if mock {
         Box::new(MockProvider)
     } else {
-        Box::new(GenAiProvider::new())
+        // Routes API models to genai and `claude-cli::`/`codex-cli::` to the subscription
+        // CLI bridge (provider-integrations Part B).
+        Box::new(DispatchProvider::new())
     };
     let router = Box::new(HeuristicRouter::new(config.clone()));
     let tools = ToolRegistry::with_core_tools();
