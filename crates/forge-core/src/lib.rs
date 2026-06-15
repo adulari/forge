@@ -23,16 +23,6 @@ pub use llm_router::LlmRouter;
 /// Hard cap on model<->tool round trips within a single turn.
 pub(crate) const MAX_STEPS: usize = 8;
 
-/// One subagent's completion, sent from its tokio task back to the orchestrator's drain loop.
-struct ChildDone {
-    index: usize,
-    id: String,
-    agent: String,
-    text: String,
-    ok: bool,
-    cost: f64,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
     #[error(transparent)]
@@ -454,8 +444,6 @@ impl Session {
         msg_id: &str,
         call: &forge_types::ToolCall,
     ) -> Result<String, CoreError> {
-        use tokio::sync::{mpsc, Semaphore};
-
         let args_json = serde_json::to_string(&call.args)?;
         let max = self.config.mesh.subagents.max_agents;
         let requests = match subagent::parse_requests(&call.args, max) {
@@ -489,71 +477,45 @@ impl Session {
             mode: self.mode,
             rules: self.rules.clone(),
         };
-        let mode_label = format!("{:?}", self.mode);
-        let n = requests.len();
-        let sem = Arc::new(Semaphore::new(
-            self.config.mesh.subagents.max_concurrency.max(1),
-        ));
-        let (tx, mut rx) = mpsc::unbounded_channel::<ChildDone>();
+        let parent_id = self.id.clone();
+        let max_concurrency = self.config.mesh.subagents.max_concurrency;
 
-        // Create each child session + emit its Start up front (so the UI shows the whole batch
-        // as running immediately), then spawn the work bounded by the concurrency permit.
-        for (i, req) in requests.into_iter().enumerate() {
-            let resolved = subagent::resolve(&req, &agents);
-            let child_id = self
-                .store
-                .create_child_session(".", &mode_label, &self.id)?;
-            self.presenter.emit(PresenterEvent::SubagentStart {
-                id: child_id.clone(),
-                agent: resolved.name.clone(),
-                task: resolved.task.clone(),
-            });
+        // Drive the shared orchestrator, turning each child lifecycle into a presenter event
+        // (running children animate live; completed ones fold into the scrollback box).
+        let presenter = &mut self.presenter;
+        let mut on_event = |ev: subagent::Lifecycle| match ev {
+            subagent::Lifecycle::Start { id, agent, task } => {
+                presenter.emit(PresenterEvent::SubagentStart {
+                    id: id.to_string(),
+                    agent: agent.to_string(),
+                    task: task.to_string(),
+                })
+            }
+            subagent::Lifecycle::Done {
+                id,
+                agent,
+                ok,
+                summary,
+                cost_usd,
+            } => presenter.emit(PresenterEvent::SubagentResult {
+                id: id.to_string(),
+                agent: agent.to_string(),
+                ok,
+                summary: summary.to_string(),
+                cost_usd,
+            }),
+        };
+        let (combined, all_ok) = subagent::orchestrate(
+            &ctx,
+            &parent_id,
+            requests,
+            &agents,
+            budget,
+            max_concurrency,
+            &mut on_event,
+        )
+        .await?;
 
-            let ctx = ctx.clone();
-            let tx = tx.clone();
-            let sem = Arc::clone(&sem);
-            tokio::spawn(async move {
-                let _permit = sem.acquire_owned().await;
-                let outcome = subagent::run_subagent(&ctx, &child_id, &resolved, budget).await;
-                let (text, ok) = match outcome {
-                    Ok(out) => (out.final_text, out.ok),
-                    Err(e) => (format!("error: subagent failed: {e}"), false),
-                };
-                let cost = ctx.store.session_cost(&child_id).unwrap_or(0.0);
-                let _ = tx.send(ChildDone {
-                    index: i,
-                    id: child_id,
-                    agent: resolved.name,
-                    text,
-                    ok,
-                    cost,
-                });
-            });
-        }
-        drop(tx); // close the channel once all tasks hold their own clone
-
-        // Drain completions as they arrive — emit each result live, and keep ordered slots for
-        // the combined transcript text.
-        let mut slots: Vec<Option<(String, String)>> = vec![None; n];
-        let mut all_ok = true;
-        while let Some(done) = rx.recv().await {
-            all_ok &= done.ok;
-            self.presenter.emit(PresenterEvent::SubagentResult {
-                id: done.id,
-                agent: done.agent.clone(),
-                ok: done.ok,
-                summary: summarize(&done.text),
-                cost_usd: done.cost,
-            });
-            slots[done.index] = Some((done.agent, done.text));
-        }
-
-        let mut combined = String::new();
-        for (i, slot) in slots.into_iter().enumerate() {
-            let (agent, text) = slot.unwrap_or_else(|| ("?".into(), "error: no result".into()));
-            combined.push_str(&format!("[agent {}: {}]\n{}\n\n", i + 1, agent, text));
-        }
-        let combined = combined.trim_end().to_string();
         self.store.record_tool_call(
             msg_id,
             &call.name,
