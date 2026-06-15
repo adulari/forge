@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| Status | Phase 1 + Phase 2 SHIPPED (codex harness = Phase 3, pending) |
+| Status | Phase 1 + 2 + 3 SHIPPED (claude & codex harness live) |
 | Author | Forge |
 | Created | 2026-06-15 |
 | Implements | follow-up to PR #26/#29 (CLI bridge) |
@@ -182,9 +182,28 @@ is proven) lets this land incrementally without regressing the working bridge.
   with the permission-boundary handler; switch the argv to `--strict-mcp-config
   --allowedTools "mcp__forge__*" --permission-mode bypassPermissions`. Now tools + permissions
   are Forge's. Gate behind `bridge_mode = "harness"`.
-- **Phase 3 — codex parity + extensibility.** Bring codex to the same model via `codex mcp`
-  config + `exec --json` (after the reasoning-schema spike). Confirm that future Forge MCP-client
-  tools and skills, being ordinary `ToolRegistry` entries, appear automatically.
+- **Phase 3 — codex parity + extensibility. (SHIPPED)** codex runs the same harness via its own
+  MCP wiring: the Forge MCP server is registered with `-c mcp_servers.forge.command=<forge_exe>
+  -c mcp_servers.forge.args=["mcp-serve"]` and its tools auto-approved with
+  `-c mcp_servers.forge.default_tools_approval_mode="approve"` (the **only** value that works —
+  see spike findings below). The sandbox stays `--sandbox read-only` and `approval_policy="never"`,
+  so codex's own shell can do read-only recon but cannot write — every write/side-effect can only
+  go through Forge's gated `mcp__forge` tools. `-c model_reasoning_summary="detailed"` makes codex
+  emit `reasoning` items so thinking streams too. Because Forge's tools are exposed as a single
+  MCP server backed by `ToolRegistry`, future Forge MCP-client tools and skills (ordinary registry
+  entries) appear to both CLIs automatically — no per-CLI work.
+
+  Live codex-0.130.0 spike findings (verified, not assumed):
+  - codex **does** discover and call the Forge MCP tools (`mcp_tool_call` items, `server:"forge"`).
+  - In `codex exec` (non-interactive) MCP tool calls are auto-cancelled (`"user cancelled MCP
+    tool call"`, openai/codex#16685) unless `default_tools_approval_mode="approve"` is set;
+    `"auto"` still cancels, and `approval_policy="never"` alone does **not** fix it.
+  - **Asymmetry vs claude:** codex has no `--tools ""` equivalent to fully disable its built-in
+    shell. The read-only sandbox is what enforces the boundary instead — codex's shell can read
+    but not write, so Forge still owns every side-effect. Full tool-isolation parity (codex using
+    *only* mcp__forge) is a non-goal until codex exposes a built-in-tool toggle.
+  - `exec --json` does not stream reasoning text by default (only `reasoning_output_tokens`);
+    `model_reasoning_summary="detailed"` surfaces it as `reasoning` items.
 
 ### Spike checklist (must pass before committing Phase 2)
 
