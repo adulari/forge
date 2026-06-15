@@ -11,8 +11,10 @@ use serde_json::Value;
 
 mod core_tools;
 mod shell;
+mod web;
 pub use core_tools::{EditFileTool, ListDirTool, ReadFileTool, SearchTool, WriteFileTool};
 pub use shell::ShellTool;
+pub use web::{BraveSearch, SearchBackend, SearchResult, WebFetchTool, WebSearchTool};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
@@ -61,6 +63,8 @@ impl ToolRegistry {
         r.register(Box::new(ShellTool));
         r.register(Box::new(ListDirTool));
         r.register(Box::new(SearchTool));
+        r.register(Box::new(WebFetchTool));
+        r.register(Box::new(WebSearchTool::new()));
         r
     }
 
@@ -98,6 +102,8 @@ mod tests {
             "shell",
             "list_dir",
             "search",
+            "web_fetch",
+            "web_search",
         ] {
             assert!(r.get(name).is_some(), "missing tool: {name}");
         }
@@ -144,5 +150,13 @@ mod tests {
             SideEffect::ReadOnly
         );
         assert_eq!(r.get("search").unwrap().side_effect(), SideEffect::ReadOnly);
+        assert_eq!(
+            r.get("web_fetch").unwrap().side_effect(),
+            SideEffect::Network
+        );
+        assert_eq!(
+            r.get("web_search").unwrap().side_effect(),
+            SideEffect::Network
+        );
     }
 }

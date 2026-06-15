@@ -31,11 +31,12 @@ pub fn decide_mode(mode: PermissionMode, side_effect: SideEffect) -> PermissionD
         PermissionMode::Plan => Deny,
         // Explicit, deliberate "do anything".
         PermissionMode::Bypass => Allow,
-        // Auto-allow edits, still gate shell.
+        // Auto-allow edits, still gate shell. A network read is low-risk → allow.
         PermissionMode::AcceptEdits => match side_effect {
             SideEffect::Write => Allow,
             SideEffect::Shell => Ask,
             SideEffect::ReadOnly => Allow,
+            SideEffect::Network => Allow,
         },
         // Safe default: confirm any side effect.
         PermissionMode::Default => Ask,
@@ -407,6 +408,15 @@ mod tests {
     fn default_asks_for_side_effects() {
         assert_eq!(decide_mode(PermissionMode::Default, SideEffect::Write), Ask);
         assert_eq!(decide_mode(PermissionMode::Default, SideEffect::Shell), Ask);
+    }
+
+    #[test]
+    fn network_is_gated_per_mode() {
+        use PermissionMode::*;
+        assert_eq!(decide_mode(Plan, SideEffect::Network), Deny);
+        assert_eq!(decide_mode(Default, SideEffect::Network), Ask);
+        assert_eq!(decide_mode(AcceptEdits, SideEffect::Network), Allow);
+        assert_eq!(decide_mode(Bypass, SideEffect::Network), Allow);
     }
 
     // ---- helpers ----
