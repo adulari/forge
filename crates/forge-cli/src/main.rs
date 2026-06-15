@@ -203,10 +203,13 @@ async fn main() -> Result<()> {
 }
 
 fn auth(provider: &str) -> Result<()> {
-    if !forge_config::known_key_providers().any(|p| p == provider) {
-        let known: Vec<_> = forge_config::known_key_providers().collect();
+    let known_provider = forge_config::known_key_providers().any(|p| p == provider);
+    let known_search = forge_config::known_search_providers().any(|p| p == provider);
+    if !known_provider && !known_search {
+        let mut known: Vec<_> = forge_config::known_key_providers().collect();
+        known.extend(forge_config::known_search_providers());
         anyhow::bail!(
-            "unknown provider '{provider}' — key-based providers are: {}",
+            "unknown provider '{provider}' — known providers are: {}",
             known.join(", ")
         );
     }
@@ -763,6 +766,8 @@ async fn build_session_with(
 ) -> Result<Session> {
     // Make any keyring-stored provider keys visible to the provider client.
     forge_config::inject_provider_keys();
+    // …and the search-API key visible to the web_search tool.
+    forge_config::inject_search_keys();
 
     let mut config = forge_config::load().context("loading configuration")?;
     if let Some(m) = mode {
