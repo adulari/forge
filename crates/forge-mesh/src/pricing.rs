@@ -105,6 +105,29 @@ impl Pricing {
 const NOMINAL_INPUT_TOKENS: u64 = 1000;
 const NOMINAL_OUTPUT_TOKENS: u64 = 500;
 
+/// The context-window size (in tokens) for a model id, or `None` when we don't have a
+/// well-established figure. Matched by family substring on the id (after any `provider::`).
+/// Deliberately conservative: an unknown model yields `None` so the statusline shows tokens
+/// used without a fabricated denominator (the gauge omits `/limit · %`). Extend as needed.
+pub fn context_limit(model: &str) -> Option<u32> {
+    let m = model.rsplit("::").next().unwrap_or(model).to_lowercase();
+    let has = |s: &str| m.contains(s);
+    let limit = if has("claude") || has("opus") || has("sonnet") || has("haiku") {
+        200_000
+    } else if has("gemini") {
+        1_000_000
+    } else if has("gpt-4o") || has("gpt-4.1") || has("gpt-4") {
+        128_000
+    } else if has("o1") || has("o3") {
+        200_000
+    } else if has("llama-3") || has("llama3") {
+        128_000
+    } else {
+        return None;
+    };
+    Some(limit)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +153,16 @@ mod tests {
     fn unknown_model_is_free() {
         let pricing = Pricing::default();
         assert_eq!(pricing.cost_for("ollama::llama3.2", 5000, 5000), 0.0);
+    }
+
+    #[test]
+    fn context_limit_known_families_and_none_for_unknown() {
+        assert_eq!(context_limit("anthropic::claude-opus-4-8"), Some(200_000));
+        assert_eq!(context_limit("gemini::gemini-2.5-pro"), Some(1_000_000));
+        assert_eq!(context_limit("openai::gpt-4o"), Some(128_000));
+        // No well-established figure → None (the gauge shows used tokens, no fake denominator).
+        assert_eq!(context_limit("codex-cli::gpt-5.5"), None);
+        assert_eq!(context_limit("ollama::some-local-model"), None);
     }
 
     #[test]

@@ -135,6 +135,13 @@ pub enum PresenterEvent {
     },
     Cost {
         session_total_usd: f64,
+        /// Session-total input/output tokens (live counter).
+        session_in: u64,
+        session_out: u64,
+        /// Tokens in the current live context (≈ the last call's input size).
+        context_tokens: u64,
+        /// The active model's context-window limit, if known (`None` → no gauge denominator).
+        context_limit: Option<u32>,
     },
     /// A subagent (child agent) was spawned for a subtask (RFC subagent-orchestration).
     SubagentStart {
@@ -244,8 +251,15 @@ impl Presenter for HeadlessPresenter {
                 let mark = if ok { "✓" } else { "✗" };
                 println!("  {mark} {name}: {summary}");
             }
-            PresenterEvent::Cost { session_total_usd } => {
-                println!("  $ session total: ${session_total_usd:.4}");
+            PresenterEvent::Cost {
+                session_total_usd,
+                session_in,
+                session_out,
+                ..
+            } => {
+                println!(
+                    "  $ session total: ${session_total_usd:.4} · ↑{session_in} ↓{session_out} tok"
+                );
             }
             PresenterEvent::SubagentStart { agent, task, .. } => {
                 println!("  ⤷ spawn [{agent}]: {task}");

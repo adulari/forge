@@ -625,6 +625,8 @@ impl Session {
 
         let specs = self.tool_specs();
         let mut final_text = String::new();
+        // Tokens in the live context after the latest call (the statusline gauge).
+        let mut context_tokens: u64 = 0;
 
         // Failover state (model-health-failover): try `active_model`, and on a *retryable*
         // provider error (rate-limit / unavailable / auth) bench it and advance down the
@@ -725,6 +727,8 @@ impl Session {
                 resp.usage.input_tokens,
                 resp.usage.output_tokens,
             );
+            // The last call's input size is the live context fill (tui-token-counter.md).
+            context_tokens = resp.usage.input_tokens;
 
             self.transcript.push(Message::assistant_tool_calls(
                 &resp.content,
@@ -790,8 +794,13 @@ impl Session {
             }
         }
 
+        let (session_in, session_out) = self.store.session_tokens(&self.id)?;
         self.presenter.emit(PresenterEvent::Cost {
             session_total_usd: self.store.session_cost(&self.id)?,
+            session_in,
+            session_out,
+            context_tokens,
+            context_limit: forge_mesh::pricing::context_limit(&active_model),
         });
         self.presenter.emit(PresenterEvent::Done {
             final_text: final_text.clone(),
