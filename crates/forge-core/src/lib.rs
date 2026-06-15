@@ -69,6 +69,8 @@ pub struct Session {
     /// The discovered model catalog (auto-discovery mesh), kept so the TUI `/models` browser can
     /// classify + group what's available without re-running discovery. `None` for mock/offline.
     catalog: Option<ModelCatalog>,
+    /// The agent's task list (the `update_tasks` tool), rehydrated from the store on resume.
+    tasks: Vec<forge_types::TodoItem>,
 }
 
 impl Session {
@@ -149,6 +151,8 @@ impl Session {
         let mode = config.permission_mode;
         let pricing = Pricing::from_config(&config);
         let rules = config.permission_rules();
+        // Rehydrate the task list (empty for a fresh session; restored on resume).
+        let tasks = store.tasks(&id).unwrap_or_default();
         let mut s = Self {
             id,
             store,
@@ -165,6 +169,7 @@ impl Session {
             checkpoint_root: std::path::PathBuf::from(".forge/checkpoints"),
             current_turn_seq: 0,
             catalog: None,
+            tasks,
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
@@ -279,6 +284,7 @@ impl Session {
         self.id = id.clone();
         self.transcript.clear();
         self.seq = 0;
+        self.tasks.clear();
         self.presenter.emit(PresenterEvent::SessionStarted { id });
         Ok(())
     }
@@ -301,9 +307,15 @@ impl Session {
             })
             .collect();
         self.id = session_id.to_string();
+        self.tasks = self.store.tasks(session_id).unwrap_or_default();
         self.presenter.emit(PresenterEvent::SessionStarted {
             id: session_id.to_string(),
         });
+        // Re-show the restored task list so the resumed session's progress is visible.
+        if !self.tasks.is_empty() {
+            self.presenter
+                .emit(PresenterEvent::Tasks(self.tasks.clone()));
+        }
         Ok(())
     }
 
@@ -435,6 +447,8 @@ impl Session {
         // The interactive question tool (AskUserQuestion) — always advertised so the model can
         // ask the user a focused question with suggested answers (docs/features/ask-user-question.md).
         specs.push(ask_user_spec());
+        // The task-tracking tool — always advertised so the model can keep a live todo list.
+        specs.push(update_tasks_spec());
         specs
     }
 
@@ -674,6 +688,18 @@ impl Session {
             }
         }
 
+        // A CLI-bridge turn may have called `update_tasks` inside `forge mcp-serve` (a separate
+        // process), persisting to the store but not touching our in-memory list. Reload and
+        // surface it so bridge-driven task updates show in the TUI (the in-process path already
+        // emitted live during the turn, so this is a no-op there).
+        if let Ok(persisted) = self.store.tasks(&self.id) {
+            if persisted != self.tasks {
+                self.tasks = persisted;
+                self.presenter
+                    .emit(PresenterEvent::Tasks(self.tasks.clone()));
+            }
+        }
+
         self.presenter.emit(PresenterEvent::Cost {
             session_total_usd: self.store.session_cost(&self.id)?,
         });
@@ -697,6 +723,10 @@ impl Session {
         // The interactive question tool is core-owned too (it needs the presenter).
         if call.name == ASK_USER_TOOL {
             return self.ask_user(msg_id, call);
+        }
+        // Task tracking is core-owned (it mutates session state + persists + emits to the TUI).
+        if call.name == UPDATE_TASKS_TOOL {
+            return self.update_tasks(msg_id, call);
         }
 
         let args_json = serde_json::to_string(&call.args)?;
@@ -944,6 +974,44 @@ impl Session {
             .record_tool_call(msg_id, &call.name, &args_json, &answer, "allowed", "ok")?;
         Ok(answer)
     }
+
+    /// Replace the session's task list (the `update_tasks` virtual tool): parse the full list,
+    /// persist it, emit it to the TUI, and return a one-line summary to the model.
+    fn update_tasks(
+        &mut self,
+        msg_id: &str,
+        call: &forge_types::ToolCall,
+    ) -> Result<String, CoreError> {
+        use forge_types::TodoStatus;
+        let args_json = serde_json::to_string(&call.args)?;
+        self.tasks = parse_tasks(&call.args);
+        let _ = self.store.set_tasks(&self.id, &self.tasks);
+        self.presenter
+            .emit(PresenterEvent::Tasks(self.tasks.clone()));
+
+        let done = self
+            .tasks
+            .iter()
+            .filter(|t| t.status == TodoStatus::Done)
+            .count();
+        let in_progress = self
+            .tasks
+            .iter()
+            .filter(|t| t.status == TodoStatus::InProgress)
+            .count();
+        let result = format!(
+            "task list updated: {} task(s) — {done} done, {in_progress} in progress",
+            self.tasks.len()
+        );
+        self.store
+            .record_tool_call(msg_id, &call.name, &args_json, &result, "allowed", "ok")?;
+        Ok(result)
+    }
+
+    /// The current task list (for the composition root / TUI to render on resume).
+    pub fn tasks(&self) -> &[forge_types::TodoItem] {
+        &self.tasks
+    }
 }
 
 /// The interactive-question virtual tool name (AskUserQuestion).
@@ -980,6 +1048,68 @@ fn ask_user_spec() -> ToolSpec {
                 }
             },
             "required": ["question"]
+        }),
+    }
+}
+
+/// The task-tracking virtual tool name.
+pub const UPDATE_TASKS_TOOL: &str = "update_tasks";
+
+/// Parse the `update_tasks` arguments into a task list (tolerant of missing/loose fields).
+/// Shared by the in-process intercept and the CLI-bridge `mcp-serve` handler.
+pub fn parse_tasks(args: &serde_json::Value) -> Vec<forge_types::TodoItem> {
+    use forge_types::{TodoItem, TodoStatus};
+    args.get("tasks")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    let title = t.get("title").and_then(|v| v.as_str())?.trim();
+                    (!title.is_empty()).then(|| TodoItem {
+                        title: title.to_string(),
+                        status: t
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .map(TodoStatus::parse_loose)
+                            .unwrap_or_default(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The `ToolSpec` advertised to the model for [`UPDATE_TASKS_TOOL`].
+pub fn update_tasks_spec() -> ToolSpec {
+    ToolSpec {
+        name: UPDATE_TASKS_TOOL.to_string(),
+        description: "Maintain a visible task list for multi-step work. Call it when you start a \
+            task with 2+ steps and again whenever a step's state changes — pass the FULL ordered \
+            list each time (it replaces the previous one). Mark exactly one task `in_progress` \
+            while you work it, `done` the moment it's finished. Keep titles short and concrete. \
+            Skip it for trivial single-step requests."
+            .to_string(),
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "description": "the full ordered task list (replaces the previous list)",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string", "description": "short task description" },
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "done"],
+                                "description": "task state (default pending)"
+                            }
+                        },
+                        "required": ["title"]
+                    }
+                }
+            },
+            "required": ["tasks"]
         }),
     }
 }
@@ -1155,6 +1285,113 @@ mod tests {
             tool_msgs.iter().any(|m| m.content == "Postgres"),
             "ask_user answer fed back as tool result: {tool_msgs:?}"
         );
+    }
+
+    /// A provider that calls `update_tasks` once with a 2-item list, then finishes.
+    #[derive(Default)]
+    struct TaskingProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for TaskingProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_provider::ModelResponse;
+            use forge_types::{new_id, ToolCall, Usage};
+            let usage = Usage::default();
+            if messages.iter().any(|m| m.role == Role::Tool) {
+                return Ok(ModelResponse {
+                    content: "done".into(),
+                    tool_calls: vec![],
+                    usage,
+                    quota: None,
+                });
+            }
+            Ok(ModelResponse {
+                content: "planning".into(),
+                tool_calls: vec![ToolCall {
+                    id: new_id(),
+                    name: "update_tasks".into(),
+                    args: serde_json::json!({"tasks": [
+                        {"title": "design the api", "status": "done"},
+                        {"title": "implement it", "status": "in_progress"}
+                    ]}),
+                }],
+                usage,
+                quota: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn update_tasks_sets_persists_and_emits_the_list() {
+        use forge_types::TodoStatus;
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(TaskingProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools(),
+            Box::new(capture),
+            Config::default(),
+            ".",
+        )
+        .unwrap();
+        let id = session.id().to_string();
+
+        session.run_turn("build the feature").await.unwrap();
+
+        // Live state updated.
+        assert_eq!(session.tasks().len(), 2);
+        assert_eq!(session.tasks()[0].status, TodoStatus::Done);
+        assert_eq!(session.tasks()[1].status, TodoStatus::InProgress);
+
+        // Persisted for resume.
+        let stored = store.tasks(&id).unwrap();
+        assert_eq!(stored, session.tasks());
+
+        // Emitted to the UI.
+        let emitted = events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, PresenterEvent::Tasks(t) if t.len() == 2));
+        assert!(emitted, "a Tasks event was emitted for the TUI");
+    }
+
+    #[tokio::test]
+    async fn resume_restores_the_task_list() {
+        use forge_types::{TodoItem, TodoStatus};
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let id = store.create_session(".", "default").unwrap();
+        store
+            .set_tasks(
+                &id,
+                &[TodoItem {
+                    title: "earlier work".into(),
+                    status: TodoStatus::InProgress,
+                }],
+            )
+            .unwrap();
+
+        let session = Session::resume(
+            Arc::clone(&store),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools(),
+            Box::new(CapturePresenter::default()),
+            Config::default(),
+            &id,
+        )
+        .unwrap();
+        assert_eq!(session.tasks().len(), 1, "task list restored on resume");
+        assert_eq!(session.tasks()[0].title, "earlier work");
     }
 
     #[tokio::test]

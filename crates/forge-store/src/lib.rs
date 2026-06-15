@@ -390,6 +390,35 @@ impl Store {
         Ok(())
     }
 
+    /// Replace a session's task list (the `update_tasks` tool). Stored as one JSON row so a
+    /// resumed session restores its tasks. An empty list clears it.
+    pub fn set_tasks(&self, session_id: &str, tasks: &[forge_types::TodoItem]) -> Result<()> {
+        let json = serde_json::to_string(tasks).unwrap_or_else(|_| "[]".to_string());
+        self.lock()?.execute(
+            "INSERT INTO session_tasks (session_id, tasks_json, updated_at)
+             VALUES (?1, ?2, strftime('%s','now'))
+             ON CONFLICT(session_id) DO UPDATE SET
+               tasks_json = excluded.tasks_json, updated_at = excluded.updated_at",
+            (session_id, json),
+        )?;
+        Ok(())
+    }
+
+    /// The session's persisted task list (empty if none/unparseable).
+    pub fn tasks(&self, session_id: &str) -> Result<Vec<forge_types::TodoItem>> {
+        let conn = self.lock()?;
+        let json: Option<String> = conn
+            .query_row(
+                "SELECT tasks_json FROM session_tasks WHERE session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(json
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default())
+    }
+
     /// Snapshot of currently-constraining subscription quotas (rows whose window hasn't reset),
     /// for the router. Only `Warning`/`Exhausted` providers are carried — `Ok` is the default.
     pub fn current_quota(&self) -> Result<forge_types::SubscriptionQuota> {
@@ -925,6 +954,35 @@ mod tests {
             vec!["turn 1", "reply 1"],
             "only the surviving turn loads"
         );
+    }
+
+    #[test]
+    fn session_tasks_round_trip_and_replace() {
+        use forge_types::{TodoItem, TodoStatus};
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        assert!(store.tasks(&sid).unwrap().is_empty(), "none initially");
+
+        let tasks = vec![
+            TodoItem {
+                title: "write the parser".into(),
+                status: TodoStatus::Done,
+            },
+            TodoItem {
+                title: "wire it up".into(),
+                status: TodoStatus::InProgress,
+            },
+        ];
+        store.set_tasks(&sid, &tasks).unwrap();
+        assert_eq!(store.tasks(&sid).unwrap(), tasks, "round-trips");
+
+        // A second write replaces the list wholesale.
+        let next = vec![TodoItem {
+            title: "ship".into(),
+            status: TodoStatus::Pending,
+        }];
+        store.set_tasks(&sid, &next).unwrap();
+        assert_eq!(store.tasks(&sid).unwrap(), next, "replaced, not appended");
     }
 
     #[test]
