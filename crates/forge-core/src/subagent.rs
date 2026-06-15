@@ -5,7 +5,9 @@
 //!
 //! `spawn_agents` is a *virtual tool*: it is advertised to the parent model but is not a
 //! `forge_tools::Tool` (it needs the provider/router/store, which ordinary tools can't reach).
-//! [`Session`](crate::Session) intercepts it and calls [`run_subagent`] here.
+//! [`orchestrate`] is the presenter-agnostic driver; [`Session`](crate::Session) calls it for a
+//! native API turn (lifecycle → TUI events) and `forge mcp-serve` calls it for a CLI-bridge
+//! (claude/codex) turn (RFC subagent-orchestration Phase 3).
 //!
 //! Children run **concurrently** (bounded by `max_concurrency`), each as a persisted child
 //! session linked to the parent. A child's toolset comes from its agent type (default:
@@ -293,6 +295,118 @@ pub async fn run_subagent(
     }
 
     Ok(SubagentOutcome { final_text, ok })
+}
+
+/// One subagent's completion, sent from its task back to the orchestrator's drain loop.
+struct ChildDone {
+    index: usize,
+    id: String,
+    agent: String,
+    text: String,
+    ok: bool,
+    cost: f64,
+}
+
+/// A subagent lifecycle event, surfaced to whatever is driving the orchestration (the TUI
+/// presenter for a native turn, or a headless logger for the CLI-bridge `mcp-serve` path).
+pub enum Lifecycle<'a> {
+    Start {
+        id: &'a str,
+        agent: &'a str,
+        task: &'a str,
+    },
+    Done {
+        id: &'a str,
+        agent: &'a str,
+        ok: bool,
+        summary: &'a str,
+        cost_usd: f64,
+    },
+}
+
+/// Run a batch of subagents concurrently (bounded by `max_concurrency`) under `parent_id`,
+/// reporting each child's lifecycle through `on_event`, and return the combined labeled result
+/// plus whether all succeeded. Presenter-agnostic so both [`crate::Session`] (TUI events) and
+/// `forge mcp-serve` (the CLI-bridge path) reuse one orchestrator (RFC subagent-orchestration).
+#[allow(clippy::too_many_arguments)]
+pub async fn orchestrate(
+    ctx: &AgentCtx,
+    parent_id: &str,
+    requests: Vec<AgentRequest>,
+    agents: &HashMap<String, AgentDef>,
+    budget: BudgetState,
+    max_concurrency: usize,
+    on_event: &mut (dyn FnMut(Lifecycle) + Send),
+) -> Result<(String, bool), CoreError> {
+    use tokio::sync::{mpsc, Semaphore};
+
+    let mode_label = format!("{:?}", ctx.mode);
+    let n = requests.len();
+    let sem = Arc::new(Semaphore::new(max_concurrency.max(1)));
+    let (tx, mut rx) = mpsc::unbounded_channel::<ChildDone>();
+
+    // Create each child session + announce Start up front (so a UI shows the whole batch as
+    // running immediately), then spawn the work bounded by a concurrency permit.
+    for (i, req) in requests.into_iter().enumerate() {
+        let resolved = resolve(&req, agents);
+        let child_id = ctx
+            .store
+            .create_child_session(".", &mode_label, parent_id)?;
+        on_event(Lifecycle::Start {
+            id: &child_id,
+            agent: &resolved.name,
+            task: &resolved.task,
+        });
+
+        let ctx = ctx.clone();
+        let tx = tx.clone();
+        let sem = Arc::clone(&sem);
+        tokio::spawn(async move {
+            let _permit = sem.acquire_owned().await;
+            let outcome = run_subagent(&ctx, &child_id, &resolved, budget).await;
+            let (text, ok) = match outcome {
+                Ok(out) => (out.final_text, out.ok),
+                Err(e) => (format!("error: subagent failed: {e}"), false),
+            };
+            let cost = ctx.store.session_cost(&child_id).unwrap_or(0.0);
+            let _ = tx.send(ChildDone {
+                index: i,
+                id: child_id,
+                agent: resolved.name,
+                text,
+                ok,
+                cost,
+            });
+        });
+    }
+    drop(tx); // close the channel once every task holds its own clone
+
+    let mut slots: Vec<Option<(String, String)>> = vec![None; n];
+    let mut all_ok = true;
+    while let Some(done) = rx.recv().await {
+        all_ok &= done.ok;
+        on_event(Lifecycle::Done {
+            id: &done.id,
+            agent: &done.agent,
+            ok: done.ok,
+            summary: &summary(&done.text),
+            cost_usd: done.cost,
+        });
+        slots[done.index] = Some((done.agent, done.text));
+    }
+
+    let mut combined = String::new();
+    for (i, slot) in slots.into_iter().enumerate() {
+        let (agent, text) = slot.unwrap_or_else(|| ("?".into(), "error: no result".into()));
+        combined.push_str(&format!("[agent {}: {}]\n{}\n\n", i + 1, agent, text));
+    }
+    Ok((combined.trim_end().to_string(), all_ok))
+}
+
+/// First non-empty line of a result, truncated — a one-line summary for lifecycle events.
+fn summary(text: &str) -> String {
+    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    line.chars().take(120).collect()
 }
 
 /// Run one subagent tool call through the permission gate (headless). Differs from the parent's

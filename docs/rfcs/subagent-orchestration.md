@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|-------|
-| Status | Phase 1 + 2 SHIPPED (parallel fan-out, `.forge/agents/*.md` types, live TUI panel) |
+| Status | Phase 1 + 2 + 3a SHIPPED (parallel, agent types, live TUI, CLI-bridge exposure); nested streaming + recursion remain |
 | Author | Floris (with Claude) |
 | Created | 2026-06-15 |
 | Last updated | 2026-06-15 |
@@ -314,10 +314,20 @@ classify each). Store mutex is not a bottleneck at these write volumes.
   → default read-only investigator. **TUI:** running children animate with a spinner in the live
   preview region; as each completes it flows into a grouped scrollback box
   (`╭─ subagents` · `├─ ✓ [agent] $cost summary` · `╰─ N agents · $total`).
-- **Phase 3 (future, separate RFC) — nested live token streaming + recursion + cross-agent
-  sequencing + exposing `spawn_agents` to the CLI-bridge (claude/codex) turns.** Out of scope
-  here. (Today `spawn_agents` is advertised to API-model turns via `tool_specs`; the CLI bridge
-  gets tools via `mcp-serve`, which does not expose the virtual tool.)
+- **Phase 3a — expose `spawn_agents` to CLI-bridge (claude/codex) turns. ✅ SHIPPED.**
+  `forge mcp-serve` now builds its own provider/router/store and advertises `spawn_agents`,
+  running the children in-process via the shared [`orchestrate`] driver. **Recursion guard
+  across the process boundary:** before running children, mcp-serve sets
+  `FORGE_NO_SPAWN_AGENTS=1`; any nested CLI-bridge child inherits the env var and does **not**
+  re-advertise `spawn_agents`, so depth stays 1 even though the guard now spans processes
+  (verified live: tool present with the var unset, absent with it set; a `tools/call
+  spawn_agents` ran a mesh-routed ollama child end-to-end at $0). The presenter-agnostic
+  `orchestrate(ctx, parent_id, requests, agents, budget, max_concurrency, on_event)` is shared
+  by `Session` (TUI events) and mcp-serve (headless logging).
+- **Phase 3b (future) — nested live token streaming + true recursion (depth >1) + cross-agent
+  sequencing.** Out of scope here. (CLI-bridge subagent activity currently surfaces as a single
+  `mcp__forge__spawn_agents` tool call in the bridge's stream, not the native per-child TUI
+  panel.)
 
 ### Spike checklist (before Phase 2)
 1. Confirm `Box`→`Arc` compiles cleanly across `forge-cli` construction sites and tests.
