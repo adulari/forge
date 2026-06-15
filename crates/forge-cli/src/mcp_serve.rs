@@ -55,6 +55,9 @@ struct ForgeMcp {
     config: Config,
     /// Present when subagents are enabled here (subagents on + `depth < max_depth`).
     subagents: Option<SubagentSupport>,
+    /// Store used by the `update_tasks` virtual tool to persist the bridge turn's task list,
+    /// keyed by the parent session id the parent's `run_turn` exported via `ENV_SESSION`.
+    tasks_store: Arc<Store>,
 }
 
 impl ServerHandler for ForgeMcp {
@@ -93,6 +96,10 @@ impl ServerHandler for ForgeMcp {
             let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
             tools.push(Tool::new(spec.name, spec.description, Arc::new(schema)));
         }
+        // Always advertise task tracking so a bridge model can maintain a visible todo list.
+        let ts = forge_core::update_tasks_spec();
+        let ts_schema: JsonObject = ts.schema.as_object().cloned().unwrap_or_default();
+        tools.push(Tool::new(ts.name, ts.description, Arc::new(ts_schema)));
         Ok(ListToolsResult {
             tools,
             next_cursor: None,
@@ -111,6 +118,23 @@ impl ServerHandler for ForgeMcp {
         // The subagent virtual tool — fan out to mesh-routed children in this process.
         if name == subagent::SPAWN_AGENTS_TOOL {
             return Ok(self.handle_spawn_agents(&args).await);
+        }
+
+        // Task tracking — persist the list to the parent session (id from ENV_SESSION) so the
+        // parent's run_turn reloads + surfaces it in the TUI after the bridge turn completes.
+        if name == forge_core::UPDATE_TASKS_TOOL {
+            let tasks = forge_core::parse_tasks(&args);
+            let done = tasks
+                .iter()
+                .filter(|t| t.status == forge_types::TodoStatus::Done)
+                .count();
+            if let Ok(session_id) = std::env::var(forge_core::snapshot::ENV_SESSION) {
+                let _ = self.tasks_store.set_tasks(&session_id, &tasks);
+            }
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "task list updated: {} task(s) — {done} done",
+                tasks.len()
+            ))]));
         }
 
         let Some(tool) = self.registry.get(&name) else {
@@ -270,12 +294,18 @@ pub async fn run() -> Result<()> {
         None
     };
 
+    // Reuse the subagent store if present, else open the project store for task persistence.
+    let tasks_store = match &subagents {
+        Some(s) => Arc::clone(&s.ctx.store),
+        None => Arc::new(Store::open(std::path::Path::new(".forge/forge.db"))?),
+    };
     let server = ForgeMcp {
         registry: ToolRegistry::with_core_tools(),
         mode: config.permission_mode,
         rules: config.permission_rules(),
         config,
         subagents,
+        tasks_store,
     };
     let service = server.serve(stdio()).await?;
     service.waiting().await?;

@@ -115,4 +115,12 @@ CREATE TABLE IF NOT EXISTS subscription_usage (
     fraction    REAL,                  -- 0.0–1.0 window used, if reported
     updated_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
+
+-- The agent's task/todo list (the `update_tasks` tool). One row per session holding the latest
+-- list as JSON, so a resumed session restores its task list. Replaced wholesale on each update.
+CREATE TABLE IF NOT EXISTS session_tasks (
+    session_id TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE,
+    tasks_json TEXT NOT NULL,          -- JSON array of {title, status}
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
 "#;
