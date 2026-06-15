@@ -123,6 +123,25 @@ fn tui_assay_mode_opens_choice_picker_and_runs_without_crashing() {
     );
 }
 
+#[test]
+#[ignore = "needs a DSR-answering pty; run locally with --ignored"]
+fn tui_config_opens_wizard_fullscreen_and_returns_to_chat() {
+    // /config takes over the screen with the setup wizard; Esc cancels it and the inline chat
+    // loop must resume cleanly (raw mode re-enabled, viewport rebuilt) — then /quit exits. This
+    // proves the alt-screen takeover + restore doesn't wedge the terminal.
+    let (clean, plain) = drive_pty(&[
+        ("/config\r", 1200),
+        ("\x1b", 800),   // Esc cancels the wizard, back to chat
+        ("/quit\r", 600), // chat still responsive → clean exit
+    ]);
+    assert!(clean, "clean exit after the config takeover: {plain}");
+    assert!(!plain.to_lowercase().contains("panic"), "no panic: {plain}");
+    assert!(
+        plain.contains("Forge setup") || plain.to_lowercase().contains("config"),
+        "the config wizard was reached and chat resumed: {plain}"
+    );
+}
+
 fn forge_id() -> String {
     format!("{}-{:?}", std::process::id(), std::thread::current().id()).replace(['(', ')', ' '], "")
 }

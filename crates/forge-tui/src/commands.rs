@@ -44,6 +44,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/models",
     },
     Command {
+        name: "config",
+        desc: "configure Forge — provider & search API keys, bridge plans",
+        usage: "/config",
+    },
+    Command {
         name: "new",
         desc: "start a fresh session",
         usage: "/new",
@@ -84,6 +89,8 @@ pub enum CommandAction {
     Resume(String),
     /// Open the interactive model browser (`/models`).
     ListModels,
+    /// Open the interactive config wizard (`/config`) — set provider/search keys + plans.
+    Config,
     New,
     ClearScreen,
     /// Open the operating-mode (temper) picker.
@@ -120,6 +127,7 @@ pub fn parse_command(line: &str) -> CommandAction {
             }
         }
         "models" | "mc" => CommandAction::ListModels,
+        "config" | "cfg" | "settings" => CommandAction::Config,
         "new" | "n" => CommandAction::New,
         "mode" | "m" | "temper" => CommandAction::Mode,
         "assay" | "analyze" | "analyse" => CommandAction::Assay,
@@ -378,6 +386,9 @@ mod tests {
             parse_command("/checkpoint before refactor"),
             CommandAction::Checkpoint(Some("before refactor".into()))
         );
+        assert_eq!(parse_command("/config"), CommandAction::Config);
+        assert_eq!(parse_command("/cfg"), CommandAction::Config);
+        assert_eq!(parse_command("/settings"), CommandAction::Config);
     }
 
     #[test]
