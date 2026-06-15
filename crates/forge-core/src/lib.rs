@@ -1415,8 +1415,8 @@ mod tests {
                 content: String::new(),
                 tool_calls: vec![ToolCall {
                     id: new_id(),
-                    name: "test__echo".into(),
-                    args: serde_json::json!({ "msg": "hi" }),
+                    name: "mcp_call".into(),
+                    args: serde_json::json!({ "name": "test__echo", "arguments": { "msg": "hi" } }),
                 }],
                 usage,
                 quota: None,
@@ -1455,12 +1455,17 @@ mod tests {
         .unwrap();
         session.set_mcp(Some(mgr));
 
-        // tool_specs advertises the meta-tools + the exposed server tool.
+        // tool_specs advertises the MCP meta-tools (search + call); server tools are reached
+        // through mcp_call, never advertised individually.
         let names: Vec<String> = session.tool_specs().into_iter().map(|s| s.name).collect();
         assert!(names.iter().any(|n| n == "mcp_search_tools"));
         assert!(
-            names.iter().any(|n| n == "test__echo"),
-            "exposed tool advertised: {names:?}"
+            names.iter().any(|n| n == "mcp_call"),
+            "mcp_call advertised: {names:?}"
+        );
+        assert!(
+            names.iter().all(|n| n != "test__echo"),
+            "server tool NOT advertised directly"
         );
         // …and built-ins are still there (additive, no regression).
         assert!(names.iter().any(|n| n == "read_file"));

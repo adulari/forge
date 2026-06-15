@@ -393,27 +393,28 @@ All entry shapes (`command`/`args`/`env` for stdio, `url`/`headers` for http) tr
 warns the user to populate it via env/keyring. The discovery + parsing layer lives in
 `forge-config::mcp` next to the figment loader.
 
-### 5.4 Deferred tool loading (the flood problem)
+### 5.4 Deferred tool loading via `mcp_search_tools` + `mcp_call`
 
-A server can expose hundreds of tools; advertising every schema every turn would blow the
-context budget and degrade model tool-selection. Forge mirrors the deferred-tool mechanism of
-the harness it runs under: **tools are discovered but not advertised by default.**
+A server can expose hundreds of tools (helm exposes 313); advertising every schema every turn
+would blow the context budget and degrade tool-selection. Forge advertises only a fixed set of
+**meta-tools** and reaches every server tool *through* one of them:
 
-- On connect, Forge fetches the full `tools/list` and stores it in the catalog (names +
-  descriptions + schemas), but advertises to the model only: (a) the MCP meta-tools, and
-  (b) any tools matched by the allowlist or within `max_eager_tools`.
-- Two meta-tools provide on-demand loading:
-  - `mcp_search_tools { query, server? }` → returns ranked `{qualified_name, description}`
-    matches from the catalog (schemas omitted — cheap).
-  - `mcp_expose_tool { qualified_name }` → registers that tool's full `ToolSpec` into the
-    advertised set for subsequent steps (idempotent).
-- `mcp_search_tools` / `mcp_read_resource` / `mcp_get_prompt` are `External` side-effect=No?
-  — searching the catalog and reading a resource are read-shaped but still hit a server; they
-  are classified `External` and gated, except `mcp_search_tools` which only reads the local
-  catalog and is `ReadOnly`.
+- On connect, Forge fetches the full `tools/list` into the catalog (names + descriptions +
+  schemas) but advertises only the meta-tools — never the server's own tools.
+- `mcp_search_tools { query, server? }` → ranked matches: `qualified_name` + description + a
+  compact **args hint** (`query:string!, count:integer`) so the model knows how to fill the
+  call. `ReadOnly` (local catalog only).
+- `mcp_call { name, arguments }` → invokes the qualified tool on the server. `External` (gated).
+  This is the single, universal invoker.
 
-This keeps the per-turn advertised tool count bounded (meta-tools + a handful of exposed
-tools) regardless of how many tools a server has.
+**Why a generic `mcp_call` instead of a per-tool "expose then call by name"?** Because the
+CLI-bridge path (claude/codex) fetches its tool list **once per turn**: a tool that became
+"exposed" mid-turn could never become callable in that turn. `mcp_call` is statically advertised
+and works identically on the direct and bridge paths — the bridge's tool surface is
+`forge mcp-serve`, which advertises the same meta-tools and routes them to its own `McpManager`.
+
+This keeps the per-turn advertised tool count fixed (the meta-tools) no matter how many tools a
+server exposes.
 
 ### 5.5 Resources & prompts (Should)
 

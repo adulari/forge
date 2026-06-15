@@ -39,11 +39,6 @@ pub struct McpConfig {
     /// without delaying session start beyond this.
     #[serde(default = "default_connect_timeout_secs")]
     pub connect_timeout_secs: u64,
-    /// How many of a server's tools to advertise to the model eagerly (per server). The rest are
-    /// discovered but loaded on demand via `mcp_search_tools`→`mcp_expose_tool`. Default 0 = all
-    /// deferred (keeps the per-turn tool list bounded for big servers).
-    #[serde(default)]
-    pub max_eager_tools: usize,
     /// Bounded reconnect attempts after a stdio child exits / an HTTP stream drops (default 3).
     #[serde(default = "default_max_reconnect_attempts")]
     pub max_reconnect_attempts: usize,
@@ -56,7 +51,6 @@ impl Default for McpConfig {
             allow: McpAllowlist::default(),
             call_timeout_secs: default_call_timeout_secs(),
             connect_timeout_secs: default_connect_timeout_secs(),
-            max_eager_tools: 0,
             max_reconnect_attempts: default_max_reconnect_attempts(),
         }
     }
@@ -574,7 +568,6 @@ mod tests {
     fn parses_mcp_toml_section() {
         let toml = r#"
 call_timeout_secs = 30
-max_eager_tools = 2
 
 [[servers]]
 name = "gitlab"
@@ -595,7 +588,6 @@ url = "https://mcp.example.com/mcp"
 "#;
         let c: McpConfig = toml::from_str(toml).unwrap();
         assert_eq!(c.call_timeout_secs, 30);
-        assert_eq!(c.max_eager_tools, 2);
         assert_eq!(c.servers.len(), 2);
         assert_eq!(c.servers[0].name, "gitlab");
         assert_eq!(c.servers[0].transport_label(), "stdio");

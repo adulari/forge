@@ -3,18 +3,22 @@
 //! the official `rmcp` SDK, discovers their tools/resources/prompts, and surfaces them to the
 //! agent loop through Forge's existing tool-calling + permission spine.
 //!
-//! Integration points (all in `forge-core`):
-//! - [`McpManager::advertised_specs`] feeds `Session::tool_specs` — the MCP **meta-tools** plus
-//!   any exposed server tools (deferred loading keeps the per-turn tool list bounded).
+//! Integration points (`forge-core` on the direct path, `forge mcp-serve` on the CLI-bridge path):
+//! - [`McpManager::advertised_specs`] feeds the model's tool list — only the fixed **meta-tools**
+//!   (`mcp_search_tools` to find a tool, `mcp_call` to run it, plus resources/prompt). A server's
+//!   own tools are reached *through* `mcp_call`, never advertised individually: this keeps the
+//!   per-turn tool list tiny for a 300-tool server AND works on the CLI bridge, where the model's
+//!   tool list is fixed once per turn (so a dynamically-"exposed" tool could never become callable
+//!   mid-turn).
 //! - [`McpManager::knows_tool`] + [`McpManager::side_effect_of`] + [`McpManager::call`] are
-//!   driven from `Session::invoke_tool`, behind the permission broker. Every MCP call is
-//!   `SideEffect::External` (untrusted third-party server) and gated like a side effect.
+//!   driven from `Session::invoke_tool` (and `ForgeMcp::call_tool` on the bridge), behind the
+//!   permission broker. Every server call is `SideEffect::External` (untrusted) and gated.
 //!
 //! Security: servers are untrusted by default. The allowlist gates which servers/tools are
 //! reachable, deferred loading keeps hostile tool descriptions out of context until surfaced,
 //! and tokens resolve from env/keyring only (ADR-0007) — never logged, never in TOML.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -32,7 +36,7 @@ mod transport;
 /// Meta-tool names (the deferred-loading + resource/prompt surface). Mirrors the
 /// `ToolSearch`-style mechanism the harness Forge itself runs under.
 pub const MCP_SEARCH_TOOLS: &str = "mcp_search_tools";
-pub const MCP_EXPOSE_TOOL: &str = "mcp_expose_tool";
+pub const MCP_CALL: &str = "mcp_call";
 pub const MCP_LIST_RESOURCES: &str = "mcp_list_resources";
 pub const MCP_READ_RESOURCE: &str = "mcp_read_resource";
 pub const MCP_GET_PROMPT: &str = "mcp_get_prompt";
@@ -136,8 +140,6 @@ struct Connection {
 /// state is behind short-lived mutexes (never locked across an `.await`).
 pub struct McpManager {
     conns: Mutex<HashMap<String, Connection>>,
-    /// Qualified tool names currently advertised to the model (deferred loading).
-    exposed: Mutex<HashSet<String>>,
     config: McpConfig,
     call_timeout: Duration,
     connect_timeout: Duration,
@@ -147,7 +149,6 @@ impl McpManager {
     fn empty(config: &McpConfig) -> Self {
         Self {
             conns: Mutex::new(HashMap::new()),
-            exposed: Mutex::new(HashSet::new()),
             config: config.clone(),
             call_timeout: Duration::from_secs(config.call_timeout_secs.max(1)),
             connect_timeout: Duration::from_secs(config.connect_timeout_secs.max(1)),
@@ -156,7 +157,6 @@ impl McpManager {
 
     /// Connect to every enabled + allowlisted server concurrently, isolating failures: a server
     /// that can't connect lands `failed` with a reason but never blocks the others or the session.
-    /// Then eagerly exposes allowlisted tools (and up to `max_eager_tools` per server).
     pub async fn connect_all(config: &McpConfig) -> Self {
         let mgr = Self::empty(config);
         let connect_timeout = mgr.connect_timeout;
@@ -223,7 +223,6 @@ impl McpManager {
                 }
             }
         }
-        mgr.apply_eager_exposure();
         mgr
     }
 
@@ -286,77 +285,36 @@ impl McpManager {
         );
     }
 
-    /// Expose allowlisted tools (and up to `max_eager_tools` per server) so they're advertised
-    /// without a `mcp_search_tools`/`mcp_expose_tool` round-trip.
-    fn apply_eager_exposure(&self) {
-        let conns = self.conns.lock().unwrap();
-        let mut exposed = self.exposed.lock().unwrap();
-        let explicit = !self.config.allow.tools.is_empty();
-        for conn in conns.values() {
-            let mut eager = 0usize;
-            for t in &conn.tools {
-                if !self.config.tool_allowed(&t.qualified) {
-                    continue;
-                }
-                if explicit {
-                    // An explicit tool allowlist IS the eager set — expose all allowed tools.
-                    exposed.insert(t.qualified.clone());
-                } else if eager < self.config.max_eager_tools {
-                    exposed.insert(t.qualified.clone());
-                    eager += 1;
-                }
-            }
-        }
-    }
-
     /// No servers connected/declared — the whole MCP path is inert.
     pub fn is_empty(&self) -> bool {
         self.conns.lock().unwrap().is_empty()
     }
 
-    /// The tools advertised to the model this turn: the meta-tools + every exposed server tool.
-    /// Returns empty when no servers are configured (zero overhead for non-MCP users).
+    /// The tools advertised to the model: just the fixed meta-tools (search / call / resources /
+    /// prompt). Server tools are reached *through* `mcp_call`, never advertised individually — so
+    /// the per-turn tool list stays tiny regardless of how many tools a server has (a 313-tool
+    /// server adds nothing here), and it works identically on the direct and CLI-bridge paths
+    /// (the bridge fixes its tool list once per turn, so a dynamically-"exposed" tool could never
+    /// become callable mid-turn — `mcp_call` sidesteps that entirely). Empty when no servers.
     pub fn advertised_specs(&self) -> Vec<McpToolSpec> {
         if self.conns.lock().unwrap().is_empty() {
             return vec![];
         }
-        let mut specs = meta_specs();
-        let exposed = self.exposed.lock().unwrap();
-        let conns = self.conns.lock().unwrap();
-        for conn in conns.values() {
-            for t in &conn.tools {
-                if exposed.contains(&t.qualified) {
-                    specs.push(McpToolSpec {
-                        name: t.qualified.clone(),
-                        description: format!("[mcp:{}] {}", conn.name, t.description),
-                        schema: t.schema.clone(),
-                    });
-                }
-            }
-        }
-        specs
+        meta_specs()
     }
 
-    /// Whether `name` is an MCP meta-tool or a known (discovered) qualified server tool — i.e.
-    /// core should route it here rather than to the built-in registry.
+    /// Whether `name` is an MCP meta-tool — i.e. core should route it here rather than to the
+    /// built-in registry. (Server tools are invoked via `mcp_call`, never by their own name.)
     pub fn knows_tool(&self, name: &str) -> bool {
-        let conns = self.conns.lock().unwrap();
-        if conns.is_empty() {
-            return false; // no servers → meta-tools aren't advertised, so nothing is "ours"
-        }
-        if is_meta_tool(name) {
-            return true;
-        }
-        conns
-            .values()
-            .any(|c| c.tools.iter().any(|t| t.qualified == name))
+        !self.conns.lock().unwrap().is_empty() && is_meta_tool(name)
     }
 
-    /// The permission class for a tool. The local meta-tools (catalog search / expose / list) are
-    /// read-only; everything that hits a server is `External` (untrusted, gated).
+    /// The permission class for a meta-tool. Local catalog reads (`mcp_search_tools`,
+    /// `mcp_list_resources`) are `ReadOnly`; anything that hits a server (`mcp_call`,
+    /// `mcp_read_resource`, `mcp_get_prompt`) is `External` (untrusted, gated).
     pub fn side_effect_of(&self, name: &str) -> SideEffect {
         match name {
-            MCP_SEARCH_TOOLS | MCP_EXPOSE_TOOL | MCP_LIST_RESOURCES => SideEffect::ReadOnly,
+            MCP_SEARCH_TOOLS | MCP_LIST_RESOURCES => SideEffect::ReadOnly,
             _ => SideEffect::External,
         }
     }
@@ -366,12 +324,34 @@ impl McpManager {
     pub async fn call(&self, name: &str, args: &Value) -> McpCallOutcome {
         match name {
             MCP_SEARCH_TOOLS => self.search_tools(args),
-            MCP_EXPOSE_TOOL => self.expose_tool(args),
+            MCP_CALL => self.mcp_call(args).await,
             MCP_LIST_RESOURCES => self.list_resources(args),
             MCP_READ_RESOURCE => self.read_resource(args).await,
             MCP_GET_PROMPT => self.get_prompt(args).await,
+            // Defensive: a direct qualified-name call still works (e.g. legacy callers).
             qualified => self.call_server_tool(qualified, args).await,
         }
+    }
+
+    /// `mcp_call { name: "server__tool", arguments: {...} }` — the universal invoker. The model
+    /// finds a tool with `mcp_search_tools`, then calls it here by qualified name. This is the
+    /// single mechanism that works on every path (no per-tool advertising, no dynamic tool list).
+    async fn mcp_call(&self, args: &Value) -> McpCallOutcome {
+        let name = args
+            .get("name")
+            .or_else(|| args.get("qualified_name"))
+            .or_else(|| args.get("tool"))
+            .and_then(Value::as_str);
+        let Some(name) = name else {
+            return McpCallOutcome::err("mcp_call: expected string 'name' (a server__tool name)");
+        };
+        // `arguments` may be an object, or absent (no-arg tool).
+        let inner = args
+            .get("arguments")
+            .or_else(|| args.get("args"))
+            .cloned()
+            .unwrap_or(Value::Object(Default::default()));
+        self.call_server_tool(name, &inner).await
     }
 
     // ---- meta-tools (local catalog) ----
@@ -385,7 +365,8 @@ impl McpManager {
         let server_filter = args.get("server").and_then(Value::as_str);
         let terms: Vec<&str> = query.split_whitespace().collect();
         let conns = self.conns.lock().unwrap();
-        let mut scored: Vec<(i64, String, String)> = Vec::new();
+        #[allow(clippy::type_complexity)]
+        let mut scored: Vec<(i64, String, String, String)> = Vec::new();
         for conn in conns.values() {
             if let Some(sf) = server_filter {
                 if conn.name != sf {
@@ -399,46 +380,29 @@ impl McpManager {
                     .map(|term| if hay.contains(term) { 1 } else { 0 })
                     .sum();
                 if terms.is_empty() || score > 0 {
-                    scored.push((score, t.qualified.clone(), one_line(&t.description)));
+                    scored.push((
+                        score,
+                        t.qualified.clone(),
+                        one_line(&t.description),
+                        schema_hint(&t.schema),
+                    ));
                 }
             }
         }
         drop(conns);
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        scored.truncate(20);
+        scored.truncate(15);
         if scored.is_empty() {
             return McpCallOutcome::ok("no matching MCP tools".to_string());
         }
         let mut out = format!("{} matching MCP tool(s):\n", scored.len());
-        for (_, name, desc) in &scored {
-            out.push_str(&format!("  {name} — {desc}\n"));
+        for (_, name, desc, hint) in &scored {
+            out.push_str(&format!("  {name} — {desc}\n      args: {hint}\n"));
         }
-        out.push_str("\ncall mcp_expose_tool { \"qualified_name\": \"…\" } to make one callable.");
+        out.push_str(
+            "\nTo run one, call mcp_call { \"name\": \"server__tool\", \"arguments\": { … } }.",
+        );
         McpCallOutcome::ok(out)
-    }
-
-    fn expose_tool(&self, args: &Value) -> McpCallOutcome {
-        let Some(qualified) = args.get("qualified_name").and_then(Value::as_str) else {
-            return McpCallOutcome::err("expected string 'qualified_name'");
-        };
-        let known = {
-            let conns = self.conns.lock().unwrap();
-            conns
-                .values()
-                .any(|c| c.tools.iter().any(|t| t.qualified == qualified))
-        };
-        if !known {
-            return McpCallOutcome::err(format!(
-                "mcp: no such tool '{qualified}' (use mcp_search_tools to find one)"
-            ));
-        }
-        if !self.config.tool_allowed(qualified) {
-            return McpCallOutcome::err(format!("mcp: '{qualified}' is not permitted by policy"));
-        }
-        self.exposed.lock().unwrap().insert(qualified.to_string());
-        McpCallOutcome::ok(format!(
-            "exposed '{qualified}' — you can call it on the next step."
-        ))
     }
 
     fn list_resources(&self, args: &Value) -> McpCallOutcome {
@@ -654,7 +618,6 @@ impl McpManager {
         match tokio::time::timeout(self.connect_timeout, transport::serve(&cfg)).await {
             Ok(Ok(service)) => {
                 self.add_established(server, label, service).await;
-                self.apply_eager_exposure();
                 self.peer_for(server)
             }
             _ => {
@@ -735,12 +698,39 @@ impl McpManager {
 fn is_meta_tool(name: &str) -> bool {
     matches!(
         name,
-        MCP_SEARCH_TOOLS
-            | MCP_EXPOSE_TOOL
-            | MCP_LIST_RESOURCES
-            | MCP_READ_RESOURCE
-            | MCP_GET_PROMPT
+        MCP_SEARCH_TOOLS | MCP_CALL | MCP_LIST_RESOURCES | MCP_READ_RESOURCE | MCP_GET_PROMPT
     )
+}
+
+/// A compact one-line parameter hint from a JSON-schema object: `query:string!, count:integer`
+/// (`!` marks required). Lets `mcp_search_tools` tell the model how to fill `mcp_call`'s
+/// `arguments` without dumping the full schema for every match.
+fn schema_hint(schema: &Value) -> String {
+    let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
+        return "(none)".to_string();
+    };
+    if props.is_empty() {
+        return "(none)".to_string();
+    }
+    let required: std::collections::HashSet<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    let mut parts: Vec<String> = props
+        .iter()
+        .map(|(k, v)| {
+            let ty = v.get("type").and_then(|t| t.as_str()).unwrap_or("any");
+            let req = if required.contains(k.as_str()) {
+                "!"
+            } else {
+                ""
+            };
+            format!("{k}:{ty}{req}")
+        })
+        .collect();
+    parts.sort();
+    parts.join(", ")
 }
 
 /// The MCP meta-tools, always advertised when at least one server is configured.
@@ -748,30 +738,34 @@ fn meta_specs() -> Vec<McpToolSpec> {
     vec![
         McpToolSpec {
             name: MCP_SEARCH_TOOLS.into(),
-            description: "Search the catalog of tools exposed by connected MCP servers (returns \
-                names + descriptions, not full schemas). Use this to find a tool before calling \
-                it. Optional `server` filters to one server."
+            description: "Find tools on the connected MCP servers (e.g. the helm server). Returns \
+                matching qualified `server__tool` names, descriptions, and an args hint. ALWAYS \
+                use this first to locate the right tool, then invoke it with `mcp_call`. Optional \
+                `server` restricts to one server."
                 .into(),
             schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "query": { "type": "string", "description": "what you're looking for" },
+                    "query": { "type": "string", "description": "what you're looking for, e.g. 'net worth'" },
                     "server": { "type": "string", "description": "optional: restrict to one server" }
                 },
                 "required": ["query"]
             }),
         },
         McpToolSpec {
-            name: MCP_EXPOSE_TOOL.into(),
-            description: "Make a discovered MCP tool callable: pass its qualified `server__tool` \
-                name (from mcp_search_tools). After this, you can call that tool directly."
+            name: MCP_CALL.into(),
+            description: "Invoke a tool on a connected MCP server. Pass the qualified `name` \
+                (`server__tool`, from mcp_search_tools) and an `arguments` object matching that \
+                tool's schema. This is how you actually run any MCP server tool (net worth, \
+                merge-request review, etc.) — there is no separate step."
                 .into(),
             schema: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "qualified_name": { "type": "string", "description": "the server__tool name" }
+                    "name": { "type": "string", "description": "qualified server__tool name" },
+                    "arguments": { "type": "object", "description": "arguments for the tool (may be omitted if none)" }
                 },
-                "required": ["qualified_name"]
+                "required": ["name"]
             }),
         },
         McpToolSpec {
@@ -955,7 +949,6 @@ pub mod testsupport {
         let client = ().serve(client_io).await.expect("client connects");
         let mgr = McpManager::empty(config);
         mgr.add_established("test", "stdio", client).await;
-        mgr.apply_eager_exposure();
         mgr
     }
 }
@@ -978,62 +971,62 @@ mod tests {
         let tools = mgr.tool_lines("test");
         assert!(tools.iter().any(|(q, _)| q == "test__echo"));
         assert!(tools.iter().any(|(q, _)| q == "test__boom"));
-        assert!(mgr.knows_tool("test__echo"));
         assert!(mgr.knows_tool(MCP_SEARCH_TOOLS));
-        assert!(!mgr.knows_tool("test__nope"));
+        assert!(mgr.knows_tool(MCP_CALL));
+        // Server tools are reached via mcp_call, never routed by their own name.
+        assert!(!mgr.knows_tool("test__echo"));
     }
 
     #[tokio::test]
-    async fn deferred_loading_hides_tools_until_exposed() {
-        // Default config: max_eager_tools = 0 → only meta-tools advertised, not the 2 server tools.
+    async fn only_meta_tools_advertised_regardless_of_server_size() {
+        // The advertised set is the fixed meta-tools — never the server's own tools. This is what
+        // keeps a 313-tool server from flooding the model AND what makes it work on the bridge.
         let mgr = manager_with_test_server(McpConfig::default()).await;
         let advertised = mgr.advertised_specs();
         assert!(
             advertised.iter().all(|s| s.name.starts_with("mcp_")),
-            "only meta-tools eager"
+            "only meta-tools advertised"
         );
         assert_eq!(advertised.len(), 5, "the five meta-tools");
+        assert!(advertised.iter().any(|s| s.name == MCP_CALL));
+        assert!(advertised.iter().all(|s| s.name != "test__echo"));
 
-        // Search finds it (local catalog) without exposing it.
+        // Search finds the tool + an args hint without advertising it.
         let found = mgr
             .call(MCP_SEARCH_TOOLS, &serde_json::json!({"query": "echo"}))
             .await;
         assert!(found.ok && found.text.contains("test__echo"));
-        assert!(mgr
-            .advertised_specs()
-            .iter()
-            .all(|s| s.name != "test__echo"));
-
-        // Expose it, then it's advertised.
-        let exposed = mgr
-            .call(
-                MCP_EXPOSE_TOOL,
-                &serde_json::json!({"qualified_name": "test__echo"}),
-            )
-            .await;
-        assert!(exposed.ok, "{}", exposed.text);
-        assert!(mgr
-            .advertised_specs()
-            .iter()
-            .any(|s| s.name == "test__echo"));
+        assert!(
+            found.text.contains("msg:string"),
+            "args hint present: {}",
+            found.text
+        );
     }
 
     #[tokio::test]
-    async fn calls_a_namespaced_tool_and_surfaces_errors() {
+    async fn mcp_call_invokes_a_server_tool_and_surfaces_errors() {
         let mgr = manager_with_test_server(McpConfig::default()).await;
+        // The universal path: mcp_call { name, arguments }.
         let ok = mgr
-            .call("test__echo", &serde_json::json!({"msg": "hi"}))
+            .call(
+                MCP_CALL,
+                &serde_json::json!({"name": "test__echo", "arguments": {"msg": "hi"}}),
+            )
             .await;
         assert!(ok.ok);
         assert_eq!(ok.text, "echo: hi");
 
         // An isError payload becomes ok=false.
-        let bad = mgr.call("test__boom", &serde_json::json!({})).await;
+        let bad = mgr
+            .call(MCP_CALL, &serde_json::json!({"name": "test__boom"}))
+            .await;
         assert!(!bad.ok);
         assert!(bad.text.contains("kaboom"));
 
         // A vanished tool is a clean error, not a hang/panic.
-        let gone = mgr.call("test__missing", &serde_json::json!({})).await;
+        let gone = mgr
+            .call(MCP_CALL, &serde_json::json!({"name": "test__missing"}))
+            .await;
         assert!(!gone.ok);
         assert!(gone.text.contains("no longer exists"));
     }
@@ -1041,14 +1034,14 @@ mod tests {
     #[tokio::test]
     async fn external_side_effect_classification() {
         let mgr = manager_with_test_server(McpConfig::default()).await;
-        assert_eq!(mgr.side_effect_of("test__echo"), SideEffect::External);
+        assert_eq!(mgr.side_effect_of(MCP_CALL), SideEffect::External);
         assert_eq!(mgr.side_effect_of(MCP_READ_RESOURCE), SideEffect::External);
         assert_eq!(mgr.side_effect_of(MCP_SEARCH_TOOLS), SideEffect::ReadOnly);
-        assert_eq!(mgr.side_effect_of(MCP_EXPOSE_TOOL), SideEffect::ReadOnly);
+        assert_eq!(mgr.side_effect_of(MCP_LIST_RESOURCES), SideEffect::ReadOnly);
     }
 
     #[tokio::test]
-    async fn allowlist_blocks_exposing_and_calling() {
+    async fn allowlist_blocks_calling_excluded_tools() {
         let config = McpConfig {
             allow: forge_config::McpAllowlist {
                 servers: vec!["test".into()],
@@ -1057,20 +1050,18 @@ mod tests {
             ..Default::default()
         };
         let mgr = manager_with_test_server(config).await;
-        // echo is allowlisted → eagerly exposed + callable.
-        assert!(mgr
-            .advertised_specs()
-            .iter()
-            .any(|s| s.name == "test__echo"));
-        // boom is excluded → expose refused, call denied.
-        let expose = mgr
+        // echo is allowlisted → callable via mcp_call.
+        let ok = mgr
             .call(
-                MCP_EXPOSE_TOOL,
-                &serde_json::json!({"qualified_name": "test__boom"}),
+                MCP_CALL,
+                &serde_json::json!({"name": "test__echo", "arguments": {"msg": "x"}}),
             )
             .await;
-        assert!(!expose.ok && expose.text.contains("not permitted"));
-        let call = mgr.call("test__boom", &serde_json::json!({})).await;
+        assert!(ok.ok, "{}", ok.text);
+        // boom is excluded → denied by policy.
+        let call = mgr
+            .call(MCP_CALL, &serde_json::json!({"name": "test__boom"}))
+            .await;
         assert!(!call.ok && call.text.contains("denied by policy"));
     }
 
