@@ -5,7 +5,7 @@
 
 use forge_types::TaskTier;
 
-use crate::capability::{is_frontier, tier_score};
+use crate::capability::{capability_score, is_frontier};
 use crate::pricing::Pricing;
 
 /// Discovered `provider::model` ids the user can actually use right now.
@@ -38,6 +38,79 @@ fn is_free(id: &str, cost: f64, subscription: bool) -> bool {
         return id.contains(":free");
     }
     true
+}
+
+/// A model's cost class for routing: `0` genuinely free (local/free-tier), `1` subscription
+/// ($0 marginal but burns the user's plan quota), `2` metered/paid. The mesh prefers low classes
+/// for cheap tiers (preserve quota) and the subscription flagship for complex work.
+pub(crate) fn cost_class(id: &str, cost: f64) -> u8 {
+    if is_subscription(id) {
+        1
+    } else if is_free(id, cost, false) {
+        0
+    } else {
+        2
+    }
+}
+
+/// How much a tier *wants* each cost class (added to the capability score). The policy:
+/// - Trivial: prefer genuinely-free, so easy tasks don't burn subscription quota.
+/// - Standard: subscription ≈ free, a slight subscription edge (use the good $0 models).
+/// - Complex: prefer the subscription flagship (strongest reliable, $0 marginal); free as backup.
+fn cost_pref(tier: TaskTier, class: u8) -> f64 {
+    match (tier, class) {
+        (TaskTier::Trivial, 0) => 1.0,
+        (TaskTier::Trivial, 1) => 0.3,
+        (TaskTier::Trivial, _) => -0.6,
+        (TaskTier::Standard, 0) => 0.5,
+        (TaskTier::Standard, 1) => 0.6,
+        (TaskTier::Standard, _) => -0.4,
+        (TaskTier::Complex, 0) => 0.4,
+        (TaskTier::Complex, 1) => 0.8,
+        (TaskTier::Complex, _) => 0.0,
+    }
+}
+
+/// A mild, defensible provider prior (a tiebreak nudge, never a hard rule):
+/// - code-heavy task → the coding-tuned flagships (codex/claude bridges + their APIs) get a small
+///   lift over general models;
+/// - trivial non-code → the fast cheap-bulk providers (groq/gemini) get a small lift.
+fn code_prior(provider: &str, code_heavy: bool, tier: TaskTier) -> f64 {
+    if code_heavy {
+        return match provider {
+            "codex-cli" | "claude-cli" | "anthropic" | "openai" => 0.3,
+            _ => 0.0,
+        };
+    }
+    if tier == TaskTier::Trivial && matches!(provider, "groq" | "gemini") {
+        return 0.2;
+    }
+    0.0
+}
+
+/// The full routing score for one model: capability fit + cost-class preference + the mild prior.
+fn route_score(id: &str, tier: TaskTier, cost: f64, code_heavy: bool) -> f64 {
+    capability_score(id, tier)
+        + cost_pref(tier, cost_class(id, cost))
+        + code_prior(provider_of(id), code_heavy, tier)
+}
+
+/// A per-prompt provider ordering key: hashing `seed:provider` means different prompts rotate
+/// which provider wins a genuine score tie, so a workload spreads across equally-good providers
+/// (claude ↔ codex) instead of always picking the alphabetically-first one — while staying fully
+/// deterministic for a given prompt.
+fn provider_rotation(provider: &str, seed: u64) -> u64 {
+    stable_hash(&format!("{seed}:{provider}"))
+}
+
+/// A small deterministic FNV-1a hash (no external deps); used for the seed and provider rotation.
+pub fn stable_hash(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 /// A discovered model classified for display (the `/models` browser + `forge models`). Pure view
@@ -133,21 +206,50 @@ impl ModelCatalog {
         &self.models
     }
 
-    /// The discovered models ranked best-first for `tier`, using the capability priors + the
-    /// estimated cost from `pricing` (free = $0). Returns at most `top` candidates so the
-    /// router's cost-aware pass has a small, strong shortlist.
+    /// The discovered models ranked best-first for `tier` (display / non-prompt callers): the
+    /// cost-tiered routing score with a neutral context (not code-heavy, fixed seed). The live
+    /// router uses [`ranked_seeded`](Self::ranked_seeded) so genuine ties spread across providers
+    /// per prompt instead of always picking the alphabetically-first one.
     pub fn ranked_for(&self, tier: TaskTier, pricing: &Pricing, top: usize) -> Vec<String> {
-        let mut scored: Vec<(f64, &String)> = self
+        self.ranked_seeded(tier, pricing, top, false, 0)
+    }
+
+    /// Prompt-aware ranking: cost-tiered capability score, with genuine ties broken by a
+    /// per-prompt `seed` rotation across providers (fair spread) then id (stable). `code_heavy`
+    /// applies the mild coding-provider prior. The single place the routing policy lives.
+    pub fn ranked_seeded(
+        &self,
+        tier: TaskTier,
+        pricing: &Pricing,
+        top: usize,
+        code_heavy: bool,
+        seed: u64,
+    ) -> Vec<String> {
+        let mut scored: Vec<(f64, u8, u64, &String)> = self
             .models
             .iter()
-            .map(|m| (tier_score(m, tier, pricing.estimated_cost(m)), m))
+            .map(|m| {
+                let cost = pricing.estimated_cost(m);
+                (
+                    route_score(m, tier, cost, code_heavy),
+                    cost_class(m, cost),
+                    provider_rotation(provider_of(m), seed),
+                    m,
+                )
+            })
             .collect();
-        // Best score first; ties broken by id for determinism.
-        scored.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+        // Best score first; then cheaper cost-class; then the per-prompt provider rotation
+        // (spreads ties across providers); then id for a fully deterministic order.
+        scored.sort_by(|a, b| {
+            b.0.total_cmp(&a.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+                .then_with(|| a.3.cmp(b.3))
+        });
         scored
             .into_iter()
             .take(top)
-            .map(|(_, m)| m.clone())
+            .map(|(_, _, _, m)| m.clone())
             .collect()
     }
 
