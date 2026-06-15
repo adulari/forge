@@ -131,7 +131,7 @@ fn tui_config_opens_wizard_fullscreen_and_returns_to_chat() {
     // proves the alt-screen takeover + restore doesn't wedge the terminal.
     let (clean, plain) = drive_pty(&[
         ("/config\r", 1200),
-        ("\x1b", 800),   // Esc cancels the wizard, back to chat
+        ("\x1b", 800),    // Esc cancels the wizard, back to chat
         ("/quit\r", 600), // chat still responsive → clean exit
     ]);
     assert!(clean, "clean exit after the config takeover: {plain}");
