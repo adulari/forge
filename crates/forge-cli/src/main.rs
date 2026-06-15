@@ -802,28 +802,14 @@ async fn probe_models(
 }
 
 /// `forge mcp [tools <server> | import [path]]` — connect to the configured MCP servers and show
-/// their status, list one server's tools, or import a Claude-Code `.mcp.json`.
+/// their status, list one server's tools, or import servers from your installed AI CLIs.
 async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
-    // Import doesn't need any connection — translate the JSON and write `.forge/mcp.toml`.
-    if let Some(McpCmd::Import { path }) = &cmd {
-        let src = path.clone().unwrap_or_else(|| ".mcp.json".to_string());
-        let (imported, warnings) = forge_config::import_mcp_json(std::path::Path::new(&src))
-            .with_context(|| format!("importing {src}"))?;
-        let out = std::path::Path::new(".forge/mcp.toml");
-        forge_config::write_mcp_toml(out, &imported).context("writing .forge/mcp.toml")?;
-        println!(
-            "✓ imported {} server(s) from {src} → {}",
-            imported.servers.len(),
-            out.display()
-        );
-        for w in &warnings {
-            println!("  ⚠ {w}");
-        }
-        if !warnings.is_empty() {
-            println!("  (secrets are never written to TOML — set token_env/keyring per ADR-0007)");
-        }
-        return Ok(());
-    }
+    // Import needs no connection. Resolve to the listing path otherwise.
+    let tools_server = match cmd {
+        Some(McpCmd::Import { path }) => return mcp_import(path),
+        Some(McpCmd::Tools { server }) => Some(server),
+        None => None,
+    };
 
     forge_config::inject_provider_keys();
     let config = forge_config::load().unwrap_or_default();
@@ -836,8 +822,8 @@ async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
     }
 
     let manager = forge_mcp::McpManager::connect_all(&config.mcp).await;
-    match cmd {
-        Some(McpCmd::Tools { server }) => {
+    match tools_server {
+        Some(server) => {
             let tools = manager.tool_lines(&server);
             if tools.is_empty() {
                 println!("no tools for server '{server}' (not connected, or it exposes none)");
@@ -848,7 +834,7 @@ async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
                 }
             }
         }
-        _ => {
+        None => {
             let lines = manager.status_lines();
             println!("MCP servers ({} configured)", lines.len());
             for s in &lines {
@@ -869,6 +855,167 @@ async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
     }
     manager.shutdown().await;
     Ok(())
+}
+
+/// `forge mcp import [path]`. With an explicit `path`, import that one JSON file. With no path,
+/// auto-scan every installed AI-CLI MCP config (Claude Code/Desktop, Codex, Cursor, Windsurf,
+/// VS Code) and let the user pick which servers to import. Selected servers are merged into
+/// `.forge/mcp.toml`; secrets are NEVER copied (ADR-0007).
+fn mcp_import(path: Option<String>) -> Result<()> {
+    let out = std::path::Path::new(".forge/mcp.toml");
+
+    // Explicit single-file import (back-compat / scripting).
+    if let Some(src) = path {
+        let (imported, warnings) = forge_config::import_mcp_json(std::path::Path::new(&src))
+            .with_context(|| format!("importing {src}"))?;
+        let (added, skipped) = merge_into_mcp_toml(out, imported.servers)?;
+        report_import(&added, &skipped, &warnings, out);
+        return Ok(());
+    }
+
+    // Auto-scan mode.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let sources = forge_config::discover_import_sources(&cwd);
+    if sources.is_empty() {
+        println!(
+            "No MCP servers found in any known AI-CLI config.\n\
+             Scanned: ~/.claude.json, ~/.codex/config.toml, ~/.cursor/mcp.json (+ project), \
+             Claude Desktop, Windsurf, ./.mcp.json, ./.vscode/mcp.json.\n\
+             You can also import a specific file: `forge mcp import <path-to-.mcp.json>`."
+        );
+        return Ok(());
+    }
+
+    // Flatten to a numbered, deduped (by server name, first source wins) selection list.
+    let mut flat: Vec<(String, forge_config::McpServerConfig)> = Vec::new();
+    let mut all_warnings: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for s in &sources {
+        all_warnings.extend(s.warnings.iter().cloned());
+        for srv in &s.servers {
+            if seen.insert(srv.name.clone()) {
+                flat.push((s.label.clone(), srv.clone()));
+            }
+        }
+    }
+
+    println!(
+        "Discovered {} MCP server(s) across your AI tools:\n",
+        flat.len()
+    );
+    for (i, (label, srv)) in flat.iter().enumerate() {
+        println!(
+            "  {:>2}. {:<16} [{}]  {}",
+            i + 1,
+            srv.name,
+            srv.transport_label(),
+            label
+        );
+    }
+
+    // Non-interactive (piped/CI): import everything so the command is scriptable.
+    let selection = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        println!();
+        let line = prompt_line("Import which? (e.g. 1,3,5 — 'a' for all, empty to cancel): ")?;
+        match parse_selection(&line, flat.len()) {
+            None => {
+                println!("cancelled — nothing imported.");
+                return Ok(());
+            }
+            Some(idx) => idx,
+        }
+    } else {
+        println!("\n(non-interactive: importing all)");
+        (0..flat.len()).collect()
+    };
+
+    let chosen: Vec<forge_config::McpServerConfig> =
+        selection.into_iter().map(|i| flat[i].1.clone()).collect();
+    if chosen.is_empty() {
+        println!("nothing selected.");
+        return Ok(());
+    }
+    // Only surface warnings for sources a chosen server actually came from.
+    let chosen_names: std::collections::HashSet<&str> =
+        chosen.iter().map(|s| s.name.as_str()).collect();
+    let relevant_warnings: Vec<String> = all_warnings
+        .into_iter()
+        .filter(|w| chosen_names.iter().any(|n| w.contains(&format!("'{n}'"))))
+        .collect();
+
+    let (added, skipped) = merge_into_mcp_toml(out, chosen)?;
+    report_import(&added, &skipped, &relevant_warnings, out);
+    Ok(())
+}
+
+/// Parse a selection line: `"a"`/`"all"` → all indices; `"1,3,5"` / `"1 3 5"` → those (1-based,
+/// clamped, deduped, 0-based out). Empty/invalid-only → `None` (cancel).
+fn parse_selection(line: &str, n: usize) -> Option<Vec<usize>> {
+    let t = line.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if t.eq_ignore_ascii_case("a") || t.eq_ignore_ascii_case("all") {
+        return Some((0..n).collect());
+    }
+    let mut out = Vec::new();
+    for tok in t.split([',', ' ']).filter(|s| !s.is_empty()) {
+        if let Ok(k) = tok.parse::<usize>() {
+            if (1..=n).contains(&k) && !out.contains(&(k - 1)) {
+                out.push(k - 1);
+            }
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// Merge `new_servers` into the existing `.forge/mcp.toml` (load → append names not already
+/// present → write). Returns `(added, skipped)` server names.
+fn merge_into_mcp_toml(
+    out: &std::path::Path,
+    new_servers: Vec<forge_config::McpServerConfig>,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let mut config = forge_config::load_mcp_toml(out);
+    let existing: std::collections::HashSet<String> =
+        config.servers.iter().map(|s| s.name.clone()).collect();
+    let (mut added, mut skipped) = (Vec::new(), Vec::new());
+    for srv in new_servers {
+        if existing.contains(&srv.name) {
+            skipped.push(srv.name);
+        } else {
+            added.push(srv.name.clone());
+            config.servers.push(srv);
+        }
+    }
+    forge_config::write_mcp_toml(out, &config).context("writing .forge/mcp.toml")?;
+    Ok((added, skipped))
+}
+
+fn report_import(added: &[String], skipped: &[String], warnings: &[String], out: &std::path::Path) {
+    if added.is_empty() {
+        println!(
+            "nothing new imported (all selected servers already in {}).",
+            out.display()
+        );
+    } else {
+        println!(
+            "✓ imported {} server(s) → {}: {}",
+            added.len(),
+            out.display(),
+            added.join(", ")
+        );
+    }
+    if !skipped.is_empty() {
+        println!("  • skipped (already present): {}", skipped.join(", "));
+    }
+    for w in warnings {
+        println!("  ⚠ {w}");
+    }
+    if !warnings.is_empty() {
+        println!(
+            "  (secrets are never written to TOML — set token_env/token_keyring per ADR-0007)"
+        );
+    }
 }
 
 async fn build_session_with(
@@ -1896,6 +2043,21 @@ fn fmt_age(created_at: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_selection_handles_all_lists_and_cancel() {
+        assert_eq!(parse_selection("a", 3), Some(vec![0, 1, 2]));
+        assert_eq!(parse_selection("ALL", 2), Some(vec![0, 1]));
+        assert_eq!(parse_selection("1,3,5", 6), Some(vec![0, 2, 4]));
+        assert_eq!(
+            parse_selection("2 2 4", 4),
+            Some(vec![1, 3]),
+            "dedup + space-sep"
+        );
+        assert_eq!(parse_selection("9", 3), None, "out-of-range only → cancel");
+        assert_eq!(parse_selection("", 3), None, "empty → cancel");
+        assert_eq!(parse_selection("  ", 3), None);
+    }
 
     #[test]
     fn interactive_logs_go_to_a_file_never_the_tui() {

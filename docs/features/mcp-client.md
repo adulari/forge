@@ -372,13 +372,26 @@ servers = ["gitlab", "docs"]
 tools   = []                         # empty = all tools of allowed servers, gated per call
 ```
 
-**Claude-Code-compatible import.** `forge mcp import [path]` reads a Claude-Code-style
-`.mcp.json` (the `mcpServers` map: `command`/`args`/`env` for stdio, `url`/`headers` for
-http) and translates each entry into an `McpServerConfig`, writing `.forge/mcp.toml`. The
-import layer lives in `forge-config` next to the figment loader; inline secrets found in
-`.mcp.json` are **not** copied into TOML — the importer emits a warning telling the user to
-move them to `token_env`/keyring. (Implementation reuses the env→keyring resolution already
-in `forge-config::api_key`.)
+**Import from installed AI CLIs.** `forge mcp import` (no path) **auto-scans** the MCP configs
+of every AI tool Forge knows about and lets the user pick which servers to import:
+- Claude Code — `~/.claude.json` (global `mcpServers` + the current project's `projects.<cwd>.mcpServers`) and `./.mcp.json`
+- Codex — `~/.codex/config.toml` (`[mcp_servers.<name>]`, TOML)
+- Cursor — `~/.cursor/mcp.json` (global) and `./.cursor/mcp.json` (project)
+- Claude Desktop — `<config>/Claude/claude_desktop_config.json`
+- Windsurf — `~/.codeium/windsurf/mcp_config.json`
+- VS Code — `./.vscode/mcp.json` (the `servers` key)
+
+Each discovered server is shown with its name, transport, and source; the user selects by
+number (`1,3,5` / `a` for all). Selected servers are **merged** into `.forge/mcp.toml`
+(servers already present are skipped). `forge mcp import <path>` still imports one explicit
+JSON file; a non-interactive run imports all discovered servers (scriptable).
+
+All entry shapes (`command`/`args`/`env` for stdio, `url`/`headers` for http) translate into
+`McpServerConfig`. **Inline secrets are never copied into TOML** (ADR-0007): a secret-looking
+`env` var becomes a `token_env` reference; a secret request header (`Authorization`,
+`X-*-Api-Key`, …) becomes a `token_keyring = "mcp:<server>"` placeholder, and the importer
+warns the user to populate it via env/keyring. The discovery + parsing layer lives in
+`forge-config::mcp` next to the figment loader.
 
 ### 5.4 Deferred tool loading (the flood problem)
 

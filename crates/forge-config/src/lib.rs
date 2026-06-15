@@ -14,8 +14,8 @@ pub mod agents;
 pub mod mcp;
 pub use agents::{load_agents, AgentDef};
 pub use mcp::{
-    import_mcp_json, write_mcp_toml, McpAllowlist, McpAuth, McpConfig, McpServerConfig,
-    McpTransport,
+    discover_import_sources, import_mcp_json, load_mcp_toml, write_mcp_toml, ImportSource,
+    McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport,
 };
 
 #[derive(Debug, thiserror::Error)]

@@ -3,7 +3,7 @@
 //! Claude-Code-compatible `.mcp.json` importer.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -199,92 +199,126 @@ fn looks_secret(key: &str) -> bool {
     .any(|m| k.contains(m))
 }
 
+/// Parse one server entry from a JSON spec (the `{type?, command/args/env | url/headers}` object
+/// used by Claude Code, Cursor, Windsurf, …). Pushes secret-stripping warnings into `warnings`;
+/// returns `None` for an entry that is neither stdio nor http. Secrets are NEVER copied.
+fn server_from_json(
+    name: &str,
+    spec: &serde_json::Value,
+    warnings: &mut Vec<String>,
+) -> Option<McpServerConfig> {
+    let (transport, auth) = if let Some(cmd) = spec.get("command").and_then(|v| v.as_str()) {
+        let args = spec
+            .get("args")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut env = HashMap::new();
+        let mut auth: Option<McpAuth> = None;
+        if let Some(env_obj) = spec.get("env").and_then(|v| v.as_object()) {
+            for (k, v) in env_obj {
+                if looks_secret(k) {
+                    auth.get_or_insert_with(McpAuth::default).token_env = Some(k.clone());
+                    warnings.push(format!(
+                        "server '{name}': not copying secret env '{k}' into mcp.toml — set \
+                         token_env = \"{k}\" and export it (or use the keyring)"
+                    ));
+                } else if let Some(val) = v.as_str() {
+                    env.insert(k.clone(), val.to_string());
+                }
+            }
+        }
+        (
+            McpTransport::Stdio {
+                command: cmd.to_string(),
+                args,
+                env,
+            },
+            auth,
+        )
+    } else if let Some(url) = spec.get("url").and_then(|v| v.as_str()) {
+        let mut headers = HashMap::new();
+        let mut had_secret_header = false;
+        if let Some(h) = spec.get("headers").and_then(|v| v.as_object()) {
+            for (k, v) in h {
+                if looks_secret(k) || k.eq_ignore_ascii_case("authorization") {
+                    had_secret_header = true;
+                    warnings.push(format!(
+                        "server '{name}': not copying header '{k}' into mcp.toml — put the token \
+                         in token_keyring/token_env (Forge sends it as a bearer token)"
+                    ));
+                } else if let Some(val) = v.as_str() {
+                    headers.insert(k.clone(), val.to_string());
+                }
+            }
+        }
+        // Leave a placeholder keyring slot so the user knows where the token belongs.
+        let auth = had_secret_header.then(|| McpAuth {
+            token_keyring: Some(format!("mcp:{name}")),
+            token_env: None,
+        });
+        (
+            McpTransport::Http {
+                url: url.to_string(),
+                headers,
+            },
+            auth,
+        )
+    } else {
+        warnings.push(format!(
+            "server '{name}': skipped — neither `command` (stdio) nor `url` (http)"
+        ));
+        return None;
+    };
+    Some(McpServerConfig {
+        name: name.to_string(),
+        transport,
+        auth,
+        enabled: true,
+    })
+}
+
+/// Parse a JSON `mcpServers` (Claude/Cursor/Windsurf) **or** `servers` (VS Code) object into
+/// server configs + secret-stripping warnings.
+fn servers_from_json(root: &serde_json::Value) -> (Vec<McpServerConfig>, Vec<String>) {
+    let obj = root
+        .get("mcpServers")
+        .or_else(|| root.get("servers"))
+        .and_then(|v| v.as_object());
+    let mut servers = Vec::new();
+    let mut warnings = Vec::new();
+    if let Some(obj) = obj {
+        for (name, spec) in obj {
+            if let Some(s) = server_from_json(name, spec, &mut warnings) {
+                servers.push(s);
+            }
+        }
+    }
+    (servers, warnings)
+}
+
 /// Translate a Claude-Code-style `.mcp.json` into an [`McpConfig`]. Returns the config plus any
-/// warnings (e.g. an inline secret that was NOT copied — the user is told to move it to
-/// `token_env`/keyring). Secrets are never written into the resulting config (ADR-0007).
+/// warnings (a secret that was NOT copied — the user is told to move it to `token_env`/keyring).
+/// Secrets are never written into the resulting config (ADR-0007).
 pub fn import_mcp_json(path: &Path) -> Result<(McpConfig, Vec<String>), ConfigError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| ConfigError::Write(format!("reading {}: {e}", path.display())))?;
     let root: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| ConfigError::Write(format!("parsing {}: {e}", path.display())))?;
-    let servers_obj = root
+    if root
         .get("mcpServers")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| ConfigError::Write("`.mcp.json` has no `mcpServers` object".into()))?;
-
-    let mut warnings = Vec::new();
-    let mut servers = Vec::new();
-    for (name, spec) in servers_obj {
-        let (transport, auth) = if let Some(cmd) = spec.get("command").and_then(|v| v.as_str()) {
-            let args = spec
-                .get("args")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-            let mut env = HashMap::new();
-            let mut auth = None;
-            if let Some(env_obj) = spec.get("env").and_then(|v| v.as_object()) {
-                for (k, v) in env_obj {
-                    if looks_secret(k) {
-                        // Don't copy the secret value; point the server at the env var instead.
-                        auth.get_or_insert(McpAuth::default()).token_env = Some(k.clone());
-                        warnings.push(format!(
-                            "server '{name}': not copying secret env '{k}' into mcp.toml — set \
-                             token_env = \"{k}\" and export it (or use the keyring)"
-                        ));
-                    } else if let Some(val) = v.as_str() {
-                        env.insert(k.clone(), val.to_string());
-                    }
-                }
-            }
-            (
-                McpTransport::Stdio {
-                    command: cmd.to_string(),
-                    args,
-                    env,
-                },
-                auth,
-            )
-        } else if let Some(url) = spec.get("url").and_then(|v| v.as_str()) {
-            let mut headers = HashMap::new();
-            let mut auth = None;
-            if let Some(h) = spec.get("headers").and_then(|v| v.as_object()) {
-                for (k, v) in h {
-                    if looks_secret(k) || k.eq_ignore_ascii_case("authorization") {
-                        warnings.push(format!(
-                            "server '{name}': not copying header '{k}' into mcp.toml — put the \
-                             token in token_env/keyring (Forge sends it as a bearer token)"
-                        ));
-                        auth.get_or_insert(McpAuth::default());
-                    } else if let Some(val) = v.as_str() {
-                        headers.insert(k.clone(), val.to_string());
-                    }
-                }
-            }
-            (
-                McpTransport::Http {
-                    url: url.to_string(),
-                    headers,
-                },
-                auth,
-            )
-        } else {
-            warnings.push(format!(
-                "server '{name}': skipped — neither `command` (stdio) nor `url` (http)"
-            ));
-            continue;
-        };
-        servers.push(McpServerConfig {
-            name: name.clone(),
-            transport,
-            auth,
-            enabled: true,
-        });
+        .or_else(|| root.get("servers"))
+        .is_none()
+    {
+        return Err(ConfigError::Write(
+            "no `mcpServers` (or `servers`) object in the file".into(),
+        ));
     }
+    let (servers, warnings) = servers_from_json(&root);
     Ok((
         McpConfig {
             servers,
@@ -292,6 +326,151 @@ pub fn import_mcp_json(path: &Path) -> Result<(McpConfig, Vec<String>), ConfigEr
         },
         warnings,
     ))
+}
+
+/// One place Forge found MCP servers declared (a specific tool's config file). Surfaced by
+/// [`discover_import_sources`] so the user can pick which servers to import.
+#[derive(Debug, Clone)]
+pub struct ImportSource {
+    /// Human label, e.g. `claude-code (global)`, `codex`, `cursor (project)`.
+    pub label: String,
+    pub path: PathBuf,
+    pub servers: Vec<McpServerConfig>,
+    /// Secret-stripping notes for this source.
+    pub warnings: Vec<String>,
+}
+
+/// Scan every AI-CLI MCP config Forge knows about (Claude Code, Claude Desktop, Codex, Cursor,
+/// Windsurf, VS Code) and return the sources that exist and declare ≥1 server. Read-only.
+/// Secrets are stripped during parsing — an [`ImportSource`]'s servers never carry a token value.
+pub fn discover_import_sources(cwd: &Path) -> Vec<ImportSource> {
+    let mut out = Vec::new();
+    let home = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf());
+    let config_dir = directories::BaseDirs::new().map(|b| b.config_dir().to_path_buf());
+
+    // --- Claude Code: ~/.claude.json (global `mcpServers` + per-project) ---
+    if let Some(home) = &home {
+        let claude = home.join(".claude.json");
+        if let Ok(text) = std::fs::read_to_string(&claude) {
+            if let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) {
+                let (servers, warnings) = servers_from_json(&root);
+                push_source(&mut out, "claude-code (global)", &claude, servers, warnings);
+                // Project-scoped: projects.<abs-cwd>.mcpServers
+                if let Some(proj) = root
+                    .get("projects")
+                    .and_then(|p| p.get(cwd.to_string_lossy().as_ref()))
+                {
+                    let (servers, warnings) = servers_from_json(proj);
+                    push_source(
+                        &mut out,
+                        "claude-code (this project)",
+                        &claude,
+                        servers,
+                        warnings,
+                    );
+                }
+            }
+        }
+    }
+
+    // --- Claude Code / generic project file: ./.mcp.json ---
+    scan_json(&mut out, "claude-code (.mcp.json)", &cwd.join(".mcp.json"));
+
+    // --- Codex: ~/.codex/config.toml ([mcp_servers.<name>]) ---
+    if let Some(home) = &home {
+        let codex = home.join(".codex/config.toml");
+        if let Ok(text) = std::fs::read_to_string(&codex) {
+            let (servers, warnings) = servers_from_codex_toml(&text);
+            push_source(&mut out, "codex", &codex, servers, warnings);
+        }
+    }
+
+    // --- Cursor: ~/.cursor/mcp.json (global) + ./.cursor/mcp.json (project) ---
+    if let Some(home) = &home {
+        scan_json(&mut out, "cursor (global)", &home.join(".cursor/mcp.json"));
+    }
+    scan_json(&mut out, "cursor (project)", &cwd.join(".cursor/mcp.json"));
+
+    // --- Claude Desktop: <config>/Claude/claude_desktop_config.json ---
+    if let Some(cfg) = &config_dir {
+        scan_json(
+            &mut out,
+            "claude-desktop",
+            &cfg.join("Claude/claude_desktop_config.json"),
+        );
+    }
+
+    // --- Windsurf: ~/.codeium/windsurf/mcp_config.json ---
+    if let Some(home) = &home {
+        scan_json(
+            &mut out,
+            "windsurf",
+            &home.join(".codeium/windsurf/mcp_config.json"),
+        );
+    }
+
+    // --- VS Code project: ./.vscode/mcp.json (uses the `servers` key) ---
+    scan_json(&mut out, "vscode (project)", &cwd.join(".vscode/mcp.json"));
+
+    out
+}
+
+/// Read a JSON MCP config and, if it has servers, push it as a source.
+fn scan_json(out: &mut Vec<ImportSource>, label: &str, path: &Path) {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        if let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) {
+            let (servers, warnings) = servers_from_json(&root);
+            push_source(out, label, path, servers, warnings);
+        }
+    }
+}
+
+fn push_source(
+    out: &mut Vec<ImportSource>,
+    label: &str,
+    path: &Path,
+    servers: Vec<McpServerConfig>,
+    warnings: Vec<String>,
+) {
+    if !servers.is_empty() {
+        out.push(ImportSource {
+            label: label.to_string(),
+            path: path.to_path_buf(),
+            servers,
+            warnings,
+        });
+    }
+}
+
+/// Parse Codex's `~/.codex/config.toml` `[mcp_servers.<name>]` tables. Stdio entries use
+/// `command`/`args`/`env`; http entries use `url`/`headers`. Secrets stripped like the JSON path.
+fn servers_from_codex_toml(text: &str) -> (Vec<McpServerConfig>, Vec<String>) {
+    let mut servers = Vec::new();
+    let mut warnings = Vec::new();
+    let root: toml::Table = match text.parse() {
+        Ok(t) => t,
+        Err(_) => return (servers, warnings),
+    };
+    let Some(table) = root.get("mcp_servers").and_then(|v| v.as_table()) else {
+        return (servers, warnings);
+    };
+    for (name, spec) in table {
+        // Reuse the JSON parser by converting the TOML value to JSON (same field shapes).
+        let json = serde_json::to_value(spec).unwrap_or(serde_json::Value::Null);
+        if let Some(s) = server_from_json(name, &json, &mut warnings) {
+            servers.push(s);
+        }
+    }
+    (servers, warnings)
+}
+
+/// Read an existing `.forge/mcp.toml` into an [`McpConfig`], or the default if it's absent or
+/// malformed. Used when merging newly-imported servers into a file that may already exist.
+pub fn load_mcp_toml(path: &Path) -> McpConfig {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| toml::from_str(&t).ok())
+        .unwrap_or_default()
 }
 
 /// Serialize an [`McpConfig`] to a `.forge/mcp.toml` file (creating parent dirs). Secrets are
@@ -408,6 +587,94 @@ url = "https://mcp.example.com/mcp"
             _ => panic!("expected stdio"),
         }
         c.validate().unwrap();
+    }
+
+    #[test]
+    fn codex_toml_servers_parse_and_infer_transport() {
+        let toml = r#"
+[mcp_servers.github]
+command = "/home/x/.local/bin/claude-code-mcp"
+args = ["github"]
+
+[mcp_servers.remote]
+url = "https://mcp.example.com/mcp"
+[mcp_servers.remote.headers]
+Authorization = "Bearer SECRET-TOKEN"
+"#;
+        let (servers, warnings) = servers_from_codex_toml(toml);
+        assert_eq!(servers.len(), 2);
+        let gh = servers.iter().find(|s| s.name == "github").unwrap();
+        assert_eq!(gh.transport_label(), "stdio");
+        let remote = servers.iter().find(|s| s.name == "remote").unwrap();
+        assert_eq!(remote.transport_label(), "http");
+        // The Authorization header value is never copied; a keyring placeholder is left instead.
+        assert!(warnings.iter().any(|w| w.contains("Authorization")));
+        assert_eq!(
+            remote.auth.as_ref().unwrap().token_keyring.as_deref(),
+            Some("mcp:remote")
+        );
+        // Round-trip the parsed config: the secret must not appear in the serialized TOML.
+        let cfg = McpConfig {
+            servers,
+            ..Default::default()
+        };
+        let body = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!body.contains("SECRET-TOKEN"));
+    }
+
+    #[test]
+    fn discovers_sources_across_clis() {
+        // A fake HOME + cwd holding a Claude global config, a Codex config, and a project .mcp.json.
+        let root = std::env::temp_dir().join(format!("forge-disco-{}", forge_types::new_id()));
+        let home = root.join("home");
+        let cwd = root.join("proj");
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(
+            home.join(".claude.json"),
+            serde_json::json!({
+                "mcpServers": { "helm": { "type": "http", "url": "https://h.example/mcp",
+                    "headers": { "Authorization": "Bearer X" } } },
+                "projects": { cwd.to_string_lossy(): { "mcpServers": {
+                    "vectra": { "type": "stdio", "command": "npx", "args": ["-y", "vectra"] } } } }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".codex/config.toml"),
+            "[mcp_servers.github]\ncommand = \"x\"\nargs = [\"github\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            cwd.join(".mcp.json"),
+            serde_json::json!({ "mcpServers": {
+                "local": { "command": "./srv", "args": [] } } })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Point discovery at the fake HOME by overriding it for this thread.
+        std::env::set_var("HOME", &home);
+        let sources = discover_import_sources(&cwd);
+        std::env::remove_var("HOME");
+
+        let labels: Vec<&str> = sources.iter().map(|s| s.label.as_str()).collect();
+        assert!(labels.contains(&"claude-code (global)"), "{labels:?}");
+        assert!(labels.contains(&"claude-code (this project)"), "{labels:?}");
+        assert!(labels.contains(&"codex"), "{labels:?}");
+        assert!(labels.contains(&"claude-code (.mcp.json)"), "{labels:?}");
+        // The helm secret never lands in a parsed server.
+        let helm = sources
+            .iter()
+            .flat_map(|s| &s.servers)
+            .find(|s| s.name == "helm")
+            .unwrap();
+        match &helm.transport {
+            McpTransport::Http { headers, .. } => assert!(!headers.contains_key("Authorization")),
+            _ => panic!("http"),
+        }
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
