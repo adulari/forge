@@ -71,6 +71,32 @@ CREATE TABLE IF NOT EXISTS usage (
 );
 CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage(created_at);
 
+-- Assay (AI-slop / quality analysis) runs + their findings (docs/features/analysis-mode.md).
+CREATE TABLE IF NOT EXISTS assay_run (
+    id          TEXT PRIMARY KEY,
+    scope       TEXT NOT NULL,             -- human label of the analyzed scope
+    cost_usd    REAL NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+
+CREATE TABLE IF NOT EXISTS finding (
+    id            TEXT PRIMARY KEY,
+    run_id        TEXT NOT NULL REFERENCES assay_run(id) ON DELETE CASCADE,
+    category      TEXT NOT NULL,
+    severity      TEXT NOT NULL,
+    confidence    TEXT NOT NULL,
+    file          TEXT NOT NULL,
+    line          INTEGER,
+    title         TEXT NOT NULL,
+    rationale     TEXT NOT NULL,
+    suggested_fix TEXT NOT NULL,
+    effort        TEXT NOT NULL,
+    lens          TEXT NOT NULL,
+    verified      INTEGER NOT NULL DEFAULT 1,
+    created_at    INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_finding_run ON finding(run_id);
+
 CREATE TABLE IF NOT EXISTS model_health (
     model          TEXT PRIMARY KEY,
     cooldown_until INTEGER NOT NULL,   -- epoch secs; the model is benched while this is > now

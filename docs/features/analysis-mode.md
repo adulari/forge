@@ -1,5 +1,12 @@
 # Feature: Assay — `forge assay` (AI-slop / quality analysis mode)
 
+> Status: **MVP shipped** (2026-06-15) — `forge assay [PATH]` runs the parallel, mesh-routed,
+> adversarially-verified critic crew and prints a ranked, persisted plain-text report (U1, U3–U7).
+> **Deferred:** git scopes `--diff/--branch/--since` (U2), the live `⚒ ASSAY` TUI view (U9
+> interactive), `/assay` in chat (U10), fix hand-off (U11), report diff `--since-last` (U12),
+> `--only/--skip` (U13), budget pre-estimate scope-down (U8 — the daily cap still applies).
+> Original design below.
+>
 > Status: **DRAFT — design only** (2026-06-15). No Rust written yet.
 >
 > **Assay** is the critical sibling to plan mode: an *analysis-first* multi-agent

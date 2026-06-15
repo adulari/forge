@@ -132,6 +132,257 @@ impl TaskTier {
     }
 }
 
+// ---- Assay: AI-slop / quality analysis (docs/features/analysis-mode.md) ----
+
+/// How serious a finding is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Critical,
+    High,
+    Medium,
+    Low,
+}
+
+impl Severity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Critical => "critical",
+            Severity::High => "high",
+            Severity::Medium => "medium",
+            Severity::Low => "low",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Severity> {
+        match s.trim().to_lowercase().as_str() {
+            "critical" | "crit" => Some(Severity::Critical),
+            "high" => Some(Severity::High),
+            "medium" | "med" => Some(Severity::Medium),
+            "low" => Some(Severity::Low),
+            _ => None,
+        }
+    }
+    /// Higher = more severe (for ranking, since the enum's declaration order would sort the
+    /// other way).
+    pub fn weight(self) -> u8 {
+        match self {
+            Severity::Critical => 3,
+            Severity::High => 2,
+            Severity::Medium => 1,
+            Severity::Low => 0,
+        }
+    }
+}
+
+/// Post-verification confidence that a finding is real.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    High,
+    Medium,
+    Low,
+}
+
+impl Confidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Confidence::High => "high",
+            Confidence::Medium => "medium",
+            Confidence::Low => "low",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Confidence> {
+        match s.trim().to_lowercase().as_str() {
+            "high" => Some(Confidence::High),
+            "medium" | "med" => Some(Confidence::Medium),
+            "low" => Some(Confidence::Low),
+            _ => None,
+        }
+    }
+    pub fn weight(self) -> u8 {
+        match self {
+            Confidence::High => 2,
+            Confidence::Medium => 1,
+            Confidence::Low => 0,
+        }
+    }
+}
+
+/// The lens a critic applies. Mechanical lenses route to the cheap/local tier; judgment lenses
+/// to the frontier tier (FR-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FindingCategory {
+    DeadWeight,
+    Correctness,
+    Unsafe,
+    TestCoverage,
+    Design,
+    Architecture,
+    DocumentationRot,
+    OverEngineering,
+}
+
+impl FindingCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FindingCategory::DeadWeight => "dead-weight",
+            FindingCategory::Correctness => "correctness",
+            FindingCategory::Unsafe => "unsafe",
+            FindingCategory::TestCoverage => "test-coverage",
+            FindingCategory::Design => "design",
+            FindingCategory::Architecture => "architecture",
+            FindingCategory::DocumentationRot => "documentation",
+            FindingCategory::OverEngineering => "over-engineering",
+        }
+    }
+    pub fn parse(s: &str) -> Option<FindingCategory> {
+        match s.trim().to_lowercase().as_str() {
+            "dead-weight" | "dead" | "deadweight" => Some(FindingCategory::DeadWeight),
+            "correctness" | "bug" | "bugs" => Some(FindingCategory::Correctness),
+            "unsafe" => Some(FindingCategory::Unsafe),
+            "test-coverage" | "tests" | "test" => Some(FindingCategory::TestCoverage),
+            "design" => Some(FindingCategory::Design),
+            "architecture" | "arch" => Some(FindingCategory::Architecture),
+            "documentation" | "docs" | "doc" => Some(FindingCategory::DocumentationRot),
+            "over-engineering" | "over-eng" | "overeng" | "ai-slop" | "slop" => {
+                Some(FindingCategory::OverEngineering)
+            }
+            _ => None,
+        }
+    }
+    /// The intended Model-Mesh tier for this lens: mechanical scans are cheap, judgment is
+    /// frontier (`docs/features/analysis-mode.md` §U4).
+    pub fn tier(self) -> TaskTier {
+        match self {
+            FindingCategory::DeadWeight
+            | FindingCategory::Unsafe
+            | FindingCategory::TestCoverage => TaskTier::Trivial,
+            _ => TaskTier::Complex,
+        }
+    }
+    /// The v0.1 critic crew, in display order.
+    pub fn crew() -> &'static [FindingCategory] {
+        &[
+            FindingCategory::DeadWeight,
+            FindingCategory::Correctness,
+            FindingCategory::Unsafe,
+            FindingCategory::TestCoverage,
+            FindingCategory::Design,
+            FindingCategory::Architecture,
+            FindingCategory::DocumentationRot,
+            FindingCategory::OverEngineering,
+        ]
+    }
+}
+
+/// Rough fix effort for a finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    Trivial,
+    #[default]
+    Small,
+    Medium,
+    Large,
+}
+
+impl Effort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Effort::Trivial => "trivial",
+            Effort::Small => "small",
+            Effort::Medium => "medium",
+            Effort::Large => "large",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Effort> {
+        match s.trim().to_lowercase().as_str() {
+            "trivial" => Some(Effort::Trivial),
+            "small" => Some(Effort::Small),
+            "medium" | "med" => Some(Effort::Medium),
+            "large" => Some(Effort::Large),
+            _ => None,
+        }
+    }
+}
+
+/// What part of the repo an assay run covers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssayScope {
+    Repo,
+    Path(String),
+}
+
+impl AssayScope {
+    pub fn label(&self) -> String {
+        match self {
+            AssayScope::Repo => "repo".to_string(),
+            AssayScope::Path(p) => format!("path {p}"),
+        }
+    }
+}
+
+/// One verified problem the crew surfaced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finding {
+    pub id: String,
+    pub category: FindingCategory,
+    pub severity: Severity,
+    pub confidence: Confidence,
+    pub file: String,
+    pub line: Option<u32>,
+    /// One-line "what's wrong".
+    pub title: String,
+    /// WHY it's a problem (the critic's reasoning).
+    pub rationale: String,
+    pub suggested_fix: String,
+    pub effort: Effort,
+    /// Which lens raised it.
+    pub lens: String,
+    /// Survived adversarial verification.
+    pub verified: bool,
+}
+
+/// The full result of an assay run, findings pre-sorted by (severity, confidence).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssayReport {
+    pub run_id: String,
+    pub scope: AssayScope,
+    pub findings: Vec<Finding>,
+    pub cost_usd: f64,
+    /// Lenses that errored out, with the reason — graceful degradation.
+    pub skipped_lenses: Vec<(String, String)>,
+}
+
+impl AssayReport {
+    /// Sort findings by severity (most severe first), then confidence, then category for a
+    /// stable order. Mutates in place.
+    pub fn rank(&mut self) {
+        self.findings.sort_by(|a, b| {
+            b.severity
+                .weight()
+                .cmp(&a.severity.weight())
+                .then(b.confidence.weight().cmp(&a.confidence.weight()))
+                .then(a.category.as_str().cmp(b.category.as_str()))
+        });
+    }
+
+    /// Count of findings per severity, for the summary header.
+    pub fn severity_counts(&self) -> [usize; 4] {
+        let mut c = [0usize; 4];
+        for f in &self.findings {
+            c[match f.severity {
+                Severity::Critical => 0,
+                Severity::High => 1,
+                Severity::Medium => 2,
+                Severity::Low => 3,
+            }] += 1;
+        }
+        c
+    }
+}
+
 /// Session-level tool-safety posture (ADR-0008). Exposed in the UI as the **temper** (the
 /// forge/metallurgy framing for the agent's disposition); see `docs/features/temper-modes.md`.
 /// Serde accepts both the canonical kebab key and the temper-label alias.
@@ -342,5 +593,83 @@ mod tests {
     #[test]
     fn ids_are_unique() {
         assert_ne!(new_id(), new_id());
+    }
+
+    fn finding(sev: Severity, conf: Confidence, cat: FindingCategory) -> Finding {
+        Finding {
+            id: new_id(),
+            category: cat,
+            severity: sev,
+            confidence: conf,
+            file: "x.rs".into(),
+            line: None,
+            title: "t".into(),
+            rationale: "r".into(),
+            suggested_fix: "f".into(),
+            effort: Effort::Small,
+            lens: cat.as_str().into(),
+            verified: true,
+        }
+    }
+
+    #[test]
+    fn report_ranks_by_severity_then_confidence() {
+        let mut report = AssayReport {
+            run_id: "r".into(),
+            scope: AssayScope::Repo,
+            findings: vec![
+                finding(Severity::Low, Confidence::High, FindingCategory::Design),
+                finding(
+                    Severity::Critical,
+                    Confidence::Low,
+                    FindingCategory::Correctness,
+                ),
+                finding(Severity::High, Confidence::Low, FindingCategory::Unsafe),
+                finding(
+                    Severity::High,
+                    Confidence::High,
+                    FindingCategory::DeadWeight,
+                ),
+            ],
+            cost_usd: 0.0,
+            skipped_lenses: vec![],
+        };
+        report.rank();
+        let order: Vec<_> = report.findings.iter().map(|f| f.severity).collect();
+        assert_eq!(
+            order,
+            vec![
+                Severity::Critical,
+                Severity::High,
+                Severity::High,
+                Severity::Low
+            ]
+        );
+        // Within the two High findings, higher confidence ranks first.
+        assert_eq!(report.findings[1].confidence, Confidence::High);
+        assert_eq!(report.severity_counts(), [1, 2, 0, 1]);
+    }
+
+    #[test]
+    fn mechanical_lenses_route_cheap_judgment_routes_frontier() {
+        assert_eq!(FindingCategory::DeadWeight.tier(), TaskTier::Trivial);
+        assert_eq!(FindingCategory::Unsafe.tier(), TaskTier::Trivial);
+        assert_eq!(FindingCategory::Architecture.tier(), TaskTier::Complex);
+        assert_eq!(FindingCategory::Correctness.tier(), TaskTier::Complex);
+    }
+
+    #[test]
+    fn severity_and_category_parse_round_trip() {
+        for s in [
+            Severity::Critical,
+            Severity::High,
+            Severity::Medium,
+            Severity::Low,
+        ] {
+            assert_eq!(Severity::parse(s.as_str()), Some(s));
+        }
+        for c in FindingCategory::crew() {
+            assert_eq!(FindingCategory::parse(c.as_str()), Some(*c));
+        }
     }
 }
