@@ -7,9 +7,11 @@
 use async_trait::async_trait;
 use forge_types::{Message, ToolCall, Usage};
 
+mod cli_provider;
 mod genai_provider;
 mod mock;
 
+pub use cli_provider::{CliKind, CliProvider};
 pub use genai_provider::GenAiProvider;
 pub use mock::MockProvider;
 
@@ -58,4 +60,68 @@ pub trait Provider: Send + Sync {
         tools: &[ToolSpec],
         on_text: &mut TextSink<'_>,
     ) -> Result<ModelResponse, ProviderError>;
+}
+
+/// Routes each turn to a backend by the model id's `provider::` prefix: `claude-cli::…` /
+/// `codex-cli::…` go to the subscription CLI bridge; everything else goes to the genai-backed
+/// API providers. This is the single `Provider` the CLI installs for a real session.
+pub struct DispatchProvider {
+    genai: GenAiProvider,
+    claude_cli: CliProvider,
+    codex_cli: CliProvider,
+    /// One-time CLI-bridge ToS/discretion notice (FR-Part-B AC-B8).
+    notice: std::sync::Once,
+}
+
+impl DispatchProvider {
+    pub fn new() -> Self {
+        Self {
+            genai: GenAiProvider::new(),
+            claude_cli: CliProvider::claude_code(),
+            codex_cli: CliProvider::codex(),
+            notice: std::sync::Once::new(),
+        }
+    }
+
+    fn cli_notice(&self) {
+        self.notice.call_once(|| {
+            tracing::warn!(
+                "CLI-bridge runs your locally-installed claude/codex; Forge never sees your \
+                 login. Using subscription CLIs from third-party tools may be restricted by \
+                 Anthropic/OpenAI terms — you run this at your own discretion. See \
+                 docs/features/provider-integrations.md."
+            );
+        });
+    }
+}
+
+impl Default for DispatchProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Provider for DispatchProvider {
+    async fn complete(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        on_text: &mut TextSink<'_>,
+    ) -> Result<ModelResponse, ProviderError> {
+        if model.starts_with("claude-cli::") {
+            self.cli_notice();
+            self.claude_cli
+                .complete(model, messages, tools, on_text)
+                .await
+        } else if model.starts_with("codex-cli::") {
+            self.cli_notice();
+            self.codex_cli
+                .complete(model, messages, tools, on_text)
+                .await
+        } else {
+            self.genai.complete(model, messages, tools, on_text).await
+        }
+    }
 }
