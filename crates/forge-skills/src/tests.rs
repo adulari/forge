@@ -352,6 +352,44 @@ fn claude_code_command_with_unknown_keys_parses_leniently() {
 }
 
 #[test]
+fn multiline_folded_description_parses_as_one_scalar() {
+    // Real Claude-Code skills wrap long descriptions across indented continuation lines — these
+    // must parse, not be rejected as malformed (the import bug).
+    let t = Tmp::new();
+    t.skill(
+        "user",
+        "auditor",
+        "---\nname: auditor\ndescription: Audit and remediate an existing codebase\n  across architecture, tests, and security — the full pass.\ntier: complex\n---\nBody.",
+    );
+    let cat = t.load();
+    let s = cat.skill("auditor").unwrap();
+    assert_eq!(
+        s.description,
+        "Audit and remediate an existing codebase across architecture, tests, and security — the full pass."
+    );
+    assert_eq!(
+        s.tier,
+        Some(TaskTier::Complex),
+        "the key after a folded value still parses"
+    );
+}
+
+#[test]
+fn block_scalar_description_parses() {
+    let t = Tmp::new();
+    t.cmd(
+        "user",
+        "review",
+        "---\ndescription: >\n  Review the diff\n  for correctness.\n---\nbody",
+    );
+    let cat = t.load();
+    assert_eq!(
+        cat.command("review").unwrap().description,
+        "Review the diff for correctness."
+    );
+}
+
+#[test]
 fn block_style_list_frontmatter_parses() {
     let t = Tmp::new();
     t.skill(

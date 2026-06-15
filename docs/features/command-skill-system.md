@@ -12,6 +12,12 @@
 > **Deferred (not in this PR):** `@path` file-path completion (should-have); command-body
 > `/skill` references producing guidance; namespaced subdir commands; argument *types*; the
 > plain (non-TUI) chat path does not yet expand `/name` (TUI is the supported surface).
+>
+> **Import (later PR):** `forge import claude [--project]` copies `~/.claude/{commands,skills}`
+> into a Forge scope, validating each with these readers (malformed skipped + warned). Building
+> it surfaced + fixed a frontmatter bug: real CC skills wrap `description:` across **indented
+> continuation lines** (folded YAML) and use `>`/`|` block scalars — the parser now handles both,
+> so multi-line metadata no longer mis-flags a file as malformed.
 
 > A new capability layer spanning the workspace: a `forge-skills` crate (Command + Skill
 > data model and loaders), a discovery/precedence path that hangs off `forge-config`, a

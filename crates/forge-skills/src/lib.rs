@@ -316,6 +316,17 @@ impl Catalog {
         self.commands.is_empty() && self.skills.is_empty()
     }
 
+    /// Every resolved command (winning definition per name). For tooling like import that needs
+    /// the underlying file paths.
+    pub fn all_commands(&self) -> Vec<&Command> {
+        self.commands.values().collect()
+    }
+
+    /// Every resolved skill metadata (winning definition per name).
+    pub fn all_skills(&self) -> Vec<&SkillMeta> {
+        self.skills.values().collect()
+    }
+
     /// All entries (commands then any skill not shadowed by a same-named command), sorted by
     /// name — the source for `forge commands` and `/help`.
     pub fn entries(&self) -> Vec<Entry> {

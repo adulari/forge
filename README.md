@@ -43,8 +43,9 @@ a budget; Forge stays under it.
   `./.forge/commands`, `./.forge/skills/<name>/SKILL.md` (and the same dirs under your user
   config). Type `/` in the TUI for a fuzzy palette; `/name args` expands a template (`$1`,
   `$ARGUMENTS`), `/skill <name>` injects a methodology. Claude-Code's `~/.claude/commands` and
-  `skills` formats parse unchanged. `forge commands` lists them. Project-scope files are
-  confirmed on first use (they can steer the model).
+  `skills` formats parse unchanged — `forge import claude` copies your existing
+  `~/.claude/{commands,skills}` straight in. `forge commands` lists them. Project-scope files
+  are confirmed on first use (they can steer the model).
 - **Local-first** — SQLite session state, no cloud account required to run.
 
 The full vision (semantic code memory, multi-agent orchestration, MCP, marketplace,
