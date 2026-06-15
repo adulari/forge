@@ -739,9 +739,16 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_single_string_tier_routes_unchanged() {
-        // AC-L1c: the single-string form behaves as a one-candidate list.
+        // AC-L1c: the single-string form behaves as a one-candidate list. (Built explicitly —
+        // the shipped defaults now lead each tier with free multi-candidate lists.)
+        let mut c = Config::default();
+        c.mesh.models.insert(
+            "standard".to_string(),
+            forge_config::OneOrMany::One("openai::gpt-4o-mini".to_string()),
+        );
+        let r = HeuristicRouter::new(c).with_availability(|_| true);
         let prompt = "add a new endpoint that returns the list of users as json".repeat(2);
-        let d = router().route(&prompt, BudgetState::default()).await;
+        let d = r.route(&prompt, BudgetState::default()).await;
         assert_eq!(d.model, "openai::gpt-4o-mini");
     }
 
