@@ -154,6 +154,9 @@ pub enum PresenterEvent {
     /// A proposed file change, emitted by core BEFORE the write is confirmed/applied so the
     /// user reviews the diff before answering the permission prompt.
     Diff(forge_types::FileDiff),
+    /// Live Assay progress (a critic finished/was skipped, verification started, …) so the run
+    /// shows incremental activity instead of a silent spinner until the report.
+    AssayProgress(String),
     /// A finished Assay analysis report, for inline rendering (docs/features/analysis-mode.md).
     AssayReport(forge_types::AssayReport),
     Done {
@@ -256,6 +259,9 @@ impl Presenter for HeadlessPresenter {
                 // Plain unified-diff text for scripting/pipes (no ANSI).
                 print!("{}", render::diff_to_plain(&diff));
                 let _ = std::io::stdout().flush();
+            }
+            PresenterEvent::AssayProgress(msg) => {
+                println!("  {msg}");
             }
             PresenterEvent::AssayReport(report) => {
                 print!("{}", render::assay_report_plain(&report));

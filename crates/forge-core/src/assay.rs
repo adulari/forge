@@ -78,10 +78,50 @@ struct Verdict {
     confidence: String,
 }
 
+/// Live progress of an assay run, surfaced as each critic / verifier finishes (so the user sees
+/// incremental activity, not a silent spinner). The caller maps these to UI events.
+#[derive(Debug, Clone)]
+pub enum AssayProgress {
+    Started {
+        critics: usize,
+    },
+    CriticDone {
+        lens: FindingCategory,
+        candidates: usize,
+    },
+    CriticSkipped {
+        lens: FindingCategory,
+        reason: String,
+    },
+    Verifying {
+        candidates: usize,
+    },
+}
+
+/// Max concurrent model calls in the crew. Bounded so the few live models (when most are
+/// rate-limited) aren't hammered into 429s — the cause of lenses skipping under heavy bench.
+const MAX_CONCURRENCY: usize = 4;
+
+/// A one-line, user-facing rendering of a progress event.
+pub fn progress_line(p: &AssayProgress) -> String {
+    match p {
+        AssayProgress::Started { critics } => format!("⚒ assay — running {critics} critics…"),
+        AssayProgress::CriticDone { lens, candidates } => {
+            format!("✓ {} — {candidates} candidate(s)", lens.as_str())
+        }
+        AssayProgress::CriticSkipped { lens, reason } => {
+            format!("⏭ {} skipped ({reason})", lens.as_str())
+        }
+        AssayProgress::Verifying { candidates } => {
+            format!("⚖ verifying {candidates} candidate(s)…")
+        }
+    }
+}
+
 /// Run the critic crew over `source` (the bundled scope content) and return a ranked report.
-/// `provider`/`pricing`/`store` are shared; critics + verifiers run concurrently, each failing
-/// over down its tier's model chain (benching dead models to `store`) so a rate-limited model
-/// doesn't skip the whole tier.
+/// `provider`/`pricing`/`store` are shared; critics + verifiers run with **bounded** concurrency,
+/// each failing over down its model chain (benching dead models) so a rate-limited model doesn't
+/// skip a lens. `on_progress` is called as each critic/verifier completes.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_assay(
     scope: AssayScope,
@@ -92,23 +132,30 @@ pub async fn run_assay(
     pricing: Arc<Pricing>,
     store: Arc<forge_store::Store>,
     cooldown: std::time::Duration,
+    on_progress: &mut (dyn FnMut(AssayProgress) + Send),
 ) -> AssayReport {
     let models = Arc::new(models);
+    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENCY));
     let mut cost = 0.0;
     let mut skipped: Vec<(String, String)> = Vec::new();
 
-    // 1. Critics — one per lens, concurrently, read-only. Each carries its lens so results stay
-    //    attributable regardless of completion order.
-    let mut critic_handles = Vec::new();
+    on_progress(AssayProgress::Started {
+        critics: lenses.len(),
+    });
+
+    // 1. Critics — bounded concurrency (a semaphore), results surfaced as they finish (JoinSet).
+    let mut critic_set = tokio::task::JoinSet::new();
     for lens in lenses {
-        let (provider, source, pricing, models, store) = (
+        let (provider, source, pricing, models, store, sem) = (
             provider.clone(),
             source.clone(),
             pricing.clone(),
             models.clone(),
             store.clone(),
+            sem.clone(),
         );
-        critic_handles.push(tokio::spawn(async move {
+        critic_set.spawn(async move {
+            let _permit = sem.acquire_owned().await;
             let msgs = critic_messages(lens, &source);
             let chain = models.models_for(lens);
             match complete_with_failover(&provider, &pricing, &store, &chain, cooldown, &msgs).await
@@ -116,32 +163,47 @@ pub async fn run_assay(
                 Ok((text, c)) => (lens, Ok(parse_candidates(&text)), c),
                 Err(e) => (lens, Err(e), 0.0),
             }
-        }));
+        });
     }
 
     let mut candidates: Vec<(FindingCategory, Candidate)> = Vec::new();
-    for h in critic_handles {
-        match h.await {
+    while let Some(joined) = critic_set.join_next().await {
+        match joined {
             Ok((lens, Ok(cands), c)) => {
                 cost += c;
+                on_progress(AssayProgress::CriticDone {
+                    lens,
+                    candidates: cands.len(),
+                });
                 candidates.extend(cands.into_iter().map(|cand| (lens, cand)));
             }
-            Ok((lens, Err(reason), _)) => skipped.push((lens.as_str().to_string(), reason)),
+            Ok((lens, Err(reason), _)) => {
+                on_progress(AssayProgress::CriticSkipped {
+                    lens,
+                    reason: reason.clone(),
+                });
+                skipped.push((lens.as_str().to_string(), reason));
+            }
             Err(_) => skipped.push(("(critic)".into(), "task panicked".into())),
         }
     }
 
-    // 2. Adversarial verification — an independent verifier per candidate, concurrently. Refuted
-    //    candidates are dropped; survivors keep the verifier's confidence.
-    let mut verify_handles = Vec::new();
+    // 2. Adversarial verification — an independent verifier per candidate, same bounded
+    //    concurrency. Refuted candidates are dropped; survivors keep the verifier's confidence.
+    on_progress(AssayProgress::Verifying {
+        candidates: candidates.len(),
+    });
+    let mut verify_set = tokio::task::JoinSet::new();
     for (lens, cand) in candidates {
-        let (provider, pricing, models, store) = (
+        let (provider, pricing, models, store, sem) = (
             provider.clone(),
             pricing.clone(),
             models.clone(),
             store.clone(),
+            sem.clone(),
         );
-        verify_handles.push(tokio::spawn(async move {
+        verify_set.spawn(async move {
+            let _permit = sem.acquire_owned().await;
             let msgs = verifier_messages(lens, &cand);
             let chain = models.models_for(lens);
             let (verdict, c) =
@@ -152,12 +214,12 @@ pub async fn run_assay(
                     Err(_) => (None, 0.0),
                 };
             (lens, cand, verdict, c)
-        }));
+        });
     }
 
     let mut findings = Vec::new();
-    for h in verify_handles {
-        let Ok((lens, cand, verdict, c)) = h.await else {
+    while let Some(joined) = verify_set.join_next().await {
+        let Ok((lens, cand, verdict, c)) = joined else {
             continue;
         };
         cost += c;
@@ -490,6 +552,7 @@ mod tests {
             pricing(),
             st.clone(),
             std::time::Duration::from_secs(60),
+            &mut |_| {},
         )
         .await;
 
@@ -526,6 +589,7 @@ mod tests {
             pricing(),
             store(),
             std::time::Duration::from_secs(60),
+            &mut |_| {},
         )
         .await;
 
@@ -557,6 +621,7 @@ mod tests {
             pricing(),
             store(),
             std::time::Duration::from_secs(60),
+            &mut |_| {},
         )
         .await;
 
@@ -590,6 +655,7 @@ mod tests {
             pricing(),
             store(),
             std::time::Duration::from_secs(60),
+            &mut |_| {},
         )
         .await;
         assert!(
@@ -600,6 +666,44 @@ mod tests {
             report.findings.len(),
             1,
             "it produced a finding: {report:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_assay_emits_live_progress() {
+        let provider = Arc::new(ScriptedProvider {
+            bad: Default::default(),
+        });
+        let mut events: Vec<AssayProgress> = Vec::new();
+        let _ = run_assay(
+            AssayScope::Repo,
+            Arc::from("fn main() {}"),
+            vec![FindingCategory::Correctness],
+            models(),
+            provider,
+            pricing(),
+            store(),
+            std::time::Duration::from_secs(60),
+            &mut |p| events.push(p),
+        )
+        .await;
+        assert!(
+            events
+                .iter()
+                .any(|p| matches!(p, AssayProgress::Started { .. })),
+            "emits a start event"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|p| matches!(p, AssayProgress::CriticDone { .. })),
+            "emits a critic-done event as a critic finishes"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|p| matches!(p, AssayProgress::Verifying { .. })),
+            "emits a verifying event"
         );
     }
 

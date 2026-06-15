@@ -322,15 +322,23 @@ impl Session {
         let pricing = Arc::new(self.pricing.clone());
         let lenses = forge_types::FindingCategory::crew().to_vec();
         let cooldown = std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
+        let provider = Arc::clone(&self.provider);
+        let store = Arc::clone(&self.store);
+        // Surface each critic/verifier as it finishes so the run shows live activity.
+        let presenter = &mut self.presenter;
+        let mut on_progress = |p: assay::AssayProgress| {
+            presenter.emit(PresenterEvent::AssayProgress(assay::progress_line(&p)));
+        };
         let mut report = assay::run_assay(
             forge_types::AssayScope::Repo,
             source,
             lenses,
             models,
-            Arc::clone(&self.provider),
+            provider,
             pricing,
-            Arc::clone(&self.store),
+            store,
             cooldown,
+            &mut on_progress,
         )
         .await;
         if let Ok(run_id) = self
