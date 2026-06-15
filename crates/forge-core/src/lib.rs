@@ -14,6 +14,7 @@ use forge_tools::ToolRegistry;
 use forge_tui::{Presenter, PresenterEvent};
 use forge_types::{Message, PermissionDecision, PermissionMode, PermissionRule, Role};
 
+pub mod assay;
 pub mod llm_router;
 pub mod permission;
 pub mod snapshot;

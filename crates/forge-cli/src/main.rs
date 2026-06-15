@@ -85,6 +85,15 @@ enum Command {
         #[arg(long)]
         probe: bool,
     },
+    /// Assay — a critical multi-agent analysis of code quality (AI-slop, dead weight, unsafe,
+    /// untested, design/architecture problems). Prints a ranked findings report; never edits.
+    Assay {
+        /// File or directory to analyze. Default: the whole repo (cwd).
+        path: Option<String>,
+        /// Use the offline mock provider (no keys/network) — for smoke-testing the pipeline.
+        #[arg(long)]
+        mock: bool,
+    },
     /// Internal: run Forge's tool registry as an MCP server on stdio (spawned by the CLI
     /// bridge so claude/codex use Forge's tools under Forge's permission gate). Not for direct use.
     #[command(hide = true)]
@@ -193,6 +202,7 @@ async fn main() -> Result<()> {
         } => chat(mock, mode, resume, plain, model).await,
         Command::Sessions => sessions(),
         Command::Models { probe } => models(probe).await,
+        Command::Assay { path, mock } => assay(path, mock).await,
         Command::Auth { provider } => auth(&provider),
         Command::McpServe => mcp_serve::run().await,
     }
@@ -260,6 +270,220 @@ fn sessions() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `forge assay [PATH]`: run the critic crew over the repo (or a path) and print a ranked report
+/// (docs/features/analysis-mode.md). Read-only — Assay never edits; fixing is a separate turn.
+async fn assay(path: Option<String>, mock: bool) -> Result<()> {
+    use forge_core::assay::{run_assay, TierModels};
+    use forge_types::{AssayScope, FindingCategory};
+
+    forge_config::inject_provider_keys();
+    let config = forge_config::load().unwrap_or_default();
+    let store = open_store()?;
+    let pricing = Arc::new(forge_mesh::pricing::Pricing::from_config(&config));
+
+    let root = path.clone().unwrap_or_else(|| ".".to_string());
+    let scope = match &path {
+        Some(p) => AssayScope::Path(p.clone()),
+        None => AssayScope::Repo,
+    };
+    let source = bundle_source(Path::new(&root), 200_000);
+    if source.trim().is_empty() {
+        anyhow::bail!("no analyzable source files found under '{root}'");
+    }
+
+    let provider: Arc<dyn Provider> = if mock {
+        Arc::new(MockProvider)
+    } else {
+        Arc::new(DispatchProvider::new(false))
+    };
+    let (trivial, complex) = if mock {
+        ("mock::cheap".to_string(), "mock::frontier".to_string())
+    } else {
+        let cat = discover_catalog().await;
+        if cat.is_empty() {
+            anyhow::bail!("no models available — `forge auth <provider>` or run ollama");
+        }
+        let pick = |tier| {
+            cat.ranked_for(tier, &pricing, 5)
+                .into_iter()
+                .next()
+                .or_else(|| config.model_for(tier).map(String::from))
+                .unwrap_or_default()
+        };
+        (pick(TaskTier::Trivial), pick(TaskTier::Complex))
+    };
+
+    println!(
+        "⚒ assay — scope: {} · {} critics · models [{trivial}] / [{complex}]",
+        scope.label(),
+        FindingCategory::crew().len()
+    );
+
+    let mut report = run_assay(
+        scope.clone(),
+        Arc::from(source.as_str()),
+        FindingCategory::crew().to_vec(),
+        TierModels { trivial, complex },
+        provider,
+        pricing,
+    )
+    .await;
+
+    let run_id = store
+        .create_assay_run(&scope.label(), report.cost_usd)
+        .context("persisting assay run")?;
+    report.run_id = run_id.clone();
+    for f in &report.findings {
+        store.add_finding(&run_id, f).ok();
+    }
+
+    print!("{}", render_report_plain(&report));
+    Ok(())
+}
+
+/// Concatenate the analyzable source under `root` (capped) with `// FILE:` headers, for the crew
+/// prompt. Skips VCS/build/vendor dirs; deterministic order. A single file is bundled directly.
+fn bundle_source(root: &Path, max_bytes: usize) -> String {
+    fn is_skip_dir(name: &str) -> bool {
+        matches!(
+            name,
+            ".git" | "target" | ".forge" | "node_modules" | "graphify-out" | ".idea" | ".vscode"
+        )
+    }
+    fn is_source(ext: &str) -> bool {
+        matches!(
+            ext,
+            "rs" | "toml"
+                | "md"
+                | "py"
+                | "js"
+                | "ts"
+                | "tsx"
+                | "go"
+                | "java"
+                | "c"
+                | "cpp"
+                | "h"
+                | "hpp"
+                | "sh"
+                | "yaml"
+                | "yml"
+                | "json"
+                | "sql"
+        )
+    }
+    fn append(out: &mut String, path: &Path) {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            out.push_str(&format!("// FILE: {}\n{content}\n\n", path.display()));
+        }
+    }
+
+    let mut out = String::new();
+    if root.is_file() {
+        append(&mut out, root);
+        out.truncate(floor_char_boundary(&out, max_bytes));
+        return out;
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if out.len() >= max_bytes {
+            break;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut paths: Vec<_> = rd.filter_map(|e| e.ok().map(|e| e.path())).collect();
+        paths.sort();
+        for p in paths {
+            if out.len() >= max_bytes {
+                break;
+            }
+            if p.is_dir() {
+                if !p
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(is_skip_dir)
+                    .unwrap_or(false)
+                {
+                    stack.push(p);
+                }
+            } else if p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(is_source)
+                .unwrap_or(false)
+            {
+                append(&mut out, &p);
+            }
+        }
+    }
+    out.truncate(floor_char_boundary(&out, max_bytes));
+    out
+}
+
+/// Largest index ≤ `max` that is a char boundary (so truncation never splits a UTF-8 char).
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut i = max;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Render a finished [`AssayReport`] as a ranked plain-text report (no ANSI), for the CLI/pipe.
+fn render_report_plain(r: &forge_types::AssayReport) -> String {
+    let [crit, high, med, low] = r.severity_counts();
+    let id8: String = r.run_id.chars().take(8).collect();
+    let mut s = format!("\n⚒ ASSAY REPORT  run {id8}  scope: {}\n", r.scope.label());
+    s.push_str(&format!(
+        "{} findings · {crit} critical · {high} high · {med} medium · {low} low · ${:.4}\n",
+        r.findings.len(),
+        r.cost_usd
+    ));
+    if !r.skipped_lenses.is_empty() {
+        let sk: Vec<String> = r
+            .skipped_lenses
+            .iter()
+            .map(|(l, why)| format!("{l} ({why})"))
+            .collect();
+        s.push_str(&format!("skipped: {}\n", sk.join(", ")));
+    }
+    s.push_str(&"─".repeat(60));
+    s.push('\n');
+    if r.findings.is_empty() {
+        s.push_str("no findings — clean, or the scope had no analyzable source.\n");
+        return s;
+    }
+    for (i, f) in r.findings.iter().enumerate() {
+        let loc = match f.line {
+            Some(l) => format!("{}:{l}", f.file),
+            None => f.file.clone(),
+        };
+        s.push_str(&format!(
+            "{:>2}. [{} · {}] {} — {loc}\n",
+            i + 1,
+            f.severity.as_str().to_uppercase(),
+            f.confidence.as_str(),
+            f.category.as_str(),
+        ));
+        s.push_str(&format!("    {}\n", f.title));
+        if !f.rationale.is_empty() {
+            s.push_str(&format!("    why: {}\n", f.rationale));
+        }
+        if !f.suggested_fix.is_empty() {
+            s.push_str(&format!(
+                "    fix: {} (effort: {})\n",
+                f.suggested_fix,
+                f.effort.as_str()
+            ));
+        }
+    }
+    s
 }
 
 /// Construct the model backend + router from config. Shared by interactive sessions and the
@@ -1141,6 +1365,56 @@ mod tests {
         // runs must route logs to a file; only pipes/CI write to stderr.
         assert_eq!(log_target(true), LogTarget::File);
         assert_eq!(log_target(false), LogTarget::Stderr);
+    }
+
+    #[test]
+    fn bundle_source_collects_source_and_skips_build_dirs() {
+        let dir = std::env::temp_dir().join(format!("forge-bundle-{}", forge_types::new_id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("target")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.join("target/junk.rs"), "GENERATED").unwrap();
+        std::fs::write(dir.join("notes.txt"), "ignored ext").unwrap();
+
+        let out = bundle_source(&dir, 100_000);
+        assert!(out.contains("fn main()"), "source included: {out}");
+        assert!(out.contains("FILE:"), "file headers present");
+        assert!(!out.contains("GENERATED"), "target/ skipped");
+        assert!(!out.contains("ignored ext"), "non-source ext skipped");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn render_report_plain_shows_summary_and_ranked_findings() {
+        use forge_types::{
+            AssayReport, AssayScope, Confidence, Effort, Finding, FindingCategory, Severity,
+        };
+        let report = AssayReport {
+            run_id: "abcdef123456".into(),
+            scope: AssayScope::Repo,
+            findings: vec![Finding {
+                id: "f1".into(),
+                category: FindingCategory::Correctness,
+                severity: Severity::Critical,
+                confidence: Confidence::High,
+                file: "core/lib.rs".into(),
+                line: Some(204),
+                title: "unwrap panics the turn".into(),
+                rationale: "a 5xx aborts the session".into(),
+                suggested_fix: "propagate via ?".into(),
+                effort: Effort::Small,
+                lens: "correctness".into(),
+                verified: true,
+            }],
+            cost_usd: 0.118,
+            skipped_lenses: vec![("design".into(), "timeout".into())],
+        };
+        let s = render_report_plain(&report);
+        assert!(s.contains("run abcdef12"), "short run id: {s}");
+        assert!(s.contains("1 findings · 1 critical"), "summary counts");
+        assert!(s.contains("skipped: design (timeout)"), "degradation noted");
+        assert!(s.contains("CRITICAL") && s.contains("core/lib.rs:204"));
+        assert!(s.contains("fix: propagate via ? (effort: small)"));
     }
 
     #[test]
