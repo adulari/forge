@@ -335,15 +335,30 @@ pub struct PriceOverride {
 impl Default for Config {
     fn default() -> Self {
         let mut models = HashMap::new();
-        let one = |s: &str| OneOrMany::One(s.to_string());
-        models.insert(TaskTier::Trivial.as_str().into(), one("ollama::llama3.2"));
+        let many = |s: &[&str]| OneOrMany::Many(s.iter().map(|x| x.to_string()).collect());
+        // Free models lead each tier: cost-aware routing (FR-5) picks the cheapest *usable*
+        // candidate, and free providers cost $0 (unlisted in pricing), so a free model with a
+        // configured key wins — otherwise the mesh falls back down the list. Free model ids
+        // change over time; edit `[mesh.models]` to taste (see docs/features/free-models.md).
+        models.insert(
+            TaskTier::Trivial.as_str().into(),
+            many(&["groq::llama-3.1-8b-instant", "ollama::llama3.2"]),
+        );
         models.insert(
             TaskTier::Standard.as_str().into(),
-            one("openai::gpt-4o-mini"),
+            many(&[
+                "groq::llama-3.3-70b-versatile",
+                "gemini::gemini-2.5-flash",
+                "openai::gpt-4o-mini",
+            ]),
         );
         models.insert(
             TaskTier::Complex.as_str().into(),
-            one("anthropic::claude-opus-4-8"),
+            many(&[
+                "groq::llama-3.3-70b-versatile",
+                "claude-cli::",
+                "anthropic::claude-opus-4-8",
+            ]),
         );
         Self {
             permission_mode: PermissionMode::default(),
@@ -426,6 +441,11 @@ const KEYRING_SERVICE: &str = "forge";
 /// genai client reads for that provider. The env var names must match genai's
 /// `API_KEY_DEFAULT_ENV_NAME` per adapter exactly (note OpenRouter's underscore). Local
 /// providers (e.g. ollama) need no key and are intentionally absent.
+// Provider prefix -> API-key env var. The prefix matches the `provider::` namespace in model
+// ids (and, except `openrouter`→`open_router`, the genai adapter namespace), and the env var
+// matches the name the genai adapter reads — so a key set here is picked up end-to-end. The
+// lower block is free / free-tier providers (genai 0.6 has native adapters for all of these
+// except Cerebras, which Forge wires via a custom endpoint resolver).
 const PROVIDER_ENV_VARS: &[(&str, &str)] = &[
     ("anthropic", "ANTHROPIC_API_KEY"),
     ("openai", "OPENAI_API_KEY"),
@@ -433,6 +453,13 @@ const PROVIDER_ENV_VARS: &[(&str, &str)] = &[
     ("xai", "XAI_API_KEY"),
     ("deepseek", "DEEPSEEK_API_KEY"),
     ("openrouter", "OPEN_ROUTER_API_KEY"),
+    // Free / free-tier providers.
+    ("groq", "GROQ_API_KEY"),
+    ("opencode_go", "OPENCODE_GO_API_KEY"), // OpenCode Zen free curated coding models
+    ("github_copilot", "GITHUB_TOKEN"),     // GitHub Models free inference
+    ("mimo", "MIMO_API_KEY"),               // Xiaomi MiMo
+    ("minimax", "MINIMAX_API_KEY"),
+    ("cerebras", "CEREBRAS_API_KEY"), // no native genai adapter — custom endpoint resolver
 ];
 
 /// The conventional environment variable for a provider's API key, if it needs one.
@@ -573,6 +600,41 @@ mod tests {
         ] {
             assert!(providers.contains(&p), "{p} should be a known key provider");
         }
+    }
+
+    #[test]
+    fn free_providers_map_to_genai_env_vars() {
+        // Names must match genai's per-adapter API_KEY_DEFAULT_ENV_NAME exactly so a key set
+        // via `forge auth`/env is picked up end-to-end.
+        assert_eq!(env_var_for("groq"), Some("GROQ_API_KEY"));
+        assert_eq!(env_var_for("opencode_go"), Some("OPENCODE_GO_API_KEY"));
+        assert_eq!(env_var_for("github_copilot"), Some("GITHUB_TOKEN"));
+        assert_eq!(env_var_for("mimo"), Some("MIMO_API_KEY"));
+        assert_eq!(env_var_for("minimax"), Some("MINIMAX_API_KEY"));
+        assert_eq!(env_var_for("cerebras"), Some("CEREBRAS_API_KEY"));
+        // provider_of pulls the right prefix from a namespaced model id.
+        assert_eq!(provider_of("groq::llama-3.3-70b-versatile"), "groq");
+        assert_eq!(provider_of("opencode_go::deepseek-v4-flash"), "opencode_go");
+    }
+
+    #[test]
+    fn default_tiers_lead_with_free_models() {
+        // Each tier offers a free candidate so cost-aware routing uses $0 models when keyed,
+        // and falls back otherwise (these are candidate lists, not single pins).
+        let c = Config::default();
+        let trivial = c.candidates_for(TaskTier::Trivial);
+        assert!(
+            trivial.iter().any(|m| m.starts_with("groq::")),
+            "trivial offers a free Groq model: {trivial:?}"
+        );
+        assert!(
+            trivial.iter().any(|m| m.starts_with("ollama::")),
+            "trivial keeps a keyless local fallback: {trivial:?}"
+        );
+        assert!(c
+            .candidates_for(TaskTier::Standard)
+            .iter()
+            .any(|m| m.starts_with("groq::") || m.starts_with("gemini::")));
     }
 
     #[test]

@@ -1,16 +1,20 @@
-//! `genai`-backed implementation of [`Provider`] (ADR-0003), covering Anthropic / OpenAI /
-//! Ollama with normalized tool calling. Tools are advertised to the model, the model's
-//! tool calls are mapped back to Forge [`ToolCall`]s, and prior tool results are replayed
-//! as genai tool responses so multi-step tool loops round-trip faithfully.
+//! `genai`-backed implementation of [`Provider`] (ADR-0003). genai 0.6 resolves an adapter
+//! per `namespace::model` id, so this one backend covers Anthropic, OpenAI, Gemini, xAI,
+//! DeepSeek, OpenRouter, Groq, OpenCode Zen (`opencode_go`), GitHub Models, MiMo, MiniMax,
+//! Ollama, … plus Cerebras via a custom-endpoint resolver ([`build_client`]). Tool calling is
+//! normalized: tools are advertised, the model's calls map back to Forge [`ToolCall`]s, and
+//! prior tool results are replayed as genai tool responses so multi-step loops round-trip.
 
 use async_trait::async_trait;
 use forge_types::{Message, Role, ToolCall, Usage};
 use futures::StreamExt;
+use genai::adapter::AdapterKind;
 use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, Tool, ToolCall as GenAiToolCall,
     ToolResponse,
 };
-use genai::Client;
+use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
+use genai::{Client, ModelIden, ServiceTarget};
 
 use crate::{EventSink, ModelResponse, Provider, ProviderError, StreamEvent, ToolSpec};
 
@@ -21,7 +25,9 @@ pub struct GenAiProvider {
 
 impl GenAiProvider {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            client: build_client(),
+        }
     }
 
     /// Construct with a caller-supplied `genai::Client`. Used by the HTTP contract tests to
@@ -29,6 +35,33 @@ impl GenAiProvider {
     pub fn with_client(client: Client) -> Self {
         Self { client }
     }
+}
+
+/// Build the genai client with a custom-endpoint resolver for providers genai has no native
+/// adapter for. Today that's **Cerebras** (`cerebras::<model>`): an OpenAI-compatible API at
+/// `api.cerebras.ai`, keyed by `CEREBRAS_API_KEY`. genai keeps the full `cerebras::…` string as
+/// the model name (unknown namespace → Ollama fallback), so the resolver detects the `cerebras`
+/// namespace, strips it, and retargets the OpenAI adapter + Cerebras endpoint + key. All native
+/// namespaces (groq/gemini/open_router/opencode_go/github_copilot/mimo/minimax/…) pass through
+/// unchanged.
+fn build_client() -> Client {
+    let resolver = ServiceTargetResolver::from_resolver_fn(
+        |st: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
+            let is_cerebras = st.model.model_name.namespace_is("cerebras");
+            if !is_cerebras {
+                return Ok(st);
+            }
+            let bare = st.model.model_name.namespace_and_name().1.to_string();
+            Ok(ServiceTarget {
+                endpoint: Endpoint::from_static("https://api.cerebras.ai/v1/"),
+                auth: AuthData::from_env("CEREBRAS_API_KEY"),
+                model: ModelIden::new(AdapterKind::OpenAI, bare),
+            })
+        },
+    );
+    Client::builder()
+        .with_service_target_resolver(resolver)
+        .build()
 }
 
 /// Forge model ids are `"provider::model"`. genai 0.6 resolves the adapter from a
@@ -211,6 +244,31 @@ mod tests {
             to_genai_model("openrouter::anthropic/claude-sonnet-4-5"),
             "open_router::anthropic/claude-sonnet-4-5"
         );
+    }
+
+    #[test]
+    fn to_genai_model_passes_free_provider_namespaces_through() {
+        // genai 0.6 has native adapters for these — pass the namespaced id straight through.
+        for (input, expect) in [
+            (
+                "groq::llama-3.3-70b-versatile",
+                "groq::llama-3.3-70b-versatile",
+            ),
+            (
+                "opencode_go::deepseek-v4-flash",
+                "opencode_go::deepseek-v4-flash",
+            ),
+            (
+                "github_copilot::openai/gpt-4.1-mini",
+                "github_copilot::openai/gpt-4.1-mini",
+            ),
+            ("mimo::mimo-v2.5", "mimo::mimo-v2.5"),
+            // Cerebras has no native adapter: the id stays namespaced so the client's
+            // service-target resolver can detect `cerebras` and retarget the OpenAI endpoint.
+            ("cerebras::llama-3.3-70b", "cerebras::llama-3.3-70b"),
+        ] {
+            assert_eq!(to_genai_model(input), expect);
+        }
     }
 
     #[test]
