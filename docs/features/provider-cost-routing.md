@@ -113,6 +113,17 @@ emits, per turn, a `rate_limit_event`:
 and the `result` event carries token usage + `modelUsage`. Codex's `turn.completed` carries
 token usage. So Forge can observe remaining headroom without extra calls.
 
+**Built (PR: L3 quota-aware routing + codex rollout source).** Both bridges now feed real
+usage into `subscription_usage`, verified by live runs:
+- **Claude Code** streams a `rate_limit_event` (`rate_limit_info.{status, rateLimitType, resetsAt,
+  isUsingOverage}`) on stdout — parsed inline by `CliProvider`.
+- **Codex** omits quota from `exec --json` stdout, but writes it to its session **rollout file**
+  (`${CODEX_HOME:-~/.codex}/sessions/YYYY/MM/DD/rollout-*-<thread_id>.jsonl`) as a `token_count`
+  event with `rate_limits.{primary,secondary}.{used_percent,window_minutes,resets_at}` +
+  `rate_limit_reached_type` + `plan_type` — the same data the codex TUI usage bar shows. Forge
+  captures the `thread.started` id from the stream, then reads that rollout file after the turn
+  and takes the stricter window. ToS-safe (reads codex's own session log, never the OAuth token).
+
 **Design sketch (for when we build it):**
 - `CliProvider` parses `rate_limit_event` → returns optional `QuotaHint { kind, resets_at,
   status, fraction_used? }` alongside `ModelResponse` (needs a small `Provider` return
