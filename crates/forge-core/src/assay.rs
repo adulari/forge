@@ -24,28 +24,51 @@ pub struct TierModels {
 }
 
 impl TierModels {
-    fn chain_for(&self, c: FindingCategory) -> &[String] {
-        match c.tier() {
-            TaskTier::Trivial => &self.trivial,
-            _ => &self.complex,
+    /// The model chain a lens should try: its preferred tier first, then the OTHER tier as a
+    /// fallback — so if a lens's whole tier is rate-limited it still runs on whatever is alive,
+    /// rather than being skipped (correctness beats cost when the cheap tier is down).
+    fn models_for(&self, c: FindingCategory) -> Vec<String> {
+        let (primary, secondary) = match c.tier() {
+            TaskTier::Trivial => (&self.trivial, &self.complex),
+            _ => (&self.complex, &self.trivial),
+        };
+        let mut out = primary.clone();
+        for m in secondary {
+            if !out.contains(m) {
+                out.push(m.clone());
+            }
         }
+        out
     }
 }
 
-/// A finding as a critic emits it (category is implied by the critic's lens).
+/// A finding as a critic emits it (category is implied by the critic's lens). Field aliases make
+/// parsing tolerant of the slightly-different key names weaker models tend to use.
 #[derive(Debug, Clone, Deserialize)]
 struct Candidate {
+    #[serde(default = "med", alias = "sev")]
     severity: String,
+    #[serde(alias = "path", alias = "file_path")]
     file: String,
     #[serde(default)]
     line: Option<u32>,
+    #[serde(alias = "issue", alias = "summary", alias = "description")]
     title: String,
-    #[serde(default)]
+    #[serde(default, alias = "reason", alias = "rationale", alias = "explanation")]
     why: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "suggested_fix",
+        alias = "suggestion",
+        alias = "recommendation"
+    )]
     fix: String,
     #[serde(default)]
     effort: String,
+}
+
+fn med() -> String {
+    "medium".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -87,15 +110,8 @@ pub async fn run_assay(
         );
         critic_handles.push(tokio::spawn(async move {
             let msgs = critic_messages(lens, &source);
-            match complete_with_failover(
-                &provider,
-                &pricing,
-                &store,
-                models.chain_for(lens),
-                cooldown,
-                &msgs,
-            )
-            .await
+            let chain = models.models_for(lens);
+            match complete_with_failover(&provider, &pricing, &store, &chain, cooldown, &msgs).await
             {
                 Ok((text, c)) => (lens, Ok(parse_candidates(&text)), c),
                 Err(e) => (lens, Err(e), 0.0),
@@ -127,19 +143,14 @@ pub async fn run_assay(
         );
         verify_handles.push(tokio::spawn(async move {
             let msgs = verifier_messages(lens, &cand);
-            let (verdict, c) = match complete_with_failover(
-                &provider,
-                &pricing,
-                &store,
-                models.chain_for(lens),
-                cooldown,
-                &msgs,
-            )
-            .await
-            {
-                Ok((text, c)) => (parse_verdict(&text), c),
-                Err(_) => (None, 0.0),
-            };
+            let chain = models.models_for(lens);
+            let (verdict, c) =
+                match complete_with_failover(&provider, &pricing, &store, &chain, cooldown, &msgs)
+                    .await
+                {
+                    Ok((text, c)) => (parse_verdict(&text), c),
+                    Err(_) => (None, 0.0),
+                };
             (lens, cand, verdict, c)
         }));
     }
@@ -193,6 +204,17 @@ async fn complete_with_failover(
     let mut sink = |_ev: StreamEvent| {};
     let mut last = String::from("no usable model");
     for model in chain {
+        // Skip models another critic (or a prior run) already benched — avoids re-hammering a
+        // known-dead model with a slow request, the main cause of assay being sluggish under
+        // rate limits.
+        if store
+            .current_benched()
+            .map(|b| b.is_benched(model))
+            .unwrap_or(false)
+        {
+            last = "rate-limited".to_string();
+            continue;
+        }
         match provider.complete(model, messages, &[], &mut sink).await {
             Ok(r) => {
                 let cost = pricing.cost_for(model, r.usage.input_tokens, r.usage.output_tokens);
@@ -262,12 +284,28 @@ fn verifier_messages(lens: FindingCategory, c: &Candidate) -> Vec<Message> {
     vec![Message::system(&sys), Message::user(&body)]
 }
 
-/// Extract the JSON array from a critic reply (tolerant of prose / code fences) and parse it.
+/// Extract findings from a critic reply, tolerant of prose / code fences / off-spec shapes:
+/// prefer a JSON array (parsed element-wise, so one malformed entry doesn't drop the rest), and
+/// fall back to a single JSON object.
 fn parse_candidates(text: &str) -> Vec<Candidate> {
-    let Some(json) = slice_between(text, '[', ']') else {
-        return Vec::new();
-    };
-    serde_json::from_str::<Vec<Candidate>>(json).unwrap_or_default()
+    if let Some(arr) = slice_between(text, '[', ']') {
+        if let Ok(vals) = serde_json::from_str::<Vec<serde_json::Value>>(arr) {
+            let cands: Vec<Candidate> = vals
+                .into_iter()
+                .filter_map(|v| serde_json::from_value(v).ok())
+                .collect();
+            if !cands.is_empty() {
+                return cands;
+            }
+        }
+    }
+    // A single finding emitted as a bare object.
+    if let Some(obj) = slice_between(text, '{', '}') {
+        if let Ok(c) = serde_json::from_str::<Candidate>(obj) {
+            return vec![c];
+        }
+    }
+    Vec::new()
 }
 
 fn parse_verdict(text: &str) -> Option<Verdict> {
@@ -531,6 +569,56 @@ mod tests {
         );
         // The run still completes (the other lens produced no findings, but didn't crash).
         assert!(report.findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_lens_falls_back_across_tiers_when_its_own_tier_is_down() {
+        // dead-weight is a trivial-tier lens; its trivial model is rate-limited, so it must fall
+        // back to the complex tier's live model rather than being skipped.
+        let provider = Arc::new(FailoverProvider {
+            bad: ["cheap::down".to_string()].into_iter().collect(),
+        });
+        let report = run_assay(
+            AssayScope::Repo,
+            Arc::from("fn main() {}"),
+            vec![FindingCategory::DeadWeight],
+            TierModels {
+                trivial: vec!["cheap::down".into()],
+                complex: vec!["frontier::up".into()],
+            },
+            provider,
+            pricing(),
+            store(),
+            std::time::Duration::from_secs(60),
+        )
+        .await;
+        assert!(
+            report.skipped_lenses.is_empty(),
+            "mechanical lens fell back to the live complex model: {report:?}"
+        );
+        assert_eq!(
+            report.findings.len(),
+            1,
+            "it produced a finding: {report:?}"
+        );
+    }
+
+    #[test]
+    fn parse_candidates_accepts_aliased_fields_and_a_single_object() {
+        // Weaker models emit slightly-off key names / a bare object — both must still parse.
+        let arr = r#"[{"sev":"high","path":"a.rs","issue":"bug","reason":"x","suggestion":"y"}]"#;
+        let c = parse_candidates(arr);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].file, "a.rs");
+        assert_eq!(c[0].severity, "high");
+        assert_eq!(c[0].title, "bug");
+
+        let obj = r#"{"severity":"low","file":"b.rs","title":"t"}"#;
+        assert_eq!(
+            parse_candidates(obj).len(),
+            1,
+            "a bare object is one finding"
+        );
     }
 
     #[test]
