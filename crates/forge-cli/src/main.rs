@@ -197,23 +197,13 @@ fn sessions() -> Result<()> {
     Ok(())
 }
 
-/// Build a session around a caller-provided presenter, wiring all subsystems.
-fn build_session_with(
-    presenter: Box<dyn Presenter>,
+/// Construct the model backend + router from config. Shared by interactive sessions and the
+/// `mcp-serve` subagent path (RFC subagent-orchestration Phase 3), so both route identically.
+pub(crate) fn build_provider_and_router(
+    config: &forge_config::Config,
     mock: bool,
-    mode: Option<Mode>,
-    resume: Option<String>,
     pin: Option<String>,
-) -> Result<Session> {
-    // Make any keyring-stored provider keys visible to the provider client.
-    forge_config::inject_provider_keys();
-
-    let mut config = forge_config::load().context("loading configuration")?;
-    if let Some(m) = mode {
-        config.permission_mode = m.into();
-    }
-
-    let store = Arc::new(open_store()?);
+) -> (Arc<dyn Provider>, Arc<dyn Router>) {
     let provider: Arc<dyn Provider> = if mock {
         Arc::new(MockProvider)
     } else {
@@ -245,6 +235,27 @@ fn build_session_with(
     } else {
         Arc::new(heuristic)
     };
+    (provider, router)
+}
+
+/// Build a session around a caller-provided presenter, wiring all subsystems.
+fn build_session_with(
+    presenter: Box<dyn Presenter>,
+    mock: bool,
+    mode: Option<Mode>,
+    resume: Option<String>,
+    pin: Option<String>,
+) -> Result<Session> {
+    // Make any keyring-stored provider keys visible to the provider client.
+    forge_config::inject_provider_keys();
+
+    let mut config = forge_config::load().context("loading configuration")?;
+    if let Some(m) = mode {
+        config.permission_mode = m.into();
+    }
+
+    let store = Arc::new(open_store()?);
+    let (provider, router) = build_provider_and_router(&config, mock, pin);
     let tools = ToolRegistry::with_core_tools();
 
     match resume {
