@@ -274,6 +274,10 @@ impl App {
                     .extend(crate::render::assay_report_lines(&report));
                 self.flush.push(TextLine::default());
             }
+            PresenterEvent::Tasks(tasks) => {
+                self.flush.extend(crate::render::task_list_lines(&tasks));
+                self.flush.push(TextLine::default());
+            }
             PresenterEvent::Done { .. } => self.done = true,
         }
     }

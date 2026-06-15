@@ -161,6 +161,8 @@ pub enum PresenterEvent {
     AssayProgress(String),
     /// A finished Assay analysis report, for inline rendering (docs/features/analysis-mode.md).
     AssayReport(forge_types::AssayReport),
+    /// The agent's task list changed (`update_tasks`); render the checklist into scrollback.
+    Tasks(Vec<forge_types::TodoItem>),
     Done {
         final_text: String,
     },
@@ -268,6 +270,16 @@ impl Presenter for HeadlessPresenter {
             PresenterEvent::AssayReport(report) => {
                 print!("{}", render::assay_report_plain(&report));
                 let _ = std::io::stdout().flush();
+            }
+            PresenterEvent::Tasks(tasks) => {
+                let done = tasks
+                    .iter()
+                    .filter(|t| t.status == forge_types::TodoStatus::Done)
+                    .count();
+                println!("  tasks ({done}/{} done):", tasks.len());
+                for t in &tasks {
+                    println!("    {} {}", t.status.marker(), t.title);
+                }
             }
             // The final answer was already streamed via AssistantText; Done is a
             // lifecycle marker, so the headless renderer needs no extra output here.

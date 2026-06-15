@@ -476,6 +476,49 @@ pub enum SideEffect {
     Network,
 }
 
+/// A single tracked task in the agent's todo list (the `update_tasks` tool). Mirrors the
+/// TodoWrite pattern: the model maintains an ordered list and updates each item's status as it
+/// works, giving the user a live view of multi-step progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoItem {
+    pub title: String,
+    pub status: TodoStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Done,
+}
+
+impl TodoStatus {
+    /// Parse a status from the model's free-form string (tolerant of synonyms/casing/spacing).
+    pub fn parse_loose(s: &str) -> Self {
+        match s
+            .trim()
+            .to_ascii_lowercase()
+            .replace([' ', '-'], "_")
+            .as_str()
+        {
+            "in_progress" | "active" | "doing" | "started" | "wip" => Self::InProgress,
+            "done" | "completed" | "complete" | "finished" => Self::Done,
+            _ => Self::Pending,
+        }
+    }
+
+    /// A checkbox glyph for the TUI list.
+    pub fn marker(&self) -> &'static str {
+        match self {
+            Self::Pending => "☐",
+            Self::InProgress => "◐",
+            Self::Done => "☑",
+        }
+    }
+}
+
 /// Outcome of a permission check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionDecision {
@@ -631,6 +674,24 @@ impl SubscriptionQuota {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn todo_status_parses_loosely_and_defaults_to_pending() {
+        assert_eq!(
+            TodoStatus::parse_loose("in progress"),
+            TodoStatus::InProgress
+        );
+        assert_eq!(
+            TodoStatus::parse_loose("In-Progress"),
+            TodoStatus::InProgress
+        );
+        assert_eq!(TodoStatus::parse_loose("DONE"), TodoStatus::Done);
+        assert_eq!(TodoStatus::parse_loose("completed"), TodoStatus::Done);
+        assert_eq!(TodoStatus::parse_loose("todo"), TodoStatus::Pending);
+        assert_eq!(TodoStatus::parse_loose("garbage"), TodoStatus::Pending);
+        assert_eq!(TodoStatus::default(), TodoStatus::Pending);
+        assert_eq!(TodoStatus::Done.marker(), "☑");
+    }
 
     #[test]
     fn usage_totals() {
