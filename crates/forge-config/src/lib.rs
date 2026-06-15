@@ -15,7 +15,7 @@ pub mod mcp;
 pub use agents::{load_agents, AgentDef};
 pub use mcp::{
     discover_import_sources, import_mcp_json, load_mcp_toml, write_mcp_toml, ImportSource,
-    McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport,
+    McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport, ParsedServers,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -683,6 +683,18 @@ pub fn store_api_key(provider: &str, key: &str) -> Result<(), ConfigError> {
         .map_err(|e| ConfigError::Keyring(e.to_string()))?;
     entry
         .set_password(key)
+        .map_err(|e| ConfigError::Keyring(e.to_string()))
+}
+
+/// Store an arbitrary secret (e.g. an MCP server token, keyed `mcp:<server>`) in the OS keyring
+/// under the `forge` service. Cross-platform via the `keyring` crate's native backends (macOS
+/// Keychain, Windows Credential Manager, Linux Secret Service). ADR-0007: secrets live in the
+/// keyring, never in config or logs. `forge mcp import` uses this to persist captured tokens.
+pub fn store_secret(key: &str, value: &str) -> Result<(), ConfigError> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, key)
+        .map_err(|e| ConfigError::Keyring(e.to_string()))?;
+    entry
+        .set_password(value)
         .map_err(|e| ConfigError::Keyring(e.to_string()))
 }
 

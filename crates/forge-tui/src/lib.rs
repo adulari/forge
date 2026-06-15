@@ -38,6 +38,7 @@ mod commands;
 mod driver;
 pub mod init_wizard;
 mod render;
+pub mod select;
 mod tui;
 pub use app::{banner_lines, handle_key, App, InputOutcome, KeyKind};
 pub use commands::{
@@ -46,6 +47,7 @@ pub use commands::{
 };
 pub use driver::{ChannelPresenter, Tui, UiMsg};
 pub use init_wizard::{BridgeItem, ProviderItem, WizardInput, WizardOutcome};
+pub use select::{select_multi, SelectItem};
 pub use tui::TuiPresenter;
 
 // `QChoice`, `resolve_answer`, `NO_ANSWER` are defined above and re-exported at crate root.

@@ -866,11 +866,9 @@ fn mcp_import(path: Option<String>) -> Result<()> {
 
     // Explicit single-file import (back-compat / scripting).
     if let Some(src) = path {
-        let (imported, warnings) = forge_config::import_mcp_json(std::path::Path::new(&src))
+        let parsed = forge_config::import_mcp_json(std::path::Path::new(&src))
             .with_context(|| format!("importing {src}"))?;
-        let (added, skipped) = merge_into_mcp_toml(out, imported.servers)?;
-        report_import(&added, &skipped, &warnings, out);
-        return Ok(());
+        return finish_import(out, parsed.servers, parsed.secrets);
     }
 
     // Auto-scan mode.
@@ -886,38 +884,44 @@ fn mcp_import(path: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    // Flatten to a numbered, deduped (by server name, first source wins) selection list.
-    let mut flat: Vec<(String, forge_config::McpServerConfig)> = Vec::new();
-    let mut all_warnings: Vec<String> = Vec::new();
+    // Flatten + dedup by server name (first source wins), carrying the captured secret from the
+    // SAME source the kept server came from.
+    let mut flat: Vec<(String, forge_config::McpServerConfig, Option<String>)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for s in &sources {
-        all_warnings.extend(s.warnings.iter().cloned());
         for srv in &s.servers {
             if seen.insert(srv.name.clone()) {
-                flat.push((s.label.clone(), srv.clone()));
+                flat.push((
+                    s.label.clone(),
+                    srv.clone(),
+                    s.secrets.get(&srv.name).cloned(),
+                ));
             }
         }
     }
 
-    println!(
-        "Discovered {} MCP server(s) across your AI tools:\n",
-        flat.len()
-    );
-    for (i, (label, srv)) in flat.iter().enumerate() {
-        println!(
-            "  {:>2}. {:<16} [{}]  {}",
-            i + 1,
-            srv.name,
-            srv.transport_label(),
-            label
-        );
-    }
-
-    // Non-interactive (piped/CI): import everything so the command is scriptable.
+    // Pick: animated TUI multi-select on a real terminal; import-all when piped/CI.
     let selection = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
-        println!();
-        let line = prompt_line("Import which? (e.g. 1,3,5 — 'a' for all, empty to cancel): ")?;
-        match parse_selection(&line, flat.len()) {
+        let items: Vec<forge_tui::SelectItem> = flat
+            .iter()
+            .map(|(label, srv, secret)| forge_tui::SelectItem {
+                label: srv.name.clone(),
+                hint: format!(
+                    "[{}]  {}{}",
+                    srv.transport_label(),
+                    label,
+                    if secret.is_some() {
+                        "  · token → keyring"
+                    } else {
+                        ""
+                    }
+                ),
+                preselected: true,
+            })
+            .collect();
+        match forge_tui::select_multi("Import MCP servers", &items)
+            .context("running the import picker")?
+        {
             None => {
                 println!("cancelled — nothing imported.");
                 return Ok(());
@@ -925,61 +929,59 @@ fn mcp_import(path: Option<String>) -> Result<()> {
             Some(idx) => idx,
         }
     } else {
-        println!("\n(non-interactive: importing all)");
+        println!(
+            "Discovered {} MCP server(s); importing all (non-interactive).",
+            flat.len()
+        );
         (0..flat.len()).collect()
     };
 
-    let chosen: Vec<forge_config::McpServerConfig> =
-        selection.into_iter().map(|i| flat[i].1.clone()).collect();
-    if chosen.is_empty() {
+    let mut servers = Vec::new();
+    let mut secrets = std::collections::HashMap::new();
+    for i in selection {
+        let (_, srv, secret) = &flat[i];
+        if let Some(val) = secret {
+            secrets.insert(srv.name.clone(), val.clone());
+        }
+        servers.push(srv.clone());
+    }
+    if servers.is_empty() {
         println!("nothing selected.");
         return Ok(());
     }
-    // Only surface warnings for sources a chosen server actually came from.
-    let chosen_names: std::collections::HashSet<&str> =
-        chosen.iter().map(|s| s.name.as_str()).collect();
-    let relevant_warnings: Vec<String> = all_warnings
-        .into_iter()
-        .filter(|w| chosen_names.iter().any(|n| w.contains(&format!("'{n}'"))))
-        .collect();
-
-    let (added, skipped) = merge_into_mcp_toml(out, chosen)?;
-    report_import(&added, &skipped, &relevant_warnings, out);
-    Ok(())
+    finish_import(out, servers, secrets)
 }
 
-/// Parse a selection line: `"a"`/`"all"` → all indices; `"1,3,5"` / `"1 3 5"` → those (1-based,
-/// clamped, deduped, 0-based out). Empty/invalid-only → `None` (cancel).
-fn parse_selection(line: &str, n: usize) -> Option<Vec<usize>> {
-    let t = line.trim();
-    if t.is_empty() {
-        return None;
-    }
-    if t.eq_ignore_ascii_case("a") || t.eq_ignore_ascii_case("all") {
-        return Some((0..n).collect());
-    }
-    let mut out = Vec::new();
-    for tok in t.split([',', ' ']).filter(|s| !s.is_empty()) {
-        if let Ok(k) = tok.parse::<usize>() {
-            if (1..=n).contains(&k) && !out.contains(&(k - 1)) {
-                out.push(k - 1);
-            }
+/// Store each captured token in the OS keyring, merge the servers into `.forge/mcp.toml`, and
+/// report. Forge does the secret-handling itself (ADR-0007): the token goes to the keyring, the
+/// config only references it — the user is never asked to move anything by hand.
+fn finish_import(
+    out: &std::path::Path,
+    servers: Vec<forge_config::McpServerConfig>,
+    secrets: std::collections::HashMap<String, String>,
+) -> Result<()> {
+    let mut stored = Vec::new();
+    let mut store_failed = Vec::new();
+    for srv in &servers {
+        let Some(value) = secrets.get(&srv.name) else {
+            continue;
+        };
+        let key = srv
+            .auth
+            .as_ref()
+            .and_then(|a| a.token_keyring.clone())
+            .unwrap_or_else(|| format!("mcp:{}", srv.name));
+        match forge_config::store_secret(&key, value) {
+            Ok(()) => stored.push(srv.name.clone()),
+            Err(e) => store_failed.push((srv.name.clone(), e.to_string())),
         }
     }
-    (!out.is_empty()).then_some(out)
-}
 
-/// Merge `new_servers` into the existing `.forge/mcp.toml` (load → append names not already
-/// present → write). Returns `(added, skipped)` server names.
-fn merge_into_mcp_toml(
-    out: &std::path::Path,
-    new_servers: Vec<forge_config::McpServerConfig>,
-) -> Result<(Vec<String>, Vec<String>)> {
     let mut config = forge_config::load_mcp_toml(out);
     let existing: std::collections::HashSet<String> =
         config.servers.iter().map(|s| s.name.clone()).collect();
     let (mut added, mut skipped) = (Vec::new(), Vec::new());
-    for srv in new_servers {
+    for srv in servers {
         if existing.contains(&srv.name) {
             skipped.push(srv.name);
         } else {
@@ -988,10 +990,7 @@ fn merge_into_mcp_toml(
         }
     }
     forge_config::write_mcp_toml(out, &config).context("writing .forge/mcp.toml")?;
-    Ok((added, skipped))
-}
 
-fn report_import(added: &[String], skipped: &[String], warnings: &[String], out: &std::path::Path) {
     if added.is_empty() {
         println!(
             "nothing new imported (all selected servers already in {}).",
@@ -1008,14 +1007,20 @@ fn report_import(added: &[String], skipped: &[String], warnings: &[String], out:
     if !skipped.is_empty() {
         println!("  • skipped (already present): {}", skipped.join(", "));
     }
-    for w in warnings {
-        println!("  ⚠ {w}");
-    }
-    if !warnings.is_empty() {
+    if !stored.is_empty() {
         println!(
-            "  (secrets are never written to TOML — set token_env/token_keyring per ADR-0007)"
+            "  🔐 stored {} token(s) in the OS keyring: {}",
+            stored.len(),
+            stored.join(", ")
         );
     }
+    for (name, err) in &store_failed {
+        println!(
+            "  ⚠ couldn't store '{name}' token in the keyring ({err}) — export it via the server's \
+             token_env, or run `forge auth`. The server is imported but won't authenticate yet."
+        );
+    }
+    Ok(())
 }
 
 async fn build_session_with(
@@ -2043,21 +2048,6 @@ fn fmt_age(created_at: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_selection_handles_all_lists_and_cancel() {
-        assert_eq!(parse_selection("a", 3), Some(vec![0, 1, 2]));
-        assert_eq!(parse_selection("ALL", 2), Some(vec![0, 1]));
-        assert_eq!(parse_selection("1,3,5", 6), Some(vec![0, 2, 4]));
-        assert_eq!(
-            parse_selection("2 2 4", 4),
-            Some(vec![1, 3]),
-            "dedup + space-sep"
-        );
-        assert_eq!(parse_selection("9", 3), None, "out-of-range only → cancel");
-        assert_eq!(parse_selection("", 3), None, "empty → cancel");
-        assert_eq!(parse_selection("  ", 3), None);
-    }
 
     #[test]
     fn interactive_logs_go_to_a_file_never_the_tui() {

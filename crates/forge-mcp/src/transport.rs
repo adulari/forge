@@ -20,6 +20,14 @@ pub async fn serve(server: &McpServerConfig) -> Result<RunningService<RoleClient
             for (k, v) in env {
                 cmd.env(k, v);
             }
+            // Inject the resolved secret token into the child's environment under its declared
+            // var name. The value comes from env/keyring (ADR-0007), never from the TOML.
+            if let (Some(token), Some(var)) = (
+                server.token(),
+                server.auth.as_ref().and_then(|a| a.token_env.clone()),
+            ) {
+                cmd.env(var, token);
+            }
             let transport =
                 TokioChildProcess::new(cmd).map_err(|e| format!("spawn '{command}': {e}"))?;
             ().serve(transport)
@@ -27,10 +35,28 @@ pub async fn serve(server: &McpServerConfig) -> Result<RunningService<RoleClient
                 .map_err(|e| format!("initialize: {e}"))
         }
         McpTransport::Http { url, headers } => {
-            let client = build_http_client(headers)?;
+            // Decide where the token rides: a custom auth header (e.g. `X-Goog-Api-Key`) is sent
+            // verbatim via the client's default headers; otherwise it's `Authorization: Bearer`.
+            let token = server.token();
+            let custom_header = server
+                .auth
+                .as_ref()
+                .and_then(|a| a.header.clone())
+                .filter(|h| !h.eq_ignore_ascii_case("authorization"));
+            let mut all_headers = headers.clone();
+            let mut bearer = None;
+            if let Some(token) = token {
+                match custom_header {
+                    Some(h) => {
+                        all_headers.insert(h, token);
+                    }
+                    None => bearer = Some(token),
+                }
+            }
+            let client = build_http_client(&all_headers)?;
             let mut cfg = StreamableHttpClientTransportConfig::with_uri(url.clone());
-            if let Some(token) = server.token() {
-                cfg = cfg.auth_header(token); // sent as `Authorization: Bearer <token>`
+            if let Some(b) = bearer {
+                cfg = cfg.auth_header(b); // sent as `Authorization: Bearer <token>`
             }
             let transport = StreamableHttpClientTransport::with_client(client, cfg);
             ().serve(transport)

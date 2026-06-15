@@ -144,12 +144,19 @@ pub enum McpTransport {
 /// Where a server's token comes from — never the value itself in config (ADR-0007).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpAuth {
-    /// Environment variable holding the token (e.g. `GITLAB_TOKEN`).
+    /// Environment variable holding the token (e.g. `GITLAB_TOKEN`). For an **stdio** server the
+    /// resolved token is injected into the child's environment under this name; for an **http**
+    /// server it is sent as a request header (see `header`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
     /// Keyring entry name (looked up under the `forge` service), e.g. `mcp:gitlab`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_keyring: Option<String>,
+    /// HTTP only: the request header the token rides in. `None` / `Authorization` → sent as
+    /// `Authorization: Bearer <token>`; any other name → sent verbatim as `<header>: <token>`
+    /// (for servers that use a custom key header, e.g. `X-Goog-Api-Key`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -199,14 +206,33 @@ fn looks_secret(key: &str) -> bool {
     .any(|m| k.contains(m))
 }
 
+/// The result of parsing one tool's MCP config: the servers (with secrets *referenced*, never
+/// embedded), human notes, and the captured secret **values** keyed by server name. The values
+/// stay in memory only — the importer writes them to the OS keyring (ADR-0007), never to TOML.
+#[derive(Debug, Clone, Default)]
+pub struct ParsedServers {
+    pub servers: Vec<McpServerConfig>,
+    pub notes: Vec<String>,
+    /// server name → token value Forge will store in the keyring under that server's `mcp:<name>`.
+    pub secrets: HashMap<String, String>,
+}
+
+/// Strip a leading `Bearer ` (case-insensitive) so a stored Authorization token is the bare
+/// credential — Forge re-adds the `Bearer ` scheme when it sends the request.
+fn strip_bearer(v: &str) -> String {
+    let t = v.trim();
+    t.strip_prefix("Bearer ")
+        .or_else(|| t.strip_prefix("bearer "))
+        .unwrap_or(t)
+        .to_string()
+}
+
 /// Parse one server entry from a JSON spec (the `{type?, command/args/env | url/headers}` object
-/// used by Claude Code, Cursor, Windsurf, …). Pushes secret-stripping warnings into `warnings`;
-/// returns `None` for an entry that is neither stdio nor http. Secrets are NEVER copied.
-fn server_from_json(
-    name: &str,
-    spec: &serde_json::Value,
-    warnings: &mut Vec<String>,
-) -> Option<McpServerConfig> {
+/// used by Claude Code, Cursor, Windsurf, …). A secret is **referenced** in the returned config
+/// (`token_keyring = "mcp:<name>"`) and its value captured into `out.secrets[name]`; it is never
+/// embedded in the config. Returns `None` for an entry that is neither stdio nor http.
+fn server_from_json(name: &str, spec: &serde_json::Value, out: &mut ParsedServers) {
+    let keyring_key = format!("mcp:{name}");
     let (transport, auth) = if let Some(cmd) = spec.get("command").and_then(|v| v.as_str()) {
         let args = spec
             .get("args")
@@ -221,13 +247,20 @@ fn server_from_json(
         let mut auth: Option<McpAuth> = None;
         if let Some(env_obj) = spec.get("env").and_then(|v| v.as_object()) {
             for (k, v) in env_obj {
-                if looks_secret(k) {
-                    auth.get_or_insert_with(McpAuth::default).token_env = Some(k.clone());
-                    warnings.push(format!(
-                        "server '{name}': not copying secret env '{k}' into mcp.toml — set \
-                         token_env = \"{k}\" and export it (or use the keyring)"
+                let val = v.as_str().unwrap_or("");
+                if looks_secret(k) && !val.is_empty() {
+                    // Capture the value for the keyring; reference it by env-var name. At connect,
+                    // the resolved token is injected into the child's env under `k`.
+                    out.secrets.insert(name.to_string(), val.to_string());
+                    auth = Some(McpAuth {
+                        token_env: Some(k.clone()),
+                        token_keyring: Some(keyring_key.clone()),
+                        header: None,
+                    });
+                    out.notes.push(format!(
+                        "server '{name}': storing secret env '{k}' in the keyring"
                     ));
-                } else if let Some(val) = v.as_str() {
+                } else {
                     env.insert(k.clone(), val.to_string());
                 }
             }
@@ -242,25 +275,32 @@ fn server_from_json(
         )
     } else if let Some(url) = spec.get("url").and_then(|v| v.as_str()) {
         let mut headers = HashMap::new();
-        let mut had_secret_header = false;
+        let mut auth: Option<McpAuth> = None;
         if let Some(h) = spec.get("headers").and_then(|v| v.as_object()) {
             for (k, v) in h {
-                if looks_secret(k) || k.eq_ignore_ascii_case("authorization") {
-                    had_secret_header = true;
-                    warnings.push(format!(
-                        "server '{name}': not copying header '{k}' into mcp.toml — put the token \
-                         in token_keyring/token_env (Forge sends it as a bearer token)"
+                let val = v.as_str().unwrap_or("");
+                let is_auth = k.eq_ignore_ascii_case("authorization");
+                if (looks_secret(k) || is_auth) && !val.is_empty() {
+                    // Capture the token; send via Authorization-Bearer or the original custom header.
+                    let token = if is_auth {
+                        strip_bearer(val)
+                    } else {
+                        val.to_string()
+                    };
+                    out.secrets.insert(name.to_string(), token);
+                    auth = Some(McpAuth {
+                        token_env: None,
+                        token_keyring: Some(keyring_key.clone()),
+                        header: (!is_auth).then(|| k.clone()),
+                    });
+                    out.notes.push(format!(
+                        "server '{name}': storing header '{k}' token in the keyring"
                     ));
-                } else if let Some(val) = v.as_str() {
+                } else {
                     headers.insert(k.clone(), val.to_string());
                 }
             }
         }
-        // Leave a placeholder keyring slot so the user knows where the token belongs.
-        let auth = had_secret_header.then(|| McpAuth {
-            token_keyring: Some(format!("mcp:{name}")),
-            token_env: None,
-        });
         (
             McpTransport::Http {
                 url: url.to_string(),
@@ -269,42 +309,37 @@ fn server_from_json(
             auth,
         )
     } else {
-        warnings.push(format!(
+        out.notes.push(format!(
             "server '{name}': skipped — neither `command` (stdio) nor `url` (http)"
         ));
-        return None;
+        return;
     };
-    Some(McpServerConfig {
+    out.servers.push(McpServerConfig {
         name: name.to_string(),
         transport,
         auth,
         enabled: true,
-    })
+    });
 }
 
-/// Parse a JSON `mcpServers` (Claude/Cursor/Windsurf) **or** `servers` (VS Code) object into
-/// server configs + secret-stripping warnings.
-fn servers_from_json(root: &serde_json::Value) -> (Vec<McpServerConfig>, Vec<String>) {
-    let obj = root
+/// Parse a JSON `mcpServers` (Claude/Cursor/Windsurf) **or** `servers` (VS Code) object.
+fn servers_from_json(root: &serde_json::Value) -> ParsedServers {
+    let mut out = ParsedServers::default();
+    if let Some(obj) = root
         .get("mcpServers")
         .or_else(|| root.get("servers"))
-        .and_then(|v| v.as_object());
-    let mut servers = Vec::new();
-    let mut warnings = Vec::new();
-    if let Some(obj) = obj {
+        .and_then(|v| v.as_object())
+    {
         for (name, spec) in obj {
-            if let Some(s) = server_from_json(name, spec, &mut warnings) {
-                servers.push(s);
-            }
+            server_from_json(name, spec, &mut out);
         }
     }
-    (servers, warnings)
+    out
 }
 
-/// Translate a Claude-Code-style `.mcp.json` into an [`McpConfig`]. Returns the config plus any
-/// warnings (a secret that was NOT copied — the user is told to move it to `token_env`/keyring).
-/// Secrets are never written into the resulting config (ADR-0007).
-pub fn import_mcp_json(path: &Path) -> Result<(McpConfig, Vec<String>), ConfigError> {
+/// Translate a Claude-Code-style `.mcp.json` into an [`McpConfig`] plus notes + captured secret
+/// values (to store in the keyring). Secrets are never written into the config (ADR-0007).
+pub fn import_mcp_json(path: &Path) -> Result<ParsedServers, ConfigError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| ConfigError::Write(format!("reading {}: {e}", path.display())))?;
     let root: serde_json::Value = serde_json::from_str(&text)
@@ -318,14 +353,7 @@ pub fn import_mcp_json(path: &Path) -> Result<(McpConfig, Vec<String>), ConfigEr
             "no `mcpServers` (or `servers`) object in the file".into(),
         ));
     }
-    let (servers, warnings) = servers_from_json(&root);
-    Ok((
-        McpConfig {
-            servers,
-            ..Default::default()
-        },
-        warnings,
-    ))
+    Ok(servers_from_json(&root))
 }
 
 /// One place Forge found MCP servers declared (a specific tool's config file). Surfaced by
@@ -336,8 +364,11 @@ pub struct ImportSource {
     pub label: String,
     pub path: PathBuf,
     pub servers: Vec<McpServerConfig>,
-    /// Secret-stripping notes for this source.
-    pub warnings: Vec<String>,
+    /// Notes (e.g. which secrets will be stored in the keyring).
+    pub notes: Vec<String>,
+    /// server name → captured token value (in-memory only; the importer writes these to the OS
+    /// keyring under `mcp:<name>`, never to TOML).
+    pub secrets: HashMap<String, String>,
 }
 
 /// Scan every AI-CLI MCP config Forge knows about (Claude Code, Claude Desktop, Codex, Cursor,
@@ -353,20 +384,22 @@ pub fn discover_import_sources(cwd: &Path) -> Vec<ImportSource> {
         let claude = home.join(".claude.json");
         if let Ok(text) = std::fs::read_to_string(&claude) {
             if let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) {
-                let (servers, warnings) = servers_from_json(&root);
-                push_source(&mut out, "claude-code (global)", &claude, servers, warnings);
+                push_source(
+                    &mut out,
+                    "claude-code (global)",
+                    &claude,
+                    servers_from_json(&root),
+                );
                 // Project-scoped: projects.<abs-cwd>.mcpServers
                 if let Some(proj) = root
                     .get("projects")
                     .and_then(|p| p.get(cwd.to_string_lossy().as_ref()))
                 {
-                    let (servers, warnings) = servers_from_json(proj);
                     push_source(
                         &mut out,
                         "claude-code (this project)",
                         &claude,
-                        servers,
-                        warnings,
+                        servers_from_json(proj),
                     );
                 }
             }
@@ -380,8 +413,7 @@ pub fn discover_import_sources(cwd: &Path) -> Vec<ImportSource> {
     if let Some(home) = &home {
         let codex = home.join(".codex/config.toml");
         if let Ok(text) = std::fs::read_to_string(&codex) {
-            let (servers, warnings) = servers_from_codex_toml(&text);
-            push_source(&mut out, "codex", &codex, servers, warnings);
+            push_source(&mut out, "codex", &codex, servers_from_codex_toml(&text));
         }
     }
 
@@ -419,49 +451,39 @@ pub fn discover_import_sources(cwd: &Path) -> Vec<ImportSource> {
 fn scan_json(out: &mut Vec<ImportSource>, label: &str, path: &Path) {
     if let Ok(text) = std::fs::read_to_string(path) {
         if let Ok(root) = serde_json::from_str::<serde_json::Value>(&text) {
-            let (servers, warnings) = servers_from_json(&root);
-            push_source(out, label, path, servers, warnings);
+            push_source(out, label, path, servers_from_json(&root));
         }
     }
 }
 
-fn push_source(
-    out: &mut Vec<ImportSource>,
-    label: &str,
-    path: &Path,
-    servers: Vec<McpServerConfig>,
-    warnings: Vec<String>,
-) {
-    if !servers.is_empty() {
+fn push_source(out: &mut Vec<ImportSource>, label: &str, path: &Path, parsed: ParsedServers) {
+    if !parsed.servers.is_empty() {
         out.push(ImportSource {
             label: label.to_string(),
             path: path.to_path_buf(),
-            servers,
-            warnings,
+            servers: parsed.servers,
+            notes: parsed.notes,
+            secrets: parsed.secrets,
         });
     }
 }
 
 /// Parse Codex's `~/.codex/config.toml` `[mcp_servers.<name>]` tables. Stdio entries use
-/// `command`/`args`/`env`; http entries use `url`/`headers`. Secrets stripped like the JSON path.
-fn servers_from_codex_toml(text: &str) -> (Vec<McpServerConfig>, Vec<String>) {
-    let mut servers = Vec::new();
-    let mut warnings = Vec::new();
-    let root: toml::Table = match text.parse() {
-        Ok(t) => t,
-        Err(_) => return (servers, warnings),
+/// `command`/`args`/`env`; http entries use `url`/`headers`. Secrets captured like the JSON path.
+fn servers_from_codex_toml(text: &str) -> ParsedServers {
+    let mut out = ParsedServers::default();
+    let Ok(root) = text.parse::<toml::Table>() else {
+        return out;
     };
     let Some(table) = root.get("mcp_servers").and_then(|v| v.as_table()) else {
-        return (servers, warnings);
+        return out;
     };
     for (name, spec) in table {
         // Reuse the JSON parser by converting the TOML value to JSON (same field shapes).
         let json = serde_json::to_value(spec).unwrap_or(serde_json::Value::Null);
-        if let Some(s) = server_from_json(name, &json, &mut warnings) {
-            servers.push(s);
-        }
+        server_from_json(name, &json, &mut out);
     }
-    (servers, warnings)
+    out
 }
 
 /// Read an existing `.forge/mcp.toml` into an [`McpConfig`], or the default if it's absent or
@@ -541,7 +563,7 @@ mod tests {
         std::env::set_var("FORGE_TEST_MCP_TOKEN", "tok-123");
         let auth = McpAuth {
             token_env: Some("FORGE_TEST_MCP_TOKEN".into()),
-            token_keyring: None,
+            ..Default::default()
         };
         assert_eq!(resolve_token(&auth).as_deref(), Some("tok-123"));
         std::env::remove_var("FORGE_TEST_MCP_TOKEN");
@@ -601,21 +623,25 @@ url = "https://mcp.example.com/mcp"
 [mcp_servers.remote.headers]
 Authorization = "Bearer SECRET-TOKEN"
 "#;
-        let (servers, warnings) = servers_from_codex_toml(toml);
-        assert_eq!(servers.len(), 2);
-        let gh = servers.iter().find(|s| s.name == "github").unwrap();
+        let parsed = servers_from_codex_toml(toml);
+        assert_eq!(parsed.servers.len(), 2);
+        let gh = parsed.servers.iter().find(|s| s.name == "github").unwrap();
         assert_eq!(gh.transport_label(), "stdio");
-        let remote = servers.iter().find(|s| s.name == "remote").unwrap();
+        let remote = parsed.servers.iter().find(|s| s.name == "remote").unwrap();
         assert_eq!(remote.transport_label(), "http");
-        // The Authorization header value is never copied; a keyring placeholder is left instead.
-        assert!(warnings.iter().any(|w| w.contains("Authorization")));
+        // The Authorization token is captured (for the keyring) and referenced, never copied.
         assert_eq!(
             remote.auth.as_ref().unwrap().token_keyring.as_deref(),
             Some("mcp:remote")
         );
+        // Captured with the `Bearer ` scheme stripped (Forge re-adds it when sending).
+        assert_eq!(
+            parsed.secrets.get("remote").map(String::as_str),
+            Some("SECRET-TOKEN")
+        );
         // Round-trip the parsed config: the secret must not appear in the serialized TOML.
         let cfg = McpConfig {
-            servers,
+            servers: parsed.servers,
             ..Default::default()
         };
         let body = toml::to_string_pretty(&cfg).unwrap();
@@ -674,7 +700,60 @@ Authorization = "Bearer SECRET-TOKEN"
             McpTransport::Http { headers, .. } => assert!(!headers.contains_key("Authorization")),
             _ => panic!("http"),
         }
+        // …but its token IS captured (for the keyring), Bearer-stripped.
+        let helm_secret = sources
+            .iter()
+            .find_map(|s| s.secrets.get("helm"))
+            .map(String::as_str);
+        assert_eq!(helm_secret, Some("X"));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn import_captures_custom_header_vs_bearer() {
+        let root = serde_json::json!({ "mcpServers": {
+            "goog": { "url": "https://g/mcp", "headers": { "X-Goog-Api-Key": "GKEY" } },
+            "bear": { "url": "https://b/mcp", "headers": { "Authorization": "Bearer BTOK" } }
+        }});
+        let p = servers_from_json(&root);
+        let goog = p.servers.iter().find(|s| s.name == "goog").unwrap();
+        // Custom header → the token rides verbatim in that header name.
+        assert_eq!(
+            goog.auth.as_ref().unwrap().header.as_deref(),
+            Some("X-Goog-Api-Key")
+        );
+        assert_eq!(p.secrets.get("goog").map(String::as_str), Some("GKEY"));
+        let bear = p.servers.iter().find(|s| s.name == "bear").unwrap();
+        // Authorization → default Bearer (no custom header), token captured without the scheme.
+        assert!(bear.auth.as_ref().unwrap().header.is_none());
+        assert_eq!(p.secrets.get("bear").map(String::as_str), Some("BTOK"));
+        // Nothing secret ends up in the serialized config.
+        let body = toml::to_string_pretty(&McpConfig {
+            servers: p.servers,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!body.contains("GKEY") && !body.contains("BTOK"));
+    }
+
+    #[test]
+    fn keyring_round_trip_store_resolve_delete() {
+        // The "do it for me" mechanism: store a captured token, resolve it via token_keyring,
+        // clean up. Tolerant of CI/headless boxes with no Secret Service.
+        let key = format!("mcp:forge-selftest-{}", forge_types::new_id());
+        if crate::store_secret(&key, "round-trip-token").is_err() {
+            eprintln!("(skipping keyring round-trip — no OS keyring service available)");
+            return;
+        }
+        let auth = McpAuth {
+            token_keyring: Some(key.clone()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_token(&auth).as_deref(), Some("round-trip-token"));
+        // Clean up so the self-test leaves no residue in the user's keyring.
+        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &key) {
+            let _ = entry.delete_credential();
+        }
     }
 
     #[test]
@@ -694,9 +773,9 @@ Authorization = "Bearer SECRET-TOKEN"
         let path = dir.join(".mcp.json");
         std::fs::write(&path, json).unwrap();
 
-        let (cfg, warnings) = import_mcp_json(&path).unwrap();
-        assert_eq!(cfg.servers.len(), 2);
-        let gl = cfg.servers.iter().find(|s| s.name == "gitlab").unwrap();
+        let parsed = import_mcp_json(&path).unwrap();
+        assert_eq!(parsed.servers.len(), 2);
+        let gl = parsed.servers.iter().find(|s| s.name == "gitlab").unwrap();
         match &gl.transport {
             McpTransport::Stdio { env, .. } => {
                 assert_eq!(env.get("GITLAB_URL").unwrap(), "https://gl.example.com");
@@ -705,15 +784,21 @@ Authorization = "Bearer SECRET-TOKEN"
             }
             _ => panic!("stdio"),
         }
-        // Instead the server points at the env var by name.
+        // The server references the env var by name + a keyring slot; the value is captured.
+        let auth = gl.auth.as_ref().unwrap();
+        assert_eq!(auth.token_env.as_deref(), Some("GITLAB_TOKEN"));
+        assert_eq!(auth.token_keyring.as_deref(), Some("mcp:gitlab"));
         assert_eq!(
-            gl.auth.as_ref().unwrap().token_env.as_deref(),
-            Some("GITLAB_TOKEN")
+            parsed.secrets.get("gitlab").map(String::as_str),
+            Some("glpat-SECRET")
         );
-        assert!(warnings.iter().any(|w| w.contains("GITLAB_TOKEN")));
 
         // Round-trips through write_mcp_toml without leaking the secret.
         let out = dir.join("mcp.toml");
+        let cfg = McpConfig {
+            servers: parsed.servers,
+            ..Default::default()
+        };
         write_mcp_toml(&out, &cfg).unwrap();
         let written = std::fs::read_to_string(&out).unwrap();
         assert!(

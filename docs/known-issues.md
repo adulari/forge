@@ -36,4 +36,18 @@ to a junk value so auth fails and the mesh benches/avoids it.
 - A `forge models --clear` / `/health clear` to wipe stale benches.
 
 **Status:** documented; build later.
+
+## Shell tool is POSIX-only (Windows gap)
+
+**Symptom:** The `shell` tool runs `sh -c <command>` and the permission deny-list parser
+assumes POSIX command syntax. On Windows (no `sh` by default) shell commands won't run.
+
+**What we know:** This predates the cross-platform mandate
+([cross-platform.md](architecture/cross-platform.md)). All other subsystems (config/secret
+locations, keyring, TUI, MCP client) are portable; the shell tool is the main exception.
+
+**Planned fix (deferred):** branch to `cmd /C` / PowerShell on Windows (or require a `sh`
+on PATH and document it), and make the deny-list command parsing OS-aware.
+
+**Status:** documented; fix deferred. Tracked on the cross-platform watch-list.
 </content>
