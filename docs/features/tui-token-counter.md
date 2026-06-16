@@ -1,5 +1,14 @@
 # Feature: live token counter + context-window gauge (statusline)
 
+> **Status: shipped.** The statusline shows `↑in ↓out` session token totals and a
+> `◷ used/limit N%` context gauge (dim <70% / yellow ≥70% / red ≥90%), width-gated so the
+> gauge drops first, then the token segment, before tier/model/cost. The per-model window
+> table (`forge_mesh::pricing::context_limit`) is conservative — models without a
+> well-established window return `None` and the gauge shows used tokens with no denominator
+> (no fabricated %). Fed by the existing post-turn `Cost` event (extended with token fields).
+> `context_tokens` = the last call's input size. Could-haves (per-turn delta, bar glyph) not
+> built.
+
 > Small TUI feature in `crates/forge-tui`. Adds live token usage next to the spinner/cost
 > in the statusline, plus a context-window fill gauge. Pairs with the existing cost meter.
 
