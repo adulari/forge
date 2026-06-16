@@ -832,18 +832,23 @@ impl Session {
         // first so the `&self.lattice` borrow is released before we mutate the transcript. The
         // budget shrinks with budget pressure — context spend follows the same discipline as model
         // spend. Empty index / disabled / any error → nothing injected, turn runs as before.
-        let injected = self
-            .lattice
-            .as_ref()
-            .filter(|_| self.config.lattice.inject)
-            .and_then(|lat| {
-                lat.retrieve(
-                    prompt,
-                    inject_budget(self.config.lattice.inject_token_budget, status),
-                )
-                .ok()
-            })
-            .filter(|ctx| !ctx.is_empty());
+        let injected = {
+            if let Some(lat) = self.lattice.as_ref().filter(|_| self.config.lattice.inject) {
+                let budget = inject_budget(self.config.lattice.inject_token_budget, status);
+                let emb = &self.config.lattice.embeddings;
+                if emb.enabled {
+                    // Hybrid: blend embedding neighbours of the prompt with structural hits. Any
+                    // backend error degrades to structural inside `retrieve_hybrid`.
+                    let embedder = forge_index::OllamaEmbedder::new(&emb.endpoint, &emb.model);
+                    lat.retrieve_hybrid(prompt, budget, &embedder).await.ok()
+                } else {
+                    lat.retrieve(prompt, budget).ok()
+                }
+            } else {
+                None
+            }
+        }
+        .filter(|ctx| !ctx.is_empty());
         if let Some(ctx) = injected {
             let files = ctx
                 .snippets

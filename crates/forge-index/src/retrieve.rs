@@ -134,6 +134,38 @@ pub fn retrieve(
     })
 }
 
+/// Fold semantic (embedding-ranked) hits into an existing structural context: append any not
+/// already present, in rank order, until the token budget is hit. Dedups by (path, line, name).
+pub fn merge_semantic(
+    mut ctx: InjectedContext,
+    semantic: Vec<NodeHit>,
+    token_budget: usize,
+) -> InjectedContext {
+    let mut seen: HashSet<(String, i64, String)> = ctx
+        .nodes
+        .iter()
+        .map(|n| (n.rel_path.clone(), n.line, n.name.clone()))
+        .collect();
+    for n in semantic {
+        if !seen.insert((n.rel_path.clone(), n.line, n.name.clone())) {
+            continue;
+        }
+        let text = render_line(&n);
+        let cost = est_tokens(&text);
+        if ctx.est_tokens + cost > token_budget {
+            continue;
+        }
+        ctx.est_tokens += cost;
+        ctx.snippets.push(RetrievedSnippet {
+            rel_path: n.rel_path.clone(),
+            line: n.line,
+            text,
+        });
+        ctx.nodes.push(n);
+    }
+    ctx
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
