@@ -412,6 +412,21 @@ pub struct MeshConfig {
     /// exact set; a stale alias just benches itself via failover.
     #[serde(default)]
     pub bridge_models: HashMap<String, Vec<String>>,
+    /// Models/providers excluded from discovery + routing. Each entry is either a full model id
+    /// (`provider::model`) or a bare provider prefix (`provider`, matching every `provider::*`).
+    /// Use it to drop a flaky or unwanted model without deleting its key (known-issues.md). A
+    /// disabled model never enters the catalog, so the mesh won't route to or fail over onto it.
+    #[serde(default)]
+    pub disabled: Vec<String>,
+}
+
+/// Whether `model_id` is excluded by a `[mesh] disabled` list — exact id match or a bare provider
+/// prefix matching `provider::*`. Pure so it's unit-testable.
+pub fn is_model_disabled(model_id: &str, disabled: &[String]) -> bool {
+    disabled.iter().any(|d| {
+        let d = d.trim();
+        !d.is_empty() && (model_id == d || model_id.starts_with(&format!("{d}::")))
+    })
 }
 
 fn default_auto_discover() -> bool {
@@ -589,6 +604,7 @@ impl Default for Config {
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
+                disabled: Vec::new(),
             },
             permissions: PermissionsConfig::default(),
             mcp: McpConfig::default(),
@@ -890,6 +906,18 @@ pub fn store_api_key(provider: &str, key: &str) -> Result<(), ConfigError> {
         .map_err(|e| ConfigError::Keyring(e.to_string()))
 }
 
+/// Delete a provider API key from the OS keyring. Returns `Ok(true)` if an entry was removed,
+/// `Ok(false)` if there was nothing stored (so `forge auth --remove` is idempotent).
+pub fn remove_api_key(provider: &str) -> Result<bool, ConfigError> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, provider)
+        .map_err(|e| ConfigError::Keyring(e.to_string()))?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(true),
+        Err(keyring::Error::NoEntry) => Ok(false),
+        Err(e) => Err(ConfigError::Keyring(e.to_string())),
+    }
+}
+
 /// Store an arbitrary secret (e.g. an MCP server token, keyed `mcp:<server>`) in the OS keyring
 /// under the `forge` service. Cross-platform via the `keyring` crate's native backends (macOS
 /// Keychain, Windows Credential Manager, Linux Secret Service). ADR-0007: secrets live in the
@@ -1147,5 +1175,23 @@ reason = "no privilege escalation"
             .permission_rules()
             .iter()
             .any(|r| r.source == RuleSource::Builtin));
+    }
+
+    #[test]
+    fn disabled_matches_exact_id_and_provider_prefix() {
+        let disabled = vec!["claude-cli::opus".to_string(), "gemini".to_string()];
+        // Exact model id.
+        assert!(is_model_disabled("claude-cli::opus", &disabled));
+        // Bare provider prefix matches all its models...
+        assert!(is_model_disabled("gemini::flash", &disabled));
+        assert!(is_model_disabled("gemini::pro", &disabled));
+        // ...but not a different provider or a non-disabled sibling model.
+        assert!(!is_model_disabled("claude-cli::sonnet", &disabled));
+        assert!(!is_model_disabled("openai::gpt-4o", &disabled));
+        // A prefix must match on the `::` boundary, not a substring.
+        assert!(!is_model_disabled("geminix::pro", &disabled));
+        // Empty list / empty entries disable nothing.
+        assert!(!is_model_disabled("gemini::flash", &[]));
+        assert!(!is_model_disabled("gemini::flash", &["".to_string()]));
     }
 }

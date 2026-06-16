@@ -93,15 +93,22 @@ enum Command {
         /// bench the ones that rate-limit / fail auth (so the mesh routes around them).
         #[arg(long)]
         probe: bool,
+        /// Clear all stale model benches (forget every rate-limited/unavailable mark) and exit.
+        #[arg(long)]
+        clear: bool,
     },
     /// Internal: run Forge's tool registry as an MCP server on stdio (spawned by the CLI
     /// bridge so claude/codex use Forge's tools under Forge's permission gate). Not for direct use.
     #[command(hide = true)]
     McpServe,
-    /// Store a provider API key securely in the OS keyring (reads the key from stdin).
+    /// Store a provider API key securely in the OS keyring (reads the key from stdin), or remove
+    /// it with `--remove`.
     Auth {
         /// Provider: anthropic, openai, gemini, xai, deepseek, or openrouter.
         provider: String,
+        /// Delete the stored key for this provider instead of setting one.
+        #[arg(long)]
+        remove: bool,
     },
     /// Interactive first-run setup: enable providers (enter API keys) and declare which
     /// subscription plan backs each installed CLI bridge, so the mesh knows your usage headroom.
@@ -287,8 +294,8 @@ async fn main() -> Result<()> {
         Command::Sessions => sessions(),
         Command::Replay { ids } => replay_cmd(&ids),
         Command::Commands => commands_cmd(),
-        Command::Models { probe } => models(probe).await,
-        Command::Auth { provider } => auth(&provider),
+        Command::Models { probe, clear } => models(probe, clear).await,
+        Command::Auth { provider, remove } => auth(&provider, remove),
         Command::Init => init(),
         Command::Mcp { cmd } => mcp_cmd(cmd).await,
         Command::McpServe => mcp_serve::run().await,
@@ -518,7 +525,7 @@ fn lattice_cmd(op: LatticeOp) -> Result<()> {
     Ok(())
 }
 
-fn auth(provider: &str) -> Result<()> {
+fn auth(provider: &str, remove: bool) -> Result<()> {
     let known_provider = forge_config::known_key_providers().any(|p| p == provider);
     let known_search = forge_config::known_search_providers().any(|p| p == provider);
     if !known_provider && !known_search {
@@ -528,6 +535,16 @@ fn auth(provider: &str) -> Result<()> {
             "unknown provider '{provider}' — known providers are: {}",
             known.join(", ")
         );
+    }
+    if remove {
+        let removed = forge_config::remove_api_key(provider)
+            .with_context(|| format!("removing {provider} key from the OS keyring"))?;
+        if removed {
+            println!("removed {provider} key from the OS keyring");
+        } else {
+            println!("no {provider} key was stored — nothing to remove");
+        }
+        return Ok(());
     }
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
@@ -1046,12 +1063,23 @@ async fn discover_catalog(config: &forge_config::Config) -> forge_mesh::ModelCat
     // Dedup while preserving discovery order (a provider could list the same id twice).
     let mut seen = std::collections::HashSet::new();
     models.retain(|m| seen.insert(m.clone()));
+    // Drop any model/provider the user disabled (`[mesh] disabled`), so the mesh never routes to
+    // or fails over onto it (known-issues.md: disable a flaky model without deleting its key).
+    models.retain(|m| !forge_config::is_model_disabled(m, &config.mesh.disabled));
     forge_mesh::ModelCatalog::new(models)
 }
 
 /// `forge models [--probe]`: discover the usable models + show the mesh's capability-ranked pick
 /// per tier. With `--probe`, also ping each model and persist health (the user-driven rescan).
-async fn models(probe: bool) -> Result<()> {
+async fn models(probe: bool, clear: bool) -> Result<()> {
+    if clear {
+        let store = open_store()?;
+        let n = store
+            .clear_all_model_health()
+            .context("clearing model benches")?;
+        println!("cleared {n} model bench(es) — the mesh will reconsider every model");
+        return Ok(());
+    }
     forge_config::inject_provider_keys();
     let config = forge_config::load().unwrap_or_default();
     let cat = discover_catalog(&config).await;
