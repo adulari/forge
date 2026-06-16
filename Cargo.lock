@@ -1209,12 +1209,16 @@ dependencies = [
 name = "forge-index"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "forge-config",
  "forge-store",
  "forge-types",
  "notify-debouncer-mini",
+ "reqwest",
+ "serde_json",
  "sha2",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "tree-sitter",
  "tree-sitter-c",

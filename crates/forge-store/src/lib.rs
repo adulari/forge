@@ -1031,6 +1031,23 @@ impl Store {
         Ok(())
     }
 
+    /// Nodes that don't yet have an embedding — the work list for incremental `embed_pending`.
+    pub fn lattice_nodes_without_embedding(&self, limit: usize) -> Result<Vec<LatticeNodeRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.file_id, n.kind, n.name, n.qualname, n.signature,
+                    n.span_start, n.span_end, n.line_start
+             FROM lattice_node n
+             LEFT JOIN lattice_embedding e ON e.node_id = n.id
+             WHERE e.node_id IS NULL
+             LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map([limit as i64], lattice_node_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// All stored `(node_id, vector)` embeddings — loaded once to cosine-rank a query vector.
     pub fn lattice_embeddings(&self) -> Result<Vec<(String, Vec<f32>)>> {
         let conn = self.lock()?;
