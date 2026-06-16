@@ -38,6 +38,24 @@ use rmcp::transport::io::stdio;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
 use serde_json::Value;
 
+/// Append one JSON record to the out-of-band subagent sink the CLI bridge tails (if it gave us
+/// one via `FORGE_SUBAGENT_SINK`). Used to surface bridge-turn activity (subagents, task-list
+/// updates) in the parent Forge TUI live. Best-effort: no sink / write error is silently ignored.
+fn report_to_sink(record: serde_json::Value) {
+    let Ok(path) = std::env::var(forge_provider::SUBAGENT_SINK_ENV) else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{record}");
+        let _ = f.flush();
+    }
+}
+
 /// Everything a `spawn_agents` call needs, built once if subagents are enabled here. `ctx`
 /// already carries the loaded agent types, the nesting depth, and `max_depth`.
 struct SubagentSupport {
@@ -143,7 +161,8 @@ impl ServerHandler for ForgeMcp {
         }
 
         // Task tracking — persist the list to the parent session (id from ENV_SESSION) so the
-        // parent's run_turn reloads + surfaces it in the TUI after the bridge turn completes.
+        // parent's run_turn reloads it. Also report it to the out-of-band sink so the parent TUI's
+        // sticky task panel updates LIVE during the bridge turn (not just on completion).
         if name == forge_core::UPDATE_TASKS_TOOL {
             let tasks = forge_core::parse_tasks(&args);
             let done = tasks
@@ -153,6 +172,7 @@ impl ServerHandler for ForgeMcp {
             if let Ok(session_id) = std::env::var(forge_core::snapshot::ENV_SESSION) {
                 let _ = self.tasks_store.set_tasks(&session_id, &tasks);
             }
+            report_to_sink(serde_json::json!({ "k": "tasks", "tasks": tasks }));
             return Ok(CallToolResult::success(vec![Content::text(format!(
                 "task list updated: {} task(s) — {done} done",
                 tasks.len()

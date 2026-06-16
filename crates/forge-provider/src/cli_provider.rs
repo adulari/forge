@@ -1072,6 +1072,10 @@ fn parse_sink_line(line: &str) -> Option<StreamEvent> {
             summary: s("summary"),
             cost_usd: v.get("cost").and_then(Value::as_f64).unwrap_or(0.0),
         }),
+        "tasks" => {
+            let tasks = serde_json::from_value(v.get("tasks")?.clone()).ok()?;
+            Some(StreamEvent::Tasks(tasks))
+        }
         _ => None,
     }
 }
@@ -1221,6 +1225,18 @@ mod tests {
         }
         assert!(parse_sink_line("not json").is_none());
         assert!(parse_sink_line(r#"{"k":"unknown"}"#).is_none());
+
+        // A bridged `update_tasks` reported over the sink → a live Tasks event for the TUI panel.
+        match parse_sink_line(
+            r#"{"k":"tasks","tasks":[{"title":"scan","status":"in_progress"},{"title":"map","status":"pending"}]}"#,
+        ) {
+            Some(StreamEvent::Tasks(t)) => {
+                assert_eq!(t.len(), 2);
+                assert_eq!(t[0].title, "scan");
+                assert_eq!(t[0].status, forge_types::TodoStatus::InProgress);
+            }
+            other => panic!("expected Tasks, got {other:?}"),
+        }
     }
 
     #[test]
