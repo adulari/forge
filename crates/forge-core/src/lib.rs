@@ -758,6 +758,7 @@ impl Session {
         let failover_enabled = self.config.mesh.failover;
         let default_cooldown =
             std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
+        let stream_idle = std::time::Duration::from_secs(self.config.mesh.stream_idle_timeout_secs);
         let mut chain = decision.fallbacks.clone().into_iter();
         let mut active_model = decision.model.clone();
 
@@ -767,48 +768,53 @@ impl Session {
             let mut resp = loop {
                 // Tight scope: borrow provider + presenter only for the streamed call, so the
                 // failover branch below has full `&mut self` for benching + warnings.
-                let result =
-                    {
-                        let provider = &self.provider;
-                        let presenter = &mut self.presenter;
-                        provider
-                            .complete(
-                                &active_model,
-                                &self.transcript,
-                                &specs,
-                                &mut |ev: StreamEvent| match ev {
-                                    StreamEvent::Text(t) => {
-                                        presenter.emit(PresenterEvent::AssistantDelta(t))
-                                    }
-                                    StreamEvent::Reasoning(t) => {
-                                        presenter.emit(PresenterEvent::Reasoning(t))
-                                    }
-                                    StreamEvent::ToolStarted { name, args } => {
-                                        presenter.emit(PresenterEvent::ToolStart { name, args })
-                                    }
-                                    StreamEvent::ToolFinished { name, ok, summary } => presenter
-                                        .emit(PresenterEvent::ToolResult { name, ok, summary }),
-                                    StreamEvent::SubagentStarted { id, agent, task } => presenter
-                                        .emit(PresenterEvent::SubagentStart { id, agent, task }),
-                                    StreamEvent::SubagentProgress { id, snippet } => presenter
-                                        .emit(PresenterEvent::SubagentProgress { id, snippet }),
-                                    StreamEvent::SubagentFinished {
-                                        id,
-                                        agent,
-                                        ok,
-                                        summary,
-                                        cost_usd,
-                                    } => presenter.emit(PresenterEvent::SubagentResult {
-                                        id,
-                                        agent,
-                                        ok,
-                                        summary,
-                                        cost_usd,
-                                    }),
-                                },
-                            )
-                            .await
+                let result = {
+                    let provider = &self.provider;
+                    let presenter = &mut self.presenter;
+                    // Bump on every stream event so the idle watchdog can distinguish a live
+                    // stream from a stalled half-open connection — a stall fails over (below)
+                    // instead of hanging the turn forever.
+                    let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let act = std::sync::Arc::clone(&activity);
+                    let mut sink = |ev: StreamEvent| {
+                        act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        match ev {
+                            StreamEvent::Text(t) => {
+                                presenter.emit(PresenterEvent::AssistantDelta(t))
+                            }
+                            StreamEvent::Reasoning(t) => {
+                                presenter.emit(PresenterEvent::Reasoning(t))
+                            }
+                            StreamEvent::ToolStarted { name, args } => {
+                                presenter.emit(PresenterEvent::ToolStart { name, args })
+                            }
+                            StreamEvent::ToolFinished { name, ok, summary } => {
+                                presenter.emit(PresenterEvent::ToolResult { name, ok, summary })
+                            }
+                            StreamEvent::SubagentStarted { id, agent, task } => {
+                                presenter.emit(PresenterEvent::SubagentStart { id, agent, task })
+                            }
+                            StreamEvent::SubagentProgress { id, snippet } => {
+                                presenter.emit(PresenterEvent::SubagentProgress { id, snippet })
+                            }
+                            StreamEvent::SubagentFinished {
+                                id,
+                                agent,
+                                ok,
+                                summary,
+                                cost_usd,
+                            } => presenter.emit(PresenterEvent::SubagentResult {
+                                id,
+                                agent,
+                                ok,
+                                summary,
+                                cost_usd,
+                            }),
+                        }
                     };
+                    let fut = provider.complete(&active_model, &self.transcript, &specs, &mut sink);
+                    stream_with_idle_timeout(fut, &activity, stream_idle).await
+                };
                 match result {
                     Ok(r) => {
                         if !r.content.is_empty() {
@@ -1452,6 +1458,47 @@ fn inject_budget(base: usize, status: BudgetStatus) -> usize {
     }
 }
 
+/// Await a streaming completion, but abort it if the stream goes silent for `idle` (a half-open /
+/// stalled connection) so a turn never hangs forever — the caller treats the synthesized
+/// `Unavailable` as retryable and fails over. `activity` is bumped by the completion's event sink;
+/// `idle == 0` disables the watchdog. Polls coarsely (every few seconds) — this guards against a
+/// hang, it is not a precise deadline.
+async fn stream_with_idle_timeout<F>(
+    fut: F,
+    activity: &std::sync::atomic::AtomicU64,
+    idle: std::time::Duration,
+) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError>
+where
+    F: std::future::Future<
+        Output = Result<forge_provider::ModelResponse, forge_provider::ProviderError>,
+    >,
+{
+    tokio::pin!(fut);
+    if idle.is_zero() {
+        return fut.await;
+    }
+    let mut last_seen = 0u64;
+    let mut last_change = std::time::Instant::now();
+    let poll = std::time::Duration::from_secs(3).min(idle);
+    loop {
+        tokio::select! {
+            r = &mut fut => return r,
+            _ = tokio::time::sleep(poll) => {
+                let now = activity.load(std::sync::atomic::Ordering::Relaxed);
+                if now != last_seen {
+                    last_seen = now;
+                    last_change = std::time::Instant::now();
+                } else if last_change.elapsed() >= idle {
+                    return Err(forge_provider::ProviderError::Unavailable(format!(
+                        "stream stalled — no data for {}s",
+                        idle.as_secs()
+                    )));
+                }
+            }
+        }
+    }
+}
+
 fn budget_override_active() -> bool {
     matches!(
         std::env::var("FORGE_BUDGET_OVERRIDE").as_deref(),
@@ -1937,6 +1984,54 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Never streams an event and never returns — simulates a half-open / stalled connection.
+    struct StallingProvider;
+    #[async_trait::async_trait]
+    impl Provider for StallingProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            unreachable!("the idle watchdog must abort this before it ever returns")
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_stream_times_out_instead_of_hanging() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut config = Config::default();
+        config.mesh.stream_idle_timeout_secs = 1; // trip fast in the test
+        config.mesh.failover = false; // no fallback → the error surfaces directly
+        let mut session = Session::start(
+            store,
+            Arc::new(StallingProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools(),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            ".",
+        )
+        .unwrap();
+        // The whole call must return well within this bound — if it hangs, the test fails here.
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            session.run_turn("anything"),
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "run_turn hung instead of timing out the stream"
+        );
+        assert!(
+            res.unwrap().is_err(),
+            "a stalled stream should surface an error, not a silent hang"
+        );
     }
 
     #[tokio::test]

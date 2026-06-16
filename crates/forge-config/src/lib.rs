@@ -359,6 +359,10 @@ pub struct MeshConfig {
     /// Default bench duration (seconds) when a rate-limited provider gives no `Retry-After`.
     #[serde(default = "default_failover_cooldown_secs")]
     pub failover_cooldown_secs: u64,
+    /// Abort a model stream that goes silent for this many seconds (a half-open/stalled
+    /// connection) and fail over, instead of hanging the turn forever. `0` disables the watchdog.
+    #[serde(default = "default_stream_idle_timeout_secs")]
+    pub stream_idle_timeout_secs: u64,
     /// Which subscription plan backs each CLI bridge (`claude-cli` → "max-20x", `codex-cli` →
     /// "plus"), captured by `forge init`. Records the usage headroom the user has so the mesh can
     /// (in the quota-aware layer, provider-cost-routing.md L3) avoid overrunning a plan. Currently
@@ -384,6 +388,12 @@ fn default_failover() -> bool {
 
 fn default_failover_cooldown_secs() -> u64 {
     300
+}
+
+fn default_stream_idle_timeout_secs() -> u64 {
+    // Long enough to never trip during normal generation (incl. slow reasoning models and a
+    // bridge running a slow tool), short enough to recover from a genuine stall in reasonable time.
+    120
 }
 
 /// Subagent orchestration settings (RFC subagent-orchestration).
@@ -540,6 +550,7 @@ impl Default for Config {
                 auto_discover: default_auto_discover(),
                 failover: default_failover(),
                 failover_cooldown_secs: default_failover_cooldown_secs(),
+                stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
             },
