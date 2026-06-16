@@ -217,6 +217,11 @@ impl App {
             PresenterEvent::ToolResult { name, ok, summary } => {
                 self.flush.push(tool_result_line(&name, ok, &summary))
             }
+            PresenterEvent::ContextInjected {
+                symbols,
+                files,
+                tokens,
+            } => self.flush.push(lattice_line(symbols, files, tokens)),
             PresenterEvent::Cost {
                 session_total_usd,
                 session_in,
@@ -444,6 +449,16 @@ fn tool_start_line(name: &str, args: &str) -> TextLine<'static> {
         Span::styled(name.to_string(), Style::default().fg(TOOLCYAN).bold()),
         Span::styled(
             format!("  {}", truncate(args, 48)),
+            Style::default().fg(DIM),
+        ),
+    ])
+}
+
+fn lattice_line(symbols: usize, files: usize, tokens: usize) -> TextLine<'static> {
+    TextLine::from(vec![
+        Span::styled("  ⌬ lattice ", Style::default().fg(TOOLCYAN).bold()),
+        Span::styled(
+            format!("→ injected {symbols} symbols · {files} files (~{tokens} tok)"),
             Style::default().fg(DIM),
         ),
     ])

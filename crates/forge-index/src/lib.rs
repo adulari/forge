@@ -1,18 +1,23 @@
 //! Lattice — Forge's native code-intelligence subsystem (docs/features/code-intelligence.md).
-//! PR1: tree-sitter structural extraction (Rust) persisted into the shared SQLite store,
-//! incremental by file content hash, queryable via the `forge lattice` CLI. Later PRs add
-//! resolved call/reference edges, auto-retrieval injection into the turn, embeddings, and a
-//! file watcher.
+//! Multi-language tree-sitter extraction (via tags queries, `extract.rs`) persisted into the
+//! shared SQLite store, incremental by file content hash. Provides structural `query`, reverse
+//! dependents (`impact`), and call-chain `path`, plus a budgeted `retrieve` used by the agent
+//! loop to auto-inject relevant context.
 
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
-use forge_store::{LatticeEdgeRow, LatticeFileRow, LatticeNodeRow, Store, StoreError};
+use forge_store::{
+    LatticeEdgeRow, LatticeFileRow, LatticeNodeRow, LatticeRefRow, Store, StoreError,
+};
 use sha2::{Digest, Sha256};
 
 mod extract;
+mod retrieve;
 
-pub use extract::{extract_rust, NodeKind, RawNode};
+pub use extract::{extract, lang_for_path, supported_languages, Def, Parsed, Ref};
+pub use retrieve::{InjectedContext, RetrievedSnippet};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LatticeError {
@@ -48,12 +53,23 @@ pub struct NodeHit {
     pub line: i64,
 }
 
+/// Reverse-dependency closure for `impact`: the symbol(s) named, everything that references them
+/// (transitively), and the files involved.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BlastRadius {
+    pub roots: Vec<NodeHit>,
+    pub dependents: Vec<NodeHit>,
+    pub files: Vec<String>,
+    pub total_sites: usize,
+}
+
 /// Index-wide counts for `forge lattice status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexStatus {
     pub files: i64,
     pub nodes: i64,
     pub edges: i64,
+    pub refs: i64,
 }
 
 impl Lattice {
@@ -87,7 +103,7 @@ impl Lattice {
                         continue;
                     }
                     stack.push(path);
-                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                } else if lang_for_path(&name).is_some() {
                     self.index_file(&path, &mut stats)?;
                 }
             }
@@ -97,7 +113,7 @@ impl Lattice {
 
     /// (Re)index a single file (e.g. after the agent edits it). No-op for unsupported files.
     pub fn reindex_path(&self, path: &Path) -> Result<(), LatticeError> {
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+        if path.to_str().and_then(lang_for_path).is_none() {
             return Ok(());
         }
         let mut stats = UpdateStats::default();
@@ -121,19 +137,17 @@ impl Lattice {
             return Ok(());
         }
 
+        let lang = lang_for_path(&rel).unwrap_or("unsupported");
         let file_id = sha_hex(format!("{}\0{}", self.repo_root, rel).as_bytes());
-        let raw = extract_rust(&src);
-        let mut node_ids: Vec<String> = Vec::with_capacity(raw.len());
-        let mut nodes = Vec::with_capacity(raw.len());
-        for n in &raw {
+        let parsed = extract(&rel, &src);
+
+        let mut node_ids: Vec<String> = Vec::with_capacity(parsed.defs.len());
+        let mut nodes = Vec::with_capacity(parsed.defs.len());
+        for d in &parsed.defs {
             let id = sha_hex(
                 format!(
                     "{}\0{}\0{}\0{}\0{}",
-                    self.repo_root,
-                    rel,
-                    n.kind.as_str(),
-                    n.qualname,
-                    n.line_start
+                    self.repo_root, rel, d.kind, d.qualname, d.line_start
                 )
                 .as_bytes(),
             );
@@ -141,19 +155,20 @@ impl Lattice {
             nodes.push(LatticeNodeRow {
                 id,
                 file_id: file_id.clone(),
-                kind: n.kind.as_str().to_string(),
-                name: n.name.clone(),
-                qualname: Some(n.qualname.clone()),
-                signature: n.signature.clone(),
-                span_start: n.span_start as i64,
-                span_end: n.span_end as i64,
-                line_start: n.line_start as i64,
+                kind: d.kind.clone(),
+                name: d.name.clone(),
+                qualname: Some(d.qualname.clone()),
+                signature: d.signature.clone(),
+                span_start: d.span_start as i64,
+                span_end: d.span_end as i64,
+                line_start: d.line_start as i64,
             });
         }
-        // `contains` edges: enclosing symbol → nested symbol (impl→method, mod→item, …).
+
+        // `contains` edges: enclosing definition → nested definition (struct→method, class→…).
         let mut edges = Vec::new();
-        for (i, n) in raw.iter().enumerate() {
-            if let Some(p) = n.parent {
+        for (i, d) in parsed.defs.iter().enumerate() {
+            if let Some(p) = d.parent {
                 let id = sha_hex(format!("{}\0contains\0{}", node_ids[p], node_ids[i]).as_bytes());
                 edges.push(LatticeEdgeRow {
                     id,
@@ -165,15 +180,36 @@ impl Lattice {
             }
         }
 
+        // References: each call/use site inside a definition → a name-keyed `lattice_ref` row.
+        let mut refs = Vec::new();
+        for (i, r) in parsed.refs.iter().enumerate() {
+            let Some(from) = r.from else { continue };
+            let id = sha_hex(
+                format!(
+                    "{}\0{}\0{}\0{}\0{i}",
+                    node_ids[from], r.name, r.kind, r.line
+                )
+                .as_bytes(),
+            );
+            refs.push(LatticeRefRow {
+                id,
+                src_id: node_ids[from].clone(),
+                name: r.name.clone(),
+                kind: r.kind.clone(),
+                line: r.line as i64,
+            });
+        }
+
         let file = LatticeFileRow {
             id: file_id,
             repo_root: self.repo_root.clone(),
             rel_path: rel,
-            lang: "rust".to_string(),
+            lang: lang.to_string(),
             content_hash: hash,
             parse_status: "ok".to_string(),
         };
-        self.store.replace_lattice_file(&file, &nodes, &edges)?;
+        self.store
+            .replace_lattice_file(&file, &nodes, &edges, &refs)?;
         stats.files_indexed += 1;
         stats.symbols += nodes.len();
         Ok(())
@@ -182,6 +218,111 @@ impl Lattice {
     /// Symbols whose name matches `query` (case-insensitive), best-first.
     pub fn query(&self, query: &str, limit: usize) -> Result<Vec<NodeHit>, LatticeError> {
         let rows = self.store.lattice_nodes_by_name(query, limit)?;
+        self.rows_to_hits(rows)
+    }
+
+    /// Reverse-dependency closure: who references `symbol`, transitively, up to `max_depth` hops.
+    pub fn impact(&self, symbol: &str, max_depth: usize) -> Result<BlastRadius, LatticeError> {
+        let roots = self.rows_to_hits(self.store.lattice_nodes_by_name(symbol, 32)?)?;
+        let roots: Vec<NodeHit> = roots.into_iter().filter(|h| h.name == symbol).collect();
+
+        let mut seen: HashSet<String> = HashSet::from([symbol.to_string()]);
+        let mut frontier = vec![symbol.to_string()];
+        let mut dependents: Vec<NodeHit> = Vec::new();
+        let mut files: HashSet<String> = roots.iter().map(|h| h.rel_path.clone()).collect();
+
+        for _ in 0..max_depth.max(1) {
+            let mut next = Vec::new();
+            for name in &frontier {
+                for hit in self.rows_to_hits(self.store.lattice_callers_by_name(name, 200)?)? {
+                    if seen.insert(hit.name.clone()) {
+                        next.push(hit.name.clone());
+                    }
+                    files.insert(hit.rel_path.clone());
+                    dependents.push(hit);
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            frontier = next;
+        }
+
+        // De-dup dependents by (name, rel_path, line) — a symbol can be reached via many paths.
+        dependents.sort_by(|a, b| {
+            (a.rel_path.as_str(), a.line, a.name.as_str()).cmp(&(
+                b.rel_path.as_str(),
+                b.line,
+                b.name.as_str(),
+            ))
+        });
+        dependents.dedup();
+        let total_sites = dependents.len();
+        let mut files: Vec<String> = files.into_iter().collect();
+        files.sort();
+        Ok(BlastRadius {
+            roots,
+            dependents,
+            files,
+            total_sites,
+        })
+    }
+
+    /// A shortest call/reference chain of symbol *names* from `a` to `b` (BFS over forward
+    /// references), or `None` if `b` isn't reachable from `a` within `max_depth` hops.
+    pub fn path(
+        &self,
+        a: &str,
+        b: &str,
+        max_depth: usize,
+    ) -> Result<Option<Vec<String>>, LatticeError> {
+        if a == b {
+            return Ok(Some(vec![a.to_string()]));
+        }
+        let mut seen: HashSet<String> = HashSet::from([a.to_string()]);
+        let mut queue: VecDeque<Vec<String>> = VecDeque::from([vec![a.to_string()]]);
+        while let Some(chain) = queue.pop_front() {
+            if chain.len() > max_depth.max(1) {
+                continue;
+            }
+            let last = chain.last().unwrap();
+            for callee in self.store.lattice_callees_of_name(last)? {
+                if callee == b {
+                    let mut found = chain.clone();
+                    found.push(callee);
+                    return Ok(Some(found));
+                }
+                if seen.insert(callee.clone()) {
+                    let mut next = chain.clone();
+                    next.push(callee);
+                    queue.push_back(next);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Retrieve a budgeted set of relevant code for `prompt` — the auto-injection payload.
+    pub fn retrieve(
+        &self,
+        prompt: &str,
+        token_budget: usize,
+    ) -> Result<InjectedContext, LatticeError> {
+        retrieve::retrieve(self, prompt, token_budget)
+    }
+
+    pub fn status(&self) -> Result<IndexStatus, LatticeError> {
+        let (files, nodes, edges) = self.store.lattice_counts()?;
+        let refs = self.store.lattice_ref_count()?;
+        Ok(IndexStatus {
+            files,
+            nodes,
+            edges,
+            refs,
+        })
+    }
+
+    fn rows_to_hits(&self, rows: Vec<LatticeNodeRow>) -> Result<Vec<NodeHit>, LatticeError> {
         let mut hits = Vec::with_capacity(rows.len());
         for r in rows {
             let rel_path = self
@@ -200,15 +341,6 @@ impl Lattice {
         Ok(hits)
     }
 
-    pub fn status(&self) -> Result<IndexStatus, LatticeError> {
-        let (files, nodes, edges) = self.store.lattice_counts()?;
-        Ok(IndexStatus {
-            files,
-            nodes,
-            edges,
-        })
-    }
-
     fn rel_path(&self, path: &Path) -> String {
         let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         canon
@@ -221,7 +353,17 @@ impl Lattice {
 
 /// Directories never worth indexing — build output, VCS, dependencies, and dotdirs.
 fn is_skippable_dir(name: &str) -> bool {
-    matches!(name, "target" | "node_modules" | ".git" | "graphify-out") || name.starts_with('.')
+    matches!(
+        name,
+        "target"
+            | "node_modules"
+            | ".git"
+            | "graphify-out"
+            | "vendor"
+            | "dist"
+            | "build"
+            | "__pycache__"
+    ) || name.starts_with('.')
 }
 
 fn sha_hex(bytes: &[u8]) -> String {
@@ -281,13 +423,43 @@ mod tests {
 
         let stats = lat.update().unwrap();
         assert_eq!(stats.files_indexed, 1, "only src/lib.rs, not target/");
-        assert!(stats.symbols >= 3, "struct + impl + method: {stats:?}");
+        assert!(stats.symbols >= 2, "struct + method: {stats:?}");
 
         let hits = lat.query("run_turn", 10).unwrap();
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].kind, "method");
         assert_eq!(hits[0].rel_path, "src/lib.rs");
         assert!(lat.query("should_not_index", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn indexes_multiple_languages() {
+        let t = Tmp::new();
+        t.write("src/app.py", "def greet(n):\n    return n\n");
+        t.write("src/main.go", "package main\nfunc Run() {}\n");
+        t.write("src/Widget.java", "class Widget { void render() {} }\n");
+        let lat = lattice(&t.root);
+        let stats = lat.update().unwrap();
+        assert_eq!(stats.files_indexed, 3, "py + go + java: {stats:?}");
+        assert_eq!(lat.query("greet", 10).unwrap().len(), 1);
+        assert_eq!(lat.query("Run", 10).unwrap().len(), 1);
+        assert_eq!(lat.query("Widget", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn impact_finds_callers_across_files() {
+        let t = Tmp::new();
+        t.write("src/a.rs", "pub fn target() {}\n");
+        t.write(
+            "src/b.rs",
+            "use crate::a::target;\npub fn caller() { target(); }\n",
+        );
+        let lat = lattice(&t.root);
+        lat.update().unwrap();
+        let blast = lat.impact("target", 3).unwrap();
+        assert!(
+            blast.dependents.iter().any(|d| d.name == "caller"),
+            "caller references target: {blast:?}"
+        );
     }
 
     #[test]
@@ -300,16 +472,14 @@ mod tests {
         assert_eq!(first.files_indexed, 1);
         assert_eq!(first.files_skipped, 0);
 
-        // Nothing changed → the second pass skips, re-parses nothing.
         let second = lat.update().unwrap();
         assert_eq!(second.files_indexed, 0);
         assert_eq!(second.files_skipped, 1);
 
-        // Edit the file → it re-indexes, and the new symbol is queryable, the old one gone.
         t.write("src/a.rs", "pub fn beta() {}");
         let third = lat.update().unwrap();
         assert_eq!(third.files_indexed, 1);
-        assert!(lat.query("beta", 10).unwrap().len() == 1);
+        assert_eq!(lat.query("beta", 10).unwrap().len(), 1);
         assert!(
             lat.query("alpha", 10).unwrap().is_empty(),
             "stale symbol removed"

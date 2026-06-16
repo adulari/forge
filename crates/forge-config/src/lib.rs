@@ -108,18 +108,35 @@ pub struct LatticeConfig {
     /// Build + maintain the structural graph. Off → the `forge lattice` commands are inert.
     #[serde(default = "default_lattice_enabled")]
     pub enabled: bool,
+    /// Auto-inject relevant code into each turn (the killer step). Off → the index still builds
+    /// and the CLI/tool work, but no system message is injected before the model call.
+    #[serde(default = "default_lattice_inject")]
+    pub inject: bool,
+    /// Token ceiling for the auto-injected context block. Scaled down as the daily budget tightens.
+    #[serde(default = "default_inject_budget")]
+    pub inject_token_budget: usize,
 }
 
 impl Default for LatticeConfig {
     fn default() -> Self {
         Self {
             enabled: default_lattice_enabled(),
+            inject: default_lattice_inject(),
+            inject_token_budget: default_inject_budget(),
         }
     }
 }
 
 fn default_lattice_enabled() -> bool {
     true
+}
+
+fn default_lattice_inject() -> bool {
+    true
+}
+
+fn default_inject_budget() -> usize {
+    1500
 }
 
 /// Settings for the slash-command + skill system.

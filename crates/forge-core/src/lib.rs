@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use forge_config::Config;
+use forge_index::Lattice;
 use forge_mesh::pricing::Pricing;
 use forge_mesh::{BudgetState, BudgetStatus, ModelCatalog, Router};
 use forge_provider::{Provider, StreamEvent, ToolSpec};
@@ -83,6 +84,10 @@ pub struct Session {
     /// Connected external MCP servers (mcp-client.md). `None` when no servers are configured —
     /// the whole MCP path is then inert (zero overhead for non-MCP users).
     mcp: Option<Arc<forge_mcp::McpManager>>,
+    /// The code-intelligence index (code-intelligence.md). `None` when disabled or unavailable —
+    /// retrieval then injects nothing and the turn runs exactly as before (additive guarantee).
+    /// `Arc` so the model-facing `lattice` tool shares the same index.
+    lattice: Option<Arc<Lattice>>,
 }
 
 impl Session {
@@ -183,6 +188,7 @@ impl Session {
             catalog: None,
             tasks,
             mcp: None,
+            lattice: None,
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
@@ -214,6 +220,12 @@ impl Session {
         // An empty manager (no servers connected) adds nothing — keep it `None` so the path stays
         // fully inert and `tool_specs` is byte-for-byte unchanged.
         self.mcp = mcp.filter(|m| !m.is_empty());
+    }
+
+    /// Attach the code-intelligence index (composition root). When set and `lattice.inject` is on,
+    /// each turn auto-injects relevant code; the agent's edits reindex the touched file in-turn.
+    pub fn set_lattice(&mut self, lattice: Option<Arc<Lattice>>) {
+        self.lattice = lattice;
     }
 
     /// Per-server MCP status for the `/mcp` listing (empty when no servers are configured).
@@ -696,6 +708,44 @@ impl Session {
         // restorable by `/undo` (the in-process tool path snapshots directly in `invoke_tool`).
         self.export_checkpoint_env(seq);
 
+        // ★ Auto-retrieve relevant code from the Lattice index and inject it as a system message
+        // before the first provider call (code-intelligence.md §5.1). Retrieve into an owned value
+        // first so the `&self.lattice` borrow is released before we mutate the transcript. The
+        // budget shrinks with budget pressure — context spend follows the same discipline as model
+        // spend. Empty index / disabled / any error → nothing injected, turn runs as before.
+        let injected = self
+            .lattice
+            .as_ref()
+            .filter(|_| self.config.lattice.inject)
+            .and_then(|lat| {
+                lat.retrieve(
+                    prompt,
+                    inject_budget(self.config.lattice.inject_token_budget, status),
+                )
+                .ok()
+            })
+            .filter(|ctx| !ctx.is_empty());
+        if let Some(ctx) = injected {
+            let files = ctx
+                .snippets
+                .iter()
+                .map(|s| s.rel_path.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            let symbols = ctx.nodes.len();
+            let tokens = ctx.est_tokens;
+            let body = ctx.render();
+            let iseq = self.next_seq();
+            self.store
+                .add_message(&self.id, iseq, Role::System, &body, None)?;
+            self.transcript.push(Message::system(&body));
+            self.presenter.emit(PresenterEvent::ContextInjected {
+                symbols,
+                files,
+                tokens,
+            });
+        }
+
         let specs = self.tool_specs();
         let mut final_text = String::new();
         // Tokens in the live context after the latest call (the statusline gauge).
@@ -996,6 +1046,11 @@ impl Session {
                             self.current_turn_seq,
                             path,
                         );
+                        // Reindex the touched file in-turn so later retrieval/queries this turn
+                        // reflect the edit (code-intelligence.md — post-edit freshness).
+                        if let Some(lat) = &self.lattice {
+                            let _ = lat.reindex_path(path);
+                        }
                     }
                     (out, true)
                 }
@@ -1387,6 +1442,16 @@ pub fn update_tasks_spec() -> ToolSpec {
 }
 
 /// True if the per-process budget override is set (lets one over-budget run proceed).
+/// Scale the Lattice injection token budget by budget pressure: full when Ok, half at Warning, a
+/// quarter at Exhausted. Context spend follows the same discipline as model spend (§5.4).
+fn inject_budget(base: usize, status: BudgetStatus) -> usize {
+    match status {
+        BudgetStatus::Ok => base,
+        BudgetStatus::Warning => base / 2,
+        BudgetStatus::Exhausted => base / 4,
+    }
+}
+
 fn budget_override_active() -> bool {
     matches!(
         std::env::var("FORGE_BUDGET_OVERRIDE").as_deref(),
@@ -1807,6 +1872,83 @@ mod tests {
                 quota: None,
             })
         }
+    }
+
+    /// Reports, as its final answer, whether the transcript it received carried a Lattice
+    /// auto-injection system message — lets a test assert injection happened.
+    struct InjectionProbeProvider;
+    #[async_trait::async_trait]
+    impl Provider for InjectionProbeProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let saw = messages.iter().any(|m| {
+                m.role == Role::System && m.content.starts_with("Relevant code (Lattice):")
+            });
+            Ok(forge_provider::ModelResponse {
+                content: if saw { "SAW_INJECTION" } else { "NO_INJECTION" }.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quota: None,
+            })
+        }
+    }
+
+    fn probe_session(store: Arc<Store>, config: Config) -> Session {
+        Session::start(
+            store,
+            Arc::new(InjectionProbeProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools(),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            ".",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn lattice_injects_relevant_code_into_the_turn() {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-inj-{}-{}",
+            std::process::id(),
+            forge_types::new_id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("probe.rs"), "pub fn lattice_probe_symbol() {}\n").unwrap();
+
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let lat = forge_index::Lattice::new(Arc::clone(&store), &dir);
+        lat.update().unwrap();
+
+        let mut session = probe_session(Arc::clone(&store), Config::default());
+        session.set_lattice(Some(Arc::new(lat)));
+        let answer = session
+            .run_turn("explain lattice_probe_symbol please")
+            .await
+            .unwrap();
+        assert_eq!(
+            answer, "SAW_INJECTION",
+            "the symbol was retrieved + injected"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn turn_runs_unchanged_without_a_lattice() {
+        // Additive guarantee: no index attached → no injection, turn proceeds as before.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = probe_session(store, Config::default());
+        let answer = session
+            .run_turn("explain lattice_probe_symbol")
+            .await
+            .unwrap();
+        assert_eq!(answer, "NO_INJECTION");
     }
 
     #[tokio::test]
