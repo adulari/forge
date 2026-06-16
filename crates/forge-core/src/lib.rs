@@ -42,6 +42,8 @@ pub enum CoreError {
     #[error(transparent)]
     Store(#[from] forge_store::StoreError),
     #[error(transparent)]
+    Lattice(#[from] forge_index::LatticeError),
+    #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error("session not found: {0}")]
     SessionNotFound(String),
@@ -235,6 +237,18 @@ impl Session {
     /// Attach the background reindex watcher (composition root); held for the session's lifetime.
     pub fn set_lattice_watcher(&mut self, watcher: Option<forge_index::LatticeWatcher>) {
         self.lattice_watcher = watcher;
+    }
+
+    /// Scoped subgraph for `symbol` from the session's live index (the `/lattice` view). `Ok(None)`
+    /// when no index is attached.
+    pub fn lattice_view(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<forge_index::LatticeView>, CoreError> {
+        match &self.lattice {
+            Some(l) => Ok(Some(l.view(symbol)?)),
+            None => Ok(None),
+        }
     }
 
     /// Per-server MCP status for the `/mcp` listing (empty when no servers are configured).

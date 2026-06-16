@@ -2287,6 +2287,33 @@ async fn dispatch_command(
         }
         // `/compact` makes a model call → run it as a background task so the spinner ticks.
         CommandAction::Compact => return Ok(DispatchOutcome::RunCompact),
+        CommandAction::Lattice(symbol) => {
+            if symbol.is_empty() {
+                app.note("usage: /lattice <symbol>");
+            } else {
+                let view = { session.lock().await.lattice_view(&symbol)? };
+                match view {
+                    None => app.note("lattice is disabled (set [lattice] enabled = true)"),
+                    Some(v) => {
+                        let rows = |hits: &[forge_index::NodeHit]| {
+                            hits.iter()
+                                .map(|h| {
+                                    (h.kind.clone(), h.name.clone(), h.rel_path.clone(), h.line)
+                                })
+                                .collect::<Vec<_>>()
+                        };
+                        let why = v.why.map(|p| (p.author, p.date, p.commit, p.subject));
+                        let lines = forge_tui::lattice_view_lines(
+                            &v.query,
+                            &rows(&v.roots),
+                            &rows(&v.dependents),
+                            why,
+                        );
+                        tui.insert_lines(lines);
+                    }
+                }
+            }
+        }
         // Not a builtin → try the file-based command/skill catalog.
         CommandAction::Unknown(_) => {
             return dispatch_catalog(line, catalog, session, app, armed, trust_project, busy).await

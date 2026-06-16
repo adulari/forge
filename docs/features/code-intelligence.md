@@ -11,14 +11,15 @@
 > `ContextInjected` UI event are wired. A **`notify`-based background watcher** reindexes files
 > on external editor edits (debounced) so retrieval stays fresh without a manual update. A git
 > blame overlay answers `why <symbol>` (last author/date/commit/subject for the symbol's line).
-> CLI: `forge lattice update|query|impact|path|why|status`.
+> An in-chat **`/lattice <symbol>`** command renders the scoped subgraph (matching defs + blast
+> radius + `why`) as a styled tree in the TUI. CLI: `forge lattice update|query|impact|path|why|status`.
 > `LatticeConfig { enabled, inject, inject_token_budget, watch }`.
 >
 > **Verified:** the multi-language matrix compiles + links (10 grammars on tree-sitter core 0.24);
-> tags extraction, cross-file `impact`, end-to-end injection, watcher auto-reindex, and `why`
-> provenance have tests (live-verified on this repo). **Not yet built:** embeddings (§5.6); the
-> interactive TUI subgraph/blast-radius view; cross-repo identity; C# (its 0.24-compatible grammar
-> ships no tags query). The sections below are the full design those PRs implement.
+> tags extraction, cross-file `impact`, end-to-end injection, watcher auto-reindex, `why`
+> provenance, and the `/lattice` view have tests (live-verified on this repo, incl. a pty TUI
+> smoke). **Not yet built:** embeddings (§5.6); cross-repo identity; C# (its 0.24-compatible
+> grammar ships no tags query). The sections below are the full design those PRs implement.
 
 > A native, zero-setup code-intelligence subsystem for Forge: a pure-Rust, tree-sitter
 > AST/dependency graph plus optional semantic retrieval, stored in SQLite **alongside**

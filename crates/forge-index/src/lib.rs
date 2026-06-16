@@ -77,6 +77,16 @@ pub struct Provenance {
     pub subject: String,
 }
 
+/// A scoped subgraph for one symbol — what the interactive `/lattice` view renders: the matching
+/// definitions, their reverse-dependents (blast radius), and git provenance for the exact match.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LatticeView {
+    pub query: String,
+    pub roots: Vec<NodeHit>,
+    pub dependents: Vec<NodeHit>,
+    pub why: Option<Provenance>,
+}
+
 /// Index-wide counts for `forge lattice status`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexStatus {
@@ -345,6 +355,24 @@ impl Lattice {
         }))
     }
 
+    /// Build the scoped subgraph for `symbol` (the interactive view): matching definitions, and —
+    /// when there's an exact-name match — its reverse-dependents and git provenance.
+    pub fn view(&self, symbol: &str) -> Result<LatticeView, LatticeError> {
+        let roots = self.query(symbol, 12)?;
+        let has_exact = roots.iter().any(|h| h.name == symbol);
+        let (dependents, why) = if has_exact {
+            (self.impact(symbol, 3)?.dependents, self.why(symbol)?)
+        } else {
+            (Vec::new(), None)
+        };
+        Ok(LatticeView {
+            query: symbol.to_string(),
+            roots,
+            dependents,
+            why,
+        })
+    }
+
     /// Retrieve a budgeted set of relevant code for `prompt` — the auto-injection payload.
     pub fn retrieve(
         &self,
@@ -581,6 +609,24 @@ mod tests {
         assert!(
             lat.query("alpha", 10).unwrap().is_empty(),
             "stale symbol removed"
+        );
+    }
+
+    #[test]
+    fn view_bundles_roots_and_dependents() {
+        let t = Tmp::new();
+        t.write("src/a.rs", "pub fn target() {}\n");
+        t.write(
+            "src/b.rs",
+            "use crate::a::target;\npub fn caller() { target(); }\n",
+        );
+        let lat = lattice(&t.root);
+        lat.update().unwrap();
+        let view = lat.view("target").unwrap();
+        assert!(view.roots.iter().any(|h| h.name == "target"));
+        assert!(
+            view.dependents.iter().any(|d| d.name == "caller"),
+            "blast radius includes the caller: {view:?}"
         );
     }
 
