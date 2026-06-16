@@ -120,7 +120,7 @@ wave approaches.
 | Feature | What | Source |
 |---------|------|--------|
 | **Skills/agents marketplace** | Publish/import skills, commands, agents — "npm for AI workflows" (25% rev share). | Helm note; designed to plug into the command/skill system |
-| **Session replay** | Record prompts + model versions + outputs; replay + diff; auditable, reproducible AI. | Helm note |
+| **Session replay** — **MVP done** | Record prompts + model versions + outputs; replay + diff; auditable, reproducible AI. **Shipped:** `forge replay <id>` (turn-by-turn transcript: model/tokens/cost/time per turn) + `forge replay <a> <b>` (summary diff: cost/prompt/model divergence), read-only over the persisted record. **Deferred:** true model re-execution, per-turn content diff, `/replay`. | [session-replay.md](features/session-replay.md); Helm note |
 | **Import / migration layer** | **Claude commands+skills done** (`forge import claude`) | Auto-detect + import from Claude Code (skills/commands/agents/hooks/memory/settings), Codex CLI, Aider, Cursor/Windsurf, Continue.dev. **Shipped:** `forge import claude [--project]` copies `~/.claude/{commands,skills}` into a Forge scope, validating with the CC-compatible readers. **Next:** agents/hooks/memory/settings; other tools. | Helm note; prerequisite for CC-compat in skills + MCP specs |
 | **Natural-language shell** | "show me what changed performance-wise since last week" → runs the right commands, diffs, explains. | Helm note |
 | **Shell error interceptor** | Command fails → AI auto-explains + offers a fix, no prompt needed. | Helm note |

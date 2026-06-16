@@ -542,6 +542,40 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// Every active message of a session in turn order, each joined to its usage row so a
+    /// replay can show the model, token counts, cost, and wall-clock time of each turn
+    /// (docs/features/session-replay.md). Unlike [`load_messages`](Self::load_messages) this
+    /// is for auditing a finished session, not rebuilding live state.
+    pub fn load_replay(&self, session_id: &str) -> Result<Vec<ReplayEntry>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT m.seq, m.role, m.content, m.model, m.created_at, m.tool_calls_json,
+                    u.input_tokens, u.output_tokens, u.cost_usd
+             FROM message m LEFT JOIN usage u ON u.message_id = m.id
+             WHERE m.session_id = ?1 AND m.active = 1 ORDER BY m.seq",
+        )?;
+        let rows = stmt.query_map([session_id], |row| {
+            let role: String = row.get(1)?;
+            let tool_calls_json: Option<String> = row.get(5)?;
+            let tool_calls = tool_calls_json
+                .and_then(|j| serde_json::from_str(&j).ok())
+                .unwrap_or_default();
+            Ok(ReplayEntry {
+                seq: row.get(0)?,
+                role: Role::parse(&role).unwrap_or(Role::User),
+                content: row.get(2)?,
+                model: row.get(3)?,
+                created_at: row.get(4)?,
+                tool_calls,
+                input_tokens: row.get(6)?,
+                output_tokens: row.get(7)?,
+                cost_usd: row.get(8)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     // --- Assay runs + findings (docs/features/analysis-mode.md) ---
 
     /// Persist an assay run; returns its id. Add findings with [`add_finding`](Self::add_finding).
@@ -678,6 +712,22 @@ pub struct StoredMessage {
     pub model: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub tool_call_id: Option<String>,
+}
+
+/// One message of a session enriched with its usage row, for `forge replay`. The token/cost
+/// fields are `None` for messages that never produced a usage record (user/tool messages, or
+/// assistant turns from before usage tracking existed).
+#[derive(Debug, Clone)]
+pub struct ReplayEntry {
+    pub seq: i64,
+    pub role: Role,
+    pub content: String,
+    pub model: Option<String>,
+    pub created_at: i64,
+    pub tool_calls: Vec<ToolCall>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cost_usd: Option<f64>,
 }
 
 /// A persisted checkpoint (rewind point) of a session.
@@ -1001,6 +1051,36 @@ mod tests {
         assert_eq!(msgs[0].tool_calls.len(), 1);
         assert_eq!(msgs[0].tool_calls[0].name, "read_file");
         assert_eq!(msgs[1].tool_call_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn load_replay_joins_usage_and_orders_by_seq() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        store.add_message(&sid, 0, Role::User, "ask", None).unwrap();
+        let mid = store
+            .add_message(&sid, 1, Role::Assistant, "answer", Some("openai::gpt-4o"))
+            .unwrap();
+        store
+            .record_usage(
+                &sid,
+                &mid,
+                &Usage {
+                    input_tokens: 12,
+                    output_tokens: 7,
+                    cost_usd: 0.03,
+                },
+            )
+            .unwrap();
+
+        let entries = store.load_replay(&sid).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].seq, 0);
+        assert_eq!(entries[0].role, Role::User);
+        assert!(entries[0].cost_usd.is_none(), "user turn has no usage row");
+        assert_eq!(entries[1].model.as_deref(), Some("openai::gpt-4o"));
+        assert_eq!(entries[1].input_tokens, Some(12));
+        assert!((entries[1].cost_usd.unwrap() - 0.03).abs() < 1e-9);
     }
 
     #[test]
