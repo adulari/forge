@@ -214,7 +214,10 @@ fn put_in_own_process_group(cmd: &mut Command) {
     }
 }
 
-/// Kill the child's process group: SIGTERM, grace, SIGKILL (Unix); plain kill elsewhere.
+/// Kill the child's whole process tree on timeout: SIGTERM→grace→SIGKILL on the process group
+/// (Unix); `taskkill /F /T` on Windows. The tree matters because `cmd /C`/`sh -c` spawn the real
+/// command as a child — killing only the shell would leave it running and hold the output pipes
+/// open, hanging the read until it exits on its own.
 async fn terminate(child: &mut Child, pgid: Option<i32>) {
     #[cfg(unix)]
     {
@@ -228,6 +231,16 @@ async fn terminate(child: &mut Child, pgid: Option<i32>) {
     #[cfg(not(unix))]
     {
         let _ = pgid;
+        if let Some(pid) = child.id() {
+            // `/T` kills the tree (the command `cmd /C` spawned), `/F` forces it.
+            let _ = Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+        }
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
