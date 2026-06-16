@@ -61,6 +61,11 @@ pub struct App {
     pub session_id: String,
     pub routing: Option<RoutingView>,
     pub cost_usd: f64,
+    /// Live token counter (tui-token-counter.md): session totals + current context fill.
+    pub session_in: u64,
+    pub session_out: u64,
+    pub context_tokens: u64,
+    pub context_limit: Option<u32>,
     pub done: bool,
     /// The active operating temper label (e.g. "Guarded"), shown in the statusline.
     pub temper: String,
@@ -212,7 +217,19 @@ impl App {
             PresenterEvent::ToolResult { name, ok, summary } => {
                 self.flush.push(tool_result_line(&name, ok, &summary))
             }
-            PresenterEvent::Cost { session_total_usd } => self.cost_usd = session_total_usd,
+            PresenterEvent::Cost {
+                session_total_usd,
+                session_in,
+                session_out,
+                context_tokens,
+                context_limit,
+            } => {
+                self.cost_usd = session_total_usd;
+                self.session_in = session_in;
+                self.session_out = session_out;
+                self.context_tokens = context_tokens;
+                self.context_limit = context_limit;
+            }
             PresenterEvent::SubagentStart { id, agent, task } => {
                 // First child of a batch opens the group box in scrollback.
                 if self.subagents.is_empty() {
@@ -768,6 +785,48 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
 
 /// A real status bar: working state · mesh tier+model · cost, with right-aligned key
 /// hints. Lower-priority segments drop out on narrow terminals; model+cost always show.
+/// Humanize a token count: `< 1000` as-is, `< 1M` as `12.3k`, else `1.1M`.
+fn human(n: u64) -> String {
+    if n < 1_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    }
+}
+
+/// The context-window gauge spans: `◷ used/limit N%` (N% colored dim<70 / yellow≥70 / red≥90),
+/// or just `◷ used` when the model's limit is unknown (no fabricated denominator).
+fn context_gauge_spans(used: u64, limit: Option<u32>) -> Vec<Span<'static>> {
+    match limit {
+        Some(limit) if limit > 0 => {
+            let pct = ((used as f64 / limit as f64) * 100.0).round() as u64;
+            let color = if pct >= 90 {
+                ERRRED
+            } else if pct >= 70 {
+                WARNYEL
+            } else {
+                DIM
+            };
+            vec![
+                Span::styled(
+                    format!("◷ {}/{} ", human(used), human(limit as u64)),
+                    Style::default().fg(DIM).bg(STATUSBG),
+                ),
+                Span::styled(
+                    format!("{pct}%"),
+                    Style::default().fg(color).bold().bg(STATUSBG),
+                ),
+            ]
+        }
+        _ => vec![Span::styled(
+            format!("◷ {}", human(used)),
+            Style::default().fg(DIM).bg(STATUSBG),
+        )],
+    }
+}
+
 fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     let bg = Style::default().bg(STATUSBG);
     let w = area.width;
@@ -804,6 +863,19 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         format!("${:.4}", app.cost_usd),
         Style::default().fg(OKGREEN).bold().bg(STATUSBG),
     ));
+    // Live token counter + context-window gauge (tui-token-counter.md). Width-gated so on a
+    // shrinking terminal the gauge drops first, then the token segment, before tier/model/cost.
+    if (app.session_in > 0 || app.session_out > 0) && w >= 76 {
+        left.push(sep());
+        left.push(Span::styled(
+            format!("↑{} ↓{}", human(app.session_in), human(app.session_out)),
+            Style::default().fg(DIM).bg(STATUSBG),
+        ));
+    }
+    if app.context_tokens > 0 && w >= 96 {
+        left.push(sep());
+        left.extend(context_gauge_spans(app.context_tokens, app.context_limit));
+    }
     // The active temper (operating mode), color-coded by how permissive it is so the current
     // posture reads at a glance: Read-only=blue, Ask=yellow, Auto-edit=green, Full=red.
     if !app.temper.is_empty() && w >= 46 {
@@ -1207,8 +1279,72 @@ mod tests {
         let mut app = App::default();
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.0033,
+            session_in: 0,
+            session_out: 0,
+            context_tokens: 0,
+            context_limit: None,
         });
         assert!(screen(&app).contains("$0.0033"));
+    }
+
+    #[test]
+    fn humanizes_token_counts() {
+        assert_eq!(human(0), "0");
+        assert_eq!(human(999), "999");
+        assert_eq!(human(12_345), "12.3k");
+        assert_eq!(human(1_100_000), "1.1M");
+    }
+
+    #[test]
+    fn statusline_shows_token_counter_and_context_gauge() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::Cost {
+            session_total_usd: 0.01,
+            session_in: 12_300,
+            session_out: 4_100,
+            context_tokens: 18_200,
+            context_limit: Some(200_000),
+        });
+        let wide = screen_wh(&app, 120, LIVE_H);
+        assert!(wide.contains("↑12.3k"), "token counter shown: {wide}");
+        assert!(wide.contains("↓4.1k"));
+        assert!(wide.contains("18.2k/200.0k"), "context gauge shown: {wide}");
+        assert!(wide.contains("9%"), "context percentage: {wide}");
+    }
+
+    #[test]
+    fn context_gauge_omits_denominator_when_limit_unknown() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::Cost {
+            session_total_usd: 0.01,
+            session_in: 5_000,
+            session_out: 1_000,
+            context_tokens: 6_000,
+            context_limit: None,
+        });
+        let wide = screen_wh(&app, 120, LIVE_H);
+        assert!(wide.contains("◷ 6.0k"), "used tokens shown: {wide}");
+        assert!(!wide.contains('%'), "no fabricated percentage: {wide}");
+    }
+
+    #[test]
+    fn token_segments_drop_on_narrow_terminals_before_cost() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::Cost {
+            session_total_usd: 0.0033,
+            session_in: 12_300,
+            session_out: 4_100,
+            context_tokens: 18_200,
+            context_limit: Some(200_000),
+        });
+        // Narrow: gauge + token segment gone, but model+cost stay.
+        let narrow = screen_wh(&app, 60, LIVE_H);
+        assert!(!narrow.contains("18.2k/200.0k"), "gauge dropped: {narrow}");
+        assert!(
+            !narrow.contains("↑12.3k"),
+            "token segment dropped: {narrow}"
+        );
+        assert!(narrow.contains("$0.0033"), "cost stays: {narrow}");
     }
 
     #[test]

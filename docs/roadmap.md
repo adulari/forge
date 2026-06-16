@@ -101,7 +101,7 @@ The power-user surface that makes the harness "better than Claude Code" (the sta
 | **Interactive clarification** | P2 | AskUserQuestion-style mid-task multiple-choice prompts. | **118** AskUserQuestion uses |
 | **Model selection UX** | P2 | `--model` pin flag, `/model`, effort/usage views (Mesh exists; add the controls). | `/model` **39** |
 | **Statusline / output styles / auto-title** | P2 | Configurable statusline + output styles (he invests in these). | auto-title hook, `/title`, caveman styles |
-| **Token counter + context gauge** | P2 | Live session token totals + context-window fill gauge next to the spinner/cost in the statusline. | [tui-token-counter.md](features/tui-token-counter.md) — explicit request |
+| **Token counter + context gauge** | P2 — **done** | Live session ↑in/↓out token totals + a context-window fill gauge (`used/limit · N%`, threshold-colored) next to the spinner/cost in the statusline; width-priority drop order; honest `None` denominator for models without a known window. | [tui-token-counter.md](features/tui-token-counter.md) — explicit request |
 | **Plan mode** | **P2 (deprioritized)** | Read-only planning mode. | **Only 6 sessions / `/plan` 1** — overrated vs reputation; Assay is the higher-value "mode" |
 
 ---

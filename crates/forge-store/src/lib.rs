@@ -257,6 +257,20 @@ impl Store {
         )?)
     }
 
+    /// `(input_tokens, output_tokens)` summed across a session's `usage` rows — the live token
+    /// counter (tui-token-counter.md).
+    pub fn session_tokens(&self, session_id: &str) -> Result<(u64, u64)> {
+        let conn = self.lock()?;
+        let (i, o): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0)
+             FROM usage u JOIN message m ON m.id = u.message_id
+             WHERE m.session_id = ?1",
+            [session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        Ok((i.max(0) as u64, o.max(0) as u64))
+    }
+
     /// Models the Mesh routed to within a session (chosen_model per routing_decision), oldest
     /// first. Used to verify subagents route independently of the parent.
     pub fn session_models(&self, session_id: &str) -> Result<Vec<String>> {
