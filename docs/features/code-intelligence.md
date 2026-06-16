@@ -18,12 +18,14 @@
 > **Verified:** the multi-language matrix compiles + links (10 grammars on tree-sitter core 0.24);
 > tags extraction, cross-file `impact`, end-to-end injection, watcher auto-reindex, `why`
 > provenance, and the `/lattice` view have tests (live-verified on this repo, incl. a pty TUI
-> smoke). **Embeddings (§5.6): core landed** — `lattice_embedding` storage, `cosine`,
-> `rank_by_vector` (vector-ranked retrieval), and `[lattice.embeddings]` config (off by default),
-> all unit-tested with hand-crafted vectors; the embedder backend (ollama) + retrieval wiring is
-> the next PR. **Not yet built:** the embedder adapter + hybrid retrieve wiring; cross-repo
-> identity; C# (its 0.24-compatible grammar ships no tags query). The sections below are the full
-> design those PRs implement.
+> smoke). **Embeddings (§5.6): shipped (off by default)** — `lattice_embedding` storage, `cosine`,
+> `rank_by_vector`, the `Embedder` trait + `OllamaEmbedder`, `embed_pending` (incremental), and
+> `retrieve_hybrid` (blends semantic neighbours into structural retrieval, degrades on backend
+> error); wired into `run_turn` when enabled, plus `forge lattice embed` and **automatic
+> indexing + embedding in the background on session start** (no manual `forge lattice update`).
+> Unit-tested with a fake embedder + hand-crafted vectors; real semantic quality needs a live
+> backend (`ollama pull nomic-embed-text`). **Not yet built:** cross-repo identity; C# (its
+> 0.24-compatible grammar ships no tags query). The sections below are the full design.
 
 > A native, zero-setup code-intelligence subsystem for Forge: a pure-Rust, tree-sitter
 > AST/dependency graph plus optional semantic retrieval, stored in SQLite **alongside**

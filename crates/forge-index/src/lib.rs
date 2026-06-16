@@ -13,10 +13,12 @@ use forge_store::{
 };
 use sha2::{Digest, Sha256};
 
+mod embed;
 mod extract;
 mod retrieve;
 mod watch;
 
+pub use embed::{parse_ollama_embeddings, Embedder, OllamaEmbedder};
 pub use extract::{extract, lang_for_path, supported_languages, Def, Parsed, Ref};
 pub use retrieve::{InjectedContext, RetrievedSnippet};
 pub use watch::{spawn_watcher, LatticeWatcher};
@@ -257,6 +259,61 @@ impl Lattice {
         Ok(self.store.lattice_embedding_count()?)
     }
 
+    /// Compute + store embeddings for every node that lacks one, in batches (incremental: already-
+    /// embedded nodes are skipped, so it's cheap to call after each `update`). Returns the count
+    /// embedded. Off-path unless a backend is configured.
+    pub async fn embed_pending(
+        &self,
+        embedder: &dyn Embedder,
+        batch: usize,
+    ) -> Result<usize, LatticeError> {
+        let batch = batch.max(1);
+        let mut total = 0;
+        loop {
+            let nodes = self.store.lattice_nodes_without_embedding(batch)?;
+            if nodes.is_empty() {
+                break;
+            }
+            let texts: Vec<String> = nodes.iter().map(embed_text).collect();
+            let vecs = embedder.embed(&texts).await?;
+            for (n, v) in nodes.iter().zip(vecs) {
+                self.store.put_lattice_embedding(&n.id, &v)?;
+            }
+            let n = nodes.len();
+            total += n;
+            if n < batch {
+                break;
+            }
+        }
+        Ok(total)
+    }
+
+    /// Hybrid retrieval: the structural/lexical [`retrieve`](retrieve::retrieve) result, augmented
+    /// with semantic neighbours of the prompt (embed the prompt → cosine-rank stored vectors) when
+    /// embeddings exist. Degrades to pure structural when none are stored or the embedder errors.
+    pub async fn retrieve_hybrid(
+        &self,
+        prompt: &str,
+        token_budget: usize,
+        embedder: &dyn Embedder,
+    ) -> Result<InjectedContext, LatticeError> {
+        let ctx = retrieve::retrieve(self, prompt, token_budget)?;
+        if self.store.lattice_embedding_count()? == 0 {
+            return Ok(ctx);
+        }
+        match embedder.embed(&[prompt.to_string()]).await {
+            Ok(vecs) => match vecs.first() {
+                Some(qv) => {
+                    let semantic = self.rank_by_vector(qv, 8)?;
+                    Ok(retrieve::merge_semantic(ctx, semantic, token_budget))
+                }
+                None => Ok(ctx),
+            },
+            // A backend hiccup must never break the turn — fall back to structural.
+            Err(_) => Ok(ctx),
+        }
+    }
+
     /// Rank indexed nodes by cosine similarity to a query embedding, best first (semantic
     /// retrieval). Returns the top `limit` nodes that still exist. Empty when no embeddings are
     /// stored — the caller then falls back to structural/lexical retrieval (graceful degrade).
@@ -460,6 +517,15 @@ impl Lattice {
     }
 }
 
+/// The text embedded for a node — its signature if known, else qualname, else `kind name`.
+fn embed_text(n: &LatticeNodeRow) -> String {
+    match (&n.signature, &n.qualname) {
+        (Some(s), _) if !s.is_empty() => s.clone(),
+        (_, Some(q)) if !q.is_empty() => format!("{} {q}", n.kind),
+        _ => format!("{} {}", n.kind, n.name),
+    }
+}
+
 /// Cosine similarity of two vectors in `[-1, 1]`; `0.0` if lengths differ or either is zero-norm
 /// (so an all-zero or mismatched vector ranks last rather than NaN-poisoning the sort).
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
@@ -611,6 +677,69 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].rel_path, "src/lib.rs");
         assert!(lat.query("should_not_index", 10).unwrap().is_empty());
+    }
+
+    struct FakeEmbedder;
+    #[async_trait::async_trait]
+    impl Embedder for FakeEmbedder {
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LatticeError> {
+            // Deterministic 3-dim vector from byte sums per position — enough to exercise the
+            // storage + ranking pipeline without a real model.
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let mut v = [0f32; 3];
+                    for (i, b) in t.bytes().enumerate() {
+                        v[i % 3] += b as f32;
+                    }
+                    v.to_vec()
+                })
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn embed_pending_embeds_every_node_then_is_a_noop() {
+        let t = Tmp::new();
+        t.write("src/lib.rs", "pub fn one() {}\npub fn two() {}\n");
+        let lat = lattice(&t.root);
+        lat.update().unwrap();
+        let n = lat.embed_pending(&FakeEmbedder, 50).await.unwrap();
+        assert!(n >= 2, "embedded both functions: {n}");
+        assert_eq!(lat.embedding_count().unwrap(), n as i64);
+        // Incremental: nothing left to embed on a second pass.
+        assert_eq!(lat.embed_pending(&FakeEmbedder, 50).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn retrieve_hybrid_degrades_without_embeddings_then_augments() {
+        let t = Tmp::new();
+        t.write("src/lib.rs", "pub fn parse_tokens() {}\n");
+        let lat = lattice(&t.root);
+        lat.update().unwrap();
+
+        // No embeddings yet → identical to structural retrieve.
+        let structural = lat.retrieve("parse_tokens", 500).unwrap();
+        let hybrid = lat
+            .retrieve_hybrid("parse_tokens", 500, &FakeEmbedder)
+            .await
+            .unwrap();
+        assert_eq!(
+            hybrid.snippets, structural.snippets,
+            "degrades to structural"
+        );
+
+        // After embedding, hybrid still returns the structural hit (and never fewer).
+        lat.embed_pending(&FakeEmbedder, 50).await.unwrap();
+        let hybrid2 = lat
+            .retrieve_hybrid("parse_tokens", 500, &FakeEmbedder)
+            .await
+            .unwrap();
+        assert!(hybrid2.snippets.len() >= structural.snippets.len());
+        assert!(hybrid2
+            .snippets
+            .iter()
+            .any(|s| s.text.contains("parse_tokens")));
     }
 
     #[test]

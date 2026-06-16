@@ -178,6 +178,10 @@ enum LatticeOp {
         /// Symbol name.
         symbol: String,
     },
+    /// Compute + store embeddings for nodes lacking them (semantic retrieval). Uses the
+    /// `[lattice.embeddings]` backend (ollama by default). Runs automatically on startup when
+    /// embeddings are enabled — this is the manual trigger / one-off.
+    Embed,
     /// Show index counts (files, symbols, edges, refs).
     Status,
 }
@@ -299,7 +303,7 @@ async fn main() -> Result<()> {
         Command::Init => init(),
         Command::Mcp { cmd } => mcp_cmd(cmd).await,
         Command::McpServe => mcp_serve::run().await,
-        Command::Lattice { op } => lattice_cmd(op),
+        Command::Lattice { op } => lattice_cmd(op).await,
         Command::Import { source } => import_cmd(source),
     }
 }
@@ -439,7 +443,7 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()>
 }
 
 /// `forge lattice <op>` — build / query / inspect the code-intelligence graph.
-fn lattice_cmd(op: LatticeOp) -> Result<()> {
+async fn lattice_cmd(op: LatticeOp) -> Result<()> {
     let config = forge_config::load().context("loading configuration")?;
     if !config.lattice.enabled {
         println!("lattice is disabled (set [lattice] enabled = true)");
@@ -448,6 +452,26 @@ fn lattice_cmd(op: LatticeOp) -> Result<()> {
     let store = std::sync::Arc::new(open_store()?);
     let cwd = std::env::current_dir()?;
     match op {
+        LatticeOp::Embed => {
+            let emb = &config.lattice.embeddings;
+            if !emb.enabled {
+                println!("embeddings are off (set [lattice.embeddings] enabled = true)");
+                return Ok(());
+            }
+            let lat = forge_index::Lattice::new(store, &cwd);
+            lat.update().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let embedder = forge_index::OllamaEmbedder::new(&emb.endpoint, &emb.model);
+            let n = lat
+                .embed_pending(&embedder, 64)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            println!(
+                "⌬ embedded {n} node(s) via {} ({}); {} total",
+                emb.backend,
+                emb.model,
+                lat.embedding_count().map_err(|e| anyhow::anyhow!("{e}"))?
+            );
+        }
         LatticeOp::Update { path } => {
             let root = path.map(std::path::PathBuf::from).unwrap_or(cwd);
             let lat = forge_index::Lattice::new(store, &root);
@@ -512,8 +536,14 @@ fn lattice_cmd(op: LatticeOp) -> Result<()> {
         LatticeOp::Status => {
             let lat = forge_index::Lattice::new(store, &cwd);
             let s = lat.status().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let embedded = lat.embedding_count().map_err(|e| anyhow::anyhow!("{e}"))?;
+            let emb = if config.lattice.embeddings.enabled {
+                format!("{embedded} embedded")
+            } else {
+                "embeddings off".to_string()
+            };
             println!(
-                "⌬ lattice — {} file(s), {} symbol(s), {} edge(s), {} ref(s) · {} languages",
+                "⌬ lattice — {} file(s), {} symbol(s), {} edge(s), {} ref(s) · {} languages · {emb}",
                 s.files,
                 s.nodes,
                 s.edges,
@@ -1474,6 +1504,18 @@ async fn build_session_with(
     let mut tools = ToolRegistry::with_core_tools();
     if let Some(lat) = &lattice {
         tools.register(Box::new(forge_tools::LatticeTool::new(Arc::clone(lat))));
+        // Auto-index (and auto-embed when enabled) in the background so the graph is fresh without
+        // a manual `forge lattice update` — "automatic under the hood". Incremental + non-blocking;
+        // the watcher keeps it fresh thereafter. Errors are swallowed (best-effort, additive).
+        let lat_bg = Arc::clone(lat);
+        let embeddings = config.lattice.embeddings.clone();
+        tokio::spawn(async move {
+            if lat_bg.update().is_ok() && embeddings.enabled {
+                let embedder =
+                    forge_index::OllamaEmbedder::new(&embeddings.endpoint, &embeddings.model);
+                let _ = lat_bg.embed_pending(&embedder, 64).await;
+            }
+        });
     }
 
     let mut session = match resume {
