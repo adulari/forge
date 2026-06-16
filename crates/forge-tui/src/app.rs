@@ -51,6 +51,8 @@ pub const LIVE_H: u16 = STREAM_PREVIEW_H + PERMISSION_H + INPUT_H + STATUS_H;
 /// Max task / running-subagent rows shown in their sticky panels before summarizing the overflow.
 const TASKS_PANEL_MAX: usize = 6;
 const SUBAGENTS_PANEL_MAX: usize = 4;
+/// Rows the open transcript browser claims above the input (clamped to the terminal by the shell).
+const TRANSCRIPT_H: u16 = 26;
 
 /// The Mesh routing decision currently displayed.
 #[derive(Debug, Clone, Default)]
@@ -109,6 +111,16 @@ pub struct App {
     /// The live task list (`update_tasks`). Kept so the sticky tasks panel stays visible during
     /// the turn (the inline scrollback copy scrolls away); cleared when the model empties the list.
     tasks: Vec<forge_types::TodoItem>,
+    /// When `Some`, the full-region subagent transcript browser is open (Ctrl+O). It's rendered by
+    /// the normal loop from live `subagents` data, so logs auto-update; `None` = closed.
+    transcript: Option<TranscriptState>,
+}
+
+/// Open-transcript browser state: which subagent is shown and how far its log is scrolled.
+#[derive(Debug, Clone, Default)]
+struct TranscriptState {
+    selected: usize,
+    scroll: usize,
 }
 
 /// One subagent's live row in the TUI.
@@ -353,10 +365,9 @@ impl App {
                 self.flush.push(TextLine::default());
             }
             PresenterEvent::Tasks(tasks) => {
-                self.flush.extend(crate::render::task_list_lines(&tasks));
-                self.flush.push(TextLine::default());
-                // Keep the latest list so the sticky panel stays visible during the turn (the
-                // scrollback copy scrolls away). An empty list collapses the panel.
+                // The task list lives ONLY in the sticky panel above the input — it does not scroll
+                // with the chat and is not part of history, so it is NOT flushed to scrollback.
+                // An empty list collapses the panel.
                 self.tasks = tasks;
             }
             PresenterEvent::McpStatus(servers) => {
@@ -404,8 +415,12 @@ impl App {
 
     /// Total pinned live-region height for the current state. The I/O shell sizes the inline
     /// viewport to this so the task/subagent panels get their own rows instead of being masked by
-    /// the streaming preview (the "always visible" requirement).
+    /// the streaming preview (the "always visible" requirement). When the transcript browser is
+    /// open it claims a tall region (clamped to the terminal by the shell).
     pub fn live_height(&self) -> u16 {
+        if self.transcript.is_some() {
+            return TRANSCRIPT_H + INPUT_H + STATUS_H;
+        }
         STREAM_PREVIEW_H
             + PERMISSION_H
             + INPUT_H
@@ -414,9 +429,9 @@ impl App {
             + self.subagents_panel_height()
     }
 
-    /// Owned snapshot of the current batch's subagents (running + just-finished), for the
-    /// full-screen scrollable transcript browser (Ctrl+O → [`crate::run_subagent_transcript`]).
-    /// In spawn order; empty when no batch has run yet / a new batch hasn't started.
+    /// Owned snapshot of the current batch's subagents (running + just-finished), in spawn order;
+    /// empty when no batch has run yet. Feeds the transcript browser (Ctrl+O), which re-reads it
+    /// every frame so a child's log updates live.
     pub fn subagent_views(&self) -> Vec<SubagentView> {
         self.subagents
             .iter()
@@ -428,6 +443,64 @@ impl App {
                 log: r.log.clone(),
             })
             .collect()
+    }
+
+    /// Whether the subagent transcript browser is open (the shell routes nav keys to it).
+    pub fn transcript_open(&self) -> bool {
+        self.transcript.is_some()
+    }
+
+    /// `(selected, scroll)` for the open transcript (`(0, 0)` when closed) — for rendering.
+    pub fn transcript_view_state(&self) -> (usize, usize) {
+        self.transcript
+            .as_ref()
+            .map(|t| (t.selected, t.scroll))
+            .unwrap_or((0, 0))
+    }
+
+    /// Toggle the transcript browser (Ctrl+O). Opening is a no-op when there are no subagents to
+    /// show; closing always works.
+    pub fn toggle_transcript(&mut self) {
+        if self.transcript.is_some() {
+            self.transcript = None;
+        } else if !self.subagents.is_empty() {
+            self.transcript = Some(TranscriptState::default());
+        }
+    }
+
+    /// Close the transcript browser (Esc).
+    pub fn close_transcript(&mut self) {
+        self.transcript = None;
+    }
+
+    /// Scroll the open transcript by `delta` lines, clamped to `[0, log.len()-1]` of the selected
+    /// child (`isize::MIN`/`MAX` jump to top/bottom). The render further clamps to the window.
+    pub fn transcript_scroll(&mut self, delta: isize) {
+        let max = self
+            .transcript
+            .as_ref()
+            .and_then(|t| {
+                self.subagents
+                    .get(t.selected.min(self.subagents.len().saturating_sub(1)))
+            })
+            .map(|r| r.log.len().saturating_sub(1))
+            .unwrap_or(0);
+        if let Some(t) = self.transcript.as_mut() {
+            t.scroll = t.scroll.saturating_add_signed(delta).min(max);
+        }
+    }
+
+    /// Switch the open transcript to the next/previous subagent (wraps), resetting the scroll.
+    pub fn transcript_select(&mut self, delta: isize) {
+        let n = self.subagents.len();
+        if n == 0 {
+            return;
+        }
+        if let Some(t) = self.transcript.as_mut() {
+            let cur = t.selected.min(n - 1) as isize;
+            t.selected = (cur + delta).rem_euclid(n as isize) as usize;
+            t.scroll = 0;
+        }
     }
 
     /// Update the active temper label. The colored statusline segment is the live indicator —
@@ -795,6 +868,31 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Draw the pinned live region for the current state (the only thing in the viewport).
 pub fn render_live(frame: &mut Frame, app: &App) {
+    // Transcript browser (Ctrl+O): claims the whole region above the input. Rendered from live
+    // `subagent_views()` every frame, so the selected child's log auto-updates as progress arrives.
+    if app.transcript_open() {
+        let areas = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(INPUT_H),
+            Constraint::Length(STATUS_H),
+        ])
+        .split(frame.area());
+        let (selected, scroll) = app.transcript_view_state();
+        frame.render_widget(
+            Paragraph::new(crate::transcript::transcript_lines(
+                &app.subagent_views(),
+                selected,
+                scroll,
+                areas[0].height,
+                areas[0].width,
+            )),
+            areas[0],
+        );
+        render_input(frame, areas[1], app);
+        render_statusline(frame, areas[2], app);
+        return;
+    }
+
     let sub_h = app.subagents_panel_height();
     let task_h = app.tasks_panel_height();
     // Subagent + task panels are their OWN rows (not the stream preview) so they stay visible
@@ -1892,6 +1990,63 @@ mod tests {
         });
         assert_eq!(app.subagent_views().len(), 1);
         assert_eq!(app.subagent_views()[0].task, "next");
+    }
+
+    #[test]
+    fn transcript_browser_opens_and_auto_updates_live() {
+        let mut app = App::default();
+        // No subagents → Ctrl+O is a no-op.
+        app.toggle_transcript();
+        assert!(!app.transcript_open(), "nothing to show without subagents");
+
+        app.apply(PresenterEvent::SubagentStart {
+            id: "a".into(),
+            agent: "general".into(),
+            task: "scan".into(),
+        });
+        app.apply(PresenterEvent::SubagentProgress {
+            id: "a".into(),
+            snippet: "first line".into(),
+        });
+        app.toggle_transcript();
+        assert!(app.transcript_open());
+        let s = screen_wh(&app, 80, app.live_height());
+        assert!(s.contains("transcript"), "browser shown: {s}");
+        assert!(s.contains("first line"), "log shown: {s}");
+
+        // The fix: a snippet arriving WHILE the browser is open shows up next frame (the view is
+        // re-read from live state, not a frozen snapshot).
+        app.apply(PresenterEvent::SubagentProgress {
+            id: "a".into(),
+            snippet: "second line".into(),
+        });
+        let s2 = screen_wh(&app, 80, app.live_height());
+        assert!(
+            s2.contains("second line"),
+            "log auto-updates while open: {s2}"
+        );
+
+        app.close_transcript();
+        assert!(!app.transcript_open());
+    }
+
+    #[test]
+    fn transcript_select_switches_between_subagents() {
+        let mut app = App::default();
+        for (id, agent) in [("a", "alpha"), ("b", "beta")] {
+            app.apply(PresenterEvent::SubagentStart {
+                id: id.into(),
+                agent: agent.into(),
+                task: "t".into(),
+            });
+        }
+        app.toggle_transcript();
+        assert!(screen_wh(&app, 80, app.live_height()).contains("alpha"));
+        app.transcript_select(1);
+        assert!(
+            screen_wh(&app, 80, app.live_height()).contains("beta"),
+            "switched to the next subagent"
+        );
     }
 
     #[test]

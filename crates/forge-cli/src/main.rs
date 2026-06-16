@@ -1996,13 +1996,30 @@ async fn run_chat_tui(
                 continue;
             }
 
-            // Ctrl+O opens the full-screen scrollable subagent transcript browser (a snapshot of
-            // the current batch's children — running or just-finished). No-op when none exist.
-            if matches!(key, KeyKind::ToggleSubagentDetail) {
-                let views = app.subagent_views();
-                if !views.is_empty() {
-                    tui.run_fullscreen(|| forge_tui::run_subagent_transcript(&views))?;
+            // Subagent transcript browser (Ctrl+O): rendered in the live region by the normal
+            // loop, so the selected child's log auto-updates as progress streams in. While open it
+            // OWNS the keys (scroll / switch agent / close); normal input + palette are skipped.
+            if app.transcript_open() {
+                match key {
+                    KeyKind::Esc | KeyKind::Char('q') | KeyKind::ToggleSubagentDetail => {
+                        app.close_transcript()
+                    }
+                    KeyKind::Up | KeyKind::Char('k') => app.transcript_scroll(-1),
+                    KeyKind::Down | KeyKind::Char('j') => app.transcript_scroll(1),
+                    KeyKind::Char('u') => app.transcript_scroll(-10),
+                    KeyKind::Char('d') | KeyKind::Char(' ') => app.transcript_scroll(10),
+                    KeyKind::Char('g') => app.transcript_scroll(isize::MIN),
+                    KeyKind::Char('G') => app.transcript_scroll(isize::MAX),
+                    KeyKind::Tab => app.transcript_select(1),
+                    KeyKind::CycleTemper => app.transcript_select(-1),
+                    _ => {}
                 }
+                dirty = true;
+                continue;
+            }
+            // Ctrl+O opens the transcript browser (no-op when no subagents exist this batch).
+            if matches!(key, KeyKind::ToggleSubagentDetail) {
+                app.toggle_transcript();
                 dirty = true;
                 continue;
             }

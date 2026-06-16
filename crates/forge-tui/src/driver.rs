@@ -152,7 +152,12 @@ impl Tui {
     /// panels appeared or went away). Recreating the terminal is how the inline viewport changes
     /// height — same mechanism as [`Tui::run_fullscreen`]; a no-op when the height is unchanged.
     fn sync_viewport(&mut self, desired: u16) {
-        let desired = desired.max(LIVE_H);
+        // Clamp to the terminal: an inline viewport taller than the screen can't anchor properly.
+        // Leave 1 row so scrollback above stays visible. Never below the base LIVE_H.
+        let term_h = self.terminal.size().map(|s| s.height).unwrap_or(LIVE_H);
+        let desired = desired
+            .min(term_h.saturating_sub(1).max(LIVE_H))
+            .max(LIVE_H);
         if desired == self.height {
             return;
         }

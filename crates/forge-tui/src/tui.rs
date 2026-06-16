@@ -57,7 +57,10 @@ impl TuiPresenter {
 
     /// Recreate the inline viewport when the desired live height changes (panels appeared/left).
     fn sync_viewport(&mut self, desired: u16) {
-        let desired = desired.max(LIVE_H);
+        let term_h = self.terminal.size().map(|s| s.height).unwrap_or(LIVE_H);
+        let desired = desired
+            .min(term_h.saturating_sub(1).max(LIVE_H))
+            .max(LIVE_H);
         if desired == self.height {
             return;
         }

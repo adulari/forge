@@ -51,7 +51,7 @@ pub use commands::{
 pub use driver::{ChannelPresenter, Tui, UiMsg};
 pub use init_wizard::{BridgeItem, ProviderItem, WizardInput, WizardOutcome};
 pub use select::{select_multi, SelectItem};
-pub use transcript::{run_subagent_transcript, transcript_lines};
+pub use transcript::transcript_lines;
 pub use tui::TuiPresenter;
 
 // `QChoice`, `resolve_answer`, `NO_ANSWER` are defined above and re-exported at crate root.
