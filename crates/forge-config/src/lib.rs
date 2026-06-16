@@ -576,6 +576,12 @@ pub fn config_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("dev", "forge", "forge").map(|d| d.config_dir().to_path_buf())
 }
 
+/// Claude Code's home directory (`~/.claude`), source for `forge import claude`. `None` if no
+/// home directory resolves on this platform.
+pub fn claude_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|b| b.home_dir().join(".claude"))
+}
+
 /// The command/skill discovery sources, scope-tagged: user scope (`<config>/forge/{commands,
 /// skills}`, present only when a config dir resolves) then project scope (`./.forge/{commands,
 /// skills}`). Project wins on a name collision (see `forge_skills::Catalog`).

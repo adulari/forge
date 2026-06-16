@@ -110,6 +110,22 @@ enum Command {
         #[command(subcommand)]
         op: LatticeOp,
     },
+    /// Import commands + skills from another AI CLI into Forge's scopes.
+    Import {
+        #[command(subcommand)]
+        source: ImportSource,
+    },
+}
+
+#[derive(Subcommand)]
+enum ImportSource {
+    /// Copy `~/.claude/commands/*.md` and `~/.claude/skills/*/` into Forge (user scope by
+    /// default). Existing definitions are kept; malformed files are skipped.
+    Claude {
+        /// Import into the project (`./.forge`) instead of the user config dir.
+        #[arg(long)]
+        project: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -245,7 +261,103 @@ async fn main() -> Result<()> {
         Command::Mcp { cmd } => mcp_cmd(cmd).await,
         Command::McpServe => mcp_serve::run().await,
         Command::Lattice { op } => lattice_cmd(op),
+        Command::Import { source } => import_cmd(source),
     }
+}
+
+/// `forge import claude [--project]` — copy CC commands + skills into a Forge scope, reusing the
+/// CC-compatible readers (command-skill-system.md) to validate before copying.
+fn import_cmd(source: ImportSource) -> Result<()> {
+    let ImportSource::Claude { project } = source;
+    let claude =
+        forge_config::claude_dir().context("no home directory — cannot locate ~/.claude")?;
+    if !claude.exists() {
+        println!("nothing to import: {} does not exist", claude.display());
+        return Ok(());
+    }
+
+    // Target scope dirs.
+    let (cmd_dst, skill_dst) = if project {
+        (
+            std::path::PathBuf::from("./.forge/commands"),
+            std::path::PathBuf::from("./.forge/skills"),
+        )
+    } else {
+        let base = forge_config::config_dir().context("no config directory on this platform")?;
+        (base.join("commands"), base.join("skills"))
+    };
+
+    // Validate CC assets with the real catalog readers (malformed files are skipped + warned).
+    let sources = forge_skills::Sources {
+        commands: vec![forge_skills::ScopedDir {
+            scope: forge_skills::Scope::User,
+            path: claude.join("commands"),
+        }],
+        skills: vec![forge_skills::ScopedDir {
+            scope: forge_skills::Scope::User,
+            path: claude.join("skills"),
+        }],
+    };
+    let cat = forge_skills::Catalog::load(&sources);
+
+    let (mut copied_c, mut skipped_c) = (0usize, 0usize);
+    std::fs::create_dir_all(&cmd_dst).ok();
+    for cmd in cat.all_commands() {
+        let Some(fname) = cmd.path.file_name() else {
+            continue;
+        };
+        let dest = cmd_dst.join(fname);
+        if dest.exists() {
+            skipped_c += 1;
+            continue;
+        }
+        if std::fs::copy(&cmd.path, &dest).is_ok() {
+            copied_c += 1;
+        }
+    }
+
+    let (mut copied_s, mut skipped_s) = (0usize, 0usize);
+    std::fs::create_dir_all(&skill_dst).ok();
+    for skill in cat.all_skills() {
+        let dest = skill_dst.join(&skill.name);
+        if dest.exists() {
+            skipped_s += 1;
+            continue;
+        }
+        if copy_dir(&skill.dir, &dest).is_ok() {
+            copied_s += 1;
+        }
+    }
+
+    println!(
+        "✓ imported {copied_c} command(s) + {copied_s} skill(s) into {} \
+         ({skipped_c} command(s), {skipped_s} skill(s) already present, skipped)",
+        if project {
+            "./.forge"
+        } else {
+            "the user config"
+        }
+    );
+    for w in cat.warnings() {
+        eprintln!("skipped (malformed): {w}");
+    }
+    Ok(())
+}
+
+/// Recursively copy a directory tree (used to import a skill's SKILL.md + its resource files).
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// `forge lattice <op>` — build / query / inspect the code-intelligence graph.

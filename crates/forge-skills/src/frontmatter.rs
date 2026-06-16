@@ -61,16 +61,51 @@ pub fn split(raw: &str) -> (Option<&str>, &str) {
     (None, raw) // no closing fence → treat the whole file as body (lenient)
 }
 
-/// Parse a frontmatter block. Returns an error on a genuinely-malformed line so the caller can
-/// skip the file and warn.
+/// Parse a frontmatter block. Handles `key: value`, inline `[a, b]` and block (`- item`) lists,
+/// `>`/`|` block scalars, and **indented continuation lines** (a folded multi-line value — common
+/// in real Claude-Code skill `description:` fields). Only a non-indented line with no `:` is a
+/// genuine error, so the caller skips the file and warns.
 pub fn parse(text: &str) -> Result<Frontmatter, String> {
-    let mut map = BTreeMap::new();
-    let mut lines = text.lines().peekable();
-    while let Some(line) = lines.next() {
+    let mut map: BTreeMap<String, FmValue> = BTreeMap::new();
+    let mut last_key: Option<String> = None;
+    for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
+        let indented = line.starts_with([' ', '\t']);
+
+        // A `- item` line extends the current key's list (block-list syntax), but only when that
+        // key is actually awaiting a list (an empty scalar or an existing list) — so a folded
+        // description that happens to start with "- " isn't misread.
+        if let Some(item) = trimmed.strip_prefix('-').map(str::trim) {
+            if let Some(k) = last_key.clone() {
+                let slot = map.entry(k).or_insert_with(|| FmValue::List(Vec::new()));
+                match slot {
+                    FmValue::List(v) => {
+                        v.push(strip_quotes(item).to_string());
+                        continue;
+                    }
+                    FmValue::Scalar(s) if s.is_empty() => {
+                        *slot = FmValue::List(vec![strip_quotes(item).to_string()]);
+                        continue;
+                    }
+                    _ => {} // fall through: treat as a continuation/new key below
+                }
+            }
+        }
+
+        if indented {
+            // Continuation of the previous scalar (YAML folded/block multi-line value).
+            if let Some(FmValue::Scalar(s)) = last_key.as_ref().and_then(|k| map.get_mut(k)) {
+                if !s.is_empty() {
+                    s.push(' ');
+                }
+                s.push_str(trimmed);
+            }
+            continue; // an indented line with no scalar context is ignored leniently
+        }
+
         let (key, val) = match line.split_once(':') {
             Some((k, v)) => (k.trim().to_lowercase(), v.trim()),
             None => return Err(format!("malformed frontmatter line: {trimmed:?}")),
@@ -78,23 +113,9 @@ pub fn parse(text: &str) -> Result<Frontmatter, String> {
         if key.is_empty() {
             return Err("empty frontmatter key".into());
         }
-        if val.is_empty() {
-            // Possibly a block list: following `- item` lines.
-            let mut items = Vec::new();
-            while let Some(peek) = lines.peek() {
-                let pt = peek.trim();
-                if let Some(item) = pt.strip_prefix('-') {
-                    items.push(strip_quotes(item.trim()).to_string());
-                    lines.next();
-                } else {
-                    break;
-                }
-            }
-            if items.is_empty() {
-                map.insert(key, FmValue::Scalar(String::new()));
-            } else {
-                map.insert(key, FmValue::List(items));
-            }
+        if val.is_empty() || matches!(val, ">" | "|" | ">-" | "|-") {
+            // Awaiting a block list or block scalar on the following (indented) lines.
+            map.insert(key.clone(), FmValue::Scalar(String::new()));
         } else if val.starts_with('[') && val.ends_with(']') {
             let inner = &val[1..val.len() - 1];
             let items = inner
@@ -102,10 +123,11 @@ pub fn parse(text: &str) -> Result<Frontmatter, String> {
                 .map(|s| strip_quotes(s.trim()).to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
-            map.insert(key, FmValue::List(items));
+            map.insert(key.clone(), FmValue::List(items));
         } else {
-            map.insert(key, FmValue::Scalar(strip_quotes(val).to_string()));
+            map.insert(key.clone(), FmValue::Scalar(strip_quotes(val).to_string()));
         }
+        last_key = Some(key);
     }
     Ok(Frontmatter { map })
 }
