@@ -58,6 +58,10 @@ struct ForgeMcp {
     /// Store used by the `update_tasks` virtual tool to persist the bridge turn's task list,
     /// keyed by the parent session id the parent's `run_turn` exported via `ENV_SESSION`.
     tasks_store: Arc<Store>,
+    /// External MCP servers (mcp-client.md). On the CLI-bridge path the model's tool surface IS
+    /// this server, so the MCP meta-tools must be advertised + handled here — otherwise a bridge
+    /// model (claude/codex) can't see or call any external MCP tool. `None` when none configured.
+    mcp: Option<Arc<forge_mcp::McpManager>>,
 }
 
 impl ServerHandler for ForgeMcp {
@@ -100,6 +104,14 @@ impl ServerHandler for ForgeMcp {
         let ts = forge_core::update_tasks_spec();
         let ts_schema: JsonObject = ts.schema.as_object().cloned().unwrap_or_default();
         tools.push(Tool::new(ts.name, ts.description, Arc::new(ts_schema)));
+        // External MCP meta-tools (mcp_search_tools / mcp_call / resources / prompt) so a bridge
+        // model can discover + call the connected servers' tools (e.g. helm). Empty if none.
+        if let Some(m) = &self.mcp {
+            for spec in m.advertised_specs() {
+                let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
+                tools.push(Tool::new(spec.name, spec.description, Arc::new(schema)));
+            }
+        }
         Ok(ListToolsResult {
             tools,
             next_cursor: None,
@@ -135,6 +147,28 @@ impl ServerHandler for ForgeMcp {
                 "task list updated: {} task(s) — {done} done",
                 tasks.len()
             ))]));
+        }
+
+        // External MCP meta-tools — gate (External/ReadOnly) then route to the manager. Server
+        // tools are invoked via `mcp_call`, so this covers the whole external surface.
+        if let Some(m) = &self.mcp {
+            if m.knows_tool(&name) {
+                let side_effect = m.side_effect_of(&name);
+                let decision =
+                    permission::decide(self.mode, side_effect, &name, &args, &self.rules);
+                if decision == PermissionDecision::Deny {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "denied by Forge permission policy: {name}"
+                    ))]));
+                }
+                let out = m.call(&name, &args).await;
+                let content = vec![Content::text(out.text)];
+                return Ok(if out.ok {
+                    CallToolResult::success(content)
+                } else {
+                    CallToolResult::error(content)
+                });
+            }
         }
 
         let Some(tool) = self.registry.get(&name) else {
@@ -299,6 +333,15 @@ pub async fn run() -> Result<()> {
         Some(s) => Arc::clone(&s.ctx.store),
         None => Arc::new(Store::open(std::path::Path::new(".forge/forge.db"))?),
     };
+    // Connect the external MCP servers in THIS process so the bridge model can drive them — the
+    // bridge's whole tool surface is this server. Skipped (None) when none are configured.
+    let mcp = if config.mcp.active_servers().next().is_some() {
+        Some(Arc::new(
+            forge_mcp::McpManager::connect_all(&config.mcp).await,
+        ))
+    } else {
+        None
+    };
     let server = ForgeMcp {
         registry: ToolRegistry::with_core_tools(),
         mode: config.permission_mode,
@@ -306,6 +349,7 @@ pub async fn run() -> Result<()> {
         config,
         subagents,
         tasks_store,
+        mcp,
     };
     let service = server.serve(stdio()).await?;
     service.waiting().await?;

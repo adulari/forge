@@ -97,6 +97,26 @@ enum Command {
     /// Interactive first-run setup: enable providers (enter API keys) and declare which
     /// subscription plan backs each installed CLI bridge, so the mesh knows your usage headroom.
     Init,
+    /// Connect to the configured MCP servers and show their status (or one server's tools, or
+    /// import a Claude-Code `.mcp.json`).
+    Mcp {
+        #[command(subcommand)]
+        cmd: Option<McpCmd>,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCmd {
+    /// Show the full discovered tool list for one connected server.
+    Tools {
+        /// Server name (as declared in `.forge/mcp.toml`).
+        server: String,
+    },
+    /// Import a Claude-Code-style `.mcp.json` into `.forge/mcp.toml` (secrets are NOT copied).
+    Import {
+        /// Path to the `.mcp.json` (default: `./.mcp.json`).
+        path: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -198,6 +218,7 @@ async fn main() -> Result<()> {
         Command::Models { probe } => models(probe).await,
         Command::Auth { provider } => auth(&provider),
         Command::Init => init(),
+        Command::Mcp { cmd } => mcp_cmd(cmd).await,
         Command::McpServe => mcp_serve::run().await,
     }
 }
@@ -780,6 +801,228 @@ async fn probe_models(
     Ok(())
 }
 
+/// `forge mcp [tools <server> | import [path]]` — connect to the configured MCP servers and show
+/// their status, list one server's tools, or import servers from your installed AI CLIs.
+async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
+    // Import needs no connection. Resolve to the listing path otherwise.
+    let tools_server = match cmd {
+        Some(McpCmd::Import { path }) => return mcp_import(path),
+        Some(McpCmd::Tools { server }) => Some(server),
+        None => None,
+    };
+
+    forge_config::inject_provider_keys();
+    let config = forge_config::load().unwrap_or_default();
+    if let Err(e) = config.mcp.validate() {
+        anyhow::bail!("{e}");
+    }
+    if config.mcp.active_servers().next().is_none() {
+        println!("no MCP servers configured. Declare them in .forge/mcp.toml, or run `forge mcp import`.");
+        return Ok(());
+    }
+
+    let manager = forge_mcp::McpManager::connect_all(&config.mcp).await;
+    match tools_server {
+        Some(server) => {
+            let tools = manager.tool_lines(&server);
+            if tools.is_empty() {
+                println!("no tools for server '{server}' (not connected, or it exposes none)");
+            } else {
+                println!("{} tool(s) on '{server}':", tools.len());
+                for (name, desc) in tools {
+                    println!("  {name} — {desc}");
+                }
+            }
+        }
+        None => {
+            let lines = manager.status_lines();
+            println!("MCP servers ({} configured)", lines.len());
+            for s in &lines {
+                let detail = s
+                    .detail
+                    .as_deref()
+                    .map(|d| format!("  {d}"))
+                    .unwrap_or_default();
+                println!(
+                    "  {:<12} {:<13} {:<6} {} tools · {} resources · {} prompts{detail}",
+                    s.name, s.status, s.transport, s.tools, s.resources, s.prompts
+                );
+            }
+            println!(
+                "\ntools load on demand — `forge mcp tools <server>` to see a server's full list."
+            );
+        }
+    }
+    manager.shutdown().await;
+    Ok(())
+}
+
+/// `forge mcp import [path]`. With an explicit `path`, import that one JSON file. With no path,
+/// auto-scan every installed AI-CLI MCP config (Claude Code/Desktop, Codex, Cursor, Windsurf,
+/// VS Code) and let the user pick which servers to import. Selected servers are merged into
+/// `.forge/mcp.toml`; secrets are NEVER copied (ADR-0007).
+fn mcp_import(path: Option<String>) -> Result<()> {
+    let out = std::path::Path::new(".forge/mcp.toml");
+
+    // Explicit single-file import (back-compat / scripting).
+    if let Some(src) = path {
+        let parsed = forge_config::import_mcp_json(std::path::Path::new(&src))
+            .with_context(|| format!("importing {src}"))?;
+        return finish_import(out, parsed.servers, parsed.secrets);
+    }
+
+    // Auto-scan mode.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let sources = forge_config::discover_import_sources(&cwd);
+    if sources.is_empty() {
+        println!(
+            "No MCP servers found in any known AI-CLI config.\n\
+             Scanned: ~/.claude.json, ~/.codex/config.toml, ~/.cursor/mcp.json (+ project), \
+             Claude Desktop, Windsurf, ./.mcp.json, ./.vscode/mcp.json.\n\
+             You can also import a specific file: `forge mcp import <path-to-.mcp.json>`."
+        );
+        return Ok(());
+    }
+
+    // Flatten + dedup by server name (first source wins), carrying the captured secret from the
+    // SAME source the kept server came from.
+    let mut flat: Vec<(String, forge_config::McpServerConfig, Option<String>)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for s in &sources {
+        for srv in &s.servers {
+            if seen.insert(srv.name.clone()) {
+                flat.push((
+                    s.label.clone(),
+                    srv.clone(),
+                    s.secrets.get(&srv.name).cloned(),
+                ));
+            }
+        }
+    }
+
+    // Pick: animated TUI multi-select on a real terminal; import-all when piped/CI.
+    let selection = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+        let items: Vec<forge_tui::SelectItem> = flat
+            .iter()
+            .map(|(label, srv, secret)| forge_tui::SelectItem {
+                label: srv.name.clone(),
+                hint: format!(
+                    "[{}]  {}{}",
+                    srv.transport_label(),
+                    label,
+                    if secret.is_some() {
+                        "  · token → keyring"
+                    } else {
+                        ""
+                    }
+                ),
+                preselected: true,
+            })
+            .collect();
+        match forge_tui::select_multi("Import MCP servers", &items)
+            .context("running the import picker")?
+        {
+            None => {
+                println!("cancelled — nothing imported.");
+                return Ok(());
+            }
+            Some(idx) => idx,
+        }
+    } else {
+        println!(
+            "Discovered {} MCP server(s); importing all (non-interactive).",
+            flat.len()
+        );
+        (0..flat.len()).collect()
+    };
+
+    let mut servers = Vec::new();
+    let mut secrets = std::collections::HashMap::new();
+    for i in selection {
+        let (_, srv, secret) = &flat[i];
+        if let Some(val) = secret {
+            secrets.insert(srv.name.clone(), val.clone());
+        }
+        servers.push(srv.clone());
+    }
+    if servers.is_empty() {
+        println!("nothing selected.");
+        return Ok(());
+    }
+    finish_import(out, servers, secrets)
+}
+
+/// Store each captured token in the OS keyring, merge the servers into `.forge/mcp.toml`, and
+/// report. Forge does the secret-handling itself (ADR-0007): the token goes to the keyring, the
+/// config only references it — the user is never asked to move anything by hand.
+fn finish_import(
+    out: &std::path::Path,
+    servers: Vec<forge_config::McpServerConfig>,
+    secrets: std::collections::HashMap<String, String>,
+) -> Result<()> {
+    let mut stored = Vec::new();
+    let mut store_failed = Vec::new();
+    for srv in &servers {
+        let Some(value) = secrets.get(&srv.name) else {
+            continue;
+        };
+        let key = srv
+            .auth
+            .as_ref()
+            .and_then(|a| a.token_keyring.clone())
+            .unwrap_or_else(|| format!("mcp:{}", srv.name));
+        match forge_config::store_secret(&key, value) {
+            Ok(()) => stored.push(srv.name.clone()),
+            Err(e) => store_failed.push((srv.name.clone(), e.to_string())),
+        }
+    }
+
+    let mut config = forge_config::load_mcp_toml(out);
+    let existing: std::collections::HashSet<String> =
+        config.servers.iter().map(|s| s.name.clone()).collect();
+    let (mut added, mut skipped) = (Vec::new(), Vec::new());
+    for srv in servers {
+        if existing.contains(&srv.name) {
+            skipped.push(srv.name);
+        } else {
+            added.push(srv.name.clone());
+            config.servers.push(srv);
+        }
+    }
+    forge_config::write_mcp_toml(out, &config).context("writing .forge/mcp.toml")?;
+
+    if added.is_empty() {
+        println!(
+            "nothing new imported (all selected servers already in {}).",
+            out.display()
+        );
+    } else {
+        println!(
+            "✓ imported {} server(s) → {}: {}",
+            added.len(),
+            out.display(),
+            added.join(", ")
+        );
+    }
+    if !skipped.is_empty() {
+        println!("  • skipped (already present): {}", skipped.join(", "));
+    }
+    if !stored.is_empty() {
+        println!(
+            "  🔐 stored {} token(s) in the OS keyring: {}",
+            stored.len(),
+            stored.join(", ")
+        );
+    }
+    for (name, err) in &store_failed {
+        println!(
+            "  ⚠ couldn't store '{name}' token in the keyring ({err}) — export it via the server's \
+             token_env, or run `forge auth`. The server is imported but won't authenticate yet."
+        );
+    }
+    Ok(())
+}
+
 async fn build_session_with(
     presenter: Box<dyn Presenter>,
     mock: bool,
@@ -796,6 +1039,10 @@ async fn build_session_with(
     if let Some(m) = mode {
         config.permission_mode = m.into();
     }
+    // Capture the MCP config before `config` is moved into the Session; connect after the session
+    // is built so its presenter can show the connection status.
+    let mcp_config = config.mcp.clone();
+    let config_has_mcp = mcp_config.active_servers().next().is_some();
 
     let store = Arc::new(open_store()?);
     // Startup hint: if models are benched from a prior run/probe, tell the user how to recheck
@@ -833,6 +1080,15 @@ async fn build_session_with(
         }
     };
     session.set_catalog(catalog);
+
+    // Connect external MCP servers (mcp-client.md). Skipped for the offline mock. Per-server
+    // failures are isolated inside connect_all (each lands `failed` with a reason); we surface the
+    // whole listing once so connection state — including failures — is visible at startup.
+    if !mock && config_has_mcp {
+        let manager = std::sync::Arc::new(forge_mcp::McpManager::connect_all(&mcp_config).await);
+        session.set_mcp(Some(manager));
+        session.announce_mcp();
+    }
     Ok(session)
 }
 
@@ -1453,6 +1709,23 @@ async fn dispatch_command(
                     outcome.keys.len(),
                     outcome.plans.len()
                 ));
+            }
+        }
+        CommandAction::Mcp(server) => {
+            let s = session.lock().await;
+            match server {
+                Some(srv) => {
+                    let tools = s.mcp_tool_lines(&srv);
+                    if tools.is_empty() {
+                        app.note(&format!("no tools for MCP server '{srv}' (not connected?)"));
+                    } else {
+                        app.note(&format!("{} tool(s) on '{srv}':", tools.len()));
+                        for (name, desc) in tools {
+                            app.note(&format!("  {name} — {desc}"));
+                        }
+                    }
+                }
+                None => app.apply(forge_tui::PresenterEvent::McpStatus(s.mcp_status())),
             }
         }
         // `/undo` and `/checkpoints` both open the same interactive picker over the per-turn

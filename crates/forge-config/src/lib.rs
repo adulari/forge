@@ -11,7 +11,12 @@ use forge_types::{PermissionDecision, PermissionMode, PermissionRule, RuleSource
 use serde::{Deserialize, Serialize};
 
 pub mod agents;
+pub mod mcp;
 pub use agents::{load_agents, AgentDef};
+pub use mcp::{
+    discover_import_sources, import_mcp_json, load_mcp_toml, write_mcp_toml, ImportSource,
+    McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport, ParsedServers,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -43,6 +48,9 @@ pub struct Config {
     /// Fine-grained allow/ask/deny rules layered on top of the mode (FR-10).
     #[serde(default)]
     pub permissions: PermissionsConfig,
+    /// External MCP servers Forge connects to as a client (mcp-client.md). Empty = inert.
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 /// Fine-grained permission rules (FR-10). Resolution is by specificity/precedence, not file
@@ -424,6 +432,7 @@ impl Default for Config {
                 subscriptions: HashMap::new(),
             },
             permissions: PermissionsConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 }
@@ -480,7 +489,18 @@ pub fn load() -> Result<Config, ConfigError> {
     fig = fig.merge(Toml::file("./.forge/config.toml"));
     fig = fig.merge(Env::prefixed("FORGE_").split("__"));
 
-    Ok(fig.extract()?)
+    let mut config: Config = fig.extract()?;
+    // Project-local `.forge/mcp.toml` is the dedicated home for MCP server declarations; when
+    // present it sets the whole `[mcp]` section (overriding any `[mcp]` in config.toml). Keeping
+    // it a separate file matches Claude-Code's `.mcp.json` convention and keeps server lists out
+    // of the main config.
+    if let Ok(text) = std::fs::read_to_string("./.forge/mcp.toml") {
+        match toml::from_str::<McpConfig>(&text) {
+            Ok(mcp) => config.mcp = mcp,
+            Err(e) => tracing::warn!("ignoring malformed .forge/mcp.toml: {e}"),
+        }
+    }
+    Ok(config)
 }
 
 /// Whether the user has a persisted config file (the onboarding "first run" signal — combined
@@ -663,6 +683,18 @@ pub fn store_api_key(provider: &str, key: &str) -> Result<(), ConfigError> {
         .map_err(|e| ConfigError::Keyring(e.to_string()))?;
     entry
         .set_password(key)
+        .map_err(|e| ConfigError::Keyring(e.to_string()))
+}
+
+/// Store an arbitrary secret (e.g. an MCP server token, keyed `mcp:<server>`) in the OS keyring
+/// under the `forge` service. Cross-platform via the `keyring` crate's native backends (macOS
+/// Keychain, Windows Credential Manager, Linux Secret Service). ADR-0007: secrets live in the
+/// keyring, never in config or logs. `forge mcp import` uses this to persist captured tokens.
+pub fn store_secret(key: &str, value: &str) -> Result<(), ConfigError> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, key)
+        .map_err(|e| ConfigError::Keyring(e.to_string()))?;
+    entry
+        .set_password(value)
         .map_err(|e| ConfigError::Keyring(e.to_string()))
 }
 
