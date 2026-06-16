@@ -315,6 +315,13 @@ agent. For ANY web access — searching the web or opening a URL — you MUST us
 `mcp__forge__web_search` and `mcp__forge__web_fetch` tools exposed over MCP. Do NOT use any \
 built-in, native, or provider web-search/browsing capability. Likewise route all file and \
 shell actions through the `mcp__forge__*` tools.\n\n\
+Tool names: every Forge tool is exposed by the `forge` MCP server and is PREFIXED `mcp__forge__`. \
+So the task-list tool is `mcp__forge__update_tasks`, subagents are `mcp__forge__spawn_agents`, \
+skills are `mcp__forge__use_skill`, plus `mcp__forge__read_file`/`write_file`/`edit_file`/\
+`list_dir`/`search`/`shell`. When a task or instruction refers to a tool by its bare name (e.g. \
+\"use the update_tasks tool\", \"record tasks\", \"spawn 2 subagents\"), it means the matching \
+`mcp__forge__*` tool — these ARE in your toolset; call them by the prefixed name. Never say a \
+tool is unavailable without first checking for its `mcp__forge__`-prefixed form.\n\n\
 Skills and slash-commands: Forge has its OWN library of skills (imported from Claude Code, \
 Codex, and other CLIs). To find or apply a skill, call the `mcp__forge__use_skill` tool — its \
 description lists every available skill by name (e.g. `orchestrate`). This is the ONLY correct \
@@ -1320,6 +1327,9 @@ mod tests {
         // Skills steering: point the bridged model at Forge's use_skill, not the filesystem.
         assert!(out.contains("mcp__forge__use_skill"));
         assert!(out.contains("~/.claude"));
+        // Tool-name mapping: bare names (update_tasks/spawn_agents) → their mcp__forge__ form.
+        assert!(out.contains("mcp__forge__update_tasks"));
+        assert!(out.contains("mcp__forge__spawn_agents"));
         assert!(out.ends_with("User: search the web"));
         // Phase-1 self-agent turns are untouched.
         assert_eq!(apply_harness_preamble(false, "User: hi".into()), "User: hi");
