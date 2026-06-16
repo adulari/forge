@@ -18,3 +18,6 @@ figment = { version = "0.10", features = ["toml", "env"] }
 toml = "0.8"
 directories = "6"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.9"

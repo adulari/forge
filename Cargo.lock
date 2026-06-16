@@ -1166,13 +1166,16 @@ dependencies = [
 name = "forge-config"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "directories",
  "figment",
  "forge-skills",
  "forge-types",
  "keyring",
+ "rand 0.9.4",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "toml",
  "tracing",
