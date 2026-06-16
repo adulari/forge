@@ -452,7 +452,7 @@ impl Catalog {
             // A command that delegates to a skill ("Use the **debugging** skill …", the
             // Claude-Code wrapper pattern) must actually load that skill's methodology, not just
             // name it — otherwise invoking the command does nothing useful.
-            let guidance = self.referenced_skill_guidance(&cmd.body, &name);
+            let guidance = self.referenced_skill_guidance(&cmd.body);
             // Don't silently drop a typed task when the body has no $ARGUMENTS/$N to receive it.
             if !rest.is_empty() && !template::uses_args(&cmd.body, &named) {
                 let trimmed = prompt.trim_end().to_string();
@@ -481,15 +481,14 @@ impl Catalog {
 
     /// Methodology guidance for every known skill that `body` references as a markdown-bold token
     /// (`**skill-name**`) — the Claude-Code "Use the **X** skill …" wrapper pattern. Each matched
-    /// skill is loaded once (deduped); `self_name` (the invoking command) is never injected, so a
-    /// command can't recurse into itself. Empty when the body references no known skill.
-    fn referenced_skill_guidance(&self, body: &str, self_name: &str) -> Vec<String> {
+    /// skill is loaded once (deduped). A command and the skill it delegates to commonly share a
+    /// name (`/orchestrate` → `orchestrate` skill); that is the intended case, not recursion —
+    /// skill guidance is inert text, never re-dispatched — so same-named delegation IS injected.
+    /// Empty when the body references no known skill.
+    fn referenced_skill_guidance(&self, body: &str) -> Vec<String> {
         let mut seen = std::collections::BTreeSet::new();
         let mut out = Vec::new();
         for tok in bold_tokens(body) {
-            if tok == self_name {
-                continue;
-            }
             if let Some(meta) = self.skills.get(&tok) {
                 if seen.insert(tok) {
                     out.push(Skill::load(meta).guidance());

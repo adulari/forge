@@ -113,6 +113,37 @@ fn command_delegating_to_a_skill_injects_that_skills_methodology() {
 }
 
 #[test]
+fn wrapper_delegating_to_a_same_named_skill_still_injects_it() {
+    // The real `/orchestrate` case: a command and the skill it delegates to share a name. The
+    // command must still inject the skill (regression: a self-name guard used to skip it).
+    let t = Tmp::new();
+    t.cmd(
+        "user",
+        "orchestrate",
+        "Use the **orchestrate** skill to handle this request.\n\nRequest: $ARGUMENTS",
+    );
+    t.skill(
+        "user",
+        "orchestrate",
+        "---\nname: orchestrate\ndescription: route any task\n---\nDiscover resources, then route.",
+    );
+    match t.load().resolve("/orchestrate analyse the codebase") {
+        Resolved::Command {
+            guidance, prompt, ..
+        } => {
+            assert_eq!(
+                guidance.len(),
+                1,
+                "same-named skill is injected, not skipped"
+            );
+            assert!(guidance[0].contains("Discover resources, then route."));
+            assert!(prompt.contains("analyse the codebase"));
+        }
+        other => panic!("expected Command, got {other:?}"),
+    }
+}
+
+#[test]
 fn command_without_skill_reference_has_no_injected_guidance() {
     let t = Tmp::new();
     t.cmd("user", "plain", "Do the thing: $ARGUMENTS");
