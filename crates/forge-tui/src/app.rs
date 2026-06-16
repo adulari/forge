@@ -45,7 +45,12 @@ pub const STREAM_PREVIEW_H: u16 = 3;
 pub const PERMISSION_H: u16 = 1;
 pub const INPUT_H: u16 = 3;
 pub const STATUS_H: u16 = 1;
+/// Base pinned-region height with no active task/subagent panels. The live viewport grows beyond
+/// this when those panels are active (see [`App::live_height`]).
 pub const LIVE_H: u16 = STREAM_PREVIEW_H + PERMISSION_H + INPUT_H + STATUS_H;
+/// Max task / running-subagent rows shown in their sticky panels before summarizing the overflow.
+const TASKS_PANEL_MAX: usize = 6;
+const SUBAGENTS_PANEL_MAX: usize = 4;
 
 /// The Mesh routing decision currently displayed.
 #[derive(Debug, Clone, Default)]
@@ -371,6 +376,42 @@ impl App {
     /// the sticky subagents panel is shown.
     pub fn running_subagents(&self) -> usize {
         self.subagents.iter().filter(|r| !r.done).count()
+    }
+
+    /// Rows the sticky tasks panel wants in the live region (0 = hidden). Header + up to
+    /// [`TASKS_PANEL_MAX`] items + an overflow line. This is a DEDICATED region (not the stream
+    /// preview) so the list stays visible even while the model is streaming.
+    pub fn tasks_panel_height(&self) -> u16 {
+        if self.tasks.is_empty() {
+            return 0;
+        }
+        let shown = self.tasks.len().min(TASKS_PANEL_MAX);
+        let overflow = u16::from(self.tasks.len() > TASKS_PANEL_MAX);
+        1 + shown as u16 + overflow
+    }
+
+    /// Rows the running-subagents panel wants in the live region (0 = none running). Dedicated
+    /// region so active children stay visible during streaming.
+    pub fn subagents_panel_height(&self) -> u16 {
+        let n = self.running_subagents();
+        if n == 0 {
+            return 0;
+        }
+        let shown = n.min(SUBAGENTS_PANEL_MAX);
+        let overflow = u16::from(n > SUBAGENTS_PANEL_MAX);
+        1 + shown as u16 + overflow
+    }
+
+    /// Total pinned live-region height for the current state. The I/O shell sizes the inline
+    /// viewport to this so the task/subagent panels get their own rows instead of being masked by
+    /// the streaming preview (the "always visible" requirement).
+    pub fn live_height(&self) -> u16 {
+        STREAM_PREVIEW_H
+            + PERMISSION_H
+            + INPUT_H
+            + STATUS_H
+            + self.tasks_panel_height()
+            + self.subagents_panel_height()
     }
 
     /// Owned snapshot of the current batch's subagents (running + just-finished), for the
@@ -754,26 +795,41 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Draw the pinned live region for the current state (the only thing in the viewport).
 pub fn render_live(frame: &mut Frame, app: &App) {
+    let sub_h = app.subagents_panel_height();
+    let task_h = app.tasks_panel_height();
+    // Subagent + task panels are their OWN rows (not the stream preview) so they stay visible
+    // while the model streams. Zero-length regions are skipped by the layout.
     let areas = Layout::vertical([
-        Constraint::Length(STREAM_PREVIEW_H), // in-flight reply edge (blank when idle)
-        Constraint::Length(PERMISSION_H),     // permission bar (blank when none)
-        Constraint::Length(INPUT_H),          // input box
-        Constraint::Length(STATUS_H),         // statusline
+        Constraint::Length(sub_h),  // running-subagents panel (0 when none)
+        Constraint::Length(task_h), // sticky task list (0 when empty)
+        Constraint::Length(STREAM_PREVIEW_H), // in-flight reply edge / palette / picker
+        Constraint::Length(PERMISSION_H), // permission bar (blank when none)
+        Constraint::Length(INPUT_H), // input box
+        Constraint::Length(STATUS_H), // statusline
     ])
     .split(frame.area());
 
+    if sub_h > 0 {
+        render_subagents_panel(frame, areas[0], app);
+    }
+    if task_h > 0 {
+        frame.render_widget(
+            Paragraph::new(tasks_panel_lines(&app.tasks, areas[1].height)),
+            areas[1],
+        );
+    }
     if app.palette.open {
-        render_palette(frame, areas[0], app);
+        render_palette(frame, areas[2], app);
     } else if app.picker.open {
-        render_picker(frame, areas[0], app);
+        render_picker(frame, areas[2], app);
     } else {
-        render_preview(frame, areas[0], app);
+        render_preview(frame, areas[2], app);
     }
     if app.prompt.is_some() {
-        render_permission(frame, areas[1], app);
+        render_permission(frame, areas[3], app);
     }
-    render_input(frame, areas[2], app);
-    render_statusline(frame, areas[3], app);
+    render_input(frame, areas[4], app);
+    render_statusline(frame, areas[5], app);
 }
 
 /// The inline slash-command palette: a scrolling window of filtered commands, selected row
@@ -897,6 +953,8 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
 /// The in-flight streaming reply's trailing edge, scrolled to its bottom so the freshest
 /// text and the `▌` cursor stay visible.
 fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
+    // Only the in-flight reply edge lives here now; the task + subagent panels are their own
+    // always-visible regions (see `render_live`), so streaming no longer hides them.
     if app.streaming_active {
         let line = TextLine::from(vec![
             Span::raw(format!("  {}", app.streaming)),
@@ -906,47 +964,38 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
         let count = para.line_count(area.width) as u16;
         let scroll = count.saturating_sub(area.height);
         frame.render_widget(para.scroll((scroll, 0)), area);
-        return;
     }
+}
 
-    // While a spawn_agents batch runs (and nothing is streaming), animate the still-running
-    // children here in the live region; finished ones have already flowed to scrollback.
+/// The sticky running-subagents panel (its own live region): a header (with the Ctrl+O hint) then
+/// one animated row per running child, sized to `area.height`, overflow summarized.
+fn render_subagents_panel(frame: &mut Frame, area: Rect, app: &App) {
     let running: Vec<&SubRow> = app.subagents.iter().filter(|r| !r.done).collect();
-    if !running.is_empty() {
-        let spin = SPINNER[app.tick % SPINNER.len()];
-        let h = area.height as usize;
-        let mut lines: Vec<TextLine> = Vec::with_capacity(h);
-        // A header so the persistent panel reads as a distinct region, with the expand hint.
-        lines.push(TextLine::from(vec![
-            Span::styled(
-                format!("  ⚒ subagents ({} running)", running.len()),
-                Style::default().fg(TOOLCYAN).bold(),
-            ),
-            Span::styled("  ^O transcript", Style::default().fg(DIM)),
-        ]));
-        let body_h = h.saturating_sub(1);
-        for r in running.iter().take(body_h) {
-            lines.push(subagent_running_line(spin, &r.agent, &r.task, &r.last));
-        }
-        if running.len() > body_h {
-            lines.pop();
-            lines.push(TextLine::from(Span::styled(
-                format!("  … +{} more running", running.len() - body_h + 1),
-                Style::default().fg(DIM),
-            )));
-        }
-        frame.render_widget(Paragraph::new(lines), area);
+    if running.is_empty() {
         return;
     }
-
-    // Idle (no stream, no subagents): keep the live task list pinned so multi-step progress
-    // stays visible during the turn even after its scrollback copy scrolls off. Empty → nothing.
-    if !app.tasks.is_empty() {
-        frame.render_widget(
-            Paragraph::new(tasks_panel_lines(&app.tasks, area.height)),
-            area,
-        );
+    let spin = SPINNER[app.tick % SPINNER.len()];
+    let h = area.height as usize;
+    let mut lines: Vec<TextLine> = Vec::with_capacity(h);
+    lines.push(TextLine::from(vec![
+        Span::styled(
+            format!("  ⚒ subagents ({} running)", running.len()),
+            Style::default().fg(TOOLCYAN).bold(),
+        ),
+        Span::styled("  ^O transcript", Style::default().fg(DIM)),
+    ]));
+    let body_h = h.saturating_sub(1);
+    for r in running.iter().take(body_h) {
+        lines.push(subagent_running_line(spin, &r.agent, &r.task, &r.last));
     }
+    if running.len() > body_h {
+        lines.pop();
+        lines.push(TextLine::from(Span::styled(
+            format!("  … +{} more running", running.len() - body_h + 1),
+            Style::default().fg(DIM),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// The sticky tasks panel (Task list always-visible): a header with the done/total count, then
@@ -1185,9 +1234,10 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    /// Render the pinned live region at the natural live height.
+    /// Render the pinned live region at its natural (dynamic) live height — so the sticky task +
+    /// subagent panels get their own rows, exactly as the real I/O shell sizes the viewport.
     fn screen(app: &App) -> String {
-        screen_wh(app, 80, LIVE_H)
+        screen_wh(app, 80, app.live_height())
     }
 
     fn screen_wh(app: &App, w: u16, h: u16) -> String {
@@ -1718,15 +1768,50 @@ mod tests {
     }
 
     #[test]
-    fn tasks_panel_hidden_while_streaming_takes_priority() {
+    fn tasks_panel_stays_visible_while_streaming() {
         use forge_types::TodoStatus;
         let mut app = App::default();
         app.apply(PresenterEvent::Tasks(vec![todo("a", TodoStatus::Pending)]));
-        // A live reply owns the preview region over the tasks panel.
+        // The task panel has its OWN region now, so a live reply does NOT mask it — both show.
         app.apply(PresenterEvent::AssistantDelta("streaming now".into()));
         let s = screen(&app);
         assert!(s.contains("streaming now"), "stream shown: {s}");
-        assert!(!s.contains("tasks ("), "tasks yield to the live stream");
+        assert!(
+            s.contains("tasks ("),
+            "tasks panel stays visible while streaming: {s}"
+        );
+    }
+
+    #[test]
+    fn subagent_panel_stays_visible_while_streaming() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::SubagentStart {
+            id: "a".into(),
+            agent: "reviewer".into(),
+            task: "review the diff".into(),
+        });
+        app.apply(PresenterEvent::AssistantDelta("thinking out loud".into()));
+        let s = screen(&app);
+        assert!(s.contains("thinking out loud"), "stream shown: {s}");
+        assert!(
+            s.contains("subagents (1 running)"),
+            "subagent panel stays visible while streaming: {s}"
+        );
+    }
+
+    #[test]
+    fn live_height_grows_for_active_panels() {
+        use forge_types::TodoStatus;
+        let mut app = App::default();
+        assert_eq!(app.live_height(), LIVE_H, "base height when idle");
+        app.apply(PresenterEvent::Tasks(vec![
+            todo("a", TodoStatus::InProgress),
+            todo("b", TodoStatus::Pending),
+        ]));
+        assert!(
+            app.live_height() > LIVE_H,
+            "viewport grows to fit the task panel"
+        );
     }
 
     #[test]
