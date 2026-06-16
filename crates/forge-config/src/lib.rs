@@ -54,6 +54,29 @@ pub struct Config {
     /// Slash-command + skill discovery and trust (command-skill-system.md).
     #[serde(default)]
     pub commands: CommandsConfig,
+    /// Native code-intelligence graph (code-intelligence.md).
+    #[serde(default)]
+    pub lattice: LatticeConfig,
+}
+
+/// Settings for the Lattice code-intelligence subsystem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatticeConfig {
+    /// Build + maintain the structural graph. Off → the `forge lattice` commands are inert.
+    #[serde(default = "default_lattice_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for LatticeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_lattice_enabled(),
+        }
+    }
+}
+
+fn default_lattice_enabled() -> bool {
+    true
 }
 
 /// Settings for the slash-command + skill system.
@@ -463,6 +486,7 @@ impl Default for Config {
             permissions: PermissionsConfig::default(),
             mcp: McpConfig::default(),
             commands: CommandsConfig::default(),
+            lattice: LatticeConfig::default(),
         }
     }
 }
