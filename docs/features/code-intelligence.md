@@ -1,5 +1,16 @@
 # Feature: Lattice — built-in code intelligence & persistent semantic memory
 
+> **Status (PR1 shipped):** the `forge-index` crate exists — tree-sitter **Rust** extraction
+> (functions/methods/structs/enums/traits/impls/consts/modules/type-aliases) → symbol nodes +
+> `contains` edges, persisted into the **shared** `forge-store` SQLite db (`lattice_file/node/
+> edge` tables), **incremental by SHA-256 content hash**. CLI: `forge lattice update [path]`,
+> `forge lattice query <name>`, `forge lattice status`. `LatticeConfig { enabled }` in config.
+>
+> **Not yet built (next PRs):** resolved `calls`/`references`/`imports`/`impls` edges + `impact`/
+> `path`/`explain`/`why`; **auto-retrieval injection** into `Session::run_turn` (§5.1/§5.4); the
+> `LatticeTool`; embeddings (§5.6); the `notify` watcher; git blame/log overlay; multi-language
+> grammars; the TUI subgraph view. The sections below are the full design those PRs implement.
+
 > A native, zero-setup code-intelligence subsystem for Forge: a pure-Rust, tree-sitter
 > AST/dependency graph plus optional semantic retrieval, stored in SQLite **alongside**
 > `forge-store`, kept always-fresh by an incremental file watcher and by every edit the
