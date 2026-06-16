@@ -647,6 +647,13 @@ pub fn claude_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|b| b.home_dir().join(".claude"))
 }
 
+/// Codex CLI's home directory (`~/.codex`), source for `forge import codex`. Custom prompts live
+/// under `~/.codex/prompts/*.md` (plain markdown slash-command templates). `None` if no home
+/// directory resolves on this platform.
+pub fn codex_dir() -> Option<PathBuf> {
+    directories::BaseDirs::new().map(|b| b.home_dir().join(".codex"))
+}
+
 /// The command/skill discovery sources, scope-tagged: user scope (`<config>/forge/{commands,
 /// skills}`, present only when a config dir resolves) then project scope (`./.forge/{commands,
 /// skills}`). Project wins on a name collision (see `forge_skills::Catalog`).
