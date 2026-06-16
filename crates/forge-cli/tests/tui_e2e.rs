@@ -26,6 +26,28 @@ fn drive_pty(script: &[(&str, u64)]) -> (bool, String) {
     let dir = std::env::temp_dir().join(format!("forge-e2e-{}", forge_id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("sample.rs"), "fn main() { let x = 1; }\n").unwrap();
+
+    // Seed a real project-scope skill + a wrapper command that delegates to it, so the
+    // skill-invocation tests exercise the actual catalog → resolve → dispatch path end to end.
+    // trust_project skips the first-use confirmation gate so the command runs on first try.
+    std::fs::create_dir_all(dir.join(".forge")).unwrap();
+    std::fs::write(
+        dir.join(".forge/config.toml"),
+        "[commands]\ntrust_project = true\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join(".forge/skills/demoskill")).unwrap();
+    std::fs::write(
+        dir.join(".forge/skills/demoskill/SKILL.md"),
+        "---\nname: demoskill\ndescription: a demo skill for e2e\n---\nDEMO_METHODOLOGY_MARKER: do the demo steps.",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.join(".forge/commands")).unwrap();
+    std::fs::write(
+        dir.join(".forge/commands/demo.md"),
+        "Use the **demoskill** skill to handle this request.\n\nRequest: $ARGUMENTS",
+    )
+    .unwrap();
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_forge"));
     cmd.arg("chat");
     cmd.arg("--mock");
@@ -120,6 +142,46 @@ fn tui_assay_mode_opens_choice_picker_and_runs_without_crashing() {
     assert!(
         plain.to_lowercase().contains("assay"),
         "the assay choice picker was reached: {plain}"
+    );
+}
+
+#[test]
+#[ignore = "needs a DSR-answering pty; run locally with --ignored"]
+fn tui_skill_invoked_directly_is_found_and_loads_methodology() {
+    // Invoking a real skill by name (no args) must FIND it and prime its methodology — the
+    // regression behind "unable to find skill". /quit exits.
+    let (clean, plain) = drive_pty(&[("/demoskill\r", 1000), ("/quit\r", 600)]);
+    assert!(clean, "clean exit: {plain}");
+    assert!(!plain.to_lowercase().contains("panic"), "no panic: {plain}");
+    assert!(
+        !plain.contains("unknown command"),
+        "the skill was found, not reported unknown: {plain}"
+    );
+    assert!(
+        plain.contains("methodology primed") || plain.contains("skill · demoskill"),
+        "the skill loaded its methodology: {plain}"
+    );
+}
+
+#[test]
+#[ignore = "needs a DSR-answering pty; run locally with --ignored"]
+fn tui_wrapper_command_delegates_to_its_skill() {
+    // A CC-style wrapper (/demo → **demoskill**) must resolve as a command and run — not
+    // "unknown command". Esc stops the mock turn, /quit exits.
+    let (clean, plain) = drive_pty(&[
+        ("/demo do the thing\r", 1200),
+        ("\x1b", 600),
+        ("/quit\r", 600),
+    ]);
+    assert!(clean, "clean exit: {plain}");
+    assert!(!plain.to_lowercase().contains("panic"), "no panic: {plain}");
+    assert!(
+        !plain.contains("unknown command"),
+        "the wrapper resolved, not unknown: {plain}"
+    );
+    assert!(
+        plain.contains("command · /demo"),
+        "the wrapper command ran: {plain}"
     );
 }
 
