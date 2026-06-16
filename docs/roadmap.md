@@ -121,7 +121,7 @@ wave approaches.
 |---------|------|--------|
 | **Skills/agents marketplace** | Publish/import skills, commands, agents — "npm for AI workflows" (25% rev share). | Helm note; designed to plug into the command/skill system |
 | **Session replay** | Record prompts + model versions + outputs; replay + diff; auditable, reproducible AI. | Helm note |
-| **Import / migration layer** | Auto-detect + import from Claude Code (skills/commands/agents/hooks/memory/settings), Codex CLI, Aider, Cursor/Windsurf, Continue.dev. | Helm note; prerequisite for CC-compat in skills + MCP specs |
+| **Import / migration layer** | **Claude commands+skills done** (`forge import claude`) | Auto-detect + import from Claude Code (skills/commands/agents/hooks/memory/settings), Codex CLI, Aider, Cursor/Windsurf, Continue.dev. **Shipped:** `forge import claude [--project]` copies `~/.claude/{commands,skills}` into a Forge scope, validating with the CC-compatible readers. **Next:** agents/hooks/memory/settings; other tools. | Helm note; prerequisite for CC-compat in skills + MCP specs |
 | **Natural-language shell** | "show me what changed performance-wise since last week" → runs the right commands, diffs, explains. | Helm note |
 | **Shell error interceptor** | Command fails → AI auto-explains + offers a fix, no prompt needed. | Helm note |
 | **Voice interface** | whisper.cpp local STT, no cloud. | Helm note |
