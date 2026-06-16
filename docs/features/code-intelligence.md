@@ -8,12 +8,14 @@
 > is live:** `retrieve_context()` auto-injects budget-bounded relevant code into `run_turn`
 > (after routing, before the first provider call), scaled by `BudgetStatus`; the agent's edits
 > reindex the touched file in-turn; a model-callable `lattice` tool (ReadOnly) and a
-> `ContextInjected` UI event are wired. CLI: `forge lattice update|query|impact|path|status`.
-> `LatticeConfig { enabled, inject, inject_token_budget }`.
+> `ContextInjected` UI event are wired. A **`notify`-based background watcher** reindexes files
+> on external editor edits (debounced) so retrieval stays fresh without a manual update. CLI:
+> `forge lattice update|query|impact|path|status`.
+> `LatticeConfig { enabled, inject, inject_token_budget, watch }`.
 >
 > **Verified:** the multi-language matrix compiles + links (10 grammars on tree-sitter core 0.24);
-> tags extraction, cross-file `impact`, and end-to-end injection have unit tests. **Not yet
-> built:** embeddings (§5.6); the `notify` watcher; git blame/log overlay (`why`); the interactive
+> tags extraction, cross-file `impact`, end-to-end injection, and watcher auto-reindex have unit
+> tests. **Not yet built:** embeddings (§5.6); git blame/log overlay (`why`); the interactive
 > TUI subgraph/blast-radius view; cross-repo identity; C# (its 0.24-compatible grammar ships no
 > tags query). The sections below are the full design those PRs implement.
 

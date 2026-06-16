@@ -88,6 +88,9 @@ pub struct Session {
     /// retrieval then injects nothing and the turn runs exactly as before (additive guarantee).
     /// `Arc` so the model-facing `lattice` tool shares the same index.
     lattice: Option<Arc<Lattice>>,
+    /// Background file watcher that keeps the index fresh on external edits. Held only to keep the
+    /// watcher thread alive for the session's lifetime (dropped → watching stops).
+    lattice_watcher: Option<forge_index::LatticeWatcher>,
 }
 
 impl Session {
@@ -189,6 +192,7 @@ impl Session {
             tasks,
             mcp: None,
             lattice: None,
+            lattice_watcher: None,
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
@@ -226,6 +230,11 @@ impl Session {
     /// each turn auto-injects relevant code; the agent's edits reindex the touched file in-turn.
     pub fn set_lattice(&mut self, lattice: Option<Arc<Lattice>>) {
         self.lattice = lattice;
+    }
+
+    /// Attach the background reindex watcher (composition root); held for the session's lifetime.
+    pub fn set_lattice_watcher(&mut self, watcher: Option<forge_index::LatticeWatcher>) {
+        self.lattice_watcher = watcher;
     }
 
     /// Per-server MCP status for the `/mcp` listing (empty when no servers are configured).

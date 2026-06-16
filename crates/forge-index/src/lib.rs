@@ -15,9 +15,11 @@ use sha2::{Digest, Sha256};
 
 mod extract;
 mod retrieve;
+mod watch;
 
 pub use extract::{extract, lang_for_path, supported_languages, Def, Parsed, Ref};
 pub use retrieve::{InjectedContext, RetrievedSnippet};
+pub use watch::{spawn_watcher, LatticeWatcher};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LatticeError {

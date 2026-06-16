@@ -115,6 +115,11 @@ pub struct LatticeConfig {
     /// Token ceiling for the auto-injected context block. Scaled down as the daily budget tightens.
     #[serde(default = "default_inject_budget")]
     pub inject_token_budget: usize,
+    /// Watch the working tree and reindex changed files automatically (external editor edits), so
+    /// retrieval stays fresh without a manual `forge lattice update`. Off → index only updates on
+    /// explicit `update`/agent edits.
+    #[serde(default = "default_lattice_watch")]
+    pub watch: bool,
 }
 
 impl Default for LatticeConfig {
@@ -123,8 +128,13 @@ impl Default for LatticeConfig {
             enabled: default_lattice_enabled(),
             inject: default_lattice_inject(),
             inject_token_budget: default_inject_budget(),
+            watch: default_lattice_watch(),
         }
     }
+}
+
+fn default_lattice_watch() -> bool {
+    true
 }
 
 fn default_lattice_enabled() -> bool {

@@ -1348,6 +1348,7 @@ async fn build_session_with(
     let mcp_config = config.mcp.clone();
     let config_has_mcp = mcp_config.active_servers().next().is_some();
     let lattice_enabled = config.lattice.enabled;
+    let config_lattice_watch = config.lattice.watch;
 
     let store = Arc::new(open_store()?);
     let store_for_lattice = Arc::clone(&store);
@@ -1399,6 +1400,20 @@ async fn build_session_with(
     session.set_catalog(catalog);
     // Share the index with the session so turns auto-inject relevant code and agent edits reindex
     // in-turn (code-intelligence.md). Empty index → nothing injected (additive guarantee).
+    // Also start the background watcher so external editor edits reindex automatically.
+    if let Some(lat) = &lattice {
+        if config_lattice_watch {
+            let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            match forge_index::spawn_watcher(
+                Arc::clone(lat),
+                &root,
+                std::time::Duration::from_millis(400),
+            ) {
+                Ok(w) => session.set_lattice_watcher(Some(w)),
+                Err(e) => session.notify_error(&format!("lattice watcher disabled: {e}")),
+            }
+        }
+    }
     session.set_lattice(lattice);
 
     // Connect external MCP servers (mcp-client.md). Skipped for the offline mock. Per-server
