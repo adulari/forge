@@ -12,10 +12,15 @@ use serde::{Deserialize, Serialize};
 
 pub mod agents;
 pub mod mcp;
+pub mod oauth;
 pub use agents::{load_agents, AgentDef};
 pub use mcp::{
     discover_import_sources, import_mcp_json, load_mcp_toml, write_mcp_toml, ImportSource,
     McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport, ParsedServers,
+};
+pub use oauth::{
+    authorize_url, clear_oauth_tokens, load_oauth_tokens, oauth_keyring_key, store_oauth_tokens,
+    AuthServerMetadata, OAuthConfig, OAuthTokens, Pkce, ProtectedResourceMetadata,
 };
 
 #[derive(Debug, thiserror::Error)]

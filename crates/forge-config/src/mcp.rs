@@ -151,6 +151,11 @@ pub struct McpAuth {
     /// (for servers that use a custom key header, e.g. `X-Goog-Api-Key`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<String>,
+    /// OAuth 2.0 (RFC-mcp-oauth): when set, the server authenticates via the OAuth flow rather
+    /// than a static token — `forge mcp login <server>` obtains + refreshes a bearer (PR2).
+    /// Resolution prefers a static token (env/keyring) first, then OAuth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<crate::oauth::OAuthConfig>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -250,6 +255,7 @@ fn server_from_json(name: &str, spec: &serde_json::Value, out: &mut ParsedServer
                         token_env: Some(k.clone()),
                         token_keyring: Some(keyring_key.clone()),
                         header: None,
+                        oauth: None,
                     });
                     out.notes.push(format!(
                         "server '{name}': storing secret env '{k}' in the keyring"
@@ -286,6 +292,7 @@ fn server_from_json(name: &str, spec: &serde_json::Value, out: &mut ParsedServer
                         token_env: None,
                         token_keyring: Some(keyring_key.clone()),
                         header: (!is_auth).then(|| k.clone()),
+                        oauth: None,
                     });
                     out.notes.push(format!(
                         "server '{name}': storing header '{k}' token in the keyring"
