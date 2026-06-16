@@ -133,6 +133,13 @@ enum ImportSource {
         #[arg(long)]
         project: bool,
     },
+    /// Copy Codex CLI custom prompts (`~/.codex/prompts/*.md`) into Forge as commands (user
+    /// scope by default). Existing definitions are kept; malformed files are skipped.
+    Codex {
+        /// Import into the project (`./.forge`) instead of the user config dir.
+        #[arg(long)]
+        project: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -290,18 +297,40 @@ async fn main() -> Result<()> {
     }
 }
 
-/// `forge import claude [--project]` — copy CC commands + skills into a Forge scope, reusing the
-/// CC-compatible readers (command-skill-system.md) to validate before copying.
+/// Tally of an import run: copied vs. already-present, for commands and skills.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ImportCounts {
+    copied_commands: usize,
+    skipped_commands: usize,
+    copied_skills: usize,
+    skipped_skills: usize,
+}
+
+/// `forge import <source> [--project]` — copy another AI CLI's commands/skills into a Forge
+/// scope, reusing the CC-compatible readers (command-skill-system.md) to validate before
+/// copying. Claude imports commands + skills; Codex imports its prompts as commands.
 fn import_cmd(source: ImportSource) -> Result<()> {
-    let ImportSource::Claude { project } = source;
-    let claude =
-        forge_config::claude_dir().context("no home directory — cannot locate ~/.claude")?;
-    if !claude.exists() {
-        println!("nothing to import: {} does not exist", claude.display());
+    let (label, project, home, commands_sub, skills_sub) = match source {
+        ImportSource::Claude { project } => (
+            "claude",
+            project,
+            forge_config::claude_dir().context("no home directory — cannot locate ~/.claude")?,
+            "commands",
+            Some("skills"),
+        ),
+        ImportSource::Codex { project } => (
+            "codex",
+            project,
+            forge_config::codex_dir().context("no home directory — cannot locate ~/.codex")?,
+            "prompts",
+            None,
+        ),
+    };
+    if !home.exists() {
+        println!("nothing to import: {} does not exist", home.display());
         return Ok(());
     }
 
-    // Target scope dirs.
     let (cmd_dst, skill_dst) = if project {
         (
             std::path::PathBuf::from("./.forge/commands"),
@@ -312,61 +341,78 @@ fn import_cmd(source: ImportSource) -> Result<()> {
         (base.join("commands"), base.join("skills"))
     };
 
-    // Validate CC assets with the real catalog readers (malformed files are skipped + warned).
+    // Validate assets with the real catalog readers (malformed files are skipped + warned).
     let sources = forge_skills::Sources {
         commands: vec![forge_skills::ScopedDir {
             scope: forge_skills::Scope::User,
-            path: claude.join("commands"),
+            path: home.join(commands_sub),
         }],
-        skills: vec![forge_skills::ScopedDir {
-            scope: forge_skills::Scope::User,
-            path: claude.join("skills"),
-        }],
+        skills: skills_sub
+            .map(|s| {
+                vec![forge_skills::ScopedDir {
+                    scope: forge_skills::Scope::User,
+                    path: home.join(s),
+                }]
+            })
+            .unwrap_or_default(),
     };
     let cat = forge_skills::Catalog::load(&sources);
+    let counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
 
-    let (mut copied_c, mut skipped_c) = (0usize, 0usize);
-    std::fs::create_dir_all(&cmd_dst).ok();
+    println!(
+        "✓ imported {} command(s) + {} skill(s) from {label} into {} \
+         ({} command(s), {} skill(s) already present, skipped)",
+        counts.copied_commands,
+        counts.copied_skills,
+        if project {
+            "./.forge"
+        } else {
+            "the user config"
+        },
+        counts.skipped_commands,
+        counts.skipped_skills,
+    );
+    for w in cat.warnings() {
+        eprintln!("skipped (malformed): {w}");
+    }
+    Ok(())
+}
+
+/// Copy a loaded catalog's command files + skill directories into the target scope, keeping any
+/// definition already present. Pure over the filesystem so it's unit-testable with temp dirs.
+fn copy_catalog_assets(
+    cat: &forge_skills::Catalog,
+    cmd_dst: &std::path::Path,
+    skill_dst: &std::path::Path,
+) -> ImportCounts {
+    let mut counts = ImportCounts::default();
+    std::fs::create_dir_all(cmd_dst).ok();
     for cmd in cat.all_commands() {
         let Some(fname) = cmd.path.file_name() else {
             continue;
         };
         let dest = cmd_dst.join(fname);
         if dest.exists() {
-            skipped_c += 1;
+            counts.skipped_commands += 1;
             continue;
         }
         if std::fs::copy(&cmd.path, &dest).is_ok() {
-            copied_c += 1;
+            counts.copied_commands += 1;
         }
     }
 
-    let (mut copied_s, mut skipped_s) = (0usize, 0usize);
-    std::fs::create_dir_all(&skill_dst).ok();
+    std::fs::create_dir_all(skill_dst).ok();
     for skill in cat.all_skills() {
         let dest = skill_dst.join(&skill.name);
         if dest.exists() {
-            skipped_s += 1;
+            counts.skipped_skills += 1;
             continue;
         }
         if copy_dir(&skill.dir, &dest).is_ok() {
-            copied_s += 1;
+            counts.copied_skills += 1;
         }
     }
-
-    println!(
-        "✓ imported {copied_c} command(s) + {copied_s} skill(s) into {} \
-         ({skipped_c} command(s), {skipped_s} skill(s) already present, skipped)",
-        if project {
-            "./.forge"
-        } else {
-            "the user config"
-        }
-    );
-    for w in cat.warnings() {
-        eprintln!("skipped (malformed): {w}");
-    }
-    Ok(())
+    counts
 }
 
 /// Recursively copy a directory tree (used to import a skill's SKILL.md + its resource files).
@@ -2735,6 +2781,43 @@ fn fmt_age(created_at: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_catalog_assets_imports_then_skips_existing() {
+        // A Codex-style prompt: plain markdown, no frontmatter (name = file stem, description =
+        // first body line). The lenient command reader must accept it and we must copy it.
+        let root = std::env::temp_dir().join(format!("forge-imp-{}", forge_types::new_id()));
+        let src = root.join("prompts");
+        let cmd_dst = root.join("out/commands");
+        let skill_dst = root.join("out/skills");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("refactor.md"),
+            "Refactor the selected code cleanly.\n",
+        )
+        .unwrap();
+
+        let sources = forge_skills::Sources {
+            commands: vec![forge_skills::ScopedDir {
+                scope: forge_skills::Scope::User,
+                path: src.clone(),
+            }],
+            skills: vec![],
+        };
+        let cat = forge_skills::Catalog::load(&sources);
+
+        let first = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+        assert_eq!(first.copied_commands, 1, "the prompt was imported");
+        assert_eq!(first.copied_skills, 0);
+        assert!(cmd_dst.join("refactor.md").exists());
+
+        // Re-running keeps the existing file instead of overwriting it.
+        let second = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+        assert_eq!(second.copied_commands, 0);
+        assert_eq!(second.skipped_commands, 1, "already present → skipped");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn interactive_logs_go_to_a_file_never_the_tui() {
