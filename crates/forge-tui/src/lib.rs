@@ -42,8 +42,8 @@ pub mod select;
 mod tui;
 pub use app::{banner_lines, handle_key, lattice_view_lines, App, InputOutcome, KeyKind};
 pub use commands::{
-    filter_commands, parse_command, Command, CommandAction, Palette, PaletteEntry, Picker,
-    PickerKind, PickerRow, COMMANDS,
+    filter_commands, parse_command, slash_token_at, Command, CommandAction, Palette, PaletteEntry,
+    Picker, PickerKind, PickerRow, SlashToken, COMMANDS,
 };
 pub use driver::{ChannelPresenter, Tui, UiMsg};
 pub use init_wizard::{BridgeItem, ProviderItem, WizardInput, WizardOutcome};

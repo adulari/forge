@@ -101,6 +101,12 @@ pub struct App {
     /// For the `/models` browser only: `Some(provider)` when drilled into a provider's models,
     /// `None` at the top-level provider list. Lets Esc step back a level instead of closing.
     pub models_drilled: Option<String>,
+    /// The live task list (`update_tasks`). Kept so the sticky tasks panel stays visible during
+    /// the turn (the inline scrollback copy scrolls away); cleared when the model empties the list.
+    tasks: Vec<forge_types::TodoItem>,
+    /// When `Some(i)`, the preview region shows subagent `i`'s fuller progress log instead of the
+    /// compact running-list (toggled by the shell). Cleared when the batch finishes.
+    subagent_detail: Option<usize>,
 }
 
 /// One subagent's live row in the TUI.
@@ -111,6 +117,9 @@ struct SubRow {
     task: String,
     /// Trailing edge of the child's streamed activity (RFC subagent-orchestration Phase 3b).
     last: String,
+    /// Recent progress snippets, newest last, for the expandable detail view. Bounded so a chatty
+    /// child can't grow the buffer without limit.
+    log: Vec<String>,
     done: bool,
     cost: f64,
 }
@@ -129,6 +138,8 @@ pub enum KeyKind {
     Tab,
     /// SHIFT+TAB — cycle the operating temper (handled by the shell, not the input line).
     CycleTemper,
+    /// CTRL+O — toggle the expanded detail view for the active subagents (shell-handled).
+    ToggleSubagentDetail,
 }
 
 /// The result of feeding a keystroke to the input line.
@@ -159,7 +170,11 @@ pub fn handle_key(input: &mut String, key: KeyKind) -> InputOutcome {
         }
         KeyKind::Esc => InputOutcome::Quit,
         // Navigation / temper keys are handled by the shell before reaching the input line.
-        KeyKind::Up | KeyKind::Down | KeyKind::Tab | KeyKind::CycleTemper => InputOutcome::Editing,
+        KeyKind::Up
+        | KeyKind::Down
+        | KeyKind::Tab
+        | KeyKind::CycleTemper
+        | KeyKind::ToggleSubagentDetail => InputOutcome::Editing,
     }
 }
 
@@ -248,6 +263,7 @@ impl App {
                     agent,
                     task,
                     last: String::new(),
+                    log: Vec::new(),
                     done: false,
                     cost: 0.0,
                 });
@@ -259,6 +275,15 @@ impl App {
                     let n = row.last.chars().count();
                     if n > 80 {
                         row.last = row.last.chars().skip(n - 80).collect();
+                    }
+                    // Keep a bounded backlog of snippets for the expandable detail view.
+                    const MAX_LOG: usize = 200;
+                    for piece in snippet.split('\n').filter(|p| !p.trim().is_empty()) {
+                        row.log.push(piece.trim().to_string());
+                    }
+                    if row.log.len() > MAX_LOG {
+                        let drop = row.log.len() - MAX_LOG;
+                        row.log.drain(0..drop);
                     }
                 }
             }
@@ -282,6 +307,7 @@ impl App {
                     let total: f64 = self.subagents.iter().map(|r| r.cost).sum();
                     self.flush.push(subagent_footer_line(n, total));
                     self.subagents.clear();
+                    self.subagent_detail = None; // batch gone — drop any open detail view.
                 }
             }
             PresenterEvent::Diff(diff) => {
@@ -302,6 +328,9 @@ impl App {
             PresenterEvent::Tasks(tasks) => {
                 self.flush.extend(crate::render::task_list_lines(&tasks));
                 self.flush.push(TextLine::default());
+                // Keep the latest list so the sticky panel stays visible during the turn (the
+                // scrollback copy scrolls away). An empty list collapses the panel.
+                self.tasks = tasks;
             }
             PresenterEvent::McpStatus(servers) => {
                 self.flush.extend(crate::render::mcp_status_lines(&servers));
@@ -309,6 +338,38 @@ impl App {
             }
             PresenterEvent::Done { .. } => self.done = true,
         }
+    }
+
+    /// The live task list (`update_tasks`), for the sticky tasks panel. Empty → panel hidden.
+    pub fn tasks(&self) -> &[forge_types::TodoItem] {
+        &self.tasks
+    }
+
+    /// Number of subagents currently running (between SubagentStart and SubagentResult). When `> 0`
+    /// the sticky subagents panel is shown.
+    pub fn running_subagents(&self) -> usize {
+        self.subagents.iter().filter(|r| !r.done).count()
+    }
+
+    /// Toggle the expandable detail view for the next running subagent (or close it if open). The
+    /// detail view swaps the preview region to one child's fuller progress log.
+    ///
+    /// Key-wiring hook: the shell (forge-cli render loop) should call this from a key handler —
+    /// add a `KeyKind` variant (e.g. mapped to Ctrl+O in `driver.rs::poll_key`) and route it here.
+    /// It isn't bound yet to avoid forcing an exhaustive-match break across the crate boundary in
+    /// this forge-tui-only pass; the rendering + toggle state are complete and unit-tested.
+    pub fn toggle_subagent_detail(&mut self) {
+        if self.subagent_detail.is_some() {
+            self.subagent_detail = None;
+            return;
+        }
+        // Open the first still-running child's detail; if none running, the most recent.
+        let idx = self
+            .subagents
+            .iter()
+            .position(|r| !r.done)
+            .or_else(|| self.subagents.len().checked_sub(1));
+        self.subagent_detail = idx;
     }
 
     /// Update the active temper label. The colored statusline segment is the live indicator —
@@ -831,27 +892,135 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
+    // Expanded detail view: one child's fuller progress log, swapped in over the running list.
+    if let Some(idx) = app.subagent_detail {
+        if let Some(row) = app.subagents.get(idx) {
+            frame.render_widget(
+                Paragraph::new(subagent_detail_lines(row, area.height)),
+                area,
+            );
+            return;
+        }
+    }
+
     // While a spawn_agents batch runs (and nothing is streaming), animate the still-running
     // children here in the live region; finished ones have already flowed to scrollback.
     let running: Vec<&SubRow> = app.subagents.iter().filter(|r| !r.done).collect();
-    if running.is_empty() {
+    if !running.is_empty() {
+        let spin = SPINNER[app.tick % SPINNER.len()];
+        let h = area.height as usize;
+        let mut lines: Vec<TextLine> = Vec::with_capacity(h);
+        // A header so the persistent panel reads as a distinct region, with the expand hint.
+        lines.push(TextLine::from(Span::styled(
+            format!("  ⚒ subagents ({} running)", running.len()),
+            Style::default().fg(TOOLCYAN).bold(),
+        )));
+        let body_h = h.saturating_sub(1);
+        for r in running.iter().take(body_h) {
+            lines.push(subagent_running_line(spin, &r.agent, &r.task, &r.last));
+        }
+        if running.len() > body_h {
+            lines.pop();
+            lines.push(TextLine::from(Span::styled(
+                format!("  … +{} more running", running.len() - body_h + 1),
+                Style::default().fg(DIM),
+            )));
+        }
+        frame.render_widget(Paragraph::new(lines), area);
         return;
     }
-    let spin = SPINNER[app.tick % SPINNER.len()];
-    let h = area.height as usize;
-    let mut lines: Vec<TextLine> = running
+
+    // Idle (no stream, no subagents): keep the live task list pinned so multi-step progress
+    // stays visible during the turn even after its scrollback copy scrolls off. Empty → nothing.
+    if !app.tasks.is_empty() {
+        frame.render_widget(
+            Paragraph::new(tasks_panel_lines(&app.tasks, area.height)),
+            area,
+        );
+    }
+}
+
+/// The sticky tasks panel (Task list always-visible): a header with the done/total count, then
+/// the items with their status glyph, sized to the fixed live region. When the list is longer
+/// than the region, the in-progress item is prioritized and the overflow is summarized.
+fn tasks_panel_lines(tasks: &[forge_types::TodoItem], height: u16) -> Vec<TextLine<'static>> {
+    use forge_types::TodoStatus;
+    let h = height as usize;
+    let done = tasks
         .iter()
-        .take(h)
-        .map(|r| subagent_running_line(spin, &r.agent, &r.task, &r.last))
-        .collect();
-    if running.len() > h {
-        lines.pop();
+        .filter(|t| t.status == TodoStatus::Done)
+        .count();
+    let mut lines = vec![TextLine::from(Span::styled(
+        format!("  ⚒ tasks ({done}/{} done)", tasks.len()),
+        Style::default().fg(ORANGE).bold(),
+    ))];
+    let body_h = h.saturating_sub(1);
+    // Prioritize showing in-progress + pending items; if everything won't fit, lead with the
+    // active item so the user always sees what's happening now.
+    let mut idxs: Vec<usize> = (0..tasks.len()).collect();
+    if tasks.len() > body_h {
+        idxs.sort_by_key(|&i| match tasks[i].status {
+            TodoStatus::InProgress => 0,
+            TodoStatus::Pending => 1,
+            TodoStatus::Done => 2,
+        });
+    }
+    let shown = idxs
+        .len()
+        .min(body_h.saturating_sub(usize::from(tasks.len() > body_h)));
+    for &i in idxs.iter().take(shown) {
+        let t = &tasks[i];
+        let style = match t.status {
+            TodoStatus::Done => Style::default().fg(DIM),
+            TodoStatus::InProgress => Style::default().fg(ORANGE).bold(),
+            TodoStatus::Pending => Style::default().fg(Color::Rgb(205, 205, 215)),
+        };
         lines.push(TextLine::from(Span::styled(
-            format!("  … +{} more running", running.len() - h + 1),
+            format!("    {} {}", t.status.marker(), truncate(&t.title, 60)),
+            style,
+        )));
+    }
+    if tasks.len() > shown {
+        lines.push(TextLine::from(Span::styled(
+            format!("    … +{} more", tasks.len() - shown),
             Style::default().fg(DIM),
         )));
     }
-    frame.render_widget(Paragraph::new(lines), area);
+    lines
+}
+
+/// The expanded detail view for one subagent: its label + task, then the tail of its progress log
+/// sized to the live region. This is the in-place expansion that fits the fixed inline viewport.
+///
+/// TODO(subagent-transcript): a *full* scrollable transcript (the child's whole chat/tool log, not
+/// just recent progress snippets) would need a fullscreen takeover like `Tui::run_fullscreen`
+/// (the `/config` wizard) — the inline viewport can't grow at runtime. The child's full transcript
+/// is persisted by core; that view would load it by subagent id and render it over an alt-screen,
+/// restoring the inline chat on exit. This compact log view is the in-viewport stand-in.
+fn subagent_detail_lines(row: &SubRow, height: u16) -> Vec<TextLine<'static>> {
+    let h = height as usize;
+    let mut lines = vec![TextLine::from(vec![
+        Span::styled(
+            format!("  ⚒ [{}] ", row.agent),
+            Style::default().fg(TOOLCYAN).bold(),
+        ),
+        Span::styled(truncate(&row.task, 52), Style::default().fg(DIM)),
+    ])];
+    let body_h = h.saturating_sub(1);
+    let start = row.log.len().saturating_sub(body_h);
+    if row.log.is_empty() {
+        lines.push(TextLine::from(Span::styled(
+            "    (no activity yet)",
+            Style::default().fg(DIM),
+        )));
+    }
+    for snippet in row.log.iter().skip(start) {
+        lines.push(TextLine::from(Span::styled(
+            format!("    {}", truncate(snippet, 70)),
+            Style::default().fg(Color::Rgb(205, 205, 215)),
+        )));
+    }
+    lines
 }
 
 fn render_permission(frame: &mut Frame, area: Rect, app: &App) {
@@ -872,12 +1041,37 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         .border_style(Style::default().fg(ORANGE))
         .padding(Padding::horizontal(1))
         .title(Span::styled(" message ", Style::default().fg(ORANGE)));
-    let line = TextLine::from(vec![
-        Span::styled("› ", Style::default().fg(ORANGE).bold()),
-        Span::raw(app.input.clone()),
-        Span::styled("▌", Style::default().fg(ORANGE)),
-    ]);
-    frame.render_widget(Paragraph::new(line).block(block), area);
+    let mut spans = vec![Span::styled("› ", Style::default().fg(ORANGE).bold())];
+    spans.extend(input_spans(&app.input));
+    spans.push(Span::styled("▌", Style::default().fg(ORANGE)));
+    frame.render_widget(Paragraph::new(TextLine::from(spans)).block(block), area);
+}
+
+/// Build the styled spans for the input buffer, highlighting a `/command` token wherever it
+/// appears on the line (not only as the first word) so e.g. `please run /orchestrate` shows
+/// `/orchestrate` in the command accent. The cursor sits at the end of the buffer, so the token
+/// being edited is selected from there. A `//literal` escape stays plain.
+fn input_spans(input: &str) -> Vec<Span<'static>> {
+    if input.is_empty() {
+        return vec![];
+    }
+    match crate::commands::slash_token_at(input, input.len()) {
+        Some(tok) => {
+            let mut out = Vec::with_capacity(3);
+            if tok.start > 0 {
+                out.push(Span::raw(input[..tok.start].to_string()));
+            }
+            out.push(Span::styled(
+                input[tok.start..tok.end].to_string(),
+                Style::default().fg(ORANGE).bold(),
+            ));
+            if tok.end < input.len() {
+                out.push(Span::raw(input[tok.end..].to_string()));
+            }
+            out
+        }
+        None => vec![Span::raw(input.to_string())],
+    }
 }
 
 /// A real status bar: working state · mesh tier+model · cost, with right-aligned key
@@ -1514,5 +1708,150 @@ mod tests {
     fn esc_quits() {
         let mut buf = "whatever".to_string();
         assert_eq!(handle_key(&mut buf, KeyKind::Esc), InputOutcome::Quit);
+    }
+
+    fn todo(title: &str, status: forge_types::TodoStatus) -> forge_types::TodoItem {
+        forge_types::TodoItem {
+            title: title.into(),
+            status,
+        }
+    }
+
+    #[test]
+    fn tasks_panel_visible_while_active_and_absent_when_empty() {
+        use forge_types::TodoStatus;
+        let mut app = App::default();
+        // No tasks → no sticky panel in the idle preview region.
+        assert!(!screen(&app).contains("tasks ("), "panel hidden when empty");
+
+        app.apply(PresenterEvent::Tasks(vec![
+            todo("scan repo", TodoStatus::Done),
+            todo("write tests", TodoStatus::InProgress),
+            todo("ship it", TodoStatus::Pending),
+        ]));
+        let s = screen(&app);
+        assert!(s.contains("tasks (1/3 done)"), "panel header + count: {s}");
+        // The in-progress item is shown with its glyph (prioritized into the small region).
+        assert!(s.contains('◐'), "in-progress glyph shown: {s}");
+
+        // Emptying the list collapses the panel.
+        app.apply(PresenterEvent::Tasks(vec![]));
+        assert!(
+            !screen(&app).contains("tasks ("),
+            "panel collapses when the list empties"
+        );
+    }
+
+    #[test]
+    fn tasks_panel_hidden_while_streaming_takes_priority() {
+        use forge_types::TodoStatus;
+        let mut app = App::default();
+        app.apply(PresenterEvent::Tasks(vec![todo("a", TodoStatus::Pending)]));
+        // A live reply owns the preview region over the tasks panel.
+        app.apply(PresenterEvent::AssistantDelta("streaming now".into()));
+        let s = screen(&app);
+        assert!(s.contains("streaming now"), "stream shown: {s}");
+        assert!(!s.contains("tasks ("), "tasks yield to the live stream");
+    }
+
+    #[test]
+    fn subagent_panel_present_while_running_absent_when_done() {
+        let mut app = App::default();
+        assert_eq!(app.running_subagents(), 0);
+        app.apply(PresenterEvent::SubagentStart {
+            id: "a".into(),
+            agent: "reviewer".into(),
+            task: "review the diff".into(),
+        });
+        assert_eq!(app.running_subagents(), 1);
+        let s = screen(&app);
+        assert!(s.contains("subagents (1 running)"), "panel header: {s}");
+        assert!(s.contains("reviewer"), "agent label shown: {s}");
+
+        app.apply(PresenterEvent::SubagentResult {
+            id: "a".into(),
+            agent: "reviewer".into(),
+            ok: true,
+            summary: "ok".into(),
+            cost_usd: 0.001,
+        });
+        assert_eq!(
+            app.running_subagents(),
+            0,
+            "no running children after result"
+        );
+        assert!(
+            !screen(&app).contains("subagents ("),
+            "panel collapses when the batch finishes"
+        );
+    }
+
+    #[test]
+    fn subagent_detail_toggle_shows_progress_log() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::SubagentStart {
+            id: "a".into(),
+            agent: "general".into(),
+            task: "find call sites".into(),
+        });
+        app.apply(PresenterEvent::SubagentProgress {
+            id: "a".into(),
+            snippet: "scanning module one\nscanning module two".into(),
+        });
+        // Compact running list by default — not the detail view.
+        assert!(screen(&app).contains("subagents (1 running)"));
+
+        app.toggle_subagent_detail();
+        let s = screen(&app);
+        assert!(s.contains("[general]"), "detail header: {s}");
+        assert!(
+            s.contains("scanning module two"),
+            "progress log line shown: {s}"
+        );
+
+        // Toggling again closes it back to the running list.
+        app.toggle_subagent_detail();
+        assert!(
+            screen(&app).contains("subagents (1 running)"),
+            "detail closed"
+        );
+    }
+
+    #[test]
+    fn input_highlights_slash_command_mid_line() {
+        let app = App {
+            input: "please run /orchestrate scan".to_string(),
+            ..Default::default()
+        };
+        let spans = input_spans(&app.input);
+        // The `/orchestrate` token is its own bold-orange span.
+        let hi = spans
+            .iter()
+            .find(|s| s.content.contains("/orchestrate"))
+            .expect("slash token has its own span");
+        assert!(
+            hi.style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "command token is highlighted bold"
+        );
+        // The preceding prose is a separate, unstyled span.
+        assert!(
+            spans.iter().any(|s| s.content == "please run "),
+            "prose kept verbatim before the token"
+        );
+    }
+
+    #[test]
+    fn input_does_not_highlight_double_slash_escape() {
+        let spans = input_spans("//literal text");
+        // No bold command span — the whole thing is plain (escape preserved).
+        assert!(
+            !spans.iter().any(|s| s
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)),
+            "// escape is not highlighted as a command"
+        );
     }
 }

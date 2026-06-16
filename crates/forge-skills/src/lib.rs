@@ -101,6 +101,9 @@ pub struct SkillMeta {
     pub resources: Vec<String>,
     pub dir: PathBuf,
     pub scope: Scope,
+    /// For a built-in skill compiled into the binary, its methodology body (there is no `dir` to
+    /// read from). `None` for on-disk skills, whose body + resources load from `dir` at use time.
+    pub body: Option<String>,
 }
 
 /// A fully-loaded skill: the methodology body plus any readable bundled resources. Built by
@@ -119,12 +122,16 @@ impl Skill {
     /// missing/unreadable resource is recorded as a warning and the skill still runs.
     pub fn load(meta: &SkillMeta) -> Skill {
         let mut warnings = Vec::new();
-        let body = match std::fs::read_to_string(meta.dir.join("SKILL.md")) {
-            Ok(raw) => frontmatter::split(&raw).1.trim().to_string(),
-            Err(e) => {
-                warnings.push(format!("skill {}: cannot read SKILL.md ({e})", meta.name));
-                String::new()
-            }
+        // A built-in skill carries its body inline (no dir to read); on-disk skills read SKILL.md.
+        let body = match &meta.body {
+            Some(b) => b.clone(),
+            None => match std::fs::read_to_string(meta.dir.join("SKILL.md")) {
+                Ok(raw) => frontmatter::split(&raw).1.trim().to_string(),
+                Err(e) => {
+                    warnings.push(format!("skill {}: cannot read SKILL.md ({e})", meta.name));
+                    String::new()
+                }
+            },
         };
         let mut resources = Vec::new();
         for res in &meta.resources {
@@ -142,13 +149,14 @@ impl Skill {
     }
 
     /// The full guidance block injected into the turn: the methodology body followed by each
-    /// loaded resource under a header.
+    /// loaded resource under a header. Rebranded so an imported skill presents as Forge-native
+    /// (see [`forge_native`]).
     pub fn guidance(&self) -> String {
         let mut out = self.body.clone();
         for (name, contents) in &self.resources {
             out.push_str(&format!("\n\n--- resource: {name} ---\n{contents}"));
         }
-        out
+        forge_native(&out)
     }
 }
 
@@ -202,6 +210,14 @@ impl Catalog {
         }
         for dir in &sources.skills {
             cat.load_skills_dir(dir);
+        }
+        // Inject built-in Forge skills last, at Builtin scope: insert_skill keeps any same-named
+        // User/Project skill (higher scope), so builtins only fill gaps — `orchestrate` is always
+        // present even with nothing imported.
+        for (name, raw) in BUILTIN_SKILLS {
+            if let Some(meta) = builtin_skill(name, raw) {
+                cat.insert_skill(meta);
+            }
         }
         cat
     }
@@ -346,7 +362,7 @@ impl Catalog {
             }
             out.push(Entry {
                 name: meta.name.clone(),
-                description: meta.description.clone(),
+                description: forge_native(&meta.description),
                 scope: meta.scope,
                 is_skill: true,
                 shadows: self.shadows(&meta.name, meta.scope),
@@ -369,10 +385,10 @@ impl Catalog {
                 .into_iter()
                 .find_map(|t| self.skills.get(&t))
             {
-                return meta.description.clone();
+                return forge_native(&meta.description);
             }
         }
-        cmd.description.clone()
+        forge_native(&cmd.description)
     }
 
     /// Fuzzy-rank entries against `query` (prefix beats subsequence), best-first, capped at
@@ -485,7 +501,7 @@ impl Catalog {
         let mut out: Vec<(String, String)> = self
             .skills
             .values()
-            .map(|m| (m.name.clone(), m.description.clone()))
+            .map(|m| (m.name.clone(), forge_native(&m.description)))
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
@@ -516,6 +532,40 @@ impl Catalog {
         }
         out
     }
+}
+
+/// Rewrite skill text so an imported Claude Code / Codex skill presents as a NATIVE Forge skill:
+/// provenance branding and harness self-references are remapped to Forge and its real tools. This
+/// is a surface rebrand of the methodology text + descriptions shown to the model — it changes no
+/// behavior, just makes every skill read as if it shipped with Forge (the user's "even imported
+/// skills think they are native Forge skills"). Order matters: specific phrases before generic.
+pub fn forge_native(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut s = text.to_string();
+    for (from, to) in [
+        ("Claude Code", "Forge"),
+        ("claude code", "Forge"),
+        ("Claude resources", "Forge resources"),
+        ("the `Skill` tool", "the `use_skill` tool"),
+        ("the Skill tool", "the `use_skill` tool"),
+        ("`Skill` tool", "`use_skill` tool"),
+        ("Skill tool", "use_skill tool"),
+        ("Agent tool", "spawn_agents tool"),
+        ("~/.claude/skills", "Forge's skill library"),
+        ("~/.claude/commands", "Forge's command library"),
+        ("~/.claude/agents", "Forge's agent library"),
+        ("~/.claude", "Forge"),
+        ("~/.codex/prompts", "Forge's command library"),
+        ("~/.codex", "Forge"),
+        ("Claude", "Forge"),
+    ] {
+        if s.contains(from) {
+            s = s.replace(from, to);
+        }
+    }
+    s
 }
 
 /// Extract the text inside each `**…**` markdown-bold span in `text`. Inner text is trimmed and
@@ -623,6 +673,31 @@ fn parse_skill_meta(raw: &str, stem: &str, scope: Scope, dir: &Path) -> Result<S
         resources,
         dir: dir.to_path_buf(),
         scope,
+        body: None,
+    })
+}
+
+/// The Forge skills compiled into the binary (`Scope::Builtin`, lowest precedence). `orchestrate`
+/// ships as a first-class Forge feature so it is ALWAYS available via `use_skill`/`/orchestrate`,
+/// with zero import — a user/project skill of the same name still overrides it. See
+/// docs/features/command-skill-system.md.
+const BUILTIN_SKILLS: &[(&str, &str)] = &[(
+    "orchestrate",
+    include_str!("../builtin/orchestrate/SKILL.md"),
+)];
+
+/// Build a `Scope::Builtin` [`SkillMeta`] from an embedded `SKILL.md`, carrying its body inline.
+fn builtin_skill(name: &str, raw: &str) -> Option<SkillMeta> {
+    let (fm_text, body) = frontmatter::split(raw);
+    let fm = frontmatter::parse(fm_text.unwrap_or("")).ok()?;
+    Some(SkillMeta {
+        name: fm.scalar("name").unwrap_or_else(|| name.to_string()),
+        description: fm.scalar("description").unwrap_or_default(),
+        tier: fm.scalar("tier").and_then(|t| parse_tier(&t)),
+        resources: Vec::new(),
+        dir: PathBuf::from("<builtin>"),
+        scope: Scope::Builtin,
+        body: Some(body.trim().to_string()),
     })
 }
 

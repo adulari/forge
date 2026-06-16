@@ -183,6 +183,9 @@ impl Tui {
                     KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::Esc
                     }
+                    KeyCode::Char('o') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyKind::ToggleSubagentDetail
+                    }
                     KeyCode::Char(c) => KeyKind::Char(c),
                     KeyCode::Backspace => KeyKind::Backspace,
                     KeyCode::Enter => KeyKind::Enter,
