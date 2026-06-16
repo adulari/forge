@@ -526,3 +526,59 @@ fn command_wins_namespace_over_same_named_skill() {
         1
     );
 }
+
+#[test]
+fn forge_native_rebrands_claude_provenance() {
+    let out =
+        forge_native("Use the Skill tool to discover Claude Code resources in ~/.claude/skills.");
+    assert!(!out.contains("Claude"), "should not mention Claude: {out}");
+    assert!(
+        !out.contains("~/.claude"),
+        "should not mention ~/.claude: {out}"
+    );
+    assert!(out.contains("use_skill"));
+    assert!(out.contains("Forge"));
+}
+
+#[test]
+fn skill_guidance_is_rebranded_forge_native() {
+    let t = Tmp::new();
+    t.skill(
+        "user",
+        "demo",
+        "---\nname: demo\ndescription: d\n---\nRun this in Claude Code via the Skill tool.",
+    );
+    let cat = t.load();
+    let g = cat.skill_guidance("demo").unwrap();
+    assert!(!g.contains("Claude Code"), "guidance not rebranded: {g}");
+    assert!(g.contains("Forge"));
+}
+
+#[test]
+fn orchestrate_is_a_builtin_skill_with_no_import() {
+    // Empty user/project scopes: orchestrate must still be present (compiled-in builtin).
+    let t = Tmp::new();
+    let cat = t.load();
+    let g = cat
+        .skill_guidance("orchestrate")
+        .expect("builtin orchestrate must be available");
+    assert!(g.contains("Forge"));
+    assert!(!g.contains("Claude"), "builtin must be Forge-native: {g}");
+    assert!(cat.skill_listing().iter().any(|(n, _)| n == "orchestrate"));
+}
+
+#[test]
+fn a_user_orchestrate_overrides_the_builtin() {
+    let t = Tmp::new();
+    t.skill(
+        "user",
+        "orchestrate",
+        "---\nname: orchestrate\ndescription: custom\n---\nMY CUSTOM ORCHESTRATE BODY.",
+    );
+    let cat = t.load();
+    let g = cat.skill_guidance("orchestrate").unwrap();
+    assert!(
+        g.contains("MY CUSTOM ORCHESTRATE BODY"),
+        "user copy should win: {g}"
+    );
+}

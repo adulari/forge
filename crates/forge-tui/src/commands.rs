@@ -143,6 +143,65 @@ pub enum CommandAction {
     Unknown(String),
 }
 
+/// A `/command` token detected somewhere in the input line, used to drive highlighting and
+/// autocomplete. Slash commands are recognized at ANY whitespace-delimited position (not just
+/// the first word), so `please run /orchestrate scan` highlights+completes `/orchestrate`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashToken {
+    /// Byte offset of the leading `/` in the input.
+    pub start: usize,
+    /// Byte offset just past the command name (where args/whitespace begin).
+    pub end: usize,
+    /// The command name without the leading slash (the autocomplete/highlight query).
+    pub name: String,
+}
+
+/// Find the `/command` token to drive the palette for, given the cursor position. We scan every
+/// whitespace-delimited word; a word qualifies when it begins with exactly one `/` (a `//literal`
+/// escape is skipped). The token *under or just before* the cursor wins, so the palette tracks
+/// the word being edited; otherwise the last slash-token on the line is used. Returns `None` when
+/// no slash-command token is present.
+pub fn slash_token_at(input: &str, cursor: usize) -> Option<SlashToken> {
+    let mut best: Option<SlashToken> = None;
+    let mut last: Option<SlashToken> = None;
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Advance to the start of a word (skip whitespace).
+        if (bytes[i] as char).is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let word_start = i;
+        // Consume to the next whitespace (word end).
+        while i < bytes.len() && !(bytes[i] as char).is_whitespace() {
+            i += 1;
+        }
+        let word_end = i;
+        let word = &input[word_start..word_end];
+        // A slash command is a single leading `/` followed by a name; `//x` is a literal escape.
+        if let Some(rest) = word.strip_prefix('/') {
+            if rest.starts_with('/') {
+                continue; // `//literal` escape — not a command token.
+            }
+            // The command name runs until the first whitespace (already the word) — but stop the
+            // highlight at the name so `/cmd` in `/cmd arg` only spans the command word itself.
+            let name = rest.to_string();
+            let tok = SlashToken {
+                start: word_start,
+                end: word_end,
+                name,
+            };
+            // Prefer the token the cursor is editing (cursor within [start, end]).
+            if cursor >= tok.start && cursor <= tok.end {
+                best = Some(tok.clone());
+            }
+            last = Some(tok);
+        }
+    }
+    best.or(last)
+}
+
 /// Parse a submitted command line (`"/resume ab12"`). The leading `/` is required; a `//`
 /// prefix is NOT a command (it escapes to a literal prompt — handled by the caller).
 pub fn parse_command(line: &str) -> CommandAction {
@@ -618,6 +677,54 @@ mod tests {
         p.query = "review".into();
         p.clamp();
         assert_eq!(p.selected_name().as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn slash_token_detected_at_leading_position() {
+        let t = slash_token_at("/orchestrate scan repo", 0).unwrap();
+        assert_eq!(t.name, "orchestrate");
+        assert_eq!(t.start, 0);
+        assert_eq!(t.end, "/orchestrate".len());
+    }
+
+    #[test]
+    fn slash_token_detected_mid_line() {
+        let input = "please run /orchestrate scan repo";
+        let off = input.find("/orchestrate").unwrap();
+        // Cursor anywhere on the line still finds the only slash-token.
+        let t = slash_token_at(input, input.len()).unwrap();
+        assert_eq!(t.name, "orchestrate");
+        assert_eq!(t.start, off);
+    }
+
+    #[test]
+    fn slash_token_under_cursor_wins_when_multiple() {
+        // Two slash tokens; the one the cursor is editing is selected.
+        let input = "/help and /clear";
+        let clear_off = input.find("/clear").unwrap();
+        // Cursor at the end of `/clear` → that token.
+        let t = slash_token_at(input, input.len()).unwrap();
+        assert_eq!(t.name, "clear");
+        assert_eq!(t.start, clear_off);
+        // Cursor on `/help` (offset 3, inside the first token) → first token.
+        let t = slash_token_at(input, 3).unwrap();
+        assert_eq!(t.name, "help");
+        assert_eq!(t.start, 0);
+    }
+
+    #[test]
+    fn double_slash_is_literal_not_a_command() {
+        assert!(slash_token_at("//literal", 0).is_none());
+        assert!(slash_token_at("run //escaped here", 18.min("run //escaped here".len())).is_none());
+        // A real command alongside an escape is still detected.
+        let t = slash_token_at("//lit and /help", 15).unwrap();
+        assert_eq!(t.name, "help");
+    }
+
+    #[test]
+    fn no_slash_token_returns_none() {
+        assert!(slash_token_at("just plain text", 5).is_none());
+        assert!(slash_token_at("", 0).is_none());
     }
 
     #[test]

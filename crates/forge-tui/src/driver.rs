@@ -108,6 +108,9 @@ impl Presenter for ChannelPresenter {
 /// and only the small pinned live region is redrawn each frame.
 pub struct Tui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    /// Current inline viewport height. The live region grows when the task/subagent panels are
+    /// active (see [`App::live_height`]); we recreate the viewport when this changes.
+    height: u16,
 }
 
 /// Install (once) a panic hook that disables raw mode before the default hook prints, so a
@@ -139,7 +142,31 @@ impl Tui {
                 viewport: Viewport::Inline(LIVE_H),
             },
         )?;
-        Ok(Self { terminal })
+        Ok(Self {
+            terminal,
+            height: LIVE_H,
+        })
+    }
+
+    /// Resize the inline viewport when the desired live-region height changes (task/subagent
+    /// panels appeared or went away). Recreating the terminal is how the inline viewport changes
+    /// height — same mechanism as [`Tui::run_fullscreen`]; a no-op when the height is unchanged.
+    fn sync_viewport(&mut self, desired: u16) {
+        let desired = desired.max(LIVE_H);
+        if desired == self.height {
+            return;
+        }
+        let backend = CrosstermBackend::new(io::stdout());
+        if let Ok(t) = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(desired),
+            },
+        ) {
+            self.terminal = t;
+            let _ = self.terminal.clear();
+            self.height = desired;
+        }
     }
 
     /// Current terminal width (for building width-dependent scrollback like the banner).
@@ -161,6 +188,7 @@ impl Tui {
     }
 
     pub fn draw(&mut self, app: &App) {
+        self.sync_viewport(app.live_height());
         let _ = self.terminal.draw(|f| app::render_live(f, app));
     }
 
@@ -182,6 +210,9 @@ impl Tui {
                 let key = match k.code {
                     KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::Esc
+                    }
+                    KeyCode::Char('o') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyKind::ToggleSubagentDetail
                     }
                     KeyCode::Char(c) => KeyKind::Char(c),
                     KeyCode::Backspace => KeyKind::Backspace,
@@ -216,7 +247,7 @@ impl Tui {
         self.terminal = Terminal::with_options(
             backend,
             TerminalOptions {
-                viewport: Viewport::Inline(LIVE_H),
+                viewport: Viewport::Inline(self.height),
             },
         )?;
         let _ = self.terminal.clear();

@@ -135,6 +135,10 @@ pub enum StreamEvent {
         summary: String,
         cost_usd: f64,
     },
+    /// The task list changed inside a bridged turn (the bridge model called `update_tasks` in the
+    /// `mcp-serve` process). Tailed from the out-of-band sink so the TUI's sticky task panel
+    /// updates LIVE during the turn, not only on completion (CLI bridge only).
+    Tasks(Vec<forge_types::TodoItem>),
 }
 
 /// A sink for [`StreamEvent`]s as they arrive (text, reasoning, tool activity).

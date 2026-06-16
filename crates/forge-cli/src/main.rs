@@ -274,6 +274,19 @@ fn init_tracing() {
     }
 }
 
+/// Keep the command palette in sync with the `/command` token at the cursor (input end): open +
+/// filter when one is present anywhere on the line, close when not (`//` escape yields no token).
+fn sync_palette_to_slash_token(app: &mut forge_tui::App) {
+    match forge_tui::slash_token_at(&app.input, app.input.len()) {
+        Some(tok) if app.palette.open => {
+            app.palette.query = tok.name;
+            app.palette.clamp();
+        }
+        Some(tok) => app.palette.open_with(&tok.name),
+        None => app.palette.close(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -1791,18 +1804,51 @@ async fn run_chat_tui(
                     KeyKind::Up => app.palette.move_up(),
                     KeyKind::Down => app.palette.move_down(),
                     KeyKind::Tab => {
-                        if let Some(name) = app.palette.selected_name() {
-                            app.input = format!("/{name}");
-                            app.palette.query = name.to_string();
+                        if let Some(name) = app.palette.selected_name().map(|s| s.to_string()) {
+                            // Replace the `/command` token in place (mid-line aware), not the
+                            // whole input — so `run /or<Tab>` completes to `run /orchestrate`.
+                            if let Some(tok) =
+                                forge_tui::slash_token_at(&app.input, app.input.len())
+                            {
+                                app.input
+                                    .replace_range(tok.start..tok.end, &format!("/{name}"));
+                            } else {
+                                app.input = format!("/{name}");
+                            }
+                            app.palette.query = name;
                             app.palette.clamp();
                         }
                     }
                     KeyKind::Enter => {
-                        let line = app
-                            .palette
-                            .selected_name()
-                            .map(|n| format!("/{n}"))
-                            .unwrap_or_else(|| app.input.clone());
+                        let leading = app.input.starts_with('/') && !app.input.starts_with("//");
+                        if !leading {
+                            // Mid-line `/command`: Enter accepts the highlighted suggestion in
+                            // place (replacing just the token) and keeps editing — it does NOT
+                            // dispatch, so the surrounding prose is preserved. A leading command
+                            // still dispatches (the branch below).
+                            if let Some(name) = app.palette.selected_name().map(|s| s.to_string()) {
+                                if let Some(tok) =
+                                    forge_tui::slash_token_at(&app.input, app.input.len())
+                                {
+                                    app.input
+                                        .replace_range(tok.start..tok.end, &format!("/{name}"));
+                                }
+                            }
+                            app.palette.close();
+                            continue;
+                        }
+                        // If the user typed args after the command, dispatch exactly what they
+                        // wrote (`/loop do it`); only autocomplete-to-selection when the line is
+                        // the bare command token, so args are never dropped.
+                        let has_args = app.input.trim().contains(char::is_whitespace);
+                        let line = if has_args {
+                            app.input.clone()
+                        } else {
+                            app.palette
+                                .selected_name()
+                                .map(|n| format!("/{n}"))
+                                .unwrap_or_else(|| app.input.clone())
+                        };
                         app.palette.close();
                         app.input.clear();
                         match dispatch_command(
@@ -1874,23 +1920,13 @@ async fn run_chat_tui(
                     }
                     KeyKind::Char(c) => {
                         app.input.push(c);
-                        if app.input.starts_with("//") {
-                            app.palette.close(); // `//` escapes to a literal prompt
-                        } else {
-                            app.palette.query = app.input[1..].to_string();
-                            app.palette.clamp();
-                        }
+                        sync_palette_to_slash_token(&mut app);
                     }
                     KeyKind::Backspace => {
                         app.input.pop();
-                        if app.input.starts_with('/') {
-                            app.palette.query = app.input[1..].to_string();
-                            app.palette.clamp();
-                        } else {
-                            app.palette.close();
-                        }
+                        sync_palette_to_slash_token(&mut app);
                     }
-                    KeyKind::CycleTemper => {}
+                    KeyKind::CycleTemper | KeyKind::ToggleSubagentDetail => {}
                 }
                 continue;
             }
@@ -1955,8 +1991,19 @@ async fn run_chat_tui(
                         app.picker.query.pop();
                         app.picker.clamp();
                     }
-                    KeyKind::Tab | KeyKind::CycleTemper => {}
+                    KeyKind::Tab | KeyKind::CycleTemper | KeyKind::ToggleSubagentDetail => {}
                 }
+                continue;
+            }
+
+            // Ctrl+O opens the full-screen scrollable subagent transcript browser (a snapshot of
+            // the current batch's children — running or just-finished). No-op when none exist.
+            if matches!(key, KeyKind::ToggleSubagentDetail) {
+                let views = app.subagent_views();
+                if !views.is_empty() {
+                    tui.run_fullscreen(|| forge_tui::run_subagent_transcript(&views))?;
+                }
+                dirty = true;
                 continue;
             }
 
@@ -2120,9 +2167,10 @@ async fn run_chat_tui(
                         break;
                     }
                     InputOutcome::Editing => {
-                        // Typing `/` as the first character opens the command palette.
-                        if app.input.starts_with('/') && !app.input.starts_with("//") {
-                            app.palette.open_with(&app.input[1..]);
+                        // A `/command` token anywhere on the line opens the palette (not only at
+                        // the start) — mid-line autocomplete + highlighting.
+                        if let Some(tok) = forge_tui::slash_token_at(&app.input, app.input.len()) {
+                            app.palette.open_with(&tok.name);
                         }
                     }
                 }
