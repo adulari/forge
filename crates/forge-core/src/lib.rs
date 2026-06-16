@@ -936,6 +936,12 @@ impl Session {
                                 summary,
                                 cost_usd,
                             }),
+                            // A bridged turn's `update_tasks` (tailed from the sink): surface the
+                            // list live so the sticky panel updates during the turn. The parent's
+                            // post-turn store reload (below) keeps `self.tasks` authoritative.
+                            StreamEvent::Tasks(tasks) => {
+                                presenter.emit(PresenterEvent::Tasks(tasks))
+                            }
                         }
                     };
                     let fut = provider.complete(&active_model, &self.transcript, &specs, &mut sink);
