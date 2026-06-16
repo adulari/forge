@@ -19,6 +19,7 @@ use forge_types::PermissionMode;
 use forge_types::TaskTier;
 
 mod mcp_serve;
+mod replay;
 
 /// Env var carrying the current subagent nesting depth across the process boundary (forge →
 /// claude/codex → `forge mcp-serve`). mcp-serve advertises `spawn_agents` only while
@@ -78,6 +79,12 @@ enum Command {
     },
     /// List past sessions (newest first).
     Sessions,
+    /// Replay a past session from the record: one id prints its turn-by-turn transcript
+    /// (model, tokens, cost, time per turn); two ids diff their summaries.
+    Replay {
+        /// One session id to reconstruct, or two to diff (git-style prefixes accepted).
+        ids: Vec<String>,
+    },
     /// List discovered slash commands + skills (project and user scope) with their descriptions.
     Commands,
     /// Show the auto-discovered model catalog and the mesh's best pick per tier.
@@ -254,6 +261,7 @@ async fn main() -> Result<()> {
             model,
         } => chat(mock, mode, resume, plain, model).await,
         Command::Sessions => sessions(),
+        Command::Replay { ids } => replay_cmd(&ids),
         Command::Commands => commands_cmd(),
         Command::Models { probe } => models(probe).await,
         Command::Auth { provider } => auth(&provider),
@@ -599,6 +607,47 @@ fn sessions() -> Result<()> {
             "{id}  ${:>8.4}  {:>3} msgs  {}",
             s.total_cost_usd, s.message_count, preview
         );
+    }
+    Ok(())
+}
+
+/// `forge replay <id>` reconstructs a session's transcript; `forge replay <a> <b>` diffs two.
+fn replay_cmd(ids: &[String]) -> Result<()> {
+    let store = open_store()?;
+    let resolve = |prefix: &str| -> Result<String> {
+        let mut matches = store
+            .matching_session_ids(prefix)
+            .with_context(|| format!("resolving session {prefix}"))?;
+        match matches.len() {
+            0 => anyhow::bail!("no session matches '{prefix}' — see `forge sessions`"),
+            1 => Ok(matches.remove(0)),
+            n => anyhow::bail!("'{prefix}' is ambiguous ({n} sessions) — use more characters"),
+        }
+    };
+    match ids {
+        [one] => {
+            let id = resolve(one)?;
+            let entries = store.load_replay(&id).context("loading replay")?;
+            if entries.is_empty() {
+                println!("session {} has no messages", &id[..id.len().min(8)]);
+                return Ok(());
+            }
+            print!(
+                "{}",
+                replay::render_transcript(&id[..id.len().min(8)], &entries)
+            );
+        }
+        [a, b] => {
+            let (ida, idb) = (resolve(a)?, resolve(b)?);
+            let ea = store.load_replay(&ida).context("loading replay a")?;
+            let eb = store.load_replay(&idb).context("loading replay b")?;
+            let d = replay::diff(&ea, &eb);
+            print!(
+                "{}",
+                replay::render_diff(&ida[..ida.len().min(8)], &idb[..idb.len().min(8)], &d)
+            );
+        }
+        _ => anyhow::bail!("usage: forge replay <id> [<id-to-diff-against>]"),
     }
     Ok(())
 }
