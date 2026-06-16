@@ -34,13 +34,16 @@ prompts (rules outrank the mode by design).
 it or to disable a specific provider/model. Workaround used in practice: set the key
 to a junk value so auth fails and the mesh benches/avoids it.
 
-**Planned fix (deferred):**
-- `forge auth --remove <provider>` (delete the keyring entry).
-- A config switch to disable a provider or specific model ids from discovery/routing
-  (e.g. `[mesh] disabled = ["openai", "gemini::antigravity-preview-05-2026"]`).
-- A `forge models --clear` / `/health clear` to wipe stale benches.
+**Shipped:**
+- `forge auth --remove <provider>` deletes the keyring entry (idempotent — reports if nothing
+  was stored).
+- `[mesh] disabled = ["openai", "gemini::antigravity-preview-05-2026"]` excludes a provider
+  (bare prefix → all its `provider::*`) or an exact model id from discovery + routing, so the
+  mesh never routes to or fails over onto it. Filtered in `discover_catalog` via
+  `forge_config::is_model_disabled`; an explicit `--model` pin still overrides (deliberate).
+- `forge models --clear` wipes all stale model benches (`Store::clear_all_model_health`).
 
-**Status:** documented; build later.
+**Status:** shipped + tested (`is_model_disabled`, `clear_all_model_health`).
 
 ## Shell tool is POSIX-only (Windows gap)
 

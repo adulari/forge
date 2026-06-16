@@ -354,6 +354,12 @@ impl Store {
         Ok(())
     }
 
+    /// Clear every model bench (the `forge models --clear` rescan reset). Returns the number of
+    /// benched rows removed so the caller can report it.
+    pub fn clear_all_model_health(&self) -> Result<usize> {
+        Ok(self.lock()?.execute("DELETE FROM model_health", [])?)
+    }
+
     /// Snapshot of models still benched as of `now` (epoch secs) — cooldown not yet elapsed.
     pub fn benched_models(&self, now: i64) -> Result<forge_types::ModelHealth> {
         let conn = self.lock()?;
@@ -1405,6 +1411,16 @@ mod tests {
         );
         store.clear_model_health("m").unwrap();
         assert!(store.benched_models(500).unwrap().is_empty());
+    }
+
+    #[test]
+    fn clear_all_model_health_wipes_every_bench() {
+        let store = Store::open_in_memory().unwrap();
+        store.bench_model("a", 2000, "rate-limited").unwrap();
+        store.bench_model("b", 2000, "auth failed").unwrap();
+        assert_eq!(store.clear_all_model_health().unwrap(), 2);
+        assert!(store.benched_models(500).unwrap().is_empty());
+        assert_eq!(store.clear_all_model_health().unwrap(), 0, "idempotent");
     }
 
     #[test]
