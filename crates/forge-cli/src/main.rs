@@ -1996,30 +1996,29 @@ async fn run_chat_tui(
                 continue;
             }
 
-            // Subagent transcript browser (Ctrl+O): rendered in the live region by the normal
-            // loop, so the selected child's log auto-updates as progress streams in. While open it
-            // OWNS the keys (scroll / switch agent / close); normal input + palette are skipped.
-            if app.transcript_open() {
-                match key {
-                    KeyKind::Esc | KeyKind::Char('q') | KeyKind::ToggleSubagentDetail => {
-                        app.close_transcript()
-                    }
-                    KeyKind::Up | KeyKind::Char('k') => app.transcript_scroll(-1),
-                    KeyKind::Down | KeyKind::Char('j') => app.transcript_scroll(1),
-                    KeyKind::Char('u') => app.transcript_scroll(-10),
-                    KeyKind::Char('d') | KeyKind::Char(' ') => app.transcript_scroll(10),
-                    KeyKind::Char('g') => app.transcript_scroll(isize::MIN),
-                    KeyKind::Char('G') => app.transcript_scroll(isize::MAX),
-                    KeyKind::Tab => app.transcript_select(1),
-                    KeyKind::CycleTemper => app.transcript_select(-1),
-                    _ => {}
-                }
-                dirty = true;
-                continue;
-            }
-            // Ctrl+O opens the transcript browser (no-op when no subagents exist this batch).
+            // Ctrl+O opens the full-screen subagent transcript browser on the ALTERNATE screen
+            // (never pollutes the chat scrollback). The refresh closure drains pending presenter
+            // events each frame so the selected child's log AUTO-UPDATES while open; a
+            // permission/question that can't be answered from the modal is safely declined.
             if matches!(key, KeyKind::ToggleSubagentDetail) {
-                app.toggle_transcript();
+                if !app.subagent_views().is_empty() {
+                    tui.run_fullscreen(|| {
+                        forge_tui::run_subagent_transcript(|| {
+                            while let Ok(msg) = rx.try_recv() {
+                                match msg {
+                                    UiMsg::Event(e) => app.apply(e),
+                                    UiMsg::Permission { reply, .. } => {
+                                        let _ = reply.send(false);
+                                    }
+                                    UiMsg::Question { reply, .. } => {
+                                        let _ = reply.send(forge_tui::NO_ANSWER.to_string());
+                                    }
+                                }
+                            }
+                            app.subagent_views()
+                        })
+                    })?;
+                }
                 dirty = true;
                 continue;
             }

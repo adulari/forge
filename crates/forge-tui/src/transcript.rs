@@ -1,12 +1,92 @@
-//! Rendering for the in-place subagent transcript browser (Ctrl+O in the chat). Unlike a blocking
-//! alternate-screen modal, this is drawn by the normal render loop from the LIVE `App` state, so
-//! the selected child's log auto-updates as new progress arrives. Pure (no terminal I/O) → the
-//! layout is unit-tested; the live viewport just grows to host it (see `App::live_height`).
+//! Full-screen subagent transcript browser (Ctrl+O in the chat). Runs on the ALTERNATE screen so
+//! it never pollutes the chat's inline scrollback, and a caller-supplied `refresh` closure is
+//! polled every frame (it drains pending activity) so the selected child's log AUTO-UPDATES while
+//! open. The line layout ([`transcript_lines`]) is pure → unit-tested without terminal I/O.
 
+use std::io;
+use std::time::Duration;
+
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
+use ratatui::backend::CrosstermBackend;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as TextLine, Span};
+use ratatui::widgets::{Clear, Paragraph};
+use ratatui::Terminal;
 
 use crate::app::SubagentView;
+
+/// Run the full-screen subagent transcript browser on the alternate screen (so it never pollutes
+/// the chat's scrollback). `refresh` is called every frame to drain pending activity and return
+/// the current views — so the selected child's log AUTO-UPDATES while open. Keys: ↑↓/j/k scroll,
+/// space/PgDn + u/d page, g/G top/bottom, ←→/Tab switch agent, Esc/q close.
+pub fn run_subagent_transcript<F>(mut refresh: F) -> io::Result<()>
+where
+    F: FnMut() -> Vec<SubagentView>,
+{
+    crate::driver::install_panic_restore();
+    enable_raw_mode()?;
+    crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
+    let res = browse(&mut refresh);
+    let _ = disable_raw_mode();
+    let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen);
+    res
+}
+
+fn browse<F: FnMut() -> Vec<SubagentView>>(refresh: &mut F) -> io::Result<()> {
+    let mut term = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+    let mut selected = 0usize;
+    let mut scroll = 0usize;
+    loop {
+        let views = refresh();
+        let n = views.len().max(1);
+        selected = selected.min(n - 1);
+        let log_len = views.get(selected).map(|v| v.log.len()).unwrap_or(0);
+        scroll = scroll.min(log_len.saturating_sub(1));
+        term.draw(|f| {
+            let a = f.area();
+            f.render_widget(Clear, a);
+            f.render_widget(
+                Paragraph::new(transcript_lines(
+                    &views, selected, scroll, a.height, a.width,
+                )),
+                a,
+            );
+        })?;
+        // Short poll so the view refreshes even without keypresses (live log updates).
+        if !event::poll(Duration::from_millis(120))? {
+            continue;
+        }
+        let Event::Key(k) = event::read()? else {
+            continue;
+        };
+        if k.kind == KeyEventKind::Release {
+            continue;
+        }
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
+            KeyCode::Up | KeyCode::Char('k') => scroll = scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => scroll = scroll.saturating_add(1),
+            KeyCode::PageUp | KeyCode::Char('u') => scroll = scroll.saturating_sub(10),
+            KeyCode::PageDown | KeyCode::Char('d') | KeyCode::Char(' ') => {
+                scroll = scroll.saturating_add(10)
+            }
+            KeyCode::Home | KeyCode::Char('g') => scroll = 0,
+            KeyCode::End | KeyCode::Char('G') => scroll = usize::MAX / 2,
+            KeyCode::Right | KeyCode::Tab => {
+                selected = (selected + 1) % n;
+                scroll = 0;
+            }
+            KeyCode::Left | KeyCode::BackTab => {
+                selected = (selected + n - 1) % n;
+                scroll = 0;
+            }
+            _ => {}
+        }
+    }
+}
 
 // Brand palette (mirrors the per-module consts elsewhere in the crate).
 const ORANGE: Color = Color::Rgb(255, 145, 60);
