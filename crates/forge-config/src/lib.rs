@@ -249,18 +249,12 @@ fn default_explain_errors() -> bool {
 }
 
 /// Git integration settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitConfig {
     /// When true, `forge git setup` installs a prepare-commit-msg hook that strips
     /// Claude/Codex co-author lines and adds `Co-Authored-By: Forge <noreply@forge.dev>`.
     #[serde(default)]
     pub coauthor: bool,
-}
-
-impl Default for GitConfig {
-    fn default() -> Self {
-        Self { coauthor: false }
-    }
 }
 
 /// Settings for the slash-command + skill system.
