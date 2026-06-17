@@ -2777,6 +2777,13 @@ async fn run_chat_tui(
                 }
             } else if busy {
                 // Mid-turn: ignore typing (quit is already handled above).
+            } else if matches!(key, KeyKind::Char('f') | KeyKind::Char('F'))
+                && app.pending_shell_fix.is_some()
+            {
+                // F: populate input with the pending shell fix command for the user to review.
+                if let Some(fix) = app.pending_shell_fix.take() {
+                    app.input = fix;
+                }
             } else if matches!(key, KeyKind::CycleTemper) {
                 // SHIFT+TAB: cycle the operating temper (idle only — never mid-turn).
                 let new = {

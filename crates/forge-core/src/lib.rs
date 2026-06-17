@@ -35,10 +35,11 @@ const COMPACT_SYSTEM: &str = "You are compacting a coding-assistant conversation
 Summarize the messages below concisely but preserve: decisions made, key facts, file paths, \
 function/type names, and any open threads or TODOs. Output only the summary.";
 
-const SHELL_DIAGNOSE_SYSTEM: &str = "A shell command run by a coding agent just failed. In at \
-most three short sentences, state the most likely cause and a concrete fix (a corrected command, \
-a missing dependency to install, etc.). Be specific and terse. No preamble, no restating the \
-command.";
+const SHELL_DIAGNOSE_SYSTEM: &str = "A shell command run by a coding agent just failed. \
+Respond with exactly one or two lines:\n\
+Line 1: the most likely cause in one terse sentence (no preamble, no restating the command).\n\
+Line 2 (optional): if a single shell command fixes it, write exactly: FIX: <the command>. \
+Omit line 2 if no single command fixes it.";
 
 /// Whether a `shell` tool result reports a failure (non-zero exit, signal, timeout, or spawn
 /// error). The tool's first line is `shell: exit N in …`, `shell: timed out …`, `shell: error: …`,
@@ -788,14 +789,34 @@ impl Session {
             let _ = self
                 .store
                 .record_side_call_usage(&self.id, "shell/diagnose", &r.usage);
-            let diagnosis = r.content.trim().to_string();
-            if !diagnosis.is_empty() {
-                // Queue a system hint so the model sees the diagnosis on its next completion.
-                self.pending_hints
-                    .push(format!("[shell diagnosis] {diagnosis}"));
+            // Parse structured response: cause on line 1, optional "FIX: <cmd>" on line 2.
+            let mut cause = String::new();
+            let mut fix: Option<String> = None;
+            for line in r.content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Some(cmd) = trimmed.strip_prefix("FIX: ") {
+                    fix = Some(cmd.trim().to_string());
+                } else if cause.is_empty() {
+                    cause = trimmed.to_string();
+                }
+            }
+            if cause.is_empty() {
+                cause = r.content.trim().to_string();
+            }
+            if !cause.is_empty() {
+                let hint = if let Some(ref f) = fix {
+                    format!("[shell diagnosis] {cause}  fix: {f}")
+                } else {
+                    format!("[shell diagnosis] {cause}")
+                };
+                self.pending_hints.push(hint);
                 self.presenter.emit(PresenterEvent::ShellDiagnosis {
                     command: command.to_string(),
-                    diagnosis,
+                    diagnosis: cause,
+                    fix,
                 });
             }
         }
@@ -2451,7 +2472,7 @@ mod tests {
         session.run_turn("build the project").await.unwrap();
 
         let diagnosed = events.lock().unwrap().iter().any(|e| {
-            matches!(e, PresenterEvent::ShellDiagnosis { command, diagnosis }
+            matches!(e, PresenterEvent::ShellDiagnosis { command, diagnosis, .. }
                 if command.contains("definitelynotacommand_xyz") && diagnosis.contains("install"))
         });
         assert!(
