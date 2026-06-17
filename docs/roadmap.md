@@ -60,11 +60,11 @@ Make real coding possible and make the core promise true. Mostly within existing
 
 | Feature | Priority | What | Spec | Evidence |
 |---------|----------|------|------|----------|
-| **Shell / bash tool** | **P0** | Run build/test/git inline; stream output; background jobs; safety-gated. The single biggest missing capability. | [shell-tool.md](features/shell-tool.md) | Bash = owner's **#1 tool, 5,909 uses**; Forge can't run any command today |
-| **Fix budget cap** (D1) | **P0** | Real daily/monthly cost aggregation + hard stop + downshift + warn. | [fix-budget-cap.md](features/fix-budget-cap.md) | Core differentiator broken |
-| **Provider test strategy** (D2) | **P0** | 3-layer tests (unit mapping → mock-server contract → gated Ollama live) so the real adapter path is verified in CI with no keys. | [provider-test-strategy.md](features/provider-test-strategy.md) | Headline feature unverified |
-| **Fine-grained permission rules** (D3) | **P0/P1** | allow/ask/deny rule engine (per-tool, path/command globs); precedence with global modes. Unblocks safe shell. | [fix-permission-rules.md](features/fix-permission-rules.md) | Owner runs auto-mode + allow/deny lists |
-| **TUI rich rendering** | **P0** | Markdown rendering of answers + syntax highlighting + **diff view before applying edits** (accept/reject). | [tui-rich-rendering.md](features/tui-rich-rendering.md) | 115 "review" asks, 202 GitLab MR-review MCP calls — review is daily |
+| **Shell / bash tool** | **P0 — done** | Run build/test/git inline; stream output; timeout-kill; cross-platform (`sh -c` Unix / `cmd /C` Windows); safety-gated via permission broker + builtin denylist (POSIX + Windows patterns). | [shell-tool.md](features/shell-tool.md) | Shipped |
+| **Fix budget cap** (D1) | **P0 — done** | Daily/monthly cost aggregation + hard stop + downshift + warn threshold. | [fix-budget-cap.md](features/fix-budget-cap.md) | Shipped |
+| **Provider test strategy** (D2) | **P0 — done** | 3-layer tests: unit mappers + httpmock contract tests (`genai_contract.rs`: streaming/tool-call/5xx) + gated Ollama live. | [provider-test-strategy.md](features/provider-test-strategy.md) | `crates/forge-provider/tests/` |
+| **Fine-grained permission rules** (D3) | **P0/P1 — partial** | Built-in denylist + TOML `[[permissions.rules]]` + 4 global modes + per-tool allow/deny. **Deferred:** "always allow" writeback to config from TUI prompt. | [fix-permission-rules.md](features/fix-permission-rules.md) | Shipped; writeback deferred |
+| **TUI rich rendering** | **P0 — done** | Markdown rendering, syntax highlighting, diff preview emitted before every write permission prompt (accept/reject flow). | [tui-rich-rendering.md](features/tui-rich-rendering.md) | Shipped |
 
 **Wave-1 dependency:** shell-tool's safety layer depends on the permission-rules engine →
 build/land `fix-permission-rules` first (or together).
@@ -96,8 +96,8 @@ The power-user surface that makes the harness "better than Claude Code" (the sta
 
 | Feature | Priority | What | Evidence |
 |---------|----------|------|----------|
-| **Hooks system** | P2 — **MVP done** (observe + block; rewrite/inject deferred) | Pre/post tool-use shell hooks (`[[hooks]]`): `PreToolUse` can block a tool, `PostToolUse` observes; tool call piped as JSON on stdin; time-bounded. The owner's whole env runs on hooks (rtk token proxy, graphify injection, auto-title). **Deferred:** input-rewriting / context-injection hooks, the CLI-bridge path, other events. | [hooks.md](features/hooks.md); his entire setup |
-| **Context compaction** | P2 — **MVP done** (`/compact`; manual, live-only) | Auto-summarize long sessions. **Shipped:** `/compact` summarizes the older transcript (keeps the recent N) into one system message via a cheap trivial-tier model call, shrinking what later turns send — runs as a background task (spinner ticks). **Deferred:** auto-trigger on a high context gauge, and persisting the compacted view across resume. | `/compact` **21** |
+| **Hooks system** | P2 — **done** (observe + block on direct + CLI-bridge; rewrite/inject deferred) | Pre/post tool-use shell hooks (`[[hooks]]`): `PreToolUse` can block a tool, `PostToolUse` observes; tool call piped as JSON on stdin; time-bounded. Fires on both the direct path and the CLI-bridge path (`forge mcp-serve`). Cross-platform: `sh -c` on Unix, `cmd /C` on Windows. **Deferred:** input-rewriting / context-injection hooks, other events. | [hooks.md](features/hooks.md) |
+| **Context compaction** | P2 — **done** (`/compact` + auto-trigger at 80% gauge) | Auto-summarize long sessions. **Shipped:** `/compact` summarizes the older transcript into one system message via trivial-tier call; auto-triggers at turn-end when the context gauge exceeds 80% of the model's window, showing a note to the user. **Deferred:** persisting the compacted view across resume. | `/compact` **21** |
 | **Interactive clarification** | P2 | AskUserQuestion-style mid-task multiple-choice prompts. | **118** AskUserQuestion uses |
 | **Model selection UX** | P2 | `--model` pin flag, `/model`, effort/usage views (Mesh exists; add the controls). | `/model` **39** |
 | **Statusline / output styles / auto-title** | P2 | Configurable statusline + output styles (he invests in these). | auto-title hook, `/title`, caveman styles |
