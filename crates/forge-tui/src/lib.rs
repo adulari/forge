@@ -191,6 +191,9 @@ pub enum PresenterEvent {
     ShellDiagnosis {
         command: String,
         diagnosis: String,
+        /// A concrete shell command that fixes the failure, if the model identified one.
+        /// The TUI shows "press F to populate fix" and pressing F inserts it into the input.
+        fix: Option<String>,
     },
     Done {
         final_text: String,
@@ -353,10 +356,17 @@ impl Presenter for HeadlessPresenter {
                     "  ⌬ lattice → injected {symbols} symbols · {files} files (~{tokens} tok)"
                 );
             }
-            PresenterEvent::ShellDiagnosis { command, diagnosis } => {
+            PresenterEvent::ShellDiagnosis {
+                command,
+                diagnosis,
+                fix,
+            } => {
                 println!("  ⚠ shell failed: {command}");
                 for line in diagnosis.lines() {
                     println!("    {line}");
+                }
+                if let Some(cmd) = fix {
+                    println!("    fix: {cmd}");
                 }
             }
             // The final answer was already streamed via AssistantText; Done is a

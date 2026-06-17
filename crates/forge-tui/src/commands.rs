@@ -234,11 +234,10 @@ pub struct AtToken {
 }
 
 /// Find the `@path` token to drive the file-path picker for, given the cursor position.
-/// Scans every whitespace-delimited word; qualifies when it begins with `@`.
-/// The token at/before the cursor wins; otherwise the last `@` token on the line.
+/// Scans every whitespace-delimited word; qualifies when it begins with `@` AND the cursor
+/// is inside the token (cursor within [start, end]). Unlike the slash palette, there is no
+/// last-token fallback — the picker closes as soon as the cursor moves off the `@` word.
 pub fn at_token_at(input: &str, cursor: usize) -> Option<AtToken> {
-    let mut best: Option<AtToken> = None;
-    let mut last: Option<AtToken> = None;
     let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -253,18 +252,16 @@ pub fn at_token_at(input: &str, cursor: usize) -> Option<AtToken> {
         let word_end = i;
         let word = &input[word_start..word_end];
         if let Some(rest) = word.strip_prefix('@') {
-            let tok = AtToken {
-                start: word_start,
-                end: word_end,
-                query: rest.to_string(),
-            };
-            if cursor >= tok.start && cursor <= tok.end {
-                best = Some(tok.clone());
+            if cursor >= word_start && cursor <= word_end {
+                return Some(AtToken {
+                    start: word_start,
+                    end: word_end,
+                    query: rest.to_string(),
+                });
             }
-            last = Some(tok);
         }
     }
-    best.or(last)
+    None
 }
 
 /// Inline file-path picker state. Opens when the input line contains an `@path` token at cursor.
