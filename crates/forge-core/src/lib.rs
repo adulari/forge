@@ -121,6 +121,9 @@ pub struct Session {
     /// In-session model pin (`/model <id>`). When set, mesh routing still classifies the prompt
     /// (for stats), but this model is used instead of the routed pick. `None` = mesh routing.
     pinned_model: Option<String>,
+    /// System hints queued by side-call diagnostics (e.g. shell error interceptor) to be injected
+    /// into the transcript immediately after the tool result that triggered them. Cleared each time.
+    pending_hints: Vec<String>,
 }
 
 impl Session {
@@ -225,6 +228,7 @@ impl Session {
             lattice_watcher: None,
             skills: None,
             pinned_model: None,
+            pending_hints: vec![],
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
@@ -657,12 +661,15 @@ impl Session {
 
         let messages = [Message::system(COMPACT_SYSTEM), Message::user(rendered)];
         let mut sink = |_: StreamEvent| {};
-        let summary = self
+        let resp = self
             .provider
             .complete(&decision.model, &messages, &[], &mut sink)
             .await
-            .map(|r| r.content)
             .map_err(CoreError::Provider)?;
+        let _ = self
+            .store
+            .record_side_call_usage(&self.id, "compact/summarize", &resp.usage);
+        let summary = resp.content;
 
         let mut compacted = Vec::with_capacity(COMPACT_KEEP_RECENT + 1);
         compacted.push(Message::system(format!(
@@ -723,8 +730,14 @@ impl Session {
             .complete(&decision.model, &messages, &[], &mut sink)
             .await
         {
+            let _ = self
+                .store
+                .record_side_call_usage(&self.id, "shell/diagnose", &r.usage);
             let diagnosis = r.content.trim().to_string();
             if !diagnosis.is_empty() {
+                // Queue a system hint so the model sees the diagnosis on its next completion.
+                self.pending_hints
+                    .push(format!("[shell diagnosis] {diagnosis}"));
                 self.presenter.emit(PresenterEvent::ShellDiagnosis {
                     command: command.to_string(),
                     diagnosis,
@@ -1065,6 +1078,14 @@ impl Session {
                     Some(&call.id),
                 )?;
                 self.transcript.push(Message::tool_result(&call.id, result));
+                // Drain any system hints queued by side-call diagnostics (e.g. shell error
+                // interceptor) so the model sees them after the failing tool result.
+                let hints: Vec<String> = self.pending_hints.drain(..).collect();
+                for hint in hints {
+                    let hseq = self.next_seq();
+                    let _ = self.store.add_message(&self.id, hseq, Role::System, &hint, None);
+                    self.transcript.push(Message::system(hint));
+                }
             }
         }
 
