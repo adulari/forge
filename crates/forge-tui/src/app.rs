@@ -61,6 +61,56 @@ pub struct RoutingView {
     pub rationale: String,
 }
 
+/// Data for the `/usage` overlay — API spend + token breakdown across providers.
+#[derive(Debug, Default, Clone)]
+pub struct UsageOverlay {
+    pub open: bool,
+    /// Per-model rows for the last 5 hours: (model, cost_usd, input_tokens, output_tokens).
+    pub by_model_5h: Vec<(String, f64, u64, u64)>,
+    /// Per-model rows for today: (model, cost_usd, input_tokens, output_tokens).
+    pub by_model: Vec<(String, f64, u64, u64)>,
+    /// Per-model rows for this week: (model, cost_usd, input_tokens, output_tokens).
+    pub by_model_week: Vec<(String, f64, u64, u64)>,
+    /// This month's total spend in USD (scalar; not per-model).
+    pub month_usd: f64,
+    /// Session spend in USD (from the running Cost events).
+    pub session_usd: f64,
+    /// Session input tokens.
+    pub session_in: u64,
+    /// Session output tokens.
+    pub session_out: u64,
+    /// Daily cap (from config), None if uncapped.
+    pub daily_cap: Option<f64>,
+    /// Weekly cap (from config), None if uncapped.
+    pub weekly_cap: Option<f64>,
+    /// Monthly cap (from config), None if uncapped.
+    pub monthly_cap: Option<f64>,
+    /// Codex 5-hour used % (0–100), from latest local session file.
+    pub codex_5h_pct: Option<f64>,
+    /// Codex weekly used % (0–100), from latest local session file.
+    pub codex_weekly_pct: Option<f64>,
+    /// Claude 5-hour used % (0–100), from ~/.claude/.rate-limits-cache.json written by statusline.
+    pub claude_5h_pct: Option<f64>,
+    /// Claude weekly used % (0–100), from ~/.claude/.rate-limits-cache.json.
+    pub claude_weekly_pct: Option<f64>,
+    /// Claude tokens (input incl cache) used in the last 5 hours.
+    pub claude_5h_in: u64,
+    pub claude_5h_out: u64,
+    /// Claude tokens used this ISO week.
+    pub claude_weekly_in: u64,
+    pub claude_weekly_out: u64,
+    /// Animation tick counter (incremented each tick, used for spinner).
+    pub anim_tick: u32,
+}
+
+impl UsageOverlay {
+    fn totals(rows: &[(String, f64, u64, u64)]) -> (f64, u64, u64) {
+        rows.iter().fold((0.0, 0, 0), |acc, r| {
+            (acc.0 + r.1, acc.1 + r.2, acc.2 + r.3)
+        })
+    }
+}
+
 /// All state the TUI needs to render the pinned live region, plus the scrollback outbox.
 #[derive(Debug, Clone, Default)]
 pub struct App {
@@ -123,6 +173,8 @@ pub struct App {
     pub subagent_picking: bool,
     /// The currently highlighted row in the subagent picker.
     pub subagent_pick_idx: usize,
+    /// The `/usage` overlay state.
+    pub usage_overlay: UsageOverlay,
 }
 
 /// One subagent's live row in the TUI.
@@ -913,6 +965,8 @@ pub fn render_live(frame: &mut Frame, app: &App) {
     }
     render_input(frame, areas[5], app);
     render_statusline(frame, areas[6], app);
+    // Usage overlay renders last so it appears on top of everything.
+    render_usage_overlay(frame, app);
 }
 
 /// The inline slash-command palette: a scrolling window of filtered commands, selected row
@@ -1373,6 +1427,206 @@ fn context_gauge_spans(used: u64, limit: Option<u32>) -> Vec<Span<'static>> {
             format!("◷ {}", human(used)),
             Style::default().fg(DIM).bg(STATUSBG),
         )],
+    }
+}
+
+/// Render the `/usage` overlay as a centered popup over the terminal.
+pub fn render_usage_overlay(f: &mut Frame, app: &App) {
+    if !app.usage_overlay.open {
+        return;
+    }
+    let area = f.area();
+    let w = (area.width as f32 * 0.82).ceil() as u16;
+    let h = (area.height as f32 * 0.72).ceil() as u16;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+
+    f.render_widget(ratatui::widgets::Clear, popup);
+
+    let spinner = SPINNER[(app.usage_overlay.anim_tick as usize) % SPINNER.len()];
+    let title = format!(" {spinner} Usage ");
+    let block = Block::bordered()
+        .title(title)
+        .border_style(Style::default().fg(TOOLCYAN));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::vertical([Constraint::Length(7), Constraint::Min(0)]).split(inner);
+
+    let o = &app.usage_overlay;
+
+    // Derive totals from per-model breakdowns so subscription ($0) rows still show tokens.
+    let (cost_5h, in_5h, out_5h) = UsageOverlay::totals(&o.by_model_5h);
+    let (cost_today, in_today, out_today) = UsageOverlay::totals(&o.by_model);
+    let (cost_week, in_week, out_week) = UsageOverlay::totals(&o.by_model_week);
+
+    // Bridge-provider annotation for each period row.
+    let bridge_5h = {
+        let mut parts = Vec::new();
+        if let Some(p) = o.codex_5h_pct {
+            parts.push(format!("codex:{:.0}%", p));
+        }
+        if let Some(p) = o.claude_5h_pct {
+            parts.push(format!("claude:{:.0}%", p));
+        } else {
+            let ctok = o.claude_5h_in + o.claude_5h_out;
+            if ctok > 0 {
+                parts.push(format!(
+                    "claude:↑{} ↓{}",
+                    format_tok(o.claude_5h_in),
+                    format_tok(o.claude_5h_out)
+                ));
+            }
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", parts.join("  "))
+        }
+    };
+    let bridge_week = {
+        let mut parts = Vec::new();
+        if let Some(p) = o.codex_weekly_pct {
+            parts.push(format!("codex:{:.0}%", p));
+        }
+        if let Some(p) = o.claude_weekly_pct {
+            parts.push(format!("claude:{:.0}%", p));
+        } else {
+            let ctok = o.claude_weekly_in + o.claude_weekly_out;
+            if ctok > 0 {
+                parts.push(format!(
+                    "claude:↑{} ↓{}",
+                    format_tok(o.claude_weekly_in),
+                    format_tok(o.claude_weekly_out)
+                ));
+            }
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", parts.join("  "))
+        }
+    };
+
+    let fmt_period =
+        |label: &str, cost: f64, inp: u64, out: u64, cap: Option<f64>, bridge: &str| -> String {
+            let tok_str = format!("↑{} ↓{}", format_tok(inp), format_tok(out));
+            let cost_str = if cost > 0.0 {
+                format!("${cost:.4}")
+            } else {
+                "sub".to_string()
+            };
+            if let Some(c) = cap {
+                let pct = (cost / c * 100.0).min(100.0);
+                format!("{label:<8}{tok_str}  {cost_str} / ${c:.2} ({pct:.0}%){bridge}")
+            } else {
+                format!("{label:<8}{tok_str}  {cost_str}{bridge}")
+            }
+        };
+
+    let month_str = if let Some(cap) = o.monthly_cap {
+        let pct = (o.month_usd / cap * 100.0).min(100.0);
+        format!(
+            "{:<8}${:.4} / ${:.2}  ({:.0}%)",
+            "Month", o.month_usd, cap, pct
+        )
+    } else {
+        format!("{:<8}${:.4}", "Month", o.month_usd)
+    };
+    let session_str = format!(
+        "{:<8}↑{} ↓{}  ${:.4}",
+        "Session",
+        format_tok(o.session_in),
+        format_tok(o.session_out),
+        o.session_usd,
+    );
+    let summary_text = ratatui::text::Text::from(vec![
+        ratatui::text::Line::from(fmt_period("5h", cost_5h, in_5h, out_5h, None, &bridge_5h)),
+        ratatui::text::Line::from(fmt_period(
+            "Today",
+            cost_today,
+            in_today,
+            out_today,
+            o.daily_cap,
+            "",
+        )),
+        ratatui::text::Line::from(fmt_period(
+            "Week",
+            cost_week,
+            in_week,
+            out_week,
+            o.weekly_cap,
+            &bridge_week,
+        )),
+        ratatui::text::Line::from(month_str),
+        ratatui::text::Line::from(session_str),
+        ratatui::text::Line::from(""),
+        ratatui::text::Line::from(Span::styled("  Esc to close", Style::default().fg(DIM))),
+    ]);
+    f.render_widget(Paragraph::new(summary_text), chunks[0]);
+
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Cell, Row, Table};
+    let header = Row::new(vec![
+        Cell::from("Model").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("Cost (today)").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("↑ In").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("↓ Out").style(Style::default().add_modifier(Modifier::BOLD)),
+    ]);
+    let rows: Vec<Row> = o
+        .by_model
+        .iter()
+        .map(|(model, cost, inp, out)| {
+            let display = if model.is_empty() {
+                "side calls".to_string()
+            } else {
+                model.clone()
+            };
+            let style = if display.starts_with("claude-cli") || display.starts_with("codex-cli") {
+                Style::default().fg(TOOLCYAN)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(display).style(style),
+                Cell::from(if *cost > 0.0 {
+                    format!("${:.5}", cost)
+                } else {
+                    "subscription".to_string()
+                })
+                .style(style),
+                Cell::from(format_tok(*inp)).style(style),
+                Cell::from(format_tok(*out)).style(style),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Percentage(50),
+            Constraint::Percentage(20),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+        ],
+    )
+    .header(header)
+    .block(Block::default());
+    f.render_widget(table, chunks[1]);
+}
+
+fn format_tok(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 

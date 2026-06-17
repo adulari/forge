@@ -38,8 +38,13 @@ load-bearing events.
 - `PreToolUse` exit 0 + JSON object on stdout → rewrites tool args before the tool runs.
   Exit 0 + plain text → note only (unchanged args). Exit non-zero → block.
 
+**Shipped (MCP tool hooks)**
+- `PreToolUse` and `PostToolUse` now fire for MCP tool calls too (e.g. `helm__get_today`,
+  `test__echo`). Block, observe, and arg-rewrite all work identically to native tools.
+  MCP tool names use the `server__tool` namespace; the existing `matcher` comma-list
+  already handles them (e.g. `matcher = "helm__create_task"`).
+
 **Deferred**
-- **MCP tool call** hooks — `invoke_tool` only covers direct built-in tools.
 - Per-hook environment templating beyond the stdin JSON.
 - Other events: `notification`, `PostSessionCompact`.
 
