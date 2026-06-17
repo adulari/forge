@@ -45,16 +45,13 @@ pub const STREAM_PREVIEW_H: u16 = 3;
 pub const PERMISSION_H: u16 = 1;
 pub const INPUT_H: u16 = 3;
 pub const STATUS_H: u16 = 1;
-/// Fixed inline-viewport height (the pinned region above scrollback). Constant — the inline
-/// viewport is never resized at runtime (resizing it pollutes the terminal scrollback).
-pub const LIVE_H: u16 = STREAM_PREVIEW_H + PERMISSION_H + INPUT_H + STATUS_H;
+/// Fixed inline-viewport height. Large enough to give the task + subagent panels their own rows
+/// (each sized dynamically within `render_live`) while keeping a small idle footprint.
+/// Cannot be resized at runtime — recreating the inline viewport pollutes the terminal scrollback.
+pub const LIVE_H: u16 = 14;
 /// Max task / running-subagent rows shown in their sticky panels before summarizing the overflow.
 const TASKS_PANEL_MAX: usize = 6;
 const SUBAGENTS_PANEL_MAX: usize = 4;
-/// Fixed height of the pinned region above the input (stream preview + the panels below it). Kept
-/// equal to the stream-preview height so the idle footprint matches the original (no gap), and the
-/// inline viewport never resizes (resizing pollutes scrollback).
-const PINNED_H: u16 = STREAM_PREVIEW_H;
 
 /// The Mesh routing decision currently displayed.
 #[derive(Debug, Clone, Default)]
@@ -113,6 +110,11 @@ pub struct App {
     /// The live task list (`update_tasks`). Kept so the sticky tasks panel stays visible during
     /// the turn (the inline scrollback copy scrolls away); cleared when the model empties the list.
     tasks: Vec<forge_types::TodoItem>,
+    /// When true, the subagent picker overlay is shown in the stream area (opened by Ctrl+O when
+    /// multiple subagents are in the current batch). ↑↓ navigate, Enter opens transcript, Esc closes.
+    pub subagent_picking: bool,
+    /// The currently highlighted row in the subagent picker.
+    pub subagent_pick_idx: usize,
 }
 
 /// One subagent's live row in the TUI.
@@ -785,56 +787,64 @@ fn truncate(s: &str, max: usize) -> String {
 // ---- Live region (pinned at the bottom; rendered every frame). ----
 
 /// Draw the pinned live region for the current state (the only thing in the viewport).
+///
+/// Layout (top → bottom, fixed total = LIVE_H):
+///   [stream preview / picker / palette]  ← Min(1) after reserving panels
+///   [running-subagents panel]             ← 0 when none running
+///   [task list panel]                     ← 0 when empty
+///   [permission bar]
+///   [input box]
+///   [statusline]
+///
+/// The inline viewport is never resized at runtime — recreating it would corrupt the scrollback.
+/// The stream area shrinks as panels grow but always keeps ≥1 row (MIN_STREAM guarantee).
 pub fn render_live(frame: &mut Frame, app: &App) {
-    // Fixed-height inline viewport (no runtime resize — recreating an inline viewport pollutes the
-    // terminal scrollback). The pinned region above the input holds the in-flight reply on top and
-    // the sticky subagent + task panels BELOW it, so the panels sit just above the input and never
-    // scroll into history.
+    const MIN_STREAM: u16 = 1;
+    let fixed = PERMISSION_H + INPUT_H + STATUS_H;
+    let avail = frame.area().height.saturating_sub(fixed);
+    let panel_avail = avail.saturating_sub(MIN_STREAM);
+
+    // Subagent panel gets at most half of panel_avail; task panel gets the rest.
+    let sub_h = app.subagents_panel_height().min(panel_avail / 2);
+    let task_h = app
+        .tasks_panel_height()
+        .min(panel_avail.saturating_sub(sub_h));
+    let stream_h = avail.saturating_sub(sub_h + task_h);
+
     let areas = Layout::vertical([
-        Constraint::Length(PINNED_H), // stream preview + panels share this fixed region
-        Constraint::Length(PERMISSION_H), // permission bar (blank when none)
-        Constraint::Length(INPUT_H),  // input box
-        Constraint::Length(STATUS_H), // statusline
+        Constraint::Length(stream_h),
+        Constraint::Length(sub_h),
+        Constraint::Length(task_h),
+        Constraint::Length(PERMISSION_H),
+        Constraint::Length(INPUT_H),
+        Constraint::Length(STATUS_H),
     ])
     .split(frame.area());
 
+    // areas[0]: stream preview (or modal overlay when palette / picker / agent-picker is open).
     if app.palette.open {
         render_palette(frame, areas[0], app);
     } else if app.picker.open {
         render_picker(frame, areas[0], app);
+    } else if app.subagent_picking {
+        render_subagent_picker(frame, areas[0], app);
     } else {
-        render_pinned_region(frame, areas[0], app);
+        render_preview(frame, areas[0], app);
     }
-    if app.prompt.is_some() {
-        render_permission(frame, areas[1], app);
-    }
-    render_input(frame, areas[2], app);
-    render_statusline(frame, areas[3], app);
-}
-
-/// The pinned region (above the permission/input rows): the streaming reply edge on top, then the
-/// running-subagent panel, then the sticky task panel BELOW it. Panels are capped to the fixed
-/// region so the input is never pushed off-screen; overflow is summarized by the panel renderers.
-fn render_pinned_region(frame: &mut Frame, area: Rect, app: &App) {
-    let max = area.height;
-    let sub_h = app.subagents_panel_height().min(max);
-    let task_h = app.tasks_panel_height().min(max.saturating_sub(sub_h));
-    let rows = Layout::vertical([
-        Constraint::Min(0), // streaming reply edge (shrinks as panels grow; blank when idle)
-        Constraint::Length(sub_h), // running subagents
-        Constraint::Length(task_h), // task list
-    ])
-    .split(area);
-    render_preview(frame, rows[0], app);
     if sub_h > 0 {
-        render_subagents_panel(frame, rows[1], app);
+        render_subagents_panel(frame, areas[1], app);
     }
     if task_h > 0 {
         frame.render_widget(
-            Paragraph::new(tasks_panel_lines(&app.tasks, rows[2].height)),
-            rows[2],
+            Paragraph::new(tasks_panel_lines(&app.tasks, areas[2].height)),
+            areas[2],
         );
     }
+    if app.prompt.is_some() {
+        render_permission(frame, areas[3], app);
+    }
+    render_input(frame, areas[4], app);
+    render_statusline(frame, areas[5], app);
 }
 
 /// The inline slash-command palette: a scrolling window of filtered commands, selected row
@@ -970,6 +980,53 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
         let scroll = count.saturating_sub(area.height);
         frame.render_widget(para.scroll((scroll, 0)), area);
     }
+}
+
+/// The subagent picker overlay: shown in the stream area when Ctrl+O is pressed with multiple
+/// agents. ↑↓ navigate, Enter opens that agent's full transcript, Esc closes.
+fn render_subagent_picker(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 {
+        return;
+    }
+    let views = app.subagent_views();
+    if views.is_empty() {
+        return;
+    }
+    let h = area.height as usize;
+    let mut lines: Vec<TextLine> = Vec::with_capacity(h);
+    lines.push(TextLine::from(vec![
+        Span::styled(
+            format!("  ⚒ agents ({}) ", views.len()),
+            Style::default().fg(ORANGE).bold(),
+        ),
+        Span::styled(
+            "↑↓ select  ·  Enter open  ·  Esc close",
+            Style::default().fg(DIM),
+        ),
+    ]));
+    let list_h = h.saturating_sub(1);
+    let start = app
+        .subagent_pick_idx
+        .saturating_sub(list_h.saturating_sub(1));
+    for (i, v) in views.iter().enumerate().skip(start).take(list_h) {
+        let selected = i == app.subagent_pick_idx;
+        let marker = if selected { "▸ " } else { "  " };
+        let status = if v.done { "done" } else { "…" };
+        let name_style = if selected {
+            Style::default().fg(ORANGE).bold()
+        } else {
+            Style::default().fg(TOOLCYAN)
+        };
+        lines.push(TextLine::from(vec![
+            Span::styled(format!("  {marker}[{}] ", v.agent), name_style),
+            Span::styled(
+                format!("${:.4}  {status}  ", v.cost),
+                Style::default().fg(DIM),
+            ),
+            Span::styled(truncate(&v.task, 44), Style::default().fg(DIM)),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// The sticky running-subagents panel (its own live region): a header (with the Ctrl+O hint) then
