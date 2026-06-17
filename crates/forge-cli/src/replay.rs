@@ -175,6 +175,43 @@ pub fn render_transcript(id: &str, entries: &[ReplayEntry]) -> String {
     out
 }
 
+/// Per-turn content diff: align corresponding assistant turns and show where the text diverges.
+/// Useful when two sessions worked on the same task but took different paths.
+pub fn render_turn_diff(id_a: &str, id_b: &str, a: &[ReplayEntry], b: &[ReplayEntry]) -> String {
+    let mut out = String::new();
+    let asst_a: Vec<&ReplayEntry> = a.iter().filter(|e| e.role == Role::Assistant).collect();
+    let asst_b: Vec<&ReplayEntry> = b.iter().filter(|e| e.role == Role::Assistant).collect();
+    out.push_str(&format!(
+        "turn diff  {id_a}  →  {id_b}  ({} vs {} assistant turns)\n\n",
+        asst_a.len(),
+        asst_b.len()
+    ));
+    let n = asst_a.len().max(asst_b.len());
+    for i in 0..n {
+        let ca = asst_a.get(i).map(|e| clip(&e.content, 120));
+        let cb = asst_b.get(i).map(|e| clip(&e.content, 120));
+        match (ca, cb) {
+            (Some(a), Some(b)) if a == b => {
+                out.push_str(&format!("  turn {:<3}  [identical]\n", i + 1));
+            }
+            (Some(a), Some(b)) => {
+                out.push_str(&format!("  turn {:<3}  A: {a}\n", i + 1));
+                out.push_str(&format!("         B: {b}\n"));
+            }
+            (Some(a), None) => {
+                out.push_str(&format!("  turn {:<3}  A: {a}\n", i + 1));
+                out.push_str("         B: <none>\n");
+            }
+            (None, Some(b)) => {
+                out.push_str(&format!("  turn {:<3}  A: <none>\n", i + 1));
+                out.push_str(&format!("         B: {b}\n"));
+            }
+            (None, None) => {}
+        }
+    }
+    out
+}
+
 /// Summary-level diff between two sessions.
 pub fn render_diff(id_a: &str, id_b: &str, d: &SessionDiff) -> String {
     let mut out = String::new();

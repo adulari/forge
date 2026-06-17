@@ -24,6 +24,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/sessions",
     },
     Command {
+        name: "replay",
+        desc: "show a session transcript inline (/replay <id>) or diff two sessions (/replay <a> <b>)",
+        usage: "/replay <id> [<id2>]",
+    },
+    Command {
         name: "resume",
         desc: "resume a session by id prefix",
         usage: "/resume <id>",
@@ -146,6 +151,8 @@ pub enum CommandAction {
     Goal(String),
     /// Re-run a task each turn until the model signals completion (`/loop <task>`).
     Loop(String),
+    /// Show a session transcript inline, or diff two sessions (`/replay <id> [<id2>]`).
+    Replay(String, Option<String>),
     Quit,
     /// Not a known command — the binary shows `unknown command: X`.
     Unknown(String),
@@ -242,6 +249,13 @@ pub fn parse_command(line: &str) -> CommandAction {
         "lattice" | "lat" => CommandAction::Lattice(arg),
         "goal" | "objective" => CommandAction::Goal(arg),
         "loop" => CommandAction::Loop(arg),
+        "replay" => {
+            // `/replay <id>` or `/replay <a> <b>`
+            let mut ids = arg.splitn(2, char::is_whitespace);
+            let id_a = ids.next().unwrap_or("").trim().to_string();
+            let id_b = ids.next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            CommandAction::Replay(id_a, id_b)
+        }
         "clear" | "cls" => CommandAction::ClearScreen,
         "quit" | "exit" | "q" => CommandAction::Quit,
         other => CommandAction::Unknown(other.to_string()),

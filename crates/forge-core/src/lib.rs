@@ -758,6 +758,19 @@ impl Session {
         Ok(())
     }
 
+    /// Load the persisted replay entries for any session (not just this one) — used by the
+    /// `/replay` chat command to show a transcript inline.
+    pub fn load_replay(&self, session_id: &str) -> Result<Vec<forge_store::ReplayEntry>, CoreError> {
+        self.store.load_replay(session_id).map_err(CoreError::Store)
+    }
+
+    /// Resolve a session-id prefix to full ids — allows `/replay abc` to find `abc123…`.
+    pub fn matching_session_ids(&self, prefix: &str) -> Result<Vec<String>, CoreError> {
+        self.store
+            .matching_session_ids(prefix)
+            .map_err(CoreError::Store)
+    }
+
     /// Like [`Session::run_turn`], but first prepends `guidance` (an invoked command's or
     /// skill's methodology) as persisted system messages, and biases routing with an optional
     /// `tier_override` (the command/skill `tier:` hint). `run_turn(p)` is exactly
