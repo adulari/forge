@@ -1495,19 +1495,22 @@ mod tests {
         use forge_types::QuotaStatus;
         // Real shape captured from ~/.codex/sessions/.../rollout-*.jsonl. Primary (5h) is closer to
         // its limit than secondary (weekly), so it governs.
-        let jsonl = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":85.0,"window_minutes":300,"resets_at":1781571092},"secondary":{"used_percent":4.0,"window_minutes":10080,"resets_at":1782087619},"plan_type":"plus","rate_limit_reached_type":null}}}"#;
+        // Use far-future resets_at (year 2286) so the staleness guard never skips them.
+        let jsonl = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":85.0,"window_minutes":300,"resets_at":9999999999},"secondary":{"used_percent":4.0,"window_minutes":10080,"resets_at":9999999999},"plan_type":"plus","rate_limit_reached_type":null}}}"#;
         let q = codex_quota_from_rollout(jsonl, "codex-cli").expect("a quota hint");
         assert_eq!(q.provider, "codex-cli");
         assert_eq!(q.window, "five_hour");
         assert_eq!(q.status, QuotaStatus::Warning); // 85% ≥ 80%
-        assert_eq!(q.resets_at, Some(1781571092));
+        assert_eq!(q.resets_at, Some(9999999999));
         assert!((q.fraction_used.unwrap() - 0.85).abs() < 1e-9);
     }
 
     #[test]
     fn codex_rollout_quota_exhausted_when_a_limit_was_reached() {
         use forge_types::QuotaStatus;
-        let jsonl = r#"{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.0,"window_minutes":300,"resets_at":1},"rate_limit_reached_type":"primary"}}}"#;
+        // Far-future resets_at so the staleness guard keeps the window; rate_limit_reached_type
+        // drives the Exhausted status regardless of the used_percent value.
+        let jsonl = r#"{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.0,"window_minutes":300,"resets_at":9999999999},"rate_limit_reached_type":"primary"}}}"#;
         let q = codex_quota_from_rollout(jsonl, "codex-cli").unwrap();
         assert_eq!(q.status, QuotaStatus::Exhausted);
     }
@@ -1516,7 +1519,7 @@ mod tests {
     fn codex_rollout_quota_ok_for_low_usage() {
         use forge_types::QuotaStatus;
         // The literal real capture (≈1% used) → Ok, last snapshot wins over an earlier one.
-        let jsonl = "{\"payload\":{\"type\":\"token_count\",\"rate_limits\":{\"primary\":{\"used_percent\":50.0,\"window_minutes\":300,\"resets_at\":1}}}}\n{\"timestamp\":\"x\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":null,\"rate_limits\":{\"limit_id\":\"codex\",\"primary\":{\"used_percent\":1.0,\"window_minutes\":300,\"resets_at\":1781571092},\"secondary\":{\"used_percent\":1.0,\"window_minutes\":10080,\"resets_at\":1782087619},\"plan_type\":\"plus\",\"rate_limit_reached_type\":null}}}";
+        let jsonl = "{\"payload\":{\"type\":\"token_count\",\"rate_limits\":{\"primary\":{\"used_percent\":50.0,\"window_minutes\":300,\"resets_at\":9999999999}}}}\n{\"timestamp\":\"x\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":null,\"rate_limits\":{\"limit_id\":\"codex\",\"primary\":{\"used_percent\":1.0,\"window_minutes\":300,\"resets_at\":9999999999},\"secondary\":{\"used_percent\":1.0,\"window_minutes\":10080,\"resets_at\":9999999999},\"plan_type\":\"plus\",\"rate_limit_reached_type\":null}}}";
         let q = codex_quota_from_rollout(jsonl, "codex-cli").unwrap();
         assert_eq!(q.status, QuotaStatus::Ok);
         assert!(
