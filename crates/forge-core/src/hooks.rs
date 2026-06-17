@@ -1,9 +1,8 @@
-//! Pre/post tool-use shell hooks (docs/features/hooks.md). Each `[[hooks]]` entry runs a POSIX
-//! `sh -c` command around a matching tool call, receiving the call as JSON on stdin. A
-//! `PreToolUse` hook that exits non-zero **blocks** the tool (its output is the reason the model
-//! sees); `PostToolUse` hooks observe (their stdout surfaces as a note). Hooks are POSIX-only
-//! (same as the shell tool — see known-issues.md) and time-bounded so a wedged hook can't hang
-//! the agent.
+//! Pre/post tool-use shell hooks (docs/features/hooks.md). Each `[[hooks]]` entry runs a shell
+//! command around a matching tool call, receiving the call as JSON on stdin. A `PreToolUse` hook
+//! that exits non-zero **blocks** the tool (its output is the reason the model sees); `PostToolUse`
+//! hooks observe (their stdout surfaces as a note). On Unix the shell is `sh -c`; on Windows it is
+//! `cmd /C` (same as the shell tool). Hooks are time-bounded so a wedged hook can't hang the agent.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -55,9 +54,20 @@ pub async fn run_hooks(
     outcome
 }
 
+/// `sh -c` on Unix, `cmd /C` on Windows — mirrors the shell tool's platform selection.
+#[cfg(not(windows))]
+fn shell_exe() -> (&'static str, &'static str) {
+    ("sh", "-c")
+}
+#[cfg(windows)]
+fn shell_exe() -> (&'static str, &'static str) {
+    ("cmd", "/C")
+}
+
 async fn run_one(h: &HookConfig, payload: &str) -> Result<(i32, String, String), String> {
-    let mut child = tokio::process::Command::new("sh")
-        .arg("-c")
+    let (sh, flag) = shell_exe();
+    let mut child = tokio::process::Command::new(sh)
+        .arg(flag)
         .arg(&h.command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -112,7 +122,12 @@ mod tests {
 
     #[tokio::test]
     async fn pretooluse_nonzero_exit_blocks_with_stderr_reason() {
-        let hooks = vec![hook(HookEvent::PreToolUse, "echo nope 1>&2; exit 1")];
+        // sh uses `;` as separator; cmd uses `&` and needs `exit /b` for subprocess exit.
+        #[cfg(not(windows))]
+        let cmd = "echo nope 1>&2; exit 1";
+        #[cfg(windows)]
+        let cmd = "echo nope 1>&2 & exit /b 1";
+        let hooks = vec![hook(HookEvent::PreToolUse, cmd)];
         let o = run_hooks(&hooks, HookEvent::PreToolUse, "shell", "{}").await;
         assert_eq!(o.blocked.as_deref(), Some("nope"));
     }
