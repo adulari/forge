@@ -2450,7 +2450,9 @@ async fn run(
 
 async fn nl_cmd(query: String, mode: Option<Mode>) -> Result<()> {
     if query.trim().is_empty() {
-        anyhow::bail!("empty query — usage: forge nl \"what changed performance-wise since last week\"");
+        anyhow::bail!(
+            "empty query — usage: forge nl \"what changed performance-wise since last week\""
+        );
     }
     // Gather shell context so the model can run the right commands.
     let cwd = std::env::current_dir()
