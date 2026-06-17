@@ -580,6 +580,30 @@ impl Session {
         self.store.bridge_fractions().unwrap_or_default()
     }
 
+    /// Seed the subscription-usage store from an externally-observed window fraction (the
+    /// Claude/Codex rate-limit caches the CLI reads). Forge otherwise only learns a subscription's
+    /// usage when it runs a turn on that bridge — usage racked up *outside* Forge would read as 0%,
+    /// making the mesh think the plan is fresh. `pct` is 0–100; `None` is skipped. The recorded row
+    /// has no reset time, so it stays live until a real in-turn QuotaUpdate replaces it.
+    pub fn seed_subscription_quota(&self, provider: &str, window: &str, pct: Option<f64>) {
+        let Some(pct) = pct else { return };
+        let frac = (pct / 100.0).clamp(0.0, 1.0);
+        let status = if frac >= 0.98 {
+            forge_types::QuotaStatus::Exhausted
+        } else if frac >= 0.80 {
+            forge_types::QuotaStatus::Warning
+        } else {
+            forge_types::QuotaStatus::Ok
+        };
+        let _ = self.store.record_quota(&forge_types::QuotaHint {
+            provider: provider.to_string(),
+            window: window.to_string(),
+            status,
+            resets_at: None,
+            fraction_used: Some(frac),
+        });
+    }
+
     /// Advance the temper through the SHIFT+TAB cycle, persist it, and return the new temper
     /// (RFC/temper-modes). Takes effect on the next turn's permission decisions.
     pub fn cycle_temper(&mut self) -> PermissionMode {

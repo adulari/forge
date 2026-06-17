@@ -1789,6 +1789,14 @@ async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
         return Ok(());
     }
     let store = open_store()?;
+    // Reflect usage from outside Forge: seed the store from the Claude/Codex rate-limit caches.
+    let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
+        .await
+        .unwrap_or_default();
+    seed_store_quota(&store, "claude-cli", "five_hour", bstats.claude_5h_pct);
+    seed_store_quota(&store, "claude-cli", "weekly", bstats.claude_weekly_pct);
+    seed_store_quota(&store, "codex-cli", "five_hour", bstats.codex_5h_pct);
+    seed_store_quota(&store, "codex-cli", "weekly", bstats.codex_weekly_pct);
     let quota = store
         .current_quota()
         .unwrap_or_default()
@@ -1817,6 +1825,27 @@ async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
         print_mesh_explanation(&e);
     }
     Ok(())
+}
+
+/// Record a subscription window fraction (0–100 pct) into the store, mapping it to a status. Used
+/// to seed the mesh quota from the Claude/Codex rate-limit caches in the `forge mesh` CLI path.
+fn seed_store_quota(store: &Store, provider: &str, window: &str, pct: Option<f64>) {
+    let Some(pct) = pct else { return };
+    let frac = (pct / 100.0).clamp(0.0, 1.0);
+    let status = if frac >= 0.98 {
+        forge_types::QuotaStatus::Exhausted
+    } else if frac >= 0.80 {
+        forge_types::QuotaStatus::Warning
+    } else {
+        forge_types::QuotaStatus::Ok
+    };
+    let _ = store.record_quota(&forge_types::QuotaHint {
+        provider: provider.to_string(),
+        window: window.to_string(),
+        status,
+        resets_at: None,
+        fraction_used: Some(frac),
+    });
 }
 
 /// A 10-cell ASCII meter for a 0.0–1.0 fraction.
@@ -2907,6 +2936,20 @@ async fn run_chat_tui(
         build_session_with(Box::new(ChannelPresenter::new(tx)), mock, mode, resume, pin).await?;
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
 
+    // Seed the mesh subscription quota from the Claude/Codex rate-limit caches at startup, so the
+    // very first routing decision reflects usage from outside Forge (it otherwise reads 0% until a
+    // turn runs on that bridge). Refreshed live by QuotaUpdate as turns run, and on each /mesh open.
+    {
+        let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
+            .await
+            .unwrap_or_default();
+        let s = session.lock().await;
+        s.seed_subscription_quota("claude-cli", "five_hour", bstats.claude_5h_pct);
+        s.seed_subscription_quota("claude-cli", "weekly", bstats.claude_weekly_pct);
+        s.seed_subscription_quota("codex-cli", "five_hour", bstats.codex_5h_pct);
+        s.seed_subscription_quota("codex-cli", "weekly", bstats.codex_weekly_pct);
+    }
+
     let mut tui = Tui::new().context("initializing TUI")?;
     // The welcome banner is a one-time print into scrollback (not a render branch).
     tui.insert_lines(banner_lines(tui.width()));
@@ -3129,11 +3172,23 @@ async fn run_chat_tui(
                 continue;
             }
 
-            // Mesh inspector overlay captures all keys; Esc closes it.
+            // Mesh inspector overlay captures all keys; Esc closes, ↑/↓ scroll the candidate list.
             if app.mesh_overlay.open {
-                if matches!(key, KeyKind::Esc) {
-                    app.mesh_overlay.open = false;
-                    dirty = true;
+                match key {
+                    KeyKind::Esc => {
+                        app.mesh_overlay.open = false;
+                        app.mesh_overlay.scroll = 0;
+                        dirty = true;
+                    }
+                    KeyKind::Down => {
+                        app.mesh_overlay.scroll = app.mesh_overlay.scroll.saturating_add(1);
+                        dirty = true;
+                    }
+                    KeyKind::Up => {
+                        app.mesh_overlay.scroll = app.mesh_overlay.scroll.saturating_sub(1);
+                        dirty = true;
+                    }
+                    _ => {}
                 }
                 continue;
             }
@@ -3636,8 +3691,9 @@ async fn run_chat_tui(
             app.picker.tick_anim();
             dirty = true;
         }
-        if app.mesh_overlay.open {
-            app.mesh_overlay.anim_tick = app.mesh_overlay.anim_tick.wrapping_add(1);
+        if app.mesh_overlay.open && app.mesh_overlay.anim_tick < app.mesh_overlay.settle_tick() {
+            // Animate only until the reveal settles, then stop redrawing (no infinite spinner).
+            app.mesh_overlay.anim_tick += 1;
             dirty = true;
         }
         if app.usage_overlay.open {
@@ -4227,8 +4283,17 @@ async fn dispatch_command(
             } else {
                 prompt.clone()
             };
+            // Seed the mesh quota from the Claude/Codex rate-limit caches first, so usage racked
+            // up outside Forge (the common case) is reflected instead of reading as 0%.
+            let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
+                .await
+                .unwrap_or_default();
             let exp = {
                 let s = session.lock().await;
+                s.seed_subscription_quota("claude-cli", "five_hour", bstats.claude_5h_pct);
+                s.seed_subscription_quota("claude-cli", "weekly", bstats.claude_weekly_pct);
+                s.seed_subscription_quota("codex-cli", "five_hour", bstats.codex_5h_pct);
+                s.seed_subscription_quota("codex-cli", "weekly", bstats.codex_weekly_pct);
                 s.explain_routing(&to_explain)
             };
             match exp {
@@ -4292,6 +4357,7 @@ async fn dispatch_command(
                         fallbacks: e.fallbacks.clone(),
                         rationale: e.rationale.clone(),
                         anim_tick: 0,
+                        scroll: 0,
                     };
                 }
                 None => tui.print_text(

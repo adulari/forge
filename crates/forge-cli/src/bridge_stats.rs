@@ -152,13 +152,17 @@ fn fetch_claude_rate_limits(stats: &mut BridgeStats, home: &Path) {
     let Ok(v) = serde_json::from_str::<Value>(&content) else {
         return;
     };
-    // Only use if the cache is fresh (< 1 hour old).
-    let ts = v["ts"].as_i64().unwrap_or(0);
-    if now_epoch() - ts > 4 * 3600 {
-        return;
+    // Staleness is per-window: a 5-hour window's % is meaningless once it's hours old, but a
+    // 7-day window barely moves — keeping a 6–24h-old weekly reading is far better than showing
+    // nothing (which makes the overlay fall back to raw tokens and the mesh see the plan as 0%).
+    // The cache only refreshes while Claude Code renders its statusline, so it routinely lags.
+    let age = now_epoch() - v["ts"].as_i64().unwrap_or(0);
+    if age <= 6 * 3600 {
+        stats.claude_5h_pct = v["5h_pct"].as_f64();
     }
-    stats.claude_5h_pct = v["5h_pct"].as_f64();
-    stats.claude_weekly_pct = v["7d_pct"].as_f64();
+    if age <= 24 * 3600 {
+        stats.claude_weekly_pct = v["7d_pct"].as_f64();
+    }
 }
 
 fn fetch_claude(stats: &mut BridgeStats, home: &Path) {

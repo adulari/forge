@@ -159,8 +159,19 @@ pub struct MeshOverlay {
     pub pick: String,
     pub fallbacks: Vec<String>,
     pub rationale: String,
-    /// Animation tick — drives the bar-fill ease and the row-by-row candidate reveal.
+    /// Animation tick — drives the bar-fill ease and the row-by-row candidate reveal. Stops
+    /// advancing once the reveal settles (so the spinner doesn't spin forever).
     pub anim_tick: u32,
+    /// Vertical scroll offset into the candidate list (↑/↓ while the overlay is open).
+    pub scroll: u16,
+}
+
+impl MeshOverlay {
+    /// The tick at which the open animation is fully settled (bars eased + every candidate row
+    /// revealed). Past this the inspector is static — no more redraws, no infinite spinner.
+    pub fn settle_tick(&self) -> u32 {
+        self.candidates.len() as u32 * 2 + 12
+    }
 }
 
 /// All state the TUI needs to render the pinned live region, plus the scrollback outbox.
@@ -1736,8 +1747,13 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     };
     f.render_widget(ratatui::widgets::Clear, popup);
 
-    let spinner = SPINNER[(o.anim_tick as usize) % SPINNER.len()];
-    let title = format!(" {spinner} mesh inspector ");
+    let settled = o.anim_tick >= o.settle_tick();
+    let glyph = if settled {
+        "⚒"
+    } else {
+        SPINNER[(o.anim_tick as usize) % SPINNER.len()]
+    };
+    let title = format!(" {glyph} mesh inspector ");
     let block = Block::bordered()
         .title(title)
         .border_style(Style::default().fg(TOOLCYAN));
@@ -1842,10 +1858,17 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         )));
     }
     rows.push(Line::from(Span::styled(
-        "Esc to close",
+        "↑/↓ scroll · Esc to close",
         Style::default().fg(DIM),
     )));
-    f.render_widget(Paragraph::new(Text::from(rows)), chunks[1]);
+    // Clamp the scroll so it can't run past the content.
+    let body_h = chunks[1].height;
+    let max_scroll = (rows.len() as u16).saturating_sub(body_h);
+    let scroll = o.scroll.min(max_scroll);
+    f.render_widget(
+        Paragraph::new(Text::from(rows)).scroll((scroll, 0)),
+        chunks[1],
+    );
 }
 
 fn format_tok(n: u64) -> String {
@@ -2617,6 +2640,7 @@ mod tests {
             fallbacks: vec!["codex-cli::gpt-5.5".into()],
             rationale: "auto-selected best".into(),
             anim_tick: 50, // fully revealed
+            scroll: 0,
         };
         let s = screen_wh(&app, 100, 30);
         assert!(s.contains("mesh inspector"), "title rendered");
