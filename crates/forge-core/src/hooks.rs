@@ -296,10 +296,12 @@ mod tests {
 
     #[tokio::test]
     async fn pretooluse_exit_zero_json_object_stdout_rewrites_args() {
-        let hooks = vec![hook(
-            HookEvent::PreToolUse,
-            "echo '{\"path\":\"rewritten.rs\"}'",
-        )];
+        // Windows cmd.exe treats single quotes as literals, so we omit them.
+        #[cfg(not(windows))]
+        let cmd = "echo '{\"path\":\"rewritten.rs\"}'";
+        #[cfg(windows)]
+        let cmd = "echo {\"path\":\"rewritten.rs\"}";
+        let hooks = vec![hook(HookEvent::PreToolUse, cmd)];
         let o = run_hooks(&hooks, HookEvent::PreToolUse, "shell", "{}").await;
         assert!(o.blocked.is_none());
         assert!(o.notes.is_empty(), "json stdout should not become a note");
