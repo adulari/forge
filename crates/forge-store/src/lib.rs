@@ -765,6 +765,22 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// The most recent assay run for `scope`, excluding `exclude_id` (the just-created run).
+    /// Returns `None` when this is the first run for this scope.
+    pub fn latest_run_for_scope(
+        &self,
+        scope: &str,
+        exclude_id: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id FROM assay_run WHERE scope = ?1 AND id != ?2
+             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query([scope, exclude_id])?;
+        Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+    }
+
     /// Past assay runs, newest first: `(id, scope, cost_usd, created_at)`.
     pub fn list_assay_runs(&self) -> Result<Vec<(String, String, f64, i64)>> {
         let conn = self.lock()?;

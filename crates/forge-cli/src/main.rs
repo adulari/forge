@@ -38,6 +38,19 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum AssayCmd {
+    /// List past assay runs (newest first).
+    List,
+    /// Compare two assay runs by id prefix: shows new, fixed, and still-open findings.
+    Compare {
+        /// First run id (or prefix).
+        a: String,
+        /// Second run id (or prefix).
+        b: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Run a single agent turn against your prompt.
     Run {
@@ -88,6 +101,11 @@ enum Command {
         /// Only valid with a single session id.
         #[arg(long)]
         json: bool,
+    },
+    /// Inspect past assay runs stored in the database.
+    Assay {
+        #[command(subcommand)]
+        sub: AssayCmd,
     },
     /// List discovered slash commands + skills (project and user scope) with their descriptions.
     Commands,
@@ -324,6 +342,7 @@ async fn main() -> Result<()> {
         } => chat(mock, mode, resume, plain, model).await,
         Command::Sessions => sessions(),
         Command::Replay { ids, json } => replay_cmd(&ids, json),
+        Command::Assay { sub } => assay_cmd(sub),
         Command::Commands => commands_cmd(),
         Command::Models { probe, clear } => models(probe, clear).await,
         Command::Auth { provider, remove } => auth(&provider, remove),
@@ -885,6 +904,73 @@ fn replay_cmd(ids: &[String], json: bool) -> Result<()> {
             print!("\n{}", replay::render_turn_diff(fa8, fb8, &ea, &eb));
         }
         _ => anyhow::bail!("usage: forge replay <id> [<id-to-diff-against>]"),
+    }
+    Ok(())
+}
+
+/// `forge assay list` / `forge assay compare <a> <b>` — inspect persisted assay runs.
+fn assay_cmd(sub: AssayCmd) -> Result<()> {
+    let store = open_store()?;
+    match sub {
+        AssayCmd::List => {
+            let runs = store.list_assay_runs().context("loading assay runs")?;
+            if runs.is_empty() {
+                println!("no assay runs found — run `/assay` inside `forge chat`");
+                return Ok(());
+            }
+            println!("{:<10}  {:<28}  {:>8}  scope", "id", "date", "cost");
+            println!("{}", "─".repeat(64));
+            for (id, scope, cost, ts) in &runs {
+                use chrono::{Local, TimeZone};
+                let date = Local
+                    .timestamp_opt(*ts, 0)
+                    .single()
+                    .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                    .unwrap_or_else(|| ts.to_string());
+                println!("{:<10}  {:<28}  ${:>7.4}  {}", &id[..id.len().min(8)], date, cost, scope);
+            }
+        }
+        AssayCmd::Compare { a, b } => {
+            let resolve = |prefix: &str| -> Result<String> {
+                let runs = store.list_assay_runs().context("loading assay runs")?;
+                let matches: Vec<_> = runs.into_iter().filter(|(id, ..)| id.starts_with(prefix)).collect();
+                match matches.len() {
+                    0 => anyhow::bail!("no assay run matches '{prefix}' — see `forge assay list`"),
+                    1 => Ok(matches.into_iter().next().unwrap().0),
+                    n => anyhow::bail!("'{prefix}' is ambiguous ({n} runs) — use more characters"),
+                }
+            };
+            let id_a = resolve(&a)?;
+            let id_b = resolve(&b)?;
+            let fa = store.load_findings(&id_a).context("loading run a")?;
+            let fb = store.load_findings(&id_b).context("loading run b")?;
+            let key = |f: &forge_types::Finding| format!("{}|{}", f.file, f.title);
+            let keys_a: std::collections::HashSet<String> = fa.iter().map(key).collect();
+            let keys_b: std::collections::HashSet<String> = fb.iter().map(key).collect();
+            let fixed: Vec<_> = keys_a.difference(&keys_b).collect();
+            let new_: Vec<_> = keys_b.difference(&keys_a).collect();
+            let open: usize = keys_a.intersection(&keys_b).count();
+            println!(
+                "assay compare  {}  →  {}\n",
+                &id_a[..id_a.len().min(8)],
+                &id_b[..id_b.len().min(8)]
+            );
+            println!("  fixed      {:>4}", fixed.len());
+            println!("  new        {:>4}", new_.len());
+            println!("  still-open {:>4}", open);
+            if !fixed.is_empty() {
+                println!("\nfixed:");
+                for k in fixed {
+                    println!("  ✓ {k}");
+                }
+            }
+            if !new_.is_empty() {
+                println!("\nnew:");
+                for k in new_ {
+                    println!("  + {k}");
+                }
+            }
+        }
     }
     Ok(())
 }

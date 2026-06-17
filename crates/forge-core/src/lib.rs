@@ -533,6 +533,18 @@ impl Session {
             for f in &report.findings {
                 let _ = self.store.add_finding(&run_id, f);
             }
+            // Auto-diff: compare against the prior run for this scope so users see what changed.
+            if let Ok(Some(prev_id)) = self
+                .store
+                .latest_run_for_scope(&report.scope.label(), &run_id)
+            {
+                if let Ok(prev) = self.store.load_findings(&prev_id) {
+                    let note = assay_diff_note(&prev, &report.findings, &prev_id[..8.min(prev_id.len())]);
+                    if !note.is_empty() {
+                        self.presenter.emit(PresenterEvent::Warning(note));
+                    }
+                }
+            }
         }
         self.presenter
             .emit(PresenterEvent::AssayReport(report.clone()));
@@ -1815,6 +1827,28 @@ fn over_budget_message(b: &BudgetState) -> String {
         cap(b.daily_cap_usd),
         b.spent_month_usd,
         cap(b.monthly_cap_usd)
+    )
+}
+
+/// Compare previous and current findings, return a human-readable diff note.
+/// Matching is by (file, title) — same issue at the same location.
+fn assay_diff_note(
+    prev: &[forge_types::Finding],
+    current: &[forge_types::Finding],
+    prev_id: &str,
+) -> String {
+    let key = |f: &forge_types::Finding| format!("{}|{}", f.file, f.title);
+    let prev_keys: std::collections::HashSet<String> = prev.iter().map(key).collect();
+    let curr_keys: std::collections::HashSet<String> = current.iter().map(key).collect();
+    let fixed: usize = prev_keys.difference(&curr_keys).count();
+    let new_: usize = curr_keys.difference(&prev_keys).count();
+    let still_open: usize = prev_keys.intersection(&curr_keys).count();
+    if fixed == 0 && new_ == 0 {
+        return String::new(); // nothing to say — identical findings
+    }
+    format!(
+        "⚒ vs run {prev_id}: {} fixed · {} new · {} still-open",
+        fixed, new_, still_open
     )
 }
 
