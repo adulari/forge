@@ -2752,6 +2752,7 @@ async fn dispatch_command(
             | CommandAction::ListSessions
             | CommandAction::Resume(_)
             | CommandAction::ClearScreen
+            | CommandAction::PinModel(_)
     );
     if busy && mutates {
         app.note("⚠ finish or Esc the current turn first");
@@ -2824,6 +2825,16 @@ async fn dispatch_command(
         // its filter. Resolving + swapping the session happens on Enter (picker_accept).
         CommandAction::Resume(prefix) => open_sessions_picker(app, &prefix)?,
         CommandAction::ListSessions => open_sessions_picker(app, "")?,
+        // `/model <id>` pins a specific model for the rest of this session (or clears the pin).
+        // Works while a turn is running (pin takes effect on the NEXT turn).
+        CommandAction::PinModel(model_id) => {
+            let mut s = session.lock().await;
+            s.pin_model(model_id.clone());
+            match model_id {
+                Some(id) => app.note(&format!("⊕ model pinned: {id} (clears with /model)")),
+                None => app.note("⊖ model pin cleared — mesh routing restored"),
+            }
+        }
         // `/models` opens the interactive model browser: a provider list (with global counts in
         // the heading) that drills into each provider's models on Enter; Esc steps back.
         CommandAction::ListModels => open_models_root(session, app).await?,
