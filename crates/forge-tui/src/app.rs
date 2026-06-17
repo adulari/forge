@@ -1023,10 +1023,7 @@ fn render_subagent_picker(frame: &mut Frame, area: Rect, app: &App) {
                 format!("${:.4}  {status}  ", v.cost),
                 Style::default().fg(DIM),
             ),
-            Span::styled(
-                truncate(&v.task, 44),
-                Style::default().fg(DIM),
-            ),
+            Span::styled(truncate(&v.task, 44), Style::default().fg(DIM)),
         ]));
     }
     frame.render_widget(Paragraph::new(lines), area);
