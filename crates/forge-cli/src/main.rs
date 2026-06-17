@@ -2543,23 +2543,14 @@ async fn run_chat_tui(
                     KeyKind::Esc => app.at_picker.close(),
                     KeyKind::Up => app.at_picker.move_up(),
                     KeyKind::Down => app.at_picker.move_down(),
-                    KeyKind::Tab => {
+                    KeyKind::Tab | KeyKind::Enter => {
                         if let Some(path) = app.at_picker.selected_path() {
                             if let Some(tok) = forge_tui::at_token_at(&app.input, app.input.len()) {
-                                app.input
-                                    .replace_range(tok.start..tok.end, &format!("@{path}"));
-                            } else {
-                                app.input = format!("@{path}");
-                            }
-                            app.at_picker.query = path;
-                            app.at_picker.clamp();
-                        }
-                    }
-                    KeyKind::Enter => {
-                        if let Some(path) = app.at_picker.selected_path() {
-                            if let Some(tok) = forge_tui::at_token_at(&app.input, app.input.len()) {
+                                // Insert `@path ` (trailing space so the user can keep typing).
                                 app.input
                                     .replace_range(tok.start..tok.end, &format!("@{path} "));
+                            } else {
+                                app.input = format!("@{path} ");
                             }
                         }
                         app.at_picker.close();
@@ -2782,6 +2773,13 @@ async fn run_chat_tui(
                 }
             } else if busy {
                 // Mid-turn: ignore typing (quit is already handled above).
+            } else if matches!(key, KeyKind::Char('f') | KeyKind::Char('F'))
+                && app.pending_shell_fix.is_some()
+            {
+                // F: populate input with the pending shell fix command for the user to review.
+                if let Some(fix) = app.pending_shell_fix.take() {
+                    app.input = fix;
+                }
             } else if matches!(key, KeyKind::CycleTemper) {
                 // SHIFT+TAB: cycle the operating temper (idle only — never mid-turn).
                 let new = {

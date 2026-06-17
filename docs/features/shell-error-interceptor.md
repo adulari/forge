@@ -44,7 +44,12 @@ fix.
   and monthly budget queries stay accurate. `compact()`'s summarise call is also recorded the
   same way.
 
+## Shipped (one-key fix populate)
+
+- Diagnosis prompt now outputs structured `cause` + optional `FIX: <cmd>` line.
+- When a fix command is present, "press F to populate fix command" appears in scrollback.
+- Pressing F (idle) inserts the fix command into the input for review before submitting.
+
 ## Deferred
 
-- A one-keystroke "apply the suggested fix" action (requires TUI key-binding + apply logic).
 - Pattern cache for common failures (missing binary, wrong cwd) to skip the model call.

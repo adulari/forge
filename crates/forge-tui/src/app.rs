@@ -115,6 +115,9 @@ pub struct App {
     tasks: Vec<forge_types::TodoItem>,
     /// File-path picker for `@path` inline completion. Opens when the input contains `@…` at cursor.
     pub at_picker: crate::commands::AtPathPicker,
+    /// A shell fix command from the last shell diagnosis. Pressing F (idle only) populates
+    /// the input with this command for the user to review before submitting.
+    pub pending_shell_fix: Option<String>,
     /// When true, the subagent picker overlay is shown in the stream area (opened by Ctrl+O when
     /// multiple subagents are in the current batch). ↑↓ navigate, Enter opens transcript, Esc closes.
     pub subagent_picking: bool,
@@ -261,9 +264,15 @@ impl App {
                 files,
                 tokens,
             } => self.flush.push(lattice_line(symbols, files, tokens)),
-            PresenterEvent::ShellDiagnosis { command, diagnosis } => self
-                .flush
-                .extend(shell_diagnosis_lines(&command, &diagnosis)),
+            PresenterEvent::ShellDiagnosis {
+                command,
+                diagnosis,
+                fix,
+            } => {
+                self.pending_shell_fix = fix.clone();
+                self.flush
+                    .extend(shell_diagnosis_lines(&command, &diagnosis, fix.as_deref()));
+            }
             PresenterEvent::Cost {
                 session_total_usd,
                 session_in,
@@ -443,6 +452,7 @@ impl App {
         if !self.subagents.is_empty() && self.subagents.iter().all(|r| r.done) {
             self.subagents.clear();
         }
+        self.pending_shell_fix = None;
     }
 
     /// Owned snapshot of the current batch's subagents (running + just-finished), in spawn order;
@@ -682,7 +692,11 @@ fn lattice_line(symbols: usize, files: usize, tokens: usize) -> TextLine<'static
 
 /// A failed shell command + the model's likely-cause/fix, rendered as a header line plus one
 /// dimmed line per diagnosis line (shell-error-interceptor.md).
-fn shell_diagnosis_lines(command: &str, diagnosis: &str) -> Vec<TextLine<'static>> {
+fn shell_diagnosis_lines(
+    command: &str,
+    diagnosis: &str,
+    fix: Option<&str>,
+) -> Vec<TextLine<'static>> {
     let mut lines = vec![TextLine::from(vec![
         Span::styled("  ⚠ shell failed ", Style::default().fg(ERRRED).bold()),
         Span::styled(truncate(command, 56), Style::default().fg(DIM)),
@@ -691,6 +705,12 @@ fn shell_diagnosis_lines(command: &str, diagnosis: &str) -> Vec<TextLine<'static
         lines.push(TextLine::from(Span::styled(
             format!("    {line}"),
             Style::default().fg(DIM),
+        )));
+    }
+    if fix.is_some() {
+        lines.push(TextLine::from(Span::styled(
+            "    press F to populate fix command in input",
+            Style::default().fg(TOOLCYAN),
         )));
     }
     lines
