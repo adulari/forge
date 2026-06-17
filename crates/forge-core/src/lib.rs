@@ -57,6 +57,42 @@ pub(crate) fn shell_command_failed(result: &str) -> bool {
     }
 }
 
+/// Match common, unambiguous failure patterns in the tool output and return a pre-canned
+/// diagnosis — skipping the model call entirely (free, instant). Returns `None` when the
+/// failure is unusual enough to need the model. Checked case-insensitively on the full result.
+pub(crate) fn pattern_diagnose(result: &str) -> Option<&'static str> {
+    // The table is ordered most-specific first so a result with multiple signals hits the
+    // most actionable match. Each pattern must be unambiguous: "permission denied" alone
+    // could be a file *or* a network ACL — but combining with exit codes is overkill here;
+    // the worst case is a slightly generic message, which is still free and instant.
+    let lower = result.to_lowercase();
+    let has = |s: &str| lower.contains(s);
+    if has("command not found") || has("no such file or directory") && has("exec") {
+        return Some("Command not found — check it is installed and in PATH.");
+    }
+    if has("no such file or directory") {
+        return Some("File or directory does not exist — verify the path with `ls` or `pwd`.");
+    }
+    if has("permission denied") || has("operation not permitted") {
+        return Some("Permission denied — try `chmod +x <file>` or prefix with `sudo`.");
+    }
+    if has("address already in use") {
+        return Some(
+            "Port already in use — find the process with `lsof -i :<port>` or `ss -tlnp`.",
+        );
+    }
+    if has("connection refused") {
+        return Some("Connection refused — the target service may not be running.");
+    }
+    if has("no space left on device") || has("disk quota exceeded") {
+        return Some("Disk full or quota exceeded — free space with `df -h` and `du -sh *`.");
+    }
+    if has("out of memory") || has("cannot allocate memory") {
+        return Some("Out of memory — reduce concurrency or increase available RAM/swap.");
+    }
+    None
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
     #[error(transparent)]
@@ -799,6 +835,16 @@ impl Session {
     /// is skipped when the budget is exhausted and stays silent on any model error, so it can
     /// never derail the turn (shell-error-interceptor.md).
     async fn diagnose_shell_error(&mut self, command: &str, result: &str) {
+        // Fast path: common patterns don't need a model call.
+        if let Some(cached) = pattern_diagnose(result) {
+            self.pending_hints
+                .push(format!("[shell diagnosis] {cached}"));
+            self.presenter.emit(PresenterEvent::ShellDiagnosis {
+                command: command.to_string(),
+                diagnosis: cached.to_string(),
+            });
+            return;
+        }
         let budget = BudgetState {
             spent_today_usd: self.store.spend_today_usd().unwrap_or(0.0),
             daily_cap_usd: self.config.mesh.daily_budget_usd,
@@ -2450,6 +2496,35 @@ mod tests {
         assert!(shell_command_failed("shell: exit signal in 5ms"));
         // Not a shell result at all → not treated as a shell failure.
         assert!(!shell_command_failed("read 3 files"));
+    }
+
+    #[test]
+    fn pattern_diagnose_matches_common_failures() {
+        assert!(pattern_diagnose("bash: docker: command not found").is_some());
+        assert!(pattern_diagnose("ls: /tmp/missing: No such file or directory").is_some());
+        assert!(pattern_diagnose("chmod: cannot access 'x.sh': Permission denied").is_some());
+        assert!(pattern_diagnose("bind: address already in use").is_some());
+        assert!(pattern_diagnose("curl: (7) Failed to connect: Connection refused").is_some());
+        assert!(pattern_diagnose("cp: error writing 'x': No space left on device").is_some());
+        assert!(pattern_diagnose("Cannot allocate memory").is_some());
+    }
+
+    #[test]
+    fn pattern_diagnose_returns_none_for_unrecognised_errors() {
+        assert!(
+            pattern_diagnose("shell: exit 1 in 2ms\n\ntest failed: assertion `left == right`")
+                .is_none()
+        );
+        assert!(
+            pattern_diagnose("shell: exit 2 in 1ms\n\nmake: *** [Makefile:5: build] Error 2")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn pattern_diagnose_is_case_insensitive() {
+        assert!(pattern_diagnose("COMMAND NOT FOUND").is_some());
+        assert!(pattern_diagnose("PERMISSION DENIED").is_some());
     }
 
     /// First call emits a failing `shell` command; the diagnosis call (identified by its system
