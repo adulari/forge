@@ -32,25 +32,25 @@ claimed. Three real gaps, one of which breaks the headline differentiator:
 
 | # | Gap | Why it matters | Priority | Spec |
 |---|-----|----------------|----------|------|
-| D1 | **Budget cap is fake** — "daily/monthly cap" is actually *per-session* cost (`spent_today_usd` = one session's total). Never aggregates across sessions; no monthly concept; no hard stop. | **The core product promise (bounded cost) is not enforced.** | **P0** | [fix-budget-cap.md](features/fix-budget-cap.md) |
-| D2 | **Real provider path untested** — `GenAiProvider` (Anthropic/OpenAI/Ollama, streaming, tool-calls) has **zero** automated tests; all 65 tests hit `MockProvider`. | FR-3, a headline capability, is unverified; mapping/streaming/tool-call regressions go uncaught. | **P0** | [provider-test-strategy.md](features/provider-test-strategy.md) |
-| D3 | **Permission rules half-built** — only the 4 global modes exist; FR-10's per-tool/per-project allow/ask/deny rules are unbuilt. | Blocks safe shell execution; owner relies on allow/deny lists today. | **P1** | [fix-permission-rules.md](features/fix-permission-rules.md) |
-| D4 | **Stale doc comments** — `forge-config/src/lib.rs:3` says keyring is "planned" (it's shipped); `forge-core/src/permission.rs:3` calls rules "planned" (accurate — see D3). | Misleads readers about what's done. | P2 | _(trivial; fix inline — no spec)_ |
+| D1 | ~~**Budget cap is fake**~~ → **fixed** — real daily + monthly aggregation across sessions, hard stop, downshift, warn threshold. | ~~The core product promise (bounded cost) is not enforced.~~ Fixed. | **done** | [fix-budget-cap.md](features/fix-budget-cap.md) |
+| D2 | ~~**Real provider path untested**~~ → **fixed** — `crates/forge-provider/tests/genai_contract.rs` has Layer 2 httpmock contract tests (streaming, tool-call translation, 5xx→Unavailable) + gated Ollama live. | Fixed. | **done** | [provider-test-strategy.md](features/provider-test-strategy.md) |
+| D3 | **Permission rules partial** — 4 global modes + TOML `[[permissions.rules]]` + builtin denylist (POSIX + Windows) all ship. **Still missing:** "always allow" writeback to config from TUI prompt. | Partial; writeback is a follow-up. | **partial** | [fix-permission-rules.md](features/fix-permission-rules.md) |
+| D4 | ~~**Stale doc comments**~~ → **fixed** — `forge-config/src/lib.rs` correctly describes keyring as shipped; `forge-core/src/permission.rs` accurately describes the rule engine. | Fixed. | **done** | _(inline)_ |
 
 ### Shipped v0.1 status (from the audit)
 
 | Req | Feature | Status | Note |
 |-----|---------|--------|------|
 | FR-1 | Agent loop (stream, tools, iterate) | **done** | 10 core tests |
-| FR-2 | Tool system (read/write/edit/list/search) | **done** | 10 tests; **no shell tool** (see P0-1) |
-| FR-3 | Multi-provider (genai) | **done** | contract-tested (#20); 7 providers + CLI bridge (#25/#26) |
-| FR-4 | Model Mesh routing | **done** | heuristic (length+keyword+hints+code+dev-verbs), `--model` pin, provider fallback; cost-aware candidate selection = future (provider-cost-routing.md) |
-| FR-5 | Cost + budget | **done** | real day+month cap across sessions (#19) |
-| FR-6 | TUI | **done** | inline-scrollback; plain markdown only (see P0-5) |
-| FR-7 | Session persistence | **done** | list + resume |
+| FR-2 | Tool system (read/write/edit/list/search/shell) | **done** | shell tool shipped + cross-platform; 10+ tests |
+| FR-3 | Multi-provider (genai) | **done** | contract-tested (streaming/tool-call/5xx); 7 providers + CLI bridge |
+| FR-4 | Model Mesh routing | **done** | cost-tiered routing, health-aware failover, `--model` pin |
+| FR-5 | Cost + budget | **done** | real day+month cap across sessions, auto-downshift, auto-compact at 80% |
+| FR-6 | TUI | **done** | inline-scrollback, syntax highlighting, diff preview, task panel, subagent picker |
+| FR-7 | Session persistence | **done** | list + resume + checkpoints + `/undo` |
 | FR-8 | Config (layered) | **done** | figment |
 | FR-9 | Secrets (env + keyring) | **done** | keyring untested (no OS service in CI) |
-| FR-10 | Permission modes | **partial** | 4 modes done; **rules unbuilt** (D3) |
+| FR-10 | Permission modes | **partial** | 4 modes + TOML rules + builtin denylist; "always allow" writeback deferred |
 
 ---
 
@@ -60,11 +60,11 @@ Make real coding possible and make the core promise true. Mostly within existing
 
 | Feature | Priority | What | Spec | Evidence |
 |---------|----------|------|------|----------|
-| **Shell / bash tool** | **P0** | Run build/test/git inline; stream output; background jobs; safety-gated. The single biggest missing capability. | [shell-tool.md](features/shell-tool.md) | Bash = owner's **#1 tool, 5,909 uses**; Forge can't run any command today |
-| **Fix budget cap** (D1) | **P0** | Real daily/monthly cost aggregation + hard stop + downshift + warn. | [fix-budget-cap.md](features/fix-budget-cap.md) | Core differentiator broken |
-| **Provider test strategy** (D2) | **P0** | 3-layer tests (unit mapping → mock-server contract → gated Ollama live) so the real adapter path is verified in CI with no keys. | [provider-test-strategy.md](features/provider-test-strategy.md) | Headline feature unverified |
-| **Fine-grained permission rules** (D3) | **P0/P1** | allow/ask/deny rule engine (per-tool, path/command globs); precedence with global modes. Unblocks safe shell. | [fix-permission-rules.md](features/fix-permission-rules.md) | Owner runs auto-mode + allow/deny lists |
-| **TUI rich rendering** | **P0** | Markdown rendering of answers + syntax highlighting + **diff view before applying edits** (accept/reject). | [tui-rich-rendering.md](features/tui-rich-rendering.md) | 115 "review" asks, 202 GitLab MR-review MCP calls — review is daily |
+| **Shell / bash tool** | **P0 — done** | Run build/test/git inline; stream output; timeout-kill; cross-platform (`sh -c` Unix / `cmd /C` Windows); safety-gated via permission broker + builtin denylist (POSIX + Windows patterns). | [shell-tool.md](features/shell-tool.md) | Shipped |
+| **Fix budget cap** (D1) | **P0 — done** | Daily/monthly cost aggregation + hard stop + downshift + warn threshold. | [fix-budget-cap.md](features/fix-budget-cap.md) | Shipped |
+| **Provider test strategy** (D2) | **P0 — done** | 3-layer tests: unit mappers + httpmock contract tests (`genai_contract.rs`: streaming/tool-call/5xx) + gated Ollama live. | [provider-test-strategy.md](features/provider-test-strategy.md) | `crates/forge-provider/tests/` |
+| **Fine-grained permission rules** (D3) | **P0/P1 — partial** | Built-in denylist + TOML `[[permissions.rules]]` + 4 global modes + per-tool allow/deny. **Deferred:** "always allow" writeback to config from TUI prompt. | [fix-permission-rules.md](features/fix-permission-rules.md) | Shipped; writeback deferred |
+| **TUI rich rendering** | **P0 — done** | Markdown rendering, syntax highlighting, diff preview emitted before every write permission prompt (accept/reject flow). | [tui-rich-rendering.md](features/tui-rich-rendering.md) | Shipped |
 
 **Wave-1 dependency:** shell-tool's safety layer depends on the permission-rules engine →
 build/land `fix-permission-rules` first (or together).
@@ -77,7 +77,7 @@ The capabilities that make Forge feel like *his* tool, including the #1 requeste
 
 | Feature | Priority | What | Spec | Evidence |
 |---------|----------|------|------|----------|
-| **Subagent orchestration** | **P1 (high)** | First-class spawn-agent primitive: parallel fan-out, Model-Mesh-routed children, budget/depth caps, synthesis. Exposed as a `task` tool + `forge orchestrate`. | [subagent-orchestration.md](features/subagent-orchestration.md) | `/orchestrate` = **#1 command (62)**; **233 subagent spawns**; Helm differentiator |
+| **Subagent orchestration** | **P1 (high) — done** | `spawn_agents` virtual tool: parallel fan-out, Model-Mesh-routed children, budget/depth caps, synthesis. Works on direct path + CLI bridge. Live TUI tree with ↑↓ picker + full transcript viewer (Ctrl+O). | [subagent-orchestration.md](features/subagent-orchestration.md) | Done |
 | **Assay — analysis mode** ⚒ | **P1 (top user ask)** — **MVP done** (#49) | Critical multi-agent crew that investigates code/design/architecture/docs for AI-slop, dead weight, unsafe/untested code, bad architecture; ranked findings, fixing opt-in. **Sibling to plan mode.** MVP: `forge assay [PATH]` (parallel mesh-routed critics + adversarial verification + ranked persisted report). Deferred: git scopes, live ⚒ TUI view, `/assay` chat, fix hand-off, report diffing. | [analysis-mode.md](features/analysis-mode.md) | Explicit #1 request; subagent-orchestration shipped (#34-38) |
 | **Commands + skills + autosuggest** | **P1** — **done** (palette + `forge-skills`; `@path` deferred) | Slash commands + reusable skills (CC-import compatible) in `./.forge/{commands,skills}`; fuzzy command palette; `/name` template expansion + `/skill` methodology injection; `forge commands`. New `forge-skills` crate. Deferred: `@path` autocomplete. | [command-skill-system.md](features/command-skill-system.md) | **212 skill uses, ~45 custom commands** authored |
 | **MCP client** | **P1** — **done** | Connect to MCP servers (stdio + HTTP/SSE via `rmcp`), expose their tools through the existing tool path + permission broker (new `SideEffect::External`, ADR-0009); deferred tool loading (`mcp_search_tools` + universal `mcp_call`, works on direct + CLI-bridge paths); allowlist; `forge mcp` + `/mcp`; auto-scan import from installed AI CLIs with secrets auto-stored in the keyring. New `forge-mcp` crate. | [mcp-client.md](features/mcp-client.md) | **~270 MCP calls** (GitLab MR review = daily) |
@@ -96,8 +96,8 @@ The power-user surface that makes the harness "better than Claude Code" (the sta
 
 | Feature | Priority | What | Evidence |
 |---------|----------|------|----------|
-| **Hooks system** | P2 — **MVP done** (observe + block; rewrite/inject deferred) | Pre/post tool-use shell hooks (`[[hooks]]`): `PreToolUse` can block a tool, `PostToolUse` observes; tool call piped as JSON on stdin; time-bounded. The owner's whole env runs on hooks (rtk token proxy, graphify injection, auto-title). **Deferred:** input-rewriting / context-injection hooks, the CLI-bridge path, other events. | [hooks.md](features/hooks.md); his entire setup |
-| **Context compaction** | P2 — **MVP done** (`/compact`; manual, live-only) | Auto-summarize long sessions. **Shipped:** `/compact` summarizes the older transcript (keeps the recent N) into one system message via a cheap trivial-tier model call, shrinking what later turns send — runs as a background task (spinner ticks). **Deferred:** auto-trigger on a high context gauge, and persisting the compacted view across resume. | `/compact` **21** |
+| **Hooks system** | P2 — **done** (observe + block on direct + CLI-bridge; rewrite/inject deferred) | Pre/post tool-use shell hooks (`[[hooks]]`): `PreToolUse` can block a tool, `PostToolUse` observes; tool call piped as JSON on stdin; time-bounded. Fires on both the direct path and the CLI-bridge path (`forge mcp-serve`). Cross-platform: `sh -c` on Unix, `cmd /C` on Windows. **Deferred:** input-rewriting / context-injection hooks, other events. | [hooks.md](features/hooks.md) |
+| **Context compaction** | P2 — **done** (`/compact` + auto-trigger at 80% gauge) | Auto-summarize long sessions. **Shipped:** `/compact` summarizes the older transcript into one system message via trivial-tier call; auto-triggers at turn-end when the context gauge exceeds 80% of the model's window, showing a note to the user. **Deferred:** persisting the compacted view across resume. | `/compact` **21** |
 | **Interactive clarification** | P2 | AskUserQuestion-style mid-task multiple-choice prompts. | **118** AskUserQuestion uses |
 | **Model selection UX** | P2 | `--model` pin flag, `/model`, effort/usage views (Mesh exists; add the controls). | `/model` **39** |
 | **Statusline / output styles / auto-title** | P2 | Configurable statusline + output styles (he invests in these). | auto-title hook, `/title`, caveman styles |
