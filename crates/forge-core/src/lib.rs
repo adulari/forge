@@ -2662,7 +2662,10 @@ mod tests {
             hooks: vec![forge_config::HookConfig {
                 event: forge_config::HookEvent::PreToolUse,
                 matcher: Some("list_dir".into()),
+                #[cfg(not(windows))]
                 command: "echo blocked-by-test 1>&2; exit 1".into(),
+                #[cfg(windows)]
+                command: "echo blocked-by-test 1>&2 & exit /b 1".into(),
                 timeout_secs: 10,
             }],
             ..Config::default()
