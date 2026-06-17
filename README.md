@@ -135,6 +135,7 @@ forge chat --plain              # headless / CI mode
 | `/checkpoints [label]` | Browse + rewind to any checkpoint |
 | `/compact` | Summarize older context to free the window |
 | `/mode` | Switch permission mode interactively |
+| `/model [<id>]` | Pin a model for this session; no arg clears the pin |
 | `/models` | Browse all discovered models |
 | `/mcp [tools <server>]` | Show MCP server status |
 | `/assay` | Run code-quality analysis crew |
@@ -152,6 +153,7 @@ forge chat --plain              # headless / CI mode
 | `Ctrl+O` | Toggle subagent detail |
 | `Esc` | Close palette / cancel |
 | `↑ / ↓` | Navigate palettes and pickers |
+| `y / n / a` | Allow / deny / always-allow a permission prompt (`a` persists to config) |
 
 ### `forge run`
 
@@ -208,6 +210,8 @@ forge mcp                   # show server status
 forge mcp tools myserver    # list tools on a specific server
 forge mcp import            # wizard: scan installed AI CLIs, pick servers to import
 forge mcp import path/to/.mcp.json  # import a specific file
+forge mcp login myserver   # OAuth 2.0 browser login (for OAuth-protected HTTP servers)
+forge mcp logout myserver  # clear stored OAuth tokens
 ```
 
 ### `forge commands`

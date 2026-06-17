@@ -24,85 +24,71 @@
 
 ---
 
-## 0. Existing-feature debt (fix before claiming v0.1 "done")
+## 0. Existing-feature debt (all resolved)
 
-The audit found v0.1 is **mostly real** (9 crates build clean, no stubs/`todo!()`, 65 tests
-green, end-to-end wiring works) — but it is **not** "feature-complete and fully tested" as
-claimed. Three real gaps, one of which breaks the headline differentiator:
+The v0.1 audit found three real gaps. All are now fixed:
 
-| # | Gap | Why it matters | Priority | Spec |
-|---|-----|----------------|----------|------|
-| D1 | **Budget cap is fake** — "daily/monthly cap" is actually *per-session* cost (`spent_today_usd` = one session's total). Never aggregates across sessions; no monthly concept; no hard stop. | **The core product promise (bounded cost) is not enforced.** | **P0** | [fix-budget-cap.md](features/fix-budget-cap.md) |
-| D2 | **Real provider path untested** — `GenAiProvider` (Anthropic/OpenAI/Ollama, streaming, tool-calls) has **zero** automated tests; all 65 tests hit `MockProvider`. | FR-3, a headline capability, is unverified; mapping/streaming/tool-call regressions go uncaught. | **P0** | [provider-test-strategy.md](features/provider-test-strategy.md) |
-| D3 | **Permission rules half-built** — only the 4 global modes exist; FR-10's per-tool/per-project allow/ask/deny rules are unbuilt. | Blocks safe shell execution; owner relies on allow/deny lists today. | **P1** | [fix-permission-rules.md](features/fix-permission-rules.md) |
-| D4 | **Stale doc comments** — `forge-config/src/lib.rs:3` says keyring is "planned" (it's shipped); `forge-core/src/permission.rs:3` calls rules "planned" (accurate — see D3). | Misleads readers about what's done. | P2 | _(trivial; fix inline — no spec)_ |
+| # | Gap | Status |
+|---|-----|--------|
+| D1 | **Budget cap was per-session** — real daily/monthly aggregation across sessions now enforced. | **fixed** (#19) |
+| D2 | **Real provider path untested** — 3-layer test strategy: unit mapping, mock-server contract, gated Ollama live. | **fixed** (#20) |
+| D3 | **Permission rules half-built** — full allow/ask/deny rule engine (per-tool, path/command globs), 'a' key writes always-allow rules to config. | **fixed** (#92) |
+| D4 | **Stale doc comments** — keyring "planned", rules "planned". | **fixed** |
 
-### Shipped v0.1 status (from the audit)
+### Current FR status
 
 | Req | Feature | Status | Note |
 |-----|---------|--------|------|
-| FR-1 | Agent loop (stream, tools, iterate) | **done** | 10 core tests |
-| FR-2 | Tool system (read/write/edit/list/search) | **done** | 10 tests; **no shell tool** (see P0-1) |
-| FR-3 | Multi-provider (genai) | **done** | contract-tested (#20); 7 providers + CLI bridge (#25/#26) |
-| FR-4 | Model Mesh routing | **done** | heuristic (length+keyword+hints+code+dev-verbs), `--model` pin, provider fallback; cost-aware candidate selection = future (provider-cost-routing.md) |
-| FR-5 | Cost + budget | **done** | real day+month cap across sessions (#19) |
-| FR-6 | TUI | **done** | inline-scrollback; plain markdown only (see P0-5) |
-| FR-7 | Session persistence | **done** | list + resume |
-| FR-8 | Config (layered) | **done** | figment |
-| FR-9 | Secrets (env + keyring) | **done** | keyring untested (no OS service in CI) |
-| FR-10 | Permission modes | **partial** | 4 modes done; **rules unbuilt** (D3) |
+| FR-1 | Agent loop (stream, tools, iterate) | **done** | 10+ core tests |
+| FR-2 | Tool system (read/write/edit/list/search/shell) | **done** | shell tool + denylist + error interceptor |
+| FR-3 | Multi-provider (genai) | **done** | contract-tested; 9+ providers + CLI bridge + free-tier auto-discovery |
+| FR-4 | Model Mesh routing | **done** | heuristic + `/model` in-session pin + failover + health + quota-aware |
+| FR-5 | Cost + budget | **done** | real day+month cap across sessions, hard stop, downshift, warn |
+| FR-6 | TUI | **done** | inline-scrollback, markdown rendering, syntax highlighting, diff-before-apply, banner, statusline |
+| FR-7 | Session persistence | **done** | list + resume + compacted-view persistence + checkpoints + undo |
+| FR-8 | Config (layered) | **done** | figment; wizard; live key injection |
+| FR-9 | Secrets (env + keyring) | **done** | OAuth tokens also in keyring (ADR-0007) |
+| FR-10 | Permission modes | **done** | 4 modes + full rule engine + 'a' always-allow writeback |
 
 ---
 
-## 1. Wave 1 — Foundation & fixes (P0)
+## 1. Wave 1 — Foundation & fixes (P0) — ALL DONE
 
-Make real coding possible and make the core promise true. Mostly within existing crates.
-
-| Feature | Priority | What | Spec | Evidence |
-|---------|----------|------|------|----------|
-| **Shell / bash tool** | **P0** | Run build/test/git inline; stream output; background jobs; safety-gated. The single biggest missing capability. | [shell-tool.md](features/shell-tool.md) | Bash = owner's **#1 tool, 5,909 uses**; Forge can't run any command today |
-| **Fix budget cap** (D1) | **P0** | Real daily/monthly cost aggregation + hard stop + downshift + warn. | [fix-budget-cap.md](features/fix-budget-cap.md) | Core differentiator broken |
-| **Provider test strategy** (D2) | **P0** | 3-layer tests (unit mapping → mock-server contract → gated Ollama live) so the real adapter path is verified in CI with no keys. | [provider-test-strategy.md](features/provider-test-strategy.md) | Headline feature unverified |
-| **Fine-grained permission rules** (D3) | **P0/P1** | allow/ask/deny rule engine (per-tool, path/command globs); precedence with global modes. Unblocks safe shell. | [fix-permission-rules.md](features/fix-permission-rules.md) | Owner runs auto-mode + allow/deny lists |
-| **TUI rich rendering** | **P0** | Markdown rendering of answers + syntax highlighting + **diff view before applying edits** (accept/reject). | [tui-rich-rendering.md](features/tui-rich-rendering.md) | 115 "review" asks, 202 GitLab MR-review MCP calls — review is daily |
-
-**Wave-1 dependency:** shell-tool's safety layer depends on the permission-rules engine →
-build/land `fix-permission-rules` first (or together).
+| Feature | Status | PR |
+|---------|--------|----|
+| **Shell / bash tool** | **done** | stream output, denylist, safety-gated, Windows cross-platform |
+| **Fix budget cap** (D1) | **done** | real day+month aggregation, hard stop, downshift, warn |
+| **Provider test strategy** (D2) | **done** | 3-layer: unit + contract + gated Ollama live |
+| **Fine-grained permission rules** (D3) | **done** | full allow/ask/deny engine + glob matching + 'a' always-allow writeback |
+| **TUI rich rendering** | **done** | markdown, syntax highlighting, diff-before-apply (accept/reject) |
 
 ---
 
-## 2. Wave 2 — Power primitives (P1)
+## 2. Wave 2 — Power primitives (P1) — ALL DONE
 
-The capabilities that make Forge feel like *his* tool, including the #1 requested feature.
-
-| Feature | Priority | What | Spec | Evidence |
-|---------|----------|------|------|----------|
-| **Subagent orchestration** | **P1 (high)** | First-class spawn-agent primitive: parallel fan-out, Model-Mesh-routed children, budget/depth caps, synthesis. Exposed as a `task` tool + `forge orchestrate`. | [subagent-orchestration.md](features/subagent-orchestration.md) | `/orchestrate` = **#1 command (62)**; **233 subagent spawns**; Helm differentiator |
-| **Assay — analysis mode** ⚒ | **P1 (top user ask)** — **MVP done** (#49) | Critical multi-agent crew that investigates code/design/architecture/docs for AI-slop, dead weight, unsafe/untested code, bad architecture; ranked findings, fixing opt-in. **Sibling to plan mode.** MVP: `forge assay [PATH]` (parallel mesh-routed critics + adversarial verification + ranked persisted report). Deferred: git scopes, live ⚒ TUI view, `/assay` chat, fix hand-off, report diffing. | [analysis-mode.md](features/analysis-mode.md) | Explicit #1 request; subagent-orchestration shipped (#34-38) |
-| **Commands + skills + autosuggest** | **P1** — **done** (palette + `forge-skills`; `@path` deferred) | Slash commands + reusable skills (CC-import compatible) in `./.forge/{commands,skills}`; fuzzy command palette; `/name` template expansion + `/skill` methodology injection; `forge commands`. New `forge-skills` crate. Deferred: `@path` autocomplete. | [command-skill-system.md](features/command-skill-system.md) | **212 skill uses, ~45 custom commands** authored |
-| **MCP client** | **P1** — **done** | Connect to MCP servers (stdio + HTTP/SSE via `rmcp`), expose their tools through the existing tool path + permission broker (new `SideEffect::External`, ADR-0009); deferred tool loading (`mcp_search_tools` + universal `mcp_call`, works on direct + CLI-bridge paths); allowlist; `forge mcp` + `/mcp`; auto-scan import from installed AI CLIs with secrets auto-stored in the keyring. New `forge-mcp` crate. | [mcp-client.md](features/mcp-client.md) | **~270 MCP calls** (GitLab MR review = daily) |
-| **Lattice — built-in code intelligence** ⚒ | **P1 (flagship)** — **PR1 done** (structural index + CLI) | Native, zero-setup semantic+structural code memory (tree-sitter + SQLite, incremental, persistent) that the agent loop **uses automatically** for ranked context retrieval — plus impact/blast-radius, git archaeology, git-native scoping, cross-repo. The "graphify but way better, built-in" feature. **Consolidates 4 former Wave-4 items.** **PR1 (shipped):** `forge-index` crate — tree-sitter Rust extraction → symbol nodes + `contains` edges, persisted in the shared SQLite db, incremental by content hash; `forge lattice update/query/status`. **Next PRs:** resolved call/ref edges + impact/path, auto-retrieval injection into `run_turn`, embeddings, watcher, git overlay, multi-language. | [code-intelligence.md](features/code-intelligence.md) | Owner relies on external graphify today (hooks-injected); wants it native + automatic + better |
-| **Web search + fetch tools** | **P1** — **done** (#58) | `web_search` (BYOK, pluggable backend; Brave reference) + `web_fetch` (keyless, SSRF-guarded, HTML→text). New `SideEffect::Network`. | [web-tools.md](features/web-tools.md) | WebSearch **373** + WebFetch **187** |
-| **Task / todo tracking** | **P1** — **done** | `update_tasks` tool → live styled checklist in the TUI, persisted + restored on resume; works on the direct path AND the CLI bridge (via mcp-serve). | [task-tracking.md](features/task-tracking.md) | TodoWrite **79** + Task* **~117** |
-
-**Wave-2 dependency:** **Assay is gated on subagent-orchestration** (its critic crew IS the
-subagent primitive). Build the primitive, then Assay.
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Subagent orchestration** | **done** | `spawn_agents` virtual tool, mesh-routed children, depth-1 guard, live TUI tree |
+| **Assay — analysis mode** ⚒ | **MVP done** | parallel critics + adversarial verify + ranked report; deferred: git scopes, fix hand-off |
+| **Commands + skills** | **done** | palette + `forge-skills`, CC-compatible, `use_skill` virtual tool, `@path` deferred |
+| **MCP client** | **done** (+OAuth PR #93) | stdio + HTTP/SSE, deferred loading, allowlist, OAuth 2.0 Authorization Code + PKCE, `forge mcp login/logout` |
+| **Lattice** ⚒ | **done** | tree-sitter Rust + multi-language, resolved edges, impact/path, auto-retrieval injection, hybrid semantic+structural embeddings, file watcher, `/lattice`, `forge lattice why` |
+| **Web tools** | **done** | `web_search` + `web_fetch`, SSRF-guarded, Brave backend |
+| **Task / todo tracking** | **done** | `update_tasks`, live TUI checklist, persisted+resume, CLI bridge |
 
 ---
 
-## 3. Wave 3 — Harness parity & polish (P2)
+## 3. Wave 3 — Harness parity & polish (P2) — ALL DONE
 
-The power-user surface that makes the harness "better than Claude Code" (the stated goal).
-
-| Feature | Priority | What | Evidence |
-|---------|----------|------|----------|
-| **Hooks system** | P2 — **MVP done** (observe + block; rewrite/inject deferred) | Pre/post tool-use shell hooks (`[[hooks]]`): `PreToolUse` can block a tool, `PostToolUse` observes; tool call piped as JSON on stdin; time-bounded. The owner's whole env runs on hooks (rtk token proxy, graphify injection, auto-title). **Deferred:** input-rewriting / context-injection hooks, the CLI-bridge path, other events. | [hooks.md](features/hooks.md); his entire setup |
-| **Context compaction** | P2 — **MVP done** (`/compact`; manual, live-only) | Auto-summarize long sessions. **Shipped:** `/compact` summarizes the older transcript (keeps the recent N) into one system message via a cheap trivial-tier model call, shrinking what later turns send — runs as a background task (spinner ticks). **Deferred:** auto-trigger on a high context gauge, and persisting the compacted view across resume. | `/compact` **21** |
-| **Interactive clarification** | P2 | AskUserQuestion-style mid-task multiple-choice prompts. | **118** AskUserQuestion uses |
-| **Model selection UX** | P2 | `--model` pin flag, `/model`, effort/usage views (Mesh exists; add the controls). | `/model` **39** |
-| **Statusline / output styles / auto-title** | P2 | Configurable statusline + output styles (he invests in these). | auto-title hook, `/title`, caveman styles |
-| **Token counter + context gauge** | P2 — **done** | Live session ↑in/↓out token totals + a context-window fill gauge (`used/limit · N%`, threshold-colored) next to the spinner/cost in the statusline; width-priority drop order; honest `None` denominator for models without a known window. | [tui-token-counter.md](features/tui-token-counter.md) — explicit request |
-| **Plan mode** | **P2 (deprioritized)** | Read-only planning mode. | **Only 6 sessions / `/plan` 1** — overrated vs reputation; Assay is the higher-value "mode" |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **Hooks system** | **done** | PreToolUse (block) + PostToolUse (observe), direct + CLI-bridge paths; deferred: rewrite/inject hooks |
+| **Context compaction** | **done** | `/compact` manual + auto-trigger at 80% context gauge + compacted-view persisted on resume |
+| **Interactive clarification** | **done** | `ask_user` virtual tool — TUI selector + headless fallback + non-interactive sentinel |
+| **Model selection UX** | **done** | `/model <id>` in-session pin (clears with `/model`), mesh still classifies for tier stats |
+| **Statusline / banner** | **done** | ASCII wordmark welcome banner, statusline (spinner/tier/model/cost/mode/hints), narrow-terminal fallback |
+| **Token counter + context gauge** | **done** | live ↑in/↓out totals + context-window fill gauge, threshold-colored, honest `None` for unknown windows |
+| **Plan mode** | **deprioritized** | 6 sessions / `/plan` 1 — Assay is the higher-value "mode" |
 
 ---
 
@@ -130,31 +116,17 @@ wave approaches.
 
 ---
 
-## 5. Build-order summary (dependency graph)
+## 5. Build-order summary
+
+All Wave 1–3 features are shipped. Wave 4 items are the remaining moonshot / monetization work.
 
 ```
-Wave 1 (P0, parallel-ish):
-  shell-tool ── needs ──▶ fix-permission-rules
-  fix-budget-cap
-  provider-test-strategy
-  tui-rich-rendering (markdown + syntax + diff)
-
-Wave 2 (P1):
-  subagent-orchestration ── unblocks ──▶ Assay (analysis mode)   ◀── top user ask
-  command-skill-system        web-tools        task-tracking
-  mcp-client                  Lattice (built-in code intelligence)  ◀── flagship
-
-Wave 3 (P2):  hooks · compaction · clarification · model UX · statusline ·
-              token-counter+context-gauge · (plan mode)
-
-Wave 4 (P3):  marketplace · session replay · import/migration · NL shell ·
-              shell error interceptor · voice · more providers · team tier
-              (semantic memory / archaeology / git-native / cross-repo → folded into Lattice)
+Wave 1 (P0) ✓  shell-tool · permission-rules · budget-cap · provider-tests · tui-rich-rendering
+Wave 2 (P1) ✓  subagent-orchestration · Assay · commands/skills · MCP+OAuth · Lattice (full) · web-tools · tasks
+Wave 3 (P2) ✓  hooks · compaction+persist · ask_user · /model pin · banner/statusline · token-gauge
+Wave 4 (P3)    marketplace · session-replay (MVP ✓) · import/migration (Claude+Codex ✓) ·
+               NL shell · shell-error-interceptor (MVP ✓) · voice · more-providers · team-tier
 ```
-
-Key gates: **Assay requires subagent-orchestration. Shell-tool requires permission-rules.
-The diff-view (tui-rich-rendering) reuses the permission/confirm flow. CC-import compat in
-the skill + MCP specs leans on the Wave-4 import layer (stub the readers until then).**
 
 ---
 
@@ -165,17 +137,17 @@ global `tool_use` occurrences; these justify the priorities above.
 
 | Tool | Count | → Forge status |
 |------|------:|----------------|
-| Bash | **5,909** | **missing** → P0 shell-tool |
+| Bash | **5,909** | **done** (shell tool, denylist, error interceptor) |
 | Read | 2,650 | done (read_file) |
-| Edit | 2,027 | done (edit_file) — add diff view |
-| Write | 1,299 | done (write_file) — add diff view |
-| WebSearch | 373 | missing → P1 web tools |
-| Agent (subagents) | 233 | missing → P1 subagent-orchestration |
-| Skill | 212 | missing → P1 command/skill system |
-| WebFetch | 187 | missing → P1 web tools |
-| AskUserQuestion | 118 | missing → P2 clarification |
-| TodoWrite + Task* | ~196 | missing → P1 task tracking |
-| MCP (all servers) | ~270 | missing → P1 MCP client (GitLab 202) |
+| Edit | 2,027 | done (edit_file + diff-before-apply review) |
+| Write | 1,299 | done (write_file + diff-before-apply review) |
+| WebSearch | 373 | done (web_search + Brave backend) |
+| Agent (subagents) | 233 | done (spawn_agents, mesh-routed, live TUI tree) |
+| Skill | 212 | done (forge-skills + use_skill + CC-compatible) |
+| WebFetch | 187 | done (web_fetch, SSRF-guarded) |
+| AskUserQuestion | 118 | done (ask_user virtual tool, TUI selector) |
+| TodoWrite + Task* | ~196 | done (update_tasks, persisted, TUI checklist) |
+| MCP (all servers) | ~270 | done (forge-mcp, stdio+HTTP/SSE, OAuth, deferred loading) |
 
 Top commands: `/orchestrate` 62, `/model` 39, `/compact` 21, `/mcp` 12. Permission modes:
 **auto 3,599** vs plan 6 (he runs YOLO-with-rails — validates P0 permission rules + P2
