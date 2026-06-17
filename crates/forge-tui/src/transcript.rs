@@ -19,25 +19,26 @@ use ratatui::Terminal;
 use crate::app::SubagentView;
 
 /// Run the full-screen subagent transcript browser on the alternate screen (so it never pollutes
-/// the chat's scrollback). `refresh` is called every frame to drain pending activity and return
-/// the current views — so the selected child's log AUTO-UPDATES while open. Keys: ↑↓/j/k scroll,
-/// space/PgDn + u/d page, g/G top/bottom, ←→/Tab switch agent, Esc/q close.
-pub fn run_subagent_transcript<F>(mut refresh: F) -> io::Result<()>
+/// the chat's scrollback). `initial_selected` opens at that agent index (0-based). `refresh` is
+/// called every frame to drain pending activity and return the current views — so the selected
+/// child's log AUTO-UPDATES while open. Keys: ↑↓/j/k scroll, space/PgDn + u/d page, g/G
+/// top/bottom, ←→/Tab switch agent, Esc/q close.
+pub fn run_subagent_transcript<F>(initial_selected: usize, mut refresh: F) -> io::Result<()>
 where
     F: FnMut() -> Vec<SubagentView>,
 {
     crate::driver::install_panic_restore();
     enable_raw_mode()?;
     crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
-    let res = browse(&mut refresh);
+    let res = browse(&mut refresh, initial_selected);
     let _ = disable_raw_mode();
     let _ = crossterm::execute!(io::stdout(), LeaveAlternateScreen);
     res
 }
 
-fn browse<F: FnMut() -> Vec<SubagentView>>(refresh: &mut F) -> io::Result<()> {
+fn browse<F: FnMut() -> Vec<SubagentView>>(refresh: &mut F, initial_selected: usize) -> io::Result<()> {
     let mut term = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let mut selected = 0usize;
+    let mut selected = initial_selected;
     let mut scroll = 0usize;
     loop {
         let views = refresh();

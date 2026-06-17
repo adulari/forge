@@ -1996,28 +1996,77 @@ async fn run_chat_tui(
                 continue;
             }
 
-            // Ctrl+O opens the full-screen subagent transcript browser on the ALTERNATE screen
-            // (never pollutes the chat scrollback). The refresh closure drains pending presenter
-            // events each frame so the selected child's log AUTO-UPDATES while open; a
-            // permission/question that can't be answered from the modal is safely declined.
-            if matches!(key, KeyKind::ToggleSubagentDetail) {
-                if !app.subagent_views().is_empty() {
-                    tui.run_fullscreen(|| {
-                        forge_tui::run_subagent_transcript(|| {
-                            while let Ok(msg) = rx.try_recv() {
-                                match msg {
-                                    UiMsg::Event(e) => app.apply(e),
-                                    UiMsg::Permission { reply, .. } => {
-                                        let _ = reply.send(false);
-                                    }
-                                    UiMsg::Question { reply, .. } => {
-                                        let _ = reply.send(forge_tui::NO_ANSWER.to_string());
+            // When the subagent picker overlay is open, ↑↓ navigate, Enter opens that agent's
+            // full-screen transcript, Esc/Ctrl+O closes the picker.
+            if app.subagent_picking {
+                match key {
+                    KeyKind::Up => {
+                        app.subagent_pick_idx = app.subagent_pick_idx.saturating_sub(1);
+                    }
+                    KeyKind::Down => {
+                        let n = app.subagent_views().len();
+                        app.subagent_pick_idx =
+                            (app.subagent_pick_idx + 1).min(n.saturating_sub(1));
+                    }
+                    KeyKind::Enter => {
+                        let idx = app.subagent_pick_idx;
+                        app.subagent_picking = false;
+                        tui.run_fullscreen(|| {
+                            forge_tui::run_subagent_transcript(idx, || {
+                                while let Ok(msg) = rx.try_recv() {
+                                    match msg {
+                                        UiMsg::Event(e) => app.apply(e),
+                                        UiMsg::Permission { reply, .. } => {
+                                            let _ = reply.send(false);
+                                        }
+                                        UiMsg::Question { reply, .. } => {
+                                            let _ = reply.send(
+                                                forge_tui::NO_ANSWER.to_string(),
+                                            );
+                                        }
                                     }
                                 }
-                            }
-                            app.subagent_views()
-                        })
-                    })?;
+                                app.subagent_views()
+                            })
+                        })?;
+                    }
+                    KeyKind::Esc | KeyKind::ToggleSubagentDetail => {
+                        app.subagent_picking = false;
+                    }
+                    _ => {}
+                }
+                dirty = true;
+                continue;
+            }
+
+            // Ctrl+O: open the subagent transcript browser. With a single agent, open it directly;
+            // with multiple agents, open the picker overlay first so the user can choose which one.
+            if matches!(key, KeyKind::ToggleSubagentDetail) {
+                let views = app.subagent_views();
+                if !views.is_empty() {
+                    if views.len() == 1 {
+                        tui.run_fullscreen(|| {
+                            forge_tui::run_subagent_transcript(0, || {
+                                while let Ok(msg) = rx.try_recv() {
+                                    match msg {
+                                        UiMsg::Event(e) => app.apply(e),
+                                        UiMsg::Permission { reply, .. } => {
+                                            let _ = reply.send(false);
+                                        }
+                                        UiMsg::Question { reply, .. } => {
+                                            let _ = reply.send(
+                                                forge_tui::NO_ANSWER.to_string(),
+                                            );
+                                        }
+                                    }
+                                }
+                                app.subagent_views()
+                            })
+                        })?;
+                    } else {
+                        app.subagent_picking = true;
+                        app.subagent_pick_idx = 0;
+                    }
                 }
                 dirty = true;
                 continue;
