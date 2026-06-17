@@ -668,6 +668,21 @@ impl Store {
         self.quota_at(chrono::Utc::now().timestamp())
     }
 
+    /// Seconds since the most recent quota update for `provider` (`None` if never recorded). Used
+    /// to gate the on-demand claude rate-limit probe so it refreshes at most every few minutes.
+    pub fn subscription_age_secs(&self, provider: &str) -> Option<i64> {
+        let conn = self.lock().ok()?;
+        let updated: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(updated_at) FROM subscription_usage WHERE provider = ?1",
+                [provider],
+                |r| r.get(0),
+            )
+            .ok()
+            .flatten();
+        updated.map(|u| chrono::Utc::now().timestamp() - u)
+    }
+
     /// Per-provider, per-window fraction from `subscription_usage` (for display).
     /// Only returns non-stale rows (window hasn't reset yet or has no reset time).
     /// Returns `HashMap<provider, HashMap<window_kind, fraction>>`.

@@ -580,6 +580,12 @@ impl Session {
         self.store.bridge_fractions().unwrap_or_default()
     }
 
+    /// Seconds since the claude subscription quota was last updated (`None` if never). The CLI
+    /// gates its on-demand rate-limit probe on this so it refreshes at most every few minutes.
+    pub fn claude_quota_age_secs(&self) -> Option<i64> {
+        self.store.subscription_age_secs("claude-cli")
+    }
+
     /// Seed the subscription-usage store from an externally-observed window fraction (the
     /// Claude/Codex rate-limit caches the CLI reads). Forge otherwise only learns a subscription's
     /// usage when it runs a turn on that bridge — usage racked up *outside* Forge would read as 0%,

@@ -28,51 +28,53 @@ pub struct BridgeStats {
     pub claude_rl_age_secs: Option<i64>,
 }
 
-/// Ensure `~/.claude/statusline.sh` writes rate-limit data to a cache file on each call.
-/// Called once at Forge startup when the Claude CLI bridge is detected.
-/// Idempotent — skips if the patch is already present.
-pub fn ensure_claude_statusline_patched() {
-    let home = match std::env::var("HOME") {
-        Ok(h) => std::path::PathBuf::from(h),
-        Err(_) => return,
-    };
-    let script = home.join(".claude/statusline.sh");
-    let Ok(content) = std::fs::read_to_string(&script) else {
-        return;
-    };
-    if content.contains("# forge:rate-limit-cache") || content.contains("_RL_CACHE=") {
-        return; // already patched
-    }
-    // Inject the cache-write block immediately after the last RL_7D_RESET= line.
-    let patch = r#"
-# forge:rate-limit-cache — write rate limits to disk for forge /usage overlay.
-if [[ -n "$RL_5H_PCT" || -n "$RL_7D_PCT" ]]; then
-  _RL_CACHE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.rate-limits-cache.json"
-  _RL_TMP="${_RL_CACHE}.tmp$$"
-  printf '{"ts":%d,"5h_pct":%s,"7d_pct":%s,"5h_resets":"%s","7d_resets":"%s"}\n' \
-    "$(date +%s)" \
-    "${RL_5H_PCT:-null}" "${RL_7D_PCT:-null}" \
-    "${RL_5H_RESET:-}" "${RL_7D_RESET:-}" \
-    > "$_RL_TMP" 2>/dev/null && mv -f "$_RL_TMP" "$_RL_CACHE" 2>/dev/null || true
-fi"#;
-
-    // Insert after the line that assigns the last rate-limit var. Try a few anchors so the patch
-    // still applies across statusline variants (helm rewrites the script with differing layouts).
-    let anchor = ["RL_7D_RESET=", "RL_7D_PCT=", "RL_5H_PCT="]
-        .into_iter()
-        .find_map(|a| content.find(a));
-    if let Some(pos) = anchor {
-        if let Some(end) = content[pos..].find('\n') {
-            let insert_at = pos + end + 1;
-            let mut patched = content.clone();
-            patched.insert_str(insert_at, patch);
-            patched.push('\n');
-            let tmp = script.with_extension("sh.forge-tmp");
-            if std::fs::write(&tmp, &patched).is_ok() {
-                let _ = std::fs::rename(&tmp, &script);
-            }
+/// Harvest the CURRENT Claude rate-limit utilisation for BOTH windows by running one minimal
+/// `claude` turn with `--debug` and reading the `anthropic-ratelimit-unified-{5h,7d}-utilization`
+/// response headers it logs. Unlike the stream-json `rate_limit_event` (which only reports the
+/// window near its limit), the headers always carry both the 5-hour and 7-day windows — the same
+/// data Claude Code feeds its statusline. The only fresh source when the statusline cache is stale.
+/// Returns (window, fraction) pairs, e.g. `[("five_hour", 0.10), ("weekly", 0.81)]`. Best-effort:
+/// empty on failure. Costs one tiny Haiku turn, so callers should gate it on staleness.
+pub fn probe_claude_limits() -> Vec<(String, f64)> {
+    let out = std::process::Command::new("claude")
+        .args([
+            "--debug",
+            "--print",
+            "--model",
+            "haiku",
+            "--append-system-prompt",
+            "Reply with a single period.",
+        ])
+        .arg(".")
+        .env("ANTHROPIC_LOG", "debug")
+        .stdin(std::process::Stdio::null())
+        .output();
+    let Ok(out) = out else { return Vec::new() };
+    // Debug logs (with the headers) go to stderr; scan both streams to be safe.
+    let mut text = String::from_utf8_lossy(&out.stderr).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stdout));
+    let mut res = Vec::new();
+    for (hdr, window) in [
+        ("anthropic-ratelimit-unified-5h-utilization", "five_hour"),
+        ("anthropic-ratelimit-unified-7d-utilization", "weekly"),
+    ] {
+        if let Some(frac) = first_float_after(&text, hdr) {
+            res.push((window.to_string(), frac));
         }
     }
+    res
+}
+
+/// Find the first numeric run (digits + `.`) appearing after `key` in `text`. Tolerant of the
+/// surrounding `": "..."` / log punctuation between the key and its value.
+fn first_float_after(text: &str, key: &str) -> Option<f64> {
+    let after = &text[text.find(key)? + key.len()..];
+    let start = after.find(|c: char| c.is_ascii_digit())?;
+    let tail = &after[start..];
+    let end = tail
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(tail.len());
+    tail[..end].parse().ok()
 }
 
 pub fn fetch() -> BridgeStats {

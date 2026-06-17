@@ -402,6 +402,19 @@ enum Parsed {
     Error(String),
 }
 
+/// Normalise a Claude `rateLimitType` to Forge's window vocabulary (`five_hour` / `weekly`).
+/// Claude uses `seven_day` for the weekly window; everything else passes through unchanged.
+fn normalize_window(rate_limit_type: &str) -> String {
+    let t = rate_limit_type.to_lowercase();
+    if t.contains("seven") || t.contains("week") || t == "7d" {
+        "weekly".to_string()
+    } else if t.contains("five") || t.contains("5h") || t == "hour" {
+        "five_hour".to_string()
+    } else {
+        rate_limit_type.to_string()
+    }
+}
+
 /// Map a Claude `rate_limit_info` into a coarse [`QuotaStatus`], defensively (the schema is
 /// version-volatile). We read the live `status` + `isUsingOverage` (NOT `overageStatus`, which is
 /// a setting, not the current state) plus a usage fraction when present. Unknown → `Ok`.
@@ -644,8 +657,11 @@ fn parse_claude_line(line: &str) -> Vec<Parsed> {
                     .get("isUsingOverage")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                // The live Claude Code field is `utilization` (0.0–1.0); older/synthetic schemas
+                // used `usedFraction`/`fractionUsed`. Try all so the fraction is actually captured.
                 let fraction = info
-                    .get("usedFraction")
+                    .get("utilization")
+                    .or_else(|| info.get("usedFraction"))
                     .or_else(|| info.get("fractionUsed"))
                     .and_then(Value::as_f64);
                 let resets_at = info.get("resetsAt").and_then(Value::as_i64).map(|t| {
@@ -656,11 +672,11 @@ fn parse_claude_line(line: &str) -> Vec<Parsed> {
                     }
                 });
                 out.push(Parsed::Quota {
-                    window: info
-                        .get("rateLimitType")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
+                    // Normalise the window name to Forge's vocabulary: Claude emits `seven_day`
+                    // for the weekly window and `five_hour` for the session window.
+                    window: normalize_window(
+                        info.get("rateLimitType").and_then(Value::as_str).unwrap_or(""),
+                    ),
                     status: quota_status_from(status, using_overage, fraction),
                     resets_at,
                     fraction,
@@ -1474,6 +1490,22 @@ mod tests {
                 ..
             }
         ));
+        // The REAL live shape (verified against `claude --output-format stream-json`): the field is
+        // `utilization`, and the weekly window is `seven_day`. Both must be parsed.
+        let real = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1781942400,"rateLimitType":"seven_day","utilization":0.81,"isUsingOverage":false}}"#;
+        match &parse_claude_line(real)[0] {
+            Parsed::Quota {
+                window,
+                status,
+                fraction,
+                ..
+            } => {
+                assert_eq!(window, "weekly", "seven_day → weekly");
+                assert_eq!(*fraction, Some(0.81), "utilization parsed");
+                assert_eq!(*status, QuotaStatus::Warning, "0.81 → Warning");
+            }
+            other => panic!("expected Quota, got {other:?}"),
+        }
     }
 
     #[test]

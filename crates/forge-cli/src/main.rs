@@ -1800,7 +1800,6 @@ async fn models(probe: bool, clear: bool) -> Result<()> {
 /// the `/mesh` TUI inspector; both read the same [`forge_mesh::RoutingExplanation`] engine.
 async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
     forge_config::inject_provider_keys();
-    bridge_stats::ensure_claude_statusline_patched();
     let config = forge_config::load().unwrap_or_default();
     let cat = discover_catalog(&config).await;
     if cat.is_empty() {
@@ -1808,14 +1807,24 @@ async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
         return Ok(());
     }
     let store = open_store()?;
-    // Reflect usage from outside Forge: seed the store from the Claude/Codex rate-limit caches.
+    // Codex from its rollout files; claude's CURRENT 5h+weekly utilisation from a one-shot
+    // `claude --debug` probe (gated: skip if the store was updated < 5 min ago).
     let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
         .await
         .unwrap_or_default();
-    seed_store_quota(&store, "claude-cli", "five_hour", bstats.claude_5h_pct);
-    seed_store_quota(&store, "claude-cli", "weekly", bstats.claude_weekly_pct);
     seed_store_quota(&store, "codex-cli", "five_hour", bstats.codex_5h_pct);
     seed_store_quota(&store, "codex-cli", "weekly", bstats.codex_weekly_pct);
+    if store
+        .subscription_age_secs("claude-cli")
+        .map_or(true, |a| a > 300)
+    {
+        let limits = tokio::task::spawn_blocking(bridge_stats::probe_claude_limits)
+            .await
+            .unwrap_or_default();
+        for (window, frac) in limits {
+            seed_store_quota(&store, "claude-cli", &window, Some(frac * 100.0));
+        }
+    }
     let quota = store
         .current_quota()
         .unwrap_or_default()
@@ -2587,13 +2596,6 @@ async fn build_session_with(
     if let Some(m) = mode {
         config.permission_mode = m.into();
     }
-    // Auto-patch ~/.claude/statusline.sh to write rate-limit data to a cache file so
-    // the /usage overlay can show Claude's 5h/weekly utilisation percentages.
-    if let Ok(home) = std::env::var("HOME") {
-        if std::path::Path::new(&home).join(".claude").is_dir() {
-            bridge_stats::ensure_claude_statusline_patched();
-        }
-    }
     // Capture the MCP config before `config` is moved into the Session; connect after the session
     // is built so its presenter can show the connection status.
     let mcp_config = config.mcp.clone();
@@ -2866,6 +2868,33 @@ fn maybe_first_run_setup(mock: bool) -> Result<()> {
     Ok(())
 }
 
+/// Probe Claude's CURRENT rate limits (both windows, via the `claude --debug` headers) and record
+/// them into the session store. Best-effort; the caller gates it on staleness. This is the live
+/// claude-usage source — it replaces the helm-wiped statusline cache.
+async fn refresh_claude_quota(session: &std::sync::Arc<tokio::sync::Mutex<Session>>) {
+    let limits = tokio::task::spawn_blocking(bridge_stats::probe_claude_limits)
+        .await
+        .unwrap_or_default();
+    if !limits.is_empty() {
+        let s = session.lock().await;
+        for (w, f) in limits {
+            s.seed_subscription_quota("claude-cli", &w, Some(f * 100.0));
+        }
+    }
+}
+
+/// Whether the stored claude quota is older than `max_age` seconds (or absent) — gates the probe.
+async fn claude_quota_is_stale(
+    session: &std::sync::Arc<tokio::sync::Mutex<Session>>,
+    max_age: i64,
+) -> bool {
+    session
+        .lock()
+        .await
+        .claude_quota_age_secs()
+        .map_or(true, |a| a > max_age)
+}
+
 async fn chat(
     mock: bool,
     mode: Option<Mode>,
@@ -2955,19 +2984,24 @@ async fn run_chat_tui(
         build_session_with(Box::new(ChannelPresenter::new(tx)), mock, mode, resume, pin).await?;
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
 
-    // Seed the mesh subscription quota from the Claude/Codex rate-limit caches at startup, so the
-    // very first routing decision reflects usage from outside Forge (it otherwise reads 0% until a
-    // turn runs on that bridge). Refreshed live by QuotaUpdate as turns run, and on each /mesh open.
+    // Seed the mesh subscription quota at startup so routing + the overlays reflect usage from
+    // outside Forge. Codex comes from its rollout files (fresh); claude's stale cache is only a
+    // weak fallback — the background probe below fetches claude's CURRENT 5h+weekly utilisation
+    // (via the `claude --debug` rate-limit headers) so the store is live within a few seconds.
     {
         let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
             .await
             .unwrap_or_default();
         let s = session.lock().await;
-        s.seed_subscription_quota("claude-cli", "five_hour", bstats.claude_5h_pct);
-        s.seed_subscription_quota("claude-cli", "weekly", bstats.claude_weekly_pct);
         s.seed_subscription_quota("codex-cli", "five_hour", bstats.codex_5h_pct);
         s.seed_subscription_quota("codex-cli", "weekly", bstats.codex_weekly_pct);
+        s.seed_subscription_quota("claude-cli", "five_hour", bstats.claude_5h_pct);
+        s.seed_subscription_quota("claude-cli", "weekly", bstats.claude_weekly_pct);
     }
+    tokio::spawn({
+        let s = session.clone();
+        async move { refresh_claude_quota(&s).await }
+    });
 
     let mut tui = Tui::new().context("initializing TUI")?;
     // The welcome banner is a one-time print into scrollback (not a render branch).
@@ -4236,11 +4270,6 @@ async fn dispatch_command(
             tui.print_text(&text);
         }
         CommandAction::Usage => {
-            // Re-assert the statusline cache-writer: helm/Claude Code periodically rewrites
-            // ~/.claude/statusline.sh and wipes our patch, freezing the claude rate-limit cache.
-            // Re-patching here means the next time Claude Code renders (incl. usage outside Forge)
-            // the cache refreshes again. Idempotent + cheap.
-            bridge_stats::ensure_claude_statusline_patched();
             let (
                 (
                     month_usd,
@@ -4288,11 +4317,15 @@ async fn dispatch_command(
             app.usage_overlay.claude_weekly_out = bstats.claude_weekly_out;
             fill_subscription_pcts(&mut app.usage_overlay, &bridge_fracs, &bstats);
             app.usage_overlay.open = true;
+            // The store is kept fresh by the startup probe + live turns, so the overlay opens with
+            // current data (no stale flash). If it's been >5 min, refresh in the background; the
+            // overlay's ~3s auto-refresh then picks up the new value from the store.
+            if claude_quota_is_stale(&session, 300).await {
+                let s = session.clone();
+                tokio::spawn(async move { refresh_claude_quota(&s).await });
+            }
         }
         CommandAction::Mesh(arg) => {
-            // Keep the statusline cache-writer alive (helm/CC rewrites wipe it) so claude usage —
-            // including turns run outside Forge — keeps refreshing the rate-limit cache.
-            bridge_stats::ensure_claude_statusline_patched();
             let prompt = arg.unwrap_or_default();
             // Bare `/mesh` → a representative complex task for the overview; else the given prompt.
             let to_explain = if prompt.trim().is_empty() {
@@ -4300,15 +4333,17 @@ async fn dispatch_command(
             } else {
                 prompt.clone()
             };
-            // Seed the mesh quota from the Claude/Codex rate-limit caches first, so usage racked
-            // up outside Forge (the common case) is reflected instead of reading as 0%.
+            // The inspector is a one-shot snapshot, so it must be fresh AT open: refresh codex from
+            // its rollout and — if the stored claude quota is stale (>5 min) — probe claude's live
+            // limits synchronously before explaining. Usually fresh (startup probe), so it no-ops.
             let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
                 .await
                 .unwrap_or_default();
+            if claude_quota_is_stale(&session, 300).await {
+                refresh_claude_quota(&session).await;
+            }
             let exp = {
                 let s = session.lock().await;
-                s.seed_subscription_quota("claude-cli", "five_hour", bstats.claude_5h_pct);
-                s.seed_subscription_quota("claude-cli", "weekly", bstats.claude_weekly_pct);
                 s.seed_subscription_quota("codex-cli", "five_hour", bstats.codex_5h_pct);
                 s.seed_subscription_quota("codex-cli", "weekly", bstats.codex_weekly_pct);
                 s.explain_routing(&to_explain)
