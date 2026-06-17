@@ -381,6 +381,17 @@ pub fn builtin_deny_rules() -> Vec<PermissionRule> {
                 "*|bash",
                 "*| zsh",
                 "*|zsh",
+                // Windows: catastrophic filesystem / disk (cmd.exe + PowerShell)
+                "rd /s /q *\\",
+                "rd /s /q /",
+                "rmdir /s /q *\\",
+                "rmdir /s /q /",
+                "del /f /s /q *\\*",
+                "format c:*",
+                "format *: /q*",
+                "Remove-Item -Recurse -Force /*",
+                "Remove-Item -Recurse -Force C:\\*",
+                "rm -Recurse -Force /*",
                 // secret-file reads via common verbs
                 "cat *.env",
                 "cat *.pem",
@@ -394,6 +405,13 @@ pub fn builtin_deny_rules() -> Vec<PermissionRule> {
                 "tail *.env",
                 "cp *.env *",
                 "cp */.ssh/* *",
+                // Windows: secret-file reads via type/more
+                "type *.env",
+                "type *.pem",
+                "type *id_rsa*",
+                "type */.ssh/*",
+                "more *.env",
+                "copy *.env *",
             ],
         ),
         deny("read_file", &secrets),
@@ -792,6 +810,20 @@ pub fn load() -> Result<Config, ConfigError> {
 /// with "no provider keys / no bridges" by the caller).
 pub fn user_config_exists() -> bool {
     config_dir().is_some_and(|d| d.join("config.toml").exists())
+}
+
+/// Append a `[[permissions.rules]]` allow entry for `tool` to the project `.forge/config.toml`.
+/// Creates the file (and `.forge/` dir) if absent. Idempotent at the file level — duplicate
+/// entries are harmless (first match wins in the permission broker).
+pub fn append_allow_rule(tool: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(".forge")?;
+    let entry = format!("\n[[permissions.rules]]\ntool = \"{tool}\"\nallow = \"*\"\n");
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(".forge/config.toml")?;
+    f.write_all(entry.as_bytes())
 }
 
 /// Persist the CLI-bridge subscription plans into the user `config.toml`, preserving every other
@@ -1258,5 +1290,38 @@ reason = "no privilege escalation"
         // Empty list / empty entries disable nothing.
         assert!(!is_model_disabled("gemini::flash", &[]));
         assert!(!is_model_disabled("gemini::flash", &["".to_string()]));
+    }
+
+    #[test]
+    fn append_allow_rule_creates_valid_toml_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let orig = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        std::fs::create_dir_all(".forge").unwrap();
+
+        append_allow_rule("shell").unwrap();
+        append_allow_rule("write_file").unwrap();
+
+        let text = std::fs::read_to_string(".forge/config.toml").unwrap();
+        // Parseable as TOML
+        let cfg: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string(&text))
+            .extract()
+            .unwrap();
+        assert_eq!(cfg.permissions.rules.len(), 2);
+        let rules: Vec<_> = cfg
+            .permissions
+            .rules
+            .iter()
+            .filter_map(RuleConfig::to_rule)
+            .collect();
+        assert!(rules
+            .iter()
+            .any(|r| r.tool == "shell" && r.decision == PermissionDecision::Allow));
+        assert!(rules
+            .iter()
+            .any(|r| r.tool == "write_file" && r.decision == PermissionDecision::Allow));
+
+        std::env::set_current_dir(orig).unwrap();
     }
 }
