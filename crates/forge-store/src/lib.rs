@@ -230,6 +230,48 @@ impl Store {
         Ok(())
     }
 
+    /// Record usage for a side call (compact, diagnose) that has no corresponding agent message.
+    /// Inserts a synthetic inactive system message as the FK anchor, then the usage row, and
+    /// bumps the session total so daily/monthly budget queries (which read `usage`) stay accurate.
+    pub fn record_side_call_usage(
+        &self,
+        session_id: &str,
+        label: &str,
+        usage: &Usage,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        let msg_id = forge_types::new_id();
+        let max_seq: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM message WHERE session_id = ?1",
+                [session_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        conn.execute(
+            "INSERT INTO message (id, session_id, seq, role, content, active) \
+             VALUES (?1, ?2, ?3, 'system', ?4, 0)",
+            (msg_id.as_str(), session_id, max_seq + 1, label),
+        )?;
+        conn.execute(
+            "INSERT INTO usage (id, message_id, input_tokens, output_tokens, cost_usd) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            (
+                forge_types::new_id(),
+                msg_id.as_str(),
+                usage.input_tokens as i64,
+                usage.output_tokens as i64,
+                usage.cost_usd,
+            ),
+        )?;
+        conn.execute(
+            "UPDATE session SET total_cost_usd = total_cost_usd + ?1, \
+             updated_at = strftime('%s','now') WHERE id = ?2",
+            (usage.cost_usd, session_id),
+        )?;
+        Ok(())
+    }
+
     /// Record a tool call and its permission outcome.
     pub fn record_tool_call(
         &self,
