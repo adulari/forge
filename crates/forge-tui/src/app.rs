@@ -444,6 +444,20 @@ impl App {
                 self.flush.push(TextLine::default());
             }
             PresenterEvent::Done { .. } => self.done = true,
+            PresenterEvent::QuotaUpdate {
+                provider,
+                window,
+                fraction,
+            } => {
+                let pct = Some(fraction * 100.0);
+                match (provider.as_str(), window.as_str()) {
+                    ("claude-cli", "five_hour") => self.usage_overlay.claude_5h_pct = pct,
+                    ("claude-cli", "weekly") => self.usage_overlay.claude_weekly_pct = pct,
+                    ("codex-cli", "five_hour") => self.usage_overlay.codex_5h_pct = pct,
+                    ("codex-cli", "weekly") => self.usage_overlay.codex_weekly_pct = pct,
+                    _ => {}
+                }
+            }
         }
     }
 

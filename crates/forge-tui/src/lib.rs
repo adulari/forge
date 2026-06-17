@@ -199,6 +199,13 @@ pub enum PresenterEvent {
     Done {
         final_text: String,
     },
+    /// A subscription quota observation arrived this turn (rate_limit_event / Codex rollout).
+    /// Used to update the /usage overlay in real-time without waiting for the DB refresh cycle.
+    QuotaUpdate {
+        provider: String,
+        window: String,
+        fraction: f64,
+    },
 }
 
 /// A rendering + interaction surface. Implementors decide how to display events and how
@@ -373,6 +380,8 @@ impl Presenter for HeadlessPresenter {
             // The final answer was already streamed via AssistantText; Done is a
             // lifecycle marker, so the headless renderer needs no extra output here.
             PresenterEvent::Done { .. } => {}
+            // Real-time quota updates are for the TUI overlay; headless ignores them.
+            PresenterEvent::QuotaUpdate { .. } => {}
         }
     }
 

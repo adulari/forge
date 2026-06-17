@@ -1308,6 +1308,14 @@ impl Session {
             // persist it so the next route() can demote/skip a near-limit subscription.
             for hint in &resp.quotas {
                 let _ = self.store.record_quota(hint);
+                // Push to the TUI so the /usage overlay updates in real-time.
+                if let Some(f) = hint.fraction_used {
+                    self.presenter.emit(forge_tui::PresenterEvent::QuotaUpdate {
+                        provider: hint.provider.clone(),
+                        window: hint.window.clone(),
+                        fraction: f,
+                    });
+                }
             }
 
             if !resp.wants_tools() {
