@@ -1714,7 +1714,10 @@ fn mesh_truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
-        format!("{}…", s.chars().take(max.saturating_sub(1)).collect::<String>())
+        format!(
+            "{}…",
+            s.chars().take(max.saturating_sub(1)).collect::<String>()
+        )
     }
 }
 
@@ -1765,18 +1768,27 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     } else {
         top.push(Line::from(vec![
             Span::styled("task  ", Style::default().fg(DIM)),
-            Span::raw(mesh_truncate(&o.prompt, inner.width.saturating_sub(8) as usize)),
+            Span::raw(mesh_truncate(
+                &o.prompt,
+                inner.width.saturating_sub(8) as usize,
+            )),
         ]));
         let tier = if !o.routed.is_empty() && o.routed != o.classified {
             format!("tier  {} → {}   ({})", o.classified, o.routed, o.reasons)
         } else {
             format!("tier  {}   ({})", o.classified, o.reasons)
         };
-        top.push(Line::from(Span::styled(tier, Style::default().fg(Color::Cyan))));
+        top.push(Line::from(Span::styled(
+            tier,
+            Style::default().fg(Color::Cyan),
+        )));
     }
     top.push(Line::from(""));
     for q in &o.quota {
-        let mut spans = vec![Span::styled(format!("  {:<11} ", q.provider), Style::default())];
+        let mut spans = vec![Span::styled(
+            format!("  {:<11} ", q.provider),
+            Style::default(),
+        )];
         spans.extend(mesh_meter(q.fraction, ease, &q.status));
         let plan = if q.plan.is_empty() { "?" } else { &q.plan };
         spans.push(Span::styled(
@@ -1791,7 +1803,11 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         top.push(Line::from(spans));
     }
     if !o.conserve_line.is_empty() {
-        let col = if o.conserve_fired { Color::Yellow } else { Color::Gray };
+        let col = if o.conserve_fired {
+            Color::Yellow
+        } else {
+            Color::Gray
+        };
         top.push(Line::from(Span::styled(
             format!("  conserve  {}", o.conserve_line),
             Style::default().fg(col),
@@ -1800,8 +1816,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     top.push(Line::from(""));
 
     let top_h = (top.len() as u16).min(inner.height.saturating_sub(1));
-    let chunks =
-        Layout::vertical([Constraint::Length(top_h), Constraint::Min(0)]).split(inner);
+    let chunks = Layout::vertical([Constraint::Length(top_h), Constraint::Min(0)]).split(inner);
     f.render_widget(Paragraph::new(Text::from(top)), chunks[0]);
 
     // --- candidate table (revealed row-by-row) + final pick ---
@@ -1823,7 +1838,9 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
             if c.usable { "" } else { " · unusable" },
         );
         let base = if c.selected {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
         } else if !c.usable {
             Style::default().fg(DIM)
         } else {
@@ -1831,9 +1848,23 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         };
         rows.push(Line::from(vec![
             Span::styled(format!("{marker} #{:<2} ", c.rank), base),
-            Span::styled(format!("{:<width$}", mesh_truncate(&c.model, model_w), width = model_w), base),
+            Span::styled(
+                format!(
+                    "{:<width$}",
+                    mesh_truncate(&c.model, model_w),
+                    width = model_w
+                ),
+                base,
+            ),
             Span::styled(format!("  {:>6.2}  ", c.score), base),
-            Span::styled(tag, if c.selected { base } else { Style::default().fg(DIM) }),
+            Span::styled(
+                tag,
+                if c.selected {
+                    base
+                } else {
+                    Style::default().fg(DIM)
+                },
+            ),
         ]));
     }
     rows.push(Line::from(""));
@@ -1841,7 +1872,9 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         Span::styled("pick  ", Style::default().fg(DIM)),
         Span::styled(
             o.pick.clone(),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         ),
     ]));
     if !o.rationale.is_empty() {

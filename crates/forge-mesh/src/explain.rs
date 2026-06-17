@@ -66,23 +66,19 @@ impl HeuristicRouter {
         let tier = cls.tier;
 
         let (conserve, rows) = if self.auto_active() {
-            self.catalog
-                .as_ref()
-                .unwrap()
-                .ranked_rows(tier, &self.pricing, hints.code_heavy, hints.seed, quota)
+            self.catalog.as_ref().unwrap().ranked_rows(
+                tier,
+                &self.pricing,
+                hints.code_heavy,
+                hints.seed,
+                quota,
+            )
         } else {
             (ConserveDecision::default(), Vec::new())
         };
 
         // The authoritative decision (pin / budget / fallback handling all live here).
-        let decision = self.decide(
-            tier,
-            cls.reasons.join(", "),
-            budget,
-            health,
-            hints,
-            quota,
-        );
+        let decision = self.decide(tier, cls.reasons.join(", "), budget, health, hints, quota);
 
         let candidates = rows
             .into_iter()

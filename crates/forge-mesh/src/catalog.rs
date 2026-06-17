@@ -264,7 +264,12 @@ pub(crate) fn conserve_decision(
     d.probability = sub_providers
         .iter()
         .map(|prov| {
-            conserve_probability(tier, quota.fraction_for(prov), quota.plan_for(prov), code_heavy)
+            conserve_probability(
+                tier,
+                quota.fraction_for(prov),
+                quota.plan_for(prov),
+                code_heavy,
+            )
         })
         .fold(0.0_f64, f64::max);
     d.roll = (stable_hash(&format!("{seed}:conserve")) % 10_000) as f64 / 10_000.0;
@@ -568,12 +573,7 @@ impl ModelCatalog {
 
     /// The per-provider spread probability for a tier (the `/mesh` quota view) — how likely a task
     /// of this tier routes off that subscription given its window fraction + plan.
-    pub fn spread_probability(
-        tier: TaskTier,
-        fraction: f64,
-        plan: &str,
-        code_heavy: bool,
-    ) -> f64 {
+    pub fn spread_probability(tier: TaskTier, fraction: f64, plan: &str, code_heavy: bool) -> f64 {
         conserve_probability(tier, fraction, plan, code_heavy)
     }
 
@@ -694,8 +694,14 @@ mod tests {
             "gemini::imagen-4.0-generate-001".into(),
         ]);
         let r = cat.ranked_for(TaskTier::Trivial, &Pricing::default(), 5);
-        assert_eq!(r.first().unwrap(), "gemini::gemini-flash-lite-latest", "{r:?}");
-        assert!(!r.iter().any(|m| m.contains("deep-research") || m.contains("imagen")));
+        assert_eq!(
+            r.first().unwrap(),
+            "gemini::gemini-flash-lite-latest",
+            "{r:?}"
+        );
+        assert!(!r
+            .iter()
+            .any(|m| m.contains("deep-research") || m.contains("imagen")));
     }
 
     #[test]
@@ -806,12 +812,12 @@ mod tests {
     fn on_a_score_tie_the_lighter_sibling_wins() {
         // opus and sonnet both rank q3 (frontier) for complex → identical score. The mesh should
         // spend the lighter sonnet, conserving opus' quota. (User rule: lightest-on-tie.)
-        let cat = ModelCatalog::new(vec![
-            "claude-cli::opus".into(),
-            "claude-cli::sonnet".into(),
-        ]);
+        let cat = ModelCatalog::new(vec!["claude-cli::opus".into(), "claude-cli::sonnet".into()]);
         let r = cat.ranked_for(TaskTier::Complex, &Pricing::default(), 2);
-        assert_eq!(r[0], "claude-cli::sonnet", "lighter sibling leads on a tie: {r:?}");
+        assert_eq!(
+            r[0], "claude-cli::sonnet",
+            "lighter sibling leads on a tie: {r:?}"
+        );
 
         // But a genuinely weaker sibling (haiku, lower score) must NOT jump ahead for complex.
         let cat2 = ModelCatalog::new(vec![
@@ -821,7 +827,11 @@ mod tests {
         ]);
         let r2 = cat2.ranked_for(TaskTier::Complex, &Pricing::default(), 3);
         assert_eq!(r2[0], "claude-cli::sonnet");
-        assert_eq!(r2.last().unwrap(), "claude-cli::haiku", "weak sibling stays last: {r2:?}");
+        assert_eq!(
+            r2.last().unwrap(),
+            "claude-cli::haiku",
+            "weak sibling stays last: {r2:?}"
+        );
     }
 
     #[test]

@@ -964,7 +964,9 @@ pub fn has_search_key(provider: &str) -> bool {
     if std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false) {
         return true;
     }
-    secret_store::get(provider).map(|k| !k.is_empty()).unwrap_or(false)
+    secret_store::get(provider)
+        .map(|k| !k.is_empty())
+        .unwrap_or(false)
 }
 
 /// A human label + hint for a search provider, shown in `forge init` / `/config`.
@@ -1018,7 +1020,9 @@ pub fn has_api_key(provider: &str) -> bool {
     if std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false) {
         return true;
     }
-    secret_store::get(provider).map(|k| !k.is_empty()).unwrap_or(false)
+    secret_store::get(provider)
+        .map(|k| !k.is_empty())
+        .unwrap_or(false)
 }
 
 /// Resolve an API key for a provider: environment variable first, then the OS keyring.

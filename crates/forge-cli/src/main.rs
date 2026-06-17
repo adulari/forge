@@ -408,7 +408,11 @@ fn fill_subscription_pcts(
     overlay.codex_5h_pct = x5;
     overlay.codex_weekly_pct = xw;
     // A live turn refreshed the weekly reading → it's current; otherwise surface the cache age.
-    overlay.claude_rl_age_secs = if cw_live { None } else { bstats.claude_rl_age_secs };
+    overlay.claude_rl_age_secs = if cw_live {
+        None
+    } else {
+        bstats.claude_rl_age_secs
+    };
 }
 
 fn sync_palette_to_slash_token(app: &mut forge_tui::App) {
@@ -1803,7 +1807,9 @@ async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
     let config = forge_config::load().unwrap_or_default();
     let cat = discover_catalog(&config).await;
     if cat.is_empty() {
-        println!("no models discovered — set a provider key (`forge auth <provider>`) or run ollama");
+        println!(
+            "no models discovered — set a provider key (`forge auth <provider>`) or run ollama"
+        );
         return Ok(());
     }
     let store = open_store()?;
@@ -1883,9 +1889,20 @@ fn meter(frac: f64) -> String {
 }
 
 /// The no-prompt overview: subscription quota gauges + per-tier ranked picks.
-fn mesh_overview(cat: &forge_mesh::ModelCatalog, config: &forge_config::Config, quota: &forge_types::SubscriptionQuota) {
+fn mesh_overview(
+    cat: &forge_mesh::ModelCatalog,
+    config: &forge_config::Config,
+    quota: &forge_types::SubscriptionQuota,
+) {
     let pricing = forge_mesh::pricing::Pricing::from_config(config);
-    println!("subscription quota (conservation {}):", if config.mesh.subscription_conserve { "on" } else { "off" });
+    println!(
+        "subscription quota (conservation {}):",
+        if config.mesh.subscription_conserve {
+            "on"
+        } else {
+            "off"
+        }
+    );
     let mut subs: Vec<&str> = cat
         .models()
         .iter()
@@ -1902,7 +1919,8 @@ fn mesh_overview(cat: &forge_mesh::ModelCatalog, config: &forge_config::Config, 
         let plan = quota.plan_for(p);
         let plan = if plan.is_empty() { "?" } else { plan };
         let pc = forge_mesh::ModelCatalog::spread_probability(TaskTier::Complex, frac, plan, false);
-        let ps = forge_mesh::ModelCatalog::spread_probability(TaskTier::Standard, frac, plan, false);
+        let ps =
+            forge_mesh::ModelCatalog::spread_probability(TaskTier::Standard, frac, plan, false);
         println!(
             "  {:<11} {} {:>3.0}% · plan {plan} · {:?} · spread P(complex)={:.0}% P(standard)={:.0}%",
             p,
@@ -1970,9 +1988,15 @@ fn print_mesh_explanation(e: &forge_mesh::RoutingExplanation) {
         let verdict = if !c.eligible {
             "no frontier alternative → not applied".to_string()
         } else if c.fired {
-            format!("FIRED (roll {:.2} < P {:.2}) → spread off subscriptions", c.roll, c.probability)
+            format!(
+                "FIRED (roll {:.2} < P {:.2}) → spread off subscriptions",
+                c.roll, c.probability
+            )
         } else {
-            format!("not fired (roll {:.2} ≥ P {:.2}) → subscription kept", c.roll, c.probability)
+            format!(
+                "not fired (roll {:.2} ≥ P {:.2}) → subscription kept",
+                c.roll, c.probability
+            )
         };
         println!("\nconservation: {verdict}");
     } else {

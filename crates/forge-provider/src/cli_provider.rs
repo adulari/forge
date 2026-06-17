@@ -463,9 +463,7 @@ fn codex_quota_from_rollout(jsonl: &str, provider: &str) -> Vec<forge_types::Quo
         .unwrap_or_default()
         .as_secs() as i64;
 
-    let reached_type = rl
-        .get("rate_limit_reached_type")
-        .and_then(Value::as_str);
+    let reached_type = rl.get("rate_limit_reached_type").and_then(Value::as_str);
 
     let mut hints = Vec::new();
     for (key, reached_key) in [("primary", "primary"), ("secondary", "secondary")] {
@@ -474,10 +472,7 @@ fn codex_quota_from_rollout(jsonl: &str, provider: &str) -> Vec<forge_types::Quo
             continue;
         };
         let resets = w.get("resets_at").and_then(Value::as_i64);
-        let mins = w
-            .get("window_minutes")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
+        let mins = w.get("window_minutes").and_then(Value::as_i64).unwrap_or(0);
         // Skip stale windows (the period has already reset).
         if let Some(r) = resets {
             if r <= now_secs {
@@ -675,7 +670,9 @@ fn parse_claude_line(line: &str) -> Vec<Parsed> {
                     // Normalise the window name to Forge's vocabulary: Claude emits `seven_day`
                     // for the weekly window and `five_hour` for the session window.
                     window: normalize_window(
-                        info.get("rateLimitType").and_then(Value::as_str).unwrap_or(""),
+                        info.get("rateLimitType")
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
                     ),
                     status: quota_status_from(status, using_overage, fraction),
                     resets_at,
@@ -1528,7 +1525,10 @@ mod tests {
         let jsonl = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":85.0,"window_minutes":300,"resets_at":9999999999},"secondary":{"used_percent":4.0,"window_minutes":10080,"resets_at":9999999999},"plan_type":"plus","rate_limit_reached_type":null}}}"#;
         let hints = codex_quota_from_rollout(jsonl, "codex-cli");
         assert_eq!(hints.len(), 2, "both windows expected");
-        let five_h = hints.iter().find(|h| h.window == "five_hour").expect("five_hour");
+        let five_h = hints
+            .iter()
+            .find(|h| h.window == "five_hour")
+            .expect("five_hour");
         assert_eq!(five_h.provider, "codex-cli");
         assert_eq!(five_h.status, QuotaStatus::Warning); // 85% >= 80%
         assert_eq!(five_h.resets_at, Some(9999999999));
@@ -1543,7 +1543,10 @@ mod tests {
         use forge_types::QuotaStatus;
         let jsonl = r#"{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.0,"window_minutes":300,"resets_at":9999999999},"rate_limit_reached_type":"primary"}}}"#;
         let hints = codex_quota_from_rollout(jsonl, "codex-cli");
-        let five_h = hints.iter().find(|h| h.window == "five_hour").expect("five_hour");
+        let five_h = hints
+            .iter()
+            .find(|h| h.window == "five_hour")
+            .expect("five_hour");
         assert_eq!(five_h.status, QuotaStatus::Exhausted);
     }
 

@@ -12,7 +12,9 @@ pub mod catalog;
 pub mod explain;
 pub mod pricing;
 
-pub use catalog::{CatalogStats, ConserveDecision, ModelCatalog, ModelInfo, ProviderGroup, ScoreRow};
+pub use catalog::{
+    CatalogStats, ConserveDecision, ModelCatalog, ModelInfo, ProviderGroup, ScoreRow,
+};
 pub use explain::{CandidateRow, ProviderQuotaView, RoutingExplanation};
 
 /// Live budget context the router considers when choosing a tier. Carries daily, weekly, and
@@ -793,7 +795,11 @@ mod tests {
             .collect()
     }
 
-    async fn subscription_share(r: &HeuristicRouter, q: &SubscriptionQuota, prompts: &[String]) -> usize {
+    async fn subscription_share(
+        r: &HeuristicRouter,
+        q: &SubscriptionQuota,
+        prompts: &[String],
+    ) -> usize {
         let mut sub = 0;
         for p in prompts {
             if is_subscription(&route_model_q(r, p, q).await) {
@@ -812,16 +818,24 @@ mod tests {
         let q = conserve_quota(0.0, "plus", "plus");
         let sub = subscription_share(&r, &q, &prompts).await;
         let free = prompts.len() - sub;
-        assert!(free > 0, "some complex tasks must spread to free frontier: free={free}");
-        assert!(sub > free, "but subscriptions still take the majority while fresh: sub={sub} free={free}");
+        assert!(
+            free > 0,
+            "some complex tasks must spread to free frontier: free={free}"
+        );
+        assert!(
+            sub > free,
+            "but subscriptions still take the majority while fresh: sub={sub} free={free}"
+        );
     }
 
     #[tokio::test]
     async fn conservation_grows_as_the_weekly_window_fills() {
         let r = mixed_router();
         let prompts = complex_workload(80);
-        let fresh_free = prompts.len() - subscription_share(&r, &conserve_quota(0.0, "plus", "plus"), &prompts).await;
-        let full_free = prompts.len() - subscription_share(&r, &conserve_quota(0.7, "plus", "plus"), &prompts).await;
+        let fresh_free = prompts.len()
+            - subscription_share(&r, &conserve_quota(0.0, "plus", "plus"), &prompts).await;
+        let full_free = prompts.len()
+            - subscription_share(&r, &conserve_quota(0.7, "plus", "plus"), &prompts).await;
         assert!(
             full_free > fresh_free,
             "more tasks must spread off subscriptions as the window fills: fresh={fresh_free} full={full_free}"
@@ -834,7 +848,8 @@ mod tests {
         // subscription type.)
         let r = mixed_router();
         let prompts = complex_workload(80);
-        let big = subscription_share(&r, &conserve_quota(0.5, "max-20x", "max-20x"), &prompts).await;
+        let big =
+            subscription_share(&r, &conserve_quota(0.5, "max-20x", "max-20x"), &prompts).await;
         let small = subscription_share(&r, &conserve_quota(0.5, "plus", "plus"), &prompts).await;
         assert!(
             big > small,
@@ -849,7 +864,11 @@ mod tests {
         let prompts = complex_workload(40);
         let q = SubscriptionQuota::default(); // conserve = false
         let sub = subscription_share(&r, &q, &prompts).await;
-        assert_eq!(sub, prompts.len(), "with conservation off every complex task uses a subscription");
+        assert_eq!(
+            sub,
+            prompts.len(),
+            "with conservation off every complex task uses a subscription"
+        );
     }
 
     #[tokio::test]
@@ -866,7 +885,11 @@ mod tests {
         let prompts = complex_workload(30);
         let q = conserve_quota(0.7, "plus", "plus"); // high pressure + conserve on
         let sub = subscription_share(&r, &q, &prompts).await;
-        assert_eq!(sub, prompts.len(), "no frontier alternative → keep using the subscription");
+        assert_eq!(
+            sub,
+            prompts.len(),
+            "no frontier alternative → keep using the subscription"
+        );
     }
 
     #[tokio::test]
@@ -1067,7 +1090,11 @@ mod tests {
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex);
-        assert!(!is_subscription(&d.model), "demoted off subscription: {}", d.model);
+        assert!(
+            !is_subscription(&d.model),
+            "demoted off subscription: {}",
+            d.model
+        );
         assert!(
             crate::capability::is_frontier(&d.model),
             "complex under weekly pressure must still pick a FRONTIER alternative: got {}",
@@ -1081,13 +1108,16 @@ mod tests {
         // for ALL tasks, not just complex ones.
         let r = mixed_router();
         let mut map = std::collections::HashMap::new();
-        map.insert("claude-cli".to_string(), forge_types::QuotaStatus::Exhausted);
+        map.insert(
+            "claude-cli".to_string(),
+            forge_types::QuotaStatus::Exhausted,
+        );
         map.insert("codex-cli".to_string(), forge_types::QuotaStatus::Exhausted);
         let quota = SubscriptionQuota::new(map);
         for p in [
-            "fix this typo",                                  // trivial
-            "write a function that validates an email",       // standard
-            "design a lock-free queue and prove it correct",  // complex
+            "fix this typo",                                 // trivial
+            "write a function that validates an email",      // standard
+            "design a lock-free queue and prove it correct", // complex
         ] {
             let d = r
                 .route(p, BudgetState::default(), &ModelHealth::default(), &quota)
