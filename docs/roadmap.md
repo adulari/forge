@@ -32,9 +32,9 @@ claimed. Three real gaps, one of which breaks the headline differentiator:
 
 | # | Gap | Why it matters | Priority | Spec |
 |---|-----|----------------|----------|------|
-| D1 | **Budget cap is fake** — "daily/monthly cap" is actually *per-session* cost (`spent_today_usd` = one session's total). Never aggregates across sessions; no monthly concept; no hard stop. | **The core product promise (bounded cost) is not enforced.** | **P0** | [fix-budget-cap.md](features/fix-budget-cap.md) |
-| D2 | **Real provider path untested** — `GenAiProvider` (Anthropic/OpenAI/Ollama, streaming, tool-calls) has **zero** automated tests; all 65 tests hit `MockProvider`. | FR-3, a headline capability, is unverified; mapping/streaming/tool-call regressions go uncaught. | **P0** | [provider-test-strategy.md](features/provider-test-strategy.md) |
-| D3 | **Permission rules half-built** — only the 4 global modes exist; FR-10's per-tool/per-project allow/ask/deny rules are unbuilt. | Blocks safe shell execution; owner relies on allow/deny lists today. | **P1** | [fix-permission-rules.md](features/fix-permission-rules.md) |
+| D1 | ~~**Budget cap is fake**~~ → **fixed** — real daily + monthly aggregation across sessions, hard stop, downshift, warn threshold. | ~~The core product promise (bounded cost) is not enforced.~~ Fixed. | **done** | [fix-budget-cap.md](features/fix-budget-cap.md) |
+| D2 | ~~**Real provider path untested**~~ → **fixed** — `crates/forge-provider/tests/genai_contract.rs` has Layer 2 httpmock contract tests (streaming, tool-call translation, 5xx→Unavailable) + gated Ollama live. | Fixed. | **done** | [provider-test-strategy.md](features/provider-test-strategy.md) |
+| D3 | **Permission rules partial** — 4 global modes + TOML `[[permissions.rules]]` + builtin denylist (POSIX + Windows) all ship. **Still missing:** "always allow" writeback to config from TUI prompt. | Partial; writeback is a follow-up. | **partial** | [fix-permission-rules.md](features/fix-permission-rules.md) |
 | D4 | **Stale doc comments** — `forge-config/src/lib.rs:3` says keyring is "planned" (it's shipped); `forge-core/src/permission.rs:3` calls rules "planned" (accurate — see D3). | Misleads readers about what's done. | P2 | _(trivial; fix inline — no spec)_ |
 
 ### Shipped v0.1 status (from the audit)
@@ -42,15 +42,15 @@ claimed. Three real gaps, one of which breaks the headline differentiator:
 | Req | Feature | Status | Note |
 |-----|---------|--------|------|
 | FR-1 | Agent loop (stream, tools, iterate) | **done** | 10 core tests |
-| FR-2 | Tool system (read/write/edit/list/search) | **done** | 10 tests; **no shell tool** (see P0-1) |
-| FR-3 | Multi-provider (genai) | **done** | contract-tested (#20); 7 providers + CLI bridge (#25/#26) |
-| FR-4 | Model Mesh routing | **done** | heuristic (length+keyword+hints+code+dev-verbs), `--model` pin, provider fallback; cost-aware candidate selection = future (provider-cost-routing.md) |
-| FR-5 | Cost + budget | **done** | real day+month cap across sessions (#19) |
-| FR-6 | TUI | **done** | inline-scrollback; plain markdown only (see P0-5) |
-| FR-7 | Session persistence | **done** | list + resume |
+| FR-2 | Tool system (read/write/edit/list/search/shell) | **done** | shell tool shipped + cross-platform; 10+ tests |
+| FR-3 | Multi-provider (genai) | **done** | contract-tested (streaming/tool-call/5xx); 7 providers + CLI bridge |
+| FR-4 | Model Mesh routing | **done** | cost-tiered routing, health-aware failover, `--model` pin |
+| FR-5 | Cost + budget | **done** | real day+month cap across sessions, auto-downshift, auto-compact at 80% |
+| FR-6 | TUI | **done** | inline-scrollback, syntax highlighting, diff preview, task panel, subagent picker |
+| FR-7 | Session persistence | **done** | list + resume + checkpoints + `/undo` |
 | FR-8 | Config (layered) | **done** | figment |
 | FR-9 | Secrets (env + keyring) | **done** | keyring untested (no OS service in CI) |
-| FR-10 | Permission modes | **partial** | 4 modes done; **rules unbuilt** (D3) |
+| FR-10 | Permission modes | **partial** | 4 modes + TOML rules + builtin denylist; "always allow" writeback deferred |
 
 ---
 
