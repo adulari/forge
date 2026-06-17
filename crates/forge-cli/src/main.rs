@@ -1004,10 +1004,9 @@ fn auth(provider: &str, remove: bool) -> Result<()> {
     if key.is_empty() {
         anyhow::bail!("no key provided");
     }
-    forge_config::store_api_key(provider, key).with_context(|| {
-        format!("storing {provider} key (is an OS keyring / secret service available?)")
-    })?;
-    println!("stored {provider} key in the OS keyring");
+    forge_config::store_api_key(provider, key)
+        .with_context(|| format!("storing {provider} key"))?;
+    println!("stored {provider} key (OS keyring, or encrypted file if no keyring is available)");
     Ok(())
 }
 

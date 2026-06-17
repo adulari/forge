@@ -17,10 +17,15 @@ tracing.workspace = true
 figment = { version = "0.10", features = ["toml", "env"] }
 toml = "0.8"
 directories = "6"
-keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+# Linux: the Secret Service backend (gnome-keyring/KWallet) persists to disk. The previous
+# `linux-native` backend is the kernel keyutils session keyring, which is wiped on logout/reboot
+# — that was the "keyring keeps getting reset" bug. `crypto-rust` supplies the transport cipher.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.9"
+# AEAD for the encrypted-file secret fallback (used when no OS keyring/Secret Service is reachable).
+chacha20poly1305 = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

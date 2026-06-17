@@ -40,6 +40,38 @@ fn is_free(id: &str, cost: f64, subscription: bool) -> bool {
     true
 }
 
+/// Whether a model id is a chat/text-generation model the mesh can route a turn to. Provider
+/// model lists mix in non-conversational endpoints — image (`imagen`, `veo`, `lyria`, `*-image`,
+/// `nano-banana`), audio/TTS (`*-tts`, `whisper`, `*-audio`), embeddings, async deep-research,
+/// `computer-use`/`robotics`, and moderation/guard models. Routing to one breaks the turn (or, for
+/// `deep-research`, silently picks a slow research endpoint for a trivial edit — the bug). They
+/// stay visible in `forge models` but are excluded from the routing ranking.
+pub fn is_routable(id: &str) -> bool {
+    let m = id.to_lowercase();
+    const BLOCK: &[&str] = &[
+        "imagen",
+        "veo",
+        "lyria",
+        "nano-banana",
+        "image",
+        "-tts",
+        "tts-",
+        "whisper",
+        "embedding",
+        "deep-research",
+        "computer-use",
+        "robotics",
+        "guard",
+        "safeguard",
+        "content-safety",
+        "moderation",
+        "-audio",
+        "audio-",
+        "-ocr",
+    ];
+    !BLOCK.iter().any(|b| m.contains(b))
+}
+
 /// A model's cost class for routing: `0` genuinely free (local/free-tier), `1` subscription
 /// ($0 marginal but burns the user's plan quota), `2` metered/paid. The mesh prefers low classes
 /// for cheap tiers (preserve quota) and the subscription flagship for complex work.
@@ -288,6 +320,7 @@ impl ModelCatalog {
         let mut scored: Vec<(f64, u8, u64, f64, &String)> = self
             .models
             .iter()
+            .filter(|m| is_routable(m))
             .map(|m| {
                 let cost = pricing.estimated_cost(m);
                 (
@@ -409,6 +442,32 @@ mod tests {
             !r.first().unwrap().contains("8b"),
             "not the tiny model: {r:?}"
         );
+    }
+
+    #[test]
+    fn non_chat_models_are_excluded_from_routing() {
+        // Provider lists mix in image/video/tts/embedding/deep-research endpoints. The mesh must
+        // never route a turn to one — for trivial that was picking a slow deep-research model.
+        assert!(!is_routable("gemini::deep-research-pro-preview-12-2025"));
+        assert!(!is_routable("gemini::imagen-4.0-generate-001"));
+        assert!(!is_routable("gemini::veo-3.0-generate-001"));
+        assert!(!is_routable("gemini::gemini-2.5-flash-image"));
+        assert!(!is_routable("gemini::gemini-embedding-001"));
+        assert!(!is_routable("groq::whisper-large-v3"));
+        assert!(!is_routable("groq::meta-llama/llama-prompt-guard-2-86m"));
+        assert!(is_routable("gemini::gemini-flash-lite-latest"));
+        assert!(is_routable("codex-cli::gpt-5.5"));
+        assert!(is_routable("groq::llama-3.1-8b-instant"));
+
+        // A trivial pick from a gemini-like set must be a fast chat model, not deep-research.
+        let cat = ModelCatalog::new(vec![
+            "gemini::deep-research-pro-preview-12-2025".into(),
+            "gemini::gemini-flash-lite-latest".into(),
+            "gemini::imagen-4.0-generate-001".into(),
+        ]);
+        let r = cat.ranked_for(TaskTier::Trivial, &Pricing::default(), 5);
+        assert_eq!(r.first().unwrap(), "gemini::gemini-flash-lite-latest", "{r:?}");
+        assert!(!r.iter().any(|m| m.contains("deep-research") || m.contains("imagen")));
     }
 
     #[test]

@@ -938,6 +938,63 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn weekly_warning_complex_picks_the_best_other_frontier() {
+        // User scenario: claude & codex ~80% weekly → a complex task uses the best OTHER
+        // available FRONTIER model, not merely any non-subscription model. (80% → Warning.)
+        let r = mixed_router();
+        let mut map = std::collections::HashMap::new();
+        map.insert("claude-cli".to_string(), forge_types::QuotaStatus::Warning);
+        map.insert("codex-cli".to_string(), forge_types::QuotaStatus::Warning);
+        let quota = SubscriptionQuota::new(map);
+        let d = r
+            .route(
+                "design a lock-free queue and prove it is correct",
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &quota,
+            )
+            .await;
+        assert_eq!(d.tier, TaskTier::Complex);
+        assert!(!is_subscription(&d.model), "demoted off subscription: {}", d.model);
+        assert!(
+            crate::capability::is_frontier(&d.model),
+            "complex under weekly pressure must still pick a FRONTIER alternative: got {}",
+            d.model
+        );
+    }
+
+    #[tokio::test]
+    async fn fully_exhausted_routes_around_subscriptions_for_every_tier() {
+        // User scenario: both subs at 100% weekly/session → use the best other available model
+        // for ALL tasks, not just complex ones.
+        let r = mixed_router();
+        let mut map = std::collections::HashMap::new();
+        map.insert("claude-cli".to_string(), forge_types::QuotaStatus::Exhausted);
+        map.insert("codex-cli".to_string(), forge_types::QuotaStatus::Exhausted);
+        let quota = SubscriptionQuota::new(map);
+        for p in [
+            "fix this typo",                                  // trivial
+            "write a function that validates an email",       // standard
+            "design a lock-free queue and prove it correct",  // complex
+        ] {
+            let d = r
+                .route(p, BudgetState::default(), &ModelHealth::default(), &quota)
+                .await;
+            assert!(
+                !is_subscription(&d.model),
+                "'{p}' ({:?}) must route around exhausted subs: got {}",
+                d.tier,
+                d.model
+            );
+            assert!(
+                !d.fallbacks.iter().any(|m| is_subscription(m)),
+                "'{p}': exhausted subs must be absent from the failover chain too: {:?}",
+                d.fallbacks
+            );
+        }
+    }
+
     // DIAGNOSTIC (ignored): print what the mesh routes to across a realistic catalog.
     // Run: cargo test -p forge-mesh routing_distribution_diagnostic -- --nocapture --ignored
     #[ignore]
