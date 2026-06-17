@@ -89,6 +89,10 @@ pub struct UsageOverlay {
     pub codex_5h_pct: Option<f64>,
     /// Codex weekly used % (0–100), from latest local session file.
     pub codex_weekly_pct: Option<f64>,
+    /// Claude 5-hour used % (0–100), from ~/.claude/.rate-limits-cache.json written by statusline.
+    pub claude_5h_pct: Option<f64>,
+    /// Claude weekly used % (0–100), from ~/.claude/.rate-limits-cache.json.
+    pub claude_weekly_pct: Option<f64>,
     /// Claude tokens (input incl cache) used in the last 5 hours.
     pub claude_5h_in: u64,
     pub claude_5h_out: u64,
@@ -101,7 +105,9 @@ pub struct UsageOverlay {
 
 impl UsageOverlay {
     fn totals(rows: &[(String, f64, u64, u64)]) -> (f64, u64, u64) {
-        rows.iter().fold((0.0, 0, 0), |acc, r| (acc.0 + r.1, acc.1 + r.2, acc.2 + r.3))
+        rows.iter().fold((0.0, 0, 0), |acc, r| {
+            (acc.0 + r.1, acc.1 + r.2, acc.2 + r.3)
+        })
     }
 }
 
@@ -1466,38 +1472,70 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
         if let Some(p) = o.codex_5h_pct {
             parts.push(format!("codex:{:.0}%", p));
         }
-        let ctok = o.claude_5h_in + o.claude_5h_out;
-        if ctok > 0 {
-            parts.push(format!("claude:↑{} ↓{}", format_tok(o.claude_5h_in), format_tok(o.claude_5h_out)));
+        if let Some(p) = o.claude_5h_pct {
+            parts.push(format!("claude:{:.0}%", p));
+        } else {
+            let ctok = o.claude_5h_in + o.claude_5h_out;
+            if ctok > 0 {
+                parts.push(format!(
+                    "claude:↑{} ↓{}",
+                    format_tok(o.claude_5h_in),
+                    format_tok(o.claude_5h_out)
+                ));
+            }
         }
-        if parts.is_empty() { String::new() } else { format!("  [{}]", parts.join("  ")) }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", parts.join("  "))
+        }
     };
     let bridge_week = {
         let mut parts = Vec::new();
         if let Some(p) = o.codex_weekly_pct {
             parts.push(format!("codex:{:.0}%", p));
         }
-        let ctok = o.claude_weekly_in + o.claude_weekly_out;
-        if ctok > 0 {
-            parts.push(format!("claude:↑{} ↓{}", format_tok(o.claude_weekly_in), format_tok(o.claude_weekly_out)));
+        if let Some(p) = o.claude_weekly_pct {
+            parts.push(format!("claude:{:.0}%", p));
+        } else {
+            let ctok = o.claude_weekly_in + o.claude_weekly_out;
+            if ctok > 0 {
+                parts.push(format!(
+                    "claude:↑{} ↓{}",
+                    format_tok(o.claude_weekly_in),
+                    format_tok(o.claude_weekly_out)
+                ));
+            }
         }
-        if parts.is_empty() { String::new() } else { format!("  [{}]", parts.join("  ")) }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("  [{}]", parts.join("  "))
+        }
     };
 
-    let fmt_period = |label: &str, cost: f64, inp: u64, out: u64, cap: Option<f64>, bridge: &str| -> String {
-        let tok_str = format!("↑{} ↓{}", format_tok(inp), format_tok(out));
-        let cost_str = if cost > 0.0 { format!("${cost:.4}") } else { "sub".to_string() };
-        if let Some(c) = cap {
-            let pct = (cost / c * 100.0).min(100.0);
-            format!("{label:<8}{tok_str}  {cost_str} / ${c:.2} ({pct:.0}%){bridge}")
-        } else {
-            format!("{label:<8}{tok_str}  {cost_str}{bridge}")
-        }
-    };
+    let fmt_period =
+        |label: &str, cost: f64, inp: u64, out: u64, cap: Option<f64>, bridge: &str| -> String {
+            let tok_str = format!("↑{} ↓{}", format_tok(inp), format_tok(out));
+            let cost_str = if cost > 0.0 {
+                format!("${cost:.4}")
+            } else {
+                "sub".to_string()
+            };
+            if let Some(c) = cap {
+                let pct = (cost / c * 100.0).min(100.0);
+                format!("{label:<8}{tok_str}  {cost_str} / ${c:.2} ({pct:.0}%){bridge}")
+            } else {
+                format!("{label:<8}{tok_str}  {cost_str}{bridge}")
+            }
+        };
 
     let month_str = if let Some(cap) = o.monthly_cap {
         let pct = (o.month_usd / cap * 100.0).min(100.0);
-        format!("{:<8}${:.4} / ${:.2}  ({:.0}%)", "Month", o.month_usd, cap, pct)
+        format!(
+            "{:<8}${:.4} / ${:.2}  ({:.0}%)",
+            "Month", o.month_usd, cap, pct
+        )
     } else {
         format!("{:<8}${:.4}", "Month", o.month_usd)
     };
@@ -1510,8 +1548,22 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
     );
     let summary_text = ratatui::text::Text::from(vec![
         ratatui::text::Line::from(fmt_period("5h", cost_5h, in_5h, out_5h, None, &bridge_5h)),
-        ratatui::text::Line::from(fmt_period("Today", cost_today, in_today, out_today, o.daily_cap, "")),
-        ratatui::text::Line::from(fmt_period("Week", cost_week, in_week, out_week, o.weekly_cap, &bridge_week)),
+        ratatui::text::Line::from(fmt_period(
+            "Today",
+            cost_today,
+            in_today,
+            out_today,
+            o.daily_cap,
+            "",
+        )),
+        ratatui::text::Line::from(fmt_period(
+            "Week",
+            cost_week,
+            in_week,
+            out_week,
+            o.weekly_cap,
+            &bridge_week,
+        )),
         ratatui::text::Line::from(month_str),
         ratatui::text::Line::from(session_str),
         ratatui::text::Line::from(""),

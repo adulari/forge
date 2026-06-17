@@ -445,15 +445,26 @@ fn codex_quota_from_rollout(jsonl: &str, provider: &str) -> Option<forge_types::
         p.get("rate_limits").filter(|r| r.is_object()).cloned()
     })?;
 
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
     let window = |key: &str| {
         rl.get(key).and_then(|w| {
             let used = w.get("used_percent").and_then(Value::as_f64)?;
             let resets = w.get("resets_at").and_then(Value::as_i64);
+            // Skip this window if its period has already reset — the usage data is stale.
+            if let Some(r) = resets {
+                if r <= now_secs {
+                    return None;
+                }
+            }
             let mins = w.get("window_minutes").and_then(Value::as_i64).unwrap_or(0);
             Some((used, resets, mins))
         })
     };
-    // Pick whichever window is closer to its limit.
+    // Pick whichever non-stale window is closer to its limit.
     let stricter = [window("primary"), window("secondary")]
         .into_iter()
         .flatten()

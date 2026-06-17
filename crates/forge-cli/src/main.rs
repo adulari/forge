@@ -2083,6 +2083,13 @@ async fn build_session_with(
     if let Some(m) = mode {
         config.permission_mode = m.into();
     }
+    // Auto-patch ~/.claude/statusline.sh to write rate-limit data to a cache file so
+    // the /usage overlay can show Claude's 5h/weekly utilisation percentages.
+    if let Ok(home) = std::env::var("HOME") {
+        if std::path::Path::new(&home).join(".claude").is_dir() {
+            bridge_stats::ensure_claude_statusline_patched();
+        }
+    }
     // Capture the MCP config before `config` is moved into the Session; connect after the session
     // is built so its presenter can show the connection status.
     let mcp_config = config.mcp.clone();
@@ -3117,7 +3124,16 @@ async fn run_chat_tui(
             dirty = true;
             // Auto-refresh data every ~3 s (180 ticks × 16 ms).
             if app.usage_overlay.anim_tick % 180 == 1 {
-                let ((month_usd, by_model_5h, by_model, by_model_week, (daily_cap, monthly_cap, weekly_cap)), (session_in, session_out, session_usd)) = {
+                let (
+                    (
+                        month_usd,
+                        by_model_5h,
+                        by_model,
+                        by_model_week,
+                        (daily_cap, monthly_cap, weekly_cap),
+                    ),
+                    (session_in, session_out, session_usd),
+                ) = {
                     let s = session.lock().await;
                     (
                         (
@@ -3130,7 +3146,9 @@ async fn run_chat_tui(
                         s.session_usage_db(),
                     )
                 };
-                let bstats = tokio::task::spawn_blocking(bridge_stats::fetch).await.unwrap_or_default();
+                let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
+                    .await
+                    .unwrap_or_default();
                 app.usage_overlay.month_usd = month_usd;
                 app.usage_overlay.session_usd = session_usd;
                 app.usage_overlay.session_in = session_in;
@@ -3143,6 +3161,8 @@ async fn run_chat_tui(
                 app.usage_overlay.monthly_cap = monthly_cap;
                 app.usage_overlay.codex_5h_pct = bstats.codex_5h_pct;
                 app.usage_overlay.codex_weekly_pct = bstats.codex_weekly_pct;
+                app.usage_overlay.claude_5h_pct = bstats.claude_5h_pct;
+                app.usage_overlay.claude_weekly_pct = bstats.claude_weekly_pct;
                 app.usage_overlay.claude_5h_in = bstats.claude_5h_in;
                 app.usage_overlay.claude_5h_out = bstats.claude_5h_out;
                 app.usage_overlay.claude_weekly_in = bstats.claude_weekly_in;
@@ -3621,7 +3641,17 @@ async fn dispatch_command(
             tui.print_text(&text);
         }
         CommandAction::Usage => {
-            let ((month_usd, by_model_5h, by_model, by_model_week, (daily_cap, monthly_cap, weekly_cap)), (session_in, session_out, session_usd), bstats) = {
+            let (
+                (
+                    month_usd,
+                    by_model_5h,
+                    by_model,
+                    by_model_week,
+                    (daily_cap, monthly_cap, weekly_cap),
+                ),
+                (session_in, session_out, session_usd),
+                bstats,
+            ) = {
                 let (db_data, session_data) = {
                     let s = session.lock().await;
                     (
@@ -3635,7 +3665,9 @@ async fn dispatch_command(
                         s.session_usage_db(),
                     )
                 };
-                let bstats = tokio::task::spawn_blocking(bridge_stats::fetch).await.unwrap_or_default();
+                let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
+                    .await
+                    .unwrap_or_default();
                 (db_data, session_data, bstats)
             };
             app.usage_overlay.month_usd = month_usd;
@@ -3650,6 +3682,8 @@ async fn dispatch_command(
             app.usage_overlay.monthly_cap = monthly_cap;
             app.usage_overlay.codex_5h_pct = bstats.codex_5h_pct;
             app.usage_overlay.codex_weekly_pct = bstats.codex_weekly_pct;
+            app.usage_overlay.claude_5h_pct = bstats.claude_5h_pct;
+            app.usage_overlay.claude_weekly_pct = bstats.claude_weekly_pct;
             app.usage_overlay.claude_5h_in = bstats.claude_5h_in;
             app.usage_overlay.claude_5h_out = bstats.claude_5h_out;
             app.usage_overlay.claude_weekly_in = bstats.claude_weekly_in;
