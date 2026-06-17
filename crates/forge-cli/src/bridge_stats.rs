@@ -56,9 +56,12 @@ if [[ -n "$RL_5H_PCT" || -n "$RL_7D_PCT" ]]; then
     > "$_RL_TMP" 2>/dev/null && mv -f "$_RL_TMP" "$_RL_CACHE" 2>/dev/null || true
 fi"#;
 
-    // Find insertion point after the RL_7D_RESET line.
-    let target = "RL_7D_RESET=";
-    if let Some(pos) = content.find(target) {
+    // Insert after the line that assigns the last rate-limit var. Try a few anchors so the patch
+    // still applies across statusline variants (helm rewrites the script with differing layouts).
+    let anchor = ["RL_7D_RESET=", "RL_7D_PCT=", "RL_5H_PCT="]
+        .into_iter()
+        .find_map(|a| content.find(a));
+    if let Some(pos) = anchor {
         if let Some(end) = content[pos..].find('\n') {
             let insert_at = pos + end + 1;
             let mut patched = content.clone();

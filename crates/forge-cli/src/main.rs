@@ -1800,6 +1800,7 @@ async fn models(probe: bool, clear: bool) -> Result<()> {
 /// the `/mesh` TUI inspector; both read the same [`forge_mesh::RoutingExplanation`] engine.
 async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
     forge_config::inject_provider_keys();
+    bridge_stats::ensure_claude_statusline_patched();
     let config = forge_config::load().unwrap_or_default();
     let cat = discover_catalog(&config).await;
     if cat.is_empty() {
@@ -4235,6 +4236,11 @@ async fn dispatch_command(
             tui.print_text(&text);
         }
         CommandAction::Usage => {
+            // Re-assert the statusline cache-writer: helm/Claude Code periodically rewrites
+            // ~/.claude/statusline.sh and wipes our patch, freezing the claude rate-limit cache.
+            // Re-patching here means the next time Claude Code renders (incl. usage outside Forge)
+            // the cache refreshes again. Idempotent + cheap.
+            bridge_stats::ensure_claude_statusline_patched();
             let (
                 (
                     month_usd,
@@ -4284,6 +4290,9 @@ async fn dispatch_command(
             app.usage_overlay.open = true;
         }
         CommandAction::Mesh(arg) => {
+            // Keep the statusline cache-writer alive (helm/CC rewrites wipe it) so claude usage —
+            // including turns run outside Forge — keeps refreshing the rate-limit cache.
+            bridge_stats::ensure_claude_statusline_patched();
             let prompt = arg.unwrap_or_default();
             // Bare `/mesh` → a representative complex task for the overview; else the given prompt.
             let to_explain = if prompt.trim().is_empty() {
