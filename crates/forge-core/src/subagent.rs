@@ -235,7 +235,12 @@ pub async fn run_subagent(
         // model the parent just rate-limited.
         None => {
             let health = ctx.store.current_benched().unwrap_or_default();
-            let quota = ctx.store.current_quota().unwrap_or_default();
+            let quota = ctx
+                .store
+                .current_quota()
+                .unwrap_or_default()
+                .with_plans(ctx.config.mesh.subscriptions.clone())
+                .with_conserve(ctx.config.mesh.subscription_conserve);
             ctx.router.route(task, budget, &health, &quota).await
         }
     };
@@ -681,7 +686,7 @@ mod tests {
                 content: "child done".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }

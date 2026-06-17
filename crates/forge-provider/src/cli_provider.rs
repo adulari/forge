@@ -402,6 +402,19 @@ enum Parsed {
     Error(String),
 }
 
+/// Normalise a Claude `rateLimitType` to Forge's window vocabulary (`five_hour` / `weekly`).
+/// Claude uses `seven_day` for the weekly window; everything else passes through unchanged.
+fn normalize_window(rate_limit_type: &str) -> String {
+    let t = rate_limit_type.to_lowercase();
+    if t.contains("seven") || t.contains("week") || t == "7d" {
+        "weekly".to_string()
+    } else if t.contains("five") || t.contains("5h") || t == "hour" {
+        "five_hour".to_string()
+    } else {
+        rate_limit_type.to_string()
+    }
+}
+
 /// Map a Claude `rate_limit_info` into a coarse [`QuotaStatus`], defensively (the schema is
 /// version-volatile). We read the live `status` + `isUsingOverage` (NOT `overageStatus`, which is
 /// a setting, not the current state) plus a usage fraction when present. Unknown → `Ok`.
@@ -430,12 +443,9 @@ fn quota_status_from(
     QuotaStatus::Ok
 }
 
-/// Build a codex [`QuotaHint`] from its session rollout JSONL (the file the TUI's usage bar reads;
-/// `exec --json` omits it from stdout). Scans for the LAST `token_count` event carrying
-/// `rate_limits` and takes the *stricter* of the primary (5h) / secondary (weekly) windows. The
-/// reset is normalised to epoch secs. ToS-safe: we read codex's own session log, never its token.
-fn codex_quota_from_rollout(jsonl: &str, provider: &str) -> Option<forge_types::QuotaHint> {
-    // Last wins — the most recent snapshot in the turn.
+/// Build [`QuotaHint`]s for ALL non-stale windows from a Codex session rollout JSONL.
+/// Returns one entry per window (primary = 5h, secondary = weekly) that is still active.
+fn codex_quota_from_rollout(jsonl: &str, provider: &str) -> Vec<forge_types::QuotaHint> {
     let rl = jsonl.lines().rev().find_map(|line| {
         let v: Value = serde_json::from_str(line.trim()).ok()?;
         let p = v.get("payload").unwrap_or(&v);
@@ -443,58 +453,54 @@ fn codex_quota_from_rollout(jsonl: &str, provider: &str) -> Option<forge_types::
             return None;
         }
         p.get("rate_limits").filter(|r| r.is_object()).cloned()
-    })?;
+    });
+    let Some(rl) = rl else {
+        return Vec::new();
+    };
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
 
-    let window = |key: &str| {
-        rl.get(key).and_then(|w| {
-            let used = w.get("used_percent").and_then(Value::as_f64)?;
-            let resets = w.get("resets_at").and_then(Value::as_i64);
-            // Skip this window if its period has already reset — the usage data is stale.
-            if let Some(r) = resets {
-                if r <= now_secs {
-                    return None;
-                }
-            }
-            let mins = w.get("window_minutes").and_then(Value::as_i64).unwrap_or(0);
-            Some((used, resets, mins))
-        })
-    };
-    // Pick whichever non-stale window is closer to its limit.
-    let stricter = [window("primary"), window("secondary")]
-        .into_iter()
-        .flatten()
-        .max_by(|a, b| a.0.total_cmp(&b.0))?;
-    let (used_percent, resets_at, window_minutes) = stricter;
+    let reached_type = rl.get("rate_limit_reached_type").and_then(Value::as_str);
 
-    let reached = rl
-        .get("rate_limit_reached_type")
-        .map(|t| !t.is_null())
-        .unwrap_or(false);
-    let fraction = used_percent / 100.0;
-    let status = if reached {
-        forge_types::QuotaStatus::Exhausted
-    } else {
-        // Reuse the same thresholds as the Claude path (≥98% over, ≥80% near).
-        quota_status_from("", false, Some(fraction))
-    };
-    let label = match window_minutes {
-        300 => "five_hour".to_string(),
-        10080 => "weekly".to_string(),
-        m if m > 0 => format!("{m}m"),
-        _ => String::new(),
-    };
-    Some(forge_types::QuotaHint {
-        provider: provider.to_string(),
-        window: label,
-        status,
-        resets_at,
-        fraction_used: Some(fraction),
-    })
+    let mut hints = Vec::new();
+    for (key, reached_key) in [("primary", "primary"), ("secondary", "secondary")] {
+        let Some(w) = rl.get(key) else { continue };
+        let Some(used) = w.get("used_percent").and_then(Value::as_f64) else {
+            continue;
+        };
+        let resets = w.get("resets_at").and_then(Value::as_i64);
+        let mins = w.get("window_minutes").and_then(Value::as_i64).unwrap_or(0);
+        // Skip stale windows (the period has already reset).
+        if let Some(r) = resets {
+            if r <= now_secs {
+                continue;
+            }
+        }
+        let fraction = used / 100.0;
+        let reached = reached_type.is_some_and(|rt| rt == reached_key);
+        let status = if reached {
+            forge_types::QuotaStatus::Exhausted
+        } else {
+            quota_status_from("", false, Some(fraction))
+        };
+        let label = match mins {
+            300 => "five_hour".to_string(),
+            10080 => "weekly".to_string(),
+            m if m > 0 => format!("{m}m"),
+            _ => key.to_string(),
+        };
+        hints.push(forge_types::QuotaHint {
+            provider: provider.to_string(),
+            window: label,
+            status,
+            resets_at: resets,
+            fraction_used: Some(fraction),
+        });
+    }
+    hints
 }
 
 /// `${CODEX_HOME:-~/.codex}/sessions`, where codex writes its rollout files.
@@ -646,8 +652,11 @@ fn parse_claude_line(line: &str) -> Vec<Parsed> {
                     .get("isUsingOverage")
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
+                // The live Claude Code field is `utilization` (0.0–1.0); older/synthetic schemas
+                // used `usedFraction`/`fractionUsed`. Try all so the fraction is actually captured.
                 let fraction = info
-                    .get("usedFraction")
+                    .get("utilization")
+                    .or_else(|| info.get("usedFraction"))
                     .or_else(|| info.get("fractionUsed"))
                     .and_then(Value::as_f64);
                 let resets_at = info.get("resetsAt").and_then(Value::as_i64).map(|t| {
@@ -658,11 +667,13 @@ fn parse_claude_line(line: &str) -> Vec<Parsed> {
                     }
                 });
                 out.push(Parsed::Quota {
-                    window: info
-                        .get("rateLimitType")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
+                    // Normalise the window name to Forge's vocabulary: Claude emits `seven_day`
+                    // for the weekly window and `five_hour` for the session window.
+                    window: normalize_window(
+                        info.get("rateLimitType")
+                            .and_then(Value::as_str)
+                            .unwrap_or(""),
+                    ),
                     status: quota_status_from(status, using_overage, fraction),
                     resets_at,
                     fraction,
@@ -918,7 +929,7 @@ impl Provider for CliProvider {
         let mut content = String::new();
         let mut final_text: Option<String> = None;
         let mut usage = Usage::default();
-        let mut quota: Option<forge_types::QuotaHint> = None;
+        let mut quotas: Vec<forge_types::QuotaHint> = Vec::new();
         // Codex's quota lives in its session rollout file, keyed by this id (read after the turn).
         let mut codex_thread: Option<String> = None;
         let mut in_band_error: Option<String> = None;
@@ -956,7 +967,7 @@ impl Provider for CliProvider {
                                     resets_at,
                                     fraction,
                                 } => {
-                                    quota = Some(forge_types::QuotaHint {
+                                    quotas.push(forge_types::QuotaHint {
                                         provider: self.kind.prefix().to_string(),
                                         window,
                                         status,
@@ -1012,11 +1023,11 @@ impl Provider for CliProvider {
 
         // Codex doesn't stream its quota (unlike Claude's `rate_limit_event`); read the snapshot
         // from the session rollout file it just wrote, keyed by the thread id (L3, ToS-safe).
-        if self.kind == CliKind::Codex && quota.is_none() {
+        if self.kind == CliKind::Codex && quotas.is_empty() {
             if let Some(tid) = &codex_thread {
                 if let Some(path) = find_codex_rollout(tid) {
                     if let Ok(text) = std::fs::read_to_string(&path) {
-                        quota = codex_quota_from_rollout(&text, self.kind.prefix());
+                        quotas = codex_quota_from_rollout(&text, self.kind.prefix());
                     }
                 }
             }
@@ -1059,7 +1070,7 @@ impl Provider for CliProvider {
             content: text,
             tool_calls: Vec::new(),
             usage,
-            quota,
+            quotas,
         })
     }
 }
@@ -1476,6 +1487,22 @@ mod tests {
                 ..
             }
         ));
+        // The REAL live shape (verified against `claude --output-format stream-json`): the field is
+        // `utilization`, and the weekly window is `seven_day`. Both must be parsed.
+        let real = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1781942400,"rateLimitType":"seven_day","utilization":0.81,"isUsingOverage":false}}"#;
+        match &parse_claude_line(real)[0] {
+            Parsed::Quota {
+                window,
+                status,
+                fraction,
+                ..
+            } => {
+                assert_eq!(window, "weekly", "seven_day → weekly");
+                assert_eq!(*fraction, Some(0.81), "utilization parsed");
+                assert_eq!(*status, QuotaStatus::Warning, "0.81 → Warning");
+            }
+            other => panic!("expected Quota, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1491,41 +1518,47 @@ mod tests {
     }
 
     #[test]
-    fn codex_rollout_quota_reads_the_stricter_window() {
+    fn codex_rollout_quota_reads_both_windows() {
         use forge_types::QuotaStatus;
-        // Real shape captured from ~/.codex/sessions/.../rollout-*.jsonl. Primary (5h) is closer to
-        // its limit than secondary (weekly), so it governs.
-        // Use far-future resets_at (year 2286) so the staleness guard never skips them.
+        // Real shape captured from ~/.codex/sessions/.../rollout-*.jsonl.
+        // Primary (5h) 85%, secondary (weekly) 4%. Both windows returned.
         let jsonl = r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":85.0,"window_minutes":300,"resets_at":9999999999},"secondary":{"used_percent":4.0,"window_minutes":10080,"resets_at":9999999999},"plan_type":"plus","rate_limit_reached_type":null}}}"#;
-        let q = codex_quota_from_rollout(jsonl, "codex-cli").expect("a quota hint");
-        assert_eq!(q.provider, "codex-cli");
-        assert_eq!(q.window, "five_hour");
-        assert_eq!(q.status, QuotaStatus::Warning); // 85% ≥ 80%
-        assert_eq!(q.resets_at, Some(9999999999));
-        assert!((q.fraction_used.unwrap() - 0.85).abs() < 1e-9);
+        let hints = codex_quota_from_rollout(jsonl, "codex-cli");
+        assert_eq!(hints.len(), 2, "both windows expected");
+        let five_h = hints
+            .iter()
+            .find(|h| h.window == "five_hour")
+            .expect("five_hour");
+        assert_eq!(five_h.provider, "codex-cli");
+        assert_eq!(five_h.status, QuotaStatus::Warning); // 85% >= 80%
+        assert_eq!(five_h.resets_at, Some(9999999999));
+        assert!((five_h.fraction_used.unwrap() - 0.85).abs() < 1e-9);
+        let weekly = hints.iter().find(|h| h.window == "weekly").expect("weekly");
+        assert_eq!(weekly.status, QuotaStatus::Ok); // 4%
+        assert!((weekly.fraction_used.unwrap() - 0.04).abs() < 1e-9);
     }
 
     #[test]
     fn codex_rollout_quota_exhausted_when_a_limit_was_reached() {
         use forge_types::QuotaStatus;
-        // Far-future resets_at so the staleness guard keeps the window; rate_limit_reached_type
-        // drives the Exhausted status regardless of the used_percent value.
         let jsonl = r#"{"payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":12.0,"window_minutes":300,"resets_at":9999999999},"rate_limit_reached_type":"primary"}}}"#;
-        let q = codex_quota_from_rollout(jsonl, "codex-cli").unwrap();
-        assert_eq!(q.status, QuotaStatus::Exhausted);
+        let hints = codex_quota_from_rollout(jsonl, "codex-cli");
+        let five_h = hints
+            .iter()
+            .find(|h| h.window == "five_hour")
+            .expect("five_hour");
+        assert_eq!(five_h.status, QuotaStatus::Exhausted);
     }
 
     #[test]
     fn codex_rollout_quota_ok_for_low_usage() {
         use forge_types::QuotaStatus;
-        // The literal real capture (≈1% used) → Ok, last snapshot wins over an earlier one.
         let jsonl = "{\"payload\":{\"type\":\"token_count\",\"rate_limits\":{\"primary\":{\"used_percent\":50.0,\"window_minutes\":300,\"resets_at\":9999999999}}}}\n{\"timestamp\":\"x\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":null,\"rate_limits\":{\"limit_id\":\"codex\",\"primary\":{\"used_percent\":1.0,\"window_minutes\":300,\"resets_at\":9999999999},\"secondary\":{\"used_percent\":1.0,\"window_minutes\":10080,\"resets_at\":9999999999},\"plan_type\":\"plus\",\"rate_limit_reached_type\":null}}}";
-        let q = codex_quota_from_rollout(jsonl, "codex-cli").unwrap();
-        assert_eq!(q.status, QuotaStatus::Ok);
-        assert!(
-            (q.fraction_used.unwrap() - 0.01).abs() < 1e-9,
-            "last snapshot wins"
-        );
+        let hints = codex_quota_from_rollout(jsonl, "codex-cli");
+        assert_eq!(hints.len(), 2, "both windows; last snapshot wins");
+        for h in &hints {
+            assert_eq!(h.status, QuotaStatus::Ok);
+        }
     }
 
     #[test]

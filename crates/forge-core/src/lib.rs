@@ -572,6 +572,44 @@ impl Session {
         )
     }
 
+    /// Per-provider, per-window fraction from `subscription_usage` (for display fallback when
+    /// the statusline cache is stale). Returns `HashMap<provider, HashMap<window_kind, fraction>>`.
+    pub fn bridge_fractions(
+        &self,
+    ) -> std::collections::HashMap<String, std::collections::HashMap<String, f64>> {
+        self.store.bridge_fractions().unwrap_or_default()
+    }
+
+    /// Seconds since the claude subscription quota was last updated (`None` if never). The CLI
+    /// gates its on-demand rate-limit probe on this so it refreshes at most every few minutes.
+    pub fn claude_quota_age_secs(&self) -> Option<i64> {
+        self.store.subscription_age_secs("claude-cli")
+    }
+
+    /// Seed the subscription-usage store from an externally-observed window fraction (the
+    /// Claude/Codex rate-limit caches the CLI reads). Forge otherwise only learns a subscription's
+    /// usage when it runs a turn on that bridge — usage racked up *outside* Forge would read as 0%,
+    /// making the mesh think the plan is fresh. `pct` is 0–100; `None` is skipped. The recorded row
+    /// has no reset time, so it stays live until a real in-turn QuotaUpdate replaces it.
+    pub fn seed_subscription_quota(&self, provider: &str, window: &str, pct: Option<f64>) {
+        let Some(pct) = pct else { return };
+        let frac = (pct / 100.0).clamp(0.0, 1.0);
+        let status = if frac >= 0.98 {
+            forge_types::QuotaStatus::Exhausted
+        } else if frac >= 0.80 {
+            forge_types::QuotaStatus::Warning
+        } else {
+            forge_types::QuotaStatus::Ok
+        };
+        let _ = self.store.record_quota(&forge_types::QuotaHint {
+            provider: provider.to_string(),
+            window: window.to_string(),
+            status,
+            resets_at: None,
+            fraction_used: Some(frac),
+        });
+    }
+
     /// Advance the temper through the SHIFT+TAB cycle, persist it, and return the new temper
     /// (RFC/temper-modes). Takes effect on the next turn's permission decisions.
     pub fn cycle_temper(&mut self) -> PermissionMode {
@@ -815,6 +853,40 @@ impl Session {
     /// subsequent turns send to the model. In-memory only — the full transcript stays in the store
     /// for audit/resume (persisting the compacted view across resume is a follow-up). No-op when
     /// the transcript is already short. Returns `(messages_before, messages_after)`.
+    /// Current subscription quota, enriched with the configured plan slugs and the conservation
+    /// opt-out, so the router can spread complex/standard load off a subscription proactively
+    /// (not just react at the hard limit). Defaults to an empty quota when the store read fails.
+    fn live_quota(&self) -> forge_types::SubscriptionQuota {
+        self.store
+            .current_quota()
+            .unwrap_or_default()
+            .with_plans(self.config.mesh.subscriptions.clone())
+            .with_conserve(self.config.mesh.subscription_conserve)
+    }
+
+    /// The current budget snapshot (spend vs caps) used for routing decisions.
+    fn budget_snapshot(&self) -> BudgetState {
+        BudgetState {
+            spent_today_usd: self.store.spend_today_usd().unwrap_or(0.0),
+            daily_cap_usd: self.config.mesh.daily_budget_usd,
+            spent_week_usd: self.store.spend_this_week_usd().unwrap_or(0.0),
+            weekly_cap_usd: self.config.mesh.weekly_budget_usd,
+            spent_month_usd: self.store.spend_this_month_usd().unwrap_or(0.0),
+            monthly_cap_usd: self.config.mesh.monthly_cap_usd,
+            warn_fraction: self.config.mesh.warn_threshold,
+        }
+    }
+
+    /// Explain how the mesh would route `prompt` right now, using this session's live catalog,
+    /// quota, benched-model health and budget — the data behind the `/mesh` inspector. `None` when
+    /// auto-discovery routing isn't active (no catalog), since the candidate table would be empty.
+    pub fn explain_routing(&self, prompt: &str) -> Option<forge_mesh::RoutingExplanation> {
+        let catalog = self.catalog.clone()?;
+        let router = forge_mesh::HeuristicRouter::new(self.config.clone()).with_catalog(catalog);
+        let health = self.store.current_benched().unwrap_or_default();
+        Some(router.explain(prompt, self.budget_snapshot(), &health, &self.live_quota()))
+    }
+
     pub async fn compact(&mut self) -> Result<(usize, usize), CoreError> {
         let before = self.transcript.len();
         if before <= COMPACT_KEEP_RECENT + COMPACT_MIN_OLDER {
@@ -839,7 +911,7 @@ impl Session {
             warn_fraction: self.config.mesh.warn_threshold,
         };
         let health = self.store.current_benched().unwrap_or_default();
-        let quota = self.store.current_quota().unwrap_or_default();
+        let quota = self.live_quota();
         let decision = self
             .router
             .route_hinted(
@@ -914,7 +986,7 @@ impl Session {
             return;
         }
         let health = self.store.current_benched().unwrap_or_default();
-        let quota = self.store.current_quota().unwrap_or_default();
+        let quota = self.live_quota();
         let decision = self
             .router
             .route_hinted(
@@ -1066,7 +1138,7 @@ impl Session {
         let health = self.store.current_benched().unwrap_or_default();
         // Quota-aware routing (L3): demote/skip a subscription that the bridge reported is near or
         // over its plan limit (recorded after earlier turns from the CLI's rate-limit events).
-        let quota = self.store.current_quota().unwrap_or_default();
+        let quota = self.live_quota();
         let decision = self
             .router
             .route_hinted(prompt, budget, &health, &quota, tier_override)
@@ -1298,8 +1370,16 @@ impl Session {
             self.store.record_usage(&self.id, &msg_id, &resp.usage)?;
             // Quota-aware routing (L3): if a CLI bridge reported its subscription window this turn,
             // persist it so the next route() can demote/skip a near-limit subscription.
-            if let Some(hint) = &resp.quota {
+            for hint in &resp.quotas {
                 let _ = self.store.record_quota(hint);
+                // Push to the TUI so the /usage overlay updates in real-time.
+                if let Some(f) = hint.fraction_used {
+                    self.presenter.emit(forge_tui::PresenterEvent::QuotaUpdate {
+                        provider: hint.provider.clone(),
+                        window: hint.window.clone(),
+                        fraction: f,
+                    });
+                }
             }
 
             if !resp.wants_tools() {
@@ -2238,7 +2318,7 @@ mod tests {
                     content: "done".into(),
                     tool_calls: vec![],
                     usage,
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             Ok(ModelResponse {
@@ -2252,7 +2332,7 @@ mod tests {
                     }),
                 }],
                 usage,
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -2311,7 +2391,7 @@ mod tests {
                     content: "done".into(),
                     tool_calls: vec![],
                     usage,
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             Ok(ModelResponse {
@@ -2322,7 +2402,7 @@ mod tests {
                     args: serde_json::json!({ "name": "test__echo", "arguments": { "msg": "hi" } }),
                 }],
                 usage,
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -2429,7 +2509,7 @@ mod tests {
                     content: "done".into(),
                     tool_calls: vec![],
                     usage,
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             Ok(ModelResponse {
@@ -2443,7 +2523,7 @@ mod tests {
                     ]}),
                 }],
                 usage,
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -2504,7 +2584,7 @@ mod tests {
                     content: "done".into(),
                     tool_calls: vec![],
                     usage: Usage::default(),
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             Ok(ModelResponse {
@@ -2515,7 +2595,7 @@ mod tests {
                     args: serde_json::json!({ "path": "." }),
                 }],
                 usage: Usage::default(),
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -2535,7 +2615,7 @@ mod tests {
                 content: "SUMMARY: built the parser, wired the CLI.".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -2559,7 +2639,7 @@ mod tests {
                 content: if saw { "SAW_INJECTION" } else { "NO_INJECTION" }.into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -2672,7 +2752,7 @@ mod tests {
                     content: "The command is not installed. Fix: install it first.".into(),
                     tool_calls: vec![],
                     usage,
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             if messages.iter().any(|m| m.role == Role::Tool) {
@@ -2680,7 +2760,7 @@ mod tests {
                     content: "done".into(),
                     tool_calls: vec![],
                     usage,
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             Ok(ModelResponse {
@@ -2691,7 +2771,7 @@ mod tests {
                     args: serde_json::json!({ "command": "definitelynotacommand_xyz" }),
                 }],
                 usage,
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -2784,7 +2864,7 @@ mod tests {
                     content: "done".into(),
                     tool_calls: vec![],
                     usage: Usage::default(),
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             Ok(ModelResponse {
@@ -2795,7 +2875,7 @@ mod tests {
                     args: serde_json::json!({ "command": "echo hi" }),
                 }],
                 usage: Usage::default(),
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -2820,7 +2900,7 @@ mod tests {
                     content: if saw { "SAW_SKILL" } else { "NO_SKILL" }.into(),
                     tool_calls: vec![],
                     usage: Usage::default(),
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             Ok(ModelResponse {
@@ -2831,7 +2911,7 @@ mod tests {
                     args: serde_json::json!({ "name": "demoskill" }),
                 }],
                 usage: Usage::default(),
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -2905,7 +2985,7 @@ mod tests {
                     content: "done".into(),
                     tool_calls: vec![],
                     usage: Usage::default(),
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             Ok(ModelResponse {
@@ -2916,7 +2996,7 @@ mod tests {
                     args: serde_json::json!({ "path": self.path, "content": "hi from auto-edit" }),
                 }],
                 usage: Usage::default(),
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -3452,7 +3532,7 @@ mod tests {
                         content: content.into(),
                         tool_calls: vec![],
                         usage,
-                        quota: None,
+                        quotas: Vec::new(),
                     });
                 }
                 return Ok(ModelResponse {
@@ -3463,7 +3543,7 @@ mod tests {
                         args: serde_json::json!({"path": "Cargo.toml"}),
                     }],
                     usage,
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             // Parent: fan out, then synthesize once results return.
@@ -3474,7 +3554,7 @@ mod tests {
                     content: content.into(),
                     tool_calls: vec![],
                     usage,
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             Ok(ModelResponse {
@@ -3488,7 +3568,7 @@ mod tests {
                     ]}),
                 }],
                 usage,
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -3640,7 +3720,7 @@ mod tests {
                     content: "leaf answer".into(),
                     tool_calls: vec![],
                     usage,
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             Ok(ModelResponse {
@@ -3651,7 +3731,7 @@ mod tests {
                     args: serde_json::json!({"agents": [{"task": "go deeper"}]}),
                 }],
                 usage,
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -3814,7 +3894,7 @@ mod tests {
                 content: "recovered".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -4028,7 +4108,7 @@ mod tests {
                     content: "done".into(),
                     tool_calls: vec![],
                     usage,
-                    quota: None,
+                    quotas: Vec::new(),
                 });
             }
             Ok(ModelResponse {
@@ -4039,7 +4119,7 @@ mod tests {
                     args: serde_json::json!({ "path": self.path, "content": self.content }),
                 }],
                 usage,
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -4156,7 +4236,7 @@ mod tests {
                 content: "too late".into(),
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
@@ -4234,7 +4314,7 @@ mod tests {
                 content,
                 tool_calls: vec![],
                 usage: forge_types::Usage::default(),
-                quota: None,
+                quotas: Vec::new(),
             })
         }
     }
