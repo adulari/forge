@@ -1,9 +1,8 @@
-//! Pre/post tool-use shell hooks (docs/features/hooks.md). Each `[[hooks]]` entry runs a POSIX
-//! `sh -c` command around a matching tool call, receiving the call as JSON on stdin. A
-//! `PreToolUse` hook that exits non-zero **blocks** the tool (its output is the reason the model
-//! sees); `PostToolUse` hooks observe (their stdout surfaces as a note). Hooks are POSIX-only
-//! (same as the shell tool — see known-issues.md) and time-bounded so a wedged hook can't hang
-//! the agent.
+//! Pre/post tool-use shell hooks (docs/features/hooks.md). Each `[[hooks]]` entry runs via the
+//! OS shell (`sh -c` on Unix, `cmd /C` on Windows) around a matching tool call, receiving the
+//! call as JSON on stdin. A `PreToolUse` hook that exits non-zero **blocks** the tool (its output
+//! is the reason the model sees); `PostToolUse` hooks observe (their stdout surfaces as a note).
+//! Hooks are time-bounded so a wedged hook can't hang the agent.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -55,9 +54,17 @@ pub async fn run_hooks(
     outcome
 }
 
+fn hook_shell() -> (&'static str, &'static str) {
+    #[cfg(windows)]
+    return ("cmd", "/C");
+    #[cfg(not(windows))]
+    ("sh", "-c")
+}
+
 async fn run_one(h: &HookConfig, payload: &str) -> Result<(i32, String, String), String> {
-    let mut child = tokio::process::Command::new("sh")
-        .arg("-c")
+    let (sh, sh_flag) = hook_shell();
+    let mut child = tokio::process::Command::new(sh)
+        .arg(sh_flag)
         .arg(&h.command)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

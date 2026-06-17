@@ -359,7 +359,7 @@ pub fn builtin_deny_rules() -> Vec<PermissionRule> {
         deny(
             "shell",
             &[
-                // catastrophic filesystem / disk
+                // catastrophic filesystem / disk (Unix)
                 "rm -rf /",
                 "rm -rf ~",
                 "rm -rf /*",
@@ -367,6 +367,13 @@ pub fn builtin_deny_rules() -> Vec<PermissionRule> {
                 "dd of=/dev/*",
                 "mkfs*",
                 "mkfs.*",
+                // catastrophic filesystem / disk (Windows)
+                "del /s *",
+                "del /f /s *",
+                "del /q /s *",
+                "rd /s *",
+                "rmdir /s *",
+                "format ?:*",
                 // remote-to-shell pipe (matched against the raw command line)
                 "*| sh",
                 "*|sh",
