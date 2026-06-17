@@ -822,10 +822,10 @@ fn replay_cmd(ids: &[String]) -> Result<()> {
             let ea = store.load_replay(&ida).context("loading replay a")?;
             let eb = store.load_replay(&idb).context("loading replay b")?;
             let d = replay::diff(&ea, &eb);
-            print!(
-                "{}",
-                replay::render_diff(&ida[..ida.len().min(8)], &idb[..idb.len().min(8)], &d)
-            );
+            let fa8 = &ida[..ida.len().min(8)];
+            let fb8 = &idb[..idb.len().min(8)];
+            print!("{}", replay::render_diff(fa8, fb8, &d));
+            print!("\n{}", replay::render_turn_diff(fa8, fb8, &ea, &eb));
         }
         _ => anyhow::bail!("usage: forge replay <id> [<id-to-diff-against>]"),
     }
@@ -2753,6 +2753,7 @@ async fn dispatch_command(
             | CommandAction::Resume(_)
             | CommandAction::ClearScreen
             | CommandAction::PinModel(_)
+            | CommandAction::Replay(_, _)
     );
     if busy && mutates {
         app.note("⚠ finish or Esc the current turn first");
@@ -2953,6 +2954,67 @@ async fn dispatch_command(
                 return Ok(DispatchOutcome::Handled);
             }
             return Ok(DispatchOutcome::StartLoop { prompt: text });
+        }
+        // `/replay <id>` — show a transcript inline; `/replay <a> <b>` diffs two sessions.
+        CommandAction::Replay(id_a, id_b) => {
+            if id_a.is_empty() {
+                app.note("usage: /replay <id>  or  /replay <id-a> <id-b>");
+                return Ok(DispatchOutcome::Handled);
+            }
+            let text = {
+                let s = session.lock().await;
+                match id_b {
+                    None => {
+                        // resolve prefix → full id, load, render
+                        let ids = s
+                            .matching_session_ids(&id_a)
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        match ids.first() {
+                            None => format!("no session matching '{id_a}'"),
+                            Some(full) => {
+                                let entries = s
+                                    .load_replay(full)
+                                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                                crate::replay::render_transcript(
+                                    &full[..full.len().min(8)],
+                                    &entries,
+                                )
+                            }
+                        }
+                    }
+                    Some(id_b) => {
+                        let ids_a = s
+                            .matching_session_ids(&id_a)
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        let ids_b = s
+                            .matching_session_ids(&id_b)
+                            .map_err(|e| anyhow::anyhow!("{e}"))?;
+                        match (ids_a.first(), ids_b.first()) {
+                            (Some(fa), Some(fb)) => {
+                                let ea = s
+                                    .load_replay(fa)
+                                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                                let eb = s
+                                    .load_replay(fb)
+                                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                                let d = crate::replay::diff(&ea, &eb);
+                                let fa8 = &fa[..fa.len().min(8)];
+                                let fb8 = &fb[..fb.len().min(8)];
+                                let mut out =
+                                    crate::replay::render_diff(fa8, fb8, &d);
+                                out.push('\n');
+                                out.push_str(&crate::replay::render_turn_diff(
+                                    fa8, fb8, &ea, &eb,
+                                ));
+                                out
+                            }
+                            (None, _) => format!("no session matching '{id_a}'"),
+                            (_, None) => format!("no session matching '{id_b}'"),
+                        }
+                    }
+                }
+            };
+            tui.print_text(&text);
         }
         // Not a builtin → try the file-based command/skill catalog.
         CommandAction::Unknown(_) => {
