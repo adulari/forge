@@ -70,6 +70,9 @@ pub struct Config {
     /// matching tool call.
     #[serde(default)]
     pub hooks: Vec<HookConfig>,
+    /// Git integration settings (co-authoring, hook installation).
+    #[serde(default)]
+    pub git: GitConfig,
 }
 
 /// When a hook fires.
@@ -243,6 +246,21 @@ impl Default for ShellConfig {
 
 fn default_explain_errors() -> bool {
     true
+}
+
+/// Git integration settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitConfig {
+    /// When true, `forge git setup` installs a prepare-commit-msg hook that strips
+    /// Claude/Codex co-author lines and adds `Co-Authored-By: Forge <noreply@forge.dev>`.
+    #[serde(default)]
+    pub coauthor: bool,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self { coauthor: false }
+    }
 }
 
 /// Settings for the slash-command + skill system.
@@ -707,6 +725,7 @@ impl Default for Config {
             lattice: LatticeConfig::default(),
             shell: ShellConfig::default(),
             hooks: Vec::new(),
+            git: GitConfig::default(),
         }
     }
 }

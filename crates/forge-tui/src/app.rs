@@ -61,6 +61,30 @@ pub struct RoutingView {
     pub rationale: String,
 }
 
+/// Data for the `/usage` overlay — API spend + token breakdown across providers.
+#[derive(Debug, Default, Clone)]
+pub struct UsageOverlay {
+    pub open: bool,
+    /// Today's total spend in USD.
+    pub today_usd: f64,
+    /// This month's total spend in USD.
+    pub month_usd: f64,
+    /// Session spend in USD (from the running Cost events).
+    pub session_usd: f64,
+    /// Session input tokens.
+    pub session_in: u64,
+    /// Session output tokens.
+    pub session_out: u64,
+    /// Per-model rows for today: (model, cost_usd, input_tokens, output_tokens).
+    pub by_model: Vec<(String, f64, u64, u64)>,
+    /// Daily cap (from config), None if uncapped.
+    pub daily_cap: Option<f64>,
+    /// Monthly cap (from config), None if uncapped.
+    pub monthly_cap: Option<f64>,
+    /// Animation tick counter (incremented each tick, used for spinner).
+    pub anim_tick: u32,
+}
+
 /// All state the TUI needs to render the pinned live region, plus the scrollback outbox.
 #[derive(Debug, Clone, Default)]
 pub struct App {
@@ -123,6 +147,8 @@ pub struct App {
     pub subagent_picking: bool,
     /// The currently highlighted row in the subagent picker.
     pub subagent_pick_idx: usize,
+    /// The `/usage` overlay state.
+    pub usage_overlay: UsageOverlay,
 }
 
 /// One subagent's live row in the TUI.
@@ -913,6 +939,8 @@ pub fn render_live(frame: &mut Frame, app: &App) {
     }
     render_input(frame, areas[5], app);
     render_statusline(frame, areas[6], app);
+    // Usage overlay renders last so it appears on top of everything.
+    render_usage_overlay(frame, app);
 }
 
 /// The inline slash-command palette: a scrolling window of filtered commands, selected row
@@ -1373,6 +1401,122 @@ fn context_gauge_spans(used: u64, limit: Option<u32>) -> Vec<Span<'static>> {
             format!("◷ {}", human(used)),
             Style::default().fg(DIM).bg(STATUSBG),
         )],
+    }
+}
+
+/// Render the `/usage` overlay as a centered popup over the terminal.
+pub fn render_usage_overlay(f: &mut Frame, app: &App) {
+    if !app.usage_overlay.open {
+        return;
+    }
+    let area = f.area();
+    let w = (area.width as f32 * 0.82).ceil() as u16;
+    let h = (area.height as f32 * 0.72).ceil() as u16;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+
+    f.render_widget(ratatui::widgets::Clear, popup);
+
+    let spinner = SPINNER[(app.usage_overlay.anim_tick as usize) % SPINNER.len()];
+    let title = format!(" {spinner} Usage ");
+    let block = Block::bordered()
+        .title(title)
+        .border_style(Style::default().fg(TOOLCYAN));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let chunks = Layout::vertical([Constraint::Length(5), Constraint::Min(0)]).split(inner);
+
+    let o = &app.usage_overlay;
+    let daily_str = if let Some(cap) = o.daily_cap {
+        let pct = (o.today_usd / cap * 100.0).min(100.0);
+        format!("Today   ${:.4} / ${:.2}  ({:.0}%)", o.today_usd, cap, pct)
+    } else {
+        format!("Today   ${:.4}", o.today_usd)
+    };
+    let month_str = if let Some(cap) = o.monthly_cap {
+        let pct = (o.month_usd / cap * 100.0).min(100.0);
+        format!("Month   ${:.4} / ${:.2}  ({:.0}%)", o.month_usd, cap, pct)
+    } else {
+        format!("Month   ${:.4}", o.month_usd)
+    };
+    let session_str = format!(
+        "Session ${:.4}  ↑{} ↓{} tok",
+        o.session_usd,
+        format_tok(o.session_in),
+        format_tok(o.session_out)
+    );
+    let summary_text = ratatui::text::Text::from(vec![
+        ratatui::text::Line::from(daily_str),
+        ratatui::text::Line::from(month_str),
+        ratatui::text::Line::from(session_str),
+        ratatui::text::Line::from(""),
+        ratatui::text::Line::from(Span::styled("  Esc to close", Style::default().fg(DIM))),
+    ]);
+    f.render_widget(Paragraph::new(summary_text), chunks[0]);
+
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Cell, Row, Table};
+    let header = Row::new(vec![
+        Cell::from("Model").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("Cost (today)").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("↑ In").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("↓ Out").style(Style::default().add_modifier(Modifier::BOLD)),
+    ]);
+    let rows: Vec<Row> = o
+        .by_model
+        .iter()
+        .map(|(model, cost, inp, out)| {
+            let display = if model.is_empty() {
+                "side calls".to_string()
+            } else {
+                model.clone()
+            };
+            let style = if display.starts_with("claude-cli") || display.starts_with("codex-cli") {
+                Style::default().fg(TOOLCYAN)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(display).style(style),
+                Cell::from(if *cost > 0.0 {
+                    format!("${:.5}", cost)
+                } else {
+                    "subscription".to_string()
+                })
+                .style(style),
+                Cell::from(format_tok(*inp)).style(style),
+                Cell::from(format_tok(*out)).style(style),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Percentage(50),
+            Constraint::Percentage(20),
+            Constraint::Percentage(15),
+            Constraint::Percentage(15),
+        ],
+    )
+    .header(header)
+    .block(Block::default());
+    f.render_widget(table, chunks[1]);
+}
+
+fn format_tok(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 

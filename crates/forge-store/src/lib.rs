@@ -350,6 +350,59 @@ impl Store {
         self.spend_between(s, e)
     }
 
+    /// Per-model spend + token counts for the current calendar day.
+    /// Returns `Vec<(model, cost_usd, input_tokens, output_tokens)>`, sorted by cost desc.
+    /// Rows where `message.model` is NULL (side calls like compact/diagnose) are grouped under
+    /// the empty string.
+    pub fn spend_by_model_today(&self) -> Result<Vec<(String, f64, u64, u64)>> {
+        let (s, e) = day_bounds_local(chrono::Local::now());
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(m.model, '') as mdl,
+                    COALESCE(SUM(u.cost_usd), 0.0),
+                    COALESCE(SUM(u.input_tokens), 0),
+                    COALESCE(SUM(u.output_tokens), 0)
+             FROM usage u JOIN message m ON m.id = u.message_id
+             WHERE u.created_at >= ?1 AND u.created_at < ?2
+             GROUP BY mdl
+             ORDER BY SUM(u.cost_usd) DESC, SUM(u.input_tokens) DESC",
+        )?;
+        let rows = stmt.query_map((s, e), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, i64>(2)? as u64,
+                r.get::<_, i64>(3)? as u64,
+            ))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// Per-model spend + token counts for the current calendar month.
+    pub fn spend_by_model_month(&self) -> Result<Vec<(String, f64, u64, u64)>> {
+        let (s, e) = month_bounds_local(chrono::Local::now());
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT COALESCE(m.model, '') as mdl,
+                    COALESCE(SUM(u.cost_usd), 0.0),
+                    COALESCE(SUM(u.input_tokens), 0),
+                    COALESCE(SUM(u.output_tokens), 0)
+             FROM usage u JOIN message m ON m.id = u.message_id
+             WHERE u.created_at >= ?1 AND u.created_at < ?2
+             GROUP BY mdl
+             ORDER BY SUM(u.cost_usd) DESC, SUM(u.input_tokens) DESC",
+        )?;
+        let rows = stmt.query_map((s, e), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, f64>(1)?,
+                r.get::<_, i64>(2)? as u64,
+                r.get::<_, i64>(3)? as u64,
+            ))
+        })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
     // --- Model health / failover (docs/features/model-health-failover.md) ---
 
     /// Bench a model until `cooldown_until` (epoch secs), recording why. Upsert: a fresh failure

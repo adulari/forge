@@ -151,6 +151,23 @@ enum Command {
         #[command(subcommand)]
         source: ImportSource,
     },
+    /// Git integration helpers (co-author hook installation, etc.).
+    Git {
+        #[command(subcommand)]
+        cmd: GitCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum GitCmd {
+    /// Install the `prepare-commit-msg` git hook that strips Claude/Codex co-author lines and
+    /// adds `Co-Authored-By: Forge <noreply@forge.dev>`. Requires `[git] coauthor = true` in
+    /// `.forge/config.toml` (or pass `--force` to install regardless).
+    Setup {
+        /// Install the hook even if `[git] coauthor` is not set in config.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -394,6 +411,7 @@ async fn main() -> Result<()> {
         Command::McpServe => mcp_serve::run().await,
         Command::Lattice { op } => lattice_cmd(op).await,
         Command::Import { source } => import_cmd(source),
+        Command::Git { cmd } => git_cmd(cmd),
     }
 }
 
@@ -411,6 +429,55 @@ struct ImportCounts {
 /// `forge import <source> [--project]` — copy another AI CLI's commands/skills/agents into a
 /// Forge scope, reusing the CC-compatible readers to validate before copying. Claude imports
 /// commands + skills + agents; Codex imports its prompts as commands.
+fn git_cmd(cmd: GitCmd) -> Result<()> {
+    match cmd {
+        GitCmd::Setup { force } => {
+            let config = forge_config::load().context("loading forge config")?;
+            if !force && !config.git.coauthor {
+                anyhow::bail!(
+                    "git.coauthor is not enabled in .forge/config.toml\n\
+                     Add `[git]\ncoauthor = true` to enable, or run `forge git setup --force`."
+                );
+            }
+            // Walk up to find .git/
+            let git_dir = {
+                let mut dir = std::env::current_dir()?;
+                loop {
+                    if dir.join(".git").exists() {
+                        break dir.join(".git");
+                    }
+                    if !dir.pop() {
+                        anyhow::bail!("not inside a git repository");
+                    }
+                }
+            };
+            let hook_path = git_dir.join("hooks").join("prepare-commit-msg");
+            let hook_script = r#"#!/bin/sh
+# Installed by 'forge git setup' — rewrites commit co-author attribution.
+# Strips Claude/Codex/Anthropic co-author lines; adds Forge as co-author.
+COMMIT_MSG_FILE="$1"
+filtered=$(grep -Ev '^Co-Authored-By:.*([Cc]laude|[Cc]odex|[Aa]nthrop)' "$COMMIT_MSG_FILE") || filtered=$(cat "$COMMIT_MSG_FILE")
+printf '%s\n\nCo-Authored-By: Forge <noreply@forge.dev>\n' "$filtered" > "$COMMIT_MSG_FILE"
+"#;
+            if let Some(hooks_dir) = hook_path.parent() {
+                std::fs::create_dir_all(hooks_dir).context("creating .git/hooks directory")?;
+            }
+            std::fs::write(&hook_path, hook_script)
+                .with_context(|| format!("writing {}", hook_path.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&hook_path)?.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&hook_path, perms)?;
+            }
+            println!("✓ installed {}", hook_path.display());
+            println!("  strips Claude/Codex co-author lines; adds Co-Authored-By: Forge");
+            Ok(())
+        }
+    }
+}
+
 fn import_cmd(source: ImportSource) -> Result<()> {
     let (label, project, home, commands_sub, skills_sub, agents_sub) = match source {
         ImportSource::Claude { project } => (
@@ -2537,6 +2604,15 @@ async fn run_chat_tui(
                 continue;
             }
 
+            // Usage overlay captures all keys; Esc closes it.
+            if app.usage_overlay.open {
+                if matches!(key, KeyKind::Esc) {
+                    app.usage_overlay.open = false;
+                    dirty = true;
+                }
+                continue;
+            }
+
             // The @path file-path picker is modal while open.
             if app.at_picker.open {
                 match key {
@@ -3035,6 +3111,30 @@ async fn run_chat_tui(
             app.picker.tick_anim();
             dirty = true;
         }
+        if app.usage_overlay.open {
+            app.usage_overlay.anim_tick = app.usage_overlay.anim_tick.wrapping_add(1);
+            dirty = true;
+            // Auto-refresh data every ~3 s (180 ticks × 16 ms).
+            if app.usage_overlay.anim_tick % 180 == 1 {
+                let (today_usd, month_usd, by_model, (daily_cap, monthly_cap)) = {
+                    let s = session.lock().await;
+                    (
+                        s.spend_today_usd(),
+                        s.spend_this_month_usd(),
+                        s.spend_by_model_today(),
+                        s.budget_caps(),
+                    )
+                };
+                app.usage_overlay.today_usd = today_usd;
+                app.usage_overlay.month_usd = month_usd;
+                app.usage_overlay.session_usd = app.cost_usd;
+                app.usage_overlay.session_in = app.session_in;
+                app.usage_overlay.session_out = app.session_out;
+                app.usage_overlay.by_model = by_model;
+                app.usage_overlay.daily_cap = daily_cap;
+                app.usage_overlay.monthly_cap = monthly_cap;
+            }
+        }
 
         // Push any finalized lines into native scrollback (above the pinned live region).
         let flushed = app.drain_flush();
@@ -3223,6 +3323,7 @@ async fn dispatch_command(
             | CommandAction::ClearScreen
             | CommandAction::PinModel(_)
             | CommandAction::Replay(_, _)
+            | CommandAction::Usage
     );
     if busy && mutates {
         app.note("⚠ finish or Esc the current turn first");
@@ -3504,6 +3605,26 @@ async fn dispatch_command(
                 }
             };
             tui.print_text(&text);
+        }
+        CommandAction::Usage => {
+            let (today_usd, month_usd, by_model, (daily_cap, monthly_cap)) = {
+                let s = session.lock().await;
+                (
+                    s.spend_today_usd(),
+                    s.spend_this_month_usd(),
+                    s.spend_by_model_today(),
+                    s.budget_caps(),
+                )
+            };
+            app.usage_overlay.today_usd = today_usd;
+            app.usage_overlay.month_usd = month_usd;
+            app.usage_overlay.session_usd = app.cost_usd;
+            app.usage_overlay.session_in = app.session_in;
+            app.usage_overlay.session_out = app.session_out;
+            app.usage_overlay.by_model = by_model;
+            app.usage_overlay.daily_cap = daily_cap;
+            app.usage_overlay.monthly_cap = monthly_cap;
+            app.usage_overlay.open = true;
         }
         // Not a builtin → try the file-based command/skill catalog.
         CommandAction::Unknown(_) => {

@@ -519,6 +519,30 @@ impl Session {
             .map(|m| m.content.as_str())
     }
 
+    /// Total spend today (UTC calendar day) across all sessions — the same figure the budget
+    /// gate checks. Returns 0.0 on store error.
+    pub fn spend_today_usd(&self) -> f64 {
+        self.store.spend_today_usd().unwrap_or(0.0)
+    }
+
+    /// Total spend this month across all sessions. Returns 0.0 on store error.
+    pub fn spend_this_month_usd(&self) -> f64 {
+        self.store.spend_this_month_usd().unwrap_or(0.0)
+    }
+
+    /// Per-model spend + token counts for today, for the `/usage` overlay.
+    pub fn spend_by_model_today(&self) -> Vec<(String, f64, u64, u64)> {
+        self.store.spend_by_model_today().unwrap_or_default()
+    }
+
+    /// Daily/monthly caps from config, for the `/usage` overlay gauges.
+    pub fn budget_caps(&self) -> (Option<f64>, Option<f64>) {
+        (
+            self.config.mesh.daily_budget_usd,
+            self.config.mesh.monthly_cap_usd,
+        )
+    }
+
     /// Advance the temper through the SHIFT+TAB cycle, persist it, and return the new temper
     /// (RFC/temper-modes). Takes effect on the next turn's permission decisions.
     pub fn cycle_temper(&mut self) -> PermissionMode {
@@ -842,6 +866,7 @@ impl Session {
             self.presenter.emit(PresenterEvent::ShellDiagnosis {
                 command: command.to_string(),
                 diagnosis: cached.to_string(),
+                fix: None,
             });
             return;
         }
@@ -1506,22 +1531,60 @@ impl Session {
             .mcp
             .clone()
             .expect("invoke_mcp only called when mcp is Some");
-        let args_json = serde_json::to_string(&call.args)?;
+        let mut args_json = serde_json::to_string(&call.args)?;
+        let mut effective_args = call.args.clone();
         let side_effect = mcp.side_effect_of(&call.name);
         self.presenter.emit(PresenterEvent::ToolStart {
             name: call.name.clone(),
             args: args_json.clone(),
         });
-        let allowed =
-            match permission::decide(self.mode, side_effect, &call.name, &call.args, &self.rules) {
-                PermissionDecision::Allow => true,
-                PermissionDecision::Deny => false,
-                PermissionDecision::Ask => self.presenter.confirm(&call.name, side_effect),
-            };
+
+        // PreToolUse hooks: same semantics as native tools — block, observe, or rewrite args.
+        if !self.config.hooks.is_empty() {
+            let payload = serde_json::json!({ "tool": call.name, "args": call.args }).to_string();
+            let outcome = hooks::run_hooks(
+                &self.config.hooks,
+                forge_config::HookEvent::PreToolUse,
+                &call.name,
+                &payload,
+            )
+            .await;
+            for n in outcome.notes {
+                self.presenter.emit(PresenterEvent::Warning(n));
+            }
+            if let Some(reason) = outcome.blocked {
+                let result = format!("blocked by hook: {reason}");
+                self.presenter.emit(PresenterEvent::ToolResult {
+                    name: call.name.clone(),
+                    ok: false,
+                    summary: "blocked by hook".to_string(),
+                });
+                self.store.record_tool_call(
+                    msg_id, &call.name, &args_json, &result, "blocked", "error",
+                )?;
+                return Ok(result);
+            }
+            if let Some(new_args) = outcome.rewritten_args {
+                args_json = serde_json::to_string(&new_args).unwrap_or_default();
+                effective_args = new_args;
+            }
+        }
+
+        let allowed = match permission::decide(
+            self.mode,
+            side_effect,
+            &call.name,
+            &effective_args,
+            &self.rules,
+        ) {
+            PermissionDecision::Allow => true,
+            PermissionDecision::Deny => false,
+            PermissionDecision::Ask => self.presenter.confirm(&call.name, side_effect),
+        };
         let permission_label = if allowed { "allowed" } else { "denied" };
 
         let (result, ok) = if allowed {
-            let out = mcp.call(&call.name, &call.args).await;
+            let out = mcp.call(&call.name, &effective_args).await;
             (out.text, out.ok)
         } else {
             ("permission denied by policy".to_string(), false)
@@ -1540,6 +1603,25 @@ impl Session {
             permission_label,
             if ok { "ok" } else { "error" },
         )?;
+
+        // PostToolUse hooks: observe only — notes surfaced, result unchanged.
+        if !self.config.hooks.is_empty() {
+            let payload = serde_json::json!({
+                "tool": call.name, "args": effective_args, "result": result, "ok": ok
+            })
+            .to_string();
+            let outcome = hooks::run_hooks(
+                &self.config.hooks,
+                forge_config::HookEvent::PostToolUse,
+                &call.name,
+                &payload,
+            )
+            .await;
+            for n in outcome.notes {
+                self.presenter.emit(PresenterEvent::Warning(n));
+            }
+        }
+
         Ok(result)
     }
 
