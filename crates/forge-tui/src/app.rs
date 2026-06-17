@@ -806,7 +806,9 @@ pub fn render_live(frame: &mut Frame, app: &App) {
 
     // Subagent panel gets at most half of panel_avail; task panel gets the rest.
     let sub_h = app.subagents_panel_height().min(panel_avail / 2);
-    let task_h = app.tasks_panel_height().min(panel_avail.saturating_sub(sub_h));
+    let task_h = app
+        .tasks_panel_height()
+        .min(panel_avail.saturating_sub(sub_h));
     let stream_h = avail.saturating_sub(sub_h + task_h);
 
     let areas = Layout::vertical([
@@ -997,7 +999,10 @@ fn render_subagent_picker(frame: &mut Frame, area: Rect, app: &App) {
             format!("  ⚒ agents ({}) ", views.len()),
             Style::default().fg(ORANGE).bold(),
         ),
-        Span::styled("↑↓ select  ·  Enter open  ·  Esc close", Style::default().fg(DIM)),
+        Span::styled(
+            "↑↓ select  ·  Enter open  ·  Esc close",
+            Style::default().fg(DIM),
+        ),
     ]));
     let list_h = h.saturating_sub(1);
     let start = app

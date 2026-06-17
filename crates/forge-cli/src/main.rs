@@ -2020,9 +2020,7 @@ async fn run_chat_tui(
                                             let _ = reply.send(false);
                                         }
                                         UiMsg::Question { reply, .. } => {
-                                            let _ = reply.send(
-                                                forge_tui::NO_ANSWER.to_string(),
-                                            );
+                                            let _ = reply.send(forge_tui::NO_ANSWER.to_string());
                                         }
                                     }
                                 }
@@ -2054,9 +2052,7 @@ async fn run_chat_tui(
                                             let _ = reply.send(false);
                                         }
                                         UiMsg::Question { reply, .. } => {
-                                            let _ = reply.send(
-                                                forge_tui::NO_ANSWER.to_string(),
-                                            );
+                                            let _ = reply.send(forge_tui::NO_ANSWER.to_string());
                                         }
                                     }
                                 }
