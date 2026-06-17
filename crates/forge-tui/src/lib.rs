@@ -42,7 +42,8 @@ pub mod select;
 mod transcript;
 mod tui;
 pub use app::{
-    banner_lines, handle_key, lattice_view_lines, App, InputOutcome, KeyKind, SubagentView,
+    banner_lines, handle_key, lattice_view_lines, render_usage_overlay, App, InputOutcome, KeyKind,
+    SubagentView, UsageOverlay,
 };
 pub use commands::{
     at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken, Command,

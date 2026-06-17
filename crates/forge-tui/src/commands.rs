@@ -111,6 +111,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/clear",
     },
     Command {
+        name: "usage",
+        desc: "show API spend + token usage across providers",
+        usage: "/usage",
+    },
+    Command {
         name: "quit",
         desc: "exit Forge",
         usage: "/quit",
@@ -161,6 +166,8 @@ pub enum CommandAction {
     Loop(String),
     /// Show a session transcript inline, or diff two sessions (`/replay <id> [<id2>]`).
     Replay(String, Option<String>),
+    /// Open the usage overlay showing API spend + token breakdown (`/usage`).
+    Usage,
     Quit,
     /// Not a known command — the binary shows `unknown command: X`.
     Unknown(String),
@@ -421,6 +428,7 @@ pub fn parse_command(line: &str) -> CommandAction {
             CommandAction::Replay(id_a, id_b)
         }
         "clear" | "cls" => CommandAction::ClearScreen,
+        "usage" => CommandAction::Usage,
         "quit" | "exit" | "q" => CommandAction::Quit,
         other => CommandAction::Unknown(other.to_string()),
     }
