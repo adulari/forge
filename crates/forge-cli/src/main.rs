@@ -120,6 +120,17 @@ enum Command {
         #[arg(long)]
         clear: bool,
     },
+    /// Explain how the mesh routes — classification, scored candidates, quota pressure, the
+    /// conservation roll, and the final pick. With a PROMPT, explains that prompt; without one,
+    /// shows the per-tier picks + subscription quota overview. `--json` for machine output.
+    Mesh {
+        /// The task prompt to explain (quote it). Omit for the per-tier / quota overview.
+        #[arg(trailing_var_arg = true)]
+        prompt: Vec<String>,
+        /// Emit the explanation as JSON instead of the formatted view.
+        #[arg(long)]
+        json: bool,
+    },
     /// Internal: run Forge's tool registry as an MCP server on stdio (spawned by the CLI
     /// bridge so claude/codex use Forge's tools under Forge's permission gate). Not for direct use.
     #[command(hide = true)]
@@ -356,6 +367,54 @@ fn init_tracing() {
 
 /// Keep the command palette in sync with the `/command` token at the cursor (input end): open +
 /// filter when one is present anywhere on the line, close when not (`//` escape yields no token).
+/// Fill in missing bridge-provider percentages on the usage overlay from the store's
+/// `subscription_usage` table (set via rate_limit_event during Forge turns). Used as a
+/// fallback when the statusline cache file is stale or missing.
+/// Populate the overlay's subscription utilisation %s, preferring the STORE's fractions (seeded
+/// from the rate-limit caches at startup AND refreshed live on every CLI-bridge turn via
+/// rate_limit_event) over the raw caches. This is the real staleness fix: a fresh Forge claude/
+/// codex turn updates the store, so the overlay reflects it instead of the frozen statusline cache.
+/// The "Xh ago" note is shown only when the claude reading is still the seeded cache value (i.e. no
+/// live turn refreshed it this session) — when a turn has, the value is current and unmarked.
+fn fill_subscription_pcts(
+    overlay: &mut forge_tui::UsageOverlay,
+    fracs: &std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
+    bstats: &bridge_stats::BridgeStats,
+) {
+    let store = |p: &str, w: &str| fracs.get(p).and_then(|m| m.get(w)).copied();
+    // Cache as the base; override with the store only when it carries a genuinely DIFFERENT (live,
+    // turn-recorded) value, so we never show a store reading staler than the cache. Returns the %
+    // and whether it came from a live override.
+    let pick = |cache: Option<f64>, st: Option<f64>| -> (Option<f64>, bool) {
+        match (st, cache) {
+            (Some(s), Some(c)) => {
+                let sp = s * 100.0;
+                if (sp - c).abs() > 1e-6 {
+                    (Some(sp), true)
+                } else {
+                    (Some(c), false)
+                }
+            }
+            (Some(s), None) => (Some(s * 100.0), true),
+            (None, c) => (c, false),
+        }
+    };
+    let (c5, _) = pick(bstats.claude_5h_pct, store("claude-cli", "five_hour"));
+    let (cw, cw_live) = pick(bstats.claude_weekly_pct, store("claude-cli", "weekly"));
+    overlay.claude_5h_pct = c5;
+    overlay.claude_weekly_pct = cw;
+    let (x5, _) = pick(bstats.codex_5h_pct, store("codex-cli", "five_hour"));
+    let (xw, _) = pick(bstats.codex_weekly_pct, store("codex-cli", "weekly"));
+    overlay.codex_5h_pct = x5;
+    overlay.codex_weekly_pct = xw;
+    // A live turn refreshed the weekly reading → it's current; otherwise surface the cache age.
+    overlay.claude_rl_age_secs = if cw_live {
+        None
+    } else {
+        bstats.claude_rl_age_secs
+    };
+}
+
 fn sync_palette_to_slash_token(app: &mut forge_tui::App) {
     match forge_tui::slash_token_at(&app.input, app.input.len()) {
         Some(tok) if app.palette.open => {
@@ -436,6 +495,7 @@ async fn main() -> Result<()> {
         Command::Assay { sub } => assay_cmd(sub),
         Command::Commands => commands_cmd(),
         Command::Models { probe, clear } => models(probe, clear).await,
+        Command::Mesh { prompt, json } => mesh_explain(prompt.join(" "), json).await,
         Command::Auth { provider, remove } => auth(&provider, remove),
         Command::Init => init(),
         Command::Mcp { cmd } => mcp_cmd(cmd).await,
@@ -978,10 +1038,9 @@ fn auth(provider: &str, remove: bool) -> Result<()> {
     if key.is_empty() {
         anyhow::bail!("no key provided");
     }
-    forge_config::store_api_key(provider, key).with_context(|| {
-        format!("storing {provider} key (is an OS keyring / secret service available?)")
-    })?;
-    println!("stored {provider} key in the OS keyring");
+    forge_config::store_api_key(provider, key)
+        .with_context(|| format!("storing {provider} key"))?;
+    println!("stored {provider} key (OS keyring, or encrypted file if no keyring is available)");
     Ok(())
 }
 
@@ -1740,6 +1799,297 @@ async fn models(probe: bool, clear: bool) -> Result<()> {
     Ok(())
 }
 
+/// `forge mesh [PROMPT]` — explain how the mesh routes. With a prompt: the full decision trace.
+/// Without one: the per-tier picks + subscription-quota overview. The non-interactive sibling of
+/// the `/mesh` TUI inspector; both read the same [`forge_mesh::RoutingExplanation`] engine.
+async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
+    forge_config::inject_provider_keys();
+    let config = forge_config::load().unwrap_or_default();
+    let cat = discover_catalog(&config).await;
+    if cat.is_empty() {
+        println!(
+            "no models discovered — set a provider key (`forge auth <provider>`) or run ollama"
+        );
+        return Ok(());
+    }
+    let store = open_store()?;
+    // Codex from its rollout files; claude's CURRENT 5h+weekly utilisation from a one-shot
+    // `claude --debug` probe (gated: skip if the store was updated < 5 min ago).
+    let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
+        .await
+        .unwrap_or_default();
+    seed_store_quota(&store, "codex-cli", "five_hour", bstats.codex_5h_pct);
+    seed_store_quota(&store, "codex-cli", "weekly", bstats.codex_weekly_pct);
+    if store
+        .subscription_age_secs("claude-cli")
+        .is_none_or(|a| a > 300)
+    {
+        let limits = tokio::task::spawn_blocking(bridge_stats::probe_claude_limits)
+            .await
+            .unwrap_or_default();
+        for (window, frac) in limits {
+            seed_store_quota(&store, "claude-cli", &window, Some(frac * 100.0));
+        }
+    }
+    let quota = store
+        .current_quota()
+        .unwrap_or_default()
+        .with_plans(config.mesh.subscriptions.clone())
+        .with_conserve(config.mesh.subscription_conserve);
+    let health = store.current_benched().unwrap_or_default();
+    let budget = forge_mesh::BudgetState {
+        spent_today_usd: store.spend_today_usd().unwrap_or(0.0),
+        daily_cap_usd: config.mesh.daily_budget_usd,
+        spent_week_usd: store.spend_this_week_usd().unwrap_or(0.0),
+        weekly_cap_usd: config.mesh.weekly_budget_usd,
+        spent_month_usd: store.spend_this_month_usd().unwrap_or(0.0),
+        monthly_cap_usd: config.mesh.monthly_cap_usd,
+        warn_fraction: config.mesh.warn_threshold,
+    };
+    let router = HeuristicRouter::new(config.clone()).with_catalog(cat.clone());
+
+    if prompt.trim().is_empty() {
+        mesh_overview(&cat, &config, &quota);
+        return Ok(());
+    }
+    let e = router.explain(&prompt, budget, &health, &quota);
+    if json {
+        println!("{}", mesh_explanation_json(&e));
+    } else {
+        print_mesh_explanation(&e);
+    }
+    Ok(())
+}
+
+/// Record a subscription window fraction (0–100 pct) into the store, mapping it to a status. Used
+/// to seed the mesh quota from the Claude/Codex rate-limit caches in the `forge mesh` CLI path.
+fn seed_store_quota(store: &Store, provider: &str, window: &str, pct: Option<f64>) {
+    let Some(pct) = pct else { return };
+    let frac = (pct / 100.0).clamp(0.0, 1.0);
+    let status = if frac >= 0.98 {
+        forge_types::QuotaStatus::Exhausted
+    } else if frac >= 0.80 {
+        forge_types::QuotaStatus::Warning
+    } else {
+        forge_types::QuotaStatus::Ok
+    };
+    let _ = store.record_quota(&forge_types::QuotaHint {
+        provider: provider.to_string(),
+        window: window.to_string(),
+        status,
+        resets_at: None,
+        fraction_used: Some(frac),
+    });
+}
+
+/// A 10-cell ASCII meter for a 0.0–1.0 fraction.
+fn meter(frac: f64) -> String {
+    let filled = (frac.clamp(0.0, 1.0) * 10.0).round() as usize;
+    format!("[{}{}]", "█".repeat(filled), "░".repeat(10 - filled))
+}
+
+/// The no-prompt overview: subscription quota gauges + per-tier ranked picks.
+fn mesh_overview(
+    cat: &forge_mesh::ModelCatalog,
+    config: &forge_config::Config,
+    quota: &forge_types::SubscriptionQuota,
+) {
+    let pricing = forge_mesh::pricing::Pricing::from_config(config);
+    println!(
+        "subscription quota (conservation {}):",
+        if config.mesh.subscription_conserve {
+            "on"
+        } else {
+            "off"
+        }
+    );
+    let mut subs: Vec<&str> = cat
+        .models()
+        .iter()
+        .filter(|m| forge_mesh::catalog::is_subscription(m))
+        .map(|m| forge_mesh::catalog::provider_of(m))
+        .collect();
+    subs.sort_unstable();
+    subs.dedup();
+    if subs.is_empty() {
+        println!("  (no subscription bridges installed)");
+    }
+    for p in &subs {
+        let frac = quota.fraction_for(p);
+        let plan = quota.plan_for(p);
+        let plan = if plan.is_empty() { "?" } else { plan };
+        let pc = forge_mesh::ModelCatalog::spread_probability(TaskTier::Complex, frac, plan, false);
+        let ps =
+            forge_mesh::ModelCatalog::spread_probability(TaskTier::Standard, frac, plan, false);
+        println!(
+            "  {:<11} {} {:>3.0}% · plan {plan} · {:?} · spread P(complex)={:.0}% P(standard)={:.0}%",
+            p,
+            meter(frac),
+            frac * 100.0,
+            quota.status_for(p),
+            pc * 100.0,
+            ps * 100.0,
+        );
+    }
+    println!("\nper-tier ranking (top 5):");
+    for tier in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
+        let (_, rows) = cat.ranked_rows(tier, &pricing, false, 0, quota);
+        println!("  {}:", tier.as_str());
+        for r in rows.iter().take(5) {
+            println!(
+                "    {:<34} score {:>6.2}  {}",
+                r.model,
+                r.final_score,
+                cost_tag(r.cost_class)
+            );
+        }
+    }
+    println!("\ntip: `forge mesh \"<your task>\"` explains exactly how one prompt routes.");
+}
+
+fn cost_tag(class: u8) -> &'static str {
+    match class {
+        0 => "free",
+        1 => "subscription",
+        _ => "paid",
+    }
+}
+
+/// The formatted single-prompt explanation.
+fn print_mesh_explanation(e: &forge_mesh::RoutingExplanation) {
+    println!("prompt: {:?}", e.prompt);
+    print!("classified: {}", e.classified_tier.as_str());
+    if e.routed_tier != e.classified_tier {
+        print!(" → routed {}", e.routed_tier.as_str());
+    }
+    println!(
+        "  ·  code-heavy: {}  ·  reasons: {}",
+        if e.code_heavy { "yes" } else { "no" },
+        e.classify_reasons.join(", ")
+    );
+
+    if !e.quota.is_empty() {
+        println!("\nquota:");
+        for q in &e.quota {
+            let plan = if q.plan.is_empty() { "?" } else { &q.plan };
+            println!(
+                "  {:<11} {} {:>3.0}% · plan {plan} · {:?} · spread P={:.0}%",
+                q.provider,
+                meter(q.fraction),
+                q.fraction * 100.0,
+                q.status,
+                q.spread_probability * 100.0,
+            );
+        }
+    }
+
+    let c = &e.conserve;
+    if c.enabled {
+        let verdict = if !c.eligible {
+            "no frontier alternative → not applied".to_string()
+        } else if c.fired {
+            format!(
+                "FIRED (roll {:.2} < P {:.2}) → spread off subscriptions",
+                c.roll, c.probability
+            )
+        } else {
+            format!(
+                "not fired (roll {:.2} ≥ P {:.2}) → subscription kept",
+                c.roll, c.probability
+            )
+        };
+        println!("\nconservation: {verdict}");
+    } else {
+        println!("\nconservation: off");
+    }
+
+    if !e.candidates.is_empty() {
+        println!("\ncandidates (top {}):", e.candidates.len().min(8));
+        for c in e.candidates.iter().take(8) {
+            let marker = if c.selected { "*" } else { " " };
+            let pen = if c.row.conserve_penalty > 0.0 {
+                format!(" −{:.0}", c.row.conserve_penalty)
+            } else {
+                String::new()
+            };
+            println!(
+                "  {marker} #{:<2} {:<34} score {:>6.2}  cap {:>5.2}  {}{}{}{}",
+                c.rank,
+                c.row.model,
+                c.row.final_score,
+                c.row.capability,
+                cost_tag(c.row.cost_class),
+                pen,
+                if c.row.frontier { " · frontier" } else { "" },
+                if c.usable { "" } else { " · UNUSABLE" },
+            );
+        }
+    }
+
+    println!("\npick: {}", e.pick);
+    if !e.fallbacks.is_empty() {
+        println!("fallbacks: {}", e.fallbacks.join(", "));
+    }
+    println!("why: {}", e.rationale);
+}
+
+/// JSON form of the explanation (stable shape for scripting / tests).
+fn mesh_explanation_json(e: &forge_mesh::RoutingExplanation) -> String {
+    let candidates: Vec<_> = e
+        .candidates
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "rank": c.rank,
+                "model": c.row.model,
+                "provider": c.row.provider,
+                "final_score": c.row.final_score,
+                "capability": c.row.capability,
+                "cost_class": c.row.cost_class,
+                "conserve_penalty": c.row.conserve_penalty,
+                "subscription": c.row.subscription,
+                "frontier": c.row.frontier,
+                "usable": c.usable,
+                "selected": c.selected,
+            })
+        })
+        .collect();
+    let quota: Vec<_> = e
+        .quota
+        .iter()
+        .map(|q| {
+            serde_json::json!({
+                "provider": q.provider,
+                "status": format!("{:?}", q.status),
+                "fraction": q.fraction,
+                "plan": q.plan,
+                "spread_probability": q.spread_probability,
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "prompt": e.prompt,
+        "classified_tier": e.classified_tier.as_str(),
+        "routed_tier": e.routed_tier.as_str(),
+        "classify_reasons": e.classify_reasons,
+        "code_heavy": e.code_heavy,
+        "seed": e.seed,
+        "conserve": {
+            "enabled": e.conserve.enabled,
+            "eligible": e.conserve.eligible,
+            "probability": e.conserve.probability,
+            "roll": e.conserve.roll,
+            "fired": e.conserve.fired,
+        },
+        "quota": quota,
+        "candidates": candidates,
+        "pick": e.pick,
+        "fallbacks": e.fallbacks,
+        "rationale": e.rationale,
+    }))
+    .unwrap_or_else(|_| "{}".into())
+}
+
 /// Ping every discovered model with a 1-token request; clear the healthy ones and bench the
 /// ones that rate-limit / fail auth / are down, so the mesh routes around them.
 async fn probe_models(
@@ -2270,13 +2620,6 @@ async fn build_session_with(
     if let Some(m) = mode {
         config.permission_mode = m.into();
     }
-    // Auto-patch ~/.claude/statusline.sh to write rate-limit data to a cache file so
-    // the /usage overlay can show Claude's 5h/weekly utilisation percentages.
-    if let Ok(home) = std::env::var("HOME") {
-        if std::path::Path::new(&home).join(".claude").is_dir() {
-            bridge_stats::ensure_claude_statusline_patched();
-        }
-    }
     // Capture the MCP config before `config` is moved into the Session; connect after the session
     // is built so its presenter can show the connection status.
     let mcp_config = config.mcp.clone();
@@ -2549,6 +2892,33 @@ fn maybe_first_run_setup(mock: bool) -> Result<()> {
     Ok(())
 }
 
+/// Probe Claude's CURRENT rate limits (both windows, via the `claude --debug` headers) and record
+/// them into the session store. Best-effort; the caller gates it on staleness. This is the live
+/// claude-usage source — it replaces the helm-wiped statusline cache.
+async fn refresh_claude_quota(session: &std::sync::Arc<tokio::sync::Mutex<Session>>) {
+    let limits = tokio::task::spawn_blocking(bridge_stats::probe_claude_limits)
+        .await
+        .unwrap_or_default();
+    if !limits.is_empty() {
+        let s = session.lock().await;
+        for (w, f) in limits {
+            s.seed_subscription_quota("claude-cli", &w, Some(f * 100.0));
+        }
+    }
+}
+
+/// Whether the stored claude quota is older than `max_age` seconds (or absent) — gates the probe.
+async fn claude_quota_is_stale(
+    session: &std::sync::Arc<tokio::sync::Mutex<Session>>,
+    max_age: i64,
+) -> bool {
+    session
+        .lock()
+        .await
+        .claude_quota_age_secs()
+        .is_none_or(|a| a > max_age)
+}
+
 async fn chat(
     mock: bool,
     mode: Option<Mode>,
@@ -2637,6 +3007,25 @@ async fn run_chat_tui(
     let session =
         build_session_with(Box::new(ChannelPresenter::new(tx)), mock, mode, resume, pin).await?;
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+
+    // Seed the mesh subscription quota at startup so routing + the overlays reflect usage from
+    // outside Forge. Codex comes from its rollout files (fresh); claude's stale cache is only a
+    // weak fallback — the background probe below fetches claude's CURRENT 5h+weekly utilisation
+    // (via the `claude --debug` rate-limit headers) so the store is live within a few seconds.
+    {
+        let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
+            .await
+            .unwrap_or_default();
+        let s = session.lock().await;
+        s.seed_subscription_quota("codex-cli", "five_hour", bstats.codex_5h_pct);
+        s.seed_subscription_quota("codex-cli", "weekly", bstats.codex_weekly_pct);
+        s.seed_subscription_quota("claude-cli", "five_hour", bstats.claude_5h_pct);
+        s.seed_subscription_quota("claude-cli", "weekly", bstats.claude_weekly_pct);
+    }
+    tokio::spawn({
+        let s = session.clone();
+        async move { refresh_claude_quota(&s).await }
+    });
 
     let mut tui = Tui::new().context("initializing TUI")?;
     // The welcome banner is a one-time print into scrollback (not a render branch).
@@ -2856,6 +3245,27 @@ async fn run_chat_tui(
                 if matches!(key, KeyKind::Esc) {
                     app.usage_overlay.open = false;
                     dirty = true;
+                }
+                continue;
+            }
+
+            // Mesh inspector overlay captures all keys; Esc closes, ↑/↓ scroll the candidate list.
+            if app.mesh_overlay.open {
+                match key {
+                    KeyKind::Esc => {
+                        app.mesh_overlay.open = false;
+                        app.mesh_overlay.scroll = 0;
+                        dirty = true;
+                    }
+                    KeyKind::Down => {
+                        app.mesh_overlay.scroll = app.mesh_overlay.scroll.saturating_add(1);
+                        dirty = true;
+                    }
+                    KeyKind::Up => {
+                        app.mesh_overlay.scroll = app.mesh_overlay.scroll.saturating_sub(1);
+                        dirty = true;
+                    }
+                    _ => {}
                 }
                 continue;
             }
@@ -3358,6 +3768,11 @@ async fn run_chat_tui(
             app.picker.tick_anim();
             dirty = true;
         }
+        if app.mesh_overlay.open && app.mesh_overlay.anim_tick < app.mesh_overlay.settle_tick() {
+            // Animate only until the reveal settles, then stop redrawing (no infinite spinner).
+            app.mesh_overlay.anim_tick += 1;
+            dirty = true;
+        }
         if app.usage_overlay.open {
             app.usage_overlay.anim_tick = app.usage_overlay.anim_tick.wrapping_add(1);
             dirty = true;
@@ -3370,6 +3785,7 @@ async fn run_chat_tui(
                         by_model,
                         by_model_week,
                         (daily_cap, monthly_cap, weekly_cap),
+                        bridge_fracs,
                     ),
                     (session_in, session_out, session_usd),
                 ) = {
@@ -3381,6 +3797,7 @@ async fn run_chat_tui(
                             s.spend_by_model_today(),
                             s.spend_by_model_week(),
                             s.budget_caps(),
+                            s.bridge_fractions(),
                         ),
                         s.session_usage_db(),
                     )
@@ -3398,14 +3815,11 @@ async fn run_chat_tui(
                 app.usage_overlay.daily_cap = daily_cap;
                 app.usage_overlay.weekly_cap = weekly_cap;
                 app.usage_overlay.monthly_cap = monthly_cap;
-                app.usage_overlay.codex_5h_pct = bstats.codex_5h_pct;
-                app.usage_overlay.codex_weekly_pct = bstats.codex_weekly_pct;
-                app.usage_overlay.claude_5h_pct = bstats.claude_5h_pct;
-                app.usage_overlay.claude_weekly_pct = bstats.claude_weekly_pct;
                 app.usage_overlay.claude_5h_in = bstats.claude_5h_in;
                 app.usage_overlay.claude_5h_out = bstats.claude_5h_out;
                 app.usage_overlay.claude_weekly_in = bstats.claude_weekly_in;
                 app.usage_overlay.claude_weekly_out = bstats.claude_weekly_out;
+                fill_subscription_pcts(&mut app.usage_overlay, &bridge_fracs, &bstats);
             }
         }
 
@@ -3887,6 +4301,7 @@ async fn dispatch_command(
                     by_model,
                     by_model_week,
                     (daily_cap, monthly_cap, weekly_cap),
+                    bridge_fracs,
                 ),
                 (session_in, session_out, session_usd),
                 bstats,
@@ -3900,6 +4315,7 @@ async fn dispatch_command(
                             s.spend_by_model_today(),
                             s.spend_by_model_week(),
                             s.budget_caps(),
+                            s.bridge_fractions(),
                         ),
                         s.session_usage_db(),
                     )
@@ -3919,15 +4335,111 @@ async fn dispatch_command(
             app.usage_overlay.daily_cap = daily_cap;
             app.usage_overlay.weekly_cap = weekly_cap;
             app.usage_overlay.monthly_cap = monthly_cap;
-            app.usage_overlay.codex_5h_pct = bstats.codex_5h_pct;
-            app.usage_overlay.codex_weekly_pct = bstats.codex_weekly_pct;
-            app.usage_overlay.claude_5h_pct = bstats.claude_5h_pct;
-            app.usage_overlay.claude_weekly_pct = bstats.claude_weekly_pct;
             app.usage_overlay.claude_5h_in = bstats.claude_5h_in;
             app.usage_overlay.claude_5h_out = bstats.claude_5h_out;
             app.usage_overlay.claude_weekly_in = bstats.claude_weekly_in;
             app.usage_overlay.claude_weekly_out = bstats.claude_weekly_out;
+            fill_subscription_pcts(&mut app.usage_overlay, &bridge_fracs, &bstats);
             app.usage_overlay.open = true;
+            // The store is kept fresh by the startup probe + live turns, so the overlay opens with
+            // current data (no stale flash). If it's been >5 min, refresh in the background; the
+            // overlay's ~3s auto-refresh then picks up the new value from the store.
+            if claude_quota_is_stale(session, 300).await {
+                let s = session.clone();
+                tokio::spawn(async move { refresh_claude_quota(&s).await });
+            }
+        }
+        CommandAction::Mesh(arg) => {
+            let prompt = arg.unwrap_or_default();
+            // Bare `/mesh` → a representative complex task for the overview; else the given prompt.
+            let to_explain = if prompt.trim().is_empty() {
+                "design and prove correct a concurrent lock-free algorithm".to_string()
+            } else {
+                prompt.clone()
+            };
+            // The inspector is a one-shot snapshot, so it must be fresh AT open: refresh codex from
+            // its rollout and — if the stored claude quota is stale (>5 min) — probe claude's live
+            // limits synchronously before explaining. Usually fresh (startup probe), so it no-ops.
+            let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
+                .await
+                .unwrap_or_default();
+            if claude_quota_is_stale(session, 300).await {
+                refresh_claude_quota(session).await;
+            }
+            let exp = {
+                let s = session.lock().await;
+                s.seed_subscription_quota("codex-cli", "five_hour", bstats.codex_5h_pct);
+                s.seed_subscription_quota("codex-cli", "weekly", bstats.codex_weekly_pct);
+                s.explain_routing(&to_explain)
+            };
+            match exp {
+                Some(e) => {
+                    let conserve_line = if !e.conserve.enabled {
+                        "off".to_string()
+                    } else if !e.conserve.eligible {
+                        "no frontier alternative → not applied".to_string()
+                    } else if e.conserve.fired {
+                        format!(
+                            "FIRED (roll {:.2} < P {:.2}) → spread to free frontier",
+                            e.conserve.roll, e.conserve.probability
+                        )
+                    } else {
+                        format!(
+                            "not fired (roll {:.2} ≥ P {:.2}) → subscription kept",
+                            e.conserve.roll, e.conserve.probability
+                        )
+                    };
+                    app.mesh_overlay = forge_tui::MeshOverlay {
+                        open: true,
+                        prompt: prompt.trim().to_string(),
+                        classified: e.classified_tier.as_str().to_string(),
+                        routed: e.routed_tier.as_str().to_string(),
+                        code_heavy: e.code_heavy,
+                        reasons: e.classify_reasons.join(", "),
+                        conserve_fired: e.conserve.fired,
+                        conserve_line,
+                        quota: e
+                            .quota
+                            .iter()
+                            .map(|q| forge_tui::MeshQuotaRow {
+                                provider: q.provider.clone(),
+                                fraction: q.fraction,
+                                plan: q.plan.clone(),
+                                status: format!("{:?}", q.status),
+                                spread_complex: q.spread_probability,
+                            })
+                            .collect(),
+                        candidates: e
+                            .candidates
+                            .iter()
+                            .take(12)
+                            .map(|c| forge_tui::MeshCandRow {
+                                rank: c.rank,
+                                model: c.row.model.clone(),
+                                score: c.row.final_score,
+                                cost_tag: match c.row.cost_class {
+                                    0 => "free",
+                                    1 => "subscription",
+                                    _ => "paid",
+                                }
+                                .to_string(),
+                                frontier: c.row.frontier,
+                                usable: c.usable,
+                                selected: c.selected,
+                                penalty: c.row.conserve_penalty,
+                            })
+                            .collect(),
+                        pick: e.pick.clone(),
+                        fallbacks: e.fallbacks.clone(),
+                        rationale: e.rationale.clone(),
+                        anim_tick: 0,
+                        scroll: 0,
+                    };
+                }
+                None => tui.print_text(
+                    "mesh: auto-discovery routing is off (no model catalog) — nothing to inspect",
+                ),
+            }
         }
         // Not a builtin → try the file-based command/skill catalog.
         CommandAction::Unknown(_) => {

@@ -99,6 +99,9 @@ pub struct UsageOverlay {
     /// Claude tokens used this ISO week.
     pub claude_weekly_in: u64,
     pub claude_weekly_out: u64,
+    /// Age (seconds) of the Claude rate-limit cache, if present — drives a "Xh ago" staleness
+    /// note so the overlay never presents an old percentage as if it were live.
+    pub claude_rl_age_secs: Option<i64>,
     /// Animation tick counter (incremented each tick, used for spinner).
     pub anim_tick: u32,
 }
@@ -108,6 +111,69 @@ impl UsageOverlay {
         rows.iter().fold((0.0, 0, 0), |acc, r| {
             (acc.0 + r.1, acc.1 + r.2, acc.2 + r.3)
         })
+    }
+}
+
+/// One subscription's quota row in the `/mesh` inspector.
+#[derive(Debug, Default, Clone)]
+pub struct MeshQuotaRow {
+    pub provider: String,
+    /// Window fraction consumed (0.0–1.0).
+    pub fraction: f64,
+    pub plan: String,
+    /// "Ok" / "Warning" / "Exhausted".
+    pub status: String,
+    /// Probability a complex task spreads off this subscription (0.0–1.0).
+    pub spread_complex: f64,
+}
+
+/// One scored candidate row in the `/mesh` inspector.
+#[derive(Debug, Default, Clone)]
+pub struct MeshCandRow {
+    pub rank: usize,
+    pub model: String,
+    pub score: f64,
+    /// "free" / "subscription" / "paid".
+    pub cost_tag: String,
+    pub frontier: bool,
+    pub usable: bool,
+    pub selected: bool,
+    /// Conservation demotion applied (0.0 = none).
+    pub penalty: f64,
+}
+
+/// Data for the `/mesh` overlay — a legible, animated trace of one routing decision (or the
+/// per-tier overview when no prompt is given). Populated by the binary from the mesh's
+/// RoutingExplanation engine; the TUI only renders the plain fields.
+#[derive(Debug, Default, Clone)]
+pub struct MeshOverlay {
+    pub open: bool,
+    /// The explained prompt ("" = overview mode).
+    pub prompt: String,
+    pub classified: String,
+    pub routed: String,
+    pub code_heavy: bool,
+    pub reasons: String,
+    /// Pre-rendered conservation verdict line.
+    pub conserve_line: String,
+    pub conserve_fired: bool,
+    pub quota: Vec<MeshQuotaRow>,
+    pub candidates: Vec<MeshCandRow>,
+    pub pick: String,
+    pub fallbacks: Vec<String>,
+    pub rationale: String,
+    /// Animation tick — drives the bar-fill ease and the row-by-row candidate reveal. Stops
+    /// advancing once the reveal settles (so the spinner doesn't spin forever).
+    pub anim_tick: u32,
+    /// Vertical scroll offset into the candidate list (↑/↓ while the overlay is open).
+    pub scroll: u16,
+}
+
+impl MeshOverlay {
+    /// The tick at which the open animation is fully settled (bars eased + every candidate row
+    /// revealed). Past this the inspector is static — no more redraws, no infinite spinner.
+    pub fn settle_tick(&self) -> u32 {
+        self.candidates.len() as u32 * 2 + 12
     }
 }
 
@@ -175,6 +241,8 @@ pub struct App {
     pub subagent_pick_idx: usize,
     /// The `/usage` overlay state.
     pub usage_overlay: UsageOverlay,
+    /// The `/mesh` routing-inspector overlay state.
+    pub mesh_overlay: MeshOverlay,
 }
 
 /// One subagent's live row in the TUI.
@@ -444,6 +512,20 @@ impl App {
                 self.flush.push(TextLine::default());
             }
             PresenterEvent::Done { .. } => self.done = true,
+            PresenterEvent::QuotaUpdate {
+                provider,
+                window,
+                fraction,
+            } => {
+                let pct = Some(fraction * 100.0);
+                match (provider.as_str(), window.as_str()) {
+                    ("claude-cli", "five_hour") => self.usage_overlay.claude_5h_pct = pct,
+                    ("claude-cli", "weekly") => self.usage_overlay.claude_weekly_pct = pct,
+                    ("codex-cli", "five_hour") => self.usage_overlay.codex_5h_pct = pct,
+                    ("codex-cli", "weekly") => self.usage_overlay.codex_weekly_pct = pct,
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -967,6 +1049,7 @@ pub fn render_live(frame: &mut Frame, app: &App) {
     render_statusline(frame, areas[6], app);
     // Usage overlay renders last so it appears on top of everything.
     render_usage_overlay(frame, app);
+    render_mesh_overlay(frame, app);
 }
 
 /// The inline slash-command palette: a scrolling window of filtered commands, selected row
@@ -1467,22 +1550,19 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
     let (cost_week, in_week, out_week) = UsageOverlay::totals(&o.by_model_week);
 
     // Bridge-provider annotation for each period row.
+    // A staleness note for the Claude rate-limit %, so an old reading is never shown as live.
+    let claude_age = rl_age_note(o.claude_rl_age_secs);
     let bridge_5h = {
         let mut parts = Vec::new();
         if let Some(p) = o.codex_5h_pct {
             parts.push(format!("codex:{:.0}%", p));
         }
         if let Some(p) = o.claude_5h_pct {
-            parts.push(format!("claude:{:.0}%", p));
-        } else {
-            let ctok = o.claude_5h_in + o.claude_5h_out;
-            if ctok > 0 {
-                parts.push(format!(
-                    "claude:↑{} ↓{}",
-                    format_tok(o.claude_5h_in),
-                    format_tok(o.claude_5h_out)
-                ));
-            }
+            parts.push(format!("claude:{:.0}%{}", p, claude_age));
+        } else if o.claude_rl_age_secs.is_some() {
+            // Cache exists but the 5h reading is too old to trust (5h window) — say so plainly
+            // rather than falling back to a confusing multi-million raw-token sum.
+            parts.push(format!("claude:5h stale{claude_age}"));
         }
         if parts.is_empty() {
             String::new()
@@ -1496,16 +1576,9 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
             parts.push(format!("codex:{:.0}%", p));
         }
         if let Some(p) = o.claude_weekly_pct {
-            parts.push(format!("claude:{:.0}%", p));
-        } else {
-            let ctok = o.claude_weekly_in + o.claude_weekly_out;
-            if ctok > 0 {
-                parts.push(format!(
-                    "claude:↑{} ↓{}",
-                    format_tok(o.claude_weekly_in),
-                    format_tok(o.claude_weekly_out)
-                ));
-            }
+            parts.push(format!("claude:{:.0}%{}", p, claude_age));
+        } else if o.claude_rl_age_secs.is_some() {
+            parts.push(format!("claude:wk stale{claude_age}"));
         }
         if parts.is_empty() {
             String::new()
@@ -1618,6 +1691,220 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
     .header(header)
     .block(Block::default());
     f.render_widget(table, chunks[1]);
+}
+
+/// A 14-cell colour-coded meter for a fraction, eased by `ease` (animation grow-in).
+fn mesh_meter(frac: f64, ease: f32, status: &str) -> Vec<Span<'static>> {
+    use ratatui::style::Color;
+    let shown = (frac as f32 * ease).clamp(0.0, 1.0);
+    let filled = (shown * 14.0).round() as usize;
+    let col = match status {
+        "Exhausted" => Color::Red,
+        "Warning" => Color::Yellow,
+        _ if frac >= 0.6 => Color::Yellow,
+        _ => Color::Green,
+    };
+    vec![
+        Span::styled("█".repeat(filled), Style::default().fg(col)),
+        Span::styled("░".repeat(14 - filled), Style::default().fg(DIM)),
+    ]
+}
+
+fn mesh_truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!(
+            "{}…",
+            s.chars().take(max.saturating_sub(1)).collect::<String>()
+        )
+    }
+}
+
+/// The animated `/mesh` routing inspector overlay.
+pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
+    if !app.mesh_overlay.open {
+        return;
+    }
+    use ratatui::style::{Color, Modifier};
+    use ratatui::text::{Line, Text};
+
+    let o = &app.mesh_overlay;
+    let area = f.area();
+    let w = (area.width as f32 * 0.84).ceil() as u16;
+    let h = (area.height as f32 * 0.80).ceil() as u16;
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let popup = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    f.render_widget(ratatui::widgets::Clear, popup);
+
+    let settled = o.anim_tick >= o.settle_tick();
+    let glyph = if settled {
+        "⚒"
+    } else {
+        SPINNER[(o.anim_tick as usize) % SPINNER.len()]
+    };
+    let title = format!(" {glyph} mesh inspector ");
+    let block = Block::bordered()
+        .title(title)
+        .border_style(Style::default().fg(TOOLCYAN));
+    let inner = block.inner(popup);
+    f.render_widget(block, popup);
+
+    let ease = ((o.anim_tick as f32) / 6.0).min(1.0);
+
+    // --- header + quota gauges + conservation verdict ---
+    let mut top: Vec<Line> = Vec::new();
+    if o.prompt.is_empty() {
+        top.push(Line::from(Span::styled(
+            "overview · complex-tier ranking — type `/mesh <task>` to trace a specific prompt",
+            Style::default().fg(DIM),
+        )));
+    } else {
+        top.push(Line::from(vec![
+            Span::styled("task  ", Style::default().fg(DIM)),
+            Span::raw(mesh_truncate(
+                &o.prompt,
+                inner.width.saturating_sub(8) as usize,
+            )),
+        ]));
+        let tier = if !o.routed.is_empty() && o.routed != o.classified {
+            format!("tier  {} → {}   ({})", o.classified, o.routed, o.reasons)
+        } else {
+            format!("tier  {}   ({})", o.classified, o.reasons)
+        };
+        top.push(Line::from(Span::styled(
+            tier,
+            Style::default().fg(Color::Cyan),
+        )));
+    }
+    top.push(Line::from(""));
+    for q in &o.quota {
+        let mut spans = vec![Span::styled(
+            format!("  {:<11} ", q.provider),
+            Style::default(),
+        )];
+        spans.extend(mesh_meter(q.fraction, ease, &q.status));
+        let plan = if q.plan.is_empty() { "?" } else { &q.plan };
+        spans.push(Span::styled(
+            format!(
+                " {:>3.0}% · {plan} · {} · spread {:.0}%",
+                q.fraction * 100.0 * ease as f64,
+                q.status,
+                q.spread_complex * 100.0
+            ),
+            Style::default().fg(DIM),
+        ));
+        top.push(Line::from(spans));
+    }
+    if !o.conserve_line.is_empty() {
+        let col = if o.conserve_fired {
+            Color::Yellow
+        } else {
+            Color::Gray
+        };
+        top.push(Line::from(Span::styled(
+            format!("  conserve  {}", o.conserve_line),
+            Style::default().fg(col),
+        )));
+    }
+    top.push(Line::from(""));
+
+    let top_h = (top.len() as u16).min(inner.height.saturating_sub(1));
+    let chunks = Layout::vertical([Constraint::Length(top_h), Constraint::Min(0)]).split(inner);
+    f.render_widget(Paragraph::new(Text::from(top)), chunks[0]);
+
+    // --- candidate table (revealed row-by-row) + final pick ---
+    let revealed = ((o.anim_tick as usize) / 2).min(o.candidates.len());
+    let model_w = inner.width.saturating_sub(40).clamp(16, 48) as usize;
+    let mut rows: Vec<Line> = Vec::new();
+    for c in o.candidates.iter().take(revealed.max(1)) {
+        let marker = if c.selected { "▶" } else { " " };
+        let pen = if c.penalty > 0.0 {
+            format!(" −{:.0}", c.penalty)
+        } else {
+            String::new()
+        };
+        let tag = format!(
+            "{}{}{}{}",
+            c.cost_tag,
+            pen,
+            if c.frontier { " · frontier" } else { "" },
+            if c.usable { "" } else { " · unusable" },
+        );
+        let base = if c.selected {
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD)
+        } else if !c.usable {
+            Style::default().fg(DIM)
+        } else {
+            Style::default()
+        };
+        rows.push(Line::from(vec![
+            Span::styled(format!("{marker} #{:<2} ", c.rank), base),
+            Span::styled(
+                format!(
+                    "{:<width$}",
+                    mesh_truncate(&c.model, model_w),
+                    width = model_w
+                ),
+                base,
+            ),
+            Span::styled(format!("  {:>6.2}  ", c.score), base),
+            Span::styled(
+                tag,
+                if c.selected {
+                    base
+                } else {
+                    Style::default().fg(DIM)
+                },
+            ),
+        ]));
+    }
+    rows.push(Line::from(""));
+    rows.push(Line::from(vec![
+        Span::styled("pick  ", Style::default().fg(DIM)),
+        Span::styled(
+            o.pick.clone(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    if !o.rationale.is_empty() {
+        rows.push(Line::from(Span::styled(
+            mesh_truncate(&format!("why   {}", o.rationale), inner.width as usize),
+            Style::default().fg(DIM),
+        )));
+    }
+    rows.push(Line::from(Span::styled(
+        "↑/↓ scroll · Esc to close",
+        Style::default().fg(DIM),
+    )));
+    // Clamp the scroll so it can't run past the content.
+    let body_h = chunks[1].height;
+    let max_scroll = (rows.len() as u16).saturating_sub(body_h);
+    let scroll = o.scroll.min(max_scroll);
+    f.render_widget(
+        Paragraph::new(Text::from(rows)).scroll((scroll, 0)),
+        chunks[1],
+    );
+}
+
+/// A compact " (Xm/Xh ago)" suffix for rate-limit data older than ~10 min; empty when fresh or
+/// unknown. Keeps the overlay honest about staleness instead of presenting old % as live.
+fn rl_age_note(age_secs: Option<i64>) -> String {
+    match age_secs {
+        Some(a) if a >= 3600 => format!(" ({}h ago)", a / 3600),
+        Some(a) if a >= 600 => format!(" ({}m ago)", a / 60),
+        _ => String::new(),
+    }
 }
 
 fn format_tok(n: u64) -> String {
@@ -2342,6 +2629,63 @@ mod tests {
             !screen(&app).contains("subagents ("),
             "panel collapses after on_turn_start: {s}"
         );
+    }
+
+    #[test]
+    fn mesh_overlay_renders_without_panic() {
+        let mesh_overlay = MeshOverlay {
+            open: true,
+            prompt: "design a lock-free queue".into(),
+            classified: "complex".into(),
+            routed: "complex".into(),
+            code_heavy: false,
+            reasons: "reasoning term".into(),
+            conserve_fired: true,
+            conserve_line: "FIRED (roll 0.05 < P 0.53) → spread to free frontier".into(),
+            quota: vec![MeshQuotaRow {
+                provider: "claude-cli".into(),
+                fraction: 0.78,
+                plan: "max-20x".into(),
+                status: "Ok".into(),
+                spread_complex: 0.5,
+            }],
+            candidates: vec![
+                MeshCandRow {
+                    rank: 1,
+                    model: "groq::llama-3.3-70b-versatile".into(),
+                    score: 6.65,
+                    cost_tag: "free".into(),
+                    frontier: true,
+                    usable: true,
+                    selected: true,
+                    penalty: 0.0,
+                },
+                MeshCandRow {
+                    rank: 2,
+                    model: "codex-cli::gpt-5.5".into(),
+                    score: 3.05,
+                    cost_tag: "subscription".into(),
+                    frontier: true,
+                    usable: true,
+                    selected: false,
+                    penalty: 4.0,
+                },
+            ],
+            pick: "groq::llama-3.3-70b-versatile".into(),
+            fallbacks: vec!["codex-cli::gpt-5.5".into()],
+            rationale: "auto-selected best".into(),
+            anim_tick: 50, // fully revealed
+            scroll: 0,
+        };
+        let app = App {
+            mesh_overlay,
+            ..Default::default()
+        };
+        let s = screen_wh(&app, 100, 30);
+        assert!(s.contains("mesh inspector"), "title rendered");
+        assert!(s.contains("groq::llama-3.3-70b-versatile"), "pick shown");
+        // A tiny terminal must not panic on the layout math.
+        let _ = screen_wh(&app, 30, 6);
     }
 
     #[test]

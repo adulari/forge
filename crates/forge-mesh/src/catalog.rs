@@ -40,6 +40,38 @@ fn is_free(id: &str, cost: f64, subscription: bool) -> bool {
     true
 }
 
+/// Whether a model id is a chat/text-generation model the mesh can route a turn to. Provider
+/// model lists mix in non-conversational endpoints — image (`imagen`, `veo`, `lyria`, `*-image`,
+/// `nano-banana`), audio/TTS (`*-tts`, `whisper`, `*-audio`), embeddings, async deep-research,
+/// `computer-use`/`robotics`, and moderation/guard models. Routing to one breaks the turn (or, for
+/// `deep-research`, silently picks a slow research endpoint for a trivial edit — the bug). They
+/// stay visible in `forge models` but are excluded from the routing ranking.
+pub fn is_routable(id: &str) -> bool {
+    let m = id.to_lowercase();
+    const BLOCK: &[&str] = &[
+        "imagen",
+        "veo",
+        "lyria",
+        "nano-banana",
+        "image",
+        "-tts",
+        "tts-",
+        "whisper",
+        "embedding",
+        "deep-research",
+        "computer-use",
+        "robotics",
+        "guard",
+        "safeguard",
+        "content-safety",
+        "moderation",
+        "-audio",
+        "audio-",
+        "-ocr",
+    ];
+    !BLOCK.iter().any(|b| m.contains(b))
+}
+
 /// A model's cost class for routing: `0` genuinely free (local/free-tier), `1` subscription
 /// ($0 marginal but burns the user's plan quota), `2` metered/paid. The mesh prefers low classes
 /// for cheap tiers (preserve quota) and the subscription flagship for complex work.
@@ -112,12 +144,168 @@ fn route_score(
     base
 }
 
+/// Soft demotion applied to subscription models when this prompt is chosen for conservation.
+/// Large enough to drop an `Ok` subscription below the best free-frontier alternative, small
+/// enough that the subscription stays in the shortlist as a fallback if every alternative fails.
+const CONSERVE_PENALTY: f64 = 4.0;
+
+/// How freely a plan may be spent: a bigger plan has more headroom, so it is conserved *less*
+/// (lower factor → lower spread probability). Unknown/unset plans stay neutral (1.0) — we don't
+/// over-conserve a plan the user never told us about.
+fn plan_factor(slug: &str) -> f64 {
+    let s = slug.to_lowercase();
+    if s.contains("20x") {
+        0.8
+    } else if s.contains("max") || s.contains("pro") {
+        0.85
+    } else {
+        1.0 // plus / team / unknown
+    }
+}
+
+/// Probability that this prompt routes OFF the subscriptions onto a free-frontier model, given the
+/// tier, how full the strictest window is (`fraction`), the plan headroom, and code-heaviness.
+/// Trivial always spreads (subs are never worth spending on it); Standard mostly spreads; Complex
+/// spreads a minority while fresh and ramps to ~1.0 as the window approaches the 80% Warning line.
+fn conserve_probability(tier: TaskTier, fraction: f64, plan: &str, code_heavy: bool) -> f64 {
+    let base = match tier {
+        TaskTier::Trivial => 1.0,
+        TaskTier::Standard => 0.65,
+        TaskTier::Complex if code_heavy => 0.15, // code-heavy complex: subscriptions earn their keep
+        TaskTier::Complex => 0.30,
+    };
+    let ramp = (fraction / 0.80).clamp(0.0, 1.0) * (1.0 - base);
+    ((base + ramp) * plan_factor(plan)).clamp(0.0, 1.0)
+}
+
+/// Whether a genuine non-subscription alternative of the right calibre exists for `tier` — a
+/// guard so conservation never drops a hard task onto a weak model when the only capable option
+/// IS the subscription. Complex needs a frontier alternative; Standard a capable (mid+) one.
+fn has_nonsub_alternative(models: &[String], tier: TaskTier) -> bool {
+    models.iter().any(|m| {
+        if is_subscription(m) || !is_routable(m) {
+            return false;
+        }
+        match tier {
+            TaskTier::Complex => crate::capability::quality_class(m) >= 3,
+            TaskTier::Standard => crate::capability::quality_class(m) >= 2,
+            TaskTier::Trivial => true,
+        }
+    })
+}
+
+/// One model's scored row for the routing inspector: the score broken out so a human can see WHY
+/// it ranked where it did. `rotation`/`fine` are the tiebreak keys (kept for a stable, explainable
+/// sort), not shown directly.
+#[derive(Debug, Clone)]
+pub struct ScoreRow {
+    pub model: String,
+    pub provider: String,
+    /// Pure capability fit for the tier (speed/quality blend).
+    pub capability: f64,
+    /// 0 = free, 1 = subscription, 2 = paid.
+    pub cost_class: u8,
+    /// Conservation demotion applied to this model for this prompt (0.0 if none).
+    pub conserve_penalty: f64,
+    /// Final ranking score (capability + cost/code priors − quota − conservation).
+    pub final_score: f64,
+    pub subscription: bool,
+    pub frontier: bool,
+    rotation: u64,
+    weight: u8,
+    fine: f64,
+}
+
+/// The full, inspectable conservation decision for a prompt (the data the `/mesh` inspector and
+/// `forge mesh explain` surface). `fired` is what routing acts on.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ConserveDecision {
+    /// Conservation enabled in config.
+    pub enabled: bool,
+    /// A subscription is present AND a capable non-subscription alternative exists for the tier.
+    pub eligible: bool,
+    /// The spread probability used (max conservation pull across the present subscriptions).
+    pub probability: f64,
+    /// The deterministic per-prompt draw in [0,1).
+    pub roll: f64,
+    /// `roll < probability` — this prompt spreads off the subscriptions.
+    pub fired: bool,
+}
+
+/// Decide — deterministically for this prompt — whether to spread off the subscriptions. Takes the
+/// strongest conservation pull across the present subscription providers (protect whichever is most
+/// pressured / smallest-plan), then draws a stable per-prompt value against it. Does not fire when
+/// disabled, when there are no subscriptions, or when no capable alternative exists.
+pub(crate) fn conserve_decision(
+    models: &[String],
+    tier: TaskTier,
+    code_heavy: bool,
+    seed: u64,
+    quota: &forge_types::SubscriptionQuota,
+) -> ConserveDecision {
+    let mut d = ConserveDecision {
+        enabled: quota.conserve_enabled(),
+        ..Default::default()
+    };
+    if !d.enabled {
+        return d;
+    }
+    let mut sub_providers: Vec<&str> = models
+        .iter()
+        .filter(|m| is_subscription(m))
+        .map(|m| provider_of(m))
+        .collect();
+    sub_providers.sort_unstable();
+    sub_providers.dedup();
+    d.eligible = !sub_providers.is_empty() && has_nonsub_alternative(models, tier);
+    if !d.eligible {
+        return d;
+    }
+    d.probability = sub_providers
+        .iter()
+        .map(|prov| {
+            conserve_probability(
+                tier,
+                quota.fraction_for(prov),
+                quota.plan_for(prov),
+                code_heavy,
+            )
+        })
+        .fold(0.0_f64, f64::max);
+    d.roll = (stable_hash(&format!("{seed}:conserve")) % 10_000) as f64 / 10_000.0;
+    d.fired = d.roll < d.probability;
+    d
+}
+
 /// A per-prompt provider ordering key: hashing `seed:provider` means different prompts rotate
 /// which provider wins a genuine score tie, so a workload spreads across equally-good providers
 /// (claude ↔ codex) instead of always picking the alphabetically-first one — while staying fully
 /// deterministic for a given prompt.
 fn provider_rotation(provider: &str, seed: u64) -> u64 {
     stable_hash(&format!("{seed}:{provider}"))
+}
+
+/// How heavy a model is on its subscription (1 = light, 3 = the heavy flagship). When two models
+/// tie on score — e.g. `claude-cli::opus` and `claude-cli::sonnet` both rank q3 for a complex task
+/// — the mesh should spend the LIGHTER one to conserve the flagship's quota. This distinguishes
+/// siblings the capability prior treats as equal (opus and sonnet are both "frontier"). It only
+/// matters as a tiebreak: a genuinely weaker model (mini/haiku) already scores lower and never
+/// enters the tie. Family-agnostic via name markers, so new bridges order sensibly too.
+fn model_weight(id: &str) -> u8 {
+    let m = id.to_lowercase();
+    if m.contains("opus") || m.contains("-pro") || m.contains("-max") || m.contains("ultra") {
+        3
+    } else if m.contains("haiku")
+        || m.contains("mini")
+        || m.contains("nano")
+        || m.contains("flash")
+        || m.contains("-lite")
+        || m.contains("instant")
+    {
+        1
+    } else {
+        2 // sonnet, gpt-5.x, and other mid-tier flagships
+    }
 }
 
 /// A fine within-family capability key (the first version number in the id: `gpt-5.5`→5.5,
@@ -285,35 +473,108 @@ impl ModelCatalog {
         seed: u64,
         quota: &forge_types::SubscriptionQuota,
     ) -> Vec<String> {
-        let mut scored: Vec<(f64, u8, u64, f64, &String)> = self
+        // Proactive subscription conservation: for this prompt, decide whether to spread off the
+        // subscription bridges onto a free-frontier model (so a complex/standard-heavy workload
+        // doesn't exhaust the plan). When it fires, subscriptions take a soft penalty so the best
+        // alternative leads while the subscription stays available as a fallback.
+        let conserve = conserve_decision(&self.models, tier, code_heavy, seed, quota).fired;
+        let mut scored: Vec<(f64, u8, u64, u8, f64, &String)> = self
             .models
             .iter()
+            .filter(|m| is_routable(m))
             .map(|m| {
                 let cost = pricing.estimated_cost(m);
+                let mut score = route_score(m, tier, cost, code_heavy, quota);
+                if conserve && is_subscription(m) {
+                    score -= CONSERVE_PENALTY;
+                }
                 (
-                    route_score(m, tier, cost, code_heavy, quota),
+                    score,
                     cost_class(m, cost),
                     provider_rotation(provider_of(m), seed),
+                    model_weight(m),
                     fine_capability(m),
                     m,
                 )
             })
             .collect();
         // Best score first; then cheaper cost-class; then the per-prompt provider rotation
-        // (spreads ties ACROSS providers); then — within one provider — the higher-version model
-        // (never a lesser sibling); then id for a fully deterministic order.
+        // (spreads ties ACROSS providers); then — among tied same-provider siblings — the LIGHTER
+        // model (conserve the flagship: sonnet before opus); then the higher-version model within
+        // one weight class (never a lesser sibling); then id for a fully deterministic order.
         scored.sort_by(|a, b| {
             b.0.total_cmp(&a.0)
                 .then_with(|| a.1.cmp(&b.1))
                 .then_with(|| a.2.cmp(&b.2))
-                .then_with(|| b.3.total_cmp(&a.3))
-                .then_with(|| a.4.cmp(b.4))
+                .then_with(|| a.3.cmp(&b.3))
+                .then_with(|| b.4.total_cmp(&a.4))
+                .then_with(|| a.5.cmp(b.5))
         });
         scored
             .into_iter()
             .take(top)
-            .map(|(_, _, _, _, m)| m.clone())
+            .map(|(_, _, _, _, _, m)| m.clone())
             .collect()
+    }
+
+    /// The full ranked candidate table for a tier with each model's score broken out — the data
+    /// behind `/mesh` and `forge mesh explain`. Same ordering as [`ranked_seeded`](Self::ranked_seeded),
+    /// but every routable model is returned (not truncated) with its capability, cost class, the
+    /// conservation penalty applied (if any), and the final score. Pure (no health/usability — the
+    /// router overlays that).
+    pub fn ranked_rows(
+        &self,
+        tier: TaskTier,
+        pricing: &Pricing,
+        code_heavy: bool,
+        seed: u64,
+        quota: &forge_types::SubscriptionQuota,
+    ) -> (ConserveDecision, Vec<ScoreRow>) {
+        let decision = conserve_decision(&self.models, tier, code_heavy, seed, quota);
+        let mut rows: Vec<ScoreRow> = self
+            .models
+            .iter()
+            .filter(|m| is_routable(m))
+            .map(|m| {
+                let cost = pricing.estimated_cost(m);
+                let base = route_score(m, tier, cost, code_heavy, quota);
+                let sub = is_subscription(m);
+                let penalty = if decision.fired && sub {
+                    CONSERVE_PENALTY
+                } else {
+                    0.0
+                };
+                ScoreRow {
+                    model: m.clone(),
+                    provider: provider_of(m).to_string(),
+                    capability: capability_score(m, tier),
+                    cost_class: cost_class(m, cost),
+                    conserve_penalty: penalty,
+                    final_score: base - penalty,
+                    subscription: sub,
+                    frontier: is_frontier(m),
+                    rotation: provider_rotation(provider_of(m), seed),
+                    weight: model_weight(m),
+                    fine: fine_capability(m),
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.final_score
+                .total_cmp(&a.final_score)
+                .then_with(|| a.cost_class.cmp(&b.cost_class))
+                .then_with(|| a.rotation.cmp(&b.rotation))
+                .then_with(|| a.weight.cmp(&b.weight))
+                .then_with(|| b.fine.total_cmp(&a.fine))
+                .then_with(|| a.model.cmp(&b.model))
+        });
+        (decision, rows)
+    }
+
+    /// The per-provider spread probability for a tier (the `/mesh` quota view) — how likely a task
+    /// of this tier routes off that subscription given its window fraction + plan.
+    pub fn spread_probability(tier: TaskTier, fraction: f64, plan: &str, code_heavy: bool) -> f64 {
+        conserve_probability(tier, fraction, plan, code_heavy)
     }
 
     /// Every discovered model classified for display (id order preserved).
@@ -409,6 +670,38 @@ mod tests {
             !r.first().unwrap().contains("8b"),
             "not the tiny model: {r:?}"
         );
+    }
+
+    #[test]
+    fn non_chat_models_are_excluded_from_routing() {
+        // Provider lists mix in image/video/tts/embedding/deep-research endpoints. The mesh must
+        // never route a turn to one — for trivial that was picking a slow deep-research model.
+        assert!(!is_routable("gemini::deep-research-pro-preview-12-2025"));
+        assert!(!is_routable("gemini::imagen-4.0-generate-001"));
+        assert!(!is_routable("gemini::veo-3.0-generate-001"));
+        assert!(!is_routable("gemini::gemini-2.5-flash-image"));
+        assert!(!is_routable("gemini::gemini-embedding-001"));
+        assert!(!is_routable("groq::whisper-large-v3"));
+        assert!(!is_routable("groq::meta-llama/llama-prompt-guard-2-86m"));
+        assert!(is_routable("gemini::gemini-flash-lite-latest"));
+        assert!(is_routable("codex-cli::gpt-5.5"));
+        assert!(is_routable("groq::llama-3.1-8b-instant"));
+
+        // A trivial pick from a gemini-like set must be a fast chat model, not deep-research.
+        let cat = ModelCatalog::new(vec![
+            "gemini::deep-research-pro-preview-12-2025".into(),
+            "gemini::gemini-flash-lite-latest".into(),
+            "gemini::imagen-4.0-generate-001".into(),
+        ]);
+        let r = cat.ranked_for(TaskTier::Trivial, &Pricing::default(), 5);
+        assert_eq!(
+            r.first().unwrap(),
+            "gemini::gemini-flash-lite-latest",
+            "{r:?}"
+        );
+        assert!(!r
+            .iter()
+            .any(|m| m.contains("deep-research") || m.contains("imagen")));
     }
 
     #[test]
@@ -513,6 +806,32 @@ mod tests {
         );
         // The mini is small-class → it is NOT the complex pick.
         assert_ne!(r[0], "codex-cli::gpt-5.4-mini");
+    }
+
+    #[test]
+    fn on_a_score_tie_the_lighter_sibling_wins() {
+        // opus and sonnet both rank q3 (frontier) for complex → identical score. The mesh should
+        // spend the lighter sonnet, conserving opus' quota. (User rule: lightest-on-tie.)
+        let cat = ModelCatalog::new(vec!["claude-cli::opus".into(), "claude-cli::sonnet".into()]);
+        let r = cat.ranked_for(TaskTier::Complex, &Pricing::default(), 2);
+        assert_eq!(
+            r[0], "claude-cli::sonnet",
+            "lighter sibling leads on a tie: {r:?}"
+        );
+
+        // But a genuinely weaker sibling (haiku, lower score) must NOT jump ahead for complex.
+        let cat2 = ModelCatalog::new(vec![
+            "claude-cli::opus".into(),
+            "claude-cli::sonnet".into(),
+            "claude-cli::haiku".into(),
+        ]);
+        let r2 = cat2.ranked_for(TaskTier::Complex, &Pricing::default(), 3);
+        assert_eq!(r2[0], "claude-cli::sonnet");
+        assert_eq!(
+            r2.last().unwrap(),
+            "claude-cli::haiku",
+            "weak sibling stays last: {r2:?}"
+        );
     }
 
     #[test]

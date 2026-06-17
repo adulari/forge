@@ -10,7 +10,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{ConfigError, KEYRING_SERVICE};
+use crate::ConfigError;
 
 /// Per-server OAuth config (the `[servers.auth.oauth]` table). All optional — discovered at login
 /// and persisted back. Presence of this (vs a static token) marks a server as OAuth.
@@ -157,32 +157,22 @@ pub fn oauth_keyring_key(server: &str) -> String {
     format!("mcp-oauth:{server}")
 }
 
-/// Persist a server's OAuth tokens in the OS keyring (ADR-0007: never in config/logs).
+/// Persist a server's OAuth tokens (keyring, encrypted-file fallback; ADR-0007: never in
+/// config/logs).
 pub fn store_oauth_tokens(server: &str, tokens: &OAuthTokens) -> Result<(), ConfigError> {
     let json = serde_json::to_string(tokens).map_err(|e| ConfigError::Keyring(e.to_string()))?;
-    let entry = keyring::Entry::new(KEYRING_SERVICE, &oauth_keyring_key(server))
-        .map_err(|e| ConfigError::Keyring(e.to_string()))?;
-    entry
-        .set_password(&json)
-        .map_err(|e| ConfigError::Keyring(e.to_string()))
+    crate::secret_store::set(&oauth_keyring_key(server), &json)
 }
 
-/// Load a server's OAuth tokens from the keyring, or `None` if none stored / unreadable.
+/// Load a server's OAuth tokens, or `None` if none stored / unreadable.
 pub fn load_oauth_tokens(server: &str) -> Option<OAuthTokens> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, &oauth_keyring_key(server)).ok()?;
-    let json = entry.get_password().ok()?;
+    let json = crate::secret_store::get(&oauth_keyring_key(server))?;
     serde_json::from_str(&json).ok()
 }
 
 /// Delete a server's stored OAuth tokens (`forge mcp logout`). Idempotent: `Ok(false)` if none.
 pub fn clear_oauth_tokens(server: &str) -> Result<bool, ConfigError> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, &oauth_keyring_key(server))
-        .map_err(|e| ConfigError::Keyring(e.to_string()))?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(true),
-        Err(keyring::Error::NoEntry) => Ok(false),
-        Err(e) => Err(ConfigError::Keyring(e.to_string())),
-    }
+    crate::secret_store::delete(&oauth_keyring_key(server))
 }
 
 #[cfg(test)]

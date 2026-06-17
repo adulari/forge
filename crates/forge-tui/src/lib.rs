@@ -42,8 +42,8 @@ pub mod select;
 mod transcript;
 mod tui;
 pub use app::{
-    banner_lines, handle_key, lattice_view_lines, render_usage_overlay, App, InputOutcome, KeyKind,
-    SubagentView, UsageOverlay,
+    banner_lines, handle_key, lattice_view_lines, render_mesh_overlay, render_usage_overlay, App,
+    InputOutcome, KeyKind, MeshCandRow, MeshOverlay, MeshQuotaRow, SubagentView, UsageOverlay,
 };
 pub use commands::{
     at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken, Command,
@@ -198,6 +198,13 @@ pub enum PresenterEvent {
     },
     Done {
         final_text: String,
+    },
+    /// A subscription quota observation arrived this turn (rate_limit_event / Codex rollout).
+    /// Used to update the /usage overlay in real-time without waiting for the DB refresh cycle.
+    QuotaUpdate {
+        provider: String,
+        window: String,
+        fraction: f64,
     },
 }
 
@@ -373,6 +380,8 @@ impl Presenter for HeadlessPresenter {
             // The final answer was already streamed via AssistantText; Done is a
             // lifecycle marker, so the headless renderer needs no extra output here.
             PresenterEvent::Done { .. } => {}
+            // Real-time quota updates are for the TUI overlay; headless ignores them.
+            PresenterEvent::QuotaUpdate { .. } => {}
         }
     }
 

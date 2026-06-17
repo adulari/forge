@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 pub mod agents;
 pub mod mcp;
 pub mod oauth;
+pub mod secret_store;
 pub use agents::{load_agents, AgentDef};
 pub use mcp::{
     discover_import_sources, import_mcp_json, load_mcp_toml, write_mcp_toml, ImportSource,
@@ -509,10 +510,18 @@ pub struct MeshConfig {
     /// connection) and fail over, instead of hanging the turn forever. `0` disables the watchdog.
     #[serde(default = "default_stream_idle_timeout_secs")]
     pub stream_idle_timeout_secs: u64,
+    /// Proactively spread complex/standard tasks off the subscription bridges (claude-cli/
+    /// codex-cli) onto the free-frontier pool, scaling with how full the weekly/session window is
+    /// and how much headroom the plan has (subscription-conservation routing). When true (default)
+    /// a fraction of complex/standard tasks route to a free frontier model even while the
+    /// subscription is fresh, so a complex-heavy workload doesn't exhaust the plan. Set false for
+    /// the old greedy behaviour (always the subscription flagship until the hard limit).
+    #[serde(default = "default_subscription_conserve")]
+    pub subscription_conserve: bool,
     /// Which subscription plan backs each CLI bridge (`claude-cli` → "max-20x", `codex-cli` →
-    /// "plus"), captured by `forge init`. Records the usage headroom the user has so the mesh can
-    /// (in the quota-aware layer, provider-cost-routing.md L3) avoid overrunning a plan. Currently
-    /// informational + shown by `forge init`/`forge models`.
+    /// "plus"), captured by `forge init`. Records the usage headroom the user has: the
+    /// subscription-conservation layer reads it so a larger plan (more headroom) is spent more
+    /// freely than a smaller one. Also shown by `forge init`/`forge models`.
     #[serde(default)]
     pub subscriptions: HashMap<String, String>,
     /// Override which models a CLI bridge exposes to auto-discovery, keyed by bridge prefix
@@ -540,6 +549,10 @@ pub fn is_model_disabled(model_id: &str, disabled: &[String]) -> bool {
 }
 
 fn default_auto_discover() -> bool {
+    true
+}
+
+fn default_subscription_conserve() -> bool {
     true
 }
 
@@ -713,6 +726,7 @@ impl Default for Config {
                 failover: default_failover(),
                 failover_cooldown_secs: default_failover_cooldown_secs(),
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
+                subscription_conserve: default_subscription_conserve(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
                 disabled: Vec::new(),
@@ -906,8 +920,6 @@ fn write_subscriptions_at(
     Ok(())
 }
 
-const KEYRING_SERVICE: &str = "forge";
-
 /// Providers that authenticate with an API key, paired with the environment variable the
 /// genai client reads for that provider. The env var names must match genai's
 /// `API_KEY_DEFAULT_ENV_NAME` per adapter exactly (note OpenRouter's underscore). Local
@@ -952,8 +964,7 @@ pub fn has_search_key(provider: &str) -> bool {
     if std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false) {
         return true;
     }
-    keyring::Entry::new(KEYRING_SERVICE, provider)
-        .and_then(|e| e.get_password())
+    secret_store::get(provider)
         .map(|k| !k.is_empty())
         .unwrap_or(false)
 }
@@ -973,10 +984,8 @@ pub fn inject_search_keys() {
         if std::env::var(var).is_ok() {
             continue;
         }
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, provider) {
-            if let Ok(key) = entry.get_password() {
-                std::env::set_var(var, key);
-            }
+        if let Some(key) = secret_store::get(provider) {
+            std::env::set_var(var, key);
         }
     }
 }
@@ -1011,8 +1020,7 @@ pub fn has_api_key(provider: &str) -> bool {
     if std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false) {
         return true;
     }
-    keyring::Entry::new(KEYRING_SERVICE, provider)
-        .and_then(|e| e.get_password())
+    secret_store::get(provider)
         .map(|k| !k.is_empty())
         .unwrap_or(false)
 }
@@ -1027,33 +1035,21 @@ pub fn api_key(provider: &str) -> Result<String, ConfigError> {
             return Ok(key);
         }
     }
-    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, provider) {
-        if let Ok(key) = entry.get_password() {
-            return Ok(key);
-        }
+    if let Some(key) = secret_store::get(provider) {
+        return Ok(key);
     }
     Err(ConfigError::MissingKey(provider.into(), var.into()))
 }
 
-/// Securely store a provider API key in the OS keyring.
+/// Securely store a provider API key (OS keyring, encrypted-file fallback).
 pub fn store_api_key(provider: &str, key: &str) -> Result<(), ConfigError> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, provider)
-        .map_err(|e| ConfigError::Keyring(e.to_string()))?;
-    entry
-        .set_password(key)
-        .map_err(|e| ConfigError::Keyring(e.to_string()))
+    secret_store::set(provider, key)
 }
 
-/// Delete a provider API key from the OS keyring. Returns `Ok(true)` if an entry was removed,
-/// `Ok(false)` if there was nothing stored (so `forge auth --remove` is idempotent).
+/// Delete a provider API key. Returns `Ok(true)` if an entry was removed, `Ok(false)` if there
+/// was nothing stored (so `forge auth --remove` is idempotent).
 pub fn remove_api_key(provider: &str) -> Result<bool, ConfigError> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, provider)
-        .map_err(|e| ConfigError::Keyring(e.to_string()))?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(true),
-        Err(keyring::Error::NoEntry) => Ok(false),
-        Err(e) => Err(ConfigError::Keyring(e.to_string())),
-    }
+    secret_store::delete(provider)
 }
 
 /// Store an arbitrary secret (e.g. an MCP server token, keyed `mcp:<server>`) in the OS keyring
@@ -1061,25 +1057,24 @@ pub fn remove_api_key(provider: &str) -> Result<bool, ConfigError> {
 /// Keychain, Windows Credential Manager, Linux Secret Service). ADR-0007: secrets live in the
 /// keyring, never in config or logs. `forge mcp import` uses this to persist captured tokens.
 pub fn store_secret(key: &str, value: &str) -> Result<(), ConfigError> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, key)
-        .map_err(|e| ConfigError::Keyring(e.to_string()))?;
-    entry
-        .set_password(value)
-        .map_err(|e| ConfigError::Keyring(e.to_string()))
+    secret_store::set(key, value)
 }
 
-/// Make keyring-stored keys visible to the provider client (genai reads keys from the
-/// environment): for each known provider with no env var set, inject the keyring value.
-/// Best-effort — providers without a stored key are simply left unset.
+/// Read a stored secret by key (keyring, then the encrypted-file fallback). Used for MCP tokens.
+pub fn load_secret(key: &str) -> Option<String> {
+    secret_store::get(key)
+}
+
+/// Make stored keys visible to the provider client (genai reads keys from the environment): for
+/// each known provider with no env var set, inject the stored value. Best-effort — providers
+/// without a stored key are simply left unset.
 pub fn inject_provider_keys() {
     for (provider, var) in PROVIDER_ENV_VARS {
         if std::env::var(var).is_ok() {
             continue;
         }
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, provider) {
-            if let Ok(key) = entry.get_password() {
-                std::env::set_var(var, key);
-            }
+        if let Some(key) = secret_store::get(provider) {
+            std::env::set_var(var, key);
         }
     }
 }

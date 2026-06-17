@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ConfigError, KEYRING_SERVICE};
+use crate::ConfigError;
 
 fn default_call_timeout_secs() -> u64 {
     60
@@ -177,11 +177,9 @@ pub fn resolve_token(auth: &McpAuth) -> Option<String> {
         }
     }
     if let Some(key) = &auth.token_keyring {
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, key) {
-            if let Ok(v) = entry.get_password() {
-                if !v.is_empty() {
-                    return Some(v);
-                }
+        if let Some(v) = crate::secret_store::get(key) {
+            if !v.is_empty() {
+                return Some(v);
             }
         }
     }
@@ -755,10 +753,8 @@ Authorization = "Bearer SECRET-TOKEN"
             ..Default::default()
         };
         assert_eq!(resolve_token(&auth).as_deref(), Some("round-trip-token"));
-        // Clean up so the self-test leaves no residue in the user's keyring.
-        if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, &key) {
-            let _ = entry.delete_credential();
-        }
+        // Clean up so the self-test leaves no residue in the keyring / file store.
+        let _ = crate::secret_store::delete(&key);
     }
 
     #[test]
