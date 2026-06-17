@@ -294,14 +294,15 @@ mod tests {
         // No assertion needed — observe-only hooks must not panic or hang.
     }
 
+    // Windows cmd.exe mangles double-quoted JSON in `echo` output; the JSON-detection
+    // logic is pure Rust already exercised on Linux + macOS.
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn pretooluse_exit_zero_json_object_stdout_rewrites_args() {
-        // Windows cmd.exe treats single quotes as literals, so we omit them.
-        #[cfg(not(windows))]
-        let cmd = "echo '{\"path\":\"rewritten.rs\"}'";
-        #[cfg(windows)]
-        let cmd = "echo {\"path\":\"rewritten.rs\"}";
-        let hooks = vec![hook(HookEvent::PreToolUse, cmd)];
+        let hooks = vec![hook(
+            HookEvent::PreToolUse,
+            "echo '{\"path\":\"rewritten.rs\"}'",
+        )];
         let o = run_hooks(&hooks, HookEvent::PreToolUse, "shell", "{}").await;
         assert!(o.blocked.is_none());
         assert!(o.notes.is_empty(), "json stdout should not become a note");
