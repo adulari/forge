@@ -118,6 +118,9 @@ pub struct Session {
     /// the `use_skill` virtual tool (command-skill-system.md). `None` → the tool is not advertised
     /// and the turn runs exactly as before.
     skills: Option<Arc<forge_skills::Catalog>>,
+    /// In-session model pin (`/model <id>`). When set, mesh routing still classifies the prompt
+    /// (for stats), but this model is used instead of the routed pick. `None` = mesh routing.
+    pinned_model: Option<String>,
 }
 
 impl Session {
@@ -221,6 +224,7 @@ impl Session {
             lattice: None,
             lattice_watcher: None,
             skills: None,
+            pinned_model: None,
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
@@ -239,6 +243,17 @@ impl Session {
     /// Attach the discovered catalog so the `/models` browser can read it (composition root).
     pub fn set_catalog(&mut self, catalog: Option<ModelCatalog>) {
         self.catalog = catalog;
+    }
+
+    /// Pin (or clear) the in-session model override. When `Some`, subsequent turns use this model
+    /// instead of the mesh-routed pick. `None` returns to normal mesh routing.
+    pub fn pin_model(&mut self, model_id: Option<String>) {
+        self.pinned_model = model_id;
+    }
+
+    /// The currently-pinned model, if any (`/model <id>` was called this session).
+    pub fn pinned_model(&self) -> Option<&str> {
+        self.pinned_model.as_deref()
     }
 
     /// The discovered model catalog, if auto-discovery ran for this session.
@@ -800,9 +815,13 @@ impl Session {
             .router
             .route_hinted(prompt, budget, &health, &quota, tier_override)
             .await;
+        // `/model <id>` override: use the pinned model instead of the mesh-routed pick; mesh still
+        // classifies (for tier stats) but the actual call uses the pin.
+        let pinned = self.pinned_model.clone();
+        let routed_model = pinned.unwrap_or_else(|| decision.model.clone());
         self.presenter.emit(PresenterEvent::Routing {
             tier: decision.tier.as_str().to_string(),
-            model: decision.model.clone(),
+            model: routed_model.clone(),
             rationale: decision.rationale.clone(),
         });
 
@@ -892,7 +911,7 @@ impl Session {
             std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
         let stream_idle = std::time::Duration::from_secs(self.config.mesh.stream_idle_timeout_secs);
         let mut chain = decision.fallbacks.clone().into_iter();
-        let mut active_model = decision.model.clone();
+        let mut active_model = routed_model;
 
         // 3. Model <-> tool loop.
         for step in 0..MAX_STEPS {

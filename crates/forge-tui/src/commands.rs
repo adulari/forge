@@ -39,6 +39,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/assay",
     },
     Command {
+        name: "model",
+        desc: "pin a specific model for this session (/model <id>), or clear the pin (/model)",
+        usage: "/model [<id>]",
+    },
+    Command {
         name: "models",
         desc: "browse available models by provider (counts + frontier/free)",
         usage: "/models",
@@ -112,6 +117,9 @@ pub enum CommandAction {
     Help,
     ListSessions,
     Resume(String),
+    /// Pin a specific model for all subsequent turns in this session. `None` clears the pin
+    /// and returns to mesh routing. `/model <id>` sets; `/model` clears.
+    PinModel(Option<String>),
     /// Open the interactive model browser (`/models`).
     ListModels,
     /// Open the interactive config wizard (`/config`) — set provider/search keys + plans.
@@ -220,6 +228,7 @@ pub fn parse_command(line: &str) -> CommandAction {
                 CommandAction::Resume(arg)
             }
         }
+        "model" => CommandAction::PinModel((!arg.is_empty()).then_some(arg)),
         "models" | "mc" => CommandAction::ListModels,
         "config" | "cfg" | "settings" => CommandAction::Config,
         "mcp" => CommandAction::Mcp((!arg.is_empty()).then_some(arg)),
