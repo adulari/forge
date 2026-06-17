@@ -2633,8 +2633,7 @@ mod tests {
 
     #[test]
     fn mesh_overlay_renders_without_panic() {
-        let mut app = App::default();
-        app.mesh_overlay = MeshOverlay {
+        let mesh_overlay = MeshOverlay {
             open: true,
             prompt: "design a lock-free queue".into(),
             classified: "complex".into(),
@@ -2677,6 +2676,10 @@ mod tests {
             rationale: "auto-selected best".into(),
             anim_tick: 50, // fully revealed
             scroll: 0,
+        };
+        let app = App {
+            mesh_overlay,
+            ..Default::default()
         };
         let s = screen_wh(&app, 100, 30);
         assert!(s.contains("mesh inspector"), "title rendered");

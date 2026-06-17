@@ -1822,7 +1822,7 @@ async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
     seed_store_quota(&store, "codex-cli", "weekly", bstats.codex_weekly_pct);
     if store
         .subscription_age_secs("claude-cli")
-        .map_or(true, |a| a > 300)
+        .is_none_or(|a| a > 300)
     {
         let limits = tokio::task::spawn_blocking(bridge_stats::probe_claude_limits)
             .await
@@ -2916,7 +2916,7 @@ async fn claude_quota_is_stale(
         .lock()
         .await
         .claude_quota_age_secs()
-        .map_or(true, |a| a > max_age)
+        .is_none_or(|a| a > max_age)
 }
 
 async fn chat(
@@ -4344,7 +4344,7 @@ async fn dispatch_command(
             // The store is kept fresh by the startup probe + live turns, so the overlay opens with
             // current data (no stale flash). If it's been >5 min, refresh in the background; the
             // overlay's ~3s auto-refresh then picks up the new value from the store.
-            if claude_quota_is_stale(&session, 300).await {
+            if claude_quota_is_stale(session, 300).await {
                 let s = session.clone();
                 tokio::spawn(async move { refresh_claude_quota(&s).await });
             }
@@ -4363,8 +4363,8 @@ async fn dispatch_command(
             let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
                 .await
                 .unwrap_or_default();
-            if claude_quota_is_stale(&session, 300).await {
-                refresh_claude_quota(&session).await;
+            if claude_quota_is_stale(session, 300).await {
+                refresh_claude_quota(session).await;
             }
             let exp = {
                 let s = session.lock().await;
