@@ -93,7 +93,7 @@ pub async fn refresh_token(
         ("refresh_token", rt),
         ("client_id", tokens.client_id.as_str()),
     ];
-    let resp: serde_json::Value = reqwest::Client::new()
+    let resp: serde_json::Value = client
         .post(&tokens.token_endpoint)
         .form(&params)
         .send()
