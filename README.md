@@ -37,7 +37,7 @@ $ forge lattice query "UserRepository"
 | **Skills & Commands** | Markdown prompt templates, skill methodology injection, Claude Code format compatible |
 | **Subagents** | Parallel fan-out (`spawn_agents`), mesh-routed children, live TUI tree, depth-limited |
 | **Session Management** | Checkpoints, `/undo` with file restore, session replay + JSON export, transcript diff, assay run history |
-| **Hooks** | Pre/post tool-use shell hooks — block (pre) or observe (post) any tool call |
+| **Hooks** | Pre/post tool-use shell hooks — block (pre) or observe (post) any tool call; fires on both direct and CLI-bridge paths |
 | **Safety** | Permission broker, per-tool rules, diff preview before write, shadow file snapshots |
 | **Shell Error Interceptor** | Failed commands auto-diagnosed; cause + fix injected as next-turn context |
 
@@ -135,7 +135,7 @@ forge chat --plain              # headless / CI mode
 | `/sessions` | Browse + pick a past session |
 | `/undo` | Revert last turn (restores edited files) |
 | `/checkpoints [label]` | Browse + rewind to any checkpoint |
-| `/compact` | Summarize older context to free the window |
+| `/compact` | Summarize older context to free the window (also auto-triggers at 80% gauge) |
 | `/mode` | Switch permission mode interactively |
 | `/model [<id>]` | Pin a model for this session; no arg clears the pin |
 | `/models` | Browse all discovered models |
@@ -153,7 +153,7 @@ forge chat --plain              # headless / CI mode
 | Key | Action |
 |-----|--------|
 | `SHIFT+TAB` | Cycle permission mode (Read-only → Ask → Auto-edit → Full) |
-| `Ctrl+O` | Toggle subagent detail |
+| `Ctrl+O` | Open subagent viewer (↑↓ select agent, Enter open transcript, Esc close) |
 | `Esc` | Close palette / cancel |
 | `↑ / ↓` | Navigate palettes and pickers |
 | `y / n / a` | Allow / deny / always-allow a permission prompt (`a` persists to config) |
@@ -394,6 +394,8 @@ command = "bash -c 'echo done >> hooks.log'"
 
 `pre_tool_use` hooks can **block** a call by exiting non-zero (stderr becomes the reason shown to the model). `post_tool_use` hooks observe only. Both receive the tool call as JSON on stdin, time-bounded.
 
+Hooks run on **both** the direct path (`forge chat` / `forge run`) and the CLI-bridge path (`forge mcp-serve` + claude/codex). On Windows, hooks use `cmd /C`; on Unix, `sh -c`.
+
 ---
 
 ## Session Safety
@@ -426,6 +428,8 @@ monthly_cap_usd = 50.0
 ```
 
 Forge tracks spend across both axes. At 80% it warns; at the cap it stops (overridable with `FORGE_BUDGET_OVERRIDE=1`). Under budget pressure, the mesh automatically downshifts to cheaper models and reduces Lattice context injection.
+
+**Context auto-compaction:** when the context gauge reaches 80% of the model's window at turn-end, Forge automatically runs `/compact` — no manual action needed. A note is shown in the TUI.
 
 ---
 

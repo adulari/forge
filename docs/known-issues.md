@@ -58,9 +58,8 @@ failure.
 
 **Also fixed:** the catastrophic denylist now includes Windows-specific dangerous commands:
 `del /s`, `del /f /s`, `rd /s`, `rmdir /s`, `format ?:*` — added to `builtin_deny_rules()` in
-`forge-config/src/lib.rs`. The `inner_script` unwrapper in `permission.rs` now also handles
-`cmd /C "<command>"` so patterns are checked recursively inside cmd-wrapped calls. PowerShell
-(`Remove-Item -Recurse -Force`) is a possible future addition.
+`forge-config/src/lib.rs`. The `inner_script` unwrapper in `permission.rs` also handles
+`cmd /C "<command>"` so patterns are checked recursively inside cmd-wrapped calls.
 
 **Also fixed:** the hooks system now uses the same OS-appropriate shell as the shell tool
 (`hook_shell()` in `forge-core/src/hooks.rs`: `sh -c` on Unix, `cmd /C` on Windows).

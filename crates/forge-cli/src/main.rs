@@ -2244,7 +2244,7 @@ async fn run_chat_tui(
     // `/loop` state: when set, each completed turn of this generation is re-run until the model
     // signals completion or the iteration cap is hit.
     let mut loop_state: Option<LoopState> = None;
-    let mut pending: Option<std::sync::mpsc::Sender<bool>> = None;
+    let mut pending: Option<(String, std::sync::mpsc::Sender<bool>)> = None;
     let mut pending_question: Option<std::sync::mpsc::Sender<String>> = None;
     // Lens filter set by `/assay --only`/`--skip`; consumed when the AssayChoice picker resolves.
     let mut assay_lenses: Vec<forge_types::FindingCategory> = Vec::new();
@@ -2578,14 +2578,23 @@ async fn run_chat_tui(
                 quit = true;
                 break;
             }
-            if let Some(reply) = pending.take() {
+            if let Some((tool, reply)) = pending.take() {
                 // Answering a permission prompt.
-                let yes = matches!(
-                    key,
-                    KeyKind::Char('y') | KeyKind::Char('Y') | KeyKind::Enter
-                );
+                let always = matches!(key, KeyKind::Char('a') | KeyKind::Char('A'));
+                let yes = always
+                    || matches!(
+                        key,
+                        KeyKind::Char('y') | KeyKind::Char('Y') | KeyKind::Enter
+                    );
                 let _ = reply.send(yes);
                 app.prompt = None;
+                if always {
+                    if let Err(e) = forge_config::append_allow_rule(&tool) {
+                        app.note(&format!("⚠ could not save allow rule: {e}"));
+                    } else {
+                        app.note(&format!("✓ {tool} added to .forge/config.toml allow rules"));
+                    }
+                }
             } else if app.awaiting_question() {
                 // Answering an AskUserQuestion (the turn task is blocked in `ask()`): the input
                 // line collects a number or free-text answer; submit resolves + replies.
@@ -2739,8 +2748,8 @@ async fn run_chat_tui(
                     side_effect,
                     reply,
                 } => {
-                    app.prompt = Some(format!("allow {tool} ({side_effect:?})"));
-                    pending = Some(reply);
+                    app.prompt = Some(format!("allow {tool} ({side_effect:?}) [y/n/a=always]"));
+                    pending = Some((tool, reply));
                 }
                 UiMsg::Question {
                     question,
@@ -2796,6 +2805,29 @@ async fn run_chat_tui(
                         loop_state = Some(ls); // a different turn finished; keep waiting
                     }
                 }
+                // Auto-compact: when no new turn was spawned (not a loop iteration) and the
+                // context gauge is above AUTO_COMPACT_THRESHOLD, quietly run /compact so the
+                // user doesn't need to do it manually (context-compaction.md).
+                if turn_handle.is_none() {
+                    if let Some(lim) = app.context_limit {
+                        let fill = app.context_tokens as f64 / lim as f64;
+                        if fill > AUTO_COMPACT_THRESHOLD {
+                            app.note(&format!(
+                                "⚒ context {:.0}% full — auto-compacting",
+                                fill * 100.0
+                            ));
+                            turn_gen += 1;
+                            turn_handle = Some(spawn_compact(
+                                &session,
+                                &done_tx,
+                                turn_gen,
+                                &mut app,
+                                &mut busy,
+                                &mut busy_since,
+                            ));
+                        }
+                    }
+                }
             }
         }
         if busy {
@@ -2835,6 +2867,8 @@ struct LoopState {
 
 /// Iteration cap so a loop that never signals completion can't run forever.
 const LOOP_MAX_ITERS: usize = 25;
+/// Context-fill fraction above which a turn-end auto-compact fires (context-compaction.md).
+const AUTO_COMPACT_THRESHOLD: f64 = 0.80;
 /// The token the model is told to emit when the looped task is fully complete.
 const LOOP_DONE_SENTINEL: &str = "LOOP_COMPLETE";
 /// Guidance injected on every loop turn: make progress, and signal completion explicitly.

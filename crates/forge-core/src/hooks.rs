@@ -119,7 +119,12 @@ mod tests {
 
     #[tokio::test]
     async fn pretooluse_nonzero_exit_blocks_with_stderr_reason() {
-        let hooks = vec![hook(HookEvent::PreToolUse, "echo nope 1>&2; exit 1")];
+        // sh uses `;` as separator; cmd uses `&` and needs `exit /b` for subprocess exit.
+        #[cfg(not(windows))]
+        let cmd = "echo nope 1>&2; exit 1";
+        #[cfg(windows)]
+        let cmd = "echo nope 1>&2 & exit /b 1";
+        let hooks = vec![hook(HookEvent::PreToolUse, cmd)];
         let o = run_hooks(&hooks, HookEvent::PreToolUse, "shell", "{}").await;
         assert_eq!(o.blocked.as_deref(), Some("nope"));
     }
