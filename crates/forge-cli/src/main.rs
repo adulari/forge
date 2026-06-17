@@ -370,27 +370,45 @@ fn init_tracing() {
 /// Fill in missing bridge-provider percentages on the usage overlay from the store's
 /// `subscription_usage` table (set via rate_limit_event during Forge turns). Used as a
 /// fallback when the statusline cache file is stale or missing.
-fn apply_quota_fallback(
+/// Populate the overlay's subscription utilisation %s, preferring the STORE's fractions (seeded
+/// from the rate-limit caches at startup AND refreshed live on every CLI-bridge turn via
+/// rate_limit_event) over the raw caches. This is the real staleness fix: a fresh Forge claude/
+/// codex turn updates the store, so the overlay reflects it instead of the frozen statusline cache.
+/// The "Xh ago" note is shown only when the claude reading is still the seeded cache value (i.e. no
+/// live turn refreshed it this session) — when a turn has, the value is current and unmarked.
+fn fill_subscription_pcts(
     overlay: &mut forge_tui::UsageOverlay,
     fracs: &std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
+    bstats: &bridge_stats::BridgeStats,
 ) {
-    let pct = |f: f64| Some(f * 100.0);
-    if let Some(claude) = fracs.get("claude-cli") {
-        if overlay.claude_5h_pct.is_none() {
-            overlay.claude_5h_pct = claude.get("five_hour").copied().and_then(|f| pct(f));
+    let store = |p: &str, w: &str| fracs.get(p).and_then(|m| m.get(w)).copied();
+    // Cache as the base; override with the store only when it carries a genuinely DIFFERENT (live,
+    // turn-recorded) value, so we never show a store reading staler than the cache. Returns the %
+    // and whether it came from a live override.
+    let pick = |cache: Option<f64>, st: Option<f64>| -> (Option<f64>, bool) {
+        match (st, cache) {
+            (Some(s), Some(c)) => {
+                let sp = s * 100.0;
+                if (sp - c).abs() > 1e-6 {
+                    (Some(sp), true)
+                } else {
+                    (Some(c), false)
+                }
+            }
+            (Some(s), None) => (Some(s * 100.0), true),
+            (None, c) => (c, false),
         }
-        if overlay.claude_weekly_pct.is_none() {
-            overlay.claude_weekly_pct = claude.get("weekly").copied().and_then(|f| pct(f));
-        }
-    }
-    if let Some(codex) = fracs.get("codex-cli") {
-        if overlay.codex_5h_pct.is_none() {
-            overlay.codex_5h_pct = codex.get("five_hour").copied().and_then(|f| pct(f));
-        }
-        if overlay.codex_weekly_pct.is_none() {
-            overlay.codex_weekly_pct = codex.get("weekly").copied().and_then(|f| pct(f));
-        }
-    }
+    };
+    let (c5, _) = pick(bstats.claude_5h_pct, store("claude-cli", "five_hour"));
+    let (cw, cw_live) = pick(bstats.claude_weekly_pct, store("claude-cli", "weekly"));
+    overlay.claude_5h_pct = c5;
+    overlay.claude_weekly_pct = cw;
+    let (x5, _) = pick(bstats.codex_5h_pct, store("codex-cli", "five_hour"));
+    let (xw, _) = pick(bstats.codex_weekly_pct, store("codex-cli", "weekly"));
+    overlay.codex_5h_pct = x5;
+    overlay.codex_weekly_pct = xw;
+    // A live turn refreshed the weekly reading → it's current; otherwise surface the cache age.
+    overlay.claude_rl_age_secs = if cw_live { None } else { bstats.claude_rl_age_secs };
 }
 
 fn sync_palette_to_slash_token(app: &mut forge_tui::App) {
@@ -3738,17 +3756,11 @@ async fn run_chat_tui(
                 app.usage_overlay.daily_cap = daily_cap;
                 app.usage_overlay.weekly_cap = weekly_cap;
                 app.usage_overlay.monthly_cap = monthly_cap;
-                app.usage_overlay.codex_5h_pct = bstats.codex_5h_pct;
-                app.usage_overlay.codex_weekly_pct = bstats.codex_weekly_pct;
-                app.usage_overlay.claude_5h_pct = bstats.claude_5h_pct;
-                app.usage_overlay.claude_weekly_pct = bstats.claude_weekly_pct;
                 app.usage_overlay.claude_5h_in = bstats.claude_5h_in;
                 app.usage_overlay.claude_5h_out = bstats.claude_5h_out;
                 app.usage_overlay.claude_weekly_in = bstats.claude_weekly_in;
                 app.usage_overlay.claude_weekly_out = bstats.claude_weekly_out;
-                // Fallback: use stored quota fractions when the statusline cache is stale.
-                // The store is updated on every CLI-bridge turn via rate_limit_event.
-                apply_quota_fallback(&mut app.usage_overlay, &bridge_fracs);
+                fill_subscription_pcts(&mut app.usage_overlay, &bridge_fracs, &bstats);
             }
         }
 
@@ -4264,16 +4276,11 @@ async fn dispatch_command(
             app.usage_overlay.daily_cap = daily_cap;
             app.usage_overlay.weekly_cap = weekly_cap;
             app.usage_overlay.monthly_cap = monthly_cap;
-            app.usage_overlay.codex_5h_pct = bstats.codex_5h_pct;
-            app.usage_overlay.codex_weekly_pct = bstats.codex_weekly_pct;
-            app.usage_overlay.claude_5h_pct = bstats.claude_5h_pct;
-            app.usage_overlay.claude_weekly_pct = bstats.claude_weekly_pct;
             app.usage_overlay.claude_5h_in = bstats.claude_5h_in;
             app.usage_overlay.claude_5h_out = bstats.claude_5h_out;
             app.usage_overlay.claude_weekly_in = bstats.claude_weekly_in;
             app.usage_overlay.claude_weekly_out = bstats.claude_weekly_out;
-            app.usage_overlay.claude_rl_age_secs = bstats.claude_rl_age_secs;
-            apply_quota_fallback(&mut app.usage_overlay, &bridge_fracs);
+            fill_subscription_pcts(&mut app.usage_overlay, &bridge_fracs, &bstats);
             app.usage_overlay.open = true;
         }
         CommandAction::Mesh(arg) => {

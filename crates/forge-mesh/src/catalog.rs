@@ -212,6 +212,7 @@ pub struct ScoreRow {
     pub subscription: bool,
     pub frontier: bool,
     rotation: u64,
+    weight: u8,
     fine: f64,
 }
 
@@ -277,6 +278,29 @@ pub(crate) fn conserve_decision(
 /// deterministic for a given prompt.
 fn provider_rotation(provider: &str, seed: u64) -> u64 {
     stable_hash(&format!("{seed}:{provider}"))
+}
+
+/// How heavy a model is on its subscription (1 = light, 3 = the heavy flagship). When two models
+/// tie on score — e.g. `claude-cli::opus` and `claude-cli::sonnet` both rank q3 for a complex task
+/// — the mesh should spend the LIGHTER one to conserve the flagship's quota. This distinguishes
+/// siblings the capability prior treats as equal (opus and sonnet are both "frontier"). It only
+/// matters as a tiebreak: a genuinely weaker model (mini/haiku) already scores lower and never
+/// enters the tie. Family-agnostic via name markers, so new bridges order sensibly too.
+fn model_weight(id: &str) -> u8 {
+    let m = id.to_lowercase();
+    if m.contains("opus") || m.contains("-pro") || m.contains("-max") || m.contains("ultra") {
+        3
+    } else if m.contains("haiku")
+        || m.contains("mini")
+        || m.contains("nano")
+        || m.contains("flash")
+        || m.contains("-lite")
+        || m.contains("instant")
+    {
+        1
+    } else {
+        2 // sonnet, gpt-5.x, and other mid-tier flagships
+    }
 }
 
 /// A fine within-family capability key (the first version number in the id: `gpt-5.5`→5.5,
@@ -449,7 +473,7 @@ impl ModelCatalog {
         // doesn't exhaust the plan). When it fires, subscriptions take a soft penalty so the best
         // alternative leads while the subscription stays available as a fallback.
         let conserve = conserve_decision(&self.models, tier, code_heavy, seed, quota).fired;
-        let mut scored: Vec<(f64, u8, u64, f64, &String)> = self
+        let mut scored: Vec<(f64, u8, u64, u8, f64, &String)> = self
             .models
             .iter()
             .filter(|m| is_routable(m))
@@ -463,25 +487,28 @@ impl ModelCatalog {
                     score,
                     cost_class(m, cost),
                     provider_rotation(provider_of(m), seed),
+                    model_weight(m),
                     fine_capability(m),
                     m,
                 )
             })
             .collect();
         // Best score first; then cheaper cost-class; then the per-prompt provider rotation
-        // (spreads ties ACROSS providers); then — within one provider — the higher-version model
-        // (never a lesser sibling); then id for a fully deterministic order.
+        // (spreads ties ACROSS providers); then — among tied same-provider siblings — the LIGHTER
+        // model (conserve the flagship: sonnet before opus); then the higher-version model within
+        // one weight class (never a lesser sibling); then id for a fully deterministic order.
         scored.sort_by(|a, b| {
             b.0.total_cmp(&a.0)
                 .then_with(|| a.1.cmp(&b.1))
                 .then_with(|| a.2.cmp(&b.2))
-                .then_with(|| b.3.total_cmp(&a.3))
-                .then_with(|| a.4.cmp(b.4))
+                .then_with(|| a.3.cmp(&b.3))
+                .then_with(|| b.4.total_cmp(&a.4))
+                .then_with(|| a.5.cmp(b.5))
         });
         scored
             .into_iter()
             .take(top)
-            .map(|(_, _, _, _, m)| m.clone())
+            .map(|(_, _, _, _, _, m)| m.clone())
             .collect()
     }
 
@@ -522,6 +549,7 @@ impl ModelCatalog {
                     subscription: sub,
                     frontier: is_frontier(m),
                     rotation: provider_rotation(provider_of(m), seed),
+                    weight: model_weight(m),
                     fine: fine_capability(m),
                 }
             })
@@ -531,6 +559,7 @@ impl ModelCatalog {
                 .total_cmp(&a.final_score)
                 .then_with(|| a.cost_class.cmp(&b.cost_class))
                 .then_with(|| a.rotation.cmp(&b.rotation))
+                .then_with(|| a.weight.cmp(&b.weight))
                 .then_with(|| b.fine.total_cmp(&a.fine))
                 .then_with(|| a.model.cmp(&b.model))
         });
@@ -771,6 +800,28 @@ mod tests {
         );
         // The mini is small-class → it is NOT the complex pick.
         assert_ne!(r[0], "codex-cli::gpt-5.4-mini");
+    }
+
+    #[test]
+    fn on_a_score_tie_the_lighter_sibling_wins() {
+        // opus and sonnet both rank q3 (frontier) for complex → identical score. The mesh should
+        // spend the lighter sonnet, conserving opus' quota. (User rule: lightest-on-tie.)
+        let cat = ModelCatalog::new(vec![
+            "claude-cli::opus".into(),
+            "claude-cli::sonnet".into(),
+        ]);
+        let r = cat.ranked_for(TaskTier::Complex, &Pricing::default(), 2);
+        assert_eq!(r[0], "claude-cli::sonnet", "lighter sibling leads on a tie: {r:?}");
+
+        // But a genuinely weaker sibling (haiku, lower score) must NOT jump ahead for complex.
+        let cat2 = ModelCatalog::new(vec![
+            "claude-cli::opus".into(),
+            "claude-cli::sonnet".into(),
+            "claude-cli::haiku".into(),
+        ]);
+        let r2 = cat2.ranked_for(TaskTier::Complex, &Pricing::default(), 3);
+        assert_eq!(r2[0], "claude-cli::sonnet");
+        assert_eq!(r2.last().unwrap(), "claude-cli::haiku", "weak sibling stays last: {r2:?}");
     }
 
     #[test]
