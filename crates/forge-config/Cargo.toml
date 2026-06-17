@@ -17,10 +17,13 @@ tracing.workspace = true
 figment = { version = "0.10", features = ["toml", "env"] }
 toml = "0.8"
 directories = "6"
-# Linux: the Secret Service backend (gnome-keyring/KWallet) persists to disk. The previous
-# `linux-native` backend is the kernel keyutils session keyring, which is wiped on logout/reboot
-# — that was the "keyring keeps getting reset" bug. `crypto-rust` supplies the transport cipher.
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+# Linux: the Secret Service backend (gnome-keyring/KWallet) persists to disk — unlike the
+# `linux-native` keyutils backend, which is wiped on logout/reboot (the "keyring keeps resetting"
+# bug). Use the `async-secret-service` impl (pure-Rust zbus) over `async-io` so it needs NO system
+# libdbus (`sync-secret-service` links libdbus-sys, which breaks builds on hosts without
+# libdbus-1-dev, incl. CI). `crypto-rust` supplies the transport cipher. Where the Secret Service
+# is unreachable (headless), the encrypted-file fallback in secret_store.rs takes over.
+keyring = { version = "3", features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.9"
