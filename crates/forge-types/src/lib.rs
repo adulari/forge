@@ -486,6 +486,41 @@ impl PermissionMode {
     }
 }
 
+/// How aggressively Forge conserves metered API credits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CreditMode {
+    /// No conservation — use the best model for each task (default).
+    #[default]
+    Normal,
+    /// Prefer free/subscription models; cap output tokens at 2048; skip auto-probing.
+    Frugal,
+    /// Only route to free-tier or subscription models; cap output tokens at 1024.
+    Strict,
+}
+
+impl CreditMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            CreditMode::Normal => "Normal",
+            CreditMode::Frugal => "Frugal",
+            CreditMode::Strict => "Strict",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            CreditMode::Normal => "no restriction — best model per task",
+            CreditMode::Frugal => "prefer free/sub; cap output to 2048 tokens",
+            CreditMode::Strict => "free/sub only; cap output to 1024 tokens",
+        }
+    }
+
+    pub fn all() -> &'static [CreditMode] {
+        &[CreditMode::Normal, CreditMode::Frugal, CreditMode::Strict]
+    }
+}
+
 /// How "dangerous" a tool is — drives the permission decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SideEffect {
