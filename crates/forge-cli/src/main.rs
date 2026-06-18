@@ -21,6 +21,7 @@ use forge_types::TaskTier;
 mod balance;
 mod benchmarks;
 mod bridge_stats;
+mod context_windows;
 mod mcp_serve;
 mod remote;
 mod replay;
@@ -1744,6 +1745,10 @@ async fn discover_catalog(config: &forge_config::Config) -> forge_mesh::ModelCat
     // it can't pay for (e.g. OpenRouter at $0 balance). Free variants + providers without a balance
     // API are untouched (fail open). Probes run concurrently across providers; each is short-timed.
     drop_unaffordable_models(&mut models).await;
+    // Fetch + persist real per-model context windows (OpenRouter exposes `context_length`) so the
+    // core can trim each turn to the routed model's window instead of overflowing it. Best-effort;
+    // the family heuristic covers everything else.
+    context_windows::fetch_and_persist(&models).await;
     // Attach measured benchmark scores (ADR-0011) so the mesh ranks on real performance. Cache-
     // first + incremental: only hits the API when a newly-discovered model has no rating yet.
     let bench = benchmarks::ensure(config, &models, false).await;

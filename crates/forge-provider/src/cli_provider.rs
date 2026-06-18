@@ -107,6 +107,18 @@ impl CliKind {
             CliKind::Codex => "install Codex and run `codex login` (ChatGPT subscription)",
         }
     }
+
+    /// The CLI's hard limit on prompt length, in characters. `codex exec` rejects stdin over
+    /// 1,048,576 chars outright (`input_too_large`), so a long transcript must be clamped before
+    /// it's piped in (see [`clamp_to_chars`]) or the turn fails instead of failing over. Claude's
+    /// print mode has no fixed character cap (it's bounded by the model's token context, which
+    /// surfaces as a normal retryable error), so it's left unclamped.
+    fn max_input_chars(self) -> Option<usize> {
+        match self {
+            CliKind::Codex => Some(1_048_576),
+            CliKind::ClaudeCode => None,
+        }
+    }
 }
 
 /// Whether `bin` resolves to a file on `PATH` (a lightweight `which`, no spawning).
@@ -365,6 +377,34 @@ fn render_prompt(messages: &[Message]) -> String {
     }
     out.push_str(&convo.join("\n\n"));
     out
+}
+
+/// Clamp a prompt to `max_chars` characters, keeping the most relevant ends: the head (the system
+/// preamble / instructions) and a larger tail (the recent turns + the latest request), dropping the
+/// oldest middle of the conversation with a visible marker. Counts CHARACTERS, not bytes, because
+/// that's the unit `codex exec` measures against its `input_too_large` cap; slicing on `char`
+/// boundaries keeps the output valid UTF-8. Returns the input unchanged when it already fits.
+fn clamp_to_chars(prompt: &str, max_chars: usize) -> String {
+    let total = prompt.chars().count();
+    if total <= max_chars {
+        return prompt.to_string();
+    }
+    const MARKER: &str =
+        "\n\n[… earlier conversation truncated to fit the model's input limit …]\n\n";
+    let marker_len = MARKER.chars().count();
+    // Degenerate tiny limit: just hard-truncate the head so we never exceed the cap.
+    if max_chars <= marker_len {
+        return prompt.chars().take(max_chars).collect();
+    }
+    let budget = max_chars - marker_len;
+    // Bias to the tail: the latest user request + recent turns matter most; the system preamble
+    // (head) carries the standing instructions, so keep a smaller slice of it.
+    let head_chars = budget / 4;
+    let tail_chars = budget - head_chars;
+    let chars: Vec<char> = prompt.chars().collect();
+    let head: String = chars[..head_chars].iter().collect();
+    let tail: String = chars[total - tail_chars..].iter().collect();
+    format!("{head}{MARKER}{tail}")
 }
 
 /// One item extracted from a CLI event line. A single line may yield several (e.g. an
@@ -858,6 +898,12 @@ impl Provider for CliProvider {
         // native search left (its built-ins are off). Forge still observes any native search
         // in the event stream and surfaces it.
         prompt = apply_harness_preamble(self.harness, prompt);
+        // Clamp to the CLI's hard input cap (codex rejects stdin > 1 MiB outright). Reserve a
+        // small margin under the cap for any bytes the CLI itself may prepend. Without this a long
+        // transcript fails the turn with `input_too_large` instead of running on a trimmed prompt.
+        if let Some(max) = self.kind.max_input_chars() {
+            prompt = clamp_to_chars(&prompt, max.saturating_sub(4096));
+        }
         // Path to *this* forge binary, so harness mode can spawn `forge mcp-serve`.
         let forge_exe = std::env::current_exe()
             .ok()
@@ -1383,6 +1429,29 @@ mod tests {
         assert!(p.contains("User: hello"));
         assert!(p.contains("Assistant: hi"));
         assert!(p.ends_with("User: explain x"));
+    }
+
+    #[test]
+    fn clamp_leaves_a_fitting_prompt_untouched() {
+        let p = "short prompt";
+        assert_eq!(clamp_to_chars(p, 1_000), p);
+    }
+
+    #[test]
+    fn clamp_trims_an_oversized_prompt_keeping_head_and_tail() {
+        // HEAD…(middle)…TAIL where the middle is the bulk.
+        let prompt = format!("HEAD-INSTRUCTIONS{}TAIL-LATEST-REQUEST", "x".repeat(50_000));
+        let out = clamp_to_chars(&prompt, 1_000);
+        assert!(out.chars().count() <= 1_000, "stays within the cap");
+        assert!(out.starts_with("HEAD"), "keeps the head: {}", &out[..20]);
+        assert!(out.ends_with("TAIL-LATEST-REQUEST"), "keeps the tail");
+        assert!(out.contains("truncated"), "marks the cut");
+    }
+
+    #[test]
+    fn codex_caps_input_claude_does_not() {
+        assert_eq!(CliKind::Codex.max_input_chars(), Some(1_048_576));
+        assert_eq!(CliKind::ClaudeCode.max_input_chars(), None);
     }
 
     // --- Parser fixtures: real-shaped lines from claude 2.1.177 / codex-cli 0.130.0 ---
