@@ -114,6 +114,74 @@ pub struct RewindOutcome {
     pub rewound_prompt: Option<String>,
 }
 
+/// Rough chars-per-token used to convert a model's token context window into a character budget
+/// for transcript trimming. ~4 is the standard English approximation; we only need a safe bound.
+const CHARS_PER_TOKEN: usize = 4;
+
+/// Trim a transcript to fit within `budget_chars` (an already-derived character budget for the
+/// model's context window minus the reserved reply). System messages are ALWAYS kept (the standing
+/// instructions); the rest are included newest-first until the budget is hit, then re-ordered to
+/// the original sequence. If even the single most-recent message overflows alone, its content is
+/// truncated from the FRONT (keeping the latest text — usually the actual request). Returns the
+/// input unchanged when it already fits. This is what stops a long conversation from overflowing a
+/// model's window and failing the turn as "unavailable" across every model.
+fn fit_messages(messages: &[Message], budget_chars: usize) -> Vec<Message> {
+    let msg_chars = |m: &Message| m.content.chars().count() + 16; // +16 ≈ role label + framing
+    let total: usize = messages.iter().map(msg_chars).sum();
+    if total <= budget_chars {
+        return messages.to_vec();
+    }
+    // System messages are non-negotiable context; reserve their cost up front.
+    let system_cost: usize = messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .map(msg_chars)
+        .sum();
+    let mut remaining = budget_chars.saturating_sub(system_cost);
+
+    // Walk non-system messages newest→oldest, keeping each that fits.
+    let mut keep_idx = std::collections::HashSet::new();
+    for (i, m) in messages.iter().enumerate().rev() {
+        if m.role == Role::System {
+            continue;
+        }
+        let cost = msg_chars(m);
+        if cost <= remaining {
+            remaining -= cost;
+            keep_idx.insert(i);
+        } else if keep_idx.is_empty() {
+            // Nothing kept yet and even this newest message is too big — truncate it from the
+            // front so the latest words survive, and stop (the budget is spent).
+            let mut m = m.clone();
+            let keep_chars = remaining.saturating_sub(48); // room for the marker
+            if keep_chars > 0 {
+                let chars: Vec<char> = m.content.chars().collect();
+                let start = chars.len().saturating_sub(keep_chars);
+                m.content = format!(
+                    "[… earlier of this message truncated to fit the model's context …]\n{}",
+                    chars[start..].iter().collect::<String>()
+                );
+            }
+            // Rebuild in order: systems first (in place) then this lone truncated tail.
+            let mut out: Vec<Message> = messages
+                .iter()
+                .filter(|m| m.role == Role::System)
+                .cloned()
+                .collect();
+            out.push(m);
+            return out;
+        } else {
+            break;
+        }
+    }
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| m.role == Role::System || keep_idx.contains(i))
+        .map(|(_, m)| m.clone())
+        .collect()
+}
+
 /// One interactive session. Construct with [`Session::start`], then drive [`Session::run_turn`].
 pub struct Session {
     id: String,
@@ -927,6 +995,32 @@ impl Session {
         }
     }
 
+    /// The context window (tokens) to assume for `model`: a fetched per-model window (provider API,
+    /// persisted in the store) first, then the family heuristic, then a conservative floor. Always
+    /// returns a usable number so a turn can be bounded even for a model we've never seen.
+    fn effective_context_window(&self, model: &str) -> u32 {
+        self.store
+            .model_context(model)
+            .ok()
+            .flatten()
+            .filter(|w| *w > 0)
+            .or_else(|| forge_mesh::pricing::context_limit(model))
+            .unwrap_or(forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW)
+    }
+
+    /// The transcript trimmed to fit `model`'s context window, reserving room for the reply. Keeps
+    /// the system preamble + the most recent turns so a long conversation never overflows the
+    /// window (which otherwise fails the turn as "unavailable" on every model). Cheap; computed per
+    /// active model each step so failover to a smaller-window model re-trims appropriately.
+    fn transcript_for(&self, model: &str) -> Vec<Message> {
+        let window = self.effective_context_window(model);
+        // Reserve the reply budget + a 10% slack against the rough chars/token estimate.
+        let reserve = self.config.mesh.max_output_tokens.max(1024);
+        let input_tokens = (window.saturating_sub(reserve) as u64) * 9 / 10;
+        let budget_chars = (input_tokens as usize).saturating_mul(CHARS_PER_TOKEN);
+        fit_messages(&self.transcript, budget_chars.max(2048))
+    }
+
     pub async fn compact(&mut self) -> Result<(usize, usize), CoreError> {
         let before = self.transcript.len();
         if before <= COMPACT_KEEP_RECENT + COMPACT_MIN_OLDER {
@@ -1291,61 +1385,65 @@ impl Session {
         for step in 0..max_steps {
             // Stream the reply, with transparent failover for this step's completion.
             let mut resp = loop {
+                // Bound what we send to the active model's context window (fetched/heuristic), so a
+                // long conversation can't overflow it — which otherwise fails the turn as
+                // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
+                // smaller-window model still fits. The immutable borrow ends before the block below.
+                let sent = self.transcript_for(&active_model);
                 // Tight scope: borrow provider + presenter only for the streamed call, so the
                 // failover branch below has full `&mut self` for benching + warnings.
-                let result = {
-                    let provider = &self.provider;
-                    let presenter = &mut self.presenter;
-                    // Bump on every stream event so the idle watchdog can distinguish a live
-                    // stream from a stalled half-open connection — a stall fails over (below)
-                    // instead of hanging the turn forever.
-                    let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    let act = std::sync::Arc::clone(&activity);
-                    let mut sink = |ev: StreamEvent| {
-                        act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        match ev {
-                            StreamEvent::Text(t) => {
-                                presenter.emit(PresenterEvent::AssistantDelta(t))
-                            }
-                            StreamEvent::Reasoning(t) => {
-                                presenter.emit(PresenterEvent::Reasoning(t))
-                            }
-                            StreamEvent::ToolStarted { name, args } => {
-                                presenter.emit(PresenterEvent::ToolStart { name, args })
-                            }
-                            StreamEvent::ToolFinished { name, ok, summary } => {
-                                presenter.emit(PresenterEvent::ToolResult { name, ok, summary })
-                            }
-                            StreamEvent::SubagentStarted { id, agent, task } => {
-                                presenter.emit(PresenterEvent::SubagentStart { id, agent, task })
-                            }
-                            StreamEvent::SubagentProgress { id, snippet } => {
-                                presenter.emit(PresenterEvent::SubagentProgress { id, snippet })
-                            }
-                            StreamEvent::SubagentFinished {
-                                id,
-                                agent,
-                                ok,
-                                summary,
-                                cost_usd,
-                            } => presenter.emit(PresenterEvent::SubagentResult {
-                                id,
-                                agent,
-                                ok,
-                                summary,
-                                cost_usd,
-                            }),
-                            // A bridged turn's `update_tasks` (tailed from the sink): surface the
-                            // list live so the sticky panel updates during the turn. The parent's
-                            // post-turn store reload (below) keeps `self.tasks` authoritative.
-                            StreamEvent::Tasks(tasks) => {
-                                presenter.emit(PresenterEvent::Tasks(tasks))
-                            }
-                        }
+                let result =
+                    {
+                        let provider = &self.provider;
+                        let presenter = &mut self.presenter;
+                        // Bump on every stream event so the idle watchdog can distinguish a live
+                        // stream from a stalled half-open connection — a stall fails over (below)
+                        // instead of hanging the turn forever.
+                        let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                        let act = std::sync::Arc::clone(&activity);
+                        let mut sink =
+                            |ev: StreamEvent| {
+                                act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                match ev {
+                                    StreamEvent::Text(t) => {
+                                        presenter.emit(PresenterEvent::AssistantDelta(t))
+                                    }
+                                    StreamEvent::Reasoning(t) => {
+                                        presenter.emit(PresenterEvent::Reasoning(t))
+                                    }
+                                    StreamEvent::ToolStarted { name, args } => {
+                                        presenter.emit(PresenterEvent::ToolStart { name, args })
+                                    }
+                                    StreamEvent::ToolFinished { name, ok, summary } => presenter
+                                        .emit(PresenterEvent::ToolResult { name, ok, summary }),
+                                    StreamEvent::SubagentStarted { id, agent, task } => presenter
+                                        .emit(PresenterEvent::SubagentStart { id, agent, task }),
+                                    StreamEvent::SubagentProgress { id, snippet } => presenter
+                                        .emit(PresenterEvent::SubagentProgress { id, snippet }),
+                                    StreamEvent::SubagentFinished {
+                                        id,
+                                        agent,
+                                        ok,
+                                        summary,
+                                        cost_usd,
+                                    } => presenter.emit(PresenterEvent::SubagentResult {
+                                        id,
+                                        agent,
+                                        ok,
+                                        summary,
+                                        cost_usd,
+                                    }),
+                                    // A bridged turn's `update_tasks` (tailed from the sink): surface the
+                                    // list live so the sticky panel updates during the turn. The parent's
+                                    // post-turn store reload (below) keeps `self.tasks` authoritative.
+                                    StreamEvent::Tasks(tasks) => {
+                                        presenter.emit(PresenterEvent::Tasks(tasks))
+                                    }
+                                }
+                            };
+                        let fut = provider.complete(&active_model, &sent, &specs, &mut sink);
+                        stream_with_idle_timeout(fut, &activity, stream_idle).await
                     };
-                    let fut = provider.complete(&active_model, &self.transcript, &specs, &mut sink);
-                    stream_with_idle_timeout(fut, &activity, stream_idle).await
-                };
                 match result {
                     Ok(r) => {
                         if !r.content.is_empty() {
@@ -2368,6 +2466,55 @@ mod tests {
     use forge_tui::HeadlessPresenter;
     use forge_types::SideEffect;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn fit_messages_keeps_everything_when_it_fits() {
+        let msgs = vec![
+            Message::system("rules"),
+            Message::user("hi"),
+            Message::assistant("hello"),
+        ];
+        assert_eq!(fit_messages(&msgs, 10_000).len(), 3);
+    }
+
+    #[test]
+    fn fit_messages_keeps_system_and_recent_drops_oldest() {
+        let msgs = vec![
+            Message::system("SYS"),
+            Message::user(format!("OLD {}", "a".repeat(500))),
+            Message::user(format!("MID {}", "b".repeat(500))),
+            Message::user("NEWEST request"),
+        ];
+        // Budget fits the system + the newest one or two, not the 500-char olds.
+        let out = fit_messages(&msgs, 16 + 4 + 16 + "NEWEST request".len() + 16);
+        assert_eq!(out[0].role, Role::System, "system always kept");
+        assert!(
+            out.iter().any(|m| m.content.contains("NEWEST")),
+            "newest kept"
+        );
+        assert!(
+            !out.iter().any(|m| m.content.contains("OLD")),
+            "oldest dropped: {out:?}"
+        );
+        // Order is preserved (system first, then the surviving recent tail).
+        assert!(out.windows(2).all(|w| true), "ordered");
+    }
+
+    #[test]
+    fn fit_messages_truncates_a_single_oversized_message() {
+        let msgs = vec![
+            Message::system("SYS"),
+            Message::user(format!("{}TAIL-WORDS", "z".repeat(5_000))),
+        ];
+        let out = fit_messages(&msgs, 200);
+        let last = out.last().unwrap();
+        assert!(
+            last.content.contains("TAIL-WORDS"),
+            "keeps the latest words"
+        );
+        assert!(last.content.contains("truncated"), "marks the cut");
+        assert!(last.content.chars().count() < 5_000, "shrunk");
+    }
 
     /// A presenter that records every event so tests can assert on what was shown.
     #[derive(Clone, Default)]

@@ -610,6 +610,31 @@ impl Store {
         Ok(())
     }
 
+    /// Persist a model's fetched context window (tokens), from a provider's model API. Upsert so a
+    /// later discovery refreshes it.
+    pub fn set_model_context(&self, model: &str, window: u32) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO model_context (model, window, updated_at) VALUES (?1, ?2, strftime('%s','now'))
+             ON CONFLICT(model) DO UPDATE SET window = excluded.window, updated_at = excluded.updated_at",
+            (model, window),
+        )?;
+        Ok(())
+    }
+
+    /// A model's fetched context window (tokens), or `None` if we never stored one. The core
+    /// prefers this over the family heuristic when bounding a turn's transcript.
+    pub fn model_context(&self, model: &str) -> Result<Option<u32>> {
+        let row = self
+            .lock()?
+            .query_row(
+                "SELECT window FROM model_context WHERE model = ?1",
+                [model],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(row.map(|w| w.max(0) as u32))
+    }
+
     /// Clear every model bench (the `forge models --clear` rescan reset). Returns the number of
     /// benched rows removed so the caller can report it.
     pub fn clear_all_model_health(&self) -> Result<usize> {
@@ -1949,6 +1974,27 @@ mod tests {
         );
         store.clear_model_health("m").unwrap();
         assert!(store.benched_models(500).unwrap().is_empty());
+    }
+
+    #[test]
+    fn model_context_round_trips_and_upserts() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.model_context("openrouter::x:free").unwrap(), None);
+        store
+            .set_model_context("openrouter::x:free", 131_072)
+            .unwrap();
+        assert_eq!(
+            store.model_context("openrouter::x:free").unwrap(),
+            Some(131_072)
+        );
+        // Upsert: a later fetch refreshes the window.
+        store
+            .set_model_context("openrouter::x:free", 65_536)
+            .unwrap();
+        assert_eq!(
+            store.model_context("openrouter::x:free").unwrap(),
+            Some(65_536)
+        );
     }
 
     #[test]

@@ -104,6 +104,16 @@ CREATE TABLE IF NOT EXISTS model_health (
     updated_at     INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 
+-- Per-model context-window sizes (tokens), fetched from provider APIs at discovery (e.g.
+-- OpenRouter's /api/v1/models `context_length`). The core trims a turn's transcript to fit the
+-- routed model's window, so a long conversation never overflows it (which surfaced as every model
+-- failing "unavailable"). A model absent here falls back to the family heuristic, then a floor.
+CREATE TABLE IF NOT EXISTS model_context (
+    model      TEXT PRIMARY KEY,
+    window     INTEGER NOT NULL,       -- context window in tokens
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+
 -- Subscription quota windows (quota-aware routing, L3). One row per bridge provider per window;
 -- composite PK so 5h and weekly windows are tracked independently.
 -- The row stops constraining once `resets_at` passes (the window rolled over).
