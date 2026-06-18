@@ -427,7 +427,8 @@ fn fill_subscription_pcts(
 }
 
 fn sync_palette_to_slash_token(app: &mut forge_tui::App) {
-    match forge_tui::slash_token_at(&app.input, app.input.len()) {
+    let cur = app.input_cursor.min(app.input.len());
+    match forge_tui::slash_token_at(&app.input, cur) {
         Some(tok) if app.palette.open => {
             app.palette.query = tok.name;
             app.palette.clamp();
@@ -467,7 +468,8 @@ fn load_at_files() -> Vec<String> {
 /// Keep the `@path` picker in sync with the `@token` at the cursor: open + filter when present,
 /// close when the token disappears. Files are loaded once on first open (cache lives in picker).
 fn sync_at_picker_to_at_token(app: &mut forge_tui::App) {
-    if let Some(tok) = forge_tui::at_token_at(&app.input, app.input.len()) {
+    let cur = app.input_cursor.min(app.input.len());
+    if let Some(tok) = forge_tui::at_token_at(&app.input, cur) {
         if app.at_picker.open {
             app.at_picker.query = tok.query;
             app.at_picker.clamp();
@@ -3208,6 +3210,9 @@ async fn run_chat_tui(
     // session-management). The current gen gates the done-signal so an aborted turn's late
     // signal is ignored once a new turn has started.
     let mut turn_gen: u64 = 0;
+    // Generation of the last auto-compact turn; prevents re-firing before a new user turn updates
+    // context_tokens (compact's own Cost event still reflects the old full-context size).
+    let mut last_auto_compact_gen: u64 = 0;
     let mut turn_handle: Option<tokio::task::JoinHandle<()>> = None;
     // `/loop` state: when set, each completed turn of this generation is re-run until the model
     // signals completion or the iteration cap is hit.
@@ -3233,6 +3238,9 @@ async fn run_chat_tui(
     // conversation isn't rebuilt 16×/sec for no reason.
     let mut dirty = true;
     let mut quit = false;
+    let mut prompt_history: Vec<String> = Vec::new();
+    let mut history_pos: Option<usize> = None;
+    let mut history_draft = String::new();
 
     while !quit {
         if dirty {
@@ -3261,13 +3269,16 @@ async fn run_chat_tui(
                         if let Some(name) = app.palette.selected_name().map(|s| s.to_string()) {
                             // Replace the `/command` token in place (mid-line aware), not the
                             // whole input — so `run /or<Tab>` completes to `run /orchestrate`.
-                            if let Some(tok) =
-                                forge_tui::slash_token_at(&app.input, app.input.len())
-                            {
+                            if let Some(tok) = forge_tui::slash_token_at(
+                                &app.input,
+                                app.input_cursor.min(app.input.len()),
+                            ) {
                                 app.input
                                     .replace_range(tok.start..tok.end, &format!("/{name}"));
+                                app.input_cursor = app.input.len();
                             } else {
                                 app.input = format!("/{name}");
+                                app.input_cursor = app.input.len();
                             }
                             app.palette.query = name;
                             app.palette.clamp();
@@ -3281,11 +3292,13 @@ async fn run_chat_tui(
                             // dispatch, so the surrounding prose is preserved. A leading command
                             // still dispatches (the branch below).
                             if let Some(name) = app.palette.selected_name().map(|s| s.to_string()) {
-                                if let Some(tok) =
-                                    forge_tui::slash_token_at(&app.input, app.input.len())
-                                {
+                                if let Some(tok) = forge_tui::slash_token_at(
+                                    &app.input,
+                                    app.input_cursor.min(app.input.len()),
+                                ) {
                                     app.input
                                         .replace_range(tok.start..tok.end, &format!("/{name}"));
+                                    app.input_cursor = app.input.len();
                                 }
                             }
                             app.palette.close();
@@ -3392,6 +3405,7 @@ async fn run_chat_tui(
                         sync_palette_to_slash_token(&mut app);
                     }
                     KeyKind::CycleTemper | KeyKind::ToggleSubagentDetail => {}
+                    _ => {}
                 }
                 continue;
             }
@@ -3434,12 +3448,17 @@ async fn run_chat_tui(
                     KeyKind::Down => app.at_picker.move_down(),
                     KeyKind::Tab | KeyKind::Enter => {
                         if let Some(path) = app.at_picker.selected_path() {
-                            if let Some(tok) = forge_tui::at_token_at(&app.input, app.input.len()) {
+                            if let Some(tok) = forge_tui::at_token_at(
+                                &app.input,
+                                app.input_cursor.min(app.input.len()),
+                            ) {
                                 // Insert `@path ` (trailing space so the user can keep typing).
                                 app.input
                                     .replace_range(tok.start..tok.end, &format!("@{path} "));
+                                app.input_cursor = app.input.len();
                             } else {
                                 app.input = format!("@{path} ");
+                                app.input_cursor = app.input.len();
                             }
                         }
                         app.at_picker.close();
@@ -3453,6 +3472,7 @@ async fn run_chat_tui(
                         sync_at_picker_to_at_token(&mut app);
                     }
                     KeyKind::CycleTemper | KeyKind::ToggleSubagentDetail => {}
+                    _ => {}
                 }
                 continue;
             }
@@ -3525,6 +3545,7 @@ async fn run_chat_tui(
                         app.picker.clamp();
                     }
                     KeyKind::Tab | KeyKind::CycleTemper | KeyKind::ToggleSubagentDetail => {}
+                    _ => {}
                 }
                 continue;
             }
@@ -3644,7 +3665,7 @@ async fn run_chat_tui(
             } else if app.awaiting_question() {
                 // Answering an AskUserQuestion (the turn task is blocked in `ask()`): the input
                 // line collects a number or free-text answer; submit resolves + replies.
-                match handle_key(&mut app.input, key) {
+                match handle_key(&mut app.input, &mut app.input_cursor, key) {
                     InputOutcome::Submit(line) => {
                         if let Some(ans) = app.resolve_question(&line) {
                             if let Some(tx) = pending_question.take() {
@@ -3676,9 +3697,45 @@ async fn run_chat_tui(
                     sess.cycle_temper()
                 };
                 app.set_temper(new.label());
+            } else if matches!(key, KeyKind::Up) {
+                // Arrow-up: browse to the previous prompt history entry.
+                if history_pos.is_none() {
+                    history_draft = app.input.clone();
+                }
+                if let Some(p) = history_pos {
+                    if p > 0 {
+                        history_pos = Some(p - 1);
+                    }
+                } else if !prompt_history.is_empty() {
+                    history_pos = Some(prompt_history.len() - 1);
+                }
+                if let Some(p) = history_pos {
+                    app.input = prompt_history[p].clone();
+                    app.input_cursor = app.input.len();
+                }
+                dirty = true;
+            } else if matches!(key, KeyKind::Down) {
+                // Arrow-down: browse to the next entry, or restore the draft past the end.
+                if let Some(p) = history_pos {
+                    if p + 1 < prompt_history.len() {
+                        history_pos = Some(p + 1);
+                        app.input = prompt_history[p + 1].clone();
+                        app.input_cursor = app.input.len();
+                    } else {
+                        history_pos = None;
+                        app.input = history_draft.clone();
+                        app.input_cursor = app.input.len();
+                    }
+                }
+                dirty = true;
             } else {
-                match handle_key(&mut app.input, key) {
+                let pre_edit_len = app.input.len();
+                match handle_key(&mut app.input, &mut app.input_cursor, key) {
                     InputOutcome::Submit(line) => {
+                        history_pos = None;
+                        if !line.trim().is_empty() && prompt_history.last() != Some(&line) {
+                            prompt_history.push(line.clone());
+                        }
                         // `//foo` escapes to a literal prompt `/foo`; a bare `/cmd` typed without
                         // the palette still dispatches as a command; everything else is a prompt.
                         if let Some(rest) = line.strip_prefix("//") {
@@ -3806,9 +3863,15 @@ async fn run_chat_tui(
                         break;
                     }
                     InputOutcome::Editing => {
+                        if app.input.len() != pre_edit_len {
+                            history_pos = None;
+                        }
                         // `/command` anywhere on the line opens the palette; `@path` opens the
                         // file picker. They are mutually exclusive — slash wins at cursor.
-                        if let Some(tok) = forge_tui::slash_token_at(&app.input, app.input.len()) {
+                        if let Some(tok) = forge_tui::slash_token_at(
+                            &app.input,
+                            app.input_cursor.min(app.input.len()),
+                        ) {
                             app.at_picker.close();
                             app.palette.open_with(&tok.name);
                         } else {
@@ -4053,7 +4116,10 @@ async fn run_chat_tui(
                 // Auto-compact: when no new turn was spawned (not a loop iteration) and the
                 // context gauge is above AUTO_COMPACT_THRESHOLD, quietly run /compact so the
                 // user doesn't need to do it manually (context-compaction.md).
-                if turn_handle.is_none() {
+                // Guard: only fire once per user turn — compact's own Cost event still carries
+                // the old full-context size, so context_tokens won't drop until the next real
+                // turn. Without the gen guard this would re-fire on every compact completion.
+                if turn_handle.is_none() && turn_gen > last_auto_compact_gen {
                     if let Some(lim) = app.context_limit {
                         let fill = app.context_tokens as f64 / lim as f64;
                         if fill > AUTO_COMPACT_THRESHOLD {
@@ -4062,6 +4128,7 @@ async fn run_chat_tui(
                                 fill * 100.0
                             ));
                             turn_gen += 1;
+                            last_auto_compact_gen = turn_gen;
                             turn_handle = Some(spawn_compact(
                                 &session,
                                 &done_tx,
