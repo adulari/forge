@@ -2525,9 +2525,18 @@ mod tests {
         });
         let wide = screen_wh(&app, 120, LIVE_H);
         // Unknown limit → conservative fallback so a % + bar still show, marked approximate.
-        assert!(wide.contains("6.0k/128.0k"), "fallback denominator shown: {wide}");
-        assert!(wide.contains('%'), "percentage shown against fallback: {wide}");
-        assert!(wide.contains("approx"), "fallback marked approximate: {wide}");
+        assert!(
+            wide.contains("6.0k/128.0k"),
+            "fallback denominator shown: {wide}"
+        );
+        assert!(
+            wide.contains('%'),
+            "percentage shown against fallback: {wide}"
+        );
+        assert!(
+            wide.contains("approx"),
+            "fallback marked approximate: {wide}"
+        );
     }
 
     #[test]
