@@ -61,10 +61,17 @@ impl BenchmarkScores {
         match self.by_canon.get(&key) {
             Some(prev) if prev.intelligence >= intelligence => {}
             _ => {
-                self.by_canon.insert(key, score);
+                self.by_canon.insert(key.clone(), score);
             }
         }
-        self.entries.push((toks, score));
+        // entries: one row per canonical key for the overlap fallback. Effort variants of the
+        // same model ("GPT-5.5 (xhigh)" / "GPT-5.5 (low)") collapse to the same key after
+        // strip_parens; keeping only the best avoids a bloated O(n) scan with redundant candidates.
+        match self.entries.iter_mut().find(|(t, _)| canon(t) == key) {
+            Some((_, s)) if s.intelligence < intelligence => *s = score,
+            Some(_) => {}
+            None => self.entries.push((toks, score)),
+        }
     }
 
     /// The score for a Forge `provider::model` id, or `None` if no confident match exists.
