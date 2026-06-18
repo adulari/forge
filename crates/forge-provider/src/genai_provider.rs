@@ -672,7 +672,10 @@ mod tests {
         let credit = classify_status(402, "x".into(), "requires more credits", None);
         assert!(matches!(credit, ProviderError::Capability(_)));
         assert!(credit.is_permanent());
-        assert!(credit.is_retryable(), "must still fail over to another model");
+        assert!(
+            credit.is_retryable(),
+            "must still fail over to another model"
+        );
 
         // 400 body that names a tool-support problem → Capability, not a plain Request.
         let no_tools = classify_status(

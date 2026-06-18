@@ -399,7 +399,11 @@ fn score_prompt(prompt: &str) -> Classification {
             TaskTier::Complex => "complex task",
         });
     }
-    Classification { tier, score: pts, reasons }
+    Classification {
+        tier,
+        score: pts,
+        reasons,
+    }
 }
 
 fn is_multistep(lower: &str) -> bool {

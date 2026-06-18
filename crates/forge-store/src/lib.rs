@@ -1957,18 +1957,35 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
 
         // A permanent exclusion: benched far into the future, reason prefixed "excluded:".
-        store.exclude_model("dead::no-tools", "no tool calling").unwrap();
+        store
+            .exclude_model("dead::no-tools", "no tool calling")
+            .unwrap();
         assert!(
-            store.current_benched().unwrap().is_benched("dead::no-tools"),
+            store
+                .current_benched()
+                .unwrap()
+                .is_benched("dead::no-tools"),
             "excluded model is benched now"
         );
         let report = store.current_benched_report().unwrap();
-        let row = report.iter().find(|(m, _, _)| m == "dead::no-tools").unwrap();
-        assert!(row.1 > now + 6 * 24 * 60 * 60, "exclusion window is ~7 days");
+        let row = report
+            .iter()
+            .find(|(m, _, _)| m == "dead::no-tools")
+            .unwrap();
+        assert!(
+            row.1 > now + 6 * 24 * 60 * 60,
+            "exclusion window is ~7 days"
+        );
         assert!(row.2.starts_with("excluded:"));
 
         // A transient bench alongside it.
-        store.bench_for("rl::model", std::time::Duration::from_secs(120), "rate-limited").unwrap();
+        store
+            .bench_for(
+                "rl::model",
+                std::time::Duration::from_secs(120),
+                "rate-limited",
+            )
+            .unwrap();
 
         // soonest_unbenched returns the transient one, never the permanent exclusion.
         assert_eq!(

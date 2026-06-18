@@ -1651,39 +1651,42 @@ pub(crate) fn build_provider_and_router(
         // Routes API models to genai and `claude-cli::`/`codex-cli::` to the subscription CLI
         // bridge. `harness` mode runs the bridge's tools through Forge's MCP server (RFC Phase 2).
         let harness = config.mesh.bridge_mode == forge_config::BridgeMode::Harness;
-        Arc::new(DispatchProvider::new(harness).with_max_output_tokens(config.mesh.max_output_tokens))
+        Arc::new(
+            DispatchProvider::new(harness).with_max_output_tokens(config.mesh.max_output_tokens),
+        )
     };
     let mut heuristic = HeuristicRouter::new(config.clone()).with_pin(pin);
     if let Some(cat) = catalog {
         heuristic = heuristic.with_catalog(cat);
     }
-    let router: Arc<dyn Router> =
-        if matches!(config.mesh.classifier, ClassifierKind::Llm | ClassifierKind::Hybrid) {
-            // LLM / Hybrid classifier: a cheap model labels the tier; the heuristic router
-            // does cost-aware selection; any failure falls back to the heuristic.
-            // Hybrid additionally skips the LLM call when the heuristic is already confident
-            // (score ≤−4 or ≥8), keeping zero added latency for obvious cases.
-            let classifier_model = config
-                .mesh
-                .classifier_model
-                .clone()
-                .or_else(|| config.model_for(TaskTier::Trivial).map(String::from))
-                .unwrap_or_default();
-            let classify_provider: Arc<dyn Provider> = if mock {
-                Arc::new(MockProvider)
-            } else {
-                // classification needs no tools/harness; cap output (one tier word) so a free
-                // classifier model isn't 402'd on a huge default max-token request.
-                Arc::new(
-                    DispatchProvider::new(false)
-                        .with_max_output_tokens(config.mesh.max_output_tokens),
-                )
-            };
-            let hybrid = config.mesh.classifier == ClassifierKind::Hybrid;
-            Arc::new(LlmRouter::new(classify_provider, classifier_model, heuristic).with_hybrid(hybrid))
+    let router: Arc<dyn Router> = if matches!(
+        config.mesh.classifier,
+        ClassifierKind::Llm | ClassifierKind::Hybrid
+    ) {
+        // LLM / Hybrid classifier: a cheap model labels the tier; the heuristic router
+        // does cost-aware selection; any failure falls back to the heuristic.
+        // Hybrid additionally skips the LLM call when the heuristic is already confident
+        // (score ≤−4 or ≥8), keeping zero added latency for obvious cases.
+        let classifier_model = config
+            .mesh
+            .classifier_model
+            .clone()
+            .or_else(|| config.model_for(TaskTier::Trivial).map(String::from))
+            .unwrap_or_default();
+        let classify_provider: Arc<dyn Provider> = if mock {
+            Arc::new(MockProvider)
         } else {
-            Arc::new(heuristic)
+            // classification needs no tools/harness; cap output (one tier word) so a free
+            // classifier model isn't 402'd on a huge default max-token request.
+            Arc::new(
+                DispatchProvider::new(false).with_max_output_tokens(config.mesh.max_output_tokens),
+            )
         };
+        let hybrid = config.mesh.classifier == ClassifierKind::Hybrid;
+        Arc::new(LlmRouter::new(classify_provider, classifier_model, heuristic).with_hybrid(hybrid))
+    } else {
+        Arc::new(heuristic)
+    };
     (provider, router)
 }
 
@@ -1773,9 +1776,7 @@ async fn drop_unaffordable_models(models: &mut Vec<String>) {
 
     for (p, bal) in broke {
         let before = models.len();
-        models.retain(|m| {
-            forge_config::provider_of(m) != p || balance::is_free_model_id(m)
-        });
+        models.retain(|m| forge_config::provider_of(m) != p || balance::is_free_model_id(m));
         let dropped = before - models.len();
         if dropped > 0 {
             tracing::info!(
@@ -2215,7 +2216,8 @@ async fn probe_models(
 ) -> Result<()> {
     use std::time::Duration;
     let harness = config.mesh.bridge_mode == forge_config::BridgeMode::Harness;
-    let provider = DispatchProvider::new(harness).with_max_output_tokens(config.mesh.max_output_tokens);
+    let provider =
+        DispatchProvider::new(harness).with_max_output_tokens(config.mesh.max_output_tokens);
     let default_cooldown = Duration::from_secs(config.mesh.failover_cooldown_secs);
     let ping = [forge_types::Message::user("ping")];
     // Probe WITH a representative tool: the real agent loop always advertises tools, so a model
@@ -3216,8 +3218,7 @@ async fn run_chat_tui(
     // Receivers for overlay background loads (mesh/usage open instantly; data fills in async).
     let mut mesh_load_rx: Option<tokio::sync::oneshot::Receiver<Option<forge_tui::MeshOverlay>>> =
         None;
-    let mut usage_load_rx: Option<tokio::sync::oneshot::Receiver<bridge_stats::BridgeStats>> =
-        None;
+    let mut usage_load_rx: Option<tokio::sync::oneshot::Receiver<bridge_stats::BridgeStats>> = None;
     // Only redraw when state actually changed: idle frames cost nothing and the whole
     // conversation isn't rebuilt 16×/sec for no reason.
     let mut dirty = true;
@@ -4565,7 +4566,17 @@ async fn dispatch_command(
         }
         CommandAction::Usage => {
             // Open immediately with fast session data; bridge stats load in background.
-            let ((month_usd, by_model_5h, by_model, by_model_week, (daily_cap, monthly_cap, weekly_cap), _), (session_in, session_out, session_usd)) = {
+            let (
+                (
+                    month_usd,
+                    by_model_5h,
+                    by_model,
+                    by_model_week,
+                    (daily_cap, monthly_cap, weekly_cap),
+                    _,
+                ),
+                (session_in, session_out, session_usd),
+            ) = {
                 let s = session.lock().await;
                 (
                     (
@@ -4620,8 +4631,7 @@ async fn dispatch_command(
                 prompt: prompt.trim().to_string(),
                 ..Default::default()
             };
-            let (tx, rx) =
-                tokio::sync::oneshot::channel::<Option<forge_tui::MeshOverlay>>();
+            let (tx, rx) = tokio::sync::oneshot::channel::<Option<forge_tui::MeshOverlay>>();
             let session_c = session.clone();
             let prompt_str = prompt.trim().to_string();
             tokio::spawn(async move {

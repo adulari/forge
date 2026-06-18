@@ -63,7 +63,9 @@ async fn deepseek_balance() -> Option<f64> {
 /// GET `url` with the provider's bearer key and parse a JSON body. `None` on any failure (no key,
 /// transport error, non-2xx, unparseable) — every balance probe fails open.
 async fn get_json(provider: &str, url: &str) -> Option<serde_json::Value> {
-    let key = forge_config::api_key(provider).ok().filter(|k| !k.is_empty())?;
+    let key = forge_config::api_key(provider)
+        .ok()
+        .filter(|k| !k.is_empty())?;
     let resp = reqwest::Client::new()
         .get(url)
         .bearer_auth(&key)
@@ -80,7 +82,8 @@ async fn get_json(provider: &str, url: &str) -> Option<serde_json::Value> {
 
 /// A JSON number that may be encoded as a number OR a string (DeepSeek sends `"10.00"`).
 fn as_number(v: &serde_json::Value) -> Option<f64> {
-    v.as_f64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
 /// Whether `model_id` is a genuinely-free model for its provider (so it survives a zero-balance

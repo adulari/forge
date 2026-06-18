@@ -290,7 +290,8 @@ mod tests {
             )
             .await;
         assert_eq!(
-            d.tier, TaskTier::Trivial,
+            d.tier,
+            TaskTier::Trivial,
             "hybrid must not call LLM for confident Trivial: {}",
             d.rationale
         );
@@ -314,7 +315,8 @@ mod tests {
             )
             .await;
         assert_eq!(
-            d.tier, TaskTier::Complex,
+            d.tier,
+            TaskTier::Complex,
             "hybrid must not call LLM for confident Complex: {}",
             d.rationale
         );
@@ -338,7 +340,8 @@ mod tests {
             )
             .await;
         assert_eq!(
-            d.tier, TaskTier::Complex,
+            d.tier,
+            TaskTier::Complex,
             "hybrid must use LLM for uncertain Standard: {}",
             d.rationale
         );
@@ -362,7 +365,8 @@ mod tests {
             )
             .await;
         assert_eq!(
-            d.tier, TaskTier::Standard,
+            d.tier,
+            TaskTier::Standard,
             "hybrid must use LLM for barely-Complex uncertain prompt: {}",
             d.rationale
         );

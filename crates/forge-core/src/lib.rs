@@ -889,15 +889,26 @@ impl Session {
         exp.classifier_label = match self.config.mesh.classifier {
             ClassifierKind::Heuristic => "heuristic".to_string(),
             ClassifierKind::Llm => {
-                let m = self.config.mesh.classifier_model.as_deref().unwrap_or("trivial-tier fallback");
+                let m = self
+                    .config
+                    .mesh
+                    .classifier_model
+                    .as_deref()
+                    .unwrap_or("trivial-tier fallback");
                 format!("llm ({m}) — actual tier may differ from this heuristic preview")
             }
             ClassifierKind::Hybrid => {
-                let (_, confident, reason) = forge_mesh::HeuristicRouter::classify_confident(prompt);
+                let (_, confident, reason) =
+                    forge_mesh::HeuristicRouter::classify_confident(prompt);
                 if confident {
                     format!("hybrid — heuristic confident ({reason}), no llm call")
                 } else {
-                    let m = self.config.mesh.classifier_model.as_deref().unwrap_or("trivial-tier fallback");
+                    let m = self
+                        .config
+                        .mesh
+                        .classifier_model
+                        .as_deref()
+                        .unwrap_or("trivial-tier fallback");
                     format!("hybrid — uncertain zone, llm ({m}) will classify at turn time")
                 }
             }

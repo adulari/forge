@@ -2662,8 +2662,10 @@ mod tests {
     fn mesh_overlay_renders_without_panic() {
         let mesh_overlay = MeshOverlay {
             open: true,
+            loading: false,
             prompt: "design a lock-free queue".into(),
             classified: "complex".into(),
+            classifier: "heuristic".into(),
             routed: "complex".into(),
             code_heavy: false,
             reasons: "reasoning term".into(),
