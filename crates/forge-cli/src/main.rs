@@ -3266,9 +3266,10 @@ async fn run_chat_tui(
                         if let Some(name) = app.palette.selected_name().map(|s| s.to_string()) {
                             // Replace the `/command` token in place (mid-line aware), not the
                             // whole input — so `run /or<Tab>` completes to `run /orchestrate`.
-                            if let Some(tok) =
-                                forge_tui::slash_token_at(&app.input, app.input_cursor.min(app.input.len()))
-                            {
+                            if let Some(tok) = forge_tui::slash_token_at(
+                                &app.input,
+                                app.input_cursor.min(app.input.len()),
+                            ) {
                                 app.input
                                     .replace_range(tok.start..tok.end, &format!("/{name}"));
                                 app.input_cursor = app.input.len();
@@ -3288,9 +3289,10 @@ async fn run_chat_tui(
                             // dispatch, so the surrounding prose is preserved. A leading command
                             // still dispatches (the branch below).
                             if let Some(name) = app.palette.selected_name().map(|s| s.to_string()) {
-                                if let Some(tok) =
-                                    forge_tui::slash_token_at(&app.input, app.input_cursor.min(app.input.len()))
-                                {
+                                if let Some(tok) = forge_tui::slash_token_at(
+                                    &app.input,
+                                    app.input_cursor.min(app.input.len()),
+                                ) {
                                     app.input
                                         .replace_range(tok.start..tok.end, &format!("/{name}"));
                                     app.input_cursor = app.input.len();
@@ -3443,7 +3445,10 @@ async fn run_chat_tui(
                     KeyKind::Down => app.at_picker.move_down(),
                     KeyKind::Tab | KeyKind::Enter => {
                         if let Some(path) = app.at_picker.selected_path() {
-                            if let Some(tok) = forge_tui::at_token_at(&app.input, app.input_cursor.min(app.input.len())) {
+                            if let Some(tok) = forge_tui::at_token_at(
+                                &app.input,
+                                app.input_cursor.min(app.input.len()),
+                            ) {
                                 // Insert `@path ` (trailing space so the user can keep typing).
                                 app.input
                                     .replace_range(tok.start..tok.end, &format!("@{path} "));
@@ -3860,7 +3865,10 @@ async fn run_chat_tui(
                         }
                         // `/command` anywhere on the line opens the palette; `@path` opens the
                         // file picker. They are mutually exclusive — slash wins at cursor.
-                        if let Some(tok) = forge_tui::slash_token_at(&app.input, app.input_cursor.min(app.input.len())) {
+                        if let Some(tok) = forge_tui::slash_token_at(
+                            &app.input,
+                            app.input_cursor.min(app.input.len()),
+                        ) {
                             app.at_picker.close();
                             app.palette.open_with(&tok.name);
                         } else {

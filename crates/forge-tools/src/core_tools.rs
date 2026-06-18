@@ -65,8 +65,14 @@ impl Tool for ReadFileTool {
     }
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
         let path = str_arg(args, "path")?;
-        let start_line = args.get("start_line").and_then(Value::as_u64).map(|n| n as usize);
-        let end_line = args.get("end_line").and_then(Value::as_u64).map(|n| n as usize);
+        let start_line = args
+            .get("start_line")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize);
+        let end_line = args
+            .get("end_line")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize);
 
         let content = tokio::fs::read_to_string(path).await?;
         if start_line.is_none() && end_line.is_none() {
@@ -367,9 +373,8 @@ impl Tool for SearchTool {
                                     line.trim_end()
                                 ));
                                 if matches.len() >= SEARCH_MATCH_CAP {
-                                    matches.push(format!(
-                                        "… (capped at {SEARCH_MATCH_CAP} matches)"
-                                    ));
+                                    matches
+                                        .push(format!("… (capped at {SEARCH_MATCH_CAP} matches)"));
                                     return Ok(matches.join("\n"));
                                 }
                             }
