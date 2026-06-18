@@ -33,15 +33,20 @@ pub fn is_subscription(id: &str) -> bool {
 /// price: OpenRouter is a paid gateway exposing hundreds of metered models (incl. frontier ones
 /// like Claude Opus) that we hold no per-model price for — reading "unpriced" as "free" there is
 /// the bug. So for OpenRouter, only its `:free`-suffixed variants count; everything else is paid.
-/// Other unpriced providers (local `ollama::`, free-tier `groq`/`cerebras`) are genuinely free.
+/// OpenCode Zen (`opencode_go`) is the same trap: a curated gateway that mixes genuinely-free
+/// models with premium ones (glm/kimi/qwen-max) — all billed against ONE shared key balance, none
+/// priced in our table. Treating its unpriced premium models as free silently burns that balance
+/// (the bug the user hit), so it's paid-by-default too; mark a known-free one via a `:free` suffix
+/// or a config price of `0`. Other unpriced providers (local `ollama::`, free-tier
+/// `groq`/`cerebras`) are genuinely free.
 fn is_free(id: &str, cost: f64, subscription: bool) -> bool {
     if subscription || cost > f64::EPSILON {
         return false;
     }
-    if provider_of(id) == "openrouter" {
-        return id.contains(":free");
+    match provider_of(id) {
+        "openrouter" | "opencode_go" => id.contains(":free"),
+        _ => true,
     }
-    true
 }
 
 /// Whether a model id is a chat/text-generation model the mesh can route a turn to. Provider
@@ -807,6 +812,7 @@ mod tests {
             "claude-cli::".into(),                          // subscription bridge
             "openrouter::anthropic/claude-opus-4".into(), // frontier, PAID gateway (no price, no :free)
             "openrouter::deepseek/deepseek-r1:free".into(), // frontier, free (:free variant)
+            "opencode_go::glm-5.2".into(),                // PAID gateway model billing key balance
         ])
     }
 
@@ -822,6 +828,18 @@ mod tests {
         // Its `:free` sibling is correctly free.
         let r1 = infos.iter().find(|m| m.id.contains(":free")).unwrap();
         assert!(r1.free && !r1.paid, "{r1:?}");
+    }
+
+    #[test]
+    fn opencode_zen_unpriced_models_are_paid_not_free() {
+        // OpenCode Zen bills a shared key balance for premium models (glm/kimi/qwen-max). Reading
+        // its unpriced models as free silently drains that balance — they must read as paid.
+        let infos = overview_catalog().infos(&Pricing::default());
+        let glm = infos
+            .iter()
+            .find(|m| m.id == "opencode_go::glm-5.2")
+            .unwrap();
+        assert!(glm.paid && !glm.free, "{glm:?}");
     }
 
     #[test]
@@ -861,12 +879,12 @@ mod tests {
     #[test]
     fn stats_count_each_category() {
         let s = overview_catalog().stats(&Pricing::default());
-        assert_eq!(s.total, 8);
-        assert_eq!(s.providers, 6); // anthropic, openai, groq, ollama, claude-cli, openrouter
+        assert_eq!(s.total, 9);
+        assert_eq!(s.providers, 7); // anthropic, openai, groq, ollama, claude-cli, openrouter, opencode_go
         assert_eq!(s.frontier, 4); // anthropic-opus, groq-70b, or-opus, or-deepseek-r1
         assert_eq!(s.subscription, 1); // claude-cli
         assert_eq!(s.free, 4); // groq-8b, groq-70b, ollama, or-deepseek-r1:free
-        assert_eq!(s.paid, 3); // anthropic-opus, gpt-4o-mini, or-opus
+        assert_eq!(s.paid, 4); // anthropic-opus, gpt-4o-mini, or-opus, opencode-glm
     }
 
     #[test]

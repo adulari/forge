@@ -454,10 +454,17 @@ impl HeuristicRouter {
         quota: &SubscriptionQuota,
     ) -> Vec<String> {
         if self.auto_active() {
-            let ranked = self.catalog.as_ref().unwrap().ranked_seeded(
+            // Rank EVERY routable discovered model (not a top-N): the result feeds the failover
+            // chain, and the mesh must keep trying down the full list rather than give up after a
+            // handful when tens of usable free models remain. The primary pick is still the
+            // first usable entry, so a longer tail never changes selection — it only deepens
+            // failover. (The bug: a top-5 cap meant ~6 unique models across tiers, so a few dead
+            // providers exhausted the chain while most of the catalog went untried.)
+            let catalog = self.catalog.as_ref().unwrap();
+            let ranked = catalog.ranked_seeded(
                 tier,
                 &self.pricing,
-                5,
+                catalog.models().len(),
                 hints.code_heavy,
                 hints.seed,
                 quota,
