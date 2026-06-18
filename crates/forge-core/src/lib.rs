@@ -1428,6 +1428,22 @@ impl Session {
                     }
                 }
             }
+
+            // When git co-authoring is on, prime the agent (once) to attribute its work to Forge.
+            // Commit trailers are stamped deterministically by the prepare-commit-msg hook; this
+            // covers the PR body (which no hook can reach) and tells the model not to add other
+            // co-author lines that the hook would only strip.
+            if self.config.git.coauthor {
+                const GIT_ATTRIBUTION: &str = "Git attribution is enabled for this session. When \
+you create commits or pull requests, attribute them to Forge:\n\
+- Commits: a `Co-Authored-By: Forge <noreply@forge.dev>` trailer is added automatically by a git \
+hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
+- Pull requests: include a line in the PR body crediting Forge, e.g. `🔨 Created with Forge`.";
+                let aseq = self.next_seq();
+                self.store
+                    .add_message(&self.id, aseq, Role::System, GIT_ATTRIBUTION, None)?;
+                self.transcript.push(Message::system(GIT_ATTRIBUTION));
+            }
         }
 
         // 2. Persist + record the user message. Its seq keys this turn's code-snapshot dir

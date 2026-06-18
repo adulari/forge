@@ -429,7 +429,12 @@ fn fill_subscription_pcts(
 
 fn sync_palette_to_slash_token(app: &mut forge_tui::App) {
     let cur = app.input_cursor.min(app.input.len());
-    match forge_tui::slash_token_at(&app.input, cur) {
+    // Cursor-anchored: drive the palette only from a `/command` token the cursor sits *within*.
+    // `slash_token_at` otherwise falls back to the last token on the line, which kept the palette
+    // open after a trailing space (so it never closed once you started typing args). Requiring the
+    // cursor to be inside the token closes it the moment the cursor moves past the command name.
+    let tok = forge_tui::slash_token_at(&app.input, cur).filter(|t| cur >= t.start && cur <= t.end);
+    match tok {
         Some(tok) if app.palette.open => {
             app.palette.query = tok.name;
             app.palette.clamp();
@@ -481,6 +486,53 @@ fn sync_at_picker_to_at_token(app: &mut forge_tui::App) {
     } else {
         app.at_picker.close();
     }
+}
+
+/// Cap on a single `@file`'s injected size, so dropping a huge file into context can't blow the
+/// window. Larger files are skipped with a note rather than truncated mid-token.
+const AT_FILE_MAX_BYTES: usize = 96 * 1024;
+
+/// Read the `@path` file references in a submitted prompt and return them as guidance context
+/// blocks (one per file) plus the list of paths actually included. The `@path` token stays in the
+/// user's text (echoed verbatim); the contents ride along as separate guidance so the displayed
+/// line stays clean. Missing paths are treated as ordinary text (silently skipped — `@` is also a
+/// mention sigil); binary/oversized files are skipped with a visible note.
+fn expand_at_files(prompt: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    let (mut blocks, mut included, mut skipped) = (Vec::new(), Vec::new(), Vec::new());
+    let bytes = prompt.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if (bytes[i] as char).is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && !(bytes[i] as char).is_whitespace() {
+            i += 1;
+        }
+        let word = &prompt[start..i];
+        let Some(path) = word.strip_prefix('@') else {
+            continue;
+        };
+        if path.is_empty() || !seen.insert(path.to_string()) {
+            continue;
+        }
+        match std::fs::read(path) {
+            Ok(raw) if raw.len() > AT_FILE_MAX_BYTES => {
+                skipped.push(format!("@{path} (>{}KB)", AT_FILE_MAX_BYTES / 1024));
+            }
+            Ok(raw) => match String::from_utf8(raw) {
+                Ok(text) => {
+                    blocks.push(format!("Referenced file `{path}`:\n```\n{text}\n```"));
+                    included.push(path.to_string());
+                }
+                Err(_) => skipped.push(format!("@{path} (binary)")),
+            },
+            Err(_) => {} // not a real file — leave as plain text
+        }
+    }
+    (blocks, included, skipped)
 }
 
 #[tokio::main]
@@ -536,6 +588,74 @@ struct ImportCounts {
 /// `forge import <source> [--project]` — copy another AI CLI's commands/skills/agents into a
 /// Forge scope, reusing the CC-compatible readers to validate before copying. Claude imports
 /// commands + skills + agents; Codex imports its prompts as commands.
+/// The `prepare-commit-msg` hook Forge installs. Strips Claude/Codex/Anthropic co-author lines,
+/// then adds Forge as co-author — model-aware: if Forge wrote the active model to
+/// `$GIT_DIR/forge-model` (it does, each turn), the model rides in the trailer.
+const FORGE_COMMIT_HOOK: &str = r#"#!/bin/sh
+# Installed by Forge — rewrites commit co-author attribution.
+# Strips Claude/Codex/Anthropic co-author lines; adds Forge (with the active model) as co-author.
+COMMIT_MSG_FILE="$1"
+GIT_DIR=$(git rev-parse --git-dir 2>/dev/null || echo .git)
+MODEL=$(cat "$GIT_DIR/forge-model" 2>/dev/null)
+filtered=$(grep -Ev '^Co-Authored-By:.*([Cc]laude|[Cc]odex|[Aa]nthrop)' "$COMMIT_MSG_FILE") || filtered=$(cat "$COMMIT_MSG_FILE")
+if [ -n "$MODEL" ]; then
+  printf '%s\n\nCo-Authored-By: Forge (%s) <noreply@forge.dev>\n' "$filtered" "$MODEL" > "$COMMIT_MSG_FILE"
+else
+  printf '%s\n\nCo-Authored-By: Forge <noreply@forge.dev>\n' "$filtered" > "$COMMIT_MSG_FILE"
+fi
+"#;
+
+/// Walk up from `cwd` to find the enclosing `.git` directory, if any.
+fn find_git_dir() -> Option<std::path::PathBuf> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir.join(".git"));
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// Write the model-aware `prepare-commit-msg` hook into `git_dir`, making it executable.
+fn install_commit_hook(git_dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    let hook_path = git_dir.join("hooks").join("prepare-commit-msg");
+    if let Some(hooks_dir) = hook_path.parent() {
+        std::fs::create_dir_all(hooks_dir).context("creating .git/hooks directory")?;
+    }
+    std::fs::write(&hook_path, FORGE_COMMIT_HOOK)
+        .with_context(|| format!("writing {}", hook_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook_path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms)?;
+    }
+    Ok(hook_path)
+}
+
+/// Auto-install the commit hook when `[git] coauthor = true` and we're inside a git repo. Best-
+/// effort and idempotent (the hook is just overwritten), so a fresh clone gets attribution without
+/// the user remembering to run `forge git setup`. Silent on any failure — it's a convenience.
+fn maybe_install_git_hook(config: &forge_config::Config) {
+    if !config.git.coauthor {
+        return;
+    }
+    if let Some(git_dir) = find_git_dir() {
+        let _ = install_commit_hook(&git_dir);
+    }
+}
+
+/// Record the active model where the commit hook can read it (`$GIT_DIR/forge-model`), so a commit
+/// the agent makes this turn is attributed to the model that actually did the work. Best-effort.
+fn write_active_model(model: &str) {
+    if let Some(git_dir) = find_git_dir() {
+        let _ = std::fs::write(git_dir.join("forge-model"), model);
+    }
+}
+
 fn git_cmd(cmd: GitCmd) -> Result<()> {
     match cmd {
         GitCmd::Setup { force } => {
@@ -546,40 +666,10 @@ fn git_cmd(cmd: GitCmd) -> Result<()> {
                      Add `[git]\ncoauthor = true` to enable, or run `forge git setup --force`."
                 );
             }
-            // Walk up to find .git/
-            let git_dir = {
-                let mut dir = std::env::current_dir()?;
-                loop {
-                    if dir.join(".git").exists() {
-                        break dir.join(".git");
-                    }
-                    if !dir.pop() {
-                        anyhow::bail!("not inside a git repository");
-                    }
-                }
-            };
-            let hook_path = git_dir.join("hooks").join("prepare-commit-msg");
-            let hook_script = r#"#!/bin/sh
-# Installed by 'forge git setup' — rewrites commit co-author attribution.
-# Strips Claude/Codex/Anthropic co-author lines; adds Forge as co-author.
-COMMIT_MSG_FILE="$1"
-filtered=$(grep -Ev '^Co-Authored-By:.*([Cc]laude|[Cc]odex|[Aa]nthrop)' "$COMMIT_MSG_FILE") || filtered=$(cat "$COMMIT_MSG_FILE")
-printf '%s\n\nCo-Authored-By: Forge <noreply@forge.dev>\n' "$filtered" > "$COMMIT_MSG_FILE"
-"#;
-            if let Some(hooks_dir) = hook_path.parent() {
-                std::fs::create_dir_all(hooks_dir).context("creating .git/hooks directory")?;
-            }
-            std::fs::write(&hook_path, hook_script)
-                .with_context(|| format!("writing {}", hook_path.display()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&hook_path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&hook_path, perms)?;
-            }
+            let git_dir = find_git_dir().context("not inside a git repository")?;
+            let hook_path = install_commit_hook(&git_dir)?;
             println!("✓ installed {}", hook_path.display());
-            println!("  strips Claude/Codex co-author lines; adds Co-Authored-By: Forge");
+            println!("  strips Claude/Codex co-author lines; adds Co-Authored-By: Forge (model)");
             Ok(())
         }
     }
@@ -3229,6 +3319,14 @@ async fn run_chat_tui(
         app.note(&format!("⚠ {w}"));
     }
     let trust_project = session.lock().await.commands_trust_project();
+    // Git attribution: auto-install the model-aware commit hook when enabled, and remember the
+    // flag so each turn's routed model is written where the hook can stamp it.
+    let git_coauthor = forge_config::load()
+        .map(|c| c.git.coauthor)
+        .unwrap_or(false);
+    if git_coauthor {
+        maybe_install_git_hook(&forge_config::load().unwrap_or_default());
+    }
     {
         let (hooks, sid) = {
             let s = session.lock().await;
@@ -3274,6 +3372,12 @@ async fn run_chat_tui(
     // conversation isn't rebuilt 16×/sec for no reason.
     let mut dirty = true;
     let mut quit = false;
+    // Drives the input-cursor blink. The cursor stays solid while the user is actively typing and
+    // only begins a calm blink after a short idle gap (like Claude Code) — measured from the last
+    // input event, so it never flickers mid-keystroke.
+    let mut last_input_at = std::time::Instant::now();
+    // Last model written to `$GIT_DIR/forge-model` for commit attribution (only when coauthor on).
+    let mut last_model_written = String::new();
     let mut prompt_history: Vec<String> = Vec::new();
     let mut history_pos: Option<usize> = None;
     let mut history_draft = String::new();
@@ -3289,6 +3393,10 @@ async fn run_chat_tui(
         // fast typing to the frame rate (~16 keys/sec) — the source of the input lag.
         while let Some(ev) = tui.poll_event().context("reading input")? {
             dirty = true;
+            // Any input counts as activity: hold the cursor solid and restart the idle timer, so
+            // the blink only resumes once typing pauses.
+            last_input_at = std::time::Instant::now();
+            app.cursor_hidden = false;
             let key = match ev {
                 forge_tui::InputEvent::Paste(s) => {
                     // Pasting an image: terminals deliver an empty/whitespace bracketed-paste for
@@ -3302,6 +3410,16 @@ async fn run_chat_tui(
                         }
                     }
                     app.handle_paste(s);
+                    continue;
+                }
+                forge_tui::InputEvent::Focus(gained) => {
+                    // Window focus changed: dim/hollow the input cursor while another window is in
+                    // front, restore the solid block on return. Reset the blink phase on regain so
+                    // the cursor reappears immediately rather than mid-"off" frame.
+                    app.unfocused = !gained;
+                    if gained {
+                        app.cursor_hidden = false;
+                    }
                     continue;
                 }
                 forge_tui::InputEvent::Key(k) => k,
@@ -3449,16 +3567,15 @@ async fn run_chat_tui(
                             }
                         }
                     }
-                    KeyKind::Char(c) => {
-                        app.input.push(c);
-                        sync_palette_to_slash_token(&mut app);
-                    }
-                    KeyKind::Backspace => {
-                        app.input.pop();
-                        sync_palette_to_slash_token(&mut app);
-                    }
                     KeyKind::CycleTemper | KeyKind::ToggleSubagentDetail => {}
-                    _ => {}
+                    // Any other editing key mutates the input at the *cursor* (not blindly at the
+                    // end) and then re-syncs the palette to the slash-token the cursor now sits in.
+                    // That keeps the text cursor moving while the palette is open, and closes the
+                    // palette once the cursor leaves the command name (e.g. a space into the args).
+                    _ => {
+                        let _ = forge_tui::handle_key(&mut app.input, &mut app.input_cursor, key);
+                        sync_palette_to_slash_token(&mut app);
+                    }
                 }
                 continue;
             }
@@ -3750,6 +3867,8 @@ async fn run_chat_tui(
                     sess.cycle_temper()
                 };
                 app.set_temper(new.label());
+                // Remember the chosen temper as the default for the next session (best-effort).
+                let _ = forge_config::write_permission_mode(new);
             } else if matches!(key, KeyKind::Up) {
                 // Arrow-up: browse to the previous prompt history entry.
                 if history_pos.is_none() {
@@ -3908,16 +4027,39 @@ async fn run_chat_tui(
                                     if !submit_images.is_empty() {
                                         session.lock().await.attach_images(submit_images);
                                     }
+                                    // Expand `@path` mentions: read those files and ride their
+                                    // contents along as turn guidance, leaving the echoed line clean.
+                                    let (file_blocks, included, skipped) = expand_at_files(&prompt);
+                                    if !included.is_empty() {
+                                        app.note(&format!("📎 included {}", included.join(", ")));
+                                    }
+                                    for s in &skipped {
+                                        app.note(&format!("⚠ skipped {s}"));
+                                    }
                                     turn_gen += 1;
-                                    turn_handle = Some(spawn_turn(
-                                        &prompt,
-                                        &session,
-                                        &done_tx,
-                                        turn_gen,
-                                        &mut app,
-                                        &mut busy,
-                                        &mut busy_since,
-                                    ));
+                                    turn_handle = Some(if file_blocks.is_empty() {
+                                        spawn_turn(
+                                            &prompt,
+                                            &session,
+                                            &done_tx,
+                                            turn_gen,
+                                            &mut app,
+                                            &mut busy,
+                                            &mut busy_since,
+                                        )
+                                    } else {
+                                        spawn_turn_with(
+                                            prompt.clone(),
+                                            file_blocks,
+                                            None,
+                                            &session,
+                                            &done_tx,
+                                            turn_gen,
+                                            &mut app,
+                                            &mut busy,
+                                            &mut busy_since,
+                                        )
+                                    });
                                 }
                             }
                         }
@@ -3970,6 +4112,17 @@ async fn run_chat_tui(
                 } => {
                     app.set_question(&question, &options, allow_other);
                     pending_question = Some(reply);
+                }
+            }
+        }
+
+        // Keep the commit hook's model file current with whichever model ran the latest turn, so a
+        // commit the agent makes is attributed to the model that actually did the work.
+        if git_coauthor {
+            if let Some(model) = app.routing.as_ref().map(|r| r.model.clone()) {
+                if !model.is_empty() && model != last_model_written {
+                    write_active_model(&model);
+                    last_model_written = model;
                 }
             }
         }
@@ -4210,6 +4363,17 @@ async fn run_chat_tui(
             let t = (busy_since.elapsed().as_millis() / 60) as usize;
             if t != app.tick {
                 app.tick = t;
+                dirty = true;
+            }
+        }
+        // Blink the input cursor only when focused AND idle: solid for the first ~600ms after the
+        // last keystroke, then a calm ~600ms square wave. Typing resets `last_input_at`, so the
+        // block never flickers while you write. Unfocused → static hollow, so leave it alone.
+        if !app.unfocused {
+            let idle = last_input_at.elapsed().as_millis();
+            let phase_off = idle >= 600 && ((idle - 600) / 600) % 2 == 1;
+            if phase_off != app.cursor_hidden {
+                app.cursor_hidden = phase_off;
                 dirty = true;
             }
         }
@@ -4909,6 +5073,65 @@ async fn dispatch_command(
                 }
             }
         }
+        // `/init` — scan the repo and write `.forge/AGENTS.md`, the project memory the agent
+        // auto-loads as a standing system prompt on future sessions.
+        CommandAction::Init => {
+            app.note("📝 scanning the repo to write .forge/AGENTS.md …");
+            return Ok(DispatchOutcome::RunTurn {
+                prompt: "Analyze this codebase and write a concise `.forge/AGENTS.md` capturing \
+what a new contributor (human or agent) needs: a one-paragraph project overview; how to build, \
+test, lint, and run it; the source layout and architecture; and the project's code conventions. \
+Inspect the real files first (README, package/build manifests, CI config, the main source dirs) \
+using your tools — do not guess. Then create `.forge/AGENTS.md` with the WriteFile tool. Keep it \
+tight and accurate; omit anything you could not verify."
+                    .to_string(),
+                guidance: Vec::new(),
+                tier: Some(forge_types::TaskTier::Complex),
+            });
+        }
+        // `/plan <task>` — planning mode: switch to read-only (Plan) temper and run a turn that
+        // investigates and proposes a plan without making any edits. Approved with `/execute`.
+        CommandAction::Plan(task) => {
+            let task = task.trim().to_string();
+            if task.is_empty() {
+                app.note("usage: /plan <task> — investigate read-only and propose a plan");
+                return Ok(DispatchOutcome::Handled);
+            }
+            let label = {
+                let mut s = session.lock().await;
+                s.set_temper(forge_types::PermissionMode::Plan).label()
+            };
+            app.set_temper(label);
+            app.note("🗺 planning mode — read-only. I'll propose a plan; approve it with /execute.");
+            return Ok(DispatchOutcome::RunTurn {
+                prompt: format!(
+                    "Investigate the codebase as needed and produce a concrete, ordered, \
+step-by-step plan to accomplish the task below. Do NOT make any edits or run state-changing \
+commands — this is planning only. Present the plan clearly for review; the user approves it with \
+/execute.\n\nTask: {task}"
+                ),
+                guidance: Vec::new(),
+                tier: Some(forge_types::TaskTier::Complex),
+            });
+        }
+        // `/execute` — approve the proposed plan: switch to Auto-edit (AcceptEdits) and carry it out.
+        CommandAction::Execute => {
+            let label = {
+                let mut s = session.lock().await;
+                s.set_temper(forge_types::PermissionMode::AcceptEdits)
+                    .label()
+            };
+            app.set_temper(label);
+            app.note("⚒ executing the approved plan (Auto-edit)");
+            return Ok(DispatchOutcome::RunTurn {
+                prompt: "Implement the plan you just proposed, step by step — make the edits and \
+run the commands needed to carry it out. If something forces a deviation from the plan, say so \
+and keep going."
+                    .to_string(),
+                guidance: Vec::new(),
+                tier: Some(forge_types::TaskTier::Complex),
+            });
+        }
         // `/goal <objective>` — pin a persisted north-star, then run a turn that decomposes it
         // into a tracked task plan (update_tasks).
         CommandAction::Goal(text) => {
@@ -5473,6 +5696,8 @@ async fn picker_accept(
                 };
                 app.set_temper(label);
                 app.note(&format!("◆ mode → {label}"));
+                // Persist as the default for the next session (best-effort).
+                let _ = forge_config::write_permission_mode(mode);
             }
         }
         // Assay's choice is handled in the render loop (it spawns a background task), never here.
@@ -5516,6 +5741,31 @@ fn fmt_age(created_at: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_at_files_reads_referenced_files_and_skips_nonfiles() {
+        let dir = std::env::temp_dir().join(format!("forge-at-{}", forge_types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("note.txt");
+        std::fs::write(&f, "hello from the file").unwrap();
+        let path = f.to_string_lossy();
+
+        // A real file is read into a guidance block + reported as included; a `@mention` that
+        // isn't a file is left alone (no block, not reported).
+        let prompt = format!("review @{path} and ping @nobody-here-xyz about it");
+        let (blocks, included, skipped) = expand_at_files(&prompt);
+        assert_eq!(included, vec![path.to_string()]);
+        assert!(skipped.is_empty());
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].contains("hello from the file"));
+        assert!(blocks[0].contains(&*path));
+
+        // The same path referenced twice is only read once.
+        let (blocks2, _, _) = expand_at_files(&format!("@{path} @{path}"));
+        assert_eq!(blocks2.len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn copy_catalog_assets_imports_then_skips_existing() {
