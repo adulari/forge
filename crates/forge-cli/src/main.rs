@@ -1072,7 +1072,7 @@ fn provider_label(provider: &str) -> &'static str {
         "deepseek" => "DeepSeek — paid",
         "openrouter" => "OpenRouter (gateway, many models) — paid + some :free",
         "groq" => "Groq — free tier (fast)",
-        "opencode_go" => "OpenCode Zen — free curated coding models",
+        "opencode_go" => "OpenCode Zen — paid credit (curated coding models)",
         "github_copilot" => "GitHub Models — free inference",
         "mimo" => "Xiaomi MiMo — free",
         "minimax" => "MiniMax — free tier",

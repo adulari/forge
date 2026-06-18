@@ -937,6 +937,7 @@ impl App {
     /// multiline pastes show a `[pasted text (N lines)]` placeholder so the input stays on one
     /// line and won't accidentally auto-submit when the pasted text contains newlines.
     pub fn handle_paste(&mut self, content: String) {
+        self.input_cursor = self.input_cursor.min(self.input.len());
         if !content.contains('\n') {
             // Single-line: insert directly as if the user typed it.
             self.input.insert_str(self.input_cursor, &content);
@@ -956,6 +957,7 @@ impl App {
     /// If cursor is immediately after (Backspace) or at (DeleteForward) a paste-block placeholder,
     /// delete the entire placeholder in one action. Returns `true` if consumed.
     pub fn try_delete_paste_block(&mut self, key: KeyKind) -> bool {
+        self.input_cursor = self.input_cursor.min(self.input.len());
         match key {
             KeyKind::Backspace => {
                 let found = {
@@ -2207,13 +2209,8 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
                 Style::default()
             };
             Row::new(vec![
-                Cell::from(display).style(style),
-                Cell::from(if *cost > 0.0 {
-                    format!("${:.5}", cost)
-                } else {
-                    "subscription".to_string()
-                })
-                .style(style),
+                Cell::from(display.clone()).style(style),
+                Cell::from(cost_cell(&display, *cost)).style(style),
                 Cell::from(format_tok(*inp)).style(style),
                 Cell::from(format_tok(*out)).style(style),
             ])
@@ -2231,6 +2228,21 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
     .header(header)
     .block(Block::default());
     f.render_widget(table, chunks[1]);
+}
+
+/// Honest cost label for a per-model row. A flat-rate subscription bridge (Claude Code / Codex
+/// CLI) genuinely costs $0 per call, so it reads "subscription". A priced model shows its dollar
+/// cost. Anything else at $0 is a model we have NO price for (gateway/credit providers like
+/// OpenCode Zen, OpenRouter pass-through) — it may still burn real credit, so we say "untracked"
+/// rather than lie that it's a subscription.
+fn cost_cell(model: &str, cost: f64) -> String {
+    if model.starts_with("claude-cli") || model.starts_with("codex-cli") {
+        "subscription".to_string()
+    } else if cost > 0.0 {
+        format!("${cost:.5}")
+    } else {
+        "untracked".to_string()
+    }
 }
 
 /// A 14-cell colour-coded meter for a fraction, eased by `ease` (animation grow-in).
@@ -2622,6 +2634,29 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    #[test]
+    fn cost_cell_distinguishes_subscription_priced_and_untracked() {
+        assert_eq!(cost_cell("claude-cli::", 0.0), "subscription");
+        assert_eq!(cost_cell("codex-cli::gpt-5.5", 0.0), "subscription");
+        assert_eq!(cost_cell("openai::gpt-4o-mini", 0.0123), "$0.01230");
+        // Unpriced gateway/credit model: not a bridge, $0 only because we lack a price.
+        assert_eq!(cost_cell("opencode_go::glm-5.2", 0.0), "untracked");
+    }
+
+    #[test]
+    fn paste_into_empty_input_with_stale_cursor_does_not_panic() {
+        // Regression: input_cursor could outlive the input contents (e.g. after a submit clears
+        // input but a key path left the cursor > 0), making a `&input[..cursor]` slice panic.
+        let mut app = App::default();
+        app.input.clear();
+        app.input_cursor = 5; // stale: past end of empty input
+        app.handle_paste("x".to_string());
+        app.input_cursor = 5;
+        app.handle_paste("a\nb\nc".to_string());
+        let _ = app.try_delete_paste_block(KeyKind::Backspace);
+        let _ = app.try_delete_paste_block(KeyKind::DeleteForward);
     }
 
     /// Concatenated text of everything queued for scrollback.
