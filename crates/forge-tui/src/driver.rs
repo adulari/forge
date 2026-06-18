@@ -8,7 +8,8 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+    self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
+    Event, KeyCode, KeyEventKind, KeyModifiers,
 };
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use forge_types::SideEffect;
@@ -26,6 +27,9 @@ pub enum InputEvent {
     /// A bracketed paste: the terminal wrapped the content in `\x1b[200~…\x1b[201~` and
     /// crossterm decoded it as a single string (EnableBracketedPaste must be active).
     Paste(String),
+    /// The terminal window gained (`true`) or lost (`false`) focus. Drives the input cursor's
+    /// focused/hollow appearance (EnableFocusChange must be active).
+    Focus(bool),
 }
 
 /// A message from a running turn to the render loop.
@@ -142,7 +146,7 @@ impl Tui {
         // Ctrl-C inert). `Drop` covers the normal/unwind path; this covers the print itself.
         install_panic_restore();
         enable_raw_mode()?;
-        crossterm::execute!(io::stdout(), EnableBracketedPaste)?;
+        crossterm::execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
         let backend = CrosstermBackend::new(io::stdout());
         let terminal = Terminal::with_options(
             backend,
@@ -197,6 +201,8 @@ impl Tui {
         }
         match event::read()? {
             Event::Paste(s) => return Ok(Some(InputEvent::Paste(s))),
+            Event::FocusGained => return Ok(Some(InputEvent::Focus(true))),
+            Event::FocusLost => return Ok(Some(InputEvent::Focus(false))),
             Event::Key(k) if k.kind == KeyEventKind::Press => {
                 let key = match k.code {
                     KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -275,7 +281,7 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
-        let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste);
+        let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste, DisableFocusChange);
         let _ = disable_raw_mode();
         let _ = self.terminal.show_cursor();
         // No alternate screen to leave: the conversation stays in the user's scrollback.

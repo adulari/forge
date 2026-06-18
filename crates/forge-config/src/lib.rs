@@ -1002,6 +1002,32 @@ fn write_settings_at(
     Ok(())
 }
 
+/// Persist only `permission_mode` to the user config TOML, preserving every other key (notably
+/// `mesh.credit_mode`, which [`write_settings`] would also rewrite). Used when the temper is
+/// switched at runtime (SHIFT+TAB / `/mode`) so the chosen posture becomes the default next launch.
+pub fn write_permission_mode(permission: PermissionMode) -> Result<PathBuf, ConfigError> {
+    let dir = config_dir().ok_or(ConfigError::NoConfigDir)?;
+    std::fs::create_dir_all(&dir).map_err(|e| ConfigError::Write(e.to_string()))?;
+    let path = dir.join("config.toml");
+    let mut root: toml::Table = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_default();
+    let perm_str = match permission {
+        PermissionMode::Default => "default",
+        PermissionMode::AcceptEdits => "accept-edits",
+        PermissionMode::Bypass => "bypass",
+        PermissionMode::Plan => "plan",
+    };
+    root.insert(
+        "permission_mode".to_string(),
+        toml::Value::String(perm_str.to_string()),
+    );
+    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
+    std::fs::write(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    Ok(path)
+}
+
 /// Append a `[[permissions.rules]]` allow entry for `tool` to the project `.forge/config.toml`.
 /// Creates the file (and `.forge/` dir) if absent. Idempotent at the file level — duplicate
 /// entries are harmless (first match wins in the permission broker).
