@@ -1206,8 +1206,30 @@ fn apply_wizard_outcome(outcome: &forge_tui::WizardOutcome) -> Result<std::path:
 }
 
 fn open_store() -> Result<Store> {
-    std::fs::create_dir_all(".forge").context("creating .forge directory")?;
-    Store::open(Path::new(".forge/forge.db")).context("opening session store")
+    // The store lives in a stable per-user data dir so usage/budget and session history persist
+    // across restarts and don't reset when `forge` is launched from a different directory (the
+    // budget is global per FR-5). Fall back to the legacy cwd-local path only if no data dir
+    // resolves. `FORGE_DB` overrides both (tests / power users).
+    if let Ok(custom) = std::env::var("FORGE_DB") {
+        let path = std::path::PathBuf::from(custom);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).context("creating store directory")?;
+        }
+        return Store::open(&path).context("opening session store");
+    }
+    let Some(dir) = forge_config::data_dir() else {
+        std::fs::create_dir_all(".forge").context("creating .forge directory")?;
+        return Store::open(Path::new(".forge/forge.db")).context("opening session store");
+    };
+    std::fs::create_dir_all(&dir).context("creating data directory")?;
+    let db = dir.join("forge.db");
+    // One-time migration: if there's no global store yet but a legacy `./.forge/forge.db` exists in
+    // this directory, move its history over so the switch doesn't appear to wipe past usage.
+    let legacy = Path::new(".forge/forge.db");
+    if !db.exists() && legacy.exists() {
+        let _ = std::fs::copy(legacy, &db);
+    }
+    Store::open(&db).context("opening session store")
 }
 
 /// Resolve a (possibly abbreviated) session id to a single full id, git-style.

@@ -177,8 +177,10 @@ pub fn context_limit(model: &str) -> Option<u32> {
     let provider = model.split("::").next().unwrap_or("");
     let m = model.rsplit("::").next().unwrap_or(model).to_lowercase();
     let has = |s: &str| m.contains(s);
-    // 256k+ frontier long-context families.
-    let frontier_256k = has("gpt-5") || has("o1") || has("o3") || has("o4");
+    // GPT-5 generation (incl. Codex gpt-5.x) ships a 272k context window.
+    let gpt5 = has("gpt-5");
+    // Older OpenAI reasoning families at 256k.
+    let frontier_256k = has("o1") || has("o3") || has("o4");
     // 128k is the modern default for most capable open / hosted models.
     let mid_128k = has("gpt-4o")
         || has("gpt-4.1")
@@ -198,10 +200,17 @@ pub fn context_limit(model: &str) -> Option<u32> {
         || has("nova")
         || has("minimax")
         || has("mimo");
-    let limit = if has("claude") || has("opus") || has("sonnet") || has("haiku") {
+    let limit = if has("opus") {
+        // Claude Opus 4.x supports a 1M-token context window.
+        1_000_000
+    } else if has("sonnet") || has("haiku") || has("claude") {
+        // Sonnet / Haiku (and any other Claude) are 200k.
         200_000
     } else if has("gemini") {
         1_000_000
+    } else if gpt5 {
+        // GPT-5 generation (incl. Codex gpt-5.x).
+        272_000
     } else if frontier_256k {
         256_000
     } else if mid_128k {
@@ -212,10 +221,12 @@ pub fn context_limit(model: &str) -> Option<u32> {
         32_000
     } else {
         // The subscription bridges carry no model name in their bare id (`claude-cli::`), so match
-        // on the provider: Claude Code ≈ 200k, Codex/gpt-5 ≈ 256k. Generous but real.
+        // on the provider. The bare id is the CLI's default model; the mesh routes to the explicit
+        // `::opus` / `::sonnet` aliases (matched above) for sizing, so a conservative 200k for the
+        // ambiguous bare Claude id is safe. Codex runs GPT-5 (272k).
         match provider {
             "claude-cli" => 200_000,
-            "codex-cli" => 256_000,
+            "codex-cli" => 272_000,
             _ => return None,
         }
     };
@@ -252,9 +263,13 @@ mod tests {
 
     #[test]
     fn context_limit_known_families_and_none_for_unknown() {
-        assert_eq!(context_limit("anthropic::claude-opus-4-8"), Some(200_000));
+        // Opus is 1M; Sonnet/Haiku stay at 200k.
+        assert_eq!(context_limit("anthropic::claude-opus-4-8"), Some(1_000_000));
+        assert_eq!(context_limit("anthropic::claude-sonnet-4-6"), Some(200_000));
+        assert_eq!(context_limit("anthropic::claude-haiku-4-5"), Some(200_000));
         assert_eq!(context_limit("gemini::gemini-2.5-pro"), Some(1_000_000));
         assert_eq!(context_limit("openai::gpt-4o"), Some(128_000));
+        assert_eq!(context_limit("openai::gpt-5.5"), Some(272_000));
         // Common free families now have conservative figures so the core can bound a turn.
         assert_eq!(
             context_limit("openrouter::qwen/qwen3-coder:free"),
@@ -268,9 +283,12 @@ mod tests {
             context_limit("openrouter::nvidia/nemotron-3-nano-30b-a3b:free"),
             Some(128_000)
         );
-        // Subscription bridges match on the provider (bare id carries no model name).
+        // Explicit bridge aliases resolve by model name: opus → 1M, sonnet → 200k.
+        assert_eq!(context_limit("claude-cli::opus"), Some(1_000_000));
+        assert_eq!(context_limit("claude-cli::sonnet"), Some(200_000));
+        // Bare bridge id (no model name) → conservative provider default; Codex → GPT-5 (272k).
         assert_eq!(context_limit("claude-cli::"), Some(200_000));
-        assert_eq!(context_limit("codex-cli::gpt-5.5"), Some(256_000));
+        assert_eq!(context_limit("codex-cli::gpt-5.5"), Some(272_000));
         // A truly unknown model → None (the gauge shows used tokens, no fake denominator).
         assert_eq!(context_limit("ollama::some-local-model"), None);
     }
