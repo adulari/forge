@@ -359,6 +359,18 @@ pub enum KeyKind {
     End,
     /// Ctrl+J — insert a newline into the input without submitting.
     InsertNewline,
+    /// Delete key — delete the character forward of the cursor.
+    DeleteForward,
+    /// Ctrl+W — delete word backward (to the previous word boundary).
+    DeleteWordBack,
+    /// Ctrl+U — kill from cursor to start of the current line.
+    KillLineBack,
+    /// Ctrl+K — kill from cursor to end of the current line.
+    KillLineForward,
+    /// Ctrl+Left — move cursor one word left.
+    WordLeft,
+    /// Ctrl+Right — move cursor one word right.
+    WordRight,
     /// TAB — complete the palette selection (ignored by the input line).
     Tab,
     /// SHIFT+TAB — cycle the operating temper (handled by the shell, not the input line).
@@ -397,6 +409,52 @@ fn next_char_boundary(s: &str, pos: usize) -> usize {
         p += 1;
     }
     p
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Ctrl+Left / Ctrl+W: find the start of the previous word from `pos`.
+fn prev_word_start(s: &str, mut pos: usize) -> usize {
+    // Skip non-word chars backward
+    while pos > 0 {
+        let p = prev_char_boundary(s, pos);
+        if is_word_char(s[p..pos].chars().next().unwrap_or(' ')) {
+            break;
+        }
+        pos = p;
+    }
+    // Skip word chars backward
+    while pos > 0 {
+        let p = prev_char_boundary(s, pos);
+        if !is_word_char(s[p..pos].chars().next().unwrap_or(' ')) {
+            break;
+        }
+        pos = p;
+    }
+    pos
+}
+
+/// Ctrl+Right: find the end of the next word from `pos`.
+fn next_word_end(s: &str, mut pos: usize) -> usize {
+    // Skip non-word chars forward
+    while pos < s.len() {
+        let next = next_char_boundary(s, pos);
+        if is_word_char(s[pos..next].chars().next().unwrap_or(' ')) {
+            break;
+        }
+        pos = next;
+    }
+    // Skip word chars forward
+    while pos < s.len() {
+        let next = next_char_boundary(s, pos);
+        if !is_word_char(s[pos..next].chars().next().unwrap_or(' ')) {
+            break;
+        }
+        pos = next;
+    }
+    pos
 }
 
 /// Apply one keystroke to the input buffer (pure; no terminal I/O). `cursor` is the byte
@@ -451,6 +509,41 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
                 *cursor = 0;
                 InputOutcome::Submit(std::mem::take(input))
             }
+        }
+        KeyKind::DeleteForward => {
+            if *cursor < input.len() {
+                let next = next_char_boundary(input, *cursor);
+                input.drain(*cursor..next);
+            }
+            InputOutcome::Editing
+        }
+        KeyKind::DeleteWordBack => {
+            let start = prev_word_start(input, *cursor);
+            input.drain(start..*cursor);
+            *cursor = start;
+            InputOutcome::Editing
+        }
+        KeyKind::KillLineBack => {
+            let line_start = input[..*cursor].rfind('\n').map(|p| p + 1).unwrap_or(0);
+            input.drain(line_start..*cursor);
+            *cursor = line_start;
+            InputOutcome::Editing
+        }
+        KeyKind::KillLineForward => {
+            let line_end = input[*cursor..]
+                .find('\n')
+                .map(|p| *cursor + p)
+                .unwrap_or(input.len());
+            input.drain(*cursor..line_end);
+            InputOutcome::Editing
+        }
+        KeyKind::WordLeft => {
+            *cursor = prev_word_start(input, *cursor);
+            InputOutcome::Editing
+        }
+        KeyKind::WordRight => {
+            *cursor = next_word_end(input, *cursor);
+            InputOutcome::Editing
         }
         KeyKind::Esc => InputOutcome::Quit,
         KeyKind::Up

@@ -230,6 +230,10 @@ pub struct Session {
     /// picks "always", a mesh failover to a model that needs compaction proceeds silently for the
     /// rest of this session (reset next launch). `false` = ask each time.
     always_compact_on_switch: bool,
+    /// Whether `.forge/AGENTS.md` (or `AGENTS.md`) has been injected as a standing system prompt.
+    /// False for fresh sessions so it's injected on the first turn; true for resumed sessions
+    /// (the content is already in the stored transcript) and after injection.
+    project_prompt_injected: bool,
 }
 
 impl Session {
@@ -312,6 +316,8 @@ impl Session {
         let rules = config.permission_rules();
         // Rehydrate the task list (empty for a fresh session; restored on resume).
         let tasks = store.tasks(&id).unwrap_or_default();
+        // Resumed sessions already have AGENTS.md in the stored transcript; don't re-inject.
+        let project_prompt_injected = !transcript.is_empty();
         let mut s = Self {
             id,
             store,
@@ -336,6 +342,7 @@ impl Session {
             pinned_model: None,
             pending_hints: vec![],
             always_compact_on_switch: false,
+            project_prompt_injected,
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
@@ -529,6 +536,7 @@ impl Session {
         self.transcript.clear();
         self.seq = 0;
         self.tasks.clear();
+        self.project_prompt_injected = false;
         self.presenter.emit(PresenterEvent::SessionStarted { id });
         Ok(())
     }
@@ -552,6 +560,7 @@ impl Session {
             .collect();
         self.id = session_id.to_string();
         self.tasks = self.store.tasks(session_id).unwrap_or_default();
+        self.project_prompt_injected = true;
         self.presenter.emit(PresenterEvent::SessionStarted {
             id: session_id.to_string(),
         });
@@ -1370,6 +1379,25 @@ impl Session {
             self.store
                 .add_message(&self.id, gseq, Role::System, g, None)?;
             self.transcript.push(Message::system(g));
+        }
+
+        // Inject the project AGENTS.md as a standing system prompt on the first turn of a
+        // fresh session. Tried in order: .forge/AGENTS.md, then AGENTS.md in cwd.
+        // Sync I/O intentional: one-time startup read of a small file; no await point so
+        // an abort() between here and user-message persistence can't skip the recording.
+        if !self.project_prompt_injected {
+            self.project_prompt_injected = true;
+            for agents_path in [".forge/AGENTS.md", "AGENTS.md"] {
+                if let Ok(body) = std::fs::read_to_string(agents_path) {
+                    if !body.trim().is_empty() {
+                        let pseq = self.next_seq();
+                        self.store
+                            .add_message(&self.id, pseq, Role::System, &body, None)?;
+                        self.transcript.push(Message::system(&body));
+                        break;
+                    }
+                }
+            }
         }
 
         // 2. Persist + record the user message. Its seq keys this turn's code-snapshot dir
