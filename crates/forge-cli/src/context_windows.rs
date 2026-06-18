@@ -10,9 +10,11 @@ use std::time::Duration;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Fetch OpenRouter per-model context windows and persist the ones present in `models`. Best-effort
-/// and fail-soft: a network/parse error just leaves the heuristic in charge. Skips the network
-/// entirely when no OpenRouter model is in the catalog.
+/// Fetch OpenRouter per-model context windows AND prices, persisting the ones present in `models`.
+/// Best-effort and fail-soft: a network/parse error just leaves the heuristics in charge. Skips the
+/// network entirely when no OpenRouter model is in the catalog. The price persistence matters for
+/// the budget cap: most gateway models aren't in the bundled rate table, so without a fetched price
+/// their spend computes to $0 and the cap can't see it.
 pub async fn fetch_and_persist(models: &[String]) {
     if !models
         .iter()
@@ -20,8 +22,12 @@ pub async fn fetch_and_persist(models: &[String]) {
     {
         return;
     }
-    let windows = openrouter_windows().await;
-    if windows.is_empty() {
+    let Some(body) = get_json("https://openrouter.ai/api/v1/models").await else {
+        return;
+    };
+    let windows = openrouter_windows(&body);
+    let prices = openrouter_pricing(&body);
+    if windows.is_empty() && prices.is_empty() {
         return;
     }
     let Ok(store) = crate::open_store() else {
@@ -33,15 +39,16 @@ pub async fn fetch_and_persist(models: &[String]) {
             let _ = store.set_model_context(&id, w);
         }
     }
+    for (id, in_1k, out_1k) in prices {
+        if wanted.contains(id.as_str()) {
+            let _ = store.set_model_pricing(&id, in_1k, out_1k);
+        }
+    }
 }
 
-/// `GET https://openrouter.ai/api/v1/models` → `{ "data": [ { "id": "vendor/model:free",
-/// "context_length": 131072, … } ] }`. Returns `(openrouter::<id>, window)` pairs. The endpoint is
-/// public (no key needed). Empty on any failure.
-async fn openrouter_windows() -> Vec<(String, u32)> {
-    let Some(body) = get_json("https://openrouter.ai/api/v1/models").await else {
-        return Vec::new();
-    };
+/// Extract `(openrouter::<id>, window)` pairs from the `/api/v1/models` body
+/// (`{ "data": [ { "id": …, "context_length": 131072 } ] }`).
+fn openrouter_windows(body: &serde_json::Value) -> Vec<(String, u32)> {
     let Some(data) = body["data"].as_array() else {
         return Vec::new();
     };
@@ -55,6 +62,71 @@ async fn openrouter_windows() -> Vec<(String, u32)> {
             ))
         })
         .collect()
+}
+
+/// Extract `(openrouter::<id>, input_per_1k, output_per_1k)` from the body. OpenRouter quotes
+/// `pricing.prompt` / `pricing.completion` as USD-per-token strings (e.g. "0.0000002"), so multiply
+/// by 1000 for per-1k. A `$0` (free) model is kept — recording 0.0 is correct and stops the price
+/// being re-fetched as "unknown". Models with no usable pricing block are skipped.
+fn openrouter_pricing(body: &serde_json::Value) -> Vec<(String, f64, f64)> {
+    let Some(data) = body["data"].as_array() else {
+        return Vec::new();
+    };
+    let per_1k = |v: &serde_json::Value| -> Option<f64> {
+        // Field is a string; tolerate a numeric too. Reject negatives / NaN.
+        let n = v
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .or_else(|| v.as_f64())?;
+        (n.is_finite() && n >= 0.0).then_some(n * 1000.0)
+    };
+    data.iter()
+        .filter_map(|m| {
+            let id = m["id"].as_str()?;
+            let pricing = &m["pricing"];
+            let input = per_1k(&pricing["prompt"])?;
+            let output = per_1k(&pricing["completion"])?;
+            Some((format!("openrouter::{id}"), input, output))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_windows_and_per_token_pricing() {
+        let body = json!({
+            "data": [
+                { "id": "vendor/paid", "context_length": 131072,
+                  "pricing": { "prompt": "0.0000002", "completion": "0.0000008" } },
+                { "id": "vendor/free", "context_length": 32768,
+                  "pricing": { "prompt": "0", "completion": "0" } },
+                { "id": "vendor/nopricing", "context_length": 8192 },
+            ]
+        });
+        let windows = openrouter_windows(&body);
+        assert!(windows.contains(&("openrouter::vendor/paid".to_string(), 131072)));
+
+        let prices = openrouter_pricing(&body);
+        // Per-token strings → per-1k (×1000): 0.0000002 → 0.0002, 0.0000008 → 0.0008.
+        let paid = prices
+            .iter()
+            .find(|(id, _, _)| id == "openrouter::vendor/paid")
+            .unwrap();
+        assert!((paid.1 - 0.0002).abs() < 1e-12);
+        assert!((paid.2 - 0.0008).abs() < 1e-12);
+        // Free model is recorded as 0.0 (kept, not skipped).
+        assert!(prices
+            .iter()
+            .any(|(id, i, o)| id == "openrouter::vendor/free" && *i == 0.0 && *o == 0.0));
+        // No pricing block → skipped entirely.
+        assert!(!prices
+            .iter()
+            .any(|(id, _, _)| id == "openrouter::vendor/nopricing"));
+    }
 }
 
 async fn get_json(url: &str) -> Option<serde_json::Value> {

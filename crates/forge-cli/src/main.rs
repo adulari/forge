@@ -22,6 +22,7 @@ mod balance;
 mod benchmarks;
 mod bridge_stats;
 mod context_windows;
+mod image_input;
 mod mcp_serve;
 mod remote;
 mod replay;
@@ -3268,6 +3269,16 @@ async fn run_chat_tui(
             dirty = true;
             let key = match ev {
                 forge_tui::InputEvent::Paste(s) => {
+                    // Pasting an image: terminals deliver an empty/whitespace bracketed-paste for
+                    // image clipboard content, so on an empty payload probe the OS clipboard for an
+                    // image and drop it in as an attachment block. Otherwise it's a normal text paste.
+                    if s.trim().is_empty() {
+                        if let Some((att, label)) = crate::image_input::clipboard_image() {
+                            app.attach_image(att, &label);
+                            app.note(&format!("📎 attached image ({label})"));
+                            continue;
+                        }
+                    }
                     app.handle_paste(s);
                     continue;
                 }
@@ -3757,7 +3768,7 @@ async fn run_chat_tui(
                 };
                 match outcome {
                     InputOutcome::Submit(raw_line) => {
-                        let line = app.substitute_paste_blocks(raw_line);
+                        let (line, submit_images) = app.resolve_paste_blocks(raw_line);
                         history_pos = None;
                         if !line.trim().is_empty() && prompt_history.last() != Some(&line) {
                             prompt_history.push(line.clone());
@@ -3870,6 +3881,11 @@ async fn run_chat_tui(
                                     app.note(&format!("⎇ prompt blocked by hook: {reason}"));
                                 }
                                 Ok(prompt) => {
+                                    // Attach any images pasted/added into this prompt as vision
+                                    // input for the turn about to run.
+                                    if !submit_images.is_empty() {
+                                        session.lock().await.attach_images(submit_images);
+                                    }
                                     turn_gen += 1;
                                     turn_handle = Some(spawn_turn(
                                         &prompt,
@@ -4794,6 +4810,18 @@ async fn dispatch_command(
             app.show_thinking = !app.show_thinking;
             let state = if app.show_thinking { "on" } else { "off" };
             app.note(&format!("thinking display: {state}"));
+        }
+        // `/image <path>` attaches an image file to the next prompt as an input block.
+        CommandAction::Image(path) => {
+            let path = path.trim();
+            if path.is_empty() {
+                app.note("usage: /image <path>");
+            } else {
+                match crate::image_input::load_image_file(path) {
+                    Ok((att, label)) => app.attach_image(att, &label),
+                    Err(e) => app.note(&format!("⚠ {e}")),
+                }
+            }
         }
         CommandAction::Mcp(server) => {
             let s = session.lock().await;

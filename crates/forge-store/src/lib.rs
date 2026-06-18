@@ -635,6 +635,42 @@ impl Store {
         Ok(row.map(|w| w.max(0) as u32))
     }
 
+    /// Persist a model's fetched USD price (per 1k tokens), from a provider's model API. Upsert so a
+    /// later discovery refreshes it.
+    pub fn set_model_pricing(
+        &self,
+        model: &str,
+        input_per_1k: f64,
+        output_per_1k: f64,
+    ) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO model_pricing (model, input_per_1k, output_per_1k, updated_at)
+             VALUES (?1, ?2, ?3, strftime('%s','now'))
+             ON CONFLICT(model) DO UPDATE SET input_per_1k = excluded.input_per_1k,
+                 output_per_1k = excluded.output_per_1k, updated_at = excluded.updated_at",
+            (model, input_per_1k, output_per_1k),
+        )?;
+        Ok(())
+    }
+
+    /// Every fetched per-model price: `model -> (input_per_1k, output_per_1k)` in USD. Fed into the
+    /// mesh's `Pricing` as overrides so gateway/credit spend is tracked, not silently $0.
+    pub fn all_model_pricing(&self) -> Result<Vec<(String, f64, f64)>> {
+        let conn = self.lock()?;
+        let mut stmt =
+            conn.prepare("SELECT model, input_per_1k, output_per_1k FROM model_pricing")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Clear every model bench (the `forge models --clear` rescan reset). Returns the number of
     /// benched rows removed so the caller can report it.
     pub fn clear_all_model_health(&self) -> Result<usize> {
@@ -1995,6 +2031,27 @@ mod tests {
             store.model_context("openrouter::x:free").unwrap(),
             Some(65_536)
         );
+    }
+
+    #[test]
+    fn model_pricing_round_trips_and_upserts() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.all_model_pricing().unwrap().is_empty());
+        store
+            .set_model_pricing("openrouter::vendor/m", 0.0002, 0.0008)
+            .unwrap();
+        let rows = store.all_model_pricing().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "openrouter::vendor/m");
+        assert!((rows[0].1 - 0.0002).abs() < 1e-12);
+        assert!((rows[0].2 - 0.0008).abs() < 1e-12);
+        // Upsert refreshes in place.
+        store
+            .set_model_pricing("openrouter::vendor/m", 0.001, 0.002)
+            .unwrap();
+        let rows = store.all_model_pricing().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].1 - 0.001).abs() < 1e-12);
     }
 
     #[test]

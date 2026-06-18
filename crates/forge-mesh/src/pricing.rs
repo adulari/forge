@@ -82,6 +82,37 @@ impl Pricing {
         Pricing::default().with_overrides(overrides)
     }
 
+    /// Bundled defaults, then prices fetched from a provider's model API (e.g. OpenRouter),
+    /// then the config's explicit overrides — so precedence is defaults < fetched < user config.
+    /// This is what lets gateway/credit spend be tracked: those models aren't in the bundled
+    /// defaults, so without the fetched layer their cost is $0 and the budget cap can't see it.
+    pub fn from_config_with_fetched(
+        config: &forge_config::Config,
+        fetched: impl IntoIterator<Item = (String, f64, f64)>,
+    ) -> Self {
+        let fetched_rates = fetched
+            .into_iter()
+            .map(|(id, input_per_1k, output_per_1k)| {
+                (
+                    id,
+                    ModelRate {
+                        input_per_1k,
+                        output_per_1k,
+                    },
+                )
+            })
+            .collect();
+        let config_overrides = config
+            .mesh
+            .pricing
+            .iter()
+            .map(|(id, &o)| (id.clone(), o.into()))
+            .collect();
+        Pricing::default()
+            .with_overrides(fetched_rates)
+            .with_overrides(config_overrides)
+    }
+
     /// Compute the USD cost of a call given token counts. Unknown models cost nothing.
     pub fn cost_for(&self, model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
         match self.rates.get(model) {
@@ -243,6 +274,30 @@ mod tests {
             p.cost_for("open_router::deepseek/deepseek-chat", 9999, 9999),
             0.0
         );
+    }
+
+    #[test]
+    fn fetched_prices_track_otherwise_unpriced_models_config_still_wins() {
+        let mut config = forge_config::Config::default();
+        // User pins an explicit price for one model.
+        config.mesh.pricing.insert(
+            "openrouter::vendor/a".to_string(),
+            forge_config::PriceOverride {
+                input_per_1k: 9.0,
+                output_per_1k: 9.0,
+            },
+        );
+        let fetched = vec![
+            // Same model the user overrode — config must win.
+            ("openrouter::vendor/a".to_string(), 1.0, 1.0),
+            // A model with no bundled default and no config — fetched gives it a real price.
+            ("openrouter::vendor/b".to_string(), 0.5, 2.0),
+        ];
+        let pricing = Pricing::from_config_with_fetched(&config, fetched);
+        // vendor/a: config (9.0/9.0) wins over fetched (1.0/1.0).
+        assert!((pricing.cost_for("openrouter::vendor/a", 1000, 1000) - 18.0).abs() < 1e-9);
+        // vendor/b: previously $0 (unpriced), now tracked from the fetched rate.
+        assert!((pricing.cost_for("openrouter::vendor/b", 1000, 1000) - 2.5).abs() < 1e-9);
     }
 
     #[test]
