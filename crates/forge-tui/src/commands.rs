@@ -76,6 +76,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/mcp [server]",
     },
     Command {
+        name: "init",
+        desc: "scan the repo and generate .forge/AGENTS.md project memory",
+        usage: "/init",
+    },
+    Command {
         name: "new",
         desc: "start a fresh session",
         usage: "/new",
@@ -104,6 +109,16 @@ pub const COMMANDS: &[Command] = &[
         name: "lattice",
         desc: "show a symbol's code-intelligence subgraph (callers + provenance)",
         usage: "/lattice <symbol>",
+    },
+    Command {
+        name: "plan",
+        desc: "planning mode: investigate read-only and propose a plan (no edits) — then /execute",
+        usage: "/plan <task>",
+    },
+    Command {
+        name: "execute",
+        desc: "approve the proposed plan and carry it out (switches to Auto-edit)",
+        usage: "/execute",
     },
     Command {
         name: "goal",
@@ -199,6 +214,12 @@ pub enum CommandAction {
     Thinking,
     /// Attach an image file to the next prompt (vision input) — `/image <path>`.
     Image(String),
+    /// Scan the repository and write `.forge/AGENTS.md` project memory (`/init`).
+    Init,
+    /// Enter planning mode (`/plan <task>`): read-only investigation that proposes a plan.
+    Plan(String),
+    /// Approve the proposed plan and execute it (`/execute`): switches to Auto-edit and builds it.
+    Execute,
     Quit,
     /// Not a known command — the binary shows `unknown command: X`.
     Unknown(String),
@@ -489,6 +510,9 @@ pub fn parse_command(line: &str) -> CommandAction {
         }
         "thinking" | "think" => CommandAction::Thinking,
         "image" | "img" => CommandAction::Image(arg),
+        "init" => CommandAction::Init,
+        "plan" => CommandAction::Plan(arg),
+        "execute" | "approve" | "go" => CommandAction::Execute,
         "quit" | "exit" | "q" => CommandAction::Quit,
         other => CommandAction::Unknown(other.to_string()),
     }
@@ -791,6 +815,15 @@ mod tests {
             parse_command("/loop fix all warnings"),
             CommandAction::Loop("fix all warnings".into())
         );
+        assert_eq!(parse_command("/init"), CommandAction::Init);
+        assert_eq!(
+            parse_command("/plan add a cache layer"),
+            CommandAction::Plan("add a cache layer".into())
+        );
+        assert_eq!(parse_command("/plan"), CommandAction::Plan(String::new()));
+        assert_eq!(parse_command("/execute"), CommandAction::Execute);
+        assert_eq!(parse_command("/approve"), CommandAction::Execute);
+        assert_eq!(parse_command("/go"), CommandAction::Execute);
     }
 
     #[test]

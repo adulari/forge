@@ -7,7 +7,7 @@
 //! line builders and `render_live` are free of terminal I/O so they stay TestBackend-able.
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as TextLine, Span};
 use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Wrap};
 use ratatui::Frame;
@@ -296,6 +296,14 @@ pub struct App {
     /// Images resolved from the last submitted prompt, stashed so the user-turn echo can show a
     /// marker line per image (the placeholder was stripped from the text). Cleared by `submit_user`.
     last_submit_images: Vec<forge_types::ImageAttachment>,
+    /// True when the terminal window has lost focus (FocusLost). Inverted sense so the derived
+    /// `Default` (false) means *focused* — terminals don't always emit an initial FocusGained.
+    /// Drives a hollow/dim input cursor while another window is in front.
+    pub unfocused: bool,
+    /// Blink phase for the input cursor: when true the block is suppressed this frame (the "off"
+    /// half of the blink). Inverted sense so `Default` (false) shows the solid block. Toggled by
+    /// the render loop ~every 530ms while focused.
+    pub cursor_hidden: bool,
 }
 
 /// How many recent scrollback lines the remote snapshot keeps (a phone screen shows ~6–8).
@@ -1888,6 +1896,15 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     // long lines are then soft-wrapped by `Wrap`. Slash-command highlighting + block cursor apply
     // to the line that contains the cursor; later lines render plain.
     let cursor = app.input_cursor.min(app.input.len());
+    // Cursor appearance: a solid orange block when focused, suppressed on the blink "off" frame,
+    // and a dim hollow (underline) when the terminal window has lost focus.
+    let cursor_style = if app.unfocused {
+        Style::default().fg(DIM).add_modifier(Modifier::UNDERLINED)
+    } else if app.cursor_hidden {
+        Style::default()
+    } else {
+        Style::default().fg(STATUSBG).bg(ORANGE)
+    };
     let input_lines: Vec<&str> = app.input.split('\n').collect();
     let mut byte_off = 0usize;
     let mut text_lines: Vec<TextLine> = Vec::with_capacity(input_lines.len().max(1));
@@ -1905,7 +1922,7 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::styled("› ", Style::default().fg(ORANGE).bold()));
         }
         if let Some(col) = cursor_col {
-            spans.extend(line_spans_with_cursor(line, col, i == 0));
+            spans.extend(line_spans_with_cursor(line, col, i == 0, cursor_style));
         } else if i == 0 {
             spans.extend(input_spans(line));
         } else {
@@ -1958,24 +1975,27 @@ fn input_spans(input: &str) -> Vec<Span<'static>> {
 /// (the character under the cursor shown with inverted fg/bg). For the first input line
 /// (`first_line = true`) a slash-command token anywhere on the line is highlighted in orange;
 /// the highlight continues correctly even when the cursor is inside the command name.
-fn line_spans_with_cursor(line: &str, col: usize, first_line: bool) -> Vec<Span<'static>> {
+fn line_spans_with_cursor(
+    line: &str,
+    col: usize,
+    first_line: bool,
+    cursor_style: Style,
+) -> Vec<Span<'static>> {
     let tok = if first_line {
         crate::commands::slash_token_at(line, line.len())
     } else {
         None
     };
 
-    // The character at `col` (or a space if at end) becomes the block-cursor cell.
+    // The character at `col` (or a space if at end) becomes the cursor cell, styled by the caller
+    // (solid block / blink-off / hollow-when-unfocused).
     let at_bytes = &line[col..];
     let (cursor_ch, cursor_len) = at_bytes
         .chars()
         .next()
         .map(|c| (c, c.len_utf8()))
         .unwrap_or((' ', 0));
-    let cursor_span = Span::styled(
-        cursor_ch.to_string(),
-        Style::default().fg(STATUSBG).bg(ORANGE),
-    );
+    let cursor_span = Span::styled(cursor_ch.to_string(), cursor_style);
 
     match tok {
         Some(ref tok) => {
