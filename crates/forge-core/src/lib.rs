@@ -114,6 +114,74 @@ pub struct RewindOutcome {
     pub rewound_prompt: Option<String>,
 }
 
+/// Rough chars-per-token used to convert a model's token context window into a character budget
+/// for transcript trimming. ~4 is the standard English approximation; we only need a safe bound.
+const CHARS_PER_TOKEN: usize = 4;
+
+/// Trim a transcript to fit within `budget_chars` (an already-derived character budget for the
+/// model's context window minus the reserved reply). System messages are ALWAYS kept (the standing
+/// instructions); the rest are included newest-first until the budget is hit, then re-ordered to
+/// the original sequence. If even the single most-recent message overflows alone, its content is
+/// truncated from the FRONT (keeping the latest text — usually the actual request). Returns the
+/// input unchanged when it already fits. This is what stops a long conversation from overflowing a
+/// model's window and failing the turn as "unavailable" across every model.
+fn fit_messages(messages: &[Message], budget_chars: usize) -> Vec<Message> {
+    let msg_chars = |m: &Message| m.content.chars().count() + 16; // +16 ≈ role label + framing
+    let total: usize = messages.iter().map(msg_chars).sum();
+    if total <= budget_chars {
+        return messages.to_vec();
+    }
+    // System messages are non-negotiable context; reserve their cost up front.
+    let system_cost: usize = messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .map(msg_chars)
+        .sum();
+    let mut remaining = budget_chars.saturating_sub(system_cost);
+
+    // Walk non-system messages newest→oldest, keeping each that fits.
+    let mut keep_idx = std::collections::HashSet::new();
+    for (i, m) in messages.iter().enumerate().rev() {
+        if m.role == Role::System {
+            continue;
+        }
+        let cost = msg_chars(m);
+        if cost <= remaining {
+            remaining -= cost;
+            keep_idx.insert(i);
+        } else if keep_idx.is_empty() {
+            // Nothing kept yet and even this newest message is too big — truncate it from the
+            // front so the latest words survive, and stop (the budget is spent).
+            let mut m = m.clone();
+            let keep_chars = remaining.saturating_sub(48); // room for the marker
+            if keep_chars > 0 {
+                let chars: Vec<char> = m.content.chars().collect();
+                let start = chars.len().saturating_sub(keep_chars);
+                m.content = format!(
+                    "[… earlier of this message truncated to fit the model's context …]\n{}",
+                    chars[start..].iter().collect::<String>()
+                );
+            }
+            // Rebuild in order: systems first (in place) then this lone truncated tail.
+            let mut out: Vec<Message> = messages
+                .iter()
+                .filter(|m| m.role == Role::System)
+                .cloned()
+                .collect();
+            out.push(m);
+            return out;
+        } else {
+            break;
+        }
+    }
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| m.role == Role::System || keep_idx.contains(i))
+        .map(|(_, m)| m.clone())
+        .collect()
+}
+
 /// One interactive session. Construct with [`Session::start`], then drive [`Session::run_turn`].
 pub struct Session {
     id: String,
@@ -158,6 +226,10 @@ pub struct Session {
     /// System hints queued by side-call diagnostics (e.g. shell error interceptor) to be injected
     /// into the transcript immediately after the tool result that triggered them. Cleared each time.
     pending_hints: Vec<String>,
+    /// Session-scoped "always" answer to the auto-compact-on-switch consent prompt: once the user
+    /// picks "always", a mesh failover to a model that needs compaction proceeds silently for the
+    /// rest of this session (reset next launch). `false` = ask each time.
+    always_compact_on_switch: bool,
 }
 
 impl Session {
@@ -263,6 +335,7 @@ impl Session {
             skills: None,
             pinned_model: None,
             pending_hints: vec![],
+            always_compact_on_switch: false,
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
@@ -927,6 +1000,102 @@ impl Session {
         }
     }
 
+    /// The context window (tokens) to assume for `model`: a fetched per-model window (provider API,
+    /// persisted in the store) first, then the family heuristic, then a conservative floor. Always
+    /// returns a usable number so a turn can be bounded even for a model we've never seen.
+    fn effective_context_window(&self, model: &str) -> u32 {
+        self.store
+            .model_context(model)
+            .ok()
+            .flatten()
+            .filter(|w| *w > 0)
+            .or_else(|| forge_mesh::pricing::context_limit(model))
+            .unwrap_or(forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW)
+    }
+
+    /// The transcript trimmed to fit `model`'s context window, reserving room for the reply. Keeps
+    /// the system preamble + the most recent turns so a long conversation never overflows the
+    /// window (which otherwise fails the turn as "unavailable" on every model). Cheap; computed per
+    /// active model each step so failover to a smaller-window model re-trims appropriately.
+    fn transcript_for(&self, model: &str) -> Vec<Message> {
+        let window = self.effective_context_window(model);
+        // Reserve the reply budget + a 10% slack against the rough chars/token estimate.
+        let reserve = self.config.mesh.max_output_tokens.max(1024);
+        let input_tokens = (window.saturating_sub(reserve) as u64) * 9 / 10;
+        let budget_chars = (input_tokens as usize).saturating_mul(CHARS_PER_TOKEN);
+        fit_messages(&self.transcript, budget_chars.max(2048))
+    }
+
+    /// Rough token estimate of the current transcript (chars / [`CHARS_PER_TOKEN`], + small
+    /// per-message framing). Used to decide compaction; not billed.
+    fn estimated_transcript_tokens(&self) -> u64 {
+        let chars: usize = self
+            .transcript
+            .iter()
+            .map(|m| m.content.chars().count() + 16)
+            .sum();
+        (chars / CHARS_PER_TOKEN) as u64
+    }
+
+    /// Whether the transcript comfortably fits `model`'s window — under 80% of the post-reply room.
+    /// Below this, the turn proceeds as-is; at/over it, auto-compaction kicks in (and a failover to
+    /// a model that fails this check triggers the consent prompt).
+    fn transcript_fits(&self, model: &str) -> bool {
+        let window = self.effective_context_window(model) as u64;
+        let reserve = self.config.mesh.max_output_tokens.max(1024) as u64;
+        let usable = window.saturating_sub(reserve) * 8 / 10;
+        self.estimated_transcript_tokens() <= usable
+    }
+
+    /// Decide whether to admit a mesh-chosen failover `model`. If the transcript already fits, use
+    /// it. Otherwise it's a switch to a smaller-window model that needs (lossy) compaction: proceed
+    /// silently when the user picked "always" this session, else ask Yes/No/Always. `Ok(false)` =
+    /// the user declined (skip this model; the caller advances to the next fallback that fits).
+    async fn admit_failover_model(&mut self, model: &str) -> Result<bool, CoreError> {
+        if self.transcript_fits(model) {
+            return Ok(true);
+        }
+        if !self.always_compact_on_switch {
+            let window_k = (self.effective_context_window(model) / 1000).max(1);
+            let q = format!(
+                "Mesh switched to {model} (~{window_k}k context) — too small for this conversation. \
+                 Compact (summarize older messages) and continue on it?"
+            );
+            let opts = [
+                forge_tui::QChoice {
+                    label: "Yes".into(),
+                    description: "Compact now and continue on this model".into(),
+                },
+                forge_tui::QChoice {
+                    label: "No".into(),
+                    description: "Skip it — try the next model that fits".into(),
+                },
+                forge_tui::QChoice {
+                    label: "Always".into(),
+                    description: "Compact on every such switch for the rest of this session".into(),
+                },
+            ];
+            let ans = self.presenter.ask(&q, &opts, false).trim().to_lowercase();
+            if ans == "always" {
+                self.always_compact_on_switch = true;
+            } else if ans != "yes" {
+                return Ok(false); // No / cancelled → skip this model
+            }
+        }
+        self.compact().await?;
+        Ok(true)
+    }
+
+    /// Auto-compact (silently) when the transcript has grown past 80% of `model`'s window — the
+    /// normal "conversation got long" case for the routed model, no prompt (the `compact` call
+    /// emits its own one-line note). No-op when it already fits or the transcript is too short to
+    /// compact. Distinct from the failover consent path ([`admit_failover_model`]).
+    async fn auto_compact_if_needed(&mut self, model: &str) {
+        if !self.transcript_fits(model) {
+            let _ = self.compact().await;
+        }
+    }
+
     pub async fn compact(&mut self) -> Result<(usize, usize), CoreError> {
         let before = self.transcript.len();
         if before <= COMPACT_KEEP_RECENT + COMPACT_MIN_OLDER {
@@ -1265,6 +1434,11 @@ impl Session {
             });
         }
 
+        // Silent auto-compaction: if the conversation has grown past ~80% of the routed model's
+        // (fetched/heuristic) context window, summarize older messages now so the turn doesn't ride
+        // the hard-trim floor and lose recent context. Transparent — `compact` emits its own note.
+        self.auto_compact_if_needed(&routed_model).await;
+
         let specs = self.tool_specs();
         let mut final_text = String::new();
         // Tokens in the live context after the latest call (the statusline gauge).
@@ -1291,61 +1465,65 @@ impl Session {
         for step in 0..max_steps {
             // Stream the reply, with transparent failover for this step's completion.
             let mut resp = loop {
+                // Bound what we send to the active model's context window (fetched/heuristic), so a
+                // long conversation can't overflow it — which otherwise fails the turn as
+                // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
+                // smaller-window model still fits. The immutable borrow ends before the block below.
+                let sent = self.transcript_for(&active_model);
                 // Tight scope: borrow provider + presenter only for the streamed call, so the
                 // failover branch below has full `&mut self` for benching + warnings.
-                let result = {
-                    let provider = &self.provider;
-                    let presenter = &mut self.presenter;
-                    // Bump on every stream event so the idle watchdog can distinguish a live
-                    // stream from a stalled half-open connection — a stall fails over (below)
-                    // instead of hanging the turn forever.
-                    let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    let act = std::sync::Arc::clone(&activity);
-                    let mut sink = |ev: StreamEvent| {
-                        act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        match ev {
-                            StreamEvent::Text(t) => {
-                                presenter.emit(PresenterEvent::AssistantDelta(t))
-                            }
-                            StreamEvent::Reasoning(t) => {
-                                presenter.emit(PresenterEvent::Reasoning(t))
-                            }
-                            StreamEvent::ToolStarted { name, args } => {
-                                presenter.emit(PresenterEvent::ToolStart { name, args })
-                            }
-                            StreamEvent::ToolFinished { name, ok, summary } => {
-                                presenter.emit(PresenterEvent::ToolResult { name, ok, summary })
-                            }
-                            StreamEvent::SubagentStarted { id, agent, task } => {
-                                presenter.emit(PresenterEvent::SubagentStart { id, agent, task })
-                            }
-                            StreamEvent::SubagentProgress { id, snippet } => {
-                                presenter.emit(PresenterEvent::SubagentProgress { id, snippet })
-                            }
-                            StreamEvent::SubagentFinished {
-                                id,
-                                agent,
-                                ok,
-                                summary,
-                                cost_usd,
-                            } => presenter.emit(PresenterEvent::SubagentResult {
-                                id,
-                                agent,
-                                ok,
-                                summary,
-                                cost_usd,
-                            }),
-                            // A bridged turn's `update_tasks` (tailed from the sink): surface the
-                            // list live so the sticky panel updates during the turn. The parent's
-                            // post-turn store reload (below) keeps `self.tasks` authoritative.
-                            StreamEvent::Tasks(tasks) => {
-                                presenter.emit(PresenterEvent::Tasks(tasks))
-                            }
-                        }
+                let result =
+                    {
+                        let provider = &self.provider;
+                        let presenter = &mut self.presenter;
+                        // Bump on every stream event so the idle watchdog can distinguish a live
+                        // stream from a stalled half-open connection — a stall fails over (below)
+                        // instead of hanging the turn forever.
+                        let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                        let act = std::sync::Arc::clone(&activity);
+                        let mut sink =
+                            |ev: StreamEvent| {
+                                act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                match ev {
+                                    StreamEvent::Text(t) => {
+                                        presenter.emit(PresenterEvent::AssistantDelta(t))
+                                    }
+                                    StreamEvent::Reasoning(t) => {
+                                        presenter.emit(PresenterEvent::Reasoning(t))
+                                    }
+                                    StreamEvent::ToolStarted { name, args } => {
+                                        presenter.emit(PresenterEvent::ToolStart { name, args })
+                                    }
+                                    StreamEvent::ToolFinished { name, ok, summary } => presenter
+                                        .emit(PresenterEvent::ToolResult { name, ok, summary }),
+                                    StreamEvent::SubagentStarted { id, agent, task } => presenter
+                                        .emit(PresenterEvent::SubagentStart { id, agent, task }),
+                                    StreamEvent::SubagentProgress { id, snippet } => presenter
+                                        .emit(PresenterEvent::SubagentProgress { id, snippet }),
+                                    StreamEvent::SubagentFinished {
+                                        id,
+                                        agent,
+                                        ok,
+                                        summary,
+                                        cost_usd,
+                                    } => presenter.emit(PresenterEvent::SubagentResult {
+                                        id,
+                                        agent,
+                                        ok,
+                                        summary,
+                                        cost_usd,
+                                    }),
+                                    // A bridged turn's `update_tasks` (tailed from the sink): surface the
+                                    // list live so the sticky panel updates during the turn. The parent's
+                                    // post-turn store reload (below) keeps `self.tasks` authoritative.
+                                    StreamEvent::Tasks(tasks) => {
+                                        presenter.emit(PresenterEvent::Tasks(tasks))
+                                    }
+                                }
+                            };
+                        let fut = provider.complete(&active_model, &sent, &specs, &mut sink);
+                        stream_with_idle_timeout(fut, &activity, stream_idle).await
                     };
-                    let fut = provider.complete(&active_model, &self.transcript, &specs, &mut sink);
-                    stream_with_idle_timeout(fut, &activity, stream_idle).await
-                };
                 match result {
                     Ok(r) => {
                         if !r.content.is_empty() {
@@ -1373,7 +1551,26 @@ impl Session {
                                 "{active_model} {reason} — failing over"
                             )));
                         }
-                        match chain.next() {
+                        // Advance down the chain to the next model we can use. A model whose window
+                        // still holds the conversation is used immediately; one that's too small is
+                        // a switch that needs (lossy) compaction, so it's gated by consent
+                        // (Yes/No/Always) — "No" skips it and we keep looking for one that fits.
+                        let mut picked = None;
+                        for next in chain.by_ref() {
+                            match self.admit_failover_model(&next).await {
+                                Ok(true) => {
+                                    picked = Some(next);
+                                    break;
+                                }
+                                Ok(false) => {
+                                    self.presenter.emit(PresenterEvent::Warning(format!(
+                                        "skipped {next} (declined compaction) — trying the next model"
+                                    )));
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        match picked {
                             Some(next) => {
                                 self.presenter.emit(PresenterEvent::Routing {
                                     tier: decision.tier.as_str().to_string(),
@@ -2369,6 +2566,55 @@ mod tests {
     use forge_types::SideEffect;
     use std::sync::{Arc, Mutex};
 
+    #[test]
+    fn fit_messages_keeps_everything_when_it_fits() {
+        let msgs = vec![
+            Message::system("rules"),
+            Message::user("hi"),
+            Message::assistant("hello"),
+        ];
+        assert_eq!(fit_messages(&msgs, 10_000).len(), 3);
+    }
+
+    #[test]
+    fn fit_messages_keeps_system_and_recent_drops_oldest() {
+        let msgs = vec![
+            Message::system("SYS"),
+            Message::user(format!("OLD {}", "a".repeat(500))),
+            Message::user(format!("MID {}", "b".repeat(500))),
+            Message::user("NEWEST request"),
+        ];
+        // Budget fits the system + the newest one or two, not the 500-char olds.
+        let out = fit_messages(&msgs, 16 + 4 + 16 + "NEWEST request".len() + 16);
+        assert_eq!(out[0].role, Role::System, "system always kept");
+        assert!(
+            out.iter().any(|m| m.content.contains("NEWEST")),
+            "newest kept"
+        );
+        assert!(
+            !out.iter().any(|m| m.content.contains("OLD")),
+            "oldest dropped: {out:?}"
+        );
+        // System stays at the front; the surviving recent tail follows in order.
+        assert_eq!(out.first().unwrap().content, "SYS");
+    }
+
+    #[test]
+    fn fit_messages_truncates_a_single_oversized_message() {
+        let msgs = vec![
+            Message::system("SYS"),
+            Message::user(format!("{}TAIL-WORDS", "z".repeat(5_000))),
+        ];
+        let out = fit_messages(&msgs, 200);
+        let last = out.last().unwrap();
+        assert!(
+            last.content.contains("TAIL-WORDS"),
+            "keeps the latest words"
+        );
+        assert!(last.content.contains("truncated"), "marks the cut");
+        assert!(last.content.chars().count() < 5_000, "shrunk");
+    }
+
     /// A presenter that records every event so tests can assert on what was shown.
     #[derive(Clone, Default)]
     struct CapturePresenter {
@@ -2388,6 +2634,91 @@ mod tests {
         fn read_line(&mut self) -> Option<String> {
             None
         }
+    }
+
+    /// A presenter whose `ask` always returns a scripted label, counting how many times it was
+    /// asked — for the auto-compact-on-switch consent tests.
+    #[derive(Clone)]
+    struct ScriptedPresenter {
+        answer: String,
+        asks: Arc<Mutex<usize>>,
+    }
+    impl Presenter for ScriptedPresenter {
+        fn emit(&mut self, _event: PresenterEvent) {}
+        fn confirm(&mut self, _tool: &str, _side_effect: SideEffect) -> bool {
+            true
+        }
+        fn ask(&mut self, _q: &str, _options: &[forge_tui::QChoice], _allow_other: bool) -> String {
+            *self.asks.lock().unwrap() += 1;
+            self.answer.clone()
+        }
+        fn read_line(&mut self) -> Option<String> {
+            None
+        }
+    }
+
+    fn scripted_session(answer: &str, asks: Arc<Mutex<usize>>) -> Session {
+        let config = Config::default();
+        Session::start(
+            Arc::new(Store::open_in_memory().unwrap()),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools(),
+            Box::new(ScriptedPresenter {
+                answer: answer.to_string(),
+                asks,
+            }),
+            config,
+            ".",
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn small_transcript_fits_any_window_no_prompt() {
+        let asks = Arc::new(Mutex::new(0));
+        let mut s = scripted_session("No", asks.clone());
+        s.transcript.push(Message::user("hi there"));
+        assert!(s.transcript_fits("ollama::tiny")); // unknown → 32k floor, easily fits
+        assert!(
+            s.admit_failover_model("ollama::tiny").await.unwrap(),
+            "a fitting model is admitted"
+        );
+        assert_eq!(*asks.lock().unwrap(), 0, "no consent prompt when it fits");
+    }
+
+    #[tokio::test]
+    async fn oversized_transcript_prompts_and_no_skips() {
+        let asks = Arc::new(Mutex::new(0));
+        let mut s = scripted_session("No", asks.clone());
+        // One giant message: over 80% of the 32k floor in tokens, but too few messages for
+        // compact() to do real work (so the gate's decision is what we're testing).
+        s.transcript.push(Message::user("x".repeat(200_000)));
+        assert!(
+            !s.transcript_fits("ollama::tiny"),
+            "overflows the small window"
+        );
+        assert!(
+            !s.admit_failover_model("ollama::tiny").await.unwrap(),
+            "\"No\" skips the model"
+        );
+        assert_eq!(*asks.lock().unwrap(), 1, "asked exactly once");
+    }
+
+    #[tokio::test]
+    async fn always_answer_silences_further_prompts() {
+        let asks = Arc::new(Mutex::new(0));
+        let mut s = scripted_session("Always", asks.clone());
+        s.transcript.push(Message::user("x".repeat(200_000)));
+        assert!(
+            s.admit_failover_model("ollama::tiny").await.unwrap(),
+            "Always → admit"
+        );
+        assert!(s.always_compact_on_switch, "the session flag is set");
+        // A second over-window switch proceeds silently (no further prompt).
+        s.transcript.push(Message::user("x".repeat(200_000)));
+        assert!(s.admit_failover_model("ollama::tiny").await.unwrap());
+        assert_eq!(*asks.lock().unwrap(), 1, "asked only the first time");
     }
 
     /// A provider that calls `ask_user` once, then answers using whatever came back.
