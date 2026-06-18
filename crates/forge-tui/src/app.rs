@@ -190,21 +190,12 @@ impl MeshOverlay {
 
 /// A bracketed-paste insertion: the placeholder string currently in `App::input` and the real
 /// multiline content it stands in for. Placeholders look like `[pasted text (3 lines)]`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct PasteBlock {
     /// The exact placeholder string inserted into `input`.
     placeholder: String,
     /// The real (possibly multiline) content.
     content: String,
-}
-
-impl Default for PasteBlock {
-    fn default() -> Self {
-        Self {
-            placeholder: String::new(),
-            content: String::new(),
-        }
-    }
 }
 
 /// All state the TUI needs to render the pinned live region, plus the scrollback outbox.
