@@ -1128,8 +1128,10 @@ fn init() -> Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         anyhow::bail!("`forge init` is interactive — run it in a terminal");
     }
+    let cfg = forge_config::load().unwrap_or_default();
     let outcome =
-        forge_tui::init_wizard::run(wizard_input()).context("running the setup wizard")?;
+        forge_tui::init_wizard::run(wizard_input(cfg.permission_mode, cfg.mesh.credit_mode))
+            .context("running the setup wizard")?;
     if outcome.cancelled {
         println!("Setup cancelled — run `forge init` anytime.");
         return Ok(());
@@ -1148,7 +1150,10 @@ fn init() -> Result<()> {
 /// Build the config-wizard inputs from what Forge knows: key-based model providers, search-API
 /// providers (for `web_search`), and every INSTALLED CLI bridge (with its subscription plans).
 /// Shared by `forge init` and the in-chat `/config` command.
-fn wizard_input() -> forge_tui::WizardInput {
+fn wizard_input(
+    current_permission: forge_types::PermissionMode,
+    current_credit_mode: forge_types::CreditMode,
+) -> forge_tui::WizardInput {
     let providers = forge_config::known_key_providers()
         .map(|p| forge_tui::ProviderItem {
             id: p.to_string(),
@@ -1178,18 +1183,22 @@ fn wizard_input() -> forge_tui::WizardInput {
         providers,
         search,
         bridges,
+        current_permission,
+        current_credit_mode,
     }
 }
 
-/// Persist a wizard outcome: keys → OS keyring (ADR-0007), plans → user config; then inject
-/// both into this process's env so a running session picks them up immediately. Returns the
-/// config path. Shared by `forge init` and `/config`.
+/// Persist a wizard outcome: keys → OS keyring (ADR-0007), plans + settings → user config; then
+/// inject keys into this process's env so a running session picks them up immediately.
+/// Returns the config path. Shared by `forge init` and `/config`.
 fn apply_wizard_outcome(outcome: &forge_tui::WizardOutcome) -> Result<std::path::PathBuf> {
     for (provider, key) in &outcome.keys {
         forge_config::store_api_key(provider, key)
             .with_context(|| format!("storing {provider} key"))?;
     }
     let path = forge_config::write_subscriptions(&outcome.plans).context("writing config")?;
+    forge_config::write_settings(outcome.permission, outcome.credit_mode)
+        .context("writing settings")?;
     forge_config::inject_provider_keys();
     forge_config::inject_search_keys();
     Ok(path)
@@ -1656,7 +1665,8 @@ pub(crate) fn build_provider_and_router(
         // bridge. `harness` mode runs the bridge's tools through Forge's MCP server (RFC Phase 2).
         let harness = config.mesh.bridge_mode == forge_config::BridgeMode::Harness;
         Arc::new(
-            DispatchProvider::new(harness).with_max_output_tokens(config.mesh.max_output_tokens),
+            DispatchProvider::new(harness)
+                .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
         )
     };
     let mut heuristic = HeuristicRouter::new(config.clone()).with_pin(pin);
@@ -1683,7 +1693,8 @@ pub(crate) fn build_provider_and_router(
             // classification needs no tools/harness; cap output (one tier word) so a free
             // classifier model isn't 402'd on a huge default max-token request.
             Arc::new(
-                DispatchProvider::new(false).with_max_output_tokens(config.mesh.max_output_tokens),
+                DispatchProvider::new(false)
+                    .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
             )
         };
         let hybrid = config.mesh.classifier == ClassifierKind::Hybrid;
@@ -2224,8 +2235,8 @@ async fn probe_models(
 ) -> Result<()> {
     use std::time::Duration;
     let harness = config.mesh.bridge_mode == forge_config::BridgeMode::Harness;
-    let provider =
-        DispatchProvider::new(harness).with_max_output_tokens(config.mesh.max_output_tokens);
+    let provider = DispatchProvider::new(harness)
+        .with_max_output_tokens(config.mesh.effective_max_output_tokens());
     let default_cooldown = Duration::from_secs(config.mesh.failover_cooldown_secs);
     let ping = [forge_types::Message::user("ping")];
     // Probe WITH a representative tool: the real agent loop always advertises tools, so a model
@@ -3163,10 +3174,12 @@ async fn run_chat_tui(
         s.seed_subscription_quota("claude-cli", "five_hour", bstats.claude_5h_pct);
         s.seed_subscription_quota("claude-cli", "weekly", bstats.claude_weekly_pct);
     }
-    tokio::spawn({
-        let s = session.clone();
-        async move { refresh_claude_quota(&s).await }
-    });
+    if claude_quota_is_stale(&session, 300).await {
+        tokio::spawn({
+            let s = session.clone();
+            async move { refresh_claude_quota(&s).await }
+        });
+    }
 
     let mut tui = Tui::new().context("initializing TUI")?;
     // The welcome banner is a one-time print into scrollback (not a render branch).
@@ -3251,8 +3264,15 @@ async fn run_chat_tui(
 
         // Drain *all* buffered keystrokes this iteration. Reading one per frame throttled
         // fast typing to the frame rate (~16 keys/sec) — the source of the input lag.
-        while let Some(key) = tui.poll_key().context("reading input")? {
+        while let Some(ev) = tui.poll_event().context("reading input")? {
             dirty = true;
+            let key = match ev {
+                forge_tui::InputEvent::Paste(s) => {
+                    app.handle_paste(s);
+                    continue;
+                }
+                forge_tui::InputEvent::Key(k) => k,
+            };
 
             // The command palette is modal while open: it owns every key. Esc dismisses it
             // (so the user isn't surprised by a quit); Ctrl-C still maps to Esc → here it just
@@ -3730,8 +3750,14 @@ async fn run_chat_tui(
                 dirty = true;
             } else {
                 let pre_edit_len = app.input.len();
-                match handle_key(&mut app.input, &mut app.input_cursor, key) {
-                    InputOutcome::Submit(line) => {
+                let outcome = if app.try_delete_paste_block(key) {
+                    InputOutcome::Editing
+                } else {
+                    handle_key(&mut app.input, &mut app.input_cursor, key)
+                };
+                match outcome {
+                    InputOutcome::Submit(raw_line) => {
+                        let line = app.substitute_paste_blocks(raw_line);
                         history_pos = None;
                         if !line.trim().is_empty() && prompt_history.last() != Some(&line) {
                             prompt_history.push(line.clone());
@@ -4737,22 +4763,37 @@ async fn dispatch_command(
         // the heading) that drills into each provider's models on Enter; Esc steps back.
         CommandAction::ListModels => open_models_root(session, app).await?,
         // `/config` launches the animated setup wizard full-screen (reconfigure mode): set
-        // provider + search API keys and bridge plans, then return to chat. Keys are stored +
-        // injected live so the current session picks them up without a restart.
+        // provider + search API keys, bridge plans, permission mode, and credit conservation.
+        // Keys go to the OS keyring; all other settings are written to the user config file.
         CommandAction::Config => {
+            let current_permission = session.lock().await.temper();
+            let current_credit_mode = forge_config::load().unwrap_or_default().mesh.credit_mode;
             let outcome = tui
-                .run_fullscreen(|| forge_tui::init_wizard::run(wizard_input()))
+                .run_fullscreen(|| {
+                    forge_tui::init_wizard::run(wizard_input(
+                        current_permission,
+                        current_credit_mode,
+                    ))
+                })
                 .map_err(|e| anyhow::anyhow!("config wizard: {e}"))?;
             if outcome.cancelled {
                 app.note("config cancelled");
             } else {
                 apply_wizard_outcome(&outcome)?;
                 app.note(&format!(
-                    "✓ config saved — {} key(s), {} bridge plan(s)",
+                    "✓ config saved — {} key(s), {} bridge plan(s), permission={}, credit={}",
                     outcome.keys.len(),
-                    outcome.plans.len()
+                    outcome.plans.len(),
+                    outcome.permission.label(),
+                    outcome.credit_mode.label(),
                 ));
             }
+        }
+        // `/thinking` toggles model reasoning/thinking block display for this session.
+        CommandAction::Thinking => {
+            app.show_thinking = !app.show_thinking;
+            let state = if app.show_thinking { "on" } else { "off" };
+            app.note(&format!("thinking display: {state}"));
         }
         CommandAction::Mcp(server) => {
             let s = session.lock().await;

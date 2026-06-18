@@ -11,6 +11,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
+use forge_types::{CreditMode, PermissionMode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -45,6 +46,10 @@ pub struct WizardInput {
     /// Search-API providers (e.g. `brave`) for the `web_search` tool — their own section.
     pub search: Vec<ProviderItem>,
     pub bridges: Vec<BridgeItem>,
+    /// Current default permission mode (pre-fills the picker).
+    pub current_permission: PermissionMode,
+    /// Current credit conservation mode (pre-fills the picker).
+    pub current_credit_mode: CreditMode,
 }
 
 /// What the wizard collected on finish.
@@ -54,16 +59,22 @@ pub struct WizardOutcome {
     pub keys: Vec<(String, String)>,
     /// Bridge prefix → chosen plan slug.
     pub plans: HashMap<String, String>,
+    /// Updated default permission mode.
+    pub permission: PermissionMode,
+    /// Updated credit conservation mode.
+    pub credit_mode: CreditMode,
     pub cancelled: bool,
 }
 
-/// A focusable row: a provider key field, a search-key field, a bridge plan chooser, or the
-/// Finish button.
+/// A focusable row: a provider key field, a search-key field, a bridge plan chooser, a settings
+/// row, or the Finish button.
 #[derive(Clone, Copy, PartialEq)]
 enum Row {
     Provider(usize),
     Search(usize),
     Bridge(usize),
+    Permission,
+    CreditMode,
     Finish,
 }
 
@@ -76,6 +87,10 @@ struct State {
     search_keys: Vec<String>,
     /// Selected plan index per bridge.
     plan_sel: Vec<Option<usize>>,
+    /// Index into PermissionMode::all() for the settings row.
+    perm_idx: usize,
+    /// Index into CreditMode::all() for the settings row.
+    credit_idx: usize,
     cursor: usize,
     /// True while typing into the focused key field (provider or search).
     editing: bool,
@@ -90,11 +105,21 @@ impl State {
         let keys = vec![String::new(); input.providers.len()];
         let search_keys = vec![String::new(); input.search.len()];
         let plan_sel = vec![None; input.bridges.len()];
+        let perm_idx = PermissionMode::all()
+            .iter()
+            .position(|&m| m == input.current_permission)
+            .unwrap_or(0);
+        let credit_idx = CreditMode::all()
+            .iter()
+            .position(|&m| m == input.current_credit_mode)
+            .unwrap_or(0);
         Self {
             input,
             keys,
             search_keys,
             plan_sel,
+            perm_idx,
+            credit_idx,
             cursor: 0,
             editing: false,
             anim: 0.0,
@@ -103,11 +128,13 @@ impl State {
         }
     }
 
-    /// The full focusable row list: providers, search keys, installed bridges, then Finish.
+    /// The full focusable row list: providers, search keys, installed bridges, settings, Finish.
     fn rows(&self) -> Vec<Row> {
         let mut r: Vec<Row> = (0..self.input.providers.len()).map(Row::Provider).collect();
         r.extend((0..self.input.search.len()).map(Row::Search));
         r.extend((0..self.input.bridges.len()).map(Row::Bridge));
+        r.push(Row::Permission);
+        r.push(Row::CreditMode);
         r.push(Row::Finish);
         r
     }
@@ -137,29 +164,49 @@ impl State {
         }
     }
 
-    /// Enter: start/stop editing a provider key, cycle nothing on a bridge, or finish.
+    /// Enter: start/stop editing a provider key, cycle settings, advance bridge plan, or finish.
     fn enter(&mut self) {
         match self.focused() {
             Row::Provider(_) | Row::Search(_) => self.editing = !self.editing,
             Row::Bridge(i) => {
-                // Enter advances the plan selection (wraps), a quick way to pick without digits.
                 let n = self.input.bridges[i].plans.len();
                 if n > 0 {
                     let next = self.plan_sel[i].map(|s| (s + 1) % n).unwrap_or(0);
                     self.plan_sel[i] = Some(next);
                 }
             }
+            Row::Permission => {
+                self.perm_idx = (self.perm_idx + 1) % PermissionMode::all().len();
+            }
+            Row::CreditMode => {
+                self.credit_idx = (self.credit_idx + 1) % CreditMode::all().len();
+            }
             Row::Finish => self.done = true,
         }
     }
 
-    /// A digit selects the Nth plan when a bridge row is focused.
+    /// A digit selects the Nth plan when a bridge row is focused, or cycles settings rows.
     fn digit(&mut self, d: u32) {
-        if let Row::Bridge(i) = self.focused() {
-            let idx = (d as usize).wrapping_sub(1);
-            if idx < self.input.bridges[i].plans.len() {
-                self.plan_sel[i] = Some(idx);
+        match self.focused() {
+            Row::Bridge(i) => {
+                let idx = (d as usize).wrapping_sub(1);
+                if idx < self.input.bridges[i].plans.len() {
+                    self.plan_sel[i] = Some(idx);
+                }
             }
+            Row::Permission => {
+                let idx = (d as usize).wrapping_sub(1);
+                if idx < PermissionMode::all().len() {
+                    self.perm_idx = idx;
+                }
+            }
+            Row::CreditMode => {
+                let idx = (d as usize).wrapping_sub(1);
+                if idx < CreditMode::all().len() {
+                    self.credit_idx = idx;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -201,6 +248,8 @@ impl State {
         if self.cancelled {
             return WizardOutcome {
                 cancelled: true,
+                permission: self.input.current_permission,
+                credit_mode: self.input.current_credit_mode,
                 ..Default::default()
             };
         }
@@ -223,6 +272,8 @@ impl State {
         WizardOutcome {
             keys,
             plans,
+            permission: PermissionMode::all()[self.perm_idx],
+            credit_mode: CreditMode::all()[self.credit_idx],
             cancelled: false,
         }
     }
@@ -338,6 +389,31 @@ fn render(f: &mut Frame, state: &State) {
         }
     }
     lines.push(Line::from(""));
+    lines.push(section("Settings", WARNYEL));
+    for (vi, row) in rows.iter().enumerate().take(revealed) {
+        match row {
+            Row::Permission => lines.push(cycle_line(
+                "permission",
+                PermissionMode::all()
+                    .iter()
+                    .map(|m| (m.label(), m.description()))
+                    .collect::<Vec<_>>(),
+                state.perm_idx,
+                vi == state.cursor,
+            )),
+            Row::CreditMode => lines.push(cycle_line(
+                "credit mode",
+                CreditMode::all()
+                    .iter()
+                    .map(|m| (m.label(), m.description()))
+                    .collect::<Vec<_>>(),
+                state.credit_idx,
+                vi == state.cursor,
+            )),
+            _ => {}
+        }
+    }
+    lines.push(Line::from(""));
     let finish_selected = matches!(state.focused(), Row::Finish);
     let finish_style = if finish_selected {
         Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD)
@@ -423,6 +499,36 @@ fn bridge_line(state: &State, i: usize, selected: bool) -> Line<'static> {
     ])
 }
 
+/// Render a cycling picker row (Enter/digit cycles through options).
+fn cycle_line(
+    name: &'static str,
+    options: Vec<(&'static str, &'static str)>,
+    sel: usize,
+    selected: bool,
+) -> Line<'static> {
+    let chosen = options[sel.min(options.len() - 1)].0;
+    let desc = options[sel.min(options.len() - 1)].1;
+    let opts = options
+        .iter()
+        .enumerate()
+        .map(|(n, (label, _))| format!("{}){}", n + 1, label))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let name_color = if selected { ORANGE } else { WARNYEL };
+    Line::from(vec![
+        Span::styled(
+            format!("  {} {:<14}", marker(selected), name),
+            Style::default().fg(name_color),
+        ),
+        Span::styled(
+            format!("{:<14}", chosen),
+            Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("{:<38} ", desc), Style::default().fg(DIM)),
+        Span::styled(opts, Style::default().fg(DIM)),
+    ])
+}
+
 /// Inset the content one column/row inside the border.
 fn pad(area: Rect) -> Rect {
     Rect {
@@ -463,17 +569,21 @@ mod tests {
                     ("Max 20×".into(), "max-20x".into()),
                 ],
             }],
+            current_permission: PermissionMode::default(),
+            current_credit_mode: CreditMode::default(),
         }
     }
 
     #[test]
-    fn rows_are_providers_then_search_then_bridges_then_finish() {
+    fn rows_are_providers_then_search_then_bridges_then_settings_then_finish() {
         let s = State::new(input());
         let rows = s.rows();
         assert!(matches!(rows[0], Row::Provider(0)));
         assert!(matches!(rows[2], Row::Search(0)));
         assert!(matches!(rows[3], Row::Bridge(0)));
-        assert!(matches!(rows[4], Row::Finish));
+        assert!(matches!(rows[4], Row::Permission));
+        assert!(matches!(rows[5], Row::CreditMode));
+        assert!(matches!(rows[6], Row::Finish));
     }
 
     #[test]

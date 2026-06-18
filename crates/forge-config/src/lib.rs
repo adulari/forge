@@ -7,7 +7,9 @@ use std::path::PathBuf;
 
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::Figment;
-use forge_types::{PermissionDecision, PermissionMode, PermissionRule, RuleSource, TaskTier};
+use forge_types::{
+    CreditMode, PermissionDecision, PermissionMode, PermissionRule, RuleSource, TaskTier,
+};
 use serde::{Deserialize, Serialize};
 
 pub mod agents;
@@ -555,6 +557,21 @@ pub struct MeshConfig {
     /// (use the provider default).
     #[serde(default = "default_max_output_tokens")]
     pub max_output_tokens: u32,
+    /// How aggressively to conserve metered API credits. Default = Normal (no restriction).
+    /// Frugal caps output tokens at 2048; Strict caps at 1024 and routes to free/sub only.
+    #[serde(default)]
+    pub credit_mode: CreditMode,
+}
+
+impl MeshConfig {
+    /// Effective per-completion output token cap, accounting for credit_mode overrides.
+    pub fn effective_max_output_tokens(&self) -> u32 {
+        match self.credit_mode {
+            CreditMode::Normal => self.max_output_tokens,
+            CreditMode::Frugal => self.max_output_tokens.min(2048),
+            CreditMode::Strict => self.max_output_tokens.min(1024),
+        }
+    }
 }
 
 /// Whether `model_id` is excluded by a `[mesh] disabled` list — exact id match or a bare provider
@@ -760,7 +777,7 @@ impl Default for Config {
             ]),
         );
         Self {
-            permission_mode: PermissionMode::default(),
+            permission_mode: PermissionMode::AcceptEdits,
             mesh: MeshConfig {
                 models,
                 prefer_subscription: default_prefer_subscription(),
@@ -785,6 +802,7 @@ impl Default for Config {
                 subscriptions: HashMap::new(),
                 disabled: Vec::new(),
                 max_output_tokens: default_max_output_tokens(),
+                credit_mode: CreditMode::Normal,
             },
             permissions: PermissionsConfig::default(),
             mcp: McpConfig::default(),
@@ -920,6 +938,61 @@ pub fn load() -> Result<Config, ConfigError> {
 /// with "no provider keys / no bridges" by the caller).
 pub fn user_config_exists() -> bool {
     config_dir().is_some_and(|d| d.join("config.toml").exists())
+}
+
+/// Persist `permission_mode` and `mesh.credit_mode` into the user config TOML, preserving all
+/// other keys. Returns the path written.
+pub fn write_settings(
+    permission: PermissionMode,
+    credit_mode: CreditMode,
+) -> Result<PathBuf, ConfigError> {
+    let dir = config_dir().ok_or(ConfigError::NoConfigDir)?;
+    std::fs::create_dir_all(&dir).map_err(|e| ConfigError::Write(e.to_string()))?;
+    let path = dir.join("config.toml");
+    write_settings_at(&path, permission, credit_mode)?;
+    Ok(path)
+}
+
+fn write_settings_at(
+    path: &std::path::Path,
+    permission: PermissionMode,
+    credit_mode: CreditMode,
+) -> Result<(), ConfigError> {
+    let mut root: toml::Table = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_default();
+
+    // permission_mode uses kebab-case serde names
+    let perm_str = match permission {
+        PermissionMode::Default => "default",
+        PermissionMode::AcceptEdits => "accept-edits",
+        PermissionMode::Bypass => "bypass",
+        PermissionMode::Plan => "plan",
+    };
+    root.insert(
+        "permission_mode".to_string(),
+        toml::Value::String(perm_str.to_string()),
+    );
+
+    let mesh = root
+        .entry("mesh".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if let toml::Value::Table(mesh_t) = mesh {
+        let credit_str = match credit_mode {
+            CreditMode::Normal => "normal",
+            CreditMode::Frugal => "frugal",
+            CreditMode::Strict => "strict",
+        };
+        mesh_t.insert(
+            "credit_mode".to_string(),
+            toml::Value::String(credit_str.to_string()),
+        );
+    }
+
+    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
+    std::fs::write(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    Ok(())
 }
 
 /// Append a `[[permissions.rules]]` allow entry for `tool` to the project `.forge/config.toml`.

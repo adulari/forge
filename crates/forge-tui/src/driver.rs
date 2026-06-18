@@ -7,7 +7,9 @@ use std::io::{self, Stdout};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use forge_types::SideEffect;
 use ratatui::backend::CrosstermBackend;
@@ -17,6 +19,14 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 
 use crate::app::{self, App, KeyKind, LIVE_H};
 use crate::{Presenter, PresenterEvent};
+
+/// An input event from the terminal — either a keystroke or a bracketed paste.
+pub enum InputEvent {
+    Key(KeyKind),
+    /// A bracketed paste: the terminal wrapped the content in `\x1b[200~…\x1b[201~` and
+    /// crossterm decoded it as a single string (EnableBracketedPaste must be active).
+    Paste(String),
+}
 
 /// A message from a running turn to the render loop.
 pub enum UiMsg {
@@ -132,6 +142,7 @@ impl Tui {
         // Ctrl-C inert). `Drop` covers the normal/unwind path; this covers the print itself.
         install_panic_restore();
         enable_raw_mode()?;
+        crossterm::execute!(io::stdout(), EnableBracketedPaste)?;
         let backend = CrosstermBackend::new(io::stdout());
         let terminal = Terminal::with_options(
             backend,
@@ -179,13 +190,14 @@ impl Tui {
         let _ = self.terminal.clear();
     }
 
-    /// Non-blocking: returns a keystroke if one is pending, else `None`.
-    pub fn poll_key(&self) -> io::Result<Option<KeyKind>> {
+    /// Non-blocking: returns the next input event (key or paste) if one is pending, else `None`.
+    pub fn poll_event(&self) -> io::Result<Option<InputEvent>> {
         if !event::poll(Duration::from_millis(0))? {
             return Ok(None);
         }
-        if let Event::Key(k) = event::read()? {
-            if k.kind == KeyEventKind::Press {
+        match event::read()? {
+            Event::Paste(s) => return Ok(Some(InputEvent::Paste(s))),
+            Event::Key(k) if k.kind == KeyEventKind::Press => {
                 let key = match k.code {
                     KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::Esc
@@ -205,7 +217,6 @@ impl Tui {
                     KeyCode::Char('k') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::KillLineForward
                     }
-                    // Ctrl+A / Ctrl+E: readline line-start / line-end (reuse existing variants).
                     KeyCode::Char('a') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::Home
                     }
@@ -217,16 +228,12 @@ impl Tui {
                     KeyCode::Delete => KeyKind::DeleteForward,
                     KeyCode::Enter => KeyKind::Enter,
                     KeyCode::Esc => KeyKind::Esc,
-                    // Shift+Tab cycles the operating temper. Most terminals report it as
-                    // `BackTab`, but some (depending on the keyboard protocol) report it as
-                    // `Tab` + the SHIFT modifier — accept both so the switch is reliable.
                     KeyCode::BackTab => KeyKind::CycleTemper,
                     KeyCode::Tab if k.modifiers.contains(KeyModifiers::SHIFT) => {
                         KeyKind::CycleTemper
                     }
                     KeyCode::Up => KeyKind::Up,
                     KeyCode::Down => KeyKind::Down,
-                    // Ctrl+Left / Ctrl+Right: word-wise cursor movement.
                     KeyCode::Left if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::WordLeft
                     }
@@ -240,8 +247,9 @@ impl Tui {
                     KeyCode::Tab => KeyKind::Tab,
                     _ => return Ok(None),
                 };
-                return Ok(Some(key));
+                return Ok(Some(InputEvent::Key(key)));
             }
+            _ => {}
         }
         Ok(None)
     }
@@ -267,6 +275,7 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
+        let _ = crossterm::execute!(io::stdout(), DisableBracketedPaste);
         let _ = disable_raw_mode();
         let _ = self.terminal.show_cursor();
         // No alternate screen to leave: the conversation stays in the user's scrollback.

@@ -51,7 +51,7 @@ pub use commands::{
     CommandAction, Palette, PaletteEntry, Picker, PickerKind, PickerRow, RemoteMode, SlashToken,
     COMMANDS,
 };
-pub use driver::{ChannelPresenter, Tui, UiMsg};
+pub use driver::{ChannelPresenter, InputEvent, Tui, UiMsg};
 pub use init_wizard::{BridgeItem, ProviderItem, WizardInput, WizardOutcome};
 pub use select::{select_multi, SelectItem};
 pub use transcript::{run_subagent_transcript, transcript_lines};

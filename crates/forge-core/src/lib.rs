@@ -286,6 +286,20 @@ impl Session {
                 tool_call_id: m.tool_call_id,
             })
             .collect();
+        // Restore the permission mode that was active when the session was last saved.
+        let mut config = config;
+        if let Ok(stored_mode) = store.session_mode(session_id) {
+            let parsed = match stored_mode.as_str() {
+                "Default" => Some(PermissionMode::Default),
+                "AcceptEdits" => Some(PermissionMode::AcceptEdits),
+                "Bypass" => Some(PermissionMode::Bypass),
+                "Plan" => Some(PermissionMode::Plan),
+                _ => PermissionMode::from_label(&stored_mode),
+            };
+            if let Some(m) = parsed {
+                config.permission_mode = m;
+            }
+        }
         Ok(Self::build(
             session_id.to_string(),
             store,
@@ -4196,16 +4210,13 @@ mod tests {
         let id = session.id().to_string();
         let mut session = session;
 
-        assert_eq!(session.temper(), PermissionMode::Default); // Guarded
-        assert_eq!(session.cycle_temper(), PermissionMode::AcceptEdits); // → Smith
-        assert_eq!(
-            store.session_mode(&id).unwrap(),
-            "AcceptEdits",
-            "switch persisted"
-        );
+        // Default config now starts at AcceptEdits (Smith).
+        assert_eq!(session.temper(), PermissionMode::AcceptEdits); // Smith
         assert_eq!(session.cycle_temper(), PermissionMode::Plan); // → Survey
-        assert_eq!(session.cycle_temper(), PermissionMode::Default); // wraps → Guarded
-                                                                     // Cycling never lands on the dangerous Unfettered temper.
+        assert_eq!(store.session_mode(&id).unwrap(), "Plan", "switch persisted");
+        assert_eq!(session.cycle_temper(), PermissionMode::Default); // → Guarded
+        assert_eq!(session.cycle_temper(), PermissionMode::AcceptEdits); // wraps → Smith
+                                                                         // Cycling never lands on the dangerous Unfettered temper.
         for _ in 0..6 {
             assert_ne!(session.cycle_temper(), PermissionMode::Bypass);
         }
