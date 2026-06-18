@@ -62,10 +62,33 @@ pub(crate) fn quality_class(id: &str) -> u8 {
     }
 }
 
+/// Minimum Artificial Analysis intelligence index that qualifies a model as "frontier-class" for
+/// the conservation guard (Complex alternative) and overview stats. Calibrated to exclude
+/// nominally-large but measurably-weak older models (Llama 3.3 70B = 10.0, Hermes 405B = 9.0)
+/// while including capable modern ones (DeepSeek R1 = 20.1, Gemini 2.5 Pro = 27.0).
+pub(crate) const FRONTIER_BENCH_THRESHOLD: f64 = 20.0;
+
+/// Minimum intelligence index for a "capable mid" model — used in the Standard-tier conservation
+/// guard. Excludes the weakest small models (Llama 3.1 8B = 6.1, GPT-4o-mini = 6.9) while
+/// retaining capable ones (Llama 3.3 70B = 10.0, GPT-4o = 12.3).
+pub(crate) const CAPABLE_BENCH_THRESHOLD: f64 = 8.0;
+
+/// Whether a model id reads as frontier-class — benchmark-aware when scores are available. A
+/// measured intelligence index ≥ `FRONTIER_BENCH_THRESHOLD` supersedes the name heuristic, so
+/// nominally-large but measurably-weak old models (Hermes 405B = 9.0) are correctly excluded while
+/// unnamed but high-scoring models are correctly included. Falls back to the name heuristic when
+/// no score exists for the model.
+pub fn is_frontier_b(id: &str, bench: Option<&BenchmarkScores>) -> bool {
+    match bench.and_then(|b| b.score_for(id)) {
+        Some(s) => s.intelligence >= FRONTIER_BENCH_THRESHOLD,
+        None => quality_class(id) == 3,
+    }
+}
+
 /// Whether a model id reads as frontier-class (top quality prior) — used to count "frontier"
-/// models in the `/models` overview. Same family heuristic the router ranks by.
+/// models in the `/models` overview. Heuristic-only; the bench-aware version is [`is_frontier_b`].
 pub fn is_frontier(id: &str) -> bool {
-    quality_class(id) == 3
+    is_frontier_b(id, None)
 }
 
 /// Coarse speed class — roughly the inverse of size (3 = fastest small model).

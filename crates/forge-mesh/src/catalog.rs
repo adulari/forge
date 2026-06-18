@@ -6,7 +6,7 @@
 use forge_types::TaskTier;
 
 use crate::bench::BenchmarkScores;
-use crate::capability::{capability_score_b, is_frontier};
+use crate::capability::{capability_score_b, is_frontier_b, CAPABLE_BENCH_THRESHOLD};
 use crate::pricing::Pricing;
 
 /// Discovered `provider::model` ids the user can actually use right now.
@@ -183,20 +183,33 @@ fn conserve_probability(tier: TaskTier, fraction: f64, plan: &str, code_heavy: b
     ((base + ramp) * plan_factor(plan)).clamp(0.0, 1.0)
 }
 
+/// Whether a model qualifies as a capable alternative for `tier`, bench-aware. For Complex the
+/// bar is frontier (bench ≥ `FRONTIER_BENCH_THRESHOLD`, else name-heuristic class 3); for
+/// Standard it's capable mid (bench ≥ `CAPABLE_BENCH_THRESHOLD`, else class 2). This prevents
+/// conservation from firing based on a nominally-large but measurably-weak old model (e.g. a
+/// Hermes 405B at score 9.0 would pass the old name check but fails the bench threshold).
+fn is_capable_alternative(id: &str, tier: TaskTier, bench: Option<&BenchmarkScores>) -> bool {
+    match tier {
+        TaskTier::Complex => is_frontier_b(id, bench),
+        TaskTier::Standard => match bench.and_then(|b| b.score_for(id)) {
+            Some(s) => s.intelligence >= CAPABLE_BENCH_THRESHOLD,
+            None => crate::capability::quality_class(id) >= 2,
+        },
+        TaskTier::Trivial => true,
+    }
+}
+
 /// Whether a genuine non-subscription alternative of the right calibre exists for `tier` — a
 /// guard so conservation never drops a hard task onto a weak model when the only capable option
 /// IS the subscription. Complex needs a frontier alternative; Standard a capable (mid+) one.
-fn has_nonsub_alternative(models: &[String], tier: TaskTier) -> bool {
-    models.iter().any(|m| {
-        if is_subscription(m) || !is_routable(m) {
-            return false;
-        }
-        match tier {
-            TaskTier::Complex => crate::capability::quality_class(m) >= 3,
-            TaskTier::Standard => crate::capability::quality_class(m) >= 2,
-            TaskTier::Trivial => true,
-        }
-    })
+fn has_nonsub_alternative(
+    models: &[String],
+    tier: TaskTier,
+    bench: Option<&BenchmarkScores>,
+) -> bool {
+    models
+        .iter()
+        .any(|m| !is_subscription(m) && is_routable(m) && is_capable_alternative(m, tier, bench))
 }
 
 /// One model's scored row for the routing inspector: the score broken out so a human can see WHY
@@ -247,6 +260,7 @@ pub(crate) fn conserve_decision(
     code_heavy: bool,
     seed: u64,
     quota: &forge_types::SubscriptionQuota,
+    bench: Option<&BenchmarkScores>,
 ) -> ConserveDecision {
     let mut d = ConserveDecision {
         enabled: quota.conserve_enabled(),
@@ -262,7 +276,7 @@ pub(crate) fn conserve_decision(
         .collect();
     sub_providers.sort_unstable();
     sub_providers.dedup();
-    d.eligible = !sub_providers.is_empty() && has_nonsub_alternative(models, tier);
+    d.eligible = !sub_providers.is_empty() && has_nonsub_alternative(models, tier, bench);
     if !d.eligible {
         return d;
     }
@@ -384,7 +398,7 @@ pub struct ModelInfo {
 }
 
 impl ModelInfo {
-    fn classify(id: &str, pricing: &Pricing) -> Self {
+    fn classify(id: &str, pricing: &Pricing, bench: Option<&BenchmarkScores>) -> Self {
         let subscription = is_subscription(id);
         let cost = pricing.estimated_cost(id);
         let free = is_free(id, cost, subscription);
@@ -396,7 +410,7 @@ impl ModelInfo {
                 .map(|(_, n)| n)
                 .unwrap_or("")
                 .to_string(),
-            frontier: is_frontier(id),
+            frontier: is_frontier_b(id, bench),
             free,
             paid: !subscription && !free,
             subscription,
@@ -506,7 +520,15 @@ impl ModelCatalog {
         // subscription bridges onto a free-frontier model (so a complex/standard-heavy workload
         // doesn't exhaust the plan). When it fires, subscriptions take a soft penalty so the best
         // alternative leads while the subscription stays available as a fallback.
-        let conserve = conserve_decision(&self.models, tier, code_heavy, seed, quota).fired;
+        let conserve = conserve_decision(
+            &self.models,
+            tier,
+            code_heavy,
+            seed,
+            quota,
+            self.bench.as_ref(),
+        )
+        .fired;
         let mut scored: Vec<(f64, u8, u64, u8, f64, &String)> = self
             .models
             .iter()
@@ -559,7 +581,14 @@ impl ModelCatalog {
         seed: u64,
         quota: &forge_types::SubscriptionQuota,
     ) -> (ConserveDecision, Vec<ScoreRow>) {
-        let decision = conserve_decision(&self.models, tier, code_heavy, seed, quota);
+        let decision = conserve_decision(
+            &self.models,
+            tier,
+            code_heavy,
+            seed,
+            quota,
+            self.bench.as_ref(),
+        );
         let mut rows: Vec<ScoreRow> = self
             .models
             .iter()
@@ -581,7 +610,7 @@ impl ModelCatalog {
                     conserve_penalty: penalty,
                     final_score: base - penalty,
                     subscription: sub,
-                    frontier: is_frontier(m),
+                    frontier: is_frontier_b(m, self.bench.as_ref()),
                     rotation: provider_rotation(provider_of(m), seed),
                     weight: model_weight(m),
                     fine: fine_capability(m),
@@ -610,7 +639,7 @@ impl ModelCatalog {
     pub fn infos(&self, pricing: &Pricing) -> Vec<ModelInfo> {
         self.models
             .iter()
-            .map(|m| ModelInfo::classify(m, pricing))
+            .map(|m| ModelInfo::classify(m, pricing, self.bench.as_ref()))
             .collect()
     }
 
@@ -888,6 +917,59 @@ mod tests {
             r2.last().unwrap(),
             "claude-cli::haiku",
             "weak sibling stays last: {r2:?}"
+        );
+    }
+
+    #[test]
+    fn bench_aware_conservation_guard_rejects_weak_large_models() {
+        use crate::bench::BenchmarkScores;
+        // Hermes 405B name-heuristic is q3 (via "-405b"), so the old guard would say "yes, capable
+        // frontier alternative" and enable conservation. Bench score 9.0 is below
+        // FRONTIER_BENCH_THRESHOLD (20.0), so with bench data the guard must refuse.
+        let mut b = BenchmarkScores::new();
+        b.insert("hermes 405b", 9.0, 8.0);
+        let models = vec![
+            "claude-cli::sonnet".to_string(),
+            "openrouter::nousresearch/hermes-3-llama-3.1-405b".to_string(),
+        ];
+        let quota = forge_types::SubscriptionQuota::default()
+            .with_fractions(std::collections::HashMap::from([(
+                "claude-cli".to_string(),
+                0.85,
+            )]))
+            .with_plans(std::collections::HashMap::from([(
+                "claude-cli".to_string(),
+                "plus".to_string(),
+            )]))
+            .with_conserve(true);
+        let d = conserve_decision(
+            &models,
+            forge_types::TaskTier::Complex,
+            false,
+            42,
+            &quota,
+            Some(&b),
+        );
+        assert!(
+            !d.eligible,
+            "hermes 405B bench score 9.0 < FRONTIER_BENCH_THRESHOLD — not a frontier alternative: {d:?}"
+        );
+    }
+
+    #[test]
+    fn bench_aware_frontier_classification() {
+        use crate::bench::BenchmarkScores;
+        // A model the name heuristic misses (unknown family) but bench-scoring above
+        // FRONTIER_BENCH_THRESHOLD must be classified as frontier.
+        let mut b = BenchmarkScores::new();
+        b.insert("acme mystery x", 55.0, 48.0);
+        let cat =
+            ModelCatalog::new(vec!["openrouter::acme/mystery-x".into()]).with_benchmarks(Some(b));
+        let infos = cat.infos(&Pricing::default());
+        assert!(
+            infos[0].frontier,
+            "bench 55.0 > FRONTIER_BENCH_THRESHOLD → frontier: {:?}",
+            infos[0]
         );
     }
 

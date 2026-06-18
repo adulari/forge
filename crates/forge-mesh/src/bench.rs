@@ -44,7 +44,10 @@ impl BenchmarkScores {
     }
 
     /// Record one source row under `name` (the source's model name or slug, e.g. "Claude 4.5
-    /// Sonnet" or "gpt-5-2"). Later rows with the same canonical key overwrite earlier ones.
+    /// Sonnet" or "gpt-5-2"). Source names often carry an effort/variant parenthetical
+    /// ("GPT-5.5 (xhigh)", "… (low)") that collapses to the same canonical key — when that
+    /// happens we keep the HIGHER-intelligence row, i.e. the model's best effort, as its
+    /// representative capability.
     pub fn insert(&mut self, name: &str, intelligence: f64, coding: f64) {
         let score = BenchScore {
             intelligence,
@@ -54,8 +57,21 @@ impl BenchmarkScores {
         if toks.is_empty() {
             return;
         }
-        self.by_canon.insert(canon(&toks), score);
-        self.entries.push((toks, score));
+        let key = canon(&toks);
+        match self.by_canon.get(&key) {
+            Some(prev) if prev.intelligence >= intelligence => {}
+            _ => {
+                self.by_canon.insert(key.clone(), score);
+            }
+        }
+        // entries: one row per canonical key for the overlap fallback. Effort variants of the
+        // same model ("GPT-5.5 (xhigh)" / "GPT-5.5 (low)") collapse to the same key after
+        // strip_parens; keeping only the best avoids a bloated O(n) scan with redundant candidates.
+        match self.entries.iter_mut().find(|(t, _)| canon(t) == key) {
+            Some((_, s)) if s.intelligence < intelligence => *s = score,
+            Some(_) => {}
+            None => self.entries.push((toks, score)),
+        }
     }
 
     /// The score for a Forge `provider::model` id, or `None` if no confident match exists.
@@ -111,9 +127,12 @@ fn id_tokens(id: &str) -> Vec<String> {
 
 /// Lowercased alphanumeric tokens, split on separators AND letter↔digit boundaries, so
 /// "claude-opus-4-8", "Claude 4.8 Opus" and "llama3.2" all tokenise comparably. A leading
-/// gateway path (`anthropic/claude-...`) is dropped to its last segment first.
+/// gateway path (`anthropic/claude-...`) is dropped to its last segment first, and any
+/// parenthetical decoration ("GPT-5.5 (xhigh)", "… (Opus 4.8 Fallback)") is stripped — that
+/// trailing junk would otherwise pollute the token set and cross-match unrelated models.
 fn tokens(s: &str) -> Vec<String> {
-    let s = s.rsplit('/').next().unwrap_or(s).to_lowercase();
+    let s = strip_parens(s);
+    let s = s.rsplit('/').next().unwrap_or(&s).to_lowercase();
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut cur_digit = false;
@@ -132,8 +151,39 @@ fn tokens(s: &str) -> Vec<String> {
     if !cur.is_empty() {
         out.push(cur);
     }
-    // Drop noise tokens that don't help identify a model.
-    out.retain(|t| !matches!(t.as_str(), "latest" | "preview" | "exp" | "instruct" | "it"));
+    // Drop noise tokens that don't help identify a model: release qualifiers and effort/variant
+    // decoration. Tier words that DO disambiguate (mini/nano/flash/max/pro/air) are kept.
+    out.retain(|t| {
+        !matches!(
+            t.as_str(),
+            "latest"
+                | "preview"
+                | "exp"
+                | "instruct"
+                | "it"
+                | "reasoning"
+                | "nonreasoning"
+                | "non"
+                | "effort"
+                | "adaptive"
+                | "fallback"
+        )
+    });
+    out
+}
+
+/// Remove parenthetical segments (and any trailing dangling open paren) from a source name.
+fn strip_parens(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0u32;
+    for c in s.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
     out
 }
 
@@ -202,5 +252,41 @@ mod tests {
         let b = scores();
         // Shares "3" with Llama 3.3 / Gemini 3 but no family word → no match.
         assert!(b.score_for("foo::random-3").is_none());
+    }
+
+    #[test]
+    fn parenthetical_decoration_does_not_cross_match() {
+        // Real-world shape: Fable's source name carries "(… Opus 4.8 Fallback)". Without stripping
+        // the parenthetical, `claude-opus-4.8` cross-matches Fable's row. With it stripped, each
+        // maps to its own row.
+        let mut b = BenchmarkScores::new();
+        b.insert(
+            "Claude Fable 5 (Adaptive Reasoning, Max Effort, Opus 4.8 Fallback)",
+            59.9,
+            76.5,
+        );
+        b.insert(
+            "Claude Opus 4.8 (Adaptive Reasoning, Max Effort)",
+            55.7,
+            56.7,
+        );
+        let opus = b.score_for("anthropic::claude-opus-4.8").unwrap();
+        assert_eq!(
+            opus.intelligence, 55.7,
+            "opus matches its own row, not Fable's"
+        );
+        let fable = b.score_for("anthropic::claude-fable-5").unwrap();
+        assert_eq!(fable.intelligence, 59.9);
+    }
+
+    #[test]
+    fn effort_variants_collapse_to_best() {
+        // Same model at several effort levels → one canonical row, the highest-intelligence one.
+        let mut b = BenchmarkScores::new();
+        b.insert("GPT-5.5 (low)", 41.7, 52.1);
+        b.insert("GPT-5.5 (xhigh)", 54.8, 74.9);
+        b.insert("GPT-5.5 (medium)", 47.1, 47.1);
+        let s = b.score_for("openai::gpt-5.5").unwrap();
+        assert_eq!(s.intelligence, 54.8, "best effort represents the model");
     }
 }
