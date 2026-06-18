@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use forge_types::{DiffKind, FileDiff, SideEffect};
+use globset::{Glob, GlobMatcher};
 use serde_json::{json, Value};
 
 use crate::{str_arg, Tool, ToolError};
@@ -30,7 +31,7 @@ fn lang_from_path(path: &str) -> Option<String> {
     Some(tok.to_string())
 }
 
-/// Read a UTF-8 text file. Read-only — never prompts for permission.
+/// Read a UTF-8 text file. Supports optional line-range slicing.
 pub struct ReadFileTool;
 
 #[async_trait]
@@ -39,7 +40,8 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read the contents of a UTF-8 text file at the given path."
+        "Read the contents of a UTF-8 text file. Optionally slice to a line range with \
+         `start_line`/`end_line` (both 1-indexed, inclusive) to avoid reading large files whole."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::ReadOnly
@@ -47,13 +49,33 @@ impl Tool for ReadFileTool {
     fn schema(&self) -> Value {
         json!({
             "type": "object",
-            "properties": { "path": { "type": "string" } },
+            "properties": {
+                "path": { "type": "string" },
+                "start_line": {
+                    "type": "integer",
+                    "description": "First line to read (1-indexed, inclusive). Default: 1."
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "Last line to read (1-indexed, inclusive). Default: end of file."
+                }
+            },
             "required": ["path"]
         })
     }
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
         let path = str_arg(args, "path")?;
-        Ok(tokio::fs::read_to_string(path).await?)
+        let start_line = args.get("start_line").and_then(Value::as_u64).map(|n| n as usize);
+        let end_line = args.get("end_line").and_then(Value::as_u64).map(|n| n as usize);
+
+        let content = tokio::fs::read_to_string(path).await?;
+        if start_line.is_none() && end_line.is_none() {
+            return Ok(content);
+        }
+        let lines: Vec<&str> = content.lines().collect();
+        let start = start_line.unwrap_or(1).saturating_sub(1); // 0-indexed
+        let end = end_line.map(|e| e.min(lines.len())).unwrap_or(lines.len());
+        Ok(lines[start.min(lines.len())..end].join("\n"))
     }
 }
 
@@ -177,6 +199,34 @@ impl Tool for EditFileTool {
     }
 }
 
+/// Delete a file. Mutates the workspace.
+pub struct DeleteFileTool;
+
+#[async_trait]
+impl Tool for DeleteFileTool {
+    fn name(&self) -> &str {
+        "delete_file"
+    }
+    fn description(&self) -> &str {
+        "Delete a file at the given path."
+    }
+    fn side_effect(&self) -> SideEffect {
+        SideEffect::Write
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } },
+            "required": ["path"]
+        })
+    }
+    async fn run(&self, args: &Value) -> Result<String, ToolError> {
+        let path = str_arg(args, "path")?;
+        tokio::fs::remove_file(path).await?;
+        Ok(format!("deleted {path}"))
+    }
+}
+
 /// List the entries of a directory, sorted, directories marked with a trailing `/`.
 pub struct ListDirTool;
 
@@ -218,7 +268,8 @@ impl Tool for ListDirTool {
     }
 }
 
-/// Recursively search text files for a substring, returning `path:lineno: line` matches.
+/// Recursively search text files for a pattern, returning `path:lineno: line` matches.
+/// Supports substring (default) or full regex matching, and an optional file-path glob filter.
 pub struct SearchTool;
 
 const SEARCH_MATCH_CAP: usize = 50;
@@ -229,7 +280,9 @@ impl Tool for SearchTool {
         "search"
     }
     fn description(&self) -> &str {
-        "Recursively search text files under `path` for lines containing `query`."
+        "Recursively search text files under `path` for lines matching `query`. \
+         Set `regex: true` for regex matching (default: substring). \
+         Use `file_pattern` (glob) to restrict which files are searched, e.g. \"**/*.rs\"."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::ReadOnly
@@ -239,7 +292,15 @@ impl Tool for SearchTool {
             "type": "object",
             "properties": {
                 "query": { "type": "string" },
-                "path": { "type": "string" }
+                "path": { "type": "string" },
+                "regex": {
+                    "type": "boolean",
+                    "description": "Treat `query` as a regex. Default: false (substring match)."
+                },
+                "file_pattern": {
+                    "type": "string",
+                    "description": "Glob to filter which files are searched, e.g. \"**/*.rs\"."
+                }
             },
             "required": ["query"]
         })
@@ -247,6 +308,27 @@ impl Tool for SearchTool {
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
         let query = str_arg(args, "query")?;
         let root = args.get("path").and_then(Value::as_str).unwrap_or(".");
+        let use_regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
+        let file_pattern = args.get("file_pattern").and_then(Value::as_str);
+
+        let re: Option<regex::Regex> = if use_regex {
+            Some(
+                regex::Regex::new(query)
+                    .map_err(|e| ToolError::Failed(format!("invalid regex: {e}")))?,
+            )
+        } else {
+            None
+        };
+
+        let file_glob: Option<GlobMatcher> = if let Some(pat) = file_pattern {
+            Some(
+                Glob::new(pat)
+                    .map_err(|e| ToolError::Failed(format!("invalid file_pattern: {e}")))?
+                    .compile_matcher(),
+            )
+        } else {
+            None
+        };
 
         let mut matches: Vec<String> = Vec::new();
         let mut stack = vec![std::path::PathBuf::from(root)];
@@ -256,7 +338,6 @@ impl Tool for SearchTool {
             };
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                // Skip hidden dirs/files (incl .git) and build output dirs.
                 if name.starts_with('.') || name == "target" {
                     continue;
                 }
@@ -264,14 +345,33 @@ impl Tool for SearchTool {
                 let Ok(ft) = entry.file_type() else { continue };
                 if ft.is_dir() {
                     stack.push(path);
-                } else if let Ok(content) = std::fs::read_to_string(&path) {
-                    let rel = path.strip_prefix(root).unwrap_or(&path).display();
-                    for (i, line) in content.lines().enumerate() {
-                        if line.contains(query) {
-                            matches.push(format!("{rel}:{}: {}", i + 1, line.trim_end()));
-                            if matches.len() >= SEARCH_MATCH_CAP {
-                                matches.push(format!("… (capped at {SEARCH_MATCH_CAP} matches)"));
-                                return Ok(matches.join("\n"));
+                } else {
+                    let rel = path.strip_prefix(root).unwrap_or(&path);
+                    if let Some(ref fg) = file_glob {
+                        if !fg.is_match(rel) {
+                            continue;
+                        }
+                    }
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        let rel_display = rel.display();
+                        for (i, line) in content.lines().enumerate() {
+                            let hit = if let Some(ref re) = re {
+                                re.is_match(line)
+                            } else {
+                                line.contains(query)
+                            };
+                            if hit {
+                                matches.push(format!(
+                                    "{rel_display}:{}: {}",
+                                    i + 1,
+                                    line.trim_end()
+                                ));
+                                if matches.len() >= SEARCH_MATCH_CAP {
+                                    matches.push(format!(
+                                        "… (capped at {SEARCH_MATCH_CAP} matches)"
+                                    ));
+                                    return Ok(matches.join("\n"));
+                                }
                             }
                         }
                     }
@@ -281,6 +381,78 @@ impl Tool for SearchTool {
         if matches.is_empty() {
             Ok(format!("no matches for '{query}'"))
         } else {
+            Ok(matches.join("\n"))
+        }
+    }
+}
+
+/// List files matching a glob pattern, recursively. Skips hidden directories and `target/`.
+pub struct GlobTool;
+
+#[async_trait]
+impl Tool for GlobTool {
+    fn name(&self) -> &str {
+        "glob"
+    }
+    fn description(&self) -> &str {
+        "List files matching a glob pattern (e.g. \"**/*.rs\", \"src/**/*.toml\"). \
+         Returns sorted relative paths. Skips hidden dirs and `target/`."
+    }
+    fn side_effect(&self) -> SideEffect {
+        SideEffect::ReadOnly
+    }
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern, e.g. \"**/*.rs\" or \"src/**/*.toml\"."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Root directory to search from (default: \".\")."
+                }
+            },
+            "required": ["pattern"]
+        })
+    }
+    async fn run(&self, args: &Value) -> Result<String, ToolError> {
+        let pattern = str_arg(args, "pattern")?;
+        let root = args.get("path").and_then(Value::as_str).unwrap_or(".");
+
+        let matcher = Glob::new(pattern)
+            .map_err(|e| ToolError::Failed(format!("invalid glob: {e}")))?
+            .compile_matcher();
+
+        let mut matches: Vec<String> = Vec::new();
+        let mut stack = vec![std::path::PathBuf::from(root)];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') || name == "target" {
+                    continue;
+                }
+                let path = entry.path();
+                let Ok(ft) = entry.file_type() else { continue };
+                if ft.is_dir() {
+                    stack.push(path);
+                } else {
+                    let rel = path.strip_prefix(root).unwrap_or(&path);
+                    if matcher.is_match(rel) {
+                        matches.push(rel.display().to_string());
+                    }
+                }
+            }
+        }
+
+        if matches.is_empty() {
+            Ok(format!("no files match '{pattern}'"))
+        } else {
+            matches.sort();
             Ok(matches.join("\n"))
         }
     }
@@ -336,9 +508,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, ToolError::Failed(_)));
-        // File must be unchanged on error.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "dup dup");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn delete_file_removes_file() {
+        let dir = temp_dir("delete");
+        let path = dir.join("f.txt");
+        std::fs::write(&path, "bye").unwrap();
+        DeleteFileTool
+            .run(&json!({ "path": path.to_str().unwrap() }))
+            .await
+            .unwrap();
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn delete_file_errors_on_missing() {
+        let err = DeleteFileTool
+            .run(&json!({ "path": "/no/such/file/xyz.txt" }))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Io(_)));
     }
 
     #[tokio::test]
@@ -385,13 +578,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_regex_matches_pattern() {
+        let dir = temp_dir("search-regex");
+        std::fs::write(dir.join("a.txt"), "fn hello() {}\nfn world() {}").unwrap();
+
+        let out = SearchTool
+            .run(&json!({
+                "query": r"fn \w+\(\)",
+                "path": dir.to_str().unwrap(),
+                "regex": true
+            }))
+            .await
+            .unwrap();
+
+        assert!(out.contains("a.txt:1:"), "got:\n{out}");
+        assert!(out.contains("a.txt:2:"), "got:\n{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn search_file_pattern_filters_extension() {
+        let dir = temp_dir("search-filepattern");
+        std::fs::write(dir.join("a.rs"), "needle").unwrap();
+        std::fs::write(dir.join("b.txt"), "needle").unwrap();
+
+        let out = SearchTool
+            .run(&json!({
+                "query": "needle",
+                "path": dir.to_str().unwrap(),
+                "file_pattern": "**/*.rs"
+            }))
+            .await
+            .unwrap();
+
+        assert!(out.contains("a.rs"), "got:\n{out}");
+        assert!(!out.contains("b.txt"), "must skip non-rs:\n{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn glob_finds_files_by_pattern() {
+        let dir = temp_dir("glob");
+        std::fs::create_dir(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "").unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+        std::fs::write(dir.join("README.md"), "").unwrap();
+
+        let out = GlobTool
+            .run(&json!({ "pattern": "**/*.rs", "path": dir.to_str().unwrap() }))
+            .await
+            .unwrap();
+
+        assert!(out.contains("main.rs"), "got:\n{out}");
+        assert!(out.contains("lib.rs"), "got:\n{out}");
+        assert!(!out.contains("README.md"), "no md:\n{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn read_file_reads_workspace_manifest() {
-        // The crate's own Cargo.toml is always present at test time.
         let out = ReadFileTool
             .run(&json!({ "path": "Cargo.toml" }))
             .await
             .unwrap();
         assert!(out.contains("forge-tools"));
+    }
+
+    #[tokio::test]
+    async fn read_file_line_range() {
+        let dir = temp_dir("read-range");
+        let path = dir.join("f.txt");
+        std::fs::write(&path, "line1\nline2\nline3\nline4\nline5").unwrap();
+
+        let out = ReadFileTool
+            .run(&json!({ "path": path.to_str().unwrap(), "start_line": 2, "end_line": 4 }))
+            .await
+            .unwrap();
+
+        assert_eq!(out, "line2\nline3\nline4");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
