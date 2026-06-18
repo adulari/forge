@@ -40,17 +40,13 @@ fn find_f64(v: &Value, key: &str) -> Option<f64> {
     }
 }
 
-/// Normalise an index to a 0–100 scale (some API versions report 0–1 fractions).
-fn norm(x: f64) -> f64 {
-    if x <= 1.5 {
-        x * 100.0
-    } else {
-        x
-    }
-}
-
 /// Parse the API body into rows. Tolerant of `{data:[…]}` vs a bare array and of where the indices
 /// live within each entry. A row needs a name and an intelligence index; coding defaults to it.
+///
+/// Scale is decided ONCE for the whole dataset, not per value: the API reports a 0–100 index
+/// (Opus ≈ 56), but some versions report 0–1 fractions. A per-value `x <= 1.5 → x*100` rule
+/// wrongly inflated genuinely weak models (a real 1.3 coding score became 130). So we look at the
+/// max index across all rows: only if EVERYTHING is ≤ 1.5 do we treat the dataset as 0–1 and scale.
 fn parse_rows(body: &str) -> Vec<Row> {
     let Ok(v) = serde_json::from_str::<Value>(body) else {
         return Vec::new();
@@ -62,7 +58,7 @@ fn parse_rows(body: &str) -> Vec<Row> {
     let Some(entries) = entries else {
         return Vec::new();
     };
-    let mut rows = Vec::new();
+    let mut raw: Vec<Row> = Vec::new();
     for e in entries {
         let name = e
             .get("name")
@@ -74,9 +70,18 @@ fn parse_rows(body: &str) -> Vec<Row> {
             continue;
         };
         let coding = find_f64(e, "artificial_analysis_coding_index").unwrap_or(intel);
-        rows.push((name.to_string(), norm(intel), norm(coding)));
+        raw.push((name.to_string(), intel, coding));
     }
-    rows
+    let max = raw
+        .iter()
+        .flat_map(|(_, i, c)| [*i, *c])
+        .fold(0.0_f64, f64::max);
+    let scale = if max <= 1.5 { 100.0 } else { 1.0 };
+    for (_, i, c) in &mut raw {
+        *i *= scale;
+        *c *= scale;
+    }
+    raw
 }
 
 fn rows_to_scores(rows: &[Row]) -> BenchmarkScores {
@@ -220,7 +225,21 @@ mod tests {
         let nested = r#"[{"slug":"claude-opus","evaluations":{"artificial_analysis_intelligence_index":0.64}}]"#;
         let r = parse_rows(nested);
         assert_eq!(r[0].0, "claude-opus");
-        assert_eq!(r[0].1, 64.0, "0–1 fraction normalised to 0–100");
+        assert_eq!(r[0].1, 64.0, "all-fraction dataset normalised to 0–100");
         assert_eq!(r[0].2, 64.0, "coding defaults to intelligence when absent");
+    }
+
+    #[test]
+    fn weak_model_in_a_0_100_dataset_is_not_inflated() {
+        // A real 0–100 dataset: a strong model at 58 and a genuinely weak one scoring 1.3.
+        // The old per-value rule turned 1.3 into 130; dataset-level scaling must leave it at 1.3.
+        let body = r#"{"data":[
+            {"name":"GPT-5.5","artificial_analysis_intelligence_index":58,"artificial_analysis_coding_index":55},
+            {"name":"Tiny 0.6B","artificial_analysis_intelligence_index":1.3,"artificial_analysis_coding_index":1.4}
+        ]}"#;
+        let r = parse_rows(body);
+        let tiny = r.iter().find(|(n, ..)| n == "Tiny 0.6B").unwrap();
+        assert_eq!(tiny.1, 1.3, "weak score stays 1.3, not 130");
+        assert_eq!(tiny.2, 1.4);
     }
 }
