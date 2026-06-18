@@ -188,6 +188,25 @@ impl MeshOverlay {
     }
 }
 
+/// A bracketed-paste insertion: the placeholder string currently in `App::input` and the real
+/// multiline content it stands in for. Placeholders look like `[pasted text (3 lines)]`.
+#[derive(Debug, Clone)]
+struct PasteBlock {
+    /// The exact placeholder string inserted into `input`.
+    placeholder: String,
+    /// The real (possibly multiline) content.
+    content: String,
+}
+
+impl Default for PasteBlock {
+    fn default() -> Self {
+        Self {
+            placeholder: String::new(),
+            content: String::new(),
+        }
+    }
+}
+
 /// All state the TUI needs to render the pinned live region, plus the scrollback outbox.
 #[derive(Debug, Clone, Default)]
 pub struct App {
@@ -267,6 +286,12 @@ pub struct App {
     /// remote-control snapshot can show the phone the tail of the conversation. Kept small (the
     /// full transcript lives in the terminal's native scrollback); newest is last.
     pub recent_transcript: std::collections::VecDeque<String>,
+    /// When true, model reasoning/thinking blocks are shown in scrollback. Default false (hidden).
+    /// Toggled by `/thinking`.
+    pub show_thinking: bool,
+    /// Paste blocks inserted by bracketed-paste: placeholder in `input`, real content here.
+    /// On submit, `substitute_paste_blocks()` replaces each placeholder with its real content.
+    paste_blocks: Vec<PasteBlock>,
 }
 
 /// How many recent scrollback lines the remote snapshot keeps (a phone screen shows ~6–8).
@@ -898,11 +923,15 @@ impl App {
     }
 
     /// Flush accumulated reasoning into scrollback as a dim "thinking" block (once), if any.
+    /// When `show_thinking` is false the buffer is discarded silently (no scrollback line).
     fn flush_reasoning(&mut self) {
         if self.reasoning.is_empty() {
             return;
         }
         let text = std::mem::take(&mut self.reasoning);
+        if !self.show_thinking {
+            return;
+        }
         let dim = Style::default().fg(DIM);
         self.flush
             .push(TextLine::from(Span::styled("✱ thinking", dim)));
@@ -911,6 +940,38 @@ impl App {
                 .push(TextLine::from(Span::styled(l.to_string(), dim)));
         }
         self.flush.push(TextLine::default());
+    }
+
+    /// Insert a bracketed paste at the cursor. Single-line pastes are inserted as plain text;
+    /// multiline pastes show a `[pasted text (N lines)]` placeholder so the input stays on one
+    /// line and won't accidentally auto-submit when the pasted text contains newlines.
+    pub fn handle_paste(&mut self, content: String) {
+        if !content.contains('\n') {
+            // Single-line: insert directly as if the user typed it.
+            self.input.insert_str(self.input_cursor, &content);
+            self.input_cursor += content.len();
+            return;
+        }
+        let n = content.lines().count();
+        let placeholder = format!("[pasted text ({n} lines)]");
+        self.input.insert_str(self.input_cursor, &placeholder);
+        self.input_cursor += placeholder.len();
+        self.paste_blocks.push(PasteBlock {
+            placeholder: placeholder.clone(),
+            content,
+        });
+    }
+
+    /// Replace each paste-block placeholder in `text` with its real content, returning the
+    /// substituted string. Call with the line returned by `handle_key`'s Submit. Drains `paste_blocks`.
+    pub fn substitute_paste_blocks(&mut self, text: String) -> String {
+        let mut result = text;
+        for block in self.paste_blocks.drain(..) {
+            if let Some(pos) = result.find(&block.placeholder) {
+                result.replace_range(pos..pos + block.placeholder.len(), &block.content);
+            }
+        }
+        result
     }
 
     /// Echo a just-submitted user message into scrollback.
@@ -1169,31 +1230,27 @@ fn tool_result_line(name: &str, ok: bool, summary: &str) -> TextLine<'static> {
     ])
 }
 
-/// The welcome banner, printed once into scrollback. Centered via leading padding (so the
-/// generic, left-aligned `insert_before` path renders it correctly). Narrow fallback.
+/// The welcome banner, printed once into scrollback. Left-aligned.
 pub fn banner_lines(width: u16) -> Vec<TextLine<'static>> {
-    let center = |text: &str, text_w: usize, color: Color, bold: bool| -> TextLine<'static> {
-        let pad = (width as usize).saturating_sub(text_w) / 2;
-        let mut style = Style::default().fg(color);
-        if bold {
-            style = style.bold();
-        }
-        TextLine::from(vec![
-            Span::raw(" ".repeat(pad)),
-            Span::styled(text.to_string(), style),
-        ])
-    };
-
     let mut lines = vec![TextLine::default()];
     if width < WORDMARK_WIDTH {
-        lines.push(center("⚒ FORGE", 7, ORANGE, true));
-        lines.push(center("model-mesh coding agent", 23, DIM, false));
+        lines.push(TextLine::from(Span::styled("⚒ FORGE", Style::default().fg(ORANGE).bold())));
+        lines.push(TextLine::from(Span::styled(
+            "model-mesh coding agent",
+            Style::default().fg(DIM),
+        )));
     } else {
         for row in FORGE_WORDMARK {
-            lines.push(center(row, WORDMARK_WIDTH as usize, ORANGE, true));
+            lines.push(TextLine::from(Span::styled(
+                row.to_string(),
+                Style::default().fg(ORANGE).bold(),
+            )));
         }
         lines.push(TextLine::default());
-        lines.push(center(TAGLINE, TAGLINE.chars().count(), DIM, false));
+        lines.push(TextLine::from(Span::styled(
+            TAGLINE.to_string(),
+            Style::default().fg(DIM),
+        )));
     }
     lines.push(TextLine::default());
     lines
@@ -1728,8 +1785,8 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         .title(Span::styled(" message ", Style::default().fg(ORANGE)));
 
     // Build one ratatui Line per explicit input line so pasted newlines render as separate rows;
-    // long lines are then soft-wrapped by `Wrap`. Slash-command highlighting applies to the first
-    // line (where a leading `/command` lives); later lines render plain.
+    // long lines are then soft-wrapped by `Wrap`. Slash-command highlighting + block cursor apply
+    // to the line that contains the cursor; later lines render plain.
     let cursor = app.input_cursor.min(app.input.len());
     let input_lines: Vec<&str> = app.input.split('\n').collect();
     let mut byte_off = 0usize;
@@ -1748,23 +1805,11 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::styled("› ", Style::default().fg(ORANGE).bold()));
         }
         if let Some(col) = cursor_col {
-            let before = &line[..col];
-            let after = &line[col..];
-            if i == 0 {
-                spans.extend(input_spans(before));
-            } else {
-                spans.push(Span::raw(before.to_string()));
-            }
-            spans.push(Span::styled("▌", Style::default().fg(ORANGE)));
-            if !after.is_empty() {
-                spans.push(Span::raw(after.to_string()));
-            }
+            spans.extend(line_spans_with_cursor(line, col, i == 0));
+        } else if i == 0 {
+            spans.extend(input_spans(line));
         } else {
-            if i == 0 {
-                spans.extend(input_spans(line));
-            } else {
-                spans.push(Span::raw(line.to_string()));
-            }
+            spans.push(Span::raw(line.to_string()));
         }
         text_lines.push(TextLine::from(spans));
     }
@@ -1806,6 +1851,107 @@ fn input_spans(input: &str) -> Vec<Span<'static>> {
             out
         }
         None => vec![Span::raw(input.to_string())],
+    }
+}
+
+/// Render one input line that contains the cursor, producing spans with a block cursor
+/// (the character under the cursor shown with inverted fg/bg). For the first input line
+/// (`first_line = true`) a slash-command token anywhere on the line is highlighted in orange;
+/// the highlight continues correctly even when the cursor is inside the command name.
+fn line_spans_with_cursor(line: &str, col: usize, first_line: bool) -> Vec<Span<'static>> {
+    let tok = if first_line {
+        crate::commands::slash_token_at(line, line.len())
+    } else {
+        None
+    };
+
+    // The character at `col` (or a space if at end) becomes the block-cursor cell.
+    let at_bytes = &line[col..];
+    let (cursor_ch, cursor_len) = at_bytes
+        .chars()
+        .next()
+        .map(|c| (c, c.len_utf8()))
+        .unwrap_or((' ', 0));
+    let cursor_span =
+        Span::styled(cursor_ch.to_string(), Style::default().fg(STATUSBG).bg(ORANGE));
+
+    match tok {
+        Some(ref tok) => {
+            let tok_start = tok.start;
+            let tok_end = tok.end;
+
+            // Helper: emit a styled tok-segment (orange bold).
+            let tok_span = |s: &str| -> Span<'static> {
+                Span::styled(s.to_string(), Style::default().fg(ORANGE).bold())
+            };
+
+            if col < tok_start {
+                // cursor is before the token
+                let mut out = vec![];
+                if col > 0 {
+                    out.push(Span::raw(line[..col].to_string()));
+                }
+                out.push(cursor_span);
+                let between = &line[col + cursor_len..tok_start];
+                if !between.is_empty() {
+                    out.push(Span::raw(between.to_string()));
+                }
+                out.push(tok_span(&line[tok_start..tok_end]));
+                if tok_end < line.len() {
+                    out.push(Span::raw(line[tok_end..].to_string()));
+                }
+                out
+            } else if col >= tok_end {
+                // cursor is after the token
+                let mut out = vec![];
+                if tok_start > 0 {
+                    out.push(Span::raw(line[..tok_start].to_string()));
+                }
+                out.push(tok_span(&line[tok_start..tok_end]));
+                let between = &line[tok_end..col];
+                if !between.is_empty() {
+                    out.push(Span::raw(between.to_string()));
+                }
+                out.push(cursor_span);
+                let rest = &line[col + cursor_len..];
+                if !rest.is_empty() {
+                    out.push(Span::raw(rest.to_string()));
+                }
+                out
+            } else {
+                // cursor is inside the token
+                let mut out = vec![];
+                if tok_start > 0 {
+                    out.push(Span::raw(line[..tok_start].to_string()));
+                }
+                let pre_in_tok = &line[tok_start..col];
+                if !pre_in_tok.is_empty() {
+                    out.push(tok_span(pre_in_tok));
+                }
+                out.push(cursor_span);
+                let post_in_tok = &line[col + cursor_len..tok_end];
+                if !post_in_tok.is_empty() {
+                    out.push(tok_span(post_in_tok));
+                }
+                if tok_end < line.len() {
+                    out.push(Span::raw(line[tok_end..].to_string()));
+                }
+                out
+            }
+        }
+        None => {
+            // No slash token — just render with block cursor.
+            let mut out = vec![];
+            if col > 0 {
+                out.push(Span::raw(line[..col].to_string()));
+            }
+            out.push(cursor_span);
+            let rest = &line[col + cursor_len..];
+            if !rest.is_empty() {
+                out.push(Span::raw(rest.to_string()));
+            }
+            out
+        }
     }
 }
 
@@ -2359,6 +2505,7 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
+    let version = concat!("v", env!("CARGO_PKG_VERSION"));
     let hint = if app.busy {
         "esc stop "
     } else if app.done {
@@ -2368,13 +2515,20 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     };
     let row1 = Rect { height: 1, ..area };
     if w >= 70 {
-        let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(24)]).split(row1);
+        // Right side: version + hint
+        let right_text = format!("{version}  {hint}");
+        let right_len = right_text.chars().count() as u16;
+        let cols =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(right_len)]).split(row1);
         frame.render_widget(Paragraph::new(TextLine::from(line1)).style(bg), cols[0]);
         frame.render_widget(
-            Paragraph::new(TextLine::from(Span::styled(
-                hint,
-                Style::default().fg(DIM).bg(STATUSBG),
-            )))
+            Paragraph::new(TextLine::from(vec![
+                Span::styled(
+                    format!("{version}  "),
+                    Style::default().fg(DIM).bg(STATUSBG),
+                ),
+                Span::styled(hint, Style::default().fg(DIM).bg(STATUSBG)),
+            ]))
             .alignment(Alignment::Right)
             .style(bg),
             cols[1],

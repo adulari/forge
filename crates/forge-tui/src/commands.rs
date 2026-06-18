@@ -57,8 +57,13 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "config",
-        desc: "configure Forge — provider & search API keys, bridge plans",
+        desc: "configure Forge — provider & search API keys, bridge plans, permission mode, credit conservation",
         usage: "/config",
+    },
+    Command {
+        name: "thinking",
+        desc: "toggle model reasoning/thinking display on or off",
+        usage: "/thinking",
     },
     Command {
         name: "mcp",
@@ -185,6 +190,8 @@ pub enum CommandAction {
     Remote {
         mode: RemoteMode,
     },
+    /// Toggle display of model reasoning/thinking blocks (`/thinking`).
+    Thinking,
     Quit,
     /// Not a known command — the binary shows `unknown command: X`.
     Unknown(String),
@@ -473,6 +480,7 @@ pub fn parse_command(line: &str) -> CommandAction {
             };
             CommandAction::Remote { mode }
         }
+        "thinking" | "think" => CommandAction::Thinking,
         "quit" | "exit" | "q" => CommandAction::Quit,
         other => CommandAction::Unknown(other.to_string()),
     }
