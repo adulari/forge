@@ -2496,8 +2496,8 @@ mod tests {
             !out.iter().any(|m| m.content.contains("OLD")),
             "oldest dropped: {out:?}"
         );
-        // Order is preserved (system first, then the surviving recent tail).
-        assert!(out.windows(2).all(|w| true), "ordered");
+        // System stays at the front; the surviving recent tail follows in order.
+        assert_eq!(out.first().unwrap().content, "SYS");
     }
 
     #[test]
