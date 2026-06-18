@@ -212,6 +212,8 @@ pub struct App {
     pub question_prompt: Option<String>,
     /// The current input-line buffer (shown in the input box).
     pub input: String,
+    /// Byte offset of the text cursor within `input`. Always on a char boundary.
+    pub input_cursor: usize,
     /// The current *partial* (un-flushed, newline-free) line of the streaming reply.
     pub streaming: String,
     /// Accumulated reasoning/thinking text, flushed as a dim block before the answer.
@@ -351,6 +353,24 @@ pub enum KeyKind {
     /// Arrow up/down — navigate the command palette / pickers (ignored by the input line).
     Up,
     Down,
+    Left,
+    Right,
+    Home,
+    End,
+    /// Ctrl+J — insert a newline into the input without submitting.
+    InsertNewline,
+    /// Delete key — delete the character forward of the cursor.
+    DeleteForward,
+    /// Ctrl+W — delete word backward (to the previous word boundary).
+    DeleteWordBack,
+    /// Ctrl+U — kill from cursor to start of the current line.
+    KillLineBack,
+    /// Ctrl+K — kill from cursor to end of the current line.
+    KillLineForward,
+    /// Ctrl+Left — move cursor one word left.
+    WordLeft,
+    /// Ctrl+Right — move cursor one word right.
+    WordRight,
     /// TAB — complete the palette selection (ignored by the input line).
     Tab,
     /// SHIFT+TAB — cycle the operating temper (handled by the shell, not the input line).
@@ -367,26 +387,165 @@ pub enum InputOutcome {
     Quit,
 }
 
-/// Apply one keystroke to the input buffer (pure; no terminal I/O).
-pub fn handle_key(input: &mut String, key: KeyKind) -> InputOutcome {
+fn prev_char_boundary(s: &str, pos: usize) -> usize {
+    let mut p = pos;
+    loop {
+        if p == 0 {
+            return 0;
+        }
+        p -= 1;
+        if s.is_char_boundary(p) {
+            return p;
+        }
+    }
+}
+
+fn next_char_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return s.len();
+    }
+    let mut p = pos + 1;
+    while p < s.len() && !s.is_char_boundary(p) {
+        p += 1;
+    }
+    p
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Ctrl+Left / Ctrl+W: find the start of the previous word from `pos`.
+fn prev_word_start(s: &str, mut pos: usize) -> usize {
+    // Skip non-word chars backward
+    while pos > 0 {
+        let p = prev_char_boundary(s, pos);
+        if is_word_char(s[p..pos].chars().next().unwrap_or(' ')) {
+            break;
+        }
+        pos = p;
+    }
+    // Skip word chars backward
+    while pos > 0 {
+        let p = prev_char_boundary(s, pos);
+        if !is_word_char(s[p..pos].chars().next().unwrap_or(' ')) {
+            break;
+        }
+        pos = p;
+    }
+    pos
+}
+
+/// Ctrl+Right: find the end of the next word from `pos`.
+fn next_word_end(s: &str, mut pos: usize) -> usize {
+    // Skip non-word chars forward
+    while pos < s.len() {
+        let next = next_char_boundary(s, pos);
+        if is_word_char(s[pos..next].chars().next().unwrap_or(' ')) {
+            break;
+        }
+        pos = next;
+    }
+    // Skip word chars forward
+    while pos < s.len() {
+        let next = next_char_boundary(s, pos);
+        if !is_word_char(s[pos..next].chars().next().unwrap_or(' ')) {
+            break;
+        }
+        pos = next;
+    }
+    pos
+}
+
+/// Apply one keystroke to the input buffer (pure; no terminal I/O). `cursor` is the byte
+/// offset of the text cursor within `input`; updated in place, always kept on a char boundary.
+pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> InputOutcome {
+    *cursor = (*cursor).min(input.len());
     match key {
         KeyKind::Char(c) => {
-            input.push(c);
+            input.insert(*cursor, c);
+            *cursor += c.len_utf8();
+            InputOutcome::Editing
+        }
+        KeyKind::InsertNewline => {
+            input.insert(*cursor, '\n');
+            *cursor += 1;
             InputOutcome::Editing
         }
         KeyKind::Backspace => {
-            input.pop();
+            if *cursor > 0 {
+                let prev = prev_char_boundary(input, *cursor);
+                input.remove(prev);
+                *cursor = prev;
+            }
+            InputOutcome::Editing
+        }
+        KeyKind::Left => {
+            if *cursor > 0 {
+                *cursor = prev_char_boundary(input, *cursor);
+            }
+            InputOutcome::Editing
+        }
+        KeyKind::Right => {
+            if *cursor < input.len() {
+                *cursor = next_char_boundary(input, *cursor);
+            }
+            InputOutcome::Editing
+        }
+        KeyKind::Home => {
+            let before = &input[..*cursor];
+            *cursor = before.rfind('\n').map(|p| p + 1).unwrap_or(0);
+            InputOutcome::Editing
+        }
+        KeyKind::End => {
+            let after = &input[*cursor..];
+            *cursor += after.find('\n').unwrap_or(after.len());
             InputOutcome::Editing
         }
         KeyKind::Enter => {
             if input.trim().is_empty() {
                 InputOutcome::Editing
             } else {
+                *cursor = 0;
                 InputOutcome::Submit(std::mem::take(input))
             }
         }
+        KeyKind::DeleteForward => {
+            if *cursor < input.len() {
+                let next = next_char_boundary(input, *cursor);
+                input.drain(*cursor..next);
+            }
+            InputOutcome::Editing
+        }
+        KeyKind::DeleteWordBack => {
+            let start = prev_word_start(input, *cursor);
+            input.drain(start..*cursor);
+            *cursor = start;
+            InputOutcome::Editing
+        }
+        KeyKind::KillLineBack => {
+            let line_start = input[..*cursor].rfind('\n').map(|p| p + 1).unwrap_or(0);
+            input.drain(line_start..*cursor);
+            *cursor = line_start;
+            InputOutcome::Editing
+        }
+        KeyKind::KillLineForward => {
+            let line_end = input[*cursor..]
+                .find('\n')
+                .map(|p| *cursor + p)
+                .unwrap_or(input.len());
+            input.drain(*cursor..line_end);
+            InputOutcome::Editing
+        }
+        KeyKind::WordLeft => {
+            *cursor = prev_word_start(input, *cursor);
+            InputOutcome::Editing
+        }
+        KeyKind::WordRight => {
+            *cursor = next_word_end(input, *cursor);
+            InputOutcome::Editing
+        }
         KeyKind::Esc => InputOutcome::Quit,
-        // Navigation / temper keys are handled by the shell before reaching the input line.
         KeyKind::Up
         | KeyKind::Down
         | KeyKind::Tab
@@ -1098,7 +1257,8 @@ pub fn render_live(frame: &mut Frame, app: &App) {
     // The input box grows with wrapped/multiline content (capped); the stream area absorbs the
     // change, so the inline viewport's total height is untouched (never resized at runtime).
     let input_h = input_box_height(&app.input, frame.area().width);
-    let fixed = PERMISSION_H + input_h + STATUS_H;
+    let status_h = statusline_height(app);
+    let fixed = PERMISSION_H + input_h + status_h;
     let avail = frame.area().height.saturating_sub(fixed);
     let panel_avail = avail.saturating_sub(MIN_STREAM);
 
@@ -1120,7 +1280,7 @@ pub fn render_live(frame: &mut Frame, app: &App) {
         Constraint::Length(task_h),
         Constraint::Length(PERMISSION_H),
         Constraint::Length(input_h),
-        Constraint::Length(STATUS_H),
+        Constraint::Length(status_h),
     ])
     .split(frame.area());
 
@@ -1570,19 +1730,41 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     // Build one ratatui Line per explicit input line so pasted newlines render as separate rows;
     // long lines are then soft-wrapped by `Wrap`. Slash-command highlighting applies to the first
     // line (where a leading `/command` lives); later lines render plain.
-    let lines: Vec<&str> = app.input.split('\n').collect();
-    let last = lines.len().saturating_sub(1);
-    let mut text_lines: Vec<TextLine> = Vec::with_capacity(lines.len().max(1));
-    for (i, line) in lines.iter().enumerate() {
+    let cursor = app.input_cursor.min(app.input.len());
+    let input_lines: Vec<&str> = app.input.split('\n').collect();
+    let mut byte_off = 0usize;
+    let mut text_lines: Vec<TextLine> = Vec::with_capacity(input_lines.len().max(1));
+    for (i, line) in input_lines.iter().enumerate() {
+        let line_end = byte_off + line.len();
+        let cursor_col = if cursor >= byte_off && cursor <= line_end {
+            Some(cursor - byte_off)
+        } else {
+            None
+        };
+        byte_off = line_end + 1; // skip the \n separator
+
         let mut spans = Vec::new();
         if i == 0 {
             spans.push(Span::styled("› ", Style::default().fg(ORANGE).bold()));
-            spans.extend(input_spans(line));
-        } else {
-            spans.push(Span::raw(line.to_string()));
         }
-        if i == last {
+        if let Some(col) = cursor_col {
+            let before = &line[..col];
+            let after = &line[col..];
+            if i == 0 {
+                spans.extend(input_spans(before));
+            } else {
+                spans.push(Span::raw(before.to_string()));
+            }
             spans.push(Span::styled("▌", Style::default().fg(ORANGE)));
+            if !after.is_empty() {
+                spans.push(Span::raw(after.to_string()));
+            }
+        } else {
+            if i == 0 {
+                spans.extend(input_spans(line));
+            } else {
+                spans.push(Span::raw(line.to_string()));
+            }
         }
         text_lines.push(TextLine::from(spans));
     }
@@ -2107,6 +2289,20 @@ fn format_tok(n: u64) -> String {
     }
 }
 
+/// Returns 1 when idle (no session data), 2 once context / token data is available.
+/// Used by [`render_live`] to allocate the right number of rows for the status area.
+pub fn statusline_height(app: &App) -> u16 {
+    if app.context_tokens > 0
+        || app.context_limit.is_some()
+        || app.session_in > 0
+        || app.session_out > 0
+    {
+        2
+    } else {
+        1
+    }
+}
+
 fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     let bg = Style::default().bg(STATUSBG);
     let w = area.width;
@@ -2119,48 +2315,35 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         .unwrap_or("—");
     let tier = app.routing.as_ref().map(|r| r.tier.as_str());
 
-    let mut left: Vec<Span> = vec![Span::styled(" ", bg)];
+    // Line 1: spinner · [tier] model · $cost · ◆ temper · ◉ remote   (hint right-aligned)
+    let mut line1: Vec<Span> = vec![Span::styled(" ", bg)];
     if app.busy && w >= 40 {
         let f = SPINNER[app.tick % SPINNER.len()];
-        left.push(Span::styled(
+        line1.push(Span::styled(
             format!("{f} working"),
             Style::default().fg(ORANGE).bg(STATUSBG),
         ));
-        left.push(sep());
+        line1.push(sep());
     }
     if let (Some(t), true) = (tier, w >= 52) {
-        left.push(Span::styled(
+        line1.push(Span::styled(
             format!("[{t}] "),
             Style::default().fg(ORANGE).bold().bg(STATUSBG),
         ));
     }
-    left.push(Span::styled(
+    line1.push(Span::styled(
         model.to_string(),
         Style::default().fg(Color::White).bg(STATUSBG),
     ));
-    left.push(sep());
-    left.push(Span::styled(
+    line1.push(sep());
+    line1.push(Span::styled(
         format!("${:.4}", app.cost_usd),
         Style::default().fg(OKGREEN).bold().bg(STATUSBG),
     ));
-    // Live token counter + context-window gauge (tui-token-counter.md). Width-gated so on a
-    // shrinking terminal the gauge drops first, then the token segment, before tier/model/cost.
-    if (app.session_in > 0 || app.session_out > 0) && w >= 76 {
-        left.push(sep());
-        left.push(Span::styled(
-            format!("↑{} ↓{}", human(app.session_in), human(app.session_out)),
-            Style::default().fg(DIM).bg(STATUSBG),
-        ));
-    }
-    if app.context_tokens > 0 && w >= 70 {
-        left.push(sep());
-        left.extend(context_gauge_spans(app.context_tokens, app.context_limit));
-    }
-    // The active temper (operating mode), color-coded by how permissive it is so the current
-    // posture reads at a glance: Read-only=blue, Ask=yellow, Auto-edit=green, Full=red.
+    // The active temper (operating mode), color-coded by how permissive it is.
     if !app.temper.is_empty() && w >= 46 {
-        left.push(sep());
-        left.push(Span::styled(
+        line1.push(sep());
+        line1.push(Span::styled(
             format!("◆ {}", app.temper),
             Style::default()
                 .fg(temper_color(&app.temper))
@@ -2168,26 +2351,25 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
                 .bg(STATUSBG),
         ));
     }
-    // Remote control active: a green `◉ remote` segment so it's visible a browser can drive the
-    // session. Shown only when on (and wide enough); dropped on narrow terminals like the temper.
     if app.remote_active && w >= 52 {
-        left.push(sep());
-        left.push(Span::styled(
+        line1.push(sep());
+        line1.push(Span::styled(
             "◉ remote",
             Style::default().fg(OKGREEN).bold().bg(STATUSBG),
         ));
     }
 
+    let hint = if app.busy {
+        "esc stop "
+    } else if app.done {
+        "done · esc quit "
+    } else {
+        "⇧⇥ temper · esc quit "
+    };
+    let row1 = Rect { height: 1, ..area };
     if w >= 70 {
-        let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(24)]).split(area);
-        frame.render_widget(Paragraph::new(TextLine::from(left)).style(bg), cols[0]);
-        let hint = if app.busy {
-            "esc stop "
-        } else if app.done {
-            "done · esc quit "
-        } else {
-            "⇧⇥ temper · esc quit "
-        };
+        let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(24)]).split(row1);
+        frame.render_widget(Paragraph::new(TextLine::from(line1)).style(bg), cols[0]);
         frame.render_widget(
             Paragraph::new(TextLine::from(Span::styled(
                 hint,
@@ -2198,7 +2380,30 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
             cols[1],
         );
     } else {
-        frame.render_widget(Paragraph::new(TextLine::from(left)).style(bg), area);
+        frame.render_widget(Paragraph::new(TextLine::from(line1)).style(bg), row1);
+    }
+
+    // Line 2: ↑in ↓out · ◷ bar used/limit pct% — always untruncated on its own row.
+    if area.height >= 2 {
+        let row2 = Rect {
+            y: area.y + 1,
+            height: 1,
+            ..area
+        };
+        let mut line2: Vec<Span> = vec![Span::styled(" ", bg)];
+        if app.session_in > 0 || app.session_out > 0 {
+            line2.push(Span::styled(
+                format!("↑{} ↓{}", human(app.session_in), human(app.session_out)),
+                Style::default().fg(DIM).bg(STATUSBG),
+            ));
+        }
+        if app.context_tokens > 0 || app.context_limit.is_some() {
+            if app.session_in > 0 || app.session_out > 0 {
+                line2.push(sep());
+            }
+            line2.extend(context_gauge_spans(app.context_tokens, app.context_limit));
+        }
+        frame.render_widget(Paragraph::new(TextLine::from(line2)).style(bg), row2);
     }
 }
 
@@ -2387,8 +2592,9 @@ mod tests {
     #[test]
     fn shift_tab_is_a_cycle_temper_key_not_an_edit() {
         let mut input = String::new();
+        let mut cur = 0usize;
         assert_eq!(
-            handle_key(&mut input, KeyKind::CycleTemper),
+            handle_key(&mut input, &mut cur, KeyKind::CycleTemper),
             InputOutcome::Editing
         );
         assert!(input.is_empty(), "temper key never edits the input line");
@@ -2676,7 +2882,7 @@ mod tests {
     }
 
     #[test]
-    fn token_segments_drop_on_narrow_terminals_before_cost() {
+    fn token_and_gauge_always_on_second_statusline_row() {
         let mut app = App::default();
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.0033,
@@ -2685,20 +2891,19 @@ mod tests {
             context_tokens: 18_200,
             context_limit: Some(200_000),
         });
-        // Narrow: gauge + token segment gone, but model+cost stay.
+        // Gauge + token counter live on line 2 — visible regardless of terminal width.
         let narrow = screen_wh(&app, 60, LIVE_H);
-        assert!(!narrow.contains("18.2k/200.0k"), "gauge dropped: {narrow}");
-        assert!(
-            !narrow.contains("↑12.3k"),
-            "token segment dropped: {narrow}"
-        );
-        assert!(narrow.contains("$0.0033"), "cost stays: {narrow}");
+        assert!(narrow.contains("18.2k/200.0k"), "gauge on line 2: {narrow}");
+        assert!(narrow.contains("↑12.3k"), "tokens on line 2: {narrow}");
+        assert!(narrow.contains("$0.0033"), "cost on line 1: {narrow}");
     }
 
     #[test]
     fn input_bar_renders_when_present() {
+        let input = "fix the bug".to_string();
         let app = App {
-            input: "fix the bug".to_string(),
+            input_cursor: input.len(),
+            input,
             ..Default::default()
         };
         assert!(screen(&app).contains("› fix the bug"));
@@ -2724,47 +2929,94 @@ mod tests {
     #[test]
     fn typing_a_char_appends_and_keeps_editing() {
         let mut buf = String::new();
+        let mut cur = 0usize;
         assert_eq!(
-            handle_key(&mut buf, KeyKind::Char('h')),
+            handle_key(&mut buf, &mut cur, KeyKind::Char('h')),
             InputOutcome::Editing
         );
         assert_eq!(
-            handle_key(&mut buf, KeyKind::Char('i')),
+            handle_key(&mut buf, &mut cur, KeyKind::Char('i')),
             InputOutcome::Editing
         );
         assert_eq!(buf, "hi");
+        assert_eq!(cur, 2);
     }
 
     #[test]
     fn backspace_removes_last_char() {
         let mut buf = "abc".to_string();
+        let mut cur = 3usize;
         assert_eq!(
-            handle_key(&mut buf, KeyKind::Backspace),
+            handle_key(&mut buf, &mut cur, KeyKind::Backspace),
             InputOutcome::Editing
         );
         assert_eq!(buf, "ab");
+        assert_eq!(cur, 2);
     }
 
     #[test]
     fn enter_submits_and_clears_buffer() {
         let mut buf = "do it".to_string();
+        let mut cur = buf.len();
         assert_eq!(
-            handle_key(&mut buf, KeyKind::Enter),
+            handle_key(&mut buf, &mut cur, KeyKind::Enter),
             InputOutcome::Submit("do it".into())
         );
         assert_eq!(buf, "", "buffer cleared after submit");
+        assert_eq!(cur, 0);
     }
 
     #[test]
     fn enter_on_empty_buffer_keeps_editing() {
         let mut buf = "   ".to_string();
-        assert_eq!(handle_key(&mut buf, KeyKind::Enter), InputOutcome::Editing);
+        let mut cur = buf.len();
+        assert_eq!(
+            handle_key(&mut buf, &mut cur, KeyKind::Enter),
+            InputOutcome::Editing
+        );
     }
 
     #[test]
     fn esc_quits() {
         let mut buf = "whatever".to_string();
-        assert_eq!(handle_key(&mut buf, KeyKind::Esc), InputOutcome::Quit);
+        let mut cur = buf.len();
+        assert_eq!(
+            handle_key(&mut buf, &mut cur, KeyKind::Esc),
+            InputOutcome::Quit
+        );
+    }
+
+    #[test]
+    fn left_right_move_cursor() {
+        let mut buf = "abc".to_string();
+        let mut cur = 3usize;
+        handle_key(&mut buf, &mut cur, KeyKind::Left);
+        assert_eq!(cur, 2);
+        handle_key(&mut buf, &mut cur, KeyKind::Left);
+        assert_eq!(cur, 1);
+        handle_key(&mut buf, &mut cur, KeyKind::Right);
+        assert_eq!(cur, 2);
+    }
+
+    #[test]
+    fn insert_at_cursor_mid_string() {
+        let mut buf = "ac".to_string();
+        let mut cur = 1usize; // between 'a' and 'c'
+        handle_key(&mut buf, &mut cur, KeyKind::Char('b'));
+        assert_eq!(buf, "abc");
+        assert_eq!(cur, 2);
+    }
+
+    #[test]
+    fn ctrl_j_inserts_newline_without_submit() {
+        let mut buf = "hello".to_string();
+        let mut cur = buf.len();
+        assert_eq!(
+            handle_key(&mut buf, &mut cur, KeyKind::InsertNewline),
+            InputOutcome::Editing
+        );
+        assert_eq!(buf, "hello\n");
+        assert_eq!(cur, 6);
     }
 
     fn todo(title: &str, status: forge_types::TodoStatus) -> forge_types::TodoItem {

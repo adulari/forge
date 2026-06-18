@@ -13,7 +13,9 @@ mod core_tools;
 mod lattice_tool;
 mod shell;
 mod web;
-pub use core_tools::{EditFileTool, ListDirTool, ReadFileTool, SearchTool, WriteFileTool};
+pub use core_tools::{
+    DeleteFileTool, EditFileTool, GlobTool, ListDirTool, ReadFileTool, SearchTool, WriteFileTool,
+};
 pub use lattice_tool::LatticeTool;
 pub use shell::ShellTool;
 pub use web::{BraveSearch, DuckDuckGo, SearchBackend, SearchResult, WebFetchTool, WebSearchTool};
@@ -62,9 +64,11 @@ impl ToolRegistry {
         r.register(Box::new(ReadFileTool));
         r.register(Box::new(WriteFileTool));
         r.register(Box::new(EditFileTool));
+        r.register(Box::new(DeleteFileTool));
         r.register(Box::new(ShellTool));
         r.register(Box::new(ListDirTool));
         r.register(Box::new(SearchTool));
+        r.register(Box::new(GlobTool));
         r.register(Box::new(WebFetchTool));
         r.register(Box::new(WebSearchTool::new()));
         r
@@ -101,9 +105,11 @@ mod tests {
             "read_file",
             "write_file",
             "edit_file",
+            "delete_file",
             "shell",
             "list_dir",
             "search",
+            "glob",
             "web_fetch",
             "web_search",
         ] {
@@ -152,6 +158,11 @@ mod tests {
             SideEffect::ReadOnly
         );
         assert_eq!(r.get("search").unwrap().side_effect(), SideEffect::ReadOnly);
+        assert_eq!(r.get("glob").unwrap().side_effect(), SideEffect::ReadOnly);
+        assert_eq!(
+            r.get("delete_file").unwrap().side_effect(),
+            SideEffect::Write
+        );
         assert_eq!(
             r.get("web_fetch").unwrap().side_effect(),
             SideEffect::Network

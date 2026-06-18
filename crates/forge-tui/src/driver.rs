@@ -193,8 +193,28 @@ impl Tui {
                     KeyCode::Char('o') if k.modifiers.contains(KeyModifiers::CONTROL) => {
                         KeyKind::ToggleSubagentDetail
                     }
+                    KeyCode::Char('j') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyKind::InsertNewline
+                    }
+                    KeyCode::Char('w') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyKind::DeleteWordBack
+                    }
+                    KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyKind::KillLineBack
+                    }
+                    KeyCode::Char('k') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyKind::KillLineForward
+                    }
+                    // Ctrl+A / Ctrl+E: readline line-start / line-end (reuse existing variants).
+                    KeyCode::Char('a') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyKind::Home
+                    }
+                    KeyCode::Char('e') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyKind::End
+                    }
                     KeyCode::Char(c) => KeyKind::Char(c),
                     KeyCode::Backspace => KeyKind::Backspace,
+                    KeyCode::Delete => KeyKind::DeleteForward,
                     KeyCode::Enter => KeyKind::Enter,
                     KeyCode::Esc => KeyKind::Esc,
                     // Shift+Tab cycles the operating temper. Most terminals report it as
@@ -206,6 +226,17 @@ impl Tui {
                     }
                     KeyCode::Up => KeyKind::Up,
                     KeyCode::Down => KeyKind::Down,
+                    // Ctrl+Left / Ctrl+Right: word-wise cursor movement.
+                    KeyCode::Left if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyKind::WordLeft
+                    }
+                    KeyCode::Left => KeyKind::Left,
+                    KeyCode::Right if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyKind::WordRight
+                    }
+                    KeyCode::Right => KeyKind::Right,
+                    KeyCode::Home => KeyKind::Home,
+                    KeyCode::End => KeyKind::End,
                     KeyCode::Tab => KeyKind::Tab,
                     _ => return Ok(None),
                 };
