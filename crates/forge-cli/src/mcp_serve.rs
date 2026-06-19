@@ -479,6 +479,8 @@ pub async fn run() -> Result<()> {
             depth,
             max_depth: config.mesh.subagents.max_depth,
             agents,
+            worktree_root: None,
+            repo_root: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         };
         Some(SubagentSupport {
             ctx,

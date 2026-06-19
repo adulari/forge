@@ -21,6 +21,7 @@ pub mod llm_router;
 pub mod permission;
 pub mod snapshot;
 pub mod subagent;
+pub mod worktree;
 
 pub use llm_router::LlmRouter;
 
@@ -2178,6 +2179,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
             &self.config.mesh.subagents.agents_dir,
         )));
+        let repo_root = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let ctx = subagent::AgentCtx {
             provider: Arc::clone(&self.provider),
             router: Arc::clone(&self.router),
@@ -2189,6 +2192,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             depth: 0,
             max_depth: self.config.mesh.subagents.max_depth,
             agents,
+            worktree_root: None,
+            repo_root,
         };
         let parent_id = self.id.clone();
         let max_concurrency = self.config.mesh.subagents.max_concurrency;
