@@ -5745,8 +5745,8 @@ mod tests {
             max_cost_usd: 0.0,
         };
         // When cap == 0.0 the gate skips the estimate check (never skips on cost).
-        assert!(
-            !(cfg.max_cost_usd > 0.0),
+        assert_eq!(
+            cfg.max_cost_usd, 0.0,
             "zero cap means unlimited — cost check is skipped"
         );
     }
@@ -5789,7 +5789,7 @@ mod tests {
         let yes = false;
         let max_cost: Option<f64> = Some(0.20);
         let est_usd = 0.85_f64;
-        let should_abort = !yes && max_cost.map_or(false, |cap| est_usd > cap);
+        let should_abort = !yes && max_cost.is_some_and(|cap| est_usd > cap);
         assert!(
             should_abort,
             "should abort when estimate exceeds --max-cost"
@@ -5797,19 +5797,19 @@ mod tests {
 
         // --yes overrides the cap
         let yes = true;
-        let should_abort = !yes && max_cost.map_or(false, |cap| est_usd > cap);
+        let should_abort = !yes && max_cost.is_some_and(|cap| est_usd > cap);
         assert!(!should_abort, "--yes must bypass the cap check");
 
         // Under cap: no abort
         let yes = false;
         let est_usd = 0.05_f64;
-        let should_abort = !yes && max_cost.map_or(false, |cap| est_usd > cap);
+        let should_abort = !yes && max_cost.is_some_and(|cap| est_usd > cap);
         assert!(!should_abort, "estimate under cap must not abort");
 
         // No --max-cost flag: never abort
         let max_cost: Option<f64> = None;
         let est_usd = 9999.0_f64;
-        let should_abort = !yes && max_cost.map_or(false, |cap| est_usd > cap);
+        let should_abort = !yes && max_cost.is_some_and(|cap| est_usd > cap);
         assert!(!should_abort, "no --max-cost flag → never abort");
     }
 
