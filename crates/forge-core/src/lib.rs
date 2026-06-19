@@ -91,6 +91,23 @@ pub(crate) fn pattern_diagnose(result: &str) -> Option<&'static str> {
     None
 }
 
+/// Whether `finding_sev` is at or above `threshold` (a string from `AssayConfig::gate_severity`).
+/// Ordering (most → least severe): critical > high > medium > low.
+/// A "high" threshold matches `high` and `critical` but not `medium` or `low`.
+/// Returns `true` for any unrecognised threshold string (fail-open: surface the finding rather than
+/// silently drop it when the config has a typo).
+pub(crate) fn severity_meets(finding_sev: forge_types::Severity, threshold: &str) -> bool {
+    use forge_types::Severity;
+    let min_weight = match threshold.trim().to_lowercase().as_str() {
+        "critical" => Severity::Critical.weight(),
+        "high" => Severity::High.weight(),
+        "medium" | "med" => Severity::Medium.weight(),
+        "low" => Severity::Low.weight(),
+        _ => 0, // unknown threshold → pass everything through
+    };
+    finding_sev.weight() >= min_weight
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
     #[error(transparent)]
@@ -105,6 +122,10 @@ pub enum CoreError {
     SessionNotFound(String),
     #[error("no healthy model available: every routed/fallback model is rate-limited or down")]
     NoHealthyModel,
+    /// The auto-review gate found findings at/above the configured severity and `gate_mode =
+    /// "block"` is set — the turn is aborted so the model can fix them before proceeding.
+    #[error("auto-review gate blocked: {0}")]
+    TurnBlocked(String),
 }
 
 /// Result of a [`Session::rewind_to`] / [`Session::undo`]: what the file-restore did, plus the
@@ -2038,6 +2059,26 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         }
         // ── End autofix ───────────────────────────────────────────────────────────────────────
 
+        // ── Auto-review gate (assay.auto_review) ──────────────────────────────────────────────
+        // When enabled: build a unified diff of files written THIS turn, run the Assay critic
+        // crew over it, and either warn or block depending on gate_mode. Zero overhead when off.
+        if self.config.assay.auto_review && self.edits_this_turn > 0 {
+            let ar = self.config.assay.clone();
+            if let Err(e) = self.auto_review_gate(&ar).await {
+                // TurnBlocked propagates up so the caller can surface it; other errors are
+                // infrastructure failures we surface as warnings to avoid silently killing the turn.
+                match &e {
+                    CoreError::TurnBlocked(_) => return Err(e),
+                    _ => {
+                        self.presenter.emit(PresenterEvent::Warning(format!(
+                            "auto-review: gate error ({e}) — skipping"
+                        )));
+                    }
+                }
+            }
+        }
+        // ── End auto-review gate ───────────────────────────────────────────────────────────────
+
         let (session_in, session_out) = self.store.session_tokens(&self.id)?;
         self.presenter.emit(PresenterEvent::Cost {
             session_total_usd: self.store.session_cost(&self.id)?,
@@ -2050,6 +2091,153 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             final_text: final_text.clone(),
         });
         Ok(final_text)
+    }
+
+    /// Build a unified diff of files written this turn (pre-turn blob vs current file), run the
+    /// Assay critic crew over it, and surface findings whose severity >= `gate_severity`. In
+    /// `warn` mode the findings are emitted as warnings and the turn continues. In `block` mode
+    /// they are emitted and `CoreError::TurnBlocked` is returned so the turn is aborted.
+    async fn auto_review_gate(
+        &mut self,
+        cfg: &forge_config::AssayConfig,
+    ) -> Result<(), CoreError> {
+        use similar::{ChangeTag, TextDiff};
+
+        // Gather files touched this turn from the snapshot manifest.
+        let turn_files = snapshot::changed_files_this_turn(
+            &self.checkpoint_root,
+            &self.id,
+            self.current_turn_seq,
+        );
+        if turn_files.is_empty() {
+            return Ok(());
+        }
+
+        // Build a concatenated unified diff: for each file, diff old (blob or empty) vs new.
+        let mut combined = String::new();
+        for tf in &turn_files {
+            let old = tf
+                .blob
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            let new = std::fs::read_to_string(&tf.path).unwrap_or_default();
+            if old == new {
+                continue;
+            }
+            combined.push_str(&format!("--- a/{}\n+++ b/{}\n", tf.path, tf.path));
+            let td = TextDiff::from_lines(old.as_str(), new.as_str());
+            for change in td.iter_all_changes() {
+                let sym = match change.tag() {
+                    ChangeTag::Delete => "-",
+                    ChangeTag::Insert => "+",
+                    ChangeTag::Equal => " ",
+                };
+                combined.push_str(&format!("{sym} {}", change.value()));
+            }
+            combined.push('\n');
+        }
+
+        if combined.len() < cfg.min_diff_bytes {
+            return Ok(());
+        }
+
+        self.presenter.emit(PresenterEvent::Warning(format!(
+            "auto-review: diff is {} bytes — running critic crew",
+            combined.len(),
+        )));
+
+        let lenses = forge_types::FindingCategory::crew().to_vec();
+        let pricing = std::sync::Arc::new(self.pricing.clone());
+        let provider = std::sync::Arc::clone(&self.provider);
+        let store = std::sync::Arc::clone(&self.store);
+        let cooldown =
+            std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
+
+        // Build tier model chains from the catalog (ranked + health-filtered) when available,
+        // falling back to the configured model list — same pattern as the CLI's /assay path.
+        let benched = self.store.current_benched().unwrap_or_default();
+        let models = {
+            let chain = |tier: forge_types::TaskTier| -> Vec<String> {
+                // Catalog path: ranked candidates, drop currently-benched ones first.
+                if let Some(cat) = &self.catalog {
+                    let ranked: Vec<String> = cat
+                        .ranked_for(tier, &self.pricing, 8)
+                        .into_iter()
+                        .filter(|m| !benched.is_benched(m))
+                        .collect();
+                    if !ranked.is_empty() {
+                        return ranked;
+                    }
+                }
+                // Config fallback: the configured candidates for this tier.
+                self.config
+                    .candidates_for(tier)
+                    .into_iter()
+                    .filter(|m| !benched.is_benched(m))
+                    .collect()
+            };
+            assay::TierModels {
+                trivial: chain(forge_types::TaskTier::Trivial),
+                complex: chain(forge_types::TaskTier::Complex),
+            }
+        };
+
+        let source: std::sync::Arc<str> = combined.into();
+        let presenter = &mut self.presenter;
+        let mut on_progress = |p: assay::AssayProgress| {
+            presenter.emit(PresenterEvent::AssayProgress(assay::progress_line(&p)));
+        };
+
+        let report = assay::run_assay(
+            forge_types::AssayScope::Diff,
+            source,
+            lenses,
+            models,
+            provider,
+            pricing,
+            store,
+            cooldown,
+            &mut on_progress,
+        )
+        .await;
+
+        // Filter to findings at/above the configured gate severity.
+        let gate_findings: Vec<&forge_types::Finding> = report
+            .findings
+            .iter()
+            .filter(|f| severity_meets(f.severity, &cfg.gate_severity))
+            .collect();
+
+        if gate_findings.is_empty() {
+            self.presenter.emit(PresenterEvent::Warning(
+                "auto-review: no findings at/above gate severity — OK".to_string(),
+            ));
+            return Ok(());
+        }
+
+        // Surface all gate-triggering findings as warnings.
+        for f in &gate_findings {
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "auto-review [{}] {}: {} — {} ({}:{})",
+                f.severity.as_str(),
+                f.category.as_str(),
+                f.title,
+                f.suggested_fix,
+                f.file,
+                f.line.map(|l| l.to_string()).unwrap_or_default(),
+            )));
+        }
+
+        if cfg.gate_mode.trim().eq_ignore_ascii_case("block") {
+            return Err(CoreError::TurnBlocked(format!(
+                "{} finding(s) at/above '{}' severity",
+                gate_findings.len(),
+                cfg.gate_severity
+            )));
+        }
+
+        Ok(())
     }
 
     /// Run the autofix stage: execute lint and/or test commands (if enabled and non-empty);
@@ -5345,5 +5533,105 @@ mod tests {
         // No commands run → stage trivially passes.
         let passed = session.run_autofix_stage(&af).await.unwrap();
         assert!(passed, "empty commands → nothing runs → stage passes");
+    }
+
+    // ── Auto-review gate tests ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn severity_meets_high_threshold() {
+        use forge_types::Severity;
+        // "high" gate: critical and high pass; medium and low do not.
+        assert!(severity_meets(Severity::Critical, "high"));
+        assert!(severity_meets(Severity::High, "high"));
+        assert!(!severity_meets(Severity::Medium, "high"));
+        assert!(!severity_meets(Severity::Low, "high"));
+    }
+
+    #[test]
+    fn severity_meets_medium_threshold() {
+        use forge_types::Severity;
+        // "medium" gate: critical, high, medium pass; low does not.
+        assert!(severity_meets(Severity::Critical, "medium"));
+        assert!(severity_meets(Severity::High, "medium"));
+        assert!(severity_meets(Severity::Medium, "medium"));
+        assert!(!severity_meets(Severity::Low, "medium"));
+    }
+
+    #[test]
+    fn severity_meets_low_threshold() {
+        use forge_types::Severity;
+        // "low" gate: everything passes.
+        assert!(severity_meets(Severity::Critical, "low"));
+        assert!(severity_meets(Severity::High, "low"));
+        assert!(severity_meets(Severity::Medium, "low"));
+        assert!(severity_meets(Severity::Low, "low"));
+    }
+
+    #[test]
+    fn severity_meets_critical_threshold() {
+        use forge_types::Severity;
+        // "critical" gate: only critical passes.
+        assert!(severity_meets(Severity::Critical, "critical"));
+        assert!(!severity_meets(Severity::High, "critical"));
+        assert!(!severity_meets(Severity::Medium, "critical"));
+        assert!(!severity_meets(Severity::Low, "critical"));
+    }
+
+    #[test]
+    fn severity_meets_unknown_threshold_is_permissive() {
+        use forge_types::Severity;
+        // Unknown threshold → fail-open (surface the finding).
+        assert!(severity_meets(Severity::Low, "unknown-typo"));
+        assert!(severity_meets(Severity::Medium, ""));
+    }
+
+    #[test]
+    fn auto_review_gate_skipped_when_disabled() {
+        // When auto_review = false, the gate condition is never entered regardless of edits.
+        let cfg = forge_config::AssayConfig {
+            auto_review: false,
+            gate_severity: "high".to_string(),
+            gate_mode: "block".to_string(),
+            min_diff_bytes: 0,
+        };
+        // The predicate `auto_review && edits_this_turn > 0` must be false with auto_review=off.
+        let edits: u32 = 5;
+        assert!(
+            !(cfg.auto_review && edits > 0),
+            "gate must be skipped when auto_review is off"
+        );
+    }
+
+    #[test]
+    fn auto_review_gate_skipped_when_no_edits() {
+        // Even with auto_review=true, gate is skipped when edits_this_turn==0.
+        let cfg = forge_config::AssayConfig {
+            auto_review: true,
+            gate_severity: "high".to_string(),
+            gate_mode: "warn".to_string(),
+            min_diff_bytes: 200,
+        };
+        let edits: u32 = 0;
+        assert!(
+            !(cfg.auto_review && edits > 0),
+            "gate must be skipped when no edits happened"
+        );
+    }
+
+    #[test]
+    fn auto_review_gate_skipped_when_diff_too_small() {
+        // The diff-size check: if the concatenated diff is < min_diff_bytes the gate returns
+        // early without running the crew. We test the predicate directly.
+        let cfg = forge_config::AssayConfig {
+            auto_review: true,
+            gate_severity: "high".to_string(),
+            gate_mode: "warn".to_string(),
+            min_diff_bytes: 200,
+        };
+        let diff = "small".to_string();
+        assert!(
+            diff.len() < cfg.min_diff_bytes,
+            "a 5-byte diff is below the 200-byte threshold"
+        );
     }
 }

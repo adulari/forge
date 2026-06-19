@@ -26,6 +26,7 @@ tracing.workspace = true
 globset.workspace = true
 shell-words.workspace = true
 async-trait.workspace = true
+similar.workspace = true
 tokio = { workspace = true }
 
 [dev-dependencies]
