@@ -12,7 +12,7 @@
 //!
 //! Run: `cargo run -p xtasks -- bench-lattice`
 //! Env: FORGE_BENCH_MODEL (default openrouter::google/gemini-2.5-flash)
-//!      FORGE_BENCH_REPS  (default 2)
+//!      FORGE_BENCH_REPS  (default 3)
 //!      FORGE_BENCH_CONDS (default "off,current,improved")
 
 use std::sync::Arc;
@@ -26,38 +26,10 @@ use forge_store::Store;
 use forge_tui::HeadlessPresenter;
 
 const DEFAULT_MODEL: &str = "openrouter::google/gemini-2.5-flash";
-const DEFAULT_REPS: usize = 2;
+const DEFAULT_REPS: usize = 3;
 const MAX_STEPS: usize = 6;
 
-struct BenchTask {
-    id: &'static str,
-    prompt: &'static str,
-}
-
-/// Narrow, repo-specific questions whose answers live in one or two source files — exactly the
-/// case where injecting the relevant symbol should save the model a file read.
-const TASKS: &[BenchTask] = &[
-    BenchTask {
-        id: "T1-usage-fields",
-        prompt: "List every field of the `Usage` struct in the forge-types crate. Answer concisely, then stop.",
-    },
-    BenchTask {
-        id: "T2-inject-budget",
-        prompt: "In forge-core, what value does the `inject_budget` function return when the BudgetStatus is the most constrained variant, given a base of 1500? Answer with the number and stop.",
-    },
-    BenchTask {
-        id: "T3-record-usage",
-        prompt: "Which method on the Store type in forge-store records per-message token usage, and which SQL table does it INSERT into? Answer in one line and stop.",
-    },
-    BenchTask {
-        id: "T4-retrieve-identifiers",
-        prompt: "In forge-index, the retrieval code extracts candidate identifiers from a prompt. What minimum length must a token be to qualify, and name one stopword it drops? Answer in one line and stop.",
-    },
-    BenchTask {
-        id: "T5-permission-modes",
-        prompt: "Name the variants of the PermissionMode enum in forge-types. Answer with just the variant names and stop.",
-    },
-];
+use crate::tasks::TASKS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Condition {
@@ -203,26 +175,43 @@ pub async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn mean(v: &[u64]) -> f64 {
+fn mean(v: &[f64]) -> f64 {
     if v.is_empty() {
         return 0.0;
     }
-    v.iter().sum::<u64>() as f64 / v.len() as f64
+    v.iter().sum::<f64>() / v.len() as f64
 }
 
-fn cond_total(rows: &[Row], cond: Condition) -> f64 {
-    // Total = input + output, the full token cost of completing the suite.
-    mean(
+/// Median is the honest per-task aggregate: a single live-model run can blow up into a 4–6-step
+/// exploration (a 5–10× token outlier), which drags an arithmetic mean toward whichever condition
+/// got unlucky. The median across reps reflects the typical run.
+fn median(v: &[u64]) -> f64 {
+    if v.is_empty() {
+        return 0.0;
+    }
+    let mut s: Vec<u64> = v.to_vec();
+    s.sort_unstable();
+    let n = s.len();
+    if n % 2 == 1 {
+        s[n / 2] as f64
+    } else {
+        (s[n / 2 - 1] + s[n / 2]) as f64 / 2.0
+    }
+}
+
+/// Median total (input+output) tokens for one task under one condition, across reps.
+fn task_median(rows: &[Row], task: &str, cond: Condition) -> f64 {
+    median(
         &rows
             .iter()
-            .filter(|r| r.cond == cond)
+            .filter(|r| r.task == task && r.cond == cond)
             .map(|r| r.input + r.output)
             .collect::<Vec<_>>(),
     )
 }
 
 fn print_report(rows: &[Row], conds: &[Condition]) {
-    println!("\n## Per-task mean (input+output) tokens\n");
+    println!("\n## Per-task median (input+output) tokens\n");
     println!(
         "| task | {} |",
         conds
@@ -235,64 +224,61 @@ fn print_report(rows: &[Row], conds: &[Condition]) {
     for task in TASKS {
         let cells: Vec<String> = conds
             .iter()
-            .map(|&c| {
-                let m = mean(
-                    &rows
-                        .iter()
-                        .filter(|r| r.task == task.id && r.cond == c)
-                        .map(|r| r.input + r.output)
-                        .collect::<Vec<_>>(),
-                );
-                format!("{m:.0}")
-            })
+            .map(|&c| format!("{:.0}", task_median(rows, task.id, c)))
             .collect();
         println!("| {} | {} |", task.id, cells.join(" | "));
     }
 
-    println!("\n## Overall mean total tokens per task (and mean steps)\n");
+    println!("\n## Median steps per condition\n");
     for &c in conds {
-        let steps = mean(
+        let steps = median(
             &rows
                 .iter()
                 .filter(|r| r.cond == c)
                 .map(|r| r.steps)
                 .collect::<Vec<_>>(),
         );
+        println!("- {:<9}: {steps:.1} steps", c.label());
+    }
+
+    // Equal-weight aggregate: per-task % reduction, then averaged across tasks. Weighting each task
+    // equally (rather than summing tokens) stops one giant-token task from dominating the headline —
+    // the flaw that produced the earlier, unreliable "-60%" figure.
+    let report_delta = |label: &str, base: Condition, cand: Condition| {
+        if !conds.contains(&base) || !conds.contains(&cand) {
+            return;
+        }
+        let deltas: Vec<f64> = TASKS
+            .iter()
+            .filter_map(|t| {
+                let b = task_median(rows, t.id, base);
+                let c = task_median(rows, t.id, cand);
+                (b > 0.0).then_some((c - b) / b * 100.0)
+            })
+            .collect();
+        let mut sorted = deltas.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med = if sorted.is_empty() {
+            0.0
+        } else if sorted.len() % 2 == 1 {
+            sorted[sorted.len() / 2]
+        } else {
+            (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
+        };
         println!(
-            "- {:<9}: {:.0} tok  ({steps:.1} steps)",
-            c.label(),
-            cond_total(rows, c)
+            "- {label}: mean {:+.1}% · median {:+.1}%  (per-task, equal weight)",
+            mean(&deltas),
+            med
         );
-    }
+    };
 
-    // Reductions vs Off and vs Current.
-    let off = conds
-        .contains(&Condition::Off)
-        .then(|| cond_total(rows, Condition::Off));
-    let current = conds
-        .contains(&Condition::Current)
-        .then(|| cond_total(rows, Condition::Current));
-    let improved = conds
-        .contains(&Condition::Improved)
-        .then(|| cond_total(rows, Condition::Improved));
-
-    println!("\n## Reduction\n");
-    if let (Some(off), Some(cur)) = (off, current) {
-        if off > 0.0 {
-            println!("- Current vs Off:  {:+.1}%", (cur - off) / off * 100.0);
-        }
-    }
-    if let (Some(off), Some(imp)) = (off, improved) {
-        if off > 0.0 {
-            println!(
-                "- Improved vs Off: {:+.1}%  (target ≤ -30%)",
-                (imp - off) / off * 100.0
-            );
-        }
-    }
-    if let (Some(cur), Some(imp)) = (current, improved) {
-        if cur > 0.0 {
-            println!("- Improved vs Current: {:+.1}%", (imp - cur) / cur * 100.0);
-        }
-    }
+    println!("\n## Reduction (equal-weight per-task)\n");
+    report_delta("Current vs Off    ", Condition::Off, Condition::Current);
+    report_delta("Improved vs Off   ", Condition::Off, Condition::Improved);
+    report_delta(
+        "Improved vs Current",
+        Condition::Current,
+        Condition::Improved,
+    );
+    println!("\n(target: Improved vs Current ≤ -30%)");
 }
