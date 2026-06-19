@@ -12,7 +12,7 @@
 //!
 //! Run: `cargo run -p xtasks -- bench-lattice`
 //! Env: FORGE_BENCH_MODEL (default openrouter::google/gemini-2.5-flash)
-//!      FORGE_BENCH_REPS  (default 2)
+//!      FORGE_BENCH_REPS  (default 3)
 //!      FORGE_BENCH_CONDS (default "off,current,improved")
 
 use std::sync::Arc;
