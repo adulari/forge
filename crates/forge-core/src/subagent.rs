@@ -975,10 +975,10 @@ mod tests {
         let root = std::path::Path::new("/work/tree");
         let args = json!({"path": "src/main.rs", "content": "fn main() {}"});
         let rewritten = rewrite_args_for_worktree(&args, root);
-        assert_eq!(
-            rewritten["path"].as_str().unwrap(),
-            "/work/tree/src/main.rs"
-        );
+        // Compute the expected path the same way the impl joins it, so the assertion holds on both
+        // unix ("/work/tree/src/main.rs") and Windows (backslash separators).
+        let expected = root.join("src/main.rs").to_string_lossy().into_owned();
+        assert_eq!(rewritten["path"].as_str().unwrap(), expected);
         // content field is untouched
         assert_eq!(rewritten["content"].as_str().unwrap(), "fn main() {}");
     }
@@ -1007,7 +1007,8 @@ mod tests {
         let root = std::path::Path::new("/work/tree");
         let args = json!({"cmd": "ls", "cwd": "subdir"});
         let rewritten = rewrite_args_for_worktree(&args, root);
-        assert_eq!(rewritten["cwd"].as_str().unwrap(), "/work/tree/subdir");
+        let expected = root.join("subdir").to_string_lossy().into_owned();
+        assert_eq!(rewritten["cwd"].as_str().unwrap(), expected);
     }
 
     #[test]

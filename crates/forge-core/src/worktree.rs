@@ -246,6 +246,14 @@ mod tests {
         )
         .unwrap();
         run_git(&dir, &["config", "user.name", "Forge Test"], "config name").unwrap();
+        // Keep line endings byte-exact so `git apply` doesn't introduce CRLF on Windows (else the
+        // merged-content assertion below would see "hello from child\r\n").
+        run_git(
+            &dir,
+            &["config", "core.autocrlf", "false"],
+            "config autocrlf",
+        )
+        .unwrap();
 
         // Initial commit (git worktree add requires at least one commit).
         let readme = dir.join("README");
