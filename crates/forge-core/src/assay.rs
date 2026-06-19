@@ -105,6 +105,47 @@ pub enum AssayProgress {
 /// rate-limited) aren't burst over free-tier RPM limits — the cause of lenses skipping.
 const MAX_CONCURRENCY: usize = 2;
 
+/// Pre-run cost estimate for an entire assay: all lenses × (one critic call + one verifier call),
+/// priced at the first available model per tier. Cheap to compute (no model call). Intended as a
+/// transparent over-estimate (not exact) so users can gate on it before committing spend.
+#[derive(Debug, Clone)]
+pub struct CostEstimate {
+    /// Estimated total input tokens across all lens × pass combinations.
+    pub est_input_tokens: u64,
+    /// Estimated USD spend (input tokens only, at the complex-tier model's rate).
+    pub est_usd: f64,
+    /// Number of lenses included in the estimate.
+    pub lens_count: usize,
+}
+
+/// Estimate the total cost of running `run_assay` over `source` with `lenses`.
+///
+/// Formula mirrors `run_assay`'s call structure: each lens makes one critic call (source as
+/// input + ~200 output tokens) plus one verifier call per candidate (estimated as one verifier
+/// per lens, ~100 input + ~20 output). This is a deliberate over-estimate — it assumes every
+/// critic produces at least one candidate that needs verifying, pricing each pass at the
+/// first available model in the lens's preferred tier.
+pub fn estimate_assay_cost(
+    source: &str,
+    lenses: &[FindingCategory],
+    models: &TierModels,
+    pricing: &Pricing,
+) -> CostEstimate {
+    let source_len = source.len();
+    let est_usd: f64 = lenses
+        .iter()
+        .map(|&l| estimate_lens_cost(l, source_len, models, pricing))
+        .sum();
+    // Input-token count: critic input (source/4) + verifier input (~100 tokens) per lens.
+    let tokens_per_lens = (source_len / 4) as u64 + 100;
+    let est_input_tokens = tokens_per_lens * lenses.len() as u64;
+    CostEstimate {
+        est_input_tokens,
+        est_usd,
+        lens_count: lenses.len(),
+    }
+}
+
 /// Estimate the USD cost of running one lens (critic call + verifier call) over `source_len`
 /// bytes of source. Uses the first model in the lens's preferred tier chain; returns 0.0 when
 /// no priced model is available (local / gateway models → effectively free).
@@ -836,6 +877,49 @@ mod tests {
 
     fn priced_pricing() -> Arc<Pricing> {
         Arc::new(Pricing::from_config(&forge_config::Config::default()))
+    }
+
+    #[test]
+    fn estimate_assay_cost_scales_with_source_and_lens_count() {
+        let p = priced_pricing();
+        let m = priced_models();
+        let small_src = "fn f() {}"; // ~9 bytes
+        let large_src = "a".repeat(100_000); // 100k bytes
+
+        let est_small = estimate_assay_cost(small_src, &[FindingCategory::Correctness], &m, &p);
+        let est_large = estimate_assay_cost(&large_src, &[FindingCategory::Correctness], &m, &p);
+        assert!(
+            est_large.est_usd > est_small.est_usd,
+            "larger source → higher estimate: {est_small:?} vs {est_large:?}"
+        );
+        assert!(
+            est_large.est_input_tokens > est_small.est_input_tokens,
+            "larger source → more estimated tokens"
+        );
+
+        // More lenses → higher total cost
+        let one_lens = estimate_assay_cost(small_src, &[FindingCategory::Correctness], &m, &p);
+        let two_lenses = estimate_assay_cost(
+            small_src,
+            &[FindingCategory::Correctness, FindingCategory::Design],
+            &m,
+            &p,
+        );
+        assert!(
+            two_lenses.est_usd > one_lens.est_usd,
+            "more lenses → higher estimate: {one_lens:?} vs {two_lenses:?}"
+        );
+        assert_eq!(one_lens.lens_count, 1);
+        assert_eq!(two_lenses.lens_count, 2);
+    }
+
+    #[test]
+    fn estimate_assay_cost_empty_lenses_is_zero() {
+        let p = priced_pricing();
+        let m = priced_models();
+        let est = estimate_assay_cost("fn main() {}", &[], &m, &p);
+        assert_eq!(est.est_usd, 0.0);
+        assert_eq!(est.lens_count, 0);
     }
 
     #[test]

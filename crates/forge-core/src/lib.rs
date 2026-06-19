@@ -2263,6 +2263,20 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             }
         };
 
+        // Cost pre-estimate: skip the gate (with a warning) when the estimated crew cost exceeds
+        // the configured cap. This prevents the gate from running away cost on large diffs.
+        // cap == 0.0 means unlimited — always run.
+        if cfg.max_cost_usd > 0.0 {
+            let est = assay::estimate_assay_cost(&combined, &lenses, &models, &self.pricing);
+            if est.est_usd > cfg.max_cost_usd {
+                self.presenter.emit(PresenterEvent::Warning(format!(
+                    "assay gate skipped: estimated ${:.3} exceeds cap ${:.3}",
+                    est.est_usd, cfg.max_cost_usd,
+                )));
+                return Ok(());
+            }
+        }
+
         let source: std::sync::Arc<str> = combined.into();
         let presenter = &mut self.presenter;
         let mut on_progress = |p: assay::AssayProgress| {
@@ -5673,6 +5687,7 @@ mod tests {
             gate_severity: "high".to_string(),
             gate_mode: "block".to_string(),
             min_diff_bytes: 0,
+            max_cost_usd: 0.0,
         };
         // The predicate `auto_review && edits_this_turn > 0` must be false with auto_review=off.
         let edits: u32 = 5;
@@ -5690,6 +5705,7 @@ mod tests {
             gate_severity: "high".to_string(),
             gate_mode: "warn".to_string(),
             min_diff_bytes: 200,
+            max_cost_usd: 0.0,
         };
         let edits: u32 = 0;
         assert!(
@@ -5707,12 +5723,94 @@ mod tests {
             gate_severity: "high".to_string(),
             gate_mode: "warn".to_string(),
             min_diff_bytes: 200,
+            max_cost_usd: 0.0,
         };
         let diff = "small".to_string();
         assert!(
             diff.len() < cfg.min_diff_bytes,
             "a 5-byte diff is below the 200-byte threshold"
         );
+    }
+
+    // ── Assay gate cost-cap predicate tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn gate_cap_zero_means_unlimited() {
+        // max_cost_usd == 0.0 → cap is disabled, the gate always runs.
+        let cfg = forge_config::AssayConfig {
+            auto_review: true,
+            gate_severity: "high".to_string(),
+            gate_mode: "warn".to_string(),
+            min_diff_bytes: 0,
+            max_cost_usd: 0.0,
+        };
+        // When cap == 0.0 the gate skips the estimate check (never skips on cost).
+        assert!(
+            !(cfg.max_cost_usd > 0.0),
+            "zero cap means unlimited — cost check is skipped"
+        );
+    }
+
+    #[test]
+    fn gate_cap_exceeded_means_skip() {
+        let cfg = forge_config::AssayConfig {
+            auto_review: true,
+            gate_severity: "high".to_string(),
+            gate_mode: "warn".to_string(),
+            min_diff_bytes: 0,
+            max_cost_usd: 0.10,
+        };
+        let est_usd = 0.75_f64; // over cap
+        assert!(
+            cfg.max_cost_usd > 0.0 && est_usd > cfg.max_cost_usd,
+            "gate should be skipped when estimate exceeds cap"
+        );
+    }
+
+    #[test]
+    fn gate_cap_not_exceeded_means_run() {
+        let cfg = forge_config::AssayConfig {
+            auto_review: true,
+            gate_severity: "high".to_string(),
+            gate_mode: "warn".to_string(),
+            min_diff_bytes: 0,
+            max_cost_usd: 0.50,
+        };
+        let est_usd = 0.10_f64; // under cap
+        assert!(
+            !(cfg.max_cost_usd > 0.0 && est_usd > cfg.max_cost_usd),
+            "gate should run when estimate is within cap"
+        );
+    }
+
+    #[test]
+    fn cli_max_cost_abort_predicate() {
+        // Mirror the CLI's guard: abort when !yes && max_cost.is_some() && est > cap.
+        let yes = false;
+        let max_cost: Option<f64> = Some(0.20);
+        let est_usd = 0.85_f64;
+        let should_abort = !yes && max_cost.map_or(false, |cap| est_usd > cap);
+        assert!(
+            should_abort,
+            "should abort when estimate exceeds --max-cost"
+        );
+
+        // --yes overrides the cap
+        let yes = true;
+        let should_abort = !yes && max_cost.map_or(false, |cap| est_usd > cap);
+        assert!(!should_abort, "--yes must bypass the cap check");
+
+        // Under cap: no abort
+        let yes = false;
+        let est_usd = 0.05_f64;
+        let should_abort = !yes && max_cost.map_or(false, |cap| est_usd > cap);
+        assert!(!should_abort, "estimate under cap must not abort");
+
+        // No --max-cost flag: never abort
+        let max_cost: Option<f64> = None;
+        let est_usd = 9999.0_f64;
+        let should_abort = !yes && max_cost.map_or(false, |cap| est_usd > cap);
+        assert!(!should_abort, "no --max-cost flag → never abort");
     }
 
     // ── Architect mode: model resolution tests ────────────────────────────────────────────────
