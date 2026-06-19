@@ -2968,6 +2968,7 @@ async fn build_session_with(
         });
     }
 
+    let lsp_config = config.lsp.clone();
     let mut session = match resume {
         Some(prefix) => {
             let full = resolve_session(&store, &prefix)?;
@@ -3017,6 +3018,11 @@ async fn build_session_with(
         let manager = std::sync::Arc::new(forge_mcp::McpManager::connect_all(&mcp_config).await);
         session.set_mcp(Some(manager));
         session.announce_mcp();
+    }
+    if lsp_config.enabled {
+        session.set_lsp(Some(std::sync::Arc::new(
+            forge_lsp::LspRegistry::from_config(&lsp_config),
+        )));
     }
     Ok(session)
 }

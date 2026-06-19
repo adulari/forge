@@ -217,6 +217,8 @@ pub struct Session {
     /// Background file watcher that keeps the index fresh on external edits. Held only to keep the
     /// watcher thread alive for the session's lifetime (dropped → watching stops).
     lattice_watcher: Option<forge_index::LatticeWatcher>,
+    /// LSP registry for live diagnostics after writes. `None` when lsp.enabled = false.
+    lsp: Option<Arc<forge_lsp::LspRegistry>>,
     /// The discovered command/skill catalog, so the model can find + load Forge's own skills via
     /// the `use_skill` virtual tool (command-skill-system.md). `None` → the tool is not advertised
     /// and the turn runs exactly as before.
@@ -364,6 +366,7 @@ impl Session {
             mcp: None,
             lattice: None,
             lattice_watcher: None,
+            lsp: None,
             skills: None,
             pinned_model: None,
             pinned_effort: None,
@@ -440,6 +443,11 @@ impl Session {
     /// Attach the background reindex watcher (composition root); held for the session's lifetime.
     pub fn set_lattice_watcher(&mut self, watcher: Option<forge_index::LatticeWatcher>) {
         self.lattice_watcher = watcher;
+    }
+
+    /// Attach the LSP registry (composition root). No-op when `lsp.enabled = false`.
+    pub fn set_lsp(&mut self, lsp: Option<Arc<forge_lsp::LspRegistry>>) {
+        self.lsp = lsp;
     }
 
     /// Attach the command/skill catalog (composition root) so the model can discover and load
@@ -1977,6 +1985,30 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         // reflect the edit (code-intelligence.md — post-edit freshness).
                         if let Some(lat) = &self.lattice {
                             let _ = lat.reindex_path(path);
+                        }
+                        // LSP diagnostics: ask the language server for errors on the
+                        // just-written file and queue them as a pending hint so the model
+                        // self-corrects this turn. Best-effort: missing server → silent.
+                        if self.config.lsp.enabled {
+                            if let Some(lsp) = &self.lsp {
+                                let abs = std::path::absolute(path)
+                                    .unwrap_or_else(|_| path.clone());
+                                let timeout = std::time::Duration::from_millis(
+                                    self.config.lsp.timeout_ms,
+                                );
+                                let lsp = Arc::clone(lsp);
+                                let diags = lsp.diagnostics_for(&abs, timeout).await;
+                                if !diags.is_empty() {
+                                    let lines: Vec<String> = diags
+                                        .iter()
+                                        .map(|d| d.format_line(&path.display().to_string()))
+                                        .collect();
+                                    self.pending_hints.push(format!(
+                                        "[lsp diagnostics]\n{}",
+                                        lines.join("\n")
+                                    ));
+                                }
+                            }
                         }
                     }
                     (out, true)
