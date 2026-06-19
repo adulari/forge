@@ -113,6 +113,13 @@ enum AssayCmd {
         /// Override the model for all critics (bypasses mesh tier selection).
         #[arg(long)]
         model: Option<String>,
+        /// Abort (exit 3) when the pre-run cost estimate exceeds this USD value.
+        /// Without this flag the estimate is printed but never blocks the run.
+        #[arg(long, value_name = "USD")]
+        max_cost: Option<f64>,
+        /// Skip the --max-cost guard and run even if the estimate exceeds the cap.
+        #[arg(long, conflicts_with = "max_cost")]
+        yes: bool,
     },
 }
 
@@ -1493,9 +1500,14 @@ async fn assay_cmd(sub: AssayCmd) -> Result<()> {
         fail_on,
         lenses,
         model,
+        max_cost,
+        yes,
     } = sub
     {
-        return assay_run_cmd(scope, branch, since, path, format, fail_on, lenses, model).await;
+        return assay_run_cmd(
+            scope, branch, since, path, format, fail_on, lenses, model, max_cost, yes,
+        )
+        .await;
     }
     let store = open_store()?;
     match sub {
@@ -1575,7 +1587,8 @@ async fn assay_cmd(sub: AssayCmd) -> Result<()> {
 /// Headless `forge assay run` — CI path. Prepares inputs exactly like the TUI's `spawn_assay`
 /// (same model-tier discovery, same `bundle_scoped_source`), calls `run_assay`, renders output,
 /// and exits 2 when `--fail-on` is set and a finding meets the threshold. Exit 1 on hard error
-/// (propagated as `anyhow::Error`); exit 0 otherwise.
+/// (propagated as `anyhow::Error`); exit 0 otherwise. Exit 3 when `--max-cost` is set and the
+/// pre-estimate exceeds the cap (unless `--yes` is also passed).
 #[allow(clippy::too_many_arguments)]
 async fn assay_run_cmd(
     scope_str: String,
@@ -1586,6 +1599,8 @@ async fn assay_run_cmd(
     fail_on: Option<FailOnSeverity>,
     lenses_str: Option<String>,
     model_override: Option<String>,
+    max_cost: Option<f64>,
+    yes: bool,
 ) -> Result<()> {
     // Inject provider keys from env (ANTHROPIC_API_KEY / OPENROUTER_API_KEY etc.) so CI works
     // without a keyring — same call as `forge models` and `forge mesh` make.
@@ -1679,6 +1694,27 @@ async fn assay_run_cmd(
         anyhow::bail!("assay: every model is rate-limited/benched — try `forge models --probe`");
     }
     let models = forge_core::assay::TierModels { trivial, complex };
+
+    // --- Cost pre-estimate: always print; abort on --max-cost unless --yes ---
+    let estimate = forge_core::assay::estimate_assay_cost(&source, &lenses, &models, &pricing);
+    eprintln!(
+        "assay: estimated ~{} input tokens, ~${:.4}",
+        estimate.est_input_tokens, estimate.est_usd
+    );
+    if !yes {
+        if let Some(cap) = max_cost {
+            if estimate.est_usd > cap {
+                eprintln!(
+                    "assay: estimated cost ${:.4} exceeds --max-cost ${:.4} — aborting \
+                     (pass --yes to run anyway)",
+                    estimate.est_usd, cap
+                );
+                use std::io::Write;
+                std::io::stderr().flush().ok();
+                std::process::exit(3);
+            }
+        }
+    }
 
     // --- Build provider (same as build_provider_and_router, no mock in CI) ---
     let harness = config.mesh.bridge_mode == forge_config::BridgeMode::Harness;

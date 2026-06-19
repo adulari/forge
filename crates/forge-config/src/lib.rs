@@ -406,6 +406,10 @@ pub struct AssayConfig {
     /// Skip review when the turn's diff is smaller than this (bytes) — trivial edits aren't worth it.
     #[serde(default = "default_assay_min_diff_bytes")]
     pub min_diff_bytes: usize,
+    /// Maximum estimated USD cost for one auto-review gate run. When the pre-estimate exceeds
+    /// this cap the gate is skipped with a warning instead of running away cost. 0.0 = unlimited.
+    #[serde(default = "default_assay_max_cost_usd")]
+    pub max_cost_usd: f64,
 }
 
 impl Default for AssayConfig {
@@ -415,6 +419,7 @@ impl Default for AssayConfig {
             gate_severity: default_assay_gate_severity(),
             gate_mode: default_assay_gate_mode(),
             min_diff_bytes: default_assay_min_diff_bytes(),
+            max_cost_usd: default_assay_max_cost_usd(),
         }
     }
 }
@@ -429,6 +434,10 @@ fn default_assay_gate_mode() -> String {
 
 fn default_assay_min_diff_bytes() -> usize {
     200
+}
+
+fn default_assay_max_cost_usd() -> f64 {
+    0.50
 }
 
 /// Settings for the slash-command + skill system.
