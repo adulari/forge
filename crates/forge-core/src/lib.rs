@@ -206,6 +206,17 @@ fn fit_messages(messages: &[Message], budget_chars: usize) -> Vec<Message> {
         .collect()
 }
 
+/// Output of one execution of the shared model↔tool loop ([`Session::run_model_loop`]).
+/// Carries everything the caller needs; the caller holds `active_model` by value so it is
+/// returned here (failover may have changed it from the original).
+struct ModelLoopOutcome {
+    final_text: String,
+    context_tokens: u64,
+    hit_step_cap: bool,
+    /// The model that produced the last response (may differ from the input if failover fired).
+    active_model: String,
+}
+
 /// One interactive session. Construct with [`Session::start`], then drive [`Session::run_turn`].
 pub struct Session {
     id: String,
@@ -1503,6 +1514,283 @@ Rules:\n\
             .map_err(CoreError::Store)
     }
 
+    /// Shared model↔tool inner loop used by both the primary turn and the autofix re-run.
+    ///
+    /// * `active_model` – the model to start with; updated by failover.
+    /// * `specs`        – tool specs to advertise (pre-built by the caller).
+    /// * `decision`     – `Some(d)` for the primary turn (enables failover, step-0 routing
+    ///   record, quota-hint persistence); `None` for autofix re-runs (no failover, no records).
+    /// * `max_steps`    – step cap (runaway guard).
+    /// * `stream_idle`  – idle-stream timeout forwarded to every `complete_with` call.
+    async fn run_model_loop(
+        &mut self,
+        mut active_model: String,
+        specs: &[ToolSpec],
+        decision: Option<&forge_mesh::RoutingDecision>,
+        max_steps: usize,
+        stream_idle: std::time::Duration,
+    ) -> Result<ModelLoopOutcome, CoreError> {
+        let failover_enabled = decision.is_some() && self.config.mesh.failover;
+        let default_cooldown =
+            std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
+
+        // Failover chain: only meaningful for the primary turn (decision is Some). The autofix
+        // path passes None, so `chain` is immediately exhausted and failover never fires.
+        let fallbacks: Vec<String> = decision.map(|d| d.fallbacks.clone()).unwrap_or_default();
+        let mut chain = fallbacks.into_iter();
+        let mut last_resort_used = false;
+
+        let mut final_text = String::new();
+        let mut context_tokens: u64 = 0;
+        let mut hit_step_cap = true;
+
+        for step in 0..max_steps {
+            // Stream the reply, with transparent failover for this step's completion.
+            let mut resp = loop {
+                // Bound what we send to the active model's context window (fetched/heuristic), so a
+                // long conversation can't overflow it — which otherwise fails the turn as
+                // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
+                // smaller-window model still fits. The immutable borrow ends before the block below.
+                let sent = self.transcript_for(&active_model);
+                // Tight scope: borrow provider + presenter only for the streamed call, so the
+                // failover branch below has full `&mut self` for benching + warnings.
+                let result =
+                    {
+                        let provider = &self.provider;
+                        let presenter = &mut self.presenter;
+                        // Bump on every stream event so the idle watchdog can distinguish a live
+                        // stream from a stalled half-open connection — a stall fails over (below)
+                        // instead of hanging the turn forever.
+                        let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                        let act = std::sync::Arc::clone(&activity);
+                        let mut sink =
+                            |ev: StreamEvent| {
+                                act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                match ev {
+                                    StreamEvent::Text(t) => {
+                                        presenter.emit(PresenterEvent::AssistantDelta(t))
+                                    }
+                                    StreamEvent::Reasoning(t) => {
+                                        presenter.emit(PresenterEvent::Reasoning(t))
+                                    }
+                                    StreamEvent::ToolStarted { name, args } => {
+                                        presenter.emit(PresenterEvent::ToolStart { name, args })
+                                    }
+                                    StreamEvent::ToolFinished { name, ok, summary } => presenter
+                                        .emit(PresenterEvent::ToolResult { name, ok, summary }),
+                                    StreamEvent::SubagentStarted { id, agent, task } => presenter
+                                        .emit(PresenterEvent::SubagentStart { id, agent, task }),
+                                    StreamEvent::SubagentProgress { id, snippet } => presenter
+                                        .emit(PresenterEvent::SubagentProgress { id, snippet }),
+                                    StreamEvent::SubagentFinished {
+                                        id,
+                                        agent,
+                                        ok,
+                                        summary,
+                                        cost_usd,
+                                    } => presenter.emit(PresenterEvent::SubagentResult {
+                                        id,
+                                        agent,
+                                        ok,
+                                        summary,
+                                        cost_usd,
+                                    }),
+                                    // A bridged turn's `update_tasks` (tailed from the sink): surface the
+                                    // list live so the sticky panel updates during the turn. The parent's
+                                    // post-turn store reload (below) keeps `self.tasks` authoritative.
+                                    StreamEvent::Tasks(tasks) => {
+                                        presenter.emit(PresenterEvent::Tasks(tasks))
+                                    }
+                                }
+                            };
+                        let completion_opts = CompletionOptions {
+                            effort: self.pinned_effort,
+                        };
+                        let fut = provider.complete_with(
+                            &active_model,
+                            &sent,
+                            specs,
+                            &completion_opts,
+                            &mut sink,
+                        );
+                        stream_with_idle_timeout(fut, &activity, stream_idle).await
+                    };
+                match result {
+                    Ok(r) => {
+                        if !r.content.is_empty() {
+                            self.presenter.emit(PresenterEvent::AssistantDone);
+                        }
+                        break r;
+                    }
+                    Err(e) if failover_enabled && e.is_retryable() => {
+                        let reason = e.reason();
+                        // A PERMANENT incapability (no tool support / unaffordable) excludes the
+                        // model for a long window so it isn't re-tried every turn (the "every model
+                        // failing" churn); a transient failure benches it on the short cooldown.
+                        if e.is_permanent() {
+                            let _ = self.store.exclude_model(&active_model, reason);
+                            self.presenter.emit(PresenterEvent::Warning(format!(
+                                "{active_model} {reason} — excluded from routing"
+                            )));
+                        } else {
+                            let _ = self.store.bench_for(
+                                &active_model,
+                                e.cooldown(default_cooldown),
+                                reason,
+                            );
+                            self.presenter.emit(PresenterEvent::Warning(format!(
+                                "{active_model} {reason} — failing over"
+                            )));
+                        }
+                        // Advance down the chain to the next model we can use. A model whose window
+                        // still holds the conversation is used immediately; one that's too small is
+                        // a switch that needs (lossy) compaction, so it's gated by consent
+                        // (Yes/No/Always) — "No" skips it and we keep looking for one that fits.
+                        let mut picked = None;
+                        for next in chain.by_ref() {
+                            match self.admit_failover_model(&next).await {
+                                Ok(true) => {
+                                    picked = Some(next);
+                                    break;
+                                }
+                                Ok(false) => {
+                                    self.presenter.emit(PresenterEvent::Warning(format!(
+                                        "skipped {next} (declined compaction) — trying the next model"
+                                    )));
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        let d = decision.expect("failover_enabled implies decision is Some");
+                        match picked {
+                            Some(next) => {
+                                self.presenter.emit(PresenterEvent::Routing {
+                                    tier: d.tier.as_str().to_string(),
+                                    model: next.clone(),
+                                    rationale: format!("failover from {active_model}"),
+                                });
+                                active_model = next;
+                                continue;
+                            }
+                            // The routed chain is exhausted. Rather than hard-fail, make ONE
+                            // last-resort attempt on the "least dead" model — the non-excluded
+                            // model whose transient bench expires soonest. This keeps a turn
+                            // working when every model is briefly rate-limited but none is
+                            // permanently incapable. Guarded by `last_resort_used` so a model that
+                            // fails again can't loop.
+                            None => match self.last_resort_model(&active_model, last_resort_used) {
+                                Some(m) => {
+                                    last_resort_used = true;
+                                    self.presenter.emit(PresenterEvent::Routing {
+                                        tier: d.tier.as_str().to_string(),
+                                        model: m.clone(),
+                                        rationale: "last-resort: least-recently-benched model"
+                                            .to_string(),
+                                    });
+                                    active_model = m;
+                                    continue;
+                                }
+                                None => return Err(CoreError::NoHealthyModel),
+                            },
+                        }
+                    }
+                    Err(e) => return Err(e.into()),
+                }
+            };
+
+            // Compute the real cost from token counts and the model's price (FR-5, A-7), pricing
+            // cache-read tokens at the discounted rate so it tracks the provider's actual bill.
+            resp.usage.cost_usd = self.pricing.cost_for_usage(&active_model, &resp.usage);
+            // The last call's input size is the live context fill (tui-token-counter.md).
+            context_tokens = resp.usage.input_tokens;
+
+            self.transcript.push(Message::assistant_tool_calls(
+                &resp.content,
+                resp.tool_calls.clone(),
+            ));
+
+            let seq = self.next_seq();
+            let msg_id = self.store.add_message_full(
+                &self.id,
+                seq,
+                Role::Assistant,
+                &resp.content,
+                Some(&active_model),
+                &resp.tool_calls,
+                None,
+            )?;
+            // Step-0 routing record and quota-hint persistence are only meaningful for the primary
+            // turn (when we have a decision). The autofix re-run skips both.
+            if let Some(d) = decision {
+                if step == 0 {
+                    self.store
+                        .record_routing(&msg_id, d.tier, &active_model, &d.rationale)?;
+                }
+                // Quota-aware routing (L3): if a CLI bridge reported its subscription window this
+                // turn, persist it so the next route() can demote/skip a near-limit subscription.
+                for hint in &resp.quotas {
+                    let _ = self.store.record_quota(hint);
+                    // Push to the TUI so the /usage overlay updates in real-time.
+                    if let Some(f) = hint.fraction_used {
+                        self.presenter.emit(forge_tui::PresenterEvent::QuotaUpdate {
+                            provider: hint.provider.clone(),
+                            window: hint.window.clone(),
+                            fraction: f,
+                        });
+                    }
+                }
+            }
+            self.store.record_usage(&self.id, &msg_id, &resp.usage)?;
+
+            if !resp.wants_tools() {
+                final_text = resp.content;
+                hit_step_cap = false;
+                // A response with neither text nor a tool call is a silent dead-end (a model
+                // glitch / refusal parsed as empty). Surface it so the turn never just "stops".
+                if final_text.trim().is_empty() {
+                    self.presenter.emit(PresenterEvent::Warning(
+                        "model returned an empty response (no text, no tool call) — stopping the turn"
+                            .to_string(),
+                    ));
+                }
+                break;
+            }
+
+            // Execute each requested tool through the permission broker.
+            for call in &resp.tool_calls {
+                let result = self.invoke_tool(&msg_id, call).await?;
+                let seq = self.next_seq();
+                self.store.add_message_full(
+                    &self.id,
+                    seq,
+                    Role::Tool,
+                    &result,
+                    None,
+                    &[],
+                    Some(&call.id),
+                )?;
+                self.transcript.push(Message::tool_result(&call.id, result));
+                // Drain any system hints queued by side-call diagnostics (e.g. shell error
+                // interceptor) so the model sees them after the failing tool result.
+                let hints: Vec<String> = self.pending_hints.drain(..).collect();
+                for hint in hints {
+                    let hseq = self.next_seq();
+                    let _ = self
+                        .store
+                        .add_message(&self.id, hseq, Role::System, &hint, None);
+                    self.transcript.push(Message::system(hint));
+                }
+            }
+        }
+
+        Ok(ModelLoopOutcome {
+            final_text,
+            context_tokens,
+            hit_step_cap,
+            active_model,
+        })
+    }
+
     /// Like [`Session::run_turn`], but first prepends `guidance` (an invoked command's or
     /// skill's methodology) as persisted system messages, and biases routing with an optional
     /// `tier_override` (the command/skill `tier:` hint). `run_turn(p)` is exactly
@@ -1743,270 +2031,25 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.auto_compact_if_needed(&edit_model).await;
 
         let specs = self.tool_specs();
-        let mut final_text = String::new();
-        // Tokens in the live context after the latest call (the statusline gauge).
-        let mut context_tokens: u64 = 0;
-
-        // Failover state (model-health-failover): try `active_model`, and on a *retryable*
-        // provider error (rate-limit / unavailable / auth) bench it and advance down the
-        // routed decision's fallback chain. `active_model` is the model that actually answered,
-        // so cost / usage / routing are recorded against it (not the original pick).
-        let failover_enabled = self.config.mesh.failover;
-        let default_cooldown =
-            std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
         let stream_idle = std::time::Duration::from_secs(self.config.mesh.stream_idle_timeout_secs);
-        let mut chain = decision.fallbacks.clone().into_iter();
-        let mut active_model = edit_model;
-        // One-shot guard for the last-resort attempt when the whole chain is exhausted (below).
-        let mut last_resort_used = false;
 
         // 3. Model <-> tool loop. The cap is a runaway guard, not a functional limit — the loop
-        // ends naturally when the model stops calling tools. `hit_step_cap` stays true only if we
-        // run out of steps mid-task, so we can warn instead of stopping silently.
+        // ends naturally when the model stops calling tools.
         let max_steps = self.config.mesh.max_steps.max(1);
-        let mut hit_step_cap = true;
-        for step in 0..max_steps {
-            // Stream the reply, with transparent failover for this step's completion.
-            let mut resp = loop {
-                // Bound what we send to the active model's context window (fetched/heuristic), so a
-                // long conversation can't overflow it — which otherwise fails the turn as
-                // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
-                // smaller-window model still fits. The immutable borrow ends before the block below.
-                let sent = self.transcript_for(&active_model);
-                // Tight scope: borrow provider + presenter only for the streamed call, so the
-                // failover branch below has full `&mut self` for benching + warnings.
-                let result =
-                    {
-                        let provider = &self.provider;
-                        let presenter = &mut self.presenter;
-                        // Bump on every stream event so the idle watchdog can distinguish a live
-                        // stream from a stalled half-open connection — a stall fails over (below)
-                        // instead of hanging the turn forever.
-                        let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                        let act = std::sync::Arc::clone(&activity);
-                        let mut sink =
-                            |ev: StreamEvent| {
-                                act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                match ev {
-                                    StreamEvent::Text(t) => {
-                                        presenter.emit(PresenterEvent::AssistantDelta(t))
-                                    }
-                                    StreamEvent::Reasoning(t) => {
-                                        presenter.emit(PresenterEvent::Reasoning(t))
-                                    }
-                                    StreamEvent::ToolStarted { name, args } => {
-                                        presenter.emit(PresenterEvent::ToolStart { name, args })
-                                    }
-                                    StreamEvent::ToolFinished { name, ok, summary } => presenter
-                                        .emit(PresenterEvent::ToolResult { name, ok, summary }),
-                                    StreamEvent::SubagentStarted { id, agent, task } => presenter
-                                        .emit(PresenterEvent::SubagentStart { id, agent, task }),
-                                    StreamEvent::SubagentProgress { id, snippet } => presenter
-                                        .emit(PresenterEvent::SubagentProgress { id, snippet }),
-                                    StreamEvent::SubagentFinished {
-                                        id,
-                                        agent,
-                                        ok,
-                                        summary,
-                                        cost_usd,
-                                    } => presenter.emit(PresenterEvent::SubagentResult {
-                                        id,
-                                        agent,
-                                        ok,
-                                        summary,
-                                        cost_usd,
-                                    }),
-                                    // A bridged turn's `update_tasks` (tailed from the sink): surface the
-                                    // list live so the sticky panel updates during the turn. The parent's
-                                    // post-turn store reload (below) keeps `self.tasks` authoritative.
-                                    StreamEvent::Tasks(tasks) => {
-                                        presenter.emit(PresenterEvent::Tasks(tasks))
-                                    }
-                                }
-                            };
-                        let completion_opts = CompletionOptions {
-                            effort: self.pinned_effort,
-                        };
-                        let fut = provider.complete_with(
-                            &active_model,
-                            &sent,
-                            &specs,
-                            &completion_opts,
-                            &mut sink,
-                        );
-                        stream_with_idle_timeout(fut, &activity, stream_idle).await
-                    };
-                match result {
-                    Ok(r) => {
-                        if !r.content.is_empty() {
-                            self.presenter.emit(PresenterEvent::AssistantDone);
-                        }
-                        break r;
-                    }
-                    Err(e) if failover_enabled && e.is_retryable() => {
-                        let reason = e.reason();
-                        // A PERMANENT incapability (no tool support / unaffordable) excludes the
-                        // model for a long window so it isn't re-tried every turn (the "every model
-                        // failing" churn); a transient failure benches it on the short cooldown.
-                        if e.is_permanent() {
-                            let _ = self.store.exclude_model(&active_model, reason);
-                            self.presenter.emit(PresenterEvent::Warning(format!(
-                                "{active_model} {reason} — excluded from routing"
-                            )));
-                        } else {
-                            let _ = self.store.bench_for(
-                                &active_model,
-                                e.cooldown(default_cooldown),
-                                reason,
-                            );
-                            self.presenter.emit(PresenterEvent::Warning(format!(
-                                "{active_model} {reason} — failing over"
-                            )));
-                        }
-                        // Advance down the chain to the next model we can use. A model whose window
-                        // still holds the conversation is used immediately; one that's too small is
-                        // a switch that needs (lossy) compaction, so it's gated by consent
-                        // (Yes/No/Always) — "No" skips it and we keep looking for one that fits.
-                        let mut picked = None;
-                        for next in chain.by_ref() {
-                            match self.admit_failover_model(&next).await {
-                                Ok(true) => {
-                                    picked = Some(next);
-                                    break;
-                                }
-                                Ok(false) => {
-                                    self.presenter.emit(PresenterEvent::Warning(format!(
-                                        "skipped {next} (declined compaction) — trying the next model"
-                                    )));
-                                }
-                                Err(e) => return Err(e),
-                            }
-                        }
-                        match picked {
-                            Some(next) => {
-                                self.presenter.emit(PresenterEvent::Routing {
-                                    tier: decision.tier.as_str().to_string(),
-                                    model: next.clone(),
-                                    rationale: format!("failover from {active_model}"),
-                                });
-                                active_model = next;
-                                continue;
-                            }
-                            // The routed chain is exhausted. Rather than hard-fail, make ONE
-                            // last-resort attempt on the "least dead" model — the non-excluded
-                            // model whose transient bench expires soonest. This keeps a turn
-                            // working when every model is briefly rate-limited but none is
-                            // permanently incapable. Guarded by `last_resort_used` so a model that
-                            // fails again can't loop.
-                            None => match self.last_resort_model(&active_model, last_resort_used) {
-                                Some(m) => {
-                                    last_resort_used = true;
-                                    self.presenter.emit(PresenterEvent::Routing {
-                                        tier: decision.tier.as_str().to_string(),
-                                        model: m.clone(),
-                                        rationale: "last-resort: least-recently-benched model"
-                                            .to_string(),
-                                    });
-                                    active_model = m;
-                                    continue;
-                                }
-                                None => return Err(CoreError::NoHealthyModel),
-                            },
-                        }
-                    }
-                    Err(e) => return Err(e.into()),
-                }
-            };
 
-            // Compute the real cost from token counts and the model's price (FR-5, A-7), pricing
-            // cache-read tokens at the discounted rate so it tracks the provider's actual bill.
-            resp.usage.cost_usd = self.pricing.cost_for_usage(&active_model, &resp.usage);
-            // The last call's input size is the live context fill (tui-token-counter.md).
-            context_tokens = resp.usage.input_tokens;
-
-            self.transcript.push(Message::assistant_tool_calls(
-                &resp.content,
-                resp.tool_calls.clone(),
-            ));
-
-            let seq = self.next_seq();
-            let msg_id = self.store.add_message_full(
-                &self.id,
-                seq,
-                Role::Assistant,
-                &resp.content,
-                Some(&active_model),
-                &resp.tool_calls,
-                None,
-            )?;
-            if step == 0 {
-                self.store.record_routing(
-                    &msg_id,
-                    decision.tier,
-                    &active_model,
-                    &decision.rationale,
-                )?;
-            }
-            self.store.record_usage(&self.id, &msg_id, &resp.usage)?;
-            // Quota-aware routing (L3): if a CLI bridge reported its subscription window this turn,
-            // persist it so the next route() can demote/skip a near-limit subscription.
-            for hint in &resp.quotas {
-                let _ = self.store.record_quota(hint);
-                // Push to the TUI so the /usage overlay updates in real-time.
-                if let Some(f) = hint.fraction_used {
-                    self.presenter.emit(forge_tui::PresenterEvent::QuotaUpdate {
-                        provider: hint.provider.clone(),
-                        window: hint.window.clone(),
-                        fraction: f,
-                    });
-                }
-            }
-
-            if !resp.wants_tools() {
-                final_text = resp.content;
-                hit_step_cap = false;
-                // A response with neither text nor a tool call is a silent dead-end (a model
-                // glitch / refusal parsed as empty). Surface it so the turn never just "stops".
-                if final_text.trim().is_empty() {
-                    self.presenter.emit(PresenterEvent::Warning(
-                        "model returned an empty response (no text, no tool call) — stopping the turn"
-                            .to_string(),
-                    ));
-                }
-                break;
-            }
-
-            // Execute each requested tool through the permission broker.
-            for call in &resp.tool_calls {
-                let result = self.invoke_tool(&msg_id, call).await?;
-                let seq = self.next_seq();
-                self.store.add_message_full(
-                    &self.id,
-                    seq,
-                    Role::Tool,
-                    &result,
-                    None,
-                    &[],
-                    Some(&call.id),
-                )?;
-                self.transcript.push(Message::tool_result(&call.id, result));
-                // Drain any system hints queued by side-call diagnostics (e.g. shell error
-                // interceptor) so the model sees them after the failing tool result.
-                let hints: Vec<String> = self.pending_hints.drain(..).collect();
-                for hint in hints {
-                    let hseq = self.next_seq();
-                    let _ = self
-                        .store
-                        .add_message(&self.id, hseq, Role::System, &hint, None);
-                    self.transcript.push(Message::system(hint));
-                }
-            }
-        }
+        // Primary turn: pass the routing decision so failover, step-0 routing record, and quota
+        // hints are all active.
+        let outcome = self
+            .run_model_loop(edit_model, &specs, Some(&decision), max_steps, stream_idle)
+            .await?;
+        let mut final_text = outcome.final_text;
+        let mut context_tokens = outcome.context_tokens;
+        let mut active_model = outcome.active_model;
 
         // Ran the full step budget while the model still wanted tools: pause loudly instead of
         // ending silently mid-task (the #1 "stops responding" bug). The work so far is persisted,
         // so the user can resume by sending `continue`.
-        if hit_step_cap {
+        if outcome.hit_step_cap {
             self.presenter.emit(PresenterEvent::Warning(format!(
                 "reached the {max_steps}-step limit — turn paused mid-task; send `continue` to keep going \
                  (raise `mesh.max_steps` in config to allow longer turns)"
@@ -2066,140 +2109,23 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                             "autofix: iteration {iterations_used}/{} — re-running model loop",
                             af.max_iterations
                         )));
-                        // Run the inner model↔tool loop again (same routing/tool setup).
-                        let fix_prompt = "(autofix re-entry: fix the failures above)";
-                        let specs = self.tool_specs();
-                        let mut fix_hit_cap = true;
-                        for step in 0..max_steps {
-                            let sent = self.transcript_for(&active_model);
-                            let result = {
-                                let provider = &self.provider;
-                                let presenter = &mut self.presenter;
-                                let activity =
-                                    std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                                let act = std::sync::Arc::clone(&activity);
-                                let mut sink = |ev: StreamEvent| {
-                                    act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    match ev {
-                                        StreamEvent::Text(t) => {
-                                            presenter.emit(PresenterEvent::AssistantDelta(t))
-                                        }
-                                        StreamEvent::Reasoning(t) => {
-                                            presenter.emit(PresenterEvent::Reasoning(t))
-                                        }
-                                        StreamEvent::ToolStarted { name, args } => {
-                                            presenter.emit(PresenterEvent::ToolStart { name, args })
-                                        }
-                                        StreamEvent::ToolFinished { name, ok, summary } => {
-                                            presenter.emit(PresenterEvent::ToolResult {
-                                                name,
-                                                ok,
-                                                summary,
-                                            })
-                                        }
-                                        StreamEvent::SubagentStarted { id, agent, task } => {
-                                            presenter.emit(PresenterEvent::SubagentStart {
-                                                id,
-                                                agent,
-                                                task,
-                                            })
-                                        }
-                                        StreamEvent::SubagentProgress { id, snippet } => presenter
-                                            .emit(PresenterEvent::SubagentProgress { id, snippet }),
-                                        StreamEvent::SubagentFinished {
-                                            id,
-                                            agent,
-                                            ok,
-                                            summary,
-                                            cost_usd,
-                                        } => presenter.emit(PresenterEvent::SubagentResult {
-                                            id,
-                                            agent,
-                                            ok,
-                                            summary,
-                                            cost_usd,
-                                        }),
-                                        StreamEvent::Tasks(tasks) => {
-                                            presenter.emit(PresenterEvent::Tasks(tasks))
-                                        }
-                                    }
-                                };
-                                let completion_opts = CompletionOptions {
-                                    effort: self.pinned_effort,
-                                };
-                                let fut = provider.complete_with(
-                                    &active_model,
-                                    &sent,
-                                    &specs,
-                                    &completion_opts,
-                                    &mut sink,
-                                );
-                                stream_with_idle_timeout(fut, &activity, stream_idle).await
-                            };
-                            let mut resp = match result {
-                                Ok(r) => {
-                                    if !r.content.is_empty() {
-                                        self.presenter.emit(PresenterEvent::AssistantDone);
-                                    }
-                                    r
-                                }
-                                Err(e) => return Err(e.into()),
-                            };
-
-                            resp.usage.cost_usd =
-                                self.pricing.cost_for_usage(&active_model, &resp.usage);
-                            context_tokens = resp.usage.input_tokens;
-                            self.transcript.push(Message::assistant_tool_calls(
-                                &resp.content,
-                                resp.tool_calls.clone(),
-                            ));
-                            let seq = self.next_seq();
-                            let msg_id = self.store.add_message_full(
-                                &self.id,
-                                seq,
-                                Role::Assistant,
-                                &resp.content,
-                                Some(&active_model),
-                                &resp.tool_calls,
+                        // Autofix re-run: pass None for decision so failover, routing record, and
+                        // quota hints are all suppressed — the active_model is kept from the
+                        // primary turn (or last failover) and is not changed here.
+                        let fix_specs = self.tool_specs();
+                        let fix_outcome = self
+                            .run_model_loop(
+                                active_model.clone(),
+                                &fix_specs,
                                 None,
-                            )?;
-                            self.store.record_usage(&self.id, &msg_id, &resp.usage)?;
-
-                            if !resp.wants_tools() {
-                                final_text = resp.content;
-                                fix_hit_cap = false;
-                                break;
-                            }
-                            for call in &resp.tool_calls {
-                                let result = self.invoke_tool(&msg_id, call).await?;
-                                let seq = self.next_seq();
-                                self.store.add_message_full(
-                                    &self.id,
-                                    seq,
-                                    Role::Tool,
-                                    &result,
-                                    None,
-                                    &[],
-                                    Some(&call.id),
-                                )?;
-                                self.transcript.push(Message::tool_result(&call.id, result));
-                                let hints: Vec<String> = self.pending_hints.drain(..).collect();
-                                for hint in hints {
-                                    let hseq = self.next_seq();
-                                    let _ = self.store.add_message(
-                                        &self.id,
-                                        hseq,
-                                        Role::System,
-                                        &hint,
-                                        None,
-                                    );
-                                    self.transcript.push(Message::system(hint));
-                                }
-                            }
-                            let _ = step; // suppress unused-variable warning
-                        }
-                        let _ = fix_prompt; // used only as a label above
-                        if fix_hit_cap {
+                                max_steps,
+                                stream_idle,
+                            )
+                            .await?;
+                        final_text = fix_outcome.final_text;
+                        context_tokens = fix_outcome.context_tokens;
+                        active_model = fix_outcome.active_model;
+                        if fix_outcome.hit_step_cap {
                             self.presenter.emit(PresenterEvent::Warning(format!(
                                 "autofix: inner model loop hit the {max_steps}-step limit"
                             )));
