@@ -9,11 +9,11 @@ use forge_config::Config;
 use forge_index::Lattice;
 use forge_mesh::pricing::Pricing;
 use forge_mesh::{BudgetState, BudgetStatus, ModelCatalog, Router};
-use forge_provider::{Provider, StreamEvent, ToolSpec};
+use forge_provider::{CompletionOptions, Provider, StreamEvent, ToolSpec};
 use forge_store::Store;
 use forge_tools::ToolRegistry;
 use forge_tui::{Presenter, PresenterEvent};
-use forge_types::{Message, PermissionDecision, PermissionMode, PermissionRule, Role, TaskTier};
+use forge_types::{EffortLevel, Message, PermissionDecision, PermissionMode, PermissionRule, Role, TaskTier};
 
 pub mod assay;
 pub mod hooks;
@@ -223,6 +223,9 @@ pub struct Session {
     /// In-session model pin (`/model <id>`). When set, mesh routing still classifies the prompt
     /// (for stats), but this model is used instead of the routed pick. `None` = mesh routing.
     pinned_model: Option<String>,
+    /// In-session reasoning-effort pin (`/effort <level>`). When set, forwarded to the provider
+    /// as a `ReasoningEffort` hint each turn. `None` = provider default (no hint sent).
+    pinned_effort: Option<EffortLevel>,
     /// System hints queued by side-call diagnostics (e.g. shell error interceptor) to be injected
     /// into the transcript immediately after the tool result that triggered them. Cleared each time.
     pending_hints: Vec<String>,
@@ -362,6 +365,7 @@ impl Session {
             lattice_watcher: None,
             skills: None,
             pinned_model: None,
+            pinned_effort: None,
             pending_hints: vec![],
             always_compact_on_switch: false,
             project_prompt_injected,
@@ -401,6 +405,16 @@ impl Session {
     /// The currently-pinned model, if any (`/model <id>` was called this session).
     pub fn pinned_model(&self) -> Option<&str> {
         self.pinned_model.as_deref()
+    }
+
+    /// Set (or clear) the in-session reasoning-effort pin. `None` returns to the provider default.
+    pub fn set_effort(&mut self, e: Option<EffortLevel>) {
+        self.pinned_effort = e;
+    }
+
+    /// The currently-pinned effort level, if any (`/effort <level>` was called this session).
+    pub fn pinned_effort(&self) -> Option<EffortLevel> {
+        self.pinned_effort
     }
 
     /// The discovered model catalog, if auto-discovery ran for this session.
@@ -1613,7 +1627,14 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                                     }
                                 }
                             };
-                        let fut = provider.complete(&active_model, &sent, &specs, &mut sink);
+                        let completion_opts = CompletionOptions { effort: self.pinned_effort };
+                        let fut = provider.complete_with(
+                            &active_model,
+                            &sent,
+                            &specs,
+                            &completion_opts,
+                            &mut sink,
+                        );
                         stream_with_idle_timeout(fut, &activity, stream_idle).await
                     };
                 match result {
