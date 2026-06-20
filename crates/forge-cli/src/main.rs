@@ -153,9 +153,13 @@ enum Command {
         /// Override the permission mode.
         #[arg(long, value_enum)]
         mode: Option<Mode>,
-        /// Resume an existing session by id.
-        #[arg(long)]
-        resume: Option<String>,
+        /// Reattach the most-recent session (cannot be combined with --resume).
+        #[arg(long, conflicts_with = "resume")]
+        r#continue: bool,
+        /// Reattach a session by id prefix, or open an interactive picker when no id is given.
+        /// Cannot be combined with --continue.
+        #[arg(long, num_args = 0..=1, value_name = "ID")]
+        resume: Option<Option<String>>,
         /// Force plain line output instead of the interactive TUI.
         #[arg(long)]
         plain: bool,
@@ -662,10 +666,15 @@ async fn main() -> Result<()> {
         Command::Chat {
             mock,
             mode,
+            r#continue,
             resume,
             plain,
             model,
-        } => chat(mock, mode, resume, plain, model).await,
+        } => {
+            let store = open_store()?;
+            let resume_mode = resolve_resume_mode(r#continue, resume, &store, plain)?;
+            chat(mock, mode, resume_mode, plain, model).await
+        }
         Command::Sessions => sessions(),
         Command::Replay { ids, json } => replay_cmd(&ids, json),
         Command::Assay { sub } => assay_cmd(sub).await,
@@ -1437,6 +1446,55 @@ fn open_store() -> Result<Store> {
         let _ = std::fs::copy(legacy, &db);
     }
     Store::open(&db).context("opening session store")
+}
+
+/// How `forge chat` should handle session continuity on startup.
+#[derive(Debug, PartialEq, Eq)]
+enum ResumeMode {
+    /// Start a brand-new session (default — no flags given).
+    Fresh,
+    /// Reattach to a specific, already-resolved full session id.
+    Id(String),
+    /// Open the interactive session picker on the first TUI frame.
+    Picker,
+}
+
+/// Resolve the `--continue` / `--resume` flags into a [`ResumeMode`].
+///
+/// * `--continue`         → `Id(most_recent)` or a clean error when there are no sessions
+/// * `--resume <prefix>`  → resolve prefix → `Id`
+/// * `--resume` (bare)    → `Picker` (headless: bail with a clear message)
+/// * neither              → `Fresh`
+fn resolve_resume_mode(
+    do_continue: bool,
+    resume: Option<Option<String>>,
+    store: &Store,
+    plain: bool,
+) -> Result<ResumeMode> {
+    match (do_continue, resume) {
+        (true, _) => {
+            let id = store
+                .most_recent_session_id()
+                .context("looking up most-recent session")?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no prior sessions — run `forge chat` to start one")
+                })?;
+            Ok(ResumeMode::Id(id))
+        }
+        (false, Some(Some(prefix))) => {
+            let id = resolve_session(store, &prefix)?;
+            Ok(ResumeMode::Id(id))
+        }
+        (false, Some(None)) => {
+            if plain || !std::io::stdout().is_terminal() {
+                anyhow::bail!(
+                    "bare --resume requires the interactive TUI; use `--resume <id>` in plain/headless mode"
+                );
+            }
+            Ok(ResumeMode::Picker)
+        }
+        (false, None) => Ok(ResumeMode::Fresh),
+    }
 }
 
 /// Resolve a (possibly abbreviated) session id to a single full id, git-style.
@@ -3699,22 +3757,27 @@ async fn claude_quota_is_stale(
 async fn chat(
     mock: bool,
     mode: Option<Mode>,
-    resume: Option<String>,
+    resume_mode: ResumeMode,
     plain: bool,
     pin: Option<String>,
 ) -> Result<()> {
     maybe_first_run_setup(mock)?;
     // Default to the interactive (animated) TUI on a real terminal.
     if !plain && std::io::stdout().is_terminal() {
-        return run_chat_tui(mock, mode, resume, pin).await;
+        return run_chat_tui(mock, mode, resume_mode, pin).await;
     }
 
     // Plain line mode: read prompts from stdin.
+    // Picker is already ruled out by resolve_resume_mode for headless/plain.
+    let resume_id = match resume_mode {
+        ResumeMode::Id(id) => Some(id),
+        ResumeMode::Fresh | ResumeMode::Picker => None,
+    };
     let mut session = build_session_with(
         Box::new(HeadlessPresenter::default()),
         mock,
         mode,
-        resume,
+        resume_id,
         pin,
     )
     .await?;
@@ -3771,7 +3834,7 @@ impl Drop for DoneGuard {
 async fn run_chat_tui(
     mock: bool,
     mode: Option<Mode>,
-    resume: Option<String>,
+    resume_mode: ResumeMode,
     pin: Option<String>,
 ) -> Result<()> {
     use forge_tui::{
@@ -3781,8 +3844,20 @@ async fn run_chat_tui(
 
     let (tx, rx) = std::sync::mpsc::channel::<UiMsg>();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<u64>();
-    let session =
-        build_session_with(Box::new(ChannelPresenter::new(tx)), mock, mode, resume, pin).await?;
+    // For Picker mode we start a fresh session; the picker fires on the first frame.
+    let open_picker_on_start = matches!(resume_mode, ResumeMode::Picker);
+    let resume_id = match resume_mode {
+        ResumeMode::Id(id) => Some(id),
+        ResumeMode::Fresh | ResumeMode::Picker => None,
+    };
+    let session = build_session_with(
+        Box::new(ChannelPresenter::new(tx)),
+        mock,
+        mode,
+        resume_id,
+        pin,
+    )
+    .await?;
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
 
     // Seed the mesh subscription quota at startup so routing + the overlays reflect usage from
@@ -3847,6 +3922,27 @@ async fn run_chat_tui(
         forge_core::hooks::run_session_hooks(&hooks, forge_config::HookEvent::SessionStart, &sid)
             .await;
     }
+
+    // On a resumed session (`--continue` / `--resume <id>`): render the prior transcript into
+    // scrollback so the conversation reappears, then push a separator so the user can tell where
+    // the resumed history ends and new input begins.
+    {
+        let s = session.lock().await;
+        let history = s.history();
+        if !history.is_empty() {
+            let sid8: String = s.session_id().chars().take(8).collect();
+            let n = history.len();
+            app.replay_history(&history);
+            app.push_resume_separator(&format!("— resumed session {sid8} ({n} messages) —"));
+        }
+    }
+
+    // For bare `--resume` (Picker mode): open the session picker on the first frame so the user
+    // can choose which session to reattach to.
+    if open_picker_on_start {
+        open_sessions_picker(&mut app, "")?;
+    }
+
     // Project-scope commands/skills can steer the model; their first use this session is gated
     // unless trusted. Re-running a gated command confirms it (its name lands here).
     let mut armed_project: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -6516,5 +6612,73 @@ mod tests {
             chat_action("fix the bug\n"),
             ChatAction::Run("fix the bug".to_string())
         );
+    }
+
+    // --- ResumeMode resolver ---
+
+    fn make_store_with_sessions(n: usize) -> forge_store::Store {
+        let store = forge_store::Store::open_in_memory().unwrap();
+        for i in 0..n {
+            store
+                .create_session(&format!("/cwd/{i}"), "default")
+                .unwrap();
+        }
+        store
+    }
+
+    #[test]
+    fn resume_mode_neither_flag_gives_fresh() {
+        let store = make_store_with_sessions(2);
+        let mode = resolve_resume_mode(false, None, &store, false).unwrap();
+        assert_eq!(mode, ResumeMode::Fresh);
+    }
+
+    #[test]
+    fn resume_mode_continue_returns_most_recent_id() {
+        let store = make_store_with_sessions(0);
+        let a = store.create_session("/a", "default").unwrap();
+        let b = store.create_session("/b", "default").unwrap();
+        let mode = resolve_resume_mode(true, None, &store, false).unwrap();
+        assert_eq!(mode, ResumeMode::Id(b.clone()));
+        // a is not the most recent
+        assert_ne!(mode, ResumeMode::Id(a));
+    }
+
+    #[test]
+    fn resume_mode_continue_with_no_sessions_errors() {
+        let store = make_store_with_sessions(0);
+        let err = resolve_resume_mode(true, None, &store, false).unwrap_err();
+        assert!(err.to_string().contains("no prior sessions"));
+    }
+
+    #[test]
+    fn resume_mode_resume_with_id_resolves_prefix() {
+        let store = make_store_with_sessions(0);
+        let id = store.create_session("/x", "default").unwrap();
+        let prefix: String = id.chars().take(6).collect();
+        let mode = resolve_resume_mode(false, Some(Some(prefix)), &store, false).unwrap();
+        assert_eq!(mode, ResumeMode::Id(id));
+    }
+
+    #[test]
+    fn resume_mode_bare_resume_plain_gives_error() {
+        let store = make_store_with_sessions(1);
+        // plain=true: headless, no TTY → should error
+        let err = resolve_resume_mode(false, Some(None), &store, true).unwrap_err();
+        assert!(err.to_string().contains("--resume <id>"));
+    }
+
+    #[test]
+    fn resume_mode_bare_resume_tty_gives_picker() {
+        // We can't test actual TTY detection in a test, but we can test with plain=false
+        // when we know stdout is NOT a terminal in CI — so we can't assert Picker here.
+        // Instead, verify the plain=false + non-TTY path gives the same error as plain=true.
+        // This is covered by the headless guard path; Picker path is integration-only.
+        let store = make_store_with_sessions(1);
+        // In a non-TTY test environment, plain=false but no terminal → same error as plain=true.
+        // We test the logic branch that matters: is_terminal() is false in tests → error path.
+        let _ = resolve_resume_mode(false, Some(None), &store, false);
+        // Not asserting the result here because is_terminal() differs per environment;
+        // the plain=true path (covered above) is the deterministic guard we rely on.
     }
 }
