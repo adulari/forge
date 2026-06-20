@@ -40,8 +40,10 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read the contents of a UTF-8 text file. Optionally slice to a line range with \
-         `start_line`/`end_line` (both 1-indexed, inclusive) to avoid reading large files whole."
+        "Read the contents of a UTF-8 text file, returned verbatim (no line numbers — so the text \
+         can be matched exactly by edit_file). Optionally slice to a line range with \
+         `start_line`/`end_line` (both 1-indexed, inclusive). Very large files are truncated; pass \
+         a line range to read a specific section. Always read a file before editing it."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::ReadOnly
@@ -75,14 +77,36 @@ impl Tool for ReadFileTool {
             .map(|n| n as usize);
 
         let content = tokio::fs::read_to_string(path).await?;
-        if start_line.is_none() && end_line.is_none() {
-            return Ok(content);
-        }
-        let lines: Vec<&str> = content.lines().collect();
-        let start = start_line.unwrap_or(1).saturating_sub(1); // 0-indexed
-        let end = end_line.map(|e| e.min(lines.len())).unwrap_or(lines.len());
-        Ok(lines[start.min(lines.len())..end].join("\n"))
+        let out = if start_line.is_none() && end_line.is_none() {
+            content
+        } else {
+            let lines: Vec<&str> = content.lines().collect();
+            let start = start_line.unwrap_or(1).saturating_sub(1); // 0-indexed
+            let end = end_line.map(|e| e.min(lines.len())).unwrap_or(lines.len());
+            lines[start.min(lines.len())..end].join("\n")
+        };
+        Ok(cap_read(out))
     }
+}
+
+/// Hard cap on a single `read_file` result so one read can't flood the model's context. A whole
+/// file over this is truncated (head kept — imports/signatures live there) with a marker telling
+/// the model to request a specific line range instead.
+const READ_MAX_BYTES: usize = 256 * 1024;
+
+fn cap_read(s: String) -> String {
+    if s.len() <= READ_MAX_BYTES {
+        return s;
+    }
+    let mut end = READ_MAX_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n[… file truncated at {} KiB — pass start_line/end_line to read a specific section …]",
+        &s[..end],
+        READ_MAX_BYTES / 1024
+    )
 }
 
 /// Write (create/overwrite) a text file. Mutates the workspace.
@@ -94,7 +118,10 @@ impl Tool for WriteFileTool {
         "write_file"
     }
     fn description(&self) -> &str {
-        "Write content to a file at the given path, creating or overwriting it."
+        "Write content to a file at the given path, creating it or OVERWRITING it whole. For an \
+         existing file, read it first and prefer edit_file for targeted changes — write_file \
+         replaces the entire file, so any content you omit is lost. Best for new files or full \
+         rewrites."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::Write
@@ -145,7 +172,13 @@ impl Tool for EditFileTool {
         "edit_file"
     }
     fn description(&self) -> &str {
-        "Replace exactly one occurrence of `old` with `new` in the file at `path`."
+        "Replace text in a file: swaps the single, EXACT occurrence of `old` with `new`. `old` must \
+         match the file byte-for-byte including indentation and whitespace, and must be UNIQUE — \
+         include enough surrounding lines of context that it matches exactly once. It is an error \
+         if `old` is absent or appears more than once (then add more context and retry). Read the \
+         file first so your `old` matches. To insert, set `old` to a unique nearby anchor and put \
+         that anchor plus the new lines in `new`. For new files or whole-file rewrites use \
+         write_file instead."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::Write
@@ -154,9 +187,13 @@ impl Tool for EditFileTool {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string" },
-                "old": { "type": "string" },
-                "new": { "type": "string" }
+                "path": { "type": "string", "description": "File to edit." },
+                "old": {
+                    "type": "string",
+                    "description": "Exact text to replace — must occur exactly once; include \
+                     surrounding context to disambiguate."
+                },
+                "new": { "type": "string", "description": "Replacement text." }
             },
             "required": ["path", "old", "new"]
         })
@@ -467,6 +504,22 @@ impl Tool for GlobTool {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn cap_read_truncates_oversized_with_a_marker() {
+        let small = "fn main() {}".to_string();
+        assert_eq!(cap_read(small.clone()), small, "small content is untouched");
+        let big = "x".repeat(READ_MAX_BYTES + 5_000);
+        let capped = cap_read(big);
+        assert!(
+            capped.len() <= READ_MAX_BYTES + 200,
+            "capped near the limit"
+        );
+        assert!(
+            capped.contains("truncated"),
+            "explains the cut + how to read more"
+        );
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("forge-tools-{tag}-{}", std::process::id()));
