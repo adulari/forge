@@ -1107,6 +1107,17 @@ impl App {
         }
     }
 
+    /// Push a dim separator line after replaying a resumed session's transcript, so the user
+    /// can tell where the prior history ends and new input begins.
+    pub fn push_resume_separator(&mut self, text: &str) {
+        self.flush.push(TextLine::default());
+        self.flush.push(TextLine::from(Span::styled(
+            format!("  {text}"),
+            Style::default().fg(DIM),
+        )));
+        self.flush.push(TextLine::default());
+    }
+
     /// Push a dim informational line into scrollback (command feedback, session lists, etc).
     pub fn note(&mut self, text: &str) {
         self.flush.push(TextLine::from(Span::styled(

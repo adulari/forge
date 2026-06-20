@@ -881,7 +881,24 @@ impl Store {
         )?)
     }
 
+    /// The id of the most-recent top-level session (excludes subagent children), or `None` if
+    /// there are no sessions yet.
+    pub fn most_recent_session_id(&self) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        let result = conn
+            .query_row(
+                "SELECT id FROM session WHERE parent_session_id IS NULL \
+                 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(result)
+    }
+
     /// Past sessions, newest first (by insertion order, then creation time).
+    /// Excludes subagent child sessions (`parent_session_id IS NOT NULL`) so the picker
+    /// and the `forge sessions` command only surface top-level sessions.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
@@ -889,7 +906,8 @@ impl Store {
                     (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id),
                     (SELECT content FROM message m WHERE m.session_id = s.id
                        AND m.role = 'user' ORDER BY m.seq LIMIT 1)
-             FROM session s ORDER BY s.created_at DESC, s.rowid DESC",
+             FROM session s WHERE s.parent_session_id IS NULL \
+             ORDER BY s.created_at DESC, s.rowid DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(SessionSummary {
@@ -2228,6 +2246,49 @@ mod tests {
         store.put_lattice_embedding("n1", &[2.0, 2.0]).unwrap();
         assert_eq!(store.lattice_embedding_count().unwrap(), 1);
         assert_eq!(store.lattice_embeddings().unwrap()[0].1, vec![2.0, 2.0]);
+    }
+
+    #[test]
+    fn most_recent_session_id_empty_store_returns_none() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.most_recent_session_id().unwrap(), None);
+    }
+
+    #[test]
+    fn most_recent_session_id_returns_newest_top_level() {
+        let store = Store::open_in_memory().unwrap();
+        let a = store.create_session("/a", "default").unwrap();
+        let b = store.create_session("/b", "default").unwrap();
+        // b was created last → should be most recent
+        assert_eq!(store.most_recent_session_id().unwrap(), Some(b));
+        // a is still there but not most recent
+        assert_ne!(store.most_recent_session_id().unwrap(), Some(a));
+    }
+
+    #[test]
+    fn most_recent_session_id_skips_child_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let parent = store.create_session("/parent", "default").unwrap();
+        // Create a child session after the parent — it must not appear as most-recent
+        let _child = store
+            .create_child_session("/child", "default", &parent)
+            .unwrap();
+        assert_eq!(
+            store.most_recent_session_id().unwrap(),
+            Some(parent.clone())
+        );
+    }
+
+    #[test]
+    fn list_sessions_excludes_child_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let parent = store.create_session("/parent", "default").unwrap();
+        let _child = store
+            .create_child_session("/child", "default", &parent)
+            .unwrap();
+        let sessions = store.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, parent);
     }
 
     #[test]
