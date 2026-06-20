@@ -42,6 +42,40 @@ Line 1: the most likely cause in one terse sentence (no preamble, no restating t
 Line 2 (optional): if a single shell command fixes it, write exactly: FIX: <the command>. \
 Omit line 2 if no single command fixes it.";
 
+/// The base coding-agent system prompt, prepended (fresh, never persisted) to every main-loop
+/// request so a model performs in Forge the way it does in a purpose-built harness. Kept tight: it
+/// establishes role + tool discipline + editing conventions without burning context. Project-level
+/// `AGENTS.md` and skill guidance layer on top of this as separate (persisted) system messages.
+const FORGE_SYSTEM: &str = "\
+You are Forge, an expert software engineering agent operating in a user's terminal on their \
+codebase. You complete the user's coding task end-to-end by reading code and editing files with the \
+tools provided, then stop.
+
+Approach:
+- Work from evidence, not assumption. Before editing, read the relevant files and search the \
+codebase so your change fits the existing structure, naming, and conventions.
+- For any non-trivial task, make a short plan and keep it current with the update_tasks tool. \
+Do the work; don't just describe it.
+- Make the smallest change that fully solves the task. Match the surrounding code's style. Do NOT \
+add comments unless the code's intent is genuinely non-obvious. Don't reformat unrelated code.
+- After editing, verify: run the project's build/tests/linters via the shell when available, and \
+fix what you broke before reporting done.
+
+Tools:
+- Prefer read_file / search / list_dir / glob over shelling out to cat / grep / ls / find.
+- When you need several independent reads or searches, request them together in one step.
+- edit_file replaces ONE exact, unique occurrence — include enough surrounding context in `old` to \
+match exactly once, and read the file first so whitespace matches. Use write_file for new files or \
+full rewrites; don't blind-overwrite a file you haven't read.
+- A tool result starting with `error:` means it failed — read the message, fix the cause, and \
+retry differently rather than repeating the same call.
+
+Communication:
+- Be concise and direct. No filler, no flattery, no restating the question. Reference code as \
+`path:line`.
+- When the task is done, stop and give a short summary of what changed. Don't ask whether to \
+proceed on work you can just do.";
+
 /// Whether a `shell` tool result reports a failure (non-zero exit, signal, timeout, or spawn
 /// error). The tool's first line is `shell: exit N in …`, `shell: timed out …`, `shell: error: …`,
 /// or `shell: failed to start …`; only `exit 0` is success.
@@ -252,6 +286,12 @@ fn fit_messages(messages: &[Message], budget_tokens: usize) -> Vec<Message> {
                     chars[start..].iter().collect::<String>()
                 );
             }
+            // A lone tool RESULT with no preceding assistant call is a dangling tool_call_id the
+            // provider rejects — demote it to a plain user message so the request stays valid.
+            if m.role == Role::Tool {
+                m.role = Role::User;
+                m.tool_call_id = None;
+            }
             // Rebuild in order: systems first (in place) then this lone truncated tail.
             let mut out: Vec<Message> = messages
                 .iter()
@@ -260,6 +300,19 @@ fn fit_messages(messages: &[Message], budget_tokens: usize) -> Vec<Message> {
                 .collect();
             out.push(m);
             return out;
+        } else {
+            break;
+        }
+    }
+    // The kept non-system messages are a contiguous newest-first tail. If that tail BEGINS with a
+    // tool result, its assistant tool_calls message was trimmed away — a dangling tool_call_id that
+    // makes Anthropic/OpenAI hard-reject the whole request. Drop leading tool results until the
+    // tail starts on a non-tool message. (System messages aren't tool-paired, so they're exempt.)
+    let mut ordered: Vec<usize> = keep_idx.iter().copied().collect();
+    ordered.sort_unstable();
+    for i in ordered {
+        if messages[i].role == Role::Tool {
+            keep_idx.remove(&i);
         } else {
             break;
         }
@@ -1251,6 +1304,45 @@ impl Session {
         fit_messages(&self.transcript, budget_tokens.max(256))
     }
 
+    /// The base harness preamble prepended (fresh, never persisted) to every main-loop request:
+    /// the Forge coding-agent system prompt + a small live environment block (cwd / OS / git
+    /// branch). Recomputed each call so it's always current, and placed first so the provider's
+    /// cache breakpoint anchors on this stable prefix.
+    fn system_preamble(&self) -> Vec<Message> {
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        let os = std::env::consts::OS;
+        let branch = std::fs::read_to_string(".git/HEAD").ok().and_then(|s| {
+            s.strip_prefix("ref: refs/heads/")
+                .map(|b| b.trim().to_string())
+        });
+        let mut env = format!("<env>\nworking_directory: {cwd}\nplatform: {os}\n");
+        if let Some(b) = branch {
+            env.push_str(&format!("git_branch: {b}\n"));
+        }
+        env.push_str("</env>");
+        vec![Message::system(FORGE_SYSTEM), Message::system(env)]
+    }
+
+    /// The request body for a main-loop call: the base harness preamble (system prompt + env)
+    /// followed by the window-fitted transcript. The preamble's token cost is subtracted from the
+    /// trim budget so the prepended prompt can't push the request over the model's window.
+    fn transcript_with_preamble(&self, model: &str) -> Vec<Message> {
+        let preamble = self.system_preamble();
+        let window = self.effective_context_window(model) as usize;
+        let reserve = self.config.mesh.max_output_tokens.max(1024) as usize;
+        let preamble_tokens: usize = preamble.iter().map(message_tokens).sum();
+        let budget_tokens = window
+            .saturating_sub(reserve)
+            .saturating_sub(preamble_tokens)
+            * 95
+            / 100;
+        let mut out = preamble;
+        out.extend(fit_messages(&self.transcript, budget_tokens.max(256)));
+        out
+    }
+
     /// System prompt for the architect planner phase. Instructs the planner to produce a concrete
     /// prose plan only — no tool calls are available in this phase.
     const ARCHITECT_PLANNER_SYSTEM: &'static str =
@@ -1795,7 +1887,7 @@ Rules:\n\
                 // long conversation can't overflow it — which otherwise fails the turn as
                 // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
                 // smaller-window model still fits. The immutable borrow ends before the block below.
-                let sent = self.transcript_for(&active_model);
+                let sent = self.transcript_with_preamble(&active_model);
                 // Tight scope: borrow provider + presenter only for the streamed call, so the
                 // failover branch below has full `&mut self` for benching + warnings.
                 let result =
@@ -3545,6 +3637,56 @@ mod tests {
         );
         assert!(last.content.contains("truncated"), "marks the cut");
         assert!(last.content.chars().count() < 5_000, "shrunk");
+    }
+
+    #[test]
+    fn fit_messages_drops_orphan_leading_tool_result() {
+        // A trim that cuts between an assistant tool-call and its result must NOT leave the result
+        // dangling (a tool_call_id with no call → the provider 400s the whole request). The leading
+        // orphan tool result is dropped.
+        let big = "context line ".repeat(400);
+        let msgs = vec![
+            Message::assistant_tool_calls(
+                big,
+                vec![forge_types::ToolCall {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({"path": "a.rs"}),
+                }],
+            ),
+            Message::tool_result("c1", "the file contents"),
+            Message::user("continue"),
+        ];
+        // Budget fits the tool result + the user turn, but not the big assistant before them.
+        let budget = message_tokens(&msgs[1]) + message_tokens(&msgs[2]) + 4;
+        let out = fit_messages(&msgs, budget);
+        assert!(
+            out.iter().all(|m| m.role != Role::Tool),
+            "dangling tool result dropped: {:?}",
+            out.iter().map(|m| m.role).collect::<Vec<_>>()
+        );
+        assert_eq!(out.last().unwrap().content, "continue");
+    }
+
+    #[test]
+    fn request_includes_base_system_prompt_and_env() {
+        let provider = Arc::new(FlakyProvider {
+            bad: std::collections::HashSet::new(),
+            err: rate_limited,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "m".into(),
+            fallbacks: vec![],
+        });
+        let (_store, session) = fixed_session(provider, router);
+        let msgs = session.transcript_with_preamble("m");
+        assert_eq!(msgs[0].role, Role::System);
+        assert!(
+            msgs[0].content.contains("You are Forge"),
+            "base coding-agent prompt is prepended"
+        );
+        assert!(msgs[1].content.contains("<env>"), "env block present");
+        assert!(msgs[1].content.contains("platform:"));
     }
 
     /// A presenter that records every event so tests can assert on what was shown.
