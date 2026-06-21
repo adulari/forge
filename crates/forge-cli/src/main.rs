@@ -939,6 +939,19 @@ fn import_cmd(source: ImportSource) -> Result<()> {
         }
     }
 
+    // Claude's standing instructions (`./CLAUDE.md`) → Forge's `./.forge/AGENTS.md`, so a migrating
+    // user keeps their agent guidance, not just commands/skills. Project scope only: Forge injects
+    // `./.forge/AGENTS.md` / `./AGENTS.md` per turn — there's no user-global agent-memory location.
+    let mut imported_memory = false;
+    if label == "claude" && project {
+        let src = std::path::PathBuf::from("./CLAUDE.md");
+        let dst = std::path::PathBuf::from("./.forge/AGENTS.md");
+        if src.is_file() && !dst.exists() {
+            std::fs::create_dir_all("./.forge").ok();
+            imported_memory = std::fs::copy(&src, &dst).is_ok();
+        }
+    }
+
     let scope = if project {
         "./.forge"
     } else {
@@ -954,6 +967,9 @@ fn import_cmd(source: ImportSource) -> Result<()> {
         counts.skipped_skills,
         counts.skipped_agents,
     );
+    if imported_memory {
+        println!("✓ imported CLAUDE.md → ./.forge/AGENTS.md (standing instructions)");
+    }
     for w in cat.warnings() {
         eprintln!("skipped (malformed): {w}");
     }
