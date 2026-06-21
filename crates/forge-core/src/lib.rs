@@ -72,7 +72,8 @@ Tools:
 - edit_file replaces ONE exact, unique occurrence — include enough surrounding context in `old` to \
 match exactly once, and read the file first so whitespace matches. To change one file in several \
 places at once, multi_edit applies a list of edits atomically. For a large or multi-file change, \
-apply_patch takes a unified diff. Use write_file for new files or full rewrites; don't \
+apply_patch takes a unified diff. For a Jupyter notebook (.ipynb) use notebook_edit (cell-level) \
+— edit_file would corrupt its JSON. Use write_file for new files or full rewrites; don't \
 blind-overwrite a file you haven't read.
 - A tool result starting with `error:` means it failed — read the message, fix the cause, and \
 retry differently rather than repeating the same call.
