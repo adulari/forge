@@ -252,6 +252,35 @@ fn messages_to_replay_items(msgs: &[Message]) -> Vec<forge_tui::ReplayItem> {
     out
 }
 
+/// Lightweight check that `args` satisfies the tool's JSON `schema`: it must be an object and
+/// contain every key the schema lists as `required`. Returns a human-readable reason on failure
+/// (naming the missing field(s) + the full required list) so the model can fix the call. Kept
+/// dependency-free — required-key + object-shape covers the overwhelmingly common malformed call;
+/// deep type validation isn't worth a JSON-schema crate here.
+fn validate_tool_args(schema: &serde_json::Value, args: &serde_json::Value) -> Result<(), String> {
+    let Some(obj) = args.as_object() else {
+        return Err("arguments must be a JSON object".to_string());
+    };
+    let required = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|k| !obj.contains_key(*k))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "missing required field(s): {}. Required: {}",
+        missing.join(", "),
+        required.join(", ")
+    ))
+}
+
 /// Real token cost of one message: its content (BPE-counted, cached) + the chat framing overhead +
 /// any tool-call name/arguments it carries (which the model also pays for).
 fn message_tokens(m: &Message) -> usize {
@@ -2997,6 +3026,22 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             }
         }
 
+        // Validate the call's arguments against the tool's schema BEFORE running it. A malformed
+        // call (missing a required field, or args that aren't an object) otherwise fails deep inside
+        // the tool with an opaque message; instead return an actionable error naming what's missing
+        // plus the required fields, so the model self-corrects on the next step instead of thrashing.
+        if let Err(reason) = validate_tool_args(&tool.schema(), &effective_args) {
+            let result = format!("error: invalid arguments for `{}` — {reason}", call.name);
+            self.presenter.emit(PresenterEvent::ToolResult {
+                name: call.name.clone(),
+                ok: false,
+                summary: "invalid arguments".to_string(),
+            });
+            self.store
+                .record_tool_call(msg_id, &call.name, &args_json, &result, "n/a", "error")?;
+            return Ok(result);
+        }
+
         // For a file-mutating tool, show the proposed change BEFORE the permission gate so
         // the user reviews a diff instead of approving a blind write.
         if side_effect == forge_types::SideEffect::Write {
@@ -3821,6 +3866,27 @@ mod tests {
         );
         assert!(last.content.contains("truncated"), "marks the cut");
         assert!(last.content.chars().count() < 5_000, "shrunk");
+    }
+
+    #[test]
+    fn validate_tool_args_catches_missing_required_and_non_objects() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"path": {}, "content": {}},
+            "required": ["path", "content"]
+        });
+        assert!(
+            validate_tool_args(&schema, &serde_json::json!({"path": "a", "content": "b"})).is_ok()
+        );
+        let err = validate_tool_args(&schema, &serde_json::json!({"path": "a"})).unwrap_err();
+        assert!(err.contains("content"), "names the missing field: {err}");
+        assert!(validate_tool_args(&schema, &serde_json::json!("nope")).is_err());
+        // A schema with no `required` accepts any object.
+        assert!(validate_tool_args(
+            &serde_json::json!({"type": "object"}),
+            &serde_json::json!({})
+        )
+        .is_ok());
     }
 
     #[test]
