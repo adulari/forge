@@ -320,6 +320,8 @@ pub struct App {
     /// over the whole frame using the MAIN terminal — no nested alternate screen — so it can never
     /// collide with the chat. Inline mode uses the separate-alt-screen `run_transcript_viewer`.
     pub viewer: Option<ViewerState>,
+    /// The dynamic `/config` settings editor overlay (modal while `open`).
+    pub config_editor: crate::config_editor::ConfigEditor,
     /// The `/usage` overlay state.
     pub usage_overlay: UsageOverlay,
     /// The `/mesh` routing-inspector overlay state.
@@ -2133,6 +2135,7 @@ pub fn render_live(frame: &mut Frame, app: &App) {
     // Usage overlay renders last so it appears on top of everything.
     render_usage_overlay(frame, app);
     render_mesh_overlay(frame, app);
+    crate::config_editor::render_config_overlay(frame, &app.config_editor);
 }
 
 /// The inline slash-command palette: a scrolling window of filtered commands, selected row
