@@ -4520,23 +4520,41 @@ async fn run_chat_tui(
                 continue;
             }
 
-            // When the subagent picker overlay is open, ↑↓ navigate, Enter opens that agent's
-            // full-screen transcript, Esc/Ctrl+O closes the picker.
-            if app.subagent_picking {
+            // Ctrl+O toggles focus on the sticky activity panel (main chat + subagents + critics).
+            // When focused, ↑↓ move the selection and Enter opens the full-screen transcript viewer.
+            if matches!(key, KeyKind::ToggleSubagentDetail) {
+                if app.has_activity() {
+                    app.activity_focused = !app.activity_focused;
+                    if app.activity_focused {
+                        app.activity_idx =
+                            app.activity_idx.min(app.activity_len().saturating_sub(1));
+                    }
+                }
+                dirty = true;
+                continue;
+            }
+
+            // While the activity panel has focus: ↑↓ move the selection (wrapping), Enter opens the
+            // selected entry's full-screen transcript viewer, Esc unfocuses. Handled before the
+            // global Esc so Esc steps out of the panel instead of quitting.
+            if app.activity_focused {
                 match key {
                     KeyKind::Up => {
-                        app.subagent_pick_idx = app.subagent_pick_idx.saturating_sub(1);
+                        let n = app.activity_len();
+                        if n > 0 {
+                            app.activity_idx = (app.activity_idx + n - 1) % n;
+                        }
                     }
                     KeyKind::Down => {
-                        let n = app.subagent_views().len();
-                        app.subagent_pick_idx =
-                            (app.subagent_pick_idx + 1).min(n.saturating_sub(1));
+                        let n = app.activity_len();
+                        if n > 0 {
+                            app.activity_idx = (app.activity_idx + 1) % n;
+                        }
                     }
                     KeyKind::Enter => {
-                        let idx = app.subagent_pick_idx;
-                        app.subagent_picking = false;
+                        let idx = app.activity_idx;
                         tui.run_fullscreen(|| {
-                            forge_tui::run_subagent_transcript(idx, || {
+                            forge_tui::run_transcript_viewer(idx, || {
                                 while let Ok(msg) = rx.try_recv() {
                                     match msg {
                                         UiMsg::Event(e) => app.apply(e),
@@ -4548,77 +4566,14 @@ async fn run_chat_tui(
                                         }
                                     }
                                 }
-                                app.subagent_views()
+                                app.activity_views()
                             })
                         })?;
                     }
-                    KeyKind::Esc | KeyKind::ToggleSubagentDetail => {
-                        app.subagent_picking = false;
+                    KeyKind::Esc => {
+                        app.activity_focused = false;
                     }
                     _ => {}
-                }
-                dirty = true;
-                continue;
-            }
-
-            // When the assay detail overlay is open, ↑↓ cycle critics, Esc/Ctrl+O closes it.
-            if app.assay_detail_idx.is_some() {
-                match key {
-                    KeyKind::Up => {
-                        let n = app.running_assay_critics();
-                        app.assay_detail_idx = app.assay_detail_idx.map(|i| {
-                            if i == 0 {
-                                n.saturating_sub(1)
-                            } else {
-                                i - 1
-                            }
-                        });
-                    }
-                    KeyKind::Down => {
-                        let n = app.running_assay_critics();
-                        app.assay_detail_idx = app.assay_detail_idx.map(|i| (i + 1) % n.max(1));
-                    }
-                    KeyKind::Esc | KeyKind::ToggleSubagentDetail => {
-                        app.assay_detail_idx = None;
-                    }
-                    _ => {}
-                }
-                dirty = true;
-                continue;
-            }
-
-            // Ctrl+O: open the subagent transcript browser, or toggle the assay detail overlay.
-            // Subagents take priority; when only assay critics are visible, Ctrl+O cycles through
-            // them (first press opens critic 0, next press opens critic 1, Esc closes).
-            if matches!(key, KeyKind::ToggleSubagentDetail) {
-                let views = app.subagent_views();
-                if !views.is_empty() {
-                    if views.len() == 1 {
-                        tui.run_fullscreen(|| {
-                            forge_tui::run_subagent_transcript(0, || {
-                                while let Ok(msg) = rx.try_recv() {
-                                    match msg {
-                                        UiMsg::Event(e) => app.apply(e),
-                                        UiMsg::Permission { reply, .. } => {
-                                            let _ = reply.send(false);
-                                        }
-                                        UiMsg::Question { reply, .. } => {
-                                            let _ = reply.send(forge_tui::NO_ANSWER.to_string());
-                                        }
-                                    }
-                                }
-                                app.subagent_views()
-                            })
-                        })?;
-                    } else {
-                        app.subagent_picking = true;
-                        app.subagent_pick_idx = 0;
-                    }
-                } else if app.running_assay_critics() > 0 {
-                    // Cycle through assay critics with each Ctrl+O press.
-                    let n = app.running_assay_critics();
-                    let next = app.assay_detail_idx.map(|i| (i + 1) % n).unwrap_or(0);
-                    app.assay_detail_idx = Some(next);
                 }
                 dirty = true;
                 continue;
