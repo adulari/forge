@@ -1094,14 +1094,25 @@ impl Session {
                 presenter.emit(PresenterEvent::AssayCriticRow(
                     forge_types::AssayCriticRow {
                         lens: lens.as_str().to_string(),
+                        focus: assay::lens_brief(*lens).to_string(),
+                        model: None,
+                        cost_usd: 0.0,
                         status: forge_types::AssayCriticStatus::Queued,
                     },
                 ));
             }
-            assay::AssayProgress::CriticDone { lens, candidates } => {
+            assay::AssayProgress::CriticDone {
+                lens,
+                candidates,
+                model,
+                cost_usd,
+            } => {
                 presenter.emit(PresenterEvent::AssayCriticRow(
                     forge_types::AssayCriticRow {
                         lens: lens.as_str().to_string(),
+                        focus: assay::lens_brief(*lens).to_string(),
+                        model: Some(model.clone()),
+                        cost_usd: *cost_usd,
                         status: forge_types::AssayCriticStatus::Done {
                             candidates: *candidates,
                         },
@@ -1112,11 +1123,19 @@ impl Session {
                 presenter.emit(PresenterEvent::AssayCriticRow(
                     forge_types::AssayCriticRow {
                         lens: lens.as_str().to_string(),
+                        focus: assay::lens_brief(*lens).to_string(),
+                        model: None,
+                        cost_usd: 0.0,
                         status: forge_types::AssayCriticStatus::Skipped {
                             reason: reason.clone(),
                         },
                     },
                 ));
+            }
+            assay::AssayProgress::Verifying { candidates } => {
+                presenter.emit(PresenterEvent::AssayVerifying {
+                    candidates: *candidates,
+                });
             }
             _ => {
                 presenter.emit(PresenterEvent::AssayProgress(assay::progress_line(&p)));
