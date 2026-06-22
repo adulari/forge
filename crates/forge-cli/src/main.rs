@@ -1498,10 +1498,107 @@ fn maybe_autostart_local() {
     }
 }
 
+/// The animated `forge local` menu (no-arg on a terminal): pick a model to install/start, or view
+/// status. Loops until the user closes it; each action prints, then waits for Enter before the
+/// menu redraws (it owns its own alternate screen).
+fn local_menu() -> Result<()> {
+    enum Act {
+        Model(&'static str),
+        Status,
+        Close,
+    }
+    loop {
+        let specs = local::detect_specs();
+        let picks = local::recommend(&specs);
+        let installed = if local::ollama_installed() {
+            local::ollama_installed_models()
+        } else {
+            Vec::new()
+        };
+        let mut items: Vec<forge_tui::SelectItem> = Vec::new();
+        let mut acts: Vec<Act> = Vec::new();
+        for m in &picks {
+            let have = installed.iter().any(|t| t == m.ollama_tag);
+            items.push(forge_tui::SelectItem {
+                label: m.label.to_string(),
+                hint: format!(
+                    "{} · ~{:.0} GB{}",
+                    m.ollama_tag,
+                    m.min_memory_gb,
+                    if have {
+                        " · installed → start"
+                    } else {
+                        " → install"
+                    }
+                ),
+                preselected: false,
+            });
+            acts.push(Act::Model(m.key));
+        }
+        items.push(forge_tui::SelectItem {
+            label: "Status".into(),
+            hint: "runtime + installed models + autostart".into(),
+            preselected: false,
+        });
+        acts.push(Act::Status);
+        items.push(forge_tui::SelectItem {
+            label: "Close".into(),
+            hint: String::new(),
+            preselected: false,
+        });
+        acts.push(Act::Close);
+
+        let title = format!(
+            "forge local — {:.0} GB usable · {} · GPU: {}",
+            specs.model_memory_gb(),
+            specs.os,
+            specs
+                .gpu
+                .as_ref()
+                .map(|g| g.name.as_str())
+                .unwrap_or("none")
+        );
+        let Some(idx) = forge_tui::select_one(&title, &items)? else {
+            return Ok(());
+        };
+        match acts[idx] {
+            Act::Close => return Ok(()),
+            Act::Status => {
+                local_status();
+                let _ = prompt_line("\n  press Enter to continue…");
+            }
+            Act::Model(key) => {
+                let installed_now = local::model_by_key(key).is_some_and(|m| {
+                    local::ollama_installed_models()
+                        .iter()
+                        .any(|t| t == m.ollama_tag)
+                });
+                let res = if installed_now {
+                    local_start(Some(key))
+                } else {
+                    local_install(Some(key))
+                };
+                if let Err(e) = res {
+                    println!("⚠ {e}");
+                }
+                let _ = prompt_line("\n  press Enter to continue…");
+            }
+        }
+    }
+}
+
 /// `forge local [subcommand]`: detect specs, install/run a local Gemma via Ollama, list, status.
-/// No subcommand → `detect` (the discovery view).
+/// No subcommand on a terminal → the animated interactive menu; otherwise (piped) → `detect`.
 fn local_cmd(sub: Option<LocalCmd>) -> Result<()> {
-    match sub.unwrap_or(LocalCmd::Detect) {
+    let Some(sub) = sub else {
+        use std::io::IsTerminal;
+        if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() {
+            return local_menu();
+        }
+        print_specs_and_recommendation();
+        return Ok(());
+    };
+    match sub {
         LocalCmd::Detect => {
             print_specs_and_recommendation();
             Ok(())
