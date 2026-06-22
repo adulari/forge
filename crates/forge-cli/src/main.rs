@@ -4328,6 +4328,18 @@ fn emit_text(tui: &mut forge_tui::Tui, app: &mut forge_tui::App, text: &str) {
     }
 }
 
+/// Every editable scalar setting (importance-ordered), as `/config` editor rows.
+fn config_editor_rows() -> Vec<forge_tui::SettingRow> {
+    forge_config::config_leaves()
+        .into_iter()
+        .map(|l| forge_tui::SettingRow {
+            path: l.path,
+            display: l.value.display(),
+            type_tag: l.value.type_tag().to_string(),
+        })
+        .collect()
+}
+
 async fn run_chat_tui(
     mock: bool,
     mode: Option<Mode>,
@@ -4584,6 +4596,34 @@ async fn run_chat_tui(
             // (scroll / switch entry / Esc to close). Rendered through the main terminal, so there's
             // no nested alternate screen to collide with the chat.
             if app.viewer_key(key) {
+                dirty = true;
+                continue;
+            }
+
+            // The `/config` editor is modal while open: it owns every key (filter / navigate / edit
+            // / Tab scope / Esc). The editor returns an action; the shell performs the validated
+            // write and refreshes the rows.
+            if app.config_editor.open {
+                match app.config_editor.handle_key(key) {
+                    forge_tui::ConfigAction::Save { path, value } => {
+                        let scope = if app.config_editor.project_scope {
+                            forge_config::ConfigScope::Project
+                        } else {
+                            forge_config::ConfigScope::User
+                        };
+                        match forge_config::set_config_value(scope, &path, &value) {
+                            Ok(()) => {
+                                app.config_editor.rows = config_editor_rows();
+                                app.config_editor.status = Some(format!("✓ saved {path}"));
+                            }
+                            Err(e) => app.config_editor.status = Some(format!("✗ {e}")),
+                        }
+                    }
+                    forge_tui::ConfigAction::Reload => {
+                        app.config_editor.rows = config_editor_rows();
+                    }
+                    forge_tui::ConfigAction::Close | forge_tui::ConfigAction::None => {}
+                }
                 dirty = true;
                 continue;
             }
@@ -6244,29 +6284,10 @@ async fn dispatch_command(
         // `/config` launches the animated setup wizard full-screen (reconfigure mode): set
         // provider + search API keys, bridge plans, permission mode, and credit conservation.
         // Keys go to the OS keyring; all other settings are written to the user config file.
+        // `/config` opens the dynamic settings editor (every scalar setting, fuzzy-searchable).
+        // The guided provider/plan wizard now lives at `forge setup`.
         CommandAction::Config => {
-            let current_permission = session.lock().await.temper();
-            let current_credit_mode = forge_config::load().unwrap_or_default().mesh.credit_mode;
-            let outcome = tui
-                .run_fullscreen(|| {
-                    forge_tui::init_wizard::run(wizard_input(
-                        current_permission,
-                        current_credit_mode,
-                    ))
-                })
-                .map_err(|e| anyhow::anyhow!("config wizard: {e}"))?;
-            if outcome.cancelled {
-                app.note("config cancelled");
-            } else {
-                apply_wizard_outcome(&outcome)?;
-                app.note(&format!(
-                    "✓ config saved — {} key(s), {} bridge plan(s), permission={}, credit={}",
-                    outcome.keys.len(),
-                    outcome.plans.len(),
-                    outcome.permission.label(),
-                    outcome.credit_mode.label(),
-                ));
-            }
+            app.config_editor.open_with(config_editor_rows());
         }
         // `/thinking` toggles model reasoning/thinking block display for this session.
         CommandAction::Thinking => {
