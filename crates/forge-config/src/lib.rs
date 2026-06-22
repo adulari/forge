@@ -1496,7 +1496,9 @@ fn leaf(path: &str, value: SettingValue) -> SettingLeaf {
 /// The config file path for a scope.
 pub fn scope_path(scope: ConfigScope) -> Result<PathBuf, ConfigError> {
     match scope {
-        ConfigScope::User => Ok(config_dir().ok_or(ConfigError::NoConfigDir)?.join("config.toml")),
+        ConfigScope::User => Ok(config_dir()
+            .ok_or(ConfigError::NoConfigDir)?
+            .join("config.toml")),
         ConfigScope::Project => Ok(PathBuf::from("./.forge/config.toml")),
     }
 }
@@ -1537,14 +1539,21 @@ pub fn set_config_value(scope: ConfigScope, path: &str, raw: &str) -> Result<(),
 
 /// Coerce raw input to a TOML value matching the existing leaf's type. `None` = clear (empty input
 /// on an optional/text). Errors on a malformed bool/number.
-fn coerce_value(raw: &str, existing: Option<&SettingValue>) -> Result<Option<toml::Value>, ConfigError> {
+fn coerce_value(
+    raw: &str,
+    existing: Option<&SettingValue>,
+) -> Result<Option<toml::Value>, ConfigError> {
     let t = raw.trim();
     match existing {
         Some(SettingValue::Bool(_)) => {
             let b = match t.to_ascii_lowercase().as_str() {
                 "true" | "on" | "yes" | "1" => true,
                 "false" | "off" | "no" | "0" => false,
-                _ => return Err(ConfigError::Write(format!("expected a boolean, got '{raw}'"))),
+                _ => {
+                    return Err(ConfigError::Write(format!(
+                        "expected a boolean, got '{raw}'"
+                    )))
+                }
             };
             Ok(Some(toml::Value::Boolean(b)))
         }
@@ -1840,11 +1849,12 @@ mod tests {
     #[test]
     fn set_and_remove_dotted_paths() {
         let mut root = toml::Table::new();
-        set_dotted(&mut root, "local.model", toml::Value::String("gemma4:12b".into()));
-        assert_eq!(
-            root["local"]["model"].as_str(),
-            Some("gemma4:12b")
+        set_dotted(
+            &mut root,
+            "local.model",
+            toml::Value::String("gemma4:12b".into()),
         );
+        assert_eq!(root["local"]["model"].as_str(), Some("gemma4:12b"));
         remove_dotted(&mut root, "local.model");
         assert!(root["local"].as_table().unwrap().get("model").is_none());
     }
