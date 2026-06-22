@@ -35,6 +35,7 @@ pub fn resolve_answer(line: &str, options: &[QChoice], allow_other: bool) -> Opt
 
 pub mod app;
 mod commands;
+pub mod config_editor;
 mod driver;
 pub mod init_wizard;
 mod render;
@@ -51,6 +52,7 @@ pub use commands::{
     CommandAction, Palette, PaletteEntry, Picker, PickerKind, PickerRow, RemoteMode, SlashToken,
     COMMANDS,
 };
+pub use config_editor::{ConfigAction, ConfigEditor, SettingRow};
 pub use driver::{ChannelPresenter, InputEvent, Tui, UiMsg};
 pub use init_wizard::{BridgeItem, ProviderItem, WizardInput, WizardOutcome};
 /// A styled scrollback line, re-exported so binaries can route out-of-band output to the right
