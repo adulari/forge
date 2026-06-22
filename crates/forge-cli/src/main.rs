@@ -239,10 +239,16 @@ enum Command {
     Commands,
     /// Show the auto-discovered model catalog and the mesh's best pick per tier.
     Models {
-        /// Actively ping every discovered model and persist the result: clear healthy ones,
-        /// bench the ones that rate-limit / fail auth (so the mesh routes around them).
+        /// Re-ping the currently benched/excluded models and persist the result (clear the ones
+        /// that recovered, re-bench the still-dead). Cheap: only touches benched models, not the
+        /// whole catalog. Use `--probe --all` to ping every discovered model (costs real money on
+        /// paid providers).
         #[arg(long)]
         probe: bool,
+        /// With `--probe`, ping EVERY discovered model, not just the benched ones. This calls each
+        /// paid model once and can cost a few dollars across a large catalog.
+        #[arg(long)]
+        all: bool,
         /// Clear all stale model benches (forget every rate-limited/unavailable mark) and exit.
         #[arg(long)]
         clear: bool,
@@ -761,7 +767,7 @@ async fn main() -> Result<()> {
             BenchCmd::Passk { reports } => bench::passk(&reports),
         },
         Command::Commands => commands_cmd(),
-        Command::Models { probe, clear } => models(probe, clear).await,
+        Command::Models { probe, all, clear } => models(probe, all, clear).await,
         Command::Mesh { prompt, json } => mesh_explain(prompt.join(" "), json).await,
         Command::Benchmarks { refresh } => benchmarks_cmd(refresh).await,
         Command::Auth { provider, remove } => auth(&provider, remove),
@@ -2625,7 +2631,7 @@ async fn drop_unaffordable_models(models: &mut Vec<String>) {
 
 /// `forge models [--probe]`: discover the usable models + show the mesh's capability-ranked pick
 /// per tier. With `--probe`, also ping each model and persist health (the user-driven rescan).
-async fn models(probe: bool, clear: bool) -> Result<()> {
+async fn models(probe: bool, probe_all: bool, clear: bool) -> Result<()> {
     if clear {
         let store = open_store()?;
         let n = store
@@ -2646,7 +2652,30 @@ async fn models(probe: bool, clear: bool) -> Result<()> {
     let store = open_store()?;
 
     if probe {
-        probe_models(&cat, &config, &store).await?;
+        // Default: only re-probe the benched/excluded models (cheap — that's the whole point of a
+        // recheck). `--all` pings every discovered model (costs real money on paid providers).
+        let targets: Vec<String> = if probe_all {
+            cat.models().to_vec()
+        } else {
+            let benched = store.current_benched().unwrap_or_default();
+            cat.models()
+                .iter()
+                .filter(|m| benched.is_benched(m))
+                .cloned()
+                .collect()
+        };
+        if targets.is_empty() {
+            println!(
+                "no benched models to recheck — all {} discovered models are healthy. \
+                 Use `--probe --all` to force a full re-ping.",
+                cat.models().len()
+            );
+        } else {
+            if !probe_all {
+                println!("rechecking {} benched model(s)…", targets.len());
+            }
+            probe_models(&targets, &config, &store).await?;
+        }
         println!();
     }
 
@@ -2698,7 +2727,10 @@ async fn models(probe: bool, clear: bool) -> Result<()> {
         println!("  {:<9} {pick}", tier.as_str());
     }
     if !probe {
-        println!("\ntip: `forge models --probe` pings each model and benches the dead ones.");
+        println!(
+            "\ntip: `forge models --probe` rechecks only the benched models (cheap); \
+             add `--all` to re-ping every model (costs money on paid providers)."
+        );
     }
     Ok(())
 }
@@ -3046,7 +3078,7 @@ fn mesh_explanation_json(e: &forge_mesh::RoutingExplanation) -> String {
 /// Ping every discovered model with a 1-token request; clear the healthy ones and bench the
 /// ones that rate-limit / fail auth / are down, so the mesh routes around them.
 async fn probe_models(
-    cat: &forge_mesh::ModelCatalog,
+    targets: &[String],
     config: &forge_config::Config,
     store: &Store,
 ) -> Result<()> {
@@ -3067,8 +3099,8 @@ async fn probe_models(
     }];
     let mut sink = |_: forge_provider::StreamEvent| {};
 
-    println!("probing {} models…", cat.models().len());
-    for m in cat.models() {
+    println!("probing {} model(s)…", targets.len());
+    for m in targets {
         let res = tokio::time::timeout(
             Duration::from_secs(20),
             provider.complete(m, &ping, &probe_tool, &mut sink),

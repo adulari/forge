@@ -12,10 +12,10 @@ use rusqlite::{Connection, OptionalExtension};
 mod schema;
 
 /// How long a permanently-failed model (a [`Store::exclude_model`] capability exclusion) stays out
-/// of routing before it's re-probed: 7 days. Long enough to stop the per-session churn of
-/// re-trying models that can't do tool calling, short enough that a provider adding support is
-/// picked up within a week.
-const CAPABILITY_EXCLUSION_SECS: i64 = 7 * 24 * 60 * 60;
+/// of routing before it's re-probed: 24 hours. Long enough to stop the per-session churn of
+/// re-trying models that can't do tool calling, short enough that a transient misclassification or
+/// a provider adding support is picked up the next day (was 7 days — too sticky).
+const CAPABILITY_EXCLUSION_SECS: i64 = 24 * 60 * 60;
 
 /// Half-open `[start, end)` epoch-second bounds of `now`'s **local** calendar day. Computed
 /// in Rust (not SQLite `strftime`) so the day rolls at the user's midnight and survives DST.
@@ -2268,8 +2268,8 @@ mod tests {
             .find(|(m, _, _)| m == "dead::no-tools")
             .unwrap();
         assert!(
-            row.1 > now + 6 * 24 * 60 * 60,
-            "exclusion window is ~7 days"
+            row.1 > now + 23 * 60 * 60 && row.1 <= now + 25 * 60 * 60,
+            "exclusion window is ~24 hours"
         );
         assert!(row.2.starts_with("excluded:"));
 
