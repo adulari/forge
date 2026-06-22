@@ -172,11 +172,14 @@ pub enum PresenterEvent {
     /// A proposed file change, emitted by core BEFORE the write is confirmed/applied so the
     /// user reviews the diff before answering the permission prompt.
     Diff(forge_types::FileDiff),
-    /// Live Assay progress (a critic finished/was skipped, verification started, …) so the run
-    /// shows incremental activity instead of a silent spinner until the report.
+    /// Live Assay progress (started / other top-level events) — shown in scrollback.
     AssayProgress(String),
     /// Structured per-critic status update for the live assay panel in the TUI.
     AssayCriticRow(forge_types::AssayCriticRow),
+    /// Verification phase started — shown in the assay panel header, not in scrollback.
+    AssayVerifying {
+        candidates: usize,
+    },
     /// A finished Assay analysis report, for inline rendering (docs/features/analysis-mode.md).
     AssayReport(forge_types::AssayReport),
     /// The agent's task list changed (`update_tasks`); render the checklist into scrollback.
@@ -330,10 +333,16 @@ impl Presenter for HeadlessPresenter {
                 use forge_types::AssayCriticStatus;
                 let status = match &row.status {
                     AssayCriticStatus::Queued => "queued".to_string(),
-                    AssayCriticStatus::Done { candidates } => format!("done ({candidates})"),
+                    AssayCriticStatus::Done { candidates } => {
+                        let model = row.model.as_deref().unwrap_or("?");
+                        format!("done ({candidates}) [{model}] ${:.4}", row.cost_usd)
+                    }
                     AssayCriticStatus::Skipped { reason } => format!("skipped ({reason})"),
                 };
                 println!("  {} — {status}", row.lens);
+            }
+            PresenterEvent::AssayVerifying { candidates } => {
+                println!("  ⚖ verifying {candidates} candidate(s)…");
             }
             PresenterEvent::AssayReport(report) => {
                 print!("{}", render::assay_report_plain(&report));

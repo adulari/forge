@@ -59,13 +59,28 @@ printf 'install: downloading %s %s...\n' "$asset" "$version" >&2
 dl "$url" "$tmp/$asset" || err "download failed: $url"
 
 # Verify against checksums.txt if present (best-effort).
+# Detect an available SHA-256 hasher: sha256sum (Linux/GNU), shasum -a 256 (macOS), gsha256sum (Homebrew).
+_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v gsha256sum >/dev/null 2>&1; then
+    gsha256sum "$1" | awk '{print $1}'
+  else
+    printf 'install: no sha256 tool found, skipping checksum\n' >&2
+    return 1
+  fi
+}
 if fetch "https://github.com/$REPO/releases/download/$version/checksums.txt" > "$tmp/checksums.txt" 2>/dev/null \
-   && [ -s "$tmp/checksums.txt" ] && command -v sha256sum >/dev/null 2>&1; then
+   && [ -s "$tmp/checksums.txt" ]; then
   want=$(grep " $asset\$" "$tmp/checksums.txt" | awk '{print $1}' | head -1)
   if [ -n "$want" ]; then
-    got=$(sha256sum "$tmp/$asset" | awk '{print $1}')
-    [ "$want" = "$got" ] || err "checksum mismatch for $asset"
-    printf 'install: checksum ok\n' >&2
+    got=$(_sha256 "$tmp/$asset") || got=""
+    if [ -n "$got" ]; then
+      [ "$want" = "$got" ] || err "checksum mismatch for $asset"
+      printf 'install: checksum ok\n' >&2
+    fi
   fi
 fi
 

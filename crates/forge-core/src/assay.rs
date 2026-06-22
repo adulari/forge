@@ -91,6 +91,8 @@ pub enum AssayProgress {
     CriticDone {
         lens: FindingCategory,
         candidates: usize,
+        model: String,
+        cost_usd: f64,
     },
     CriticSkipped {
         lens: FindingCategory,
@@ -209,7 +211,9 @@ pub fn progress_line(p: &AssayProgress) -> String {
     match p {
         AssayProgress::Started { critics } => format!("⚒ assay — running {critics} critics…"),
         AssayProgress::CriticQueued { lens } => format!("⏳ {} queued", lens.as_str()),
-        AssayProgress::CriticDone { lens, candidates } => {
+        AssayProgress::CriticDone {
+            lens, candidates, ..
+        } => {
             format!("✓ {} — {candidates} candidate(s)", lens.as_str())
         }
         AssayProgress::CriticSkipped { lens, reason } => {
@@ -264,7 +268,7 @@ pub async fn run_assay(
             let chain = models.models_for(lens);
             match complete_with_failover(&provider, &pricing, &store, &chain, cooldown, &msgs).await
             {
-                Ok((text, c)) => (lens, Ok(parse_candidates(&text)), c),
+                Ok((text, c, model)) => (lens, Ok((parse_candidates(&text), model)), c),
                 Err(e) => (lens, Err(e), 0.0),
             }
         });
@@ -273,11 +277,13 @@ pub async fn run_assay(
     let mut candidates: Vec<(FindingCategory, Candidate)> = Vec::new();
     while let Some(joined) = critic_set.join_next().await {
         match joined {
-            Ok((lens, Ok(cands), c)) => {
+            Ok((lens, Ok((cands, model)), c)) => {
                 cost += c;
                 on_progress(AssayProgress::CriticDone {
                     lens,
                     candidates: cands.len(),
+                    model,
+                    cost_usd: c,
                 });
                 candidates.extend(cands.into_iter().map(|cand| (lens, cand)));
             }
@@ -314,7 +320,7 @@ pub async fn run_assay(
                 match complete_with_failover(&provider, &pricing, &store, &chain, cooldown, &msgs)
                     .await
                 {
-                    Ok((text, c)) => (parse_verdict(&text), c),
+                    Ok((text, c, _model)) => (parse_verdict(&text), c),
                     Err(_) => (None, 0.0),
                 };
             (lens, cand, verdict, c)
@@ -352,7 +358,7 @@ pub async fn run_assay(
     report
 }
 
-/// Try each model in `chain` (best-first) until one answers; returns its text + priced cost.
+/// Try each model in `chain` (best-first) until one answers; returns text + priced cost + model name.
 /// A retryable failure (rate-limit / unavailable / auth) benches that model in `store` and falls
 /// over to the next — the same model-health failover the agent loop uses (model-health-failover).
 /// `Err` only when the whole chain is exhausted (carries the last failure reason).
@@ -363,7 +369,7 @@ async fn complete_with_failover(
     chain: &[String],
     cooldown: std::time::Duration,
     messages: &[Message],
-) -> Result<(String, f64), String> {
+) -> Result<(String, f64, String), String> {
     if chain.is_empty() {
         return Err("no usable model for this tier".to_string());
     }
@@ -387,7 +393,7 @@ async fn complete_with_failover(
             match provider.complete(model, messages, &[], &mut sink).await {
                 Ok(r) => {
                     let cost = pricing.cost_for(model, r.usage.input_tokens, r.usage.output_tokens);
-                    return Ok((r.content, cost));
+                    return Ok((r.content, cost, model.clone()));
                 }
                 Err(e) => {
                     last = e.reason().to_string();
@@ -427,7 +433,7 @@ async fn complete_with_failover(
 const CRITIC_MARKER: &str = "ASSAY-CRITIC";
 const VERIFIER_MARKER: &str = "ASSAY-VERIFIER";
 
-fn lens_brief(c: FindingCategory) -> &'static str {
+pub fn lens_brief(c: FindingCategory) -> &'static str {
     match c {
         FindingCategory::DeadWeight => "unused/unreachable/dead code, duplicated logic",
         FindingCategory::Correctness => "bugs, wrong logic, panics on real fallible paths",

@@ -269,6 +269,9 @@ pub struct App {
     /// Per-critic rows for the live assay panel. Populated from AssayCriticRow events; cleared
     /// when the AssayReport arrives (the full report lands in scrollback instead).
     assay_critics: Vec<forge_types::AssayCriticRow>,
+    /// Number of candidates being adversarially verified — shown in the panel header; `None`
+    /// before the verifier phase starts or after the report arrives.
+    assay_verifying: Option<usize>,
     /// The inline slash-command palette (RFC session-management-and-commands). Open while the
     /// input line starts with `/`.
     pub palette: crate::commands::Palette,
@@ -774,15 +777,23 @@ impl App {
                 )));
             }
             PresenterEvent::AssayCriticRow(row) => {
-                // Update the live panel: insert on Queued, update status on Done/Skipped.
+                // Update the live panel: insert on Queued, merge status+model+cost on Done/Skipped.
                 if let Some(existing) = self.assay_critics.iter_mut().find(|r| r.lens == row.lens) {
                     existing.status = row.status;
+                    if row.model.is_some() {
+                        existing.model = row.model;
+                        existing.cost_usd = row.cost_usd;
+                    }
                 } else {
                     self.assay_critics.push(row);
                 }
             }
+            PresenterEvent::AssayVerifying { candidates } => {
+                self.assay_verifying = Some(candidates);
+            }
             PresenterEvent::AssayReport(report) => {
                 self.assay_critics.clear();
+                self.assay_verifying = None;
                 self.flush
                     .extend(crate::render::assay_report_lines(&report));
                 self.flush.push(TextLine::default());
@@ -1837,8 +1848,8 @@ fn render_subagents_panel(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// The sticky live-assay panel: header showing total critic count, then one row per critic with
-/// its current status glyph (queued / spinner / done / skipped). Cleared when AssayReport arrives.
+/// The sticky live-assay panel: header showing critic count + verifying state, then one row per
+/// critic with its lens, focus brief, status, model, and cost. Cleared when AssayReport arrives.
 fn render_assay_panel(frame: &mut Frame, area: Rect, app: &App) {
     use forge_types::AssayCriticStatus;
     if app.assay_critics.is_empty() {
@@ -1851,26 +1862,47 @@ fn render_assay_panel(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .filter(|r| !matches!(r.status, AssayCriticStatus::Queued))
         .count();
+    let header = if let Some(n) = app.assay_verifying {
+        format!("  ⚖ assay  {done}/{total} critics · verifying {n}…")
+    } else {
+        format!("  ⚒ assay  {done}/{total} critics")
+    };
     let h = area.height as usize;
     let mut lines: Vec<TextLine> = Vec::with_capacity(h);
     lines.push(TextLine::from(Span::styled(
-        format!("  ⚒ assay critics ({done}/{total})"),
+        header,
         Style::default().fg(ORANGE).bold(),
     )));
     let body_h = h.saturating_sub(1);
     for r in app.assay_critics.iter().take(body_h) {
-        let (glyph, style) = match &r.status {
-            AssayCriticStatus::Queued => (format!("{spin} {}", r.lens), Style::default().fg(DIM)),
-            AssayCriticStatus::Done { candidates } => (
-                format!("✓ {} ({candidates})", r.lens),
-                Style::default().fg(OKGREEN),
+        let focus_short = truncate(&r.focus, 28);
+        let (label, style) = match &r.status {
+            AssayCriticStatus::Queued => (
+                format!("{spin} {}  {}", r.lens, focus_short),
+                Style::default().fg(DIM),
             ),
+            AssayCriticStatus::Done { candidates } => {
+                let model = r
+                    .model
+                    .as_deref()
+                    .and_then(|m| m.split("::").last())
+                    .unwrap_or("?");
+                let cost = if r.cost_usd > 0.0 {
+                    format!("  ${:.4}", r.cost_usd)
+                } else {
+                    String::new()
+                };
+                (
+                    format!("✓ {}  {candidates} found{cost}  [{model}]", r.lens),
+                    Style::default().fg(OKGREEN),
+                )
+            }
             AssayCriticStatus::Skipped { reason } => (
-                format!("⏭ {} — {}", r.lens, truncate(reason, 40)),
+                format!("⏭ {}  skipped ({})", r.lens, truncate(reason, 30)),
                 Style::default().fg(DIM),
             ),
         };
-        lines.push(TextLine::from(Span::styled(format!("  {glyph}"), style)));
+        lines.push(TextLine::from(Span::styled(format!("  {label}"), style)));
     }
     if app.assay_critics.len() > body_h {
         lines.pop();
