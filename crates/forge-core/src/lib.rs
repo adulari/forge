@@ -2054,7 +2054,12 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                                     StreamEvent::ToolFinished { name, ok, summary } => presenter
                                         .emit(PresenterEvent::ToolResult { name, ok, summary }),
                                     StreamEvent::SubagentStarted { id, agent, task } => presenter
-                                        .emit(PresenterEvent::SubagentStart { id, agent, task }),
+                                        .emit(PresenterEvent::SubagentStart {
+                                            id,
+                                            agent,
+                                            task,
+                                            model: None,
+                                        }),
                                     StreamEvent::SubagentProgress { id, snippet } => presenter
                                         .emit(PresenterEvent::SubagentProgress { id, snippet }),
                                     StreamEvent::SubagentFinished {
@@ -3430,13 +3435,17 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // (running children animate live; completed ones fold into the scrollback box).
         let presenter = &mut self.presenter;
         let mut on_event = |ev: subagent::Lifecycle| match ev {
-            subagent::Lifecycle::Start { id, agent, task } => {
-                presenter.emit(PresenterEvent::SubagentStart {
-                    id: id.to_string(),
-                    agent: agent.to_string(),
-                    task: task.to_string(),
-                })
-            }
+            subagent::Lifecycle::Start {
+                id,
+                agent,
+                task,
+                model,
+            } => presenter.emit(PresenterEvent::SubagentStart {
+                id: id.to_string(),
+                agent: agent.to_string(),
+                task: task.to_string(),
+                model: Some(model.to_string()),
+            }),
             subagent::Lifecycle::Progress { id, snippet } => {
                 presenter.emit(PresenterEvent::SubagentProgress {
                     id: id.to_string(),
@@ -5398,7 +5407,10 @@ mod tests {
     #[tokio::test]
     async fn resume_rehydrates_transcript_and_continues_same_session() {
         let path = std::env::temp_dir().join(format!("forge-resume-{}.db", forge_types::new_id()));
-        let config = Config::default();
+        // This test asserts message_count == transcript length; the per-turn recap side-call would
+        // add a usage row (counted by message_count, not rehydrated), so disable it here.
+        let mut config = Config::default();
+        config.recap.enabled = false;
 
         // First run on a file-backed store, then drop it.
         let (id, cost1, msgs1) = {

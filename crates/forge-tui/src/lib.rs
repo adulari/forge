@@ -42,9 +42,9 @@ pub mod select;
 mod transcript;
 mod tui;
 pub use app::{
-    banner_lines, handle_key, lattice_view_lines, render_mesh_overlay, render_usage_overlay, App,
-    InputOutcome, KeyKind, MeshCandRow, MeshOverlay, MeshQuotaRow, RemoteSnapshot, ReplayItem,
-    SubagentView, UsageOverlay,
+    banner_lines, handle_key, lattice_view_lines, render_mesh_overlay, render_usage_overlay,
+    ActivityKind, ActivityStatus, App, InputOutcome, KeyKind, MeshCandRow, MeshOverlay,
+    MeshQuotaRow, RemoteSnapshot, ReplayItem, TranscriptView, UsageOverlay,
 };
 pub use commands::{
     at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken, Command,
@@ -54,7 +54,7 @@ pub use commands::{
 pub use driver::{ChannelPresenter, InputEvent, Tui, UiMsg};
 pub use init_wizard::{BridgeItem, ProviderItem, WizardInput, WizardOutcome};
 pub use select::{select_multi, SelectItem};
-pub use transcript::{run_subagent_transcript, transcript_lines};
+pub use transcript::{run_transcript_viewer, transcript_lines};
 pub use tui::TuiPresenter;
 
 // `QChoice`, `resolve_answer`, `NO_ANSWER` are defined above and re-exported at crate root.
@@ -155,6 +155,9 @@ pub enum PresenterEvent {
         id: String,
         agent: String,
         task: String,
+        /// The model the child routed to, when known up front (native path). `None` on the
+        /// provider-stream path where the model isn't surfaced.
+        model: Option<String>,
     },
     /// A live activity snippet from a still-running subagent (streamed text/reasoning).
     SubagentProgress {
