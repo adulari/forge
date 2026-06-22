@@ -317,8 +317,10 @@ enum Command {
         #[arg(long)]
         remove: bool,
     },
-    /// Interactive first-run setup: enable providers (enter API keys) and declare which
-    /// subscription plan backs each installed CLI bridge, so the mesh knows your usage headroom.
+    /// Guided first-run setup: enable providers (enter API keys), declare which subscription plan
+    /// backs each installed CLI bridge, and optionally install a local LLM that fits this machine.
+    Setup,
+    /// Alias for `setup` (kept for muscle memory) — runs the same guided setup.
     Init,
     /// Connect to the configured MCP servers and show their status (or one server's tools, or
     /// import a Claude-Code `.mcp.json`).
@@ -817,7 +819,7 @@ async fn main() -> Result<()> {
         Command::Benchmarks { refresh } => benchmarks_cmd(refresh).await,
         Command::Local { sub } => local_cmd(sub),
         Command::Auth { provider, remove } => auth(&provider, remove),
-        Command::Init => init(),
+        Command::Setup | Command::Init => setup(),
         Command::Mcp { cmd } => mcp_cmd(cmd).await,
         Command::McpServe => mcp_serve::run().await,
         Command::Lattice { op } => lattice_cmd(op).await,
@@ -1739,6 +1741,60 @@ fn init() -> Result<()> {
     );
     println!("  The mesh routes across these by task tier + cost. Try `forge models`.");
     Ok(())
+}
+
+/// `forge setup`: the full guided flow — the provider/plan wizard ([`init`]), then an optional
+/// local-LLM step. Used by `forge setup`, `forge init`, and the first-run prompt.
+fn setup() -> Result<()> {
+    init()?;
+    offer_local_setup();
+    Ok(())
+}
+
+/// Interactive local-LLM step of `forge setup`: detect the machine, recommend a Gemma model that
+/// fits, and offer to install it (and auto-start it). Best-effort — any failure prints and the
+/// flow continues. Skipped on a machine too small for the smallest model.
+fn offer_local_setup() {
+    let specs = local::detect_specs();
+    let picks = local::recommend(&specs);
+    let Some(&rec) = picks.first() else {
+        return; // nothing fits — don't pester the user
+    };
+    println!("\n⚒ Local LLM (optional)");
+    println!(
+        "  This machine (~{:.0} GB usable) can run {} [{}].",
+        specs.model_memory_gb(),
+        rec.label,
+        rec.ollama_tag
+    );
+    let ans = match prompt_line("  Install it now via Ollama? [Y/n]: ") {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    if !(ans.is_empty() || ans.eq_ignore_ascii_case("y") || ans.eq_ignore_ascii_case("yes")) {
+        println!("  Skipped. Run `forge local install` anytime.");
+        return;
+    }
+    if let Err(e) = local_install(Some(rec.key)) {
+        println!("  ⚠ {e}");
+        return;
+    }
+    // Offer auto-start so the model is ready whenever Forge runs.
+    if let Ok(a) = prompt_line("  Auto-start this model when Forge runs? [y/N]: ") {
+        if a.eq_ignore_ascii_case("y") || a.eq_ignore_ascii_case("yes") {
+            let _ = forge_config::set_config_value(
+                forge_config::ConfigScope::User,
+                "local.autostart",
+                "true",
+            );
+            let _ = forge_config::set_config_value(
+                forge_config::ConfigScope::User,
+                "local.model",
+                rec.ollama_tag,
+            );
+            println!("  ✓ Auto-start enabled ({}).", rec.ollama_tag);
+        }
+    }
 }
 
 /// Build the config-wizard inputs from what Forge knows: key-based model providers, search-API
@@ -4187,13 +4243,13 @@ fn maybe_first_run_setup(mock: bool) -> Result<()> {
         return Ok(());
     }
     println!("⚒ Welcome to Forge — no providers are configured yet.");
-    let yes = prompt_line("Run interactive setup now? [Y/n]: ")?;
+    let yes = prompt_line("Run guided setup now? [Y/n]: ")?;
     if yes.is_empty() || yes.eq_ignore_ascii_case("y") || yes.eq_ignore_ascii_case("yes") {
-        init()?;
+        setup()?;
     } else {
-        // Mark onboarded so we don't ask again; the user can re-run `forge init` anytime.
+        // Mark onboarded so we don't ask again; the user can re-run `forge setup` anytime.
         let _ = forge_config::write_subscriptions(&std::collections::HashMap::new());
-        println!("Skipped. Run `forge init` anytime, or `forge auth <provider>` to add a key.");
+        println!("Skipped. Run `forge setup` anytime, or `forge auth <provider>` to add a key.");
     }
     Ok(())
 }
