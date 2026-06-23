@@ -877,6 +877,10 @@ pub(crate) async fn run_chat_tui(
         }
         if dirty {
             app.busy = busy;
+            // Tick the turn timer live while a turn runs; the last value stays frozen once it ends.
+            if busy {
+                app.turn_elapsed_secs = busy_since.elapsed().as_secs();
+            }
             tui.draw(&app);
             dirty = false;
         }

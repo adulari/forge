@@ -1,0 +1,11 @@
+# Turn timer + per-turn/session token counters in the statusline.
+# Run: scripts/tui-drive.sh scripts/tui-scripts/turn-timer.txt
+sleep 500
+expect message
+send check the project
+sleep 4000
+capture after-turn
+expect ⧖ 0s ↑
+expect Σ ↑
+reject 337%
+send /quit

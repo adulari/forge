@@ -7,6 +7,10 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Turn timer + token counter in the statusline (like Claude Code / Codex). While a turn runs, the
+  spinner shows live elapsed time (`⟳ working 12s`) and row 2 shows `⧖ 12s ↑in ↓out` for this turn,
+  ticking live and freezing at the final totals when the turn ends; the session running totals move
+  to a `Σ ↑in ↓out` segment beside the context gauge.
 - Mouse text selection in full-screen mode, no Shift needed. Forge now does its own click-drag
   selection (highlighted in place) and copies the text to the clipboard on release — so the wheel
   still scrolls AND plain drag selects, where kitty/most terminals otherwise force Shift+drag once an
@@ -48,6 +52,20 @@ All notable changes to Forge are documented here. The format follows
   templates, and this changelog.
 
 ### Fixed
+- Streaming replies now render as markdown live, not as one raw unwrapped blob. The in-flight reply
+  edge was dumped into a single span (embedded newlines, headings, lists and code fences all
+  collapsed into one wrapped paragraph) and only re-rendered as markdown once the turn finished. It's
+  now markdown-rendered on every update — matching the finalized block — and memoized on content
+  length so re-parsing doesn't re-introduce the long-conversation lag.
+- The claude CLI bridge no longer gives up on shell commands ("can't run that / tool channel broken")
+  and fails to commit or open a PR. Told to "commit and push" without a named tool, claude reached
+  for its (harness-disabled) native `Bash`, emitted the call as text, and hallucinated interactive-
+  shell output (login banner, prompt) — then spiralled, unable to read its own results. The harness
+  preamble now states plainly that native tools are disabled, that EVERY shell command goes through
+  `mcp__forge__shell` (a clean non-interactive `sh -c`), that garbled/empty output means re-verify
+  rather than "channel broken," and that it must never claim it cannot run a command, commit, or open
+  a PR. Verified live (claude 2.1.186): a vague "commit and push" now routes through `mcp__forge__shell`
+  and lands the commit.
 - The codex bridge no longer stalls a plan build claiming it has "no write permissions." codex's
   own shell is sandboxed read-only **by design** (every write is meant to go through Forge's gated
   `mcp__forge__*` tools, which run outside that sandbox), but codex would run `test -w .`, see the
