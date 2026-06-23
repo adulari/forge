@@ -95,6 +95,9 @@ pub struct Config {
     /// Local-LLM runtime (Ollama): which model to auto-start and whether to start it with Forge.
     #[serde(default)]
     pub local: LocalConfig,
+    /// Startup update check (GitHub releases). On by default; throttled to once a day.
+    #[serde(default)]
+    pub update: UpdateConfig,
 }
 
 /// When a hook fires.
@@ -390,6 +393,27 @@ impl Default for LocalConfig {
 
 fn default_local_endpoint() -> String {
     "http://localhost:11434".to_string()
+}
+
+/// Startup update-check settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateConfig {
+    /// Check GitHub releases on startup and notify when a newer version exists. Default: true.
+    /// Throttled to once per day; the env var `FORGE_NO_UPDATE_CHECK=1` also disables it.
+    #[serde(default = "default_update_check")]
+    pub check: bool,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            check: default_update_check(),
+        }
+    }
+}
+
+fn default_update_check() -> bool {
+    true
 }
 
 /// Git integration settings.
@@ -1119,6 +1143,7 @@ impl Default for Config {
             recap: RecapConfig::default(),
             tui: TuiConfig::default(),
             local: LocalConfig::default(),
+            update: UpdateConfig::default(),
         }
     }
 }
@@ -1523,6 +1548,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "local.endpoint" => Some(("Local LLM", "Ollama endpoint")),
         "tui.fullscreen" => Some(("Interface", "Full-screen TUI")),
         "recap.enabled" => Some(("Interface", "Per-turn recap")),
+        "update.check" => Some(("Interface", "Check for updates")),
         "shell.explain_errors" => Some(("Shell", "Explain failed commands")),
         "lattice.enabled" => Some(("Code Intelligence", "Enabled")),
         "lattice.inject" => Some(("Code Intelligence", "Auto-inject context")),
@@ -1716,6 +1742,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "local.endpoint" => "Ollama HTTP endpoint (default http://localhost:11434).",
         "tui.fullscreen" => "Full-screen TUI on the alternate screen. Off = inline in native scrollback.",
         "recap.enabled" => "Show a one-line AI recap after each completed turn.",
+        "update.check" => "Check GitHub for a newer Forge release on startup (throttled to once a day).",
         "shell.explain_errors" => "When a shell command fails, the AI explains the likely cause + a fix.",
         "lattice.enabled" => "Build/maintain the code-intelligence graph (`forge lattice`).",
         "lattice.inject" => "Auto-inject relevant code into each turn before the model call.",
