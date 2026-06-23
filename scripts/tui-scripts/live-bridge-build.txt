@@ -1,0 +1,14 @@
+# Live CLI-bridge build in Auto-edit. Verifies the bridge writes (live-temper perms fix),
+# the turn is NOT continue-nudge-spammed (bridge-terminal fix), and no <invoke> XML leaks.
+# Run: scripts/tui-drive.sh --real --keep --model codex-cli::gpt-5.5 --mode accept-edits \
+#        scripts/tui-scripts/live-bridge-build.txt
+sleep 5000
+expect message
+send Create three files in the current directory: a.txt containing the word alpha, b.txt containing beta, c.txt containing gamma. First call update_tasks with one task per file, then create each file and mark its task done as you finish. Stop only when all three are done.
+sleep 120000
+capture result
+reject continuing it
+reject <invoke
+reject denied by Forge permission
+reject channel
+send /quit

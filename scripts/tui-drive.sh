@@ -6,12 +6,14 @@
 # can't, because of cursor moves and redraws).
 #
 # Usage:
-#   scripts/tui-drive.sh [--real] [--cols N] [--rows N] <script-file>
+#   scripts/tui-drive.sh [--real] [--model ID] [--cols N] [--rows N] <script-file>
 #
 # By default it runs `forge chat --mock` (deterministic, no API): the mock provider is
 # plan/task-aware, so `/plan ...` renders a real plan card + seeds the task panel, and a prompt
 # mentioning "task list" renders the sticky task panel — no CLI bridge or network needed.
-# Pass --real to drive a live `forge chat` (real mesh/providers/bridges) instead.
+# Pass --real to drive a live `forge chat` (real mesh/providers/bridges) instead. With --real,
+# --model <ID> pins the model (e.g. codex-cli::gpt-5.5) so a specific bridge/provider is exercised
+# deterministically instead of letting the mesh route.
 #
 # Script commands (one per line; '#' comments and blank lines ignored):
 #   send <text>      type <text> then Enter
@@ -31,10 +33,16 @@ FORGE="$REPO/target/release/forge"
 COLS=200
 ROWS=50
 REAL=0
+MODEL=""
+MODE=""
+KEEP=0
 
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
     --real) REAL=1; shift ;;
+    --model) MODEL="$2"; shift 2 ;;
+    --mode) MODE="$2"; shift 2 ;;
+    --keep) KEEP=1; shift ;;
     --cols) COLS="$2"; shift 2 ;;
     --rows) ROWS="$2"; shift 2 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
@@ -50,11 +58,16 @@ SESSION="forge-drive-$$"
 WORK="$(mktemp -d)"
 DB="$WORK/forge.db"
 FAILED=0
-cleanup() { tmux kill-session -t "$SESSION" 2>/dev/null; rm -rf "$WORK"; }
+cleanup() {
+  tmux kill-session -t "$SESSION" 2>/dev/null
+  if [[ "$KEEP" == 1 ]]; then echo "kept workdir: $WORK" >&2; else rm -rf "$WORK"; fi
+}
 trap cleanup EXIT
 
 MODE_ARGS="--mock"
 [[ "$REAL" == 1 ]] && MODE_ARGS=""
+[[ -n "$MODEL" ]] && MODE_ARGS="$MODE_ARGS --model $MODEL"
+[[ -n "$MODE" ]] && MODE_ARGS="$MODE_ARGS --mode $MODE"
 
 tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS"
 # Run in an isolated cwd + DB so the dev's real sessions/usage are untouched.
