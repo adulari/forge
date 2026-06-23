@@ -28,13 +28,13 @@ fn stream_words(text: &str, on_event: &mut EventSink<'_>) {
     }
 }
 
-fn resp(content: &str, tool_calls: Vec<ToolCall>) -> ModelResponse {
+fn resp(content: &str, tool_calls: Vec<ToolCall>, input: u64, output: u64) -> ModelResponse {
     ModelResponse {
         content: content.to_string(),
         tool_calls,
         usage: Usage {
-            input_tokens: 32,
-            output_tokens: 14,
+            input_tokens: input,
+            output_tokens: output,
             cached_input_tokens: 0,
             cost_usd: 0.0,
         },
@@ -83,7 +83,7 @@ impl Provider for MockProvider {
             if plan_proposed {
                 let content = "The plan is on screen for your review.";
                 stream_words(content, on_event);
-                return Ok(resp(content, vec![]));
+                return Ok(resp(content, vec![], 42, 18));
             }
             let content = "Here's a plan for the refactor.";
             stream_words(content, on_event);
@@ -102,6 +102,8 @@ impl Provider for MockProvider {
                         "notes": "Pure mechanical move; cargo build after each step.",
                     }),
                 }],
+                30,
+                12,
             ));
         }
 
@@ -110,7 +112,7 @@ impl Provider for MockProvider {
             if tasks_set {
                 let content = "Tasks are tracked in the panel above.";
                 stream_words(content, on_event);
-                return Ok(resp(content, vec![]));
+                return Ok(resp(content, vec![], 42, 18));
             }
             let content = "Setting up the task list.";
             stream_words(content, on_event);
@@ -127,14 +129,17 @@ impl Provider for MockProvider {
                         ],
                     }),
                 }],
+                30,
+                12,
             ));
         }
 
-        // Default: a read_file round-trip then a final answer.
+        // Default: a read_file round-trip then a final answer. The token counts here are load-bearing
+        // — cost/budget tests in forge-core depend on this exact usage (30/12 then 42/18).
         if used_read {
             let content = "Done — I read the project manifest and the workspace looks healthy.";
             stream_words(content, on_event);
-            Ok(resp(content, vec![]))
+            Ok(resp(content, vec![], 42, 18))
         } else {
             let content = "Let me inspect the project manifest.";
             stream_words(content, on_event);
@@ -145,6 +150,8 @@ impl Provider for MockProvider {
                     name: "read_file".to_string(),
                     args: json!({ "path": "Cargo.toml" }),
                 }],
+                30,
+                12,
             ))
         }
     }
