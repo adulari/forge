@@ -1042,6 +1042,9 @@ impl Provider for CliProvider {
                 "FORGE_CHECKPOINT_SEQ",
                 "FORGE_CHECKPOINT_ROOT",
                 "FORGE_SUBAGENT_DEPTH",
+                // The parent's live temper, so the bridge's permission gate matches the UI mode
+                // (Plan→Auto-edit switches reach mcp-serve instead of it using the stale config).
+                "FORGE_PERMISSION_MODE",
             ] {
                 if let Ok(val) = std::env::var(key) {
                     env.push((key.to_string(), val));

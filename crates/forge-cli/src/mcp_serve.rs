@@ -474,7 +474,17 @@ impl ForgeMcp {
 /// (so it shares the project's permission rules) and serves the core tool registry.
 pub async fn run() -> Result<()> {
     forge_config::inject_provider_keys();
-    let config = forge_config::load().unwrap_or_else(|_| Config::default());
+    let mut config = forge_config::load().unwrap_or_else(|_| Config::default());
+    // The parent hands us its CURRENT runtime temper via env (set per turn in `export_checkpoint_env`).
+    // Honor it over the on-disk config mode so the permission gate matches the UI: after the user
+    // switches Plan→Auto-edit (e.g. approving a plan), writes are actually allowed here — previously
+    // the bridge used the stale config mode and denied them, which the model reported as "no perms".
+    if let Some(mode) = std::env::var(forge_core::snapshot::ENV_MODE)
+        .ok()
+        .and_then(|s| PermissionMode::from_key(&s))
+    {
+        config.permission_mode = mode;
+    }
 
     // Current nesting depth, carried across the process boundary. Subagents are exposed here
     // only when enabled AND there is depth budget left — a nested bridge child inherits a

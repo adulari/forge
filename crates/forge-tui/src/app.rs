@@ -3848,7 +3848,7 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     if app.busy && w >= 40 {
         let f = SPINNER[app.tick % SPINNER.len()];
         line1.push(Span::styled(
-            format!("{f} working {}", fmt_dur(app.turn_elapsed_secs)),
+            format!("{f} working"),
             Style::default().fg(ORANGE).bg(STATUSBG),
         ));
         line1.push(sep());
@@ -3950,20 +3950,24 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
                     .bg(STATUSBG),
             ));
         }
+        // Context gauge next — it's the most important readout, so it comes before the session
+        // totals and survives right-truncation on a narrow terminal.
+        if app.context_tokens > 0 || app.context_limit.is_some() {
+            if line2.len() > 1 {
+                line2.push(sep());
+            }
+            line2.extend(context_gauge_spans(app.context_tokens, app.context_limit));
+        }
+        // Session running totals last (least critical — the per-turn figures are above): if the row
+        // is too narrow this is what gets clipped, not the gauge.
         if app.session_in > 0 || app.session_out > 0 {
-            if show_turn {
+            if line2.len() > 1 {
                 line2.push(sep());
             }
             line2.push(Span::styled(
                 format!("Σ ↑{} ↓{}", human(app.session_in), human(app.session_out)),
                 Style::default().fg(DIM).bg(STATUSBG),
             ));
-        }
-        if app.context_tokens > 0 || app.context_limit.is_some() {
-            if line2.len() > 1 {
-                line2.push(sep());
-            }
-            line2.extend(context_gauge_spans(app.context_tokens, app.context_limit));
         }
         frame.render_widget(Paragraph::new(TextLine::from(line2)).style(bg), row2);
     }
@@ -4615,11 +4619,17 @@ mod tests {
             context_limit: None,
         });
         let s = screen_wh(&app, 120, LIVE_H);
+        // The spinner says only "working" (no duration); the timer lives once in the ⧖ segment so
+        // there's no double clock.
+        assert!(s.contains("working"), "spinner shows working: {s}");
         assert!(
-            s.contains("working 1m13s"),
-            "live timer rides the spinner: {s}"
+            !s.contains("working 1m13s"),
+            "no duplicate timer on the spinner: {s}"
         );
-        assert!(s.contains("⧖ 1m13s"), "turn-timer segment on row 2: {s}");
+        assert!(
+            s.contains("⧖ 1m13s"),
+            "single turn-timer segment on row 2: {s}"
+        );
         assert!(
             s.contains("↑1.2k") && s.contains("↓340"),
             "per-turn token deltas: {s}"

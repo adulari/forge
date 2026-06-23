@@ -8,9 +8,10 @@ All notable changes to Forge are documented here. The format follows
 
 ### Added
 - Turn timer + token counter in the statusline (like Claude Code / Codex). While a turn runs, the
-  spinner shows live elapsed time (`⟳ working 12s`) and row 2 shows `⧖ 12s ↑in ↓out` for this turn,
-  ticking live and freezing at the final totals when the turn ends; the session running totals move
-  to a `Σ ↑in ↓out` segment beside the context gauge.
+  spinner shows `⟳ working` and row 2 shows a single `⧖ 12s ↑in ↓out` segment for this turn — elapsed
+  time ticking live, the per-turn token deltas filling in, both frozen at the final totals when the
+  turn ends. The context gauge sits next, then the session running totals as `Σ ↑in ↓out` (clipped
+  first if the row is narrow, so the gauge always stays visible).
 - Mouse text selection in full-screen mode, no Shift needed. Forge now does its own click-drag
   selection (highlighted in place) and copies the text to the clipboard on release — so the wheel
   still scrolls AND plain drag selects, where kitty/most terminals otherwise force Shift+drag once an
@@ -52,6 +53,19 @@ All notable changes to Forge are documented here. The format follows
   templates, and this changelog.
 
 ### Fixed
+- The CLI bridge (claude/codex) now gates on Forge's **live** temper, not the stale on-disk config
+  mode — so switching Plan→Auto-edit (e.g. approving a plan) actually lets the bridged model write.
+  `forge mcp-serve` runs as a fresh process per turn and loaded `permission_mode` from the config
+  file, blind to runtime switches: after the user moved to Auto-edit, the bridge still denied
+  `mcp__forge__write_file` with "denied by Forge permission policy", which the model surfaced as "I
+  have no permissions" even though the UI said Auto-edit. The parent now exports its current temper
+  (`FORGE_PERMISSION_MODE`) into the per-turn checkpoint env and forwards it to the bridge child,
+  which honors it over the config. Verified live (codex 0.141): `plan` denies the write, `accept-edits`
+  performs it. This also closes the opposite hole — writes are no longer silently allowed *during*
+  Plan mode when the config happened to be `accept-edits`.
+- Statusline no longer shows a duplicate turn timer (the elapsed time appeared on both the spinner
+  and the `⧖` segment) and no longer pushes the context gauge off-screen — the gauge is now ordered
+  ahead of the session totals so a narrow row clips the totals, not the gauge.
 - Streaming replies now render as markdown live, not as one raw unwrapped blob. The in-flight reply
   edge was dumped into a single span (embedded newlines, headings, lists and code fences all
   collapsed into one wrapped paragraph) and only re-rendered as markdown once the turn finished. It's
