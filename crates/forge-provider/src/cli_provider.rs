@@ -403,6 +403,16 @@ agent. For ANY web access — searching the web or opening a URL — you MUST us
 `mcp__forge__web_search` and `mcp__forge__web_fetch` tools exposed over MCP. Do NOT use any \
 built-in, native, or provider web-search/browsing capability. Likewise route all file and \
 shell actions through the `mcp__forge__*` tools.\n\n\
+Running commands: your native built-in tools (Bash, Shell, Read, Edit, Write, …) are DISABLED \
+here — the ONLY callable tools are the `mcp__forge__*` ones. To run ANY shell command — git, gh, \
+cargo, ls, anything — call `mcp__forge__shell` with the command. Do NOT emit a `Bash`/`Shell` \
+tool call, and never write a tool-call block out as plain text and then imagine its output: that \
+output is fiction and will mislead you. `mcp__forge__shell` runs a clean non-interactive `sh -c` \
+(no login banner, no prompt) and returns the real exit code + combined output. If a tool result \
+ever looks garbled, truncated, or empty, the call STILL RAN — re-verify with another \
+`mcp__forge__` call (e.g. `mcp__forge__shell` `git log -1 --oneline`, `mcp__forge__read_file`) \
+rather than concluding the tool channel is broken. NEVER tell the user you cannot run a command, \
+make a commit, push, or open a PR — you can, every time, via `mcp__forge__shell`.\n\n\
 Writing files: your OWN shell may be sandboxed read-only and your approval policy may read \
 `never` — this is BY DESIGN and is NOT an error or a block. File changes do not go through your \
 shell; they go through the Forge MCP tools (`mcp__forge__write_file`, `edit_file`, `multi_edit`, \
