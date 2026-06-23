@@ -1536,7 +1536,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "forge-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "forge-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -1596,7 +1596,7 @@ dependencies = [
 
 [[package]]
 name = "forge-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "forge-config",
@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "forge-index"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "forge-config",
@@ -1661,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "forge-lsp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "forge-config",
  "serde",
@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "forge-config",
  "forge-types",
@@ -1689,7 +1689,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mesh"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "forge-config",
@@ -1699,7 +1699,7 @@ dependencies = [
 
 [[package]]
 name = "forge-provider"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "forge-config",
@@ -1717,7 +1717,7 @@ dependencies = [
 
 [[package]]
 name = "forge-skills"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "forge-types",
  "tracing",
@@ -1725,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "forge-store"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "forge-types",
@@ -1736,7 +1736,7 @@ dependencies = [
 
 [[package]]
 name = "forge-tools"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "forge-index",
@@ -1755,7 +1755,7 @@ dependencies = [
 
 [[package]]
 name = "forge-tui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "crossterm",
  "forge-types",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "forge-types"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6707,7 +6707,7 @@ dependencies = [
 
 [[package]]
 name = "xtasks"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "forge-config",

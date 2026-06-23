@@ -1,0 +1,42 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting! Please run `forge doctor` and paste its output below — it captures the environment we need.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: Steps to reproduce, expected vs. actual behaviour.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Forge version
+      description: Output of `forge --version`.
+      placeholder: forge 0.2.0
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`forge doctor` output"
+      description: Paste the output of `forge doctor` (redact anything sensitive).
+      render: text
+  - type: input
+    id: os
+    attributes:
+      label: OS / terminal
+      placeholder: e.g. macOS 15 (Apple Silicon), iTerm2 / Ubuntu 24.04, kitty / Windows 11, Terminal
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Any error output or a backtrace (`RUST_BACKTRACE=1`). Optional.
+      render: shell

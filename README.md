@@ -253,6 +253,15 @@ forge init               # alias for `forge setup`
 
 Runs automatically on first launch when nothing is configured.
 
+### `forge doctor`
+
+```bash
+forge doctor             # diagnose config, providers/keys, bridges, Ollama, git, terminal
+```
+
+One command to check your whole setup, with an actionable fix for anything broken. Exits non-zero
+when something's wrong (handy in CI) — and it's the first thing to paste into a bug report.
+
 ### `forge local`
 
 Run local LLMs via [Ollama](https://ollama.com) (also a first-class mesh provider, `ollama::<tag>`).
