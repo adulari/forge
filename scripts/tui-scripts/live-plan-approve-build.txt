@@ -1,0 +1,18 @@
+# Live bridge plan -> approve -> build. Starts in read-only Plan mode; approving switches to
+# Auto-edit and builds. Verifies the EXACT Plan->Auto-edit transition grants writes (live-temper
+# fix) and the build turn isn't nudge-spammed.
+# Run: scripts/tui-drive.sh --real --keep --model codex-cli::gpt-5.5 --mode plan \
+#        scripts/tui-scripts/live-plan-approve-build.txt
+sleep 5000
+expect message
+send /plan Create two files in the current directory: x.txt containing the word one, y.txt containing two. Use update_tasks with one task per file.
+sleep 120000
+capture plan
+expect PLAN
+send 1
+sleep 120000
+capture build
+reject continuing it
+reject <invoke
+reject denied by Forge permission
+send /quit
