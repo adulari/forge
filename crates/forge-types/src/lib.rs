@@ -545,6 +545,29 @@ impl PermissionMode {
         }
     }
 
+    /// Canonical kebab key (matches the serde rename) — stable for crossing a process boundary,
+    /// e.g. the `FORGE_PERMISSION_MODE` env the parent hands its CLI-bridge `forge mcp-serve` child
+    /// so the bridge gates on the parent's *runtime* temper, not the stale on-disk config mode.
+    pub fn key(self) -> &'static str {
+        match self {
+            PermissionMode::Plan => "plan",
+            PermissionMode::Default => "default",
+            PermissionMode::AcceptEdits => "accept-edits",
+            PermissionMode::Bypass => "bypass",
+        }
+    }
+
+    /// Inverse of [`PermissionMode::key`] — exact, no fuzzy aliases.
+    pub fn from_key(s: &str) -> Option<PermissionMode> {
+        match s {
+            "plan" => Some(PermissionMode::Plan),
+            "default" => Some(PermissionMode::Default),
+            "accept-edits" => Some(PermissionMode::AcceptEdits),
+            "bypass" => Some(PermissionMode::Bypass),
+            _ => None,
+        }
+    }
+
     /// The next temper in the SHIFT+TAB cycle. The cycle covers the three everyday tempers and
     /// **wraps** — `Bypass`/Unfettered is intentionally excluded (reachable only via explicit
     /// `--mode unfettered`/config, never by tapping a key). From Unfettered, cycling re-enters
@@ -1050,5 +1073,23 @@ mod tests {
         for c in FindingCategory::crew() {
             assert_eq!(FindingCategory::parse(c.as_str()), Some(*c));
         }
+    }
+
+    #[test]
+    fn permission_mode_key_round_trips() {
+        // The bridge hands the temper across a process boundary as this key, so the round-trip must
+        // be exact (no fuzzy aliases) for every variant.
+        for m in PermissionMode::all() {
+            assert_eq!(
+                PermissionMode::from_key(m.key()),
+                Some(*m),
+                "round-trip {m:?}"
+            );
+        }
+        assert_eq!(
+            PermissionMode::from_key("accept-edits"),
+            Some(PermissionMode::AcceptEdits)
+        );
+        assert_eq!(PermissionMode::from_key("nope"), None);
     }
 }

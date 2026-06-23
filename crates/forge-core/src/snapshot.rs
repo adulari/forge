@@ -16,6 +16,11 @@ use serde::{Deserialize, Serialize};
 pub const ENV_SESSION: &str = "FORGE_CHECKPOINT_SESSION";
 pub const ENV_SEQ: &str = "FORGE_CHECKPOINT_SEQ";
 pub const ENV_ROOT: &str = "FORGE_CHECKPOINT_ROOT";
+/// The parent's CURRENT runtime temper (permission mode), handed to the CLI-bridge `forge mcp-serve`
+/// child so its permission gate matches what the user sees — not the stale on-disk config mode. The
+/// bridge is a fresh process per turn and can't see the parent's in-memory temper otherwise, so a
+/// Plan→Auto-edit switch (or SHIFT+TAB) wouldn't change what the bridged model is allowed to do.
+pub const ENV_MODE: &str = "FORGE_PERMISSION_MODE";
 
 /// Snapshot a write happening in the bridge subprocess into the parent turn's dir, reading the
 /// turn context from the environment (set by the parent's `run_turn`). No-op when unset (the

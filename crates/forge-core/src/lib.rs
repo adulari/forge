@@ -797,6 +797,11 @@ impl Session {
         std::env::set_var(snapshot::ENV_SESSION, &self.id);
         std::env::set_var(snapshot::ENV_SEQ, seq.to_string());
         std::env::set_var(snapshot::ENV_ROOT, root);
+        // Hand the bridge child our CURRENT runtime temper so its permission gate matches the UI —
+        // a Plan→Auto-edit switch (plan approval) or SHIFT+TAB now actually reaches `mcp-serve`,
+        // instead of it falling back to the stale on-disk config mode (which denied writes after the
+        // user switched to Auto-edit, or allowed them during Plan mode).
+        std::env::set_var(snapshot::ENV_MODE, self.temper().key());
     }
 
     /// Save a conversation checkpoint at the current boundary. `label` None = an auto checkpoint.
