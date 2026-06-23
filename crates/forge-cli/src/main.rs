@@ -24,11 +24,13 @@ mod bench;
 mod benchmarks;
 mod bridge_stats;
 mod context_windows;
+mod doctor;
 mod image_input;
 mod local;
 mod mcp_serve;
 mod remote;
 mod replay;
+mod update_check;
 
 /// Env var carrying the current subagent nesting depth across the process boundary (forge →
 /// claude/codex → `forge mcp-serve`). mcp-serve advertises `spawn_agents` only while
@@ -304,6 +306,9 @@ enum Command {
         #[command(subcommand)]
         sub: Option<LocalCmd>,
     },
+    /// Diagnose your setup — config, providers/keys, CLI bridges, Ollama, git, terminal — with
+    /// actionable fixes. Paste its output into bug reports. Exits non-zero if anything is broken.
+    Doctor,
     /// Internal: run Forge's tool registry as an MCP server on stdio (spawned by the CLI
     /// bridge so claude/codex use Forge's tools under Forge's permission gate). Not for direct use.
     #[command(hide = true)]
@@ -818,6 +823,13 @@ async fn main() -> Result<()> {
         Command::Mesh { prompt, json } => mesh_explain(prompt.join(" "), json).await,
         Command::Benchmarks { refresh } => benchmarks_cmd(refresh).await,
         Command::Local { sub } => local_cmd(sub).await,
+        Command::Doctor => {
+            let fails = doctor::run()?;
+            if fails > 0 {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Command::Auth { provider, remove } => auth(&provider, remove),
         Command::Setup | Command::Init => setup(),
         Command::Mcp { cmd } => mcp_cmd(cmd).await,
@@ -4419,6 +4431,7 @@ async fn chat(
 ) -> Result<()> {
     maybe_first_run_setup(mock)?;
     maybe_autostart_local();
+    update_check::maybe_notify(&forge_config::load().unwrap_or_default()).await;
     // Default to the interactive (animated) TUI on a real terminal.
     if !plain && std::io::stdout().is_terminal() {
         return run_chat_tui(mock, mode, resume_mode, fullscreen, pin).await;
