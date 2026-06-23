@@ -29,6 +29,15 @@ pub fn normalize_model_id(model: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Borrowed(model)
 }
 
+/// True when `model` routes to a subscription CLI bridge (`claude-cli::…` / `codex-cli::…`). A
+/// bridge runs its OWN internal tool loop and returns the finished turn as a single text response
+/// (no tool calls surface to the parent), so the parent must treat a bridge response as terminal —
+/// it must NOT nudge it to "keep calling tools," which only re-runs the whole bridge in confusion.
+pub fn is_cli_bridge(model: &str) -> bool {
+    let m = normalize_model_id(model);
+    m.starts_with("claude-cli::") || m.starts_with("codex-cli::")
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderError {
     /// A non-retryable failure: bad request, malformed response, context-length, etc. It
@@ -132,6 +141,20 @@ impl ProviderError {
 #[cfg(test)]
 mod error_tests {
     use super::*;
+
+    #[test]
+    fn is_cli_bridge_detects_both_forms() {
+        assert!(is_cli_bridge("claude-cli::opus"));
+        assert!(is_cli_bridge("codex-cli::gpt-5.5"));
+        assert!(is_cli_bridge("claude_cli::opus"), "legacy underscore form");
+        assert!(
+            is_cli_bridge("codex_cli::gpt-5.5"),
+            "legacy underscore form"
+        );
+        assert!(!is_cli_bridge("openrouter::google/gemini-3.5-flash"));
+        assert!(!is_cli_bridge("gemini::gemini-3.5-flash"));
+        assert!(!is_cli_bridge("ollama::llama3.2"));
+    }
 
     #[test]
     fn is_context_overflow_sniffs_the_message_but_not_plain_outages() {
