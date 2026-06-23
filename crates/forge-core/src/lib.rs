@@ -2356,12 +2356,19 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         "model returned an empty response (no text, no tool call) — stopping the turn"
                             .to_string(),
                     ));
+                } else if forge_provider::is_cli_bridge(&active_model) {
+                    // A CLI-bridge turn is TERMINAL: the bridge ran its own internal tool loop and
+                    // returned the finished turn as one text response (no tool calls surface here),
+                    // so its non-empty text IS the answer. Never nudge it to "keep calling tools" —
+                    // that re-runs the entire bridge in a confused state (it begins narrating tool
+                    // calls as text and spiralling, the bug behind the per-turn nudge spam). The
+                    // user can send `continue` to re-run the bridge cleanly.
                 } else {
-                    // Non-empty text, no tool call — usually the real final answer. But a weaker
-                    // model often narrates its NEXT action ("now I'll edit X") without calling the
-                    // tool, or signs off with tasks still open. If the tracked task list still has
-                    // unfinished items, this is a premature stall: drive it onward (bounded) so the
-                    // harness completes the work with ANY model instead of ending the turn mid-task.
+                    // Direct model, non-empty text, no tool call — usually the real final answer.
+                    // But a weaker model often narrates its NEXT action ("now I'll edit X") without
+                    // calling the tool, or signs off with tasks still open. If the tracked task list
+                    // still has unfinished items, this is a premature stall: drive it onward
+                    // (bounded) so the work completes instead of ending the turn mid-task.
                     let unfinished = self
                         .tasks
                         .iter()
@@ -4999,6 +5006,45 @@ mod tests {
             nudged,
             "emitted a continue-nudge warning for the unfinished task"
         );
+    }
+
+    #[tokio::test]
+    async fn cli_bridge_turn_is_terminal_and_not_nudged() {
+        use forge_types::TodoStatus;
+        // A CLI bridge runs its own internal tool loop and returns the whole turn as one text
+        // response; the parent must treat it as terminal and NEVER continue-nudge it (doing so
+        // re-runs the entire bridge and makes it spiral). Force a bridge model id via FixedRouter.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(StallThenFinishProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            Arc::new(FixedRouter {
+                model: "claude-cli::opus".into(),
+                fallbacks: vec![],
+            }),
+            ToolRegistry::with_core_tools(),
+            Box::new(capture),
+            Config::default(),
+            ".",
+        )
+        .unwrap();
+
+        let answer = session.run_turn("do the thing").await.unwrap();
+
+        // The text-only 2nd "bridge" response ended the turn — it was NOT driven onward, even
+        // though a task is still in_progress.
+        assert_eq!(answer, "I'll keep going on this.");
+        assert_eq!(session.tasks()[0].status, TodoStatus::InProgress);
+        let nudged = events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("unfinished")));
+        assert!(!nudged, "a CLI-bridge turn is never continue-nudged");
     }
 
     #[test]
