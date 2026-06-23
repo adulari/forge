@@ -236,6 +236,20 @@ pub struct App {
     pub session_out: u64,
     pub context_tokens: u64,
     pub context_limit: Option<u32>,
+    /// Wall-clock seconds the current turn has been running; updated live by the I/O shell each
+    /// frame while busy and left frozen at the final value once the turn ends (reset on the next
+    /// turn). Drives the `⧖ Ns` turn timer in the statusline.
+    pub turn_elapsed_secs: u64,
+    /// Input/output tokens attributed to the current/last turn (session totals minus the snapshot
+    /// taken at turn start). Shown alongside the timer; the session totals stay on their own.
+    pub turn_in: u64,
+    pub turn_out: u64,
+    /// Session in/out totals captured at turn start, so `turn_in/out` are deltas from here.
+    turn_base_in: u64,
+    turn_base_out: u64,
+    /// True once at least one turn has started this session — so the turn timer/token segment shows
+    /// the last turn's frozen stats even for a sub-second turn (where `turn_elapsed_secs` is 0).
+    turn_ran: bool,
     /// Set while compaction is running, driving the animated progress band. `None` otherwise.
     pub compaction: Option<CompactionState>,
     pub done: bool,
@@ -370,6 +384,11 @@ pub struct App {
     /// Active text selection in transcript coords: (wrapped_row, col) anchor + cursor. `None` when
     /// nothing is selected. Highlighted in the transcript and copied to the clipboard on release.
     selection: Option<(TextPos, TextPos)>,
+    /// Memoized markdown render of the in-flight streaming reply, keyed on `(len, width)`. The live
+    /// preview renders the partial reply as markdown (so it matches the finalized block instead of a
+    /// raw unwrapped blob); re-parsing every frame would be O(reply) lag, so it's only rebuilt when
+    /// new tokens arrive or the width changes.
+    stream_cache: std::cell::RefCell<StreamCache>,
 }
 
 /// A position in the wrapped transcript: `row` is the wrapped-row index in the cache, `col` the
@@ -392,6 +411,15 @@ struct TranscriptGeom {
 struct WrapCache {
     width: u16,
     rev: u64,
+    rows: Vec<TextLine<'static>>,
+}
+
+/// Cached markdown render of the streaming reply edge. Valid while `(len, width)` are unchanged;
+/// `len` is the byte length of [`App::streaming`], which only grows as tokens arrive.
+#[derive(Debug, Clone, Default)]
+struct StreamCache {
+    len: usize,
+    width: u16,
     rows: Vec<TextLine<'static>>,
 }
 
@@ -865,6 +893,9 @@ impl App {
                 self.session_out = session_out;
                 self.context_tokens = context_tokens;
                 self.context_limit = context_limit;
+                // Per-turn token deltas from the baseline snapshotted in `on_turn_start`.
+                self.turn_in = session_in.saturating_sub(self.turn_base_in);
+                self.turn_out = session_out.saturating_sub(self.turn_base_out);
             }
             PresenterEvent::SubagentStart {
                 id,
@@ -1116,6 +1147,14 @@ impl App {
         self.activity_focused = false;
         self.activity_idx = 0;
         self.pending_shell_fix = None;
+        // Reset the per-turn timer + token counters and snapshot the session-token baseline so this
+        // turn's in/out are measured as a delta from here.
+        self.turn_elapsed_secs = 0;
+        self.turn_in = 0;
+        self.turn_out = 0;
+        self.turn_base_in = self.session_in;
+        self.turn_base_out = self.session_out;
+        self.turn_ran = true;
     }
 
     /// Cheap per-frame metadata for the sticky activity panel (no transcript cloning). Order:
@@ -1799,23 +1838,54 @@ impl App {
         }
     }
 
-    /// The in-flight reply edge, wrapped to `width` (empty when not streaming). Cheap — one logical
-    /// line — so it's recomputed each frame rather than cached, while the bulk log stays memoized.
+    /// Rebuild the memoized markdown render of the in-flight reply if the content or width changed.
+    /// Rendering the partial reply as markdown (rather than dumping `self.streaming` as one raw,
+    /// unwrapped span) makes the live preview match the finalized block; memoizing on `(len, width)`
+    /// keeps it from re-parsing O(reply) every frame.
+    fn ensure_stream_cache(&self, width: u16) {
+        let mut c = self.stream_cache.borrow_mut();
+        if c.len != self.streaming.len() || c.width != width {
+            let lines = if self.streaming.is_empty() {
+                Vec::new()
+            } else {
+                crate::render::markdown_to_lines(&self.streaming)
+            };
+            c.rows = crate::transcript::wrap_lines(&lines, width.saturating_sub(1) as usize);
+            c.len = self.streaming.len();
+            c.width = width;
+        }
+    }
+
+    /// The in-flight reply edge, markdown-rendered and wrapped to `width` (empty when not streaming),
+    /// with the orange cursor block appended to the last row. The markdown parse is memoized; only
+    /// the cheap cursor append + clone happens per frame.
     fn streaming_edge(&self, width: u16) -> Vec<TextLine<'static>> {
         if !self.streaming_active {
             return Vec::new();
         }
-        let line = TextLine::from(vec![
-            Span::raw(format!("  {}", self.streaming)),
-            Span::styled("▌", Style::default().fg(ORANGE)),
-        ]);
-        crate::transcript::wrap_lines(&[line], width.saturating_sub(1) as usize)
+        self.ensure_stream_cache(width);
+        let mut rows = self.stream_cache.borrow().rows.clone();
+        let cursor = Span::styled("▌", Style::default().fg(ORANGE));
+        match rows.last_mut() {
+            Some(l) => l.spans.push(cursor),
+            None => rows.push(TextLine::from(cursor)),
+        }
+        rows
+    }
+
+    /// Wrapped-row count of the streaming edge without cloning it (for scroll math).
+    fn streaming_edge_len(&self, width: u16) -> usize {
+        if !self.streaming_active {
+            return 0;
+        }
+        self.ensure_stream_cache(width);
+        self.stream_cache.borrow().rows.len().max(1)
     }
 
     /// Total wrapped rows of the full-screen transcript (memoized log + the streaming edge).
     fn transcript_total_rows(&self, width: u16) -> usize {
         self.ensure_wrapped_main(width);
-        self.wrap_cache.borrow().rows.len() + self.streaming_edge(width).len()
+        self.wrap_cache.borrow().rows.len() + self.streaming_edge_len(width)
     }
 
     /// Map a screen cell to a transcript position (wrapped-row, col) if it's inside the transcript
@@ -3740,10 +3810,24 @@ pub fn statusline_height(app: &App) -> u16 {
         || app.context_limit.is_some()
         || app.session_in > 0
         || app.session_out > 0
+        || app.busy
+        || app.turn_ran
     {
         2
     } else {
         1
+    }
+}
+
+/// Compact wall-clock duration for the turn timer: `Ns` under a minute, `MmSSs` under an hour,
+/// `HhMMm` beyond. No leading zeros on the largest unit so it stays short in the statusline.
+fn fmt_dur(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 
@@ -3764,7 +3848,7 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     if app.busy && w >= 40 {
         let f = SPINNER[app.tick % SPINNER.len()];
         line1.push(Span::styled(
-            format!("{f} working"),
+            format!("{f} working {}", fmt_dur(app.turn_elapsed_secs)),
             Style::default().fg(ORANGE).bg(STATUSBG),
         ));
         line1.push(sep());
@@ -3850,14 +3934,33 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
             ..area
         };
         let mut line2: Vec<Span> = vec![Span::styled(" ", bg)];
-        if app.session_in > 0 || app.session_out > 0 {
+        // Per-turn timer + this-turn token deltas: live (orange) while the turn runs, frozen (dim)
+        // once it ends — like the per-response readout in Claude Code / Codex.
+        let show_turn = app.busy || app.turn_ran;
+        if show_turn {
             line2.push(Span::styled(
-                format!("↑{} ↓{}", human(app.session_in), human(app.session_out)),
+                format!(
+                    "⧖ {} ↑{} ↓{}",
+                    fmt_dur(app.turn_elapsed_secs),
+                    human(app.turn_in),
+                    human(app.turn_out)
+                ),
+                Style::default()
+                    .fg(if app.busy { ORANGE } else { DIM })
+                    .bg(STATUSBG),
+            ));
+        }
+        if app.session_in > 0 || app.session_out > 0 {
+            if show_turn {
+                line2.push(sep());
+            }
+            line2.push(Span::styled(
+                format!("Σ ↑{} ↓{}", human(app.session_in), human(app.session_out)),
                 Style::default().fg(DIM).bg(STATUSBG),
             ));
         }
         if app.context_tokens > 0 || app.context_limit.is_some() {
-            if app.session_in > 0 || app.session_out > 0 {
+            if line2.len() > 1 {
                 line2.push(sep());
             }
             line2.extend(context_gauge_spans(app.context_tokens, app.context_limit));
@@ -4494,6 +4597,48 @@ mod tests {
     }
 
     #[test]
+    fn statusline_shows_live_turn_timer_and_per_turn_tokens() {
+        let mut app = App {
+            session_in: 1_000,
+            session_out: 200,
+            ..Default::default()
+        };
+        // A turn starts: baseline snapshot taken, the I/O shell ticks the timer, usage reported.
+        app.on_turn_start();
+        app.busy = true;
+        app.turn_elapsed_secs = 73; // 1m13s
+        app.apply(PresenterEvent::Cost {
+            session_total_usd: 0.02,
+            session_in: 2_200, // +1.2k this turn
+            session_out: 540,  // +340 this turn
+            context_tokens: 0,
+            context_limit: None,
+        });
+        let s = screen_wh(&app, 120, LIVE_H);
+        assert!(
+            s.contains("working 1m13s"),
+            "live timer rides the spinner: {s}"
+        );
+        assert!(s.contains("⧖ 1m13s"), "turn-timer segment on row 2: {s}");
+        assert!(
+            s.contains("↑1.2k") && s.contains("↓340"),
+            "per-turn token deltas: {s}"
+        );
+        assert!(
+            s.contains("Σ ↑2.2k ↓540"),
+            "session totals relabeled Σ: {s}"
+        );
+    }
+
+    #[test]
+    fn fmt_dur_is_compact_across_scales() {
+        assert_eq!(fmt_dur(0), "0s");
+        assert_eq!(fmt_dur(45), "45s");
+        assert_eq!(fmt_dur(73), "1m13s");
+        assert_eq!(fmt_dur(3_661), "1h01m");
+    }
+
+    #[test]
     fn context_gauge_uses_fallback_limit_when_unknown() {
         let mut app = App::default();
         app.apply(PresenterEvent::Cost {
@@ -4738,6 +4883,38 @@ mod tests {
         );
         assert!(text.contains('╭') && text.contains('╰'), "has a frame");
         assert!(text.contains("approve to build"), "footer hint present");
+    }
+
+    #[test]
+    fn streaming_edge_renders_markdown_not_a_raw_blob() {
+        let app = App {
+            streaming_active: true,
+            streaming: "# Heading\n\n- first point\n- second point\n\nA closing paragraph.".into(),
+            ..Default::default()
+        };
+        let rows = app.streaming_edge(80);
+        let text: Vec<String> = rows
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
+            .collect();
+        // The old code dumped the whole reply (newlines and all) as ONE wrapped span. Markdown
+        // rendering must split it across rows for the heading, each bullet, and the paragraph.
+        assert!(
+            rows.len() >= 4,
+            "partial markdown split into rows: {text:?}"
+        );
+        assert!(
+            text.iter().any(|l| l.contains("first point"))
+                && text.iter().any(|l| l.contains("second point")),
+            "bullets on their own rows: {text:?}"
+        );
+        // The blinking cursor block rides the last row.
+        assert!(
+            text.last().unwrap().contains('▌'),
+            "cursor on last row: {text:?}"
+        );
+        // streaming_edge_len agrees with the rendered row count (no cursor-only extra row here).
+        assert_eq!(app.streaming_edge_len(80), rows.len());
     }
 
     #[test]
