@@ -36,20 +36,32 @@ pub struct BridgeStats {
 /// Returns (window, fraction) pairs, e.g. `[("five_hour", 0.10), ("weekly", 0.81)]`. Best-effort:
 /// empty on failure. Costs one tiny Haiku turn, so callers should gate it on staleness.
 pub fn probe_claude_limits() -> Vec<(String, f64)> {
-    let out = std::process::Command::new("claude")
-        .args([
-            "--debug",
-            "--print",
-            "--model",
-            "haiku",
-            "--append-system-prompt",
-            "Reply with a single period.",
-        ])
-        .arg(".")
-        .env("ANTHROPIC_LOG", "debug")
-        .stdin(std::process::Stdio::null())
-        .output();
-    let Ok(out) = out else { return Vec::new() };
+    // Bound the probe: `claude --print` can stall on a cold network or an auth prompt. Run it on a
+    // detached thread and wait at most PROBE_TIMEOUT for the result; on timeout return empty so the
+    // (backgrounded) quota refresh completes instead of leaking a task blocked on a hung child. The
+    // statusline cache / next refresh fills the numbers in later.
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new("claude")
+            .args([
+                "--debug",
+                "--print",
+                "--model",
+                "haiku",
+                "--append-system-prompt",
+                "Reply with a single period.",
+            ])
+            .arg(".")
+            .env("ANTHROPIC_LOG", "debug")
+            .stdin(std::process::Stdio::null())
+            .output();
+        let _ = tx.send(out);
+    });
+    let out = match rx.recv_timeout(PROBE_TIMEOUT) {
+        Ok(Ok(out)) => out,
+        _ => return Vec::new(),
+    };
     // Debug logs (with the headers) go to stderr; scan both streams to be safe.
     let mut text = String::from_utf8_lossy(&out.stderr).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stdout));
