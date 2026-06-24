@@ -9,11 +9,13 @@ All notable changes to Forge are documented here. The format follows
 ## [0.3.8] - 2026-06-24
 
 ### Added
-- **`/copy [N]` — copy an assistant response to the clipboard.** `/copy` copies the most recent
-  assistant response; `/copy N` copies the Nth-latest (1-based from the most recent — `/copy 2` is
-  the second-to-last). `/yank` is an alias. The text is resolved from the session transcript and
-  written to the system clipboard, with a confirmation note. (An interactive code-block picker and a
-  `w`-to-file option are planned as a follow-up.)
+- **`/copy [N]` — copy an assistant response to the clipboard, with a code-block picker.** `/copy`
+  copies the most recent assistant response; `/copy N` copies the Nth-latest (1-based from the most
+  recent — `/copy 2` is the second-to-last). `/yank` is an alias. When the response contains fenced
+  code blocks, `/copy` opens an interactive picker to copy the **full response** or any **individual
+  block** (shown with its language + size); ↑↓ select, **Enter** copies to the clipboard, **`w`**
+  writes the selection to a timestamped file in the cwd (useful over SSH, where the clipboard can't
+  reach your local machine), **Esc** cancels. A response with no code blocks copies directly.
 
 ## [0.3.7] - 2026-06-24
 

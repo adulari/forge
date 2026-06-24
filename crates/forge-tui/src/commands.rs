@@ -699,6 +699,10 @@ pub enum PickerKind {
     /// On resuming a previously-compacted session: continue with the compacted context, or reload
     /// the full original history into the model's view.
     ResumeMode,
+    /// Pick what part of an assistant response to copy (`/copy` when the response has code blocks):
+    /// the full response or an individual fenced block. Enter → clipboard, `w` → write to a file.
+    /// Each row's `id` is the index into [`App::copy_candidates`](crate::App::copy_candidates).
+    CopyBlocks,
 }
 
 /// One row in an interactive picker: an opaque `id` the loop acts on, plus two display strings.

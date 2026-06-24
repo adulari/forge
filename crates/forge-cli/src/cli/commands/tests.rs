@@ -2,10 +2,28 @@ use super::assay::bundle_source;
 use super::import::{convert_mdc_to_command_md, copy_catalog_assets};
 use super::local::bridge_plans;
 use super::run::{
-    chat_action, expand_at_files, loop_stop_reason, models_for_provider, models_provider_view,
-    nth_assistant_response, ChatAction, LOOP_MAX_ITERS,
+    chat_action, expand_at_files, extract_code_blocks, loop_stop_reason, models_for_provider,
+    models_provider_view, nth_assistant_response, ChatAction, LOOP_MAX_ITERS,
 };
 use crate::*;
+
+#[test]
+fn extract_code_blocks_pulls_fenced_blocks_with_lang() {
+    let md =
+        "Here you go:\n\n```rust\nfn main() {}\n```\n\nand shell:\n\n```bash\nls -la\n```\ndone";
+    let blocks = extract_code_blocks(md);
+    assert_eq!(blocks.len(), 2);
+    assert_eq!(blocks[0].0, "rust");
+    assert_eq!(blocks[0].1, "fn main() {}\n");
+    assert_eq!(blocks[1].0, "bash");
+    assert_eq!(blocks[1].1, "ls -la\n");
+    // Prose with no fences → no blocks (the caller then copies the whole response directly).
+    assert!(extract_code_blocks("just some prose, no code").is_empty());
+    // An unterminated final fence is still captured (model cut off mid-block).
+    let cut = extract_code_blocks("```python\nprint(1)\n");
+    assert_eq!(cut.len(), 1);
+    assert_eq!(cut[0].0, "python");
+}
 
 #[test]
 fn nth_assistant_response_counts_back_from_the_latest() {
