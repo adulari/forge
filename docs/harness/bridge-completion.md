@@ -36,7 +36,11 @@ All in `forge-core` `run_model_loop` (the `is_cli_bridge` arm) + the `cli_provid
 4. **Inspection requirement.** A verification turn that just re-marks `update_tasks` without inspecting
    does **not** count (`inspect_ran` counts tools other than `update_tasks`/`present_plan`). Forge
    re-prompts up to `MAX_VERIFY_ATTEMPTS`; if the model still never inspects, the turn ends **flagged
-   UNVERIFIED** — never a silent success.
+   UNVERIFIED** — never a silent success. **Scoped to turns that did real work:** the hard inspection
+   requirement only applies when the turn ran inspectable tools at all (`did_real_work`). A pure
+   reasoning/analysis plan (the deliverable is the answer text — no external state to check) would
+   over-fire, so it's accepted after one verification pass with a calm "not tool-verified (no external
+   artifacts)" note instead of UNVERIFIED.
 5. **Preamble mandate** (`HARNESS_TOOL_PREAMBLE`): complete the whole task and **WAIT** for any async
    job you launch (release build, CI) — "launched" ≠ "done".
 

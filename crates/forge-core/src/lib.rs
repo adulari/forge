@@ -2550,18 +2550,34 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                     } else if !self.tasks.is_empty() {
                         // The bridge reports every task Done — but a self-reported status is exactly
                         // what produced the phantom release (claimed merged + tagged; nothing ran).
-                        // Completion is accepted ONLY after the model has PROVEN it with a real
-                        // inspection tool (read_file/shell/list_dir/…), not just re-marked
-                        // `update_tasks`. `verify_attempts` tracks the forced verification turns for
-                        // this claim; `inspected_this_turn` is whether the turn we just observed
-                        // actually ran an inspection tool.
+                        // Force ONE tool-grounded verification turn, then judge by whether the turn
+                        // did real, inspectable WORK:
+                        //   * If the turn ran inspectable tools at all (`did_real_work`) — file/shell/
+                        //     read ops — completion is accepted ONLY after the verification turn runs
+                        //     a real inspection (not just re-marking `update_tasks`); otherwise it
+                        //     ends flagged UNVERIFIED. This catches a model that claims done on work
+                        //     it didn't actually finish/verify.
+                        //   * If the turn did NO inspectable work (a pure reasoning/analysis plan —
+                        //     the deliverable is the answer text, there is no external state to
+                        //     check), requiring a tool inspection would over-fire. Accept after one
+                        //     verification pass with a calm "not tool-verified" note instead.
+                        // `did_real_work` is cumulative over the whole turn; `inspected_this_turn`
+                        // is whether the turn just observed ran an inspection tool.
                         const MAX_VERIFY_ATTEMPTS: usize = 2;
-                        if verify_attempts > 0 && inspected_this_turn {
-                            // The verification turn ran a real check and the tasks are still all
-                            // Done → genuinely verified. Accept (fall through to terminal).
+                        let did_real_work =
+                            inspect_ran.load(std::sync::atomic::Ordering::Relaxed) > 0;
+                        if verify_attempts > 0 && (inspected_this_turn || !did_real_work) {
+                            // Accept: a real check ran, OR there was no external work to tool-verify.
+                            if !inspected_this_turn && !did_real_work {
+                                self.presenter.emit(PresenterEvent::Warning(
+                                    "completion not tool-verified (no external artifacts to check) — accepting the reported result"
+                                        .to_string(),
+                                ));
+                            }
+                            // fall through to terminal
                         } else if verify_attempts < MAX_VERIFY_ATTEMPTS {
                             // Either the first "all done" claim (verify_attempts == 0), or a
-                            // verification turn that re-asserted done WITHOUT inspecting (the C8
+                            // work-producing turn that re-asserted done WITHOUT inspecting (the C8
                             // hole) — force another tool-grounded verification.
                             verify_attempts += 1;
                             self.presenter.emit(PresenterEvent::Warning(format!(
@@ -2574,8 +2590,9 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                                          — and look at the actual output. Re-marking update_tasks is \
                                          NOT verification; you must run a real check. If the output \
                                          shows ANY task is not actually complete, mark it not done \
-                                         and finish it. Only after you have inspected real output \
-                                         confirming every task, state exactly what you checked and stop.";
+                                         and finish it. (If a task has no external artifact to check — \
+                                         a pure analysis answer — say so and restate the result.) Only \
+                                         after confirming every task, state exactly what you checked and stop.";
                             let nseq = self.next_seq();
                             let _ =
                                 self.store
@@ -2583,9 +2600,9 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             self.transcript.push(Message::system(nudge));
                             continue;
                         } else {
-                            // Verification budget spent and the model still never ran a real check
-                            // (a model that won't verify, e.g. one told to lie). Do NOT silently
-                            // report success — end LOUDLY flagging the completion as unverified.
+                            // Work was done but the verification turns never ran a real check (a
+                            // model that won't verify, e.g. one told to lie). Do NOT silently report
+                            // success — end LOUDLY flagging the completion as unverified.
                             self.presenter.emit(PresenterEvent::Warning(
                                 "completion could NOT be tool-verified — the model reported done without \
                                  inspecting real state. Treat this result as UNVERIFIED."
@@ -7116,11 +7133,14 @@ mod tests {
     }
 
     /// Mimics a CLI bridge: returns text with NO structured tool calls (a bridge's tools run in
-    /// its own process; only its narration comes back here). `runs_tool` makes it emit a
-    /// ToolStarted each call — the "made progress" signal the re-drive gate keys on.
+    /// its own process; only its narration comes back here). Emits a `shell` ToolStarted on the
+    /// first `inspect_calls` invocations — that's both the "made progress" signal the re-drive gate
+    /// keys on AND the real-inspection signal the verification gate requires. 0 = never inspects
+    /// (pure reasoning / a model that won't check); usize::MAX = inspects every turn; 1 = does real
+    /// work once then stops inspecting (verification can't confirm).
     struct BridgeProvider {
         calls: std::sync::atomic::AtomicUsize,
-        runs_tool: bool,
+        inspect_calls: usize,
     }
     #[async_trait::async_trait]
     impl Provider for BridgeProvider {
@@ -7131,8 +7151,8 @@ mod tests {
             _tools: &[ToolSpec],
             on_event: &mut forge_provider::EventSink<'_>,
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
-            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if self.runs_tool {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.inspect_calls {
                 on_event(StreamEvent::ToolStarted {
                     name: "shell".into(),
                     args: "git status".into(),
@@ -7242,7 +7262,7 @@ mod tests {
         // (the old bridge-nudge bug). Exactly one invocation.
         let provider = Arc::new(BridgeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            runs_tool: false,
+            inspect_calls: 0,
         });
         let (store, mut session) = bridge_session(provider.clone());
         seed_tasks(&store, &session.id, &[("ship the release", false)]);
@@ -7262,7 +7282,7 @@ mod tests {
         // forever. 1 initial turn + MAX_BRIDGE_CONTINUE_NUDGES (8) re-drives = 9 invocations.
         let provider = Arc::new(BridgeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            runs_tool: true,
+            inspect_calls: usize::MAX, // a tool runs every turn = progress every turn
         });
         let (store, mut session) = bridge_session(provider.clone());
         seed_tasks(&store, &session.id, &[("ship the release", false)]);
@@ -7281,7 +7301,7 @@ mod tests {
         // exactly 2 invocations (the claim + the verifying check).
         let provider = Arc::new(BridgeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            runs_tool: true, // emits a `shell` ToolStarted each turn = a real inspection
+            inspect_calls: usize::MAX, // emits a `shell` ToolStarted each turn = a real inspection
         });
         let (store, mut session) = bridge_session(provider.clone());
         seed_tasks(&store, &session.id, &[("ship the release", true)]);
@@ -7295,13 +7315,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_completion_flagged_unverified_when_model_never_inspects() {
-        // The C8 hole: a model reports done but NEVER runs a real check (just re-asserts). Forge
-        // must NOT silently accept it — it re-prompts up to the cap, then ends LOUDLY flagging the
-        // result UNVERIFIED. `runs_tool:false` means no inspection ever happens.
+    async fn bridge_reasoning_only_completion_accepted_without_overfiring() {
+        // The over-fire fix: a pure reasoning/analysis plan does NO inspectable work (the answer is
+        // the deliverable). Demanding a tool inspection would wrongly flag it. Forge runs ONE
+        // verification pass, sees there's nothing external to check, and ACCEPTS with a calm note —
+        // it does NOT loop to the cap or shout UNVERIFIED. `inspect_calls: 0` = never inspects.
         let provider = Arc::new(BridgeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            runs_tool: false,
+            inspect_calls: 0,
+        });
+        let (store, mut session) = bridge_session(provider.clone());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+        seed_tasks(&store, &session.id, &[("analyze the tradeoffs", true)]);
+        let answer = session.run_turn("think it through").await.unwrap();
+        assert_eq!(answer, "working");
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "reasoning-only completion must accept after ONE verification pass, not over-fire to the cap"
+        );
+        let ev = events.lock().unwrap();
+        let calm = ev.iter().any(
+            |e| matches!(e, PresenterEvent::Warning(w) if w.contains("no external artifacts")),
+        );
+        let shouted = ev
+            .iter()
+            .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("UNVERIFIED")));
+        assert!(
+            calm,
+            "must note it couldn't tool-verify (no artifacts), calmly"
+        );
+        assert!(
+            !shouted,
+            "must NOT shout UNVERIFIED on a legitimate reasoning task"
+        );
+    }
+
+    #[tokio::test]
+    async fn bridge_completion_flagged_unverified_when_work_done_but_never_re_checked() {
+        // The C8 hole, properly scoped: the turn DID real work (inspect_calls: 1 → a tool ran on the
+        // first turn), then claimed done but never re-inspected on verification. Forge forces the
+        // verification cap and ends LOUDLY flagging UNVERIFIED — never a silent success.
+        let provider = Arc::new(BridgeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            inspect_calls: 1, // real work on turn 1, no inspection on the verification turns
         });
         let (store, mut session) = bridge_session(provider.clone());
         let capture = CapturePresenter::default();
@@ -7309,7 +7368,7 @@ mod tests {
         session.presenter = Box::new(capture);
         seed_tasks(&store, &session.id, &[("ship the release", true)]);
         let _ = session.run_turn("release it").await.unwrap();
-        // 1 claim + MAX_VERIFY_ATTEMPTS (2) verification turns = 3 invocations, then it stops.
+        // 1 work/claim turn + MAX_VERIFY_ATTEMPTS (2) verification turns = 3 invocations.
         assert_eq!(
             provider.calls.load(std::sync::atomic::Ordering::SeqCst),
             3,
@@ -7322,7 +7381,7 @@ mod tests {
             .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("UNVERIFIED")));
         assert!(
             unverified,
-            "completion the model never tool-verified must end flagged UNVERIFIED, not as success"
+            "work-producing completion never re-checked must end flagged UNVERIFIED, not as success"
         );
     }
 
