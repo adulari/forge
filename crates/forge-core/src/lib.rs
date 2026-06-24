@@ -1414,9 +1414,9 @@ impl Session {
         // everything" churn on a box with no groq key). `has_api_key` is true for keyless providers
         // (ollama, the claude/codex bridges), so those still qualify.
         let ordered = self.store.transient_benched_ordered().unwrap_or_default();
-        ordered.into_iter().find(|m| {
-            m != just_failed && forge_config::has_api_key(forge_config::provider_of(m))
-        })
+        ordered
+            .into_iter()
+            .find(|m| m != just_failed && forge_config::has_api_key(forge_config::provider_of(m)))
     }
 
     /// The context window (tokens) to assume for `model`: a fetched per-model window (provider API,
@@ -2126,88 +2126,88 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 // synthesize a permanent Auth failure so the existing failover branch EXCLUDES it and
                 // advances to a usable model. `has_api_key` is true for keyless providers (ollama,
                 // the claude/codex bridges), so a legitimate bridge turn is never short-circuited.
-                let result = if !forge_config::has_api_key(forge_config::provider_of(&active_model)) {
-                    Err(forge_provider::ProviderError::Auth(format!(
-                        "no API key configured for provider '{}'",
-                        forge_config::provider_of(&active_model)
-                    )))
-                } else {
-                    let provider = &self.provider;
-                    let presenter = &mut self.presenter;
-                    // Bump on every stream event so the idle watchdog can distinguish a live
-                    // stream from a stalled half-open connection — a stall fails over (below)
-                    // instead of hanging the turn forever.
-                    let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    let act = std::sync::Arc::clone(&activity);
-                    let mut sink = |ev: StreamEvent| {
-                        act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        match ev {
-                            StreamEvent::Text(t) => {
-                                presenter.emit(PresenterEvent::AssistantDelta(t))
-                            }
-                            StreamEvent::Reasoning(t) => {
-                                presenter.emit(PresenterEvent::Reasoning(t))
-                            }
-                            StreamEvent::ToolStarted { name, args } => {
-                                presenter.emit(PresenterEvent::ToolStart { name, args })
-                            }
-                            StreamEvent::ToolFinished { name, ok, summary } => {
-                                presenter.emit(PresenterEvent::ToolResult { name, ok, summary })
-                            }
-                            StreamEvent::SubagentStarted { id, agent, task } => {
-                                presenter.emit(PresenterEvent::SubagentStart {
-                                    id,
-                                    agent,
-                                    task,
-                                    model: None,
-                                })
-                            }
-                            StreamEvent::SubagentProgress { id, snippet } => {
-                                presenter.emit(PresenterEvent::SubagentProgress { id, snippet })
-                            }
-                            StreamEvent::SubagentFinished {
-                                id,
-                                agent,
-                                ok,
-                                summary,
-                                cost_usd,
-                            } => presenter.emit(PresenterEvent::SubagentResult {
-                                id,
-                                agent,
-                                ok,
-                                summary,
-                                cost_usd,
-                            }),
-                            // A bridged turn's `update_tasks` (tailed from the sink): surface the
-                            // list live so the sticky panel updates during the turn. The parent's
-                            // post-turn store reload (below) keeps `self.tasks` authoritative.
-                            StreamEvent::Tasks(tasks) => {
-                                presenter.emit(PresenterEvent::Tasks(tasks))
-                            }
-                            // A bridged turn's `present_plan`: in planning mode, render the
-                            // card now and stash it for the turn's approval flow (picked up
-                            // via the outcome). Ignored outside Plan mode (stray proposal).
-                            StreamEvent::Plan(plan) => {
-                                if in_plan_mode {
-                                    presenter.emit(PresenterEvent::PlanProposed(plan.clone()));
-                                    proposed_plan = Some(plan);
+                let result =
+                    if !forge_config::has_api_key(forge_config::provider_of(&active_model)) {
+                        Err(forge_provider::ProviderError::Auth(format!(
+                            "no API key configured for provider '{}'",
+                            forge_config::provider_of(&active_model)
+                        )))
+                    } else {
+                        let provider = &self.provider;
+                        let presenter = &mut self.presenter;
+                        // Bump on every stream event so the idle watchdog can distinguish a live
+                        // stream from a stalled half-open connection — a stall fails over (below)
+                        // instead of hanging the turn forever.
+                        let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                        let act = std::sync::Arc::clone(&activity);
+                        let mut sink =
+                            |ev: StreamEvent| {
+                                act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                match ev {
+                                    StreamEvent::Text(t) => {
+                                        presenter.emit(PresenterEvent::AssistantDelta(t))
+                                    }
+                                    StreamEvent::Reasoning(t) => {
+                                        presenter.emit(PresenterEvent::Reasoning(t))
+                                    }
+                                    StreamEvent::ToolStarted { name, args } => {
+                                        presenter.emit(PresenterEvent::ToolStart { name, args })
+                                    }
+                                    StreamEvent::ToolFinished { name, ok, summary } => presenter
+                                        .emit(PresenterEvent::ToolResult { name, ok, summary }),
+                                    StreamEvent::SubagentStarted { id, agent, task } => presenter
+                                        .emit(PresenterEvent::SubagentStart {
+                                            id,
+                                            agent,
+                                            task,
+                                            model: None,
+                                        }),
+                                    StreamEvent::SubagentProgress { id, snippet } => presenter
+                                        .emit(PresenterEvent::SubagentProgress { id, snippet }),
+                                    StreamEvent::SubagentFinished {
+                                        id,
+                                        agent,
+                                        ok,
+                                        summary,
+                                        cost_usd,
+                                    } => presenter.emit(PresenterEvent::SubagentResult {
+                                        id,
+                                        agent,
+                                        ok,
+                                        summary,
+                                        cost_usd,
+                                    }),
+                                    // A bridged turn's `update_tasks` (tailed from the sink): surface the
+                                    // list live so the sticky panel updates during the turn. The parent's
+                                    // post-turn store reload (below) keeps `self.tasks` authoritative.
+                                    StreamEvent::Tasks(tasks) => {
+                                        presenter.emit(PresenterEvent::Tasks(tasks))
+                                    }
+                                    // A bridged turn's `present_plan`: in planning mode, render the
+                                    // card now and stash it for the turn's approval flow (picked up
+                                    // via the outcome). Ignored outside Plan mode (stray proposal).
+                                    StreamEvent::Plan(plan) => {
+                                        if in_plan_mode {
+                                            presenter
+                                                .emit(PresenterEvent::PlanProposed(plan.clone()));
+                                            proposed_plan = Some(plan);
+                                        }
+                                    }
                                 }
-                            }
-                        }
+                            };
+                        let completion_opts = CompletionOptions {
+                            effort: self.pinned_effort,
+                            temperature: Some(CODING_TEMPERATURE),
+                        };
+                        let fut = provider.complete_with(
+                            &active_model,
+                            &sent,
+                            specs,
+                            &completion_opts,
+                            &mut sink,
+                        );
+                        stream_with_idle_timeout(fut, &activity, stream_idle).await
                     };
-                    let completion_opts = CompletionOptions {
-                        effort: self.pinned_effort,
-                        temperature: Some(CODING_TEMPERATURE),
-                    };
-                    let fut = provider.complete_with(
-                        &active_model,
-                        &sent,
-                        specs,
-                        &completion_opts,
-                        &mut sink,
-                    );
-                    stream_with_idle_timeout(fut, &activity, stream_idle).await
-                };
                 match result {
                     Ok(r) => {
                         if !r.content.is_empty() {

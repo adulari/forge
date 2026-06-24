@@ -859,7 +859,9 @@ mod tests {
         assert!(matches!(e, ProviderError::Auth(_)), "got {e:?}");
         assert!(e.is_permanent());
         assert!(is_auth_config_failure(msg));
-        assert!(!is_auth_config_failure("provider unavailable: 502 bad gateway"));
+        assert!(!is_auth_config_failure(
+            "provider unavailable: 502 bad gateway"
+        ));
     }
 
     #[test]
