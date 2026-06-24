@@ -2580,6 +2580,31 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         // classifies (for tier stats) but the actual call uses the pin.
         let pinned = self.pinned_model.clone();
         let routed_model = pinned.unwrap_or_else(|| decision.model.clone());
+
+        // No usable model: the router filters unkeyed models out of the chain (is_usable →
+        // has_api_key), so the routed pick belongs to a key-needing provider with no key ONLY when
+        // nothing usable existed at all — the built-in defaults lead with groq, so a user whose keys
+        // are for other providers (or whose auto-discovery came up empty) would otherwise watch the
+        // mesh call groq and auth-fail on EVERY turn. Stop with an actionable diagnostic instead of
+        // spinning on a key we don't have. (Keyless providers — ollama, the claude/codex bridges,
+        // unknown prefixes — return has_api_key=true and pass through untouched.)
+        if !forge_config::has_api_key(forge_config::provider_of(&routed_model)) {
+            let msg = no_usable_model_message(&routed_model);
+            self.presenter.emit(PresenterEvent::Warning(msg.clone()));
+            let seq = self.next_seq();
+            self.store
+                .add_message(&self.id, seq, Role::User, prompt, None)?;
+            self.transcript.push(Message::user(prompt));
+            let seq = self.next_seq();
+            self.store
+                .add_message(&self.id, seq, Role::System, &msg, None)?;
+            self.transcript.push(Message::system(&msg));
+            self.presenter.emit(PresenterEvent::Done {
+                final_text: msg.clone(),
+            });
+            return Ok(msg);
+        }
+
         self.presenter.emit(PresenterEvent::Routing {
             tier: decision.tier.as_str().to_string(),
             model: routed_model.clone(),
@@ -4290,6 +4315,33 @@ fn over_budget_message(b: &BudgetState) -> String {
         cap(b.daily_cap_usd),
         b.spent_month_usd,
         cap(b.monthly_cap_usd)
+    )
+}
+
+/// Actionable message when the mesh routed to a model whose provider has no API key and nothing
+/// else was usable — instead of silently calling it and auth-failing every turn. Names the dead
+/// provider, lists the providers that DO have a usable key, and gives the concrete fixes.
+fn no_usable_model_message(routed_model: &str) -> String {
+    let provider = forge_config::provider_of(routed_model);
+    let keyed: Vec<&str> = forge_config::known_key_providers()
+        .filter(|p| forge_config::has_api_key(p))
+        .collect();
+    let have = if keyed.is_empty() {
+        "no provider API keys are configured".to_string()
+    } else {
+        format!("you have keys for: {}", keyed.join(", "))
+    };
+    format!(
+        "No usable model for this turn: the mesh routed to '{routed_model}', but provider \
+         '{provider}' has no API key and no other model was usable ({have}).\n\
+         Fix one of:\n  \
+         • forge auth      — add a provider API key\n  \
+         • forge models    — see which models are actually usable right now\n  \
+         • /model <id>     — pin a usable model for this session\n  \
+         • ollama serve    — run a local model (no key needed)\n\
+         If you DO have a key for another provider, run `forge models`: auto-discovery may have \
+         failed to reach it, so the mesh fell back to the built-in defaults (which lead with \
+         '{provider}')."
     )
 }
 
@@ -6035,6 +6087,20 @@ mod tests {
     }
 
     #[test]
+    fn no_usable_model_message_names_the_dead_provider_and_the_fixes() {
+        let msg = no_usable_model_message("groq::llama-3.1-8b-instant");
+        assert!(msg.contains("groq"), "names the dead provider");
+        assert!(msg.contains("forge auth"), "points at adding a key");
+        assert!(
+            msg.contains("forge models"),
+            "points at the usable-models view"
+        );
+        assert!(msg.contains("/model"), "offers a pin escape hatch");
+        // Mentions auto-discovery so a user who DOES have another key knows why it fell back.
+        assert!(msg.to_lowercase().contains("auto-discovery"));
+    }
+
+    #[test]
     fn summarize_does_not_panic_on_multibyte_boundary() {
         // Byte 80 lands inside the multi-byte 'é' — `&first[..80]` would panic here.
         let line = format!(
@@ -6675,6 +6741,45 @@ mod tests {
         )
         .unwrap();
         (store, session)
+    }
+
+    /// Panics if asked to complete — proves a code path makes NO provider call.
+    struct PanicProvider;
+    #[async_trait::async_trait]
+    impl Provider for PanicProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            panic!("provider must NOT be called when no usable model exists (routed: {model})");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_usable_model_stops_the_turn_instead_of_spinning_on_a_keyless_provider() {
+        // The "keeps trying groq for everything" bug: when nothing is usable the router falls back
+        // to a key-needing model anyway. The core must STOP with an actionable diagnostic, not call
+        // it (and auth-fail) every turn. `minimax` has no key here, so routing to it must short
+        // out before the provider is ever touched — PanicProvider would fire if it were called.
+        assert!(
+            !forge_config::has_api_key("minimax"),
+            "test precondition: no minimax key in the environment"
+        );
+        let (_store, mut session) = fixed_session(
+            Arc::new(PanicProvider),
+            Arc::new(FixedRouter {
+                model: "minimax::abab-test".into(),
+                fallbacks: vec![],
+            }),
+        );
+        let answer = session.run_turn("write hello world").await.unwrap();
+        assert!(
+            answer.contains("No usable model") && answer.contains("minimax"),
+            "actionable no-usable-model stop expected, got: {answer}"
+        );
     }
 
     #[test]

@@ -2022,6 +2022,27 @@ pub fn known_key_providers() -> impl Iterator<Item = &'static str> {
     PROVIDER_ENV_VARS.iter().map(|(name, _)| *name)
 }
 
+/// Conventional / legacy env-var aliases accepted IN ADDITION to the canonical name in
+/// [`PROVIDER_ENV_VARS`]. OpenRouter's own docs and most users use `OPENROUTER_API_KEY`, but the
+/// canonical var (the one genai's `open_router` adapter reads) is `OPEN_ROUTER_API_KEY` — so a user
+/// who exported the conventional name was silently treated as keyless, the mesh skipped OpenRouter
+/// discovery, and routing fell back to the built-in groq defaults. Accept both: read either name,
+/// and [`inject_provider_keys`] copies an alias into the canonical var genai authenticates with.
+const PROVIDER_ENV_ALIASES: &[(&str, &str)] = &[("openrouter", "OPENROUTER_API_KEY")];
+
+/// Accepted env-var aliases for `provider` (besides its canonical [`env_var_for`] name).
+fn env_aliases_for(provider: &str) -> impl Iterator<Item = &'static str> + '_ {
+    PROVIDER_ENV_ALIASES
+        .iter()
+        .filter(move |(p, _)| *p == provider)
+        .map(|(_, v)| *v)
+}
+
+/// Whether an env var is set to a non-empty value.
+fn env_set(var: &str) -> bool {
+    std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false)
+}
+
 /// The provider prefix of a `"provider::model"` id (the part before the first `::`), or `""`
 /// when the id is unprefixed.
 pub fn provider_of(model: &str) -> &str {
@@ -2036,7 +2057,7 @@ pub fn has_api_key(provider: &str) -> bool {
     let Some(var) = env_var_for(provider) else {
         return true; // keyless / unknown -> don't block routing on it
     };
-    if std::env::var(var).map(|v| !v.is_empty()).unwrap_or(false) {
+    if env_set(var) || env_aliases_for(provider).any(env_set) {
         return true;
     }
     secret_store::get(provider)
@@ -2052,6 +2073,13 @@ pub fn api_key(provider: &str) -> Result<String, ConfigError> {
     if let Ok(key) = std::env::var(var) {
         if !key.is_empty() {
             return Ok(key);
+        }
+    }
+    for alias in env_aliases_for(provider) {
+        if let Ok(key) = std::env::var(alias) {
+            if !key.is_empty() {
+                return Ok(key);
+            }
         }
     }
     if let Some(key) = secret_store::get(provider) {
@@ -2089,7 +2117,15 @@ pub fn load_secret(key: &str) -> Option<String> {
 /// without a stored key are simply left unset.
 pub fn inject_provider_keys() {
     for (provider, var) in PROVIDER_ENV_VARS {
-        if std::env::var(var).is_ok() {
+        if env_set(var) {
+            continue;
+        }
+        // A conventional alias the user exported (e.g. OPENROUTER_API_KEY) → copy into the
+        // canonical var genai's adapter actually reads (OPEN_ROUTER_API_KEY), so it authenticates.
+        if let Some(key) =
+            env_aliases_for(provider).find_map(|a| std::env::var(a).ok().filter(|s| !s.is_empty()))
+        {
+            std::env::set_var(var, key);
             continue;
         }
         if let Some(key) = secret_store::get(provider) {
@@ -2202,6 +2238,28 @@ mod tests {
         std::env::set_var("OPENAI_API_KEY", "sk-env-precedence");
         assert_eq!(api_key("openai").unwrap(), "sk-env-precedence");
         std::env::remove_var("OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn openrouter_accepts_the_conventional_env_var_alias() {
+        // OpenRouter's own docs + most users export OPENROUTER_API_KEY, but the canonical var genai's
+        // adapter reads is OPEN_ROUTER_API_KEY. Both must be recognised — else the mesh treats the
+        // user as keyless, skips OpenRouter discovery, and falls back to the built-in groq defaults.
+        std::env::remove_var("OPEN_ROUTER_API_KEY");
+        std::env::set_var("OPENROUTER_API_KEY", "sk-or-conventional");
+        assert!(
+            has_api_key("openrouter"),
+            "conventional alias counts as a key"
+        );
+        assert_eq!(api_key("openrouter").unwrap(), "sk-or-conventional");
+        // inject copies the alias into the canonical var genai authenticates with.
+        inject_provider_keys();
+        assert_eq!(
+            std::env::var("OPEN_ROUTER_API_KEY").unwrap(),
+            "sk-or-conventional"
+        );
+        std::env::remove_var("OPENROUTER_API_KEY");
+        std::env::remove_var("OPEN_ROUTER_API_KEY");
     }
 
     #[test]
