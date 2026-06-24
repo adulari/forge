@@ -556,16 +556,15 @@ pub(crate) async fn claude_quota_is_stale(
         .is_none_or(|a| a > max_age)
 }
 
-/// Copy text to the clipboard from inside the TUI. Two paths, because neither alone is enough:
-///   1. `arboard` (the long-lived instance) — works on X11/macOS/Windows native. But on **Wayland**
-///      it silently no-ops: arboard's Wayland backend needs an owned window/surface, which a
-///      terminal app doesn't have — so `/copy` "succeeded" but copied nothing (the reported bug).
-///   2. **OSC 52** — ask the TERMINAL to set the clipboard. This is the reliable path on Wayland,
-///      over SSH, and in Windows Terminal / kitty / iTerm; it doesn't need any display server.
-/// Both are best-effort and silent (no stray VISIBLE output — OSC 52 is an out-of-band control
-/// sequence the terminal intercepts, so it doesn't corrupt the alt-screen grid). A single arboard
-/// instance is reused so its X11 selection thread stays alive (recreating it logs "clipboard
-/// dropped" and wrecks the layout).
+/// Copy text to the clipboard from inside the TUI via two complementary paths, because neither
+/// alone is enough. `arboard` (the long-lived instance) covers X11 / macOS / Windows-native, but on
+/// Wayland it silently no-ops — its Wayland backend needs an owned window/surface a terminal app
+/// doesn't have, so `/copy` "succeeded" yet copied nothing (the reported bug). OSC 52 covers that
+/// gap by asking the TERMINAL to set the clipboard: the reliable path on Wayland, over SSH, and in
+/// Windows Terminal / kitty / iTerm, with no display server needed. Both are best-effort and silent
+/// (OSC 52 is an out-of-band control sequence the terminal intercepts, so it never corrupts the
+/// alt-screen grid). The single arboard instance is reused so its X11 selection thread stays alive
+/// (recreating it logs "clipboard dropped" and wrecks the layout).
 pub(crate) fn copy_selection(clipboard: &mut Option<arboard::Clipboard>, text: &str) {
     if let Some(cb) = clipboard.as_mut() {
         let _ = cb.set_text(text.to_owned());
