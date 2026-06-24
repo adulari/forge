@@ -238,8 +238,23 @@ pub(crate) async fn build_session_with(
 
     // Auto-discovery: build a live model catalog so the mesh routes to the best usable model
     // (docs/features/auto-discovery-mesh.md). Skipped for the offline mock and when disabled.
+    // Bounded by an overall deadline: individual provider list calls already time out (4s/8s), but
+    // a pile of unreachable providers on a slow network could still sum to a long stall that LOOKS
+    // like a hang. Cap the whole phase — on timeout, fall back to the built-in catalog and tell the
+    // user, so startup always completes and the error is visible rather than an infinite load.
     let catalog = if !mock && config.mesh.auto_discover {
-        Some(discover_catalog(&config).await)
+        const DISCOVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+        match tokio::time::timeout(DISCOVERY_BUDGET, discover_catalog(&config)).await {
+            Ok(cat) => Some(cat),
+            Err(_) => {
+                presenter.emit(forge_tui::PresenterEvent::Warning(format!(
+                    "model auto-discovery exceeded {}s — using built-in defaults for now; run \
+                     `forge models` to refresh once your network/providers respond",
+                    DISCOVERY_BUDGET.as_secs()
+                )));
+                None
+            }
+        }
     } else {
         None
     };
@@ -739,9 +754,19 @@ pub(crate) async fn run_chat_tui(
     // weak fallback — the background probe below fetches claude's CURRENT 5h+weekly utilisation
     // (via the `claude --debug` rate-limit headers) so the store is live within a few seconds.
     {
-        let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
-            .await
-            .unwrap_or_default();
+        // bridge_stats::fetch recursively scans ~/.claude/projects/**/*.jsonl — on a slow FS (WSL
+        // /mnt, a huge history) that can stall the first frame. It only seeds non-essential quota
+        // percentages, so bound it; the background refresh below fills live numbers in shortly. A
+        // timeout leaves the blocking task to finish detached rather than blocking startup.
+        let bstats = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::task::spawn_blocking(bridge_stats::fetch),
+        )
+        .await
+        {
+            Ok(Ok(b)) => b,
+            _ => Default::default(),
+        };
         let s = session.lock().await;
         s.seed_subscription_quota("codex-cli", "five_hour", bstats.codex_5h_pct);
         s.seed_subscription_quota("codex-cli", "weekly", bstats.codex_weekly_pct);

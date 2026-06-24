@@ -6,6 +6,42 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-06-24
+
+Stability release: make Forge usable for new users on Windows / WSL / non-Arch boxes. Every fix
+targets a "Forge is unusable and doesn't say why" failure reported from the field.
+
+### Fixed
+- **The mesh can no longer dispatch a provider you have no key for (the "groq for everything"
+  churn).** Reported on Windows + WSL: the mesh kept trying `groq::llama-3.3-70b-versatile` despite
+  no groq key — even with `--model` forced — and surfaced a raw `Resolver error`. Root cause was a
+  keyless model reaching the wire via a path that wasn't key-filtered. Closed with three independent
+  layers: (1) a genai "Resolver error" (adapter/auth couldn't be built — almost always a missing
+  key) is now classified **permanent `Auth`** → the model is *excluded* and re-probed, not benched
+  and retried forever; (2) the **last-resort fallback** (`soonest_unbenched`) now skips any provider
+  with no key, so a benched keyless default can't become the pick; (3) a **pre-dispatch backstop**
+  converts any keyless `active_model` into a permanent failure so failover advances to a usable
+  model instead of dispatching and erroring. Keyless providers (ollama, the claude/codex bridges)
+  are unaffected.
+- **`forge chat` no longer hangs forever before the TUI opens (WSL).** On WSL / headless Linux an
+  activatable-but-dead `org.freedesktop.secrets` made the OS-keyring call **block indefinitely** —
+  and it's called per provider at startup, so the TUI never drew its first frame. The keyring is now
+  probed once with an 800ms timeout and, if it doesn't answer, Forge uses its encrypted file store
+  for the session (secrets stay durable). The setup menu worked because it doesn't hit that path.
+- **All blocking startup steps are now time-boxed** — a command completes its preflight (or shows a
+  clear error) before the TUI draws, instead of loading infinitely: model auto-discovery is capped
+  at 15s (then falls back to built-in defaults + a warning), the `~/.claude` quota scan at 3s, and
+  the background `claude --debug` quota probe at 20s.
+
+### Changed
+- **`forge doctor` now tests function, not just presence** — it reported "0 failures" on machines
+  where Forge was unusable. It now runs two bounded live probes: a **CLI-bridge round-trip** (it
+  actually launches the detected claude/codex bridge and confirms it answers — catching a bridge
+  that's on PATH but can't launch, e.g. the Windows `cmd /S /C` shim case), and a **keyed-provider
+  reachability** check (a `list_models` timeout means the provider won't route → the keyless-fallback
+  cause). The terminal check now resolves the old `interactive (?)` (warns on an unusable `TERM`) and
+  flags WSL explicitly.
+
 ## [0.3.4] - 2026-06-24
 
 ### Fixed
