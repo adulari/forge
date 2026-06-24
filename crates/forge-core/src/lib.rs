@@ -1408,10 +1408,15 @@ impl Session {
         if already_used {
             return None;
         }
-        match self.store.soonest_unbenched() {
-            Ok(Some(m)) if m != just_failed => Some(m),
-            _ => None,
-        }
+        // Soonest-recovering transiently-benched model, but NEVER one whose provider has no key —
+        // otherwise a keyless built-in default (e.g. groq) that got benched becomes the last-resort
+        // pick, dispatches, hits a no-auth "Resolver error", and re-benches forever (the "groq for
+        // everything" churn on a box with no groq key). `has_api_key` is true for keyless providers
+        // (ollama, the claude/codex bridges), so those still qualify.
+        let ordered = self.store.transient_benched_ordered().unwrap_or_default();
+        ordered
+            .into_iter()
+            .find(|m| m != just_failed && forge_config::has_api_key(forge_config::provider_of(m)))
     }
 
     /// The context window (tokens) to assume for `model`: a fetched per-model window (provider API,
@@ -2114,85 +2119,95 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
                 // smaller-window model still fits. The immutable borrow ends before the block below.
                 let sent = self.transcript_with_preamble(&active_model);
-                // Tight scope: borrow provider + presenter only for the streamed call, so the
-                // failover branch below has full `&mut self` for benching + warnings.
-                let result = {
-                    let provider = &self.provider;
-                    let presenter = &mut self.presenter;
-                    // Bump on every stream event so the idle watchdog can distinguish a live
-                    // stream from a stalled half-open connection — a stall fails over (below)
-                    // instead of hanging the turn forever.
-                    let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    let act = std::sync::Arc::clone(&activity);
-                    let mut sink = |ev: StreamEvent| {
-                        act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        match ev {
-                            StreamEvent::Text(t) => {
-                                presenter.emit(PresenterEvent::AssistantDelta(t))
-                            }
-                            StreamEvent::Reasoning(t) => {
-                                presenter.emit(PresenterEvent::Reasoning(t))
-                            }
-                            StreamEvent::ToolStarted { name, args } => {
-                                presenter.emit(PresenterEvent::ToolStart { name, args })
-                            }
-                            StreamEvent::ToolFinished { name, ok, summary } => {
-                                presenter.emit(PresenterEvent::ToolResult { name, ok, summary })
-                            }
-                            StreamEvent::SubagentStarted { id, agent, task } => {
-                                presenter.emit(PresenterEvent::SubagentStart {
-                                    id,
-                                    agent,
-                                    task,
-                                    model: None,
-                                })
-                            }
-                            StreamEvent::SubagentProgress { id, snippet } => {
-                                presenter.emit(PresenterEvent::SubagentProgress { id, snippet })
-                            }
-                            StreamEvent::SubagentFinished {
-                                id,
-                                agent,
-                                ok,
-                                summary,
-                                cost_usd,
-                            } => presenter.emit(PresenterEvent::SubagentResult {
-                                id,
-                                agent,
-                                ok,
-                                summary,
-                                cost_usd,
-                            }),
-                            // A bridged turn's `update_tasks` (tailed from the sink): surface the
-                            // list live so the sticky panel updates during the turn. The parent's
-                            // post-turn store reload (below) keeps `self.tasks` authoritative.
-                            StreamEvent::Tasks(tasks) => {
-                                presenter.emit(PresenterEvent::Tasks(tasks))
-                            }
-                            // A bridged turn's `present_plan`: in planning mode, render the
-                            // card now and stash it for the turn's approval flow (picked up
-                            // via the outcome). Ignored outside Plan mode (stray proposal).
-                            StreamEvent::Plan(plan) => {
-                                if in_plan_mode {
-                                    presenter.emit(PresenterEvent::PlanProposed(plan.clone()));
-                                    proposed_plan = Some(plan);
+                // Pre-dispatch key backstop: a model can reach here with NO provider key via a path
+                // that isn't key-filtered (the last-resort fallback, or an architect editor/planner
+                // default). Dispatching it just yields a no-auth genai "Resolver error" surfaced raw
+                // to the user (the "groq for everything" report on a box with no groq key). Instead
+                // synthesize a permanent Auth failure so the existing failover branch EXCLUDES it and
+                // advances to a usable model. `has_api_key` is true for keyless providers (ollama,
+                // the claude/codex bridges), so a legitimate bridge turn is never short-circuited.
+                let result =
+                    if !forge_config::has_api_key(forge_config::provider_of(&active_model)) {
+                        Err(forge_provider::ProviderError::Auth(format!(
+                            "no API key configured for provider '{}'",
+                            forge_config::provider_of(&active_model)
+                        )))
+                    } else {
+                        let provider = &self.provider;
+                        let presenter = &mut self.presenter;
+                        // Bump on every stream event so the idle watchdog can distinguish a live
+                        // stream from a stalled half-open connection — a stall fails over (below)
+                        // instead of hanging the turn forever.
+                        let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                        let act = std::sync::Arc::clone(&activity);
+                        let mut sink =
+                            |ev: StreamEvent| {
+                                act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                match ev {
+                                    StreamEvent::Text(t) => {
+                                        presenter.emit(PresenterEvent::AssistantDelta(t))
+                                    }
+                                    StreamEvent::Reasoning(t) => {
+                                        presenter.emit(PresenterEvent::Reasoning(t))
+                                    }
+                                    StreamEvent::ToolStarted { name, args } => {
+                                        presenter.emit(PresenterEvent::ToolStart { name, args })
+                                    }
+                                    StreamEvent::ToolFinished { name, ok, summary } => presenter
+                                        .emit(PresenterEvent::ToolResult { name, ok, summary }),
+                                    StreamEvent::SubagentStarted { id, agent, task } => presenter
+                                        .emit(PresenterEvent::SubagentStart {
+                                            id,
+                                            agent,
+                                            task,
+                                            model: None,
+                                        }),
+                                    StreamEvent::SubagentProgress { id, snippet } => presenter
+                                        .emit(PresenterEvent::SubagentProgress { id, snippet }),
+                                    StreamEvent::SubagentFinished {
+                                        id,
+                                        agent,
+                                        ok,
+                                        summary,
+                                        cost_usd,
+                                    } => presenter.emit(PresenterEvent::SubagentResult {
+                                        id,
+                                        agent,
+                                        ok,
+                                        summary,
+                                        cost_usd,
+                                    }),
+                                    // A bridged turn's `update_tasks` (tailed from the sink): surface the
+                                    // list live so the sticky panel updates during the turn. The parent's
+                                    // post-turn store reload (below) keeps `self.tasks` authoritative.
+                                    StreamEvent::Tasks(tasks) => {
+                                        presenter.emit(PresenterEvent::Tasks(tasks))
+                                    }
+                                    // A bridged turn's `present_plan`: in planning mode, render the
+                                    // card now and stash it for the turn's approval flow (picked up
+                                    // via the outcome). Ignored outside Plan mode (stray proposal).
+                                    StreamEvent::Plan(plan) => {
+                                        if in_plan_mode {
+                                            presenter
+                                                .emit(PresenterEvent::PlanProposed(plan.clone()));
+                                            proposed_plan = Some(plan);
+                                        }
+                                    }
                                 }
-                            }
-                        }
+                            };
+                        let completion_opts = CompletionOptions {
+                            effort: self.pinned_effort,
+                            temperature: Some(CODING_TEMPERATURE),
+                        };
+                        let fut = provider.complete_with(
+                            &active_model,
+                            &sent,
+                            specs,
+                            &completion_opts,
+                            &mut sink,
+                        );
+                        stream_with_idle_timeout(fut, &activity, stream_idle).await
                     };
-                    let completion_opts = CompletionOptions {
-                        effort: self.pinned_effort,
-                        temperature: Some(CODING_TEMPERATURE),
-                    };
-                    let fut = provider.complete_with(
-                        &active_model,
-                        &sent,
-                        specs,
-                        &completion_opts,
-                        &mut sink,
-                    );
-                    stream_with_idle_timeout(fut, &activity, stream_idle).await
-                };
                 match result {
                     Ok(r) => {
                         if !r.content.is_empty() {
@@ -6765,6 +6780,50 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             panic!("provider must NOT be called when no usable model exists (routed: {model})");
         }
+    }
+
+    #[test]
+    fn last_resort_skips_a_keyless_provider_even_when_it_recovers_soonest() {
+        // The "groq for everything" churn: groq (no key) gets benched and, recovering soonest,
+        // becomes the last-resort pick — dispatched, no-auth "Resolver error", re-benched, forever.
+        // last_resort must skip any provider with no key (ollama/bridges keep qualifying — keyless).
+        // `minimax` has no key on any test box (mirrors the sibling no-usable-model test); the dev
+        // machine may well have a real GROQ_API_KEY, so use minimax as the keyless stand-in.
+        assert!(
+            !forge_config::has_api_key("minimax"),
+            "test precondition: no minimax key in the environment"
+        );
+        assert!(
+            forge_config::has_api_key("ollama"),
+            "ollama is keyless → always usable"
+        );
+        let (store, session) = fixed_session(
+            Arc::new(PanicProvider),
+            Arc::new(FixedRouter {
+                model: "m".into(),
+                fallbacks: vec![],
+            }),
+        );
+        // minimax recovers SOONER (10s) than ollama (60s) → soonest_unbenched would return minimax.
+        store
+            .bench_for(
+                "minimax::abab-test",
+                std::time::Duration::from_secs(10),
+                "rate-limited",
+            )
+            .unwrap();
+        store
+            .bench_for(
+                "ollama::llama3.2",
+                std::time::Duration::from_secs(60),
+                "rate-limited",
+            )
+            .unwrap();
+        assert_eq!(
+            session.last_resort_model("other::x", false).as_deref(),
+            Some("ollama::llama3.2"),
+            "last-resort must skip keyless groq and pick the usable ollama model"
+        );
     }
 
     #[tokio::test]
