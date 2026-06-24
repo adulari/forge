@@ -6,6 +6,26 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-06-24
+
+### Fixed
+- **`/copy` now actually copies on Wayland (and over SSH).** It reported "✓ copied" but the
+  clipboard stayed empty: `arboard`'s Wayland backend silently no-ops from a terminal app (it needs
+  an owned window/surface a TUI doesn't have). `/copy` (and mouse-selection copy) now also emit an
+  **OSC 52** escape so the *terminal* sets the clipboard — reliable on Wayland, over SSH, and in
+  Windows Terminal / kitty / iTerm with no display server (tmux/screen get the passthrough form).
+  `arboard` is kept for X11 / macOS / Windows-native.
+
+### Added
+- **Cross-platform real-turn E2E you can run yourself, no VM.** `scripts/e2e-docker.sh` drives a
+  real `forge run` turn across Ubuntu/Debian/Fedora containers against your host ollama (builds the
+  *current* code in a glibc container so you test what you're editing), and reproduces the
+  no-Secret-Service condition that hung `forge chat` on WSL — asserting startup stays bounded. A new
+  `e2e` GitHub Actions workflow runs the same headless real turn + the probing `forge doctor` on
+  **windows-latest** / ubuntu / macOS (manual or weekly) and uploads the logs, so cross-platform
+  breakage is diagnosable without owning a Windows machine. (Set repo var `E2E_MODEL` + a provider
+  secret, e.g. `GROQ_API_KEY`.)
+
 ## [0.3.8] - 2026-06-24
 
 ### Added
