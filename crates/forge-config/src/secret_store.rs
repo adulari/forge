@@ -25,19 +25,64 @@ use crate::ConfigError;
 
 const KEYRING_SERVICE: &str = "forge";
 
-/// Store `value` under `key`: OS keyring first, encrypted file on keyring failure.
+/// Max time to wait for the OS keyring backend to answer a probe before declaring it unusable for
+/// the session. Generous enough for a slow-but-live Secret Service, short enough that a *dead* one
+/// (the WSL/headless case) doesn't stall startup.
+const KEYRING_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// Whether the OS keyring backend is reachable — probed ONCE, with a timeout, and cached for the
+/// process. This exists because on some boxes (WSL / headless Linux with an activatable-but-dead
+/// `org.freedesktop.secrets`) a keyring call **blocks forever** instead of returning an error,
+/// which hung `forge chat` before the TUI ever drew its first frame. We run the probe on a detached
+/// thread and wait at most [`KEYRING_PROBE_TIMEOUT`]; if it doesn't answer we treat the keyring as
+/// unavailable for the whole session and use the encrypted file store exclusively. A box with a
+/// live keyring answers in milliseconds, so this is invisible there.
+fn keyring_available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            // Any return (Ok OR Err) means the backend ANSWERED within the window — real calls will
+            // then also return promptly (and fall back to the file on their own Err). Only a true
+            // hang never sends, tripping the recv timeout below. The detached thread is left to
+            // unblock on its own rather than wedging the main path.
+            let _ = keyring::Entry::new(KEYRING_SERVICE, "__forge_probe__").map(|e| e.get_password());
+            let _ = tx.send(());
+        });
+        match rx.recv_timeout(KEYRING_PROBE_TIMEOUT) {
+            Ok(()) => true,
+            Err(_) => {
+                tracing::warn!(
+                    "OS keyring did not respond within {}ms — using the encrypted file store for \
+                     this session (secrets are still durable)",
+                    KEYRING_PROBE_TIMEOUT.as_millis()
+                );
+                false
+            }
+        }
+    })
+}
+
+/// Store `value` under `key`: OS keyring first, encrypted file on keyring failure/unavailability.
 pub fn set(key: &str, value: &str) -> Result<(), ConfigError> {
-    match keyring::Entry::new(KEYRING_SERVICE, key).and_then(|e| e.set_password(value)) {
-        Ok(()) => Ok(()),
-        Err(_) => file_set(key, value),
+    if keyring_available() {
+        if keyring::Entry::new(KEYRING_SERVICE, key)
+            .and_then(|e| e.set_password(value))
+            .is_ok()
+        {
+            return Ok(());
+        }
     }
+    file_set(key, value)
 }
 
 /// Read the secret for `key`: env-independent. Keyring first, then the encrypted file.
 pub fn get(key: &str) -> Option<String> {
-    if let Ok(v) = keyring::Entry::new(KEYRING_SERVICE, key).and_then(|e| e.get_password()) {
-        if !v.is_empty() {
-            return Some(v);
+    if keyring_available() {
+        if let Ok(v) = keyring::Entry::new(KEYRING_SERVICE, key).and_then(|e| e.get_password()) {
+            if !v.is_empty() {
+                return Some(v);
+            }
         }
     }
     file_get(key)
@@ -47,10 +92,12 @@ pub fn get(key: &str) -> Option<String> {
 /// `Ok(false)` if nothing was stored — so removal stays idempotent.
 pub fn delete(key: &str) -> Result<bool, ConfigError> {
     let mut removed = false;
-    match keyring::Entry::new(KEYRING_SERVICE, key).and_then(|e| e.delete_credential()) {
-        Ok(()) => removed = true,
-        Err(keyring::Error::NoEntry) => {}
-        Err(_) => {} // keyring unreachable — fall through to the file store
+    if keyring_available() {
+        match keyring::Entry::new(KEYRING_SERVICE, key).and_then(|e| e.delete_credential()) {
+            Ok(()) => removed = true,
+            Err(keyring::Error::NoEntry) => {}
+            Err(_) => {} // keyring unreachable — fall through to the file store
+        }
     }
     removed |= file_delete(key)?;
     Ok(removed)
