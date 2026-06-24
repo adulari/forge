@@ -1223,6 +1223,13 @@ pub(crate) async fn run_chat_tui(
                             DispatchOutcome::ToggleRemote { exposure } => {
                                 toggle_remote(&mut remote, &mut app, &mut tui, exposure).await?;
                             }
+                            DispatchOutcome::CopyToClipboard(text) => {
+                                let chars = text.chars().count();
+                                copy_selection(&mut clipboard, &text);
+                                app.note(&format!(
+                                    "✓ copied response to clipboard ({chars} chars)"
+                                ));
+                            }
                         }
                     }
                     KeyKind::CycleTemper | KeyKind::ToggleSubagentDetail => {}
@@ -1736,6 +1743,13 @@ pub(crate) async fn run_chat_tui(
                                 DispatchOutcome::ToggleRemote { exposure } => {
                                     toggle_remote(&mut remote, &mut app, &mut tui, exposure)
                                         .await?;
+                                }
+                                DispatchOutcome::CopyToClipboard(text) => {
+                                    let chars = text.chars().count();
+                                    copy_selection(&mut clipboard, &text);
+                                    app.note(&format!(
+                                        "✓ copied response to clipboard ({chars} chars)"
+                                    ));
                                 }
                             }
                         } else {
@@ -2508,6 +2522,9 @@ pub(crate) enum DispatchOutcome {
     /// `/remote [--lan|--local|--anywhere]` — toggle remote control on (start the server) or off
     /// (stop it). The [`remote::Exposure`] selects bind address / public-tunnel mode.
     ToggleRemote { exposure: remote::Exposure },
+    /// `/copy [N]` — write the resolved assistant response text to the clipboard. The driver loop
+    /// owns the `arboard::Clipboard`, so dispatch resolves the text and hands it back to copy.
+    CopyToClipboard(String),
 }
 
 /// Build a fully-populated [`forge_tui::MeshOverlay`] from a routing explanation.
@@ -2818,6 +2835,32 @@ pub(crate) async fn dispatch_command(
         }
         // `/compact` makes a model call → run it as a background task so the spinner ticks.
         CommandAction::Compact => return Ok(DispatchOutcome::RunCompact),
+        // `/copy [N]` — resolve the Nth-latest assistant response and hand it to the loop to copy
+        // (the loop owns the clipboard). N is 1-based from the most recent (1 = last response).
+        CommandAction::Copy { nth } => {
+            let text = {
+                let s = session.lock().await;
+                s.history()
+                    .into_iter()
+                    .filter(|(role, _)| matches!(role, forge_types::Role::Assistant))
+                    .map(|(_, text)| text)
+                    .rev()
+                    .nth(nth - 1)
+            };
+            match text {
+                Some(t) if !t.trim().is_empty() => return Ok(DispatchOutcome::CopyToClipboard(t)),
+                _ => app.note(&format!(
+                    "no assistant response #{nth} to copy (only {} so far)",
+                    {
+                        let s = session.lock().await;
+                        s.history()
+                            .iter()
+                            .filter(|(role, _)| matches!(role, forge_types::Role::Assistant))
+                            .count()
+                    }
+                )),
+            }
+        }
         CommandAction::Lattice(symbol) => {
             if symbol.is_empty() {
                 app.note("usage: /lattice <symbol>");
