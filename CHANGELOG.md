@@ -6,6 +6,21 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-06-24
+
+### Fixed
+- The mesh no longer spins on a keyless provider (e.g. "keeps trying groq for everything" with no
+  groq key). When routing can find no usable model — because auto-discovery came up empty, or the
+  user's keys are for providers not in the built-in defaults — it previously fell back to the first
+  default candidate (groq) anyway and called it, auth-failing every turn. The turn now stops with an
+  actionable diagnostic instead: it names the keyless provider, lists the providers you *do* have a
+  key for, and points at `forge auth` / `forge models` / `/model <id>` / `ollama serve`.
+- OpenRouter is now recognised when its API key is set under the conventional `OPENROUTER_API_KEY`
+  name, not only Forge/genai's canonical `OPEN_ROUTER_API_KEY`. A user who exported the standard
+  name was silently treated as keyless, so the mesh skipped OpenRouter discovery and fell back to
+  the groq defaults. Both names are accepted, and the conventional one is copied into the canonical
+  variable the provider client authenticates with.
+
 ## [0.3.1] - 2026-06-24
 
 ### Fixed
@@ -235,7 +250,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/florisvoskamp/forge/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/florisvoskamp/forge/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/florisvoskamp/forge/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/florisvoskamp/forge/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/florisvoskamp/forge/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/florisvoskamp/forge/compare/v0.1.0...v0.2.0
