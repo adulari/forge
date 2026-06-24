@@ -18,13 +18,19 @@ All notable changes to Forge are documented here. The format follows
   - **Progress gate (anti-spiral).** A re-run must make real progress — start a tool or close a
     task — or the turn HALTS loudly instead of re-driving. This is the guard the earlier
     bridge-nudge lacked: a bridge that just re-narrates can't loop.
-  - **Objective verification gate.** When the bridge reports every task Done, forge forces one
+  - **Objective verification gate.** When the bridge reports every task Done, forge forces a
     tool-grounded verification turn ("prove each task is actually complete by checking real state —
-    git, gh, files — and reopen anything that isn't") before the turn can end. Self-reported "done"
-    is never trusted on its own — which is what produced the phantom release.
+    git, gh, files — and reopen anything that isn't") before the turn can end. The verification must
+    run a real INSPECTION tool (not just re-mark `update_tasks`); if the model never inspects, forge
+    re-prompts then ends flagged UNVERIFIED rather than reporting success. Self-reported "done" is
+    never trusted on its own — which is what produced the phantom release.
   - The bridge preamble now mandates completing the whole task and WAITING for any async job it
     launches (a release build, CI) rather than treating "launched" as "done"
     (`crates/forge-provider/src/cli_provider.rs`).
+  - **Invariant:** forge never reports a phantom success — incomplete work is completed+verified,
+    re-driven, halted loudly, or flagged UNVERIFIED. Documented in `docs/harness/bridge-completion.md`
+    with the end-to-end test method (`scripts/bridge-e2e.sh` drives real subscription bridges and
+    asserts on the real filesystem + run log).
 
 ## [0.4.0] - 2026-06-24
 
