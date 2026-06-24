@@ -2270,10 +2270,9 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         // Drive the single animated "finding a model" indicator instead of emitting
                         // one scrollback warning per hop (the failover spam). It clears itself when
                         // real output begins; the chain-exhausted case below still surfaces an error.
-                        self.presenter
-                            .emit(PresenterEvent::ModelSearch {
-                                model: active_model.clone(),
-                            });
+                        self.presenter.emit(PresenterEvent::ModelSearch {
+                            model: active_model.clone(),
+                        });
                         // Advance down the chain to the next model we can use. A model whose window
                         // still holds the conversation is used immediately; one that's too small is
                         // a switch that needs (lossy) compaction, so it's gated by consent
