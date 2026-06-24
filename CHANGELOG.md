@@ -6,6 +6,12 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-24
+
+### Changed
+- **Prepared the Forge workspace for the 0.4 release line.** The Rust workspace package version and
+  internal workspace dependency constraints now agree on `0.4.0` for the release build.
+
 ## [0.3.10] - 2026-06-24
 
 ### Fixed
@@ -411,7 +417,14 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/florisvoskamp/forge/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/florisvoskamp/forge/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/florisvoskamp/forge/compare/v0.3.10...v0.4.0
+[0.3.10]: https://github.com/florisvoskamp/forge/compare/v0.3.9...v0.3.10
+[0.3.9]: https://github.com/florisvoskamp/forge/compare/v0.3.8...v0.3.9
+[0.3.8]: https://github.com/florisvoskamp/forge/compare/v0.3.7...v0.3.8
+[0.3.7]: https://github.com/florisvoskamp/forge/compare/v0.3.6...v0.3.7
+[0.3.6]: https://github.com/florisvoskamp/forge/compare/v0.3.5...v0.3.6
+[0.3.5]: https://github.com/florisvoskamp/forge/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/florisvoskamp/forge/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/florisvoskamp/forge/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/florisvoskamp/forge/compare/v0.3.1...v0.3.2
