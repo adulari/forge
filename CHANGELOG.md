@@ -8,9 +8,39 @@ All notable changes to Forge are documented here. The format follows
 
 ## [0.4.0] - 2026-06-24
 
+Reliability release: every fix here came out of Forge attempting (and botching) its own release,
+which exposed how a routed turn could silently do nothing yet report success.
+
+### Fixed
+- **Failover now follows the mesh ranking exactly.** When a model failed, Forge advanced to the
+  *next-ranked* model — except the failover chain was secretly re-ordered by a provider round-robin
+  (`interleave_by_provider`), so the second model tried was the top model of the *second provider*,
+  not the second-best-ranked model overall. That is how release-critical turns ended up on a
+  low-ranked free model after a higher-ranked provider's first model failed over. The chain is now
+  in strict rank order. Storm protection is preserved differently: only when a model fails with a
+  **rate limit** does Forge skip that provider's remaining chain entries (a 429 is usually
+  provider-wide) — every other failure keeps strict rank order
+  (`crates/forge-mesh/src/lib.rs`, `crates/forge-core/src/lib.rs`).
+- **A model that writes a tool call as *text* no longer "succeeds" without doing anything.** Some
+  providers' native adapters (notably genai's Gemini adapter on newer models) don't decode a
+  model's function calls into structured tool calls — the call leaks into the assistant's text as
+  `<invoke …>` / `default_api:` markup and never executes. Forge saw no tool calls, accepted the
+  narration as the final answer, and reported success having merged no PR and pushed no tag. Two
+  defenses now: (1) a **text tool-call recovery pass** reconstructs the call from the markup
+  (`<invoke>`, `<tool_call>` JSON; `default_api:`/`mcp__forge__` namespaces normalized) and executes
+  it (`crates/forge-provider/src/tool_recovery.rs`); (2) an **honest-failure guard** detects
+  un-executed tool-call text a direct model emits, nudges it to actually call the tool, and — if it
+  persists — fails loudly instead of silently accepting the narration (`crates/forge-core/src/lib.rs`).
+- **"database is locked" under concurrent Forge processes.** The SQLite store set WAL mode but no
+  `busy_timeout`, so a second Forge process (the TUI plus the `mcp-serve` bridge sharing one global
+  db) hit `SQLITE_BUSY` immediately and could crash a turn mid-run. The connection now waits up to
+  5s for the write lock (`crates/forge-store/src/lib.rs`).
+
 ### Changed
-- **Prepared the Forge workspace for the 0.4 release line.** The Rust workspace package version and
-  internal workspace dependency constraints now agree on `0.4.0` for the release build.
+- Workspace version and internal dependency constraints bumped to `0.4.0`; the Homebrew formula is
+  bumped in lockstep (its sha256 values are filled from `checksums.txt` after the release build).
+- Added `RELEASING.md` — a fixed cut-a-release checklist (the missed Homebrew-version bump that
+  shipped stale `brew` installs was a recurring symptom of having no written process).
 
 ## [0.3.10] - 2026-06-24
 
