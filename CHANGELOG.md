@@ -18,6 +18,13 @@ All notable changes to Forge are documented here. The format follows
   configured for provider 'groq'`). The planner/editor now pick the first candidate whose provider
   has a key (keyless bridges / ollama qualify), so they land on e.g. `claude-cli` / `gemini`, never
   a keyless default. (A different path than the v0.3.5 last-resort leak — same symptom.)
+- **Built-in default model lists no longer lead with `groq`.** Every tier's default candidate list
+  started with `groq::llama-3.3-70b-versatile`, a free model that needs a key many users don't have
+  — so any code path taking "the first candidate" landed on groq and failed. The defaults now lead
+  with a keyless/bridge option (ollama / `claude-cli`) and keep groq last. Routing is unchanged
+  (the cost-ranker picks the cheapest *usable* model regardless of list order); this only hardens
+  the first-candidate fallback paths. A regression test asserts a config that omits `architect_mode`
+  keeps it `false`.
 - **`forge doctor` no longer false-warns about `TERM` on Windows.** `TERM` is a Unix concept and is
   normally unset on Windows (crossterm drives the console via the Console API regardless), so an
   interactive Windows console is simply OK. The "TUI may not render" warning now only fires on Unix,

@@ -7760,26 +7760,28 @@ mod tests {
 
     #[test]
     fn resolve_planner_falls_back_to_complex_tier_model() {
-        // No architect_model set, no pin → first Complex-tier candidate.
-        let config = Config::default();
-        let expected = config
-            .model_for(forge_types::TaskTier::Complex)
-            .unwrap()
-            .to_string();
+        // No architect_model set, no pin → first USABLE Complex-tier candidate. Deterministic
+        // config (a single keyless candidate) so the result doesn't depend on which provider keys
+        // happen to be set in the test environment.
+        let mut config = Config::default();
+        config.mesh.models.insert(
+            forge_types::TaskTier::Complex.as_str().into(),
+            forge_config::OneOrMany::Many(vec!["ollama::big".into()]),
+        );
         let session = make_session(config);
-        assert_eq!(session.resolve_planner_model(), expected);
+        assert_eq!(session.resolve_planner_model(), "ollama::big");
     }
 
     #[test]
     fn resolve_editor_falls_back_to_standard_tier_model() {
-        // No editor_model set, no pin → first Standard-tier candidate.
-        let config = Config::default();
-        let expected = config
-            .model_for(forge_types::TaskTier::Standard)
-            .unwrap()
-            .to_string();
+        // No editor_model set, no pin → first USABLE Standard-tier candidate (deterministic config).
+        let mut config = Config::default();
+        config.mesh.models.insert(
+            forge_types::TaskTier::Standard.as_str().into(),
+            forge_config::OneOrMany::Many(vec!["ollama::mid".into()]),
+        );
         let session = make_session(config);
-        assert_eq!(session.resolve_editor_model(), expected);
+        assert_eq!(session.resolve_editor_model(), "ollama::mid");
     }
 
     #[test]
