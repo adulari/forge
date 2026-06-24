@@ -309,7 +309,11 @@ fn environment_checks() -> Vec<Check> {
     let (status, detail, fix) = if !tty {
         (Status::Info, "non-interactive (piped/CI)".to_string(), None)
     } else if cfg!(windows) {
-        (Status::Ok, "interactive (Windows console)".to_string(), None)
+        (
+            Status::Ok,
+            "interactive (Windows console)".to_string(),
+            None,
+        )
     } else if term_usable {
         (Status::Ok, format!("interactive ({})", term.unwrap()), None)
     } else {
