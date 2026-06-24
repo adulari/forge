@@ -86,15 +86,18 @@ opt-in probe (`E2E_REAL=1`) so the default e2e stays green on the mock smoke. **
 with `E2E_REAL=1`, bisect with tokio-console / a thread dump at the hang, or try `--cpus=1` and the
 `current_thread` vs multi-thread runtime.
 
-## Panic when the system has no CA certificates (accepted / minimal-env only)
+## Panic when the system has no CA certificates (fixed)
 
-**Symptom:** on a stripped system/container with no `ca-certificates` installed, the genai/reqwest
-HTTPS client build panics: `Failed to build reqwest client: … No CA certificates were loaded from
-the system`. A user on such a system sees a raw panic, not a clear error.
+**Was:** on a stripped system/container with no `ca-certificates` installed, the genai/reqwest
+HTTPS client build panicked: `Failed to build reqwest client: … No CA certificates were loaded from
+the system`. A user on such a system saw a raw panic, not a clear error.
 
-**Status: accepted, low impact.** Real desktops/servers/CI ship a system trust store; only bare
-containers hit it (and `scripts/e2e-docker.sh` installs `ca-certificates` first to mirror a real
-machine). **Planned fix:** catch the reqwest builder error → a friendly `ProviderError`
-("no system CA certificates — install ca-certificates"), or bundle `webpki-roots` so HTTPS doesn't
-depend on the OS trust store.
+**Fixed:** `build_reqwest_client()` in `forge-provider/src/genai_provider.rs` now builds a
+`reqwest::Client` with `tls_certs_only()` seeded from the bundled `webpki-root-certs` crate
+(Mozilla root CAs compiled into the binary) and passes it to genai via `Client::builder()
+.with_reqwest(…)`. The platform verifier (`rustls-platform-verifier`) is bypassed entirely, so
+HTTPS no longer depends on the OS certificate store. Both `build_client()` (the main provider
+client) and `list_models()` (auto-discovery) use this path.
+
+**Status:** fixed + all 76 unit tests + 3 contract tests pass.
 </content>
