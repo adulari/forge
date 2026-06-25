@@ -6,6 +6,26 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-25
+
+Patch release: bridge-completion reliability, HTTPS on bare systems, and a security fix for
+per-tool MCP permission rules.
+
+### Security
+- **`mcp_call` now enforces per-tool permission rules on the direct path.** On the
+  `forge-core` direct path, `mcp_call` forwarded calls to `invoke_mcp` after checking only
+  the outer wrapper name (`"mcp_call"`). A configured allow/ask/deny rule targeting the
+  actual inner tool (e.g. `deny = ["myserver__dangerous"]`) was silently ignored because
+  the broker never saw the inner tool name. Fix: after the outer wrapper passes, extract the
+  inner tool name and arguments from the `mcp_call` arguments and run a second
+  `permission::decide` against the real tool identity — deny or ask outcomes block execution
+  (`crates/forge-core/src/lib.rs`).
+- **`rule_matches` now fires on `deny = "*"` for MCP tool names.** For non-shell/non-path
+  tools (all MCP server tools), a wildcard pattern `"*"` was matching zero args instead of
+  any args, so `deny = "*"` on an MCP tool name never fired. Without this fix the per-tool
+  gate above was unusable from config even after the `invoke_mcp` fix
+  (`crates/forge-core/src/permission.rs`).
+
 ### Fixed
 - **A bridge turn can no longer end with the plan half-done or falsely "done."** A CLI bridge
   (claude-cli/codex) is a one-shot subprocess that runs its own loop and exits, so a long plan
@@ -31,6 +51,30 @@ All notable changes to Forge are documented here. The format follows
     re-driven, halted loudly, or flagged UNVERIFIED. Documented in `docs/harness/bridge-completion.md`
     with the end-to-end test method (`scripts/bridge-e2e.sh` drives real subscription bridges and
     asserts on the real filesystem + run log).
+- **HTTPS no longer requires a system trust store.** `build_reqwest_client()` now seeds
+  Mozilla's bundled `webpki-root-certs` as the sole trust store, bypassing
+  `rustls-platform-verifier`. Forge works on bare containers and minimal CI images with no
+  `ca-certificates` package installed. Applied to both the API client and model auto-discovery
+  (`crates/forge-provider/src/genai_provider.rs`).
+- **Failover now follows the mesh ranking exactly.** When a model failed, Forge advanced to the
+  *next-ranked* model — except the failover chain was secretly re-ordered by a provider
+  round-robin (`interleave_by_provider`), so the second model tried was the top model of the
+  *second provider*, not the second-best-ranked model overall. The chain is now in strict rank
+  order. Storm protection is preserved differently: only a rate-limit (429) lazily skips that
+  provider's remaining chain entries; every other failure keeps strict rank order
+  (`crates/forge-mesh/src/lib.rs`, `crates/forge-core/src/lib.rs`).
+- **A model that writes a tool call as *text* no longer "succeeds" without doing anything.**
+  Some providers' native adapters (notably genai's Gemini adapter) don't decode function calls
+  into structured tool calls — the call leaks into the assistant's text as `<invoke …>` /
+  `default_api:` markup and never executes. Two defenses: (1) a **text tool-call recovery
+  pass** reconstructs and executes the call from the markup
+  (`crates/forge-provider/src/tool_recovery.rs`); (2) an **honest-failure guard** detects
+  un-executed tool-call text, nudges the model to call the tool, and — if it persists — fails
+  loudly instead of silently accepting the narration (`crates/forge-core/src/lib.rs`).
+- **"database is locked" under concurrent Forge processes.** The SQLite store set WAL mode
+  but no `busy_timeout`, so a second Forge process (TUI + `mcp-serve` bridge sharing one
+  global db) hit `SQLITE_BUSY` immediately. The connection now waits up to 5 s for the write
+  lock (`crates/forge-store/src/lib.rs`).
 
 ## [0.4.0] - 2026-06-24
 
@@ -473,7 +517,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/florisvoskamp/forge/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/florisvoskamp/forge/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/florisvoskamp/forge/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/florisvoskamp/forge/compare/v0.3.10...v0.4.0
 [0.3.10]: https://github.com/florisvoskamp/forge/compare/v0.3.9...v0.3.10
 [0.3.9]: https://github.com/florisvoskamp/forge/compare/v0.3.8...v0.3.9
