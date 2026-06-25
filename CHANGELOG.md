@@ -6,6 +6,13 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-06-25
+
+Patch release: tool_recovery now handles the Llama/Groq `<function=NAME>{json}</function>` format.
+
+### Fixed
+- **tool_recovery now recovers the Llama/Groq `<function=NAME>{json}</function>` tool-call format** (bare and wrapped in `<tool_call>`), in addition to `<invoke>` and `<tool_call>{json}`; a groq llama-3.x model routed by the mesh had leaked this as text and stalled the turn. Normalizes `mcp__forge__`/`default_api:` prefixes and recovers even an empty body so a degenerate call can't be mistaken for a final answer (`crates/forge-provider/src/tool_recovery.rs`).
+
 ## [0.4.2] - 2026-06-25
 
 Patch release: bounded poll mode for the shell tool so the model can wait out long external jobs.
@@ -524,7 +531,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/florisvoskamp/forge/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/florisvoskamp/forge/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/florisvoskamp/forge/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/florisvoskamp/forge/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/florisvoskamp/forge/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/florisvoskamp/forge/compare/v0.3.10...v0.4.0
