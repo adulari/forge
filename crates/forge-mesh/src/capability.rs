@@ -73,6 +73,28 @@ pub(crate) const FRONTIER_BENCH_THRESHOLD: f64 = 20.0;
 /// retaining capable ones (Llama 3.3 70B = 10.0, GPT-4o = 12.3).
 pub(crate) const CAPABLE_BENCH_THRESHOLD: f64 = 8.0;
 
+/// Ranking demotion for models with unreliable STRUCTURED tool-calling. Forge is a tool-driven
+/// harness: a model that emits tool calls as TEXT instead of structured calls is a poor pick even
+/// when its raw intelligence/coding bench ranks it top. `forge-provider::tool_recovery` salvages
+/// the leaked markup, but only after a wasted round-trip (and weaker models can stall outright), so
+/// we'd rather route to an equally-capable peer that calls tools cleanly. The penalty is sized to
+/// drop an offender BELOW a comparable tool-reliable model while keeping it in the fallback chain.
+const TOOL_UNRELIABLE_PENALTY: f64 = 3.0;
+
+/// Tool-call-reliability penalty for `id` (0.0 = clean). Evidence-based, not a capability judgement:
+/// the **Gemini *flash* family** leaks function-call markup as text (`<function=…>` / `<invoke>`)
+/// observed both via genai's native adapter and through OpenRouter, despite a top intelligence
+/// score. Matched by name so it spans providers (`gemini::…`, `openrouter::google/gemini-…-flash`).
+/// Reversible: drop the entry once the upstream tool-call parsing is fixed.
+pub(crate) fn tool_reliability_penalty(id: &str) -> f64 {
+    let l = id.to_lowercase();
+    if l.contains("gemini") && l.contains("flash") {
+        TOOL_UNRELIABLE_PENALTY
+    } else {
+        0.0
+    }
+}
+
 /// Whether a model id reads as frontier-class — benchmark-aware when scores are available. A
 /// measured intelligence index ≥ `FRONTIER_BENCH_THRESHOLD` supersedes the name heuristic, so
 /// nominally-large but measurably-weak old models (Hermes 405B = 9.0) are correctly excluded while
@@ -145,6 +167,36 @@ pub(crate) fn capability_score_b(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_reliability_penalty_flags_gemini_flash_across_providers_only() {
+        // The Gemini flash family leaks tool calls as text — penalized regardless of provider prefix.
+        for id in [
+            "gemini::gemini-3.5-flash",
+            "openrouter::google/gemini-3.5-flash",
+            "gemini::gemini-2.5-flash-lite",
+            "gemini::gemini-flash-latest",
+        ] {
+            assert!(
+                tool_reliability_penalty(id) > 0.0,
+                "gemini flash must be penalized: {id}"
+            );
+        }
+        // Tool-reliable models (incl. non-flash Gemini) are not penalized.
+        for id in [
+            "claude-cli::sonnet",
+            "openai::gpt-5.5",
+            "gemini::gemini-3-pro-preview",
+            "openrouter::deepseek/deepseek-v4",
+            "groq::llama-3.3-70b-versatile",
+        ] {
+            assert_eq!(
+                tool_reliability_penalty(id),
+                0.0,
+                "must not be penalized: {id}"
+            );
+        }
+    }
 
     #[test]
     fn trivial_prefers_a_fast_small_model_over_a_frontier_one() {
