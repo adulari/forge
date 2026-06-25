@@ -161,7 +161,8 @@ fn route_score(
 ) -> f64 {
     let base = capability_score_b(id, tier, code_heavy, bench)
         + cost_pref(tier, cost_class(id, cost))
-        + code_prior(provider_of(id), code_heavy, tier);
+        + code_prior(provider_of(id), code_heavy, tier)
+        - crate::capability::tool_reliability_penalty(id);
     if is_subscription(id) {
         match quota.status_for(provider_of(id)) {
             forge_types::QuotaStatus::Exhausted => return base - 100.0, // effectively last
@@ -765,6 +766,31 @@ mod tests {
         );
         let (covered, total) = cat.benchmark_coverage();
         assert_eq!((covered, total), (2, 2));
+    }
+
+    #[test]
+    fn tool_unreliable_gemini_flash_ranks_below_a_comparable_tool_reliable_model() {
+        use crate::bench::BenchmarkScores;
+        // Equal top benchmark scores: without the tool-reliability penalty these would tie. The
+        // Gemini *flash* model leaks tool calls as text, so it must rank BELOW the tool-reliable
+        // peer for a (tool-driven) Complex task — while staying in the chain as a fallback.
+        let cat = ModelCatalog::new(vec![
+            "openrouter::google/gemini-3.5-flash".into(),
+            "openrouter::deepseek/deepseek-v4".into(),
+        ]);
+        let mut b = BenchmarkScores::new();
+        b.insert("google gemini-3.5-flash", 60.0, 58.0);
+        b.insert("deepseek deepseek-v4", 60.0, 58.0);
+        let cat = cat.with_benchmarks(Some(b));
+        let r = cat.ranked_for(TaskTier::Complex, &Pricing::default(), 2);
+        assert_eq!(
+            r[0], "openrouter::deepseek/deepseek-v4",
+            "tool-reliable peer outranks tool-leaky gemini-flash at equal bench: {r:?}"
+        );
+        assert!(
+            r.contains(&"openrouter::google/gemini-3.5-flash".to_string()),
+            "gemini-flash stays in the chain as a fallback: {r:?}"
+        );
     }
 
     #[test]
