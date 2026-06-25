@@ -82,9 +82,42 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("store lock poisoned")]
     Lock,
+    #[error("portable metadata JSON: {0}")]
+    Json(String),
 }
 
 type Result<T> = std::result::Result<T, StoreError>;
+
+/// Tables safe to carry in a `forge migrate` bundle: model metadata only (cooldowns, context
+/// windows, pricing). Deliberately EXCLUDES every session/message/usage/routing/lattice table so a
+/// metadata export can never leak private history. The set is an allow-list on both export and
+/// import — a tampered bundle naming other tables is ignored.
+const PORTABLE_METADATA_TABLES: &[&str] = &["model_health", "model_context", "model_pricing"];
+
+/// SQLite value (as read via `get_ref`) → JSON, for the portable-metadata dump.
+fn value_ref_to_json(v: rusqlite::types::ValueRef<'_>) -> serde_json::Value {
+    use rusqlite::types::ValueRef;
+    match v {
+        ValueRef::Null => serde_json::Value::Null,
+        ValueRef::Integer(i) => serde_json::Value::from(i),
+        ValueRef::Real(f) => serde_json::Value::from(f),
+        ValueRef::Text(t) => serde_json::Value::from(String::from_utf8_lossy(t).into_owned()),
+        ValueRef::Blob(b) => serde_json::Value::from(String::from_utf8_lossy(b).into_owned()),
+    }
+}
+
+/// JSON → SQLite bind value, the inverse of [`value_ref_to_json`] for the portable-metadata import.
+fn json_to_sql_value(v: &serde_json::Value) -> rusqlite::types::Value {
+    use rusqlite::types::Value;
+    match v {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Integer(*b as i64),
+        serde_json::Value::Number(n) if n.is_i64() => Value::Integer(n.as_i64().unwrap()),
+        serde_json::Value::Number(n) => Value::Real(n.as_f64().unwrap_or(0.0)),
+        serde_json::Value::String(s) => Value::Text(s.clone()),
+        other => Value::Text(other.to_string()),
+    }
+}
 
 /// A fetched per-model price row: `(model, input_per_1k, output_per_1k, cache_read_per_1k)` in USD.
 pub type ModelPriceRow = (String, f64, f64, Option<f64>);
@@ -177,6 +210,76 @@ impl Store {
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn.lock().map_err(|_| StoreError::Lock)
+    }
+
+    /// Export machine-agnostic model metadata (health cooldowns, context windows, pricing) as JSON,
+    /// for `forge migrate`. ONLY the allow-listed [`PORTABLE_METADATA_TABLES`] are dumped — it
+    /// contains NO session, message, usage, or routing data, so it is safe to put in a bundle that
+    /// deliberately excludes history. Column order is preserved so the import is schema-faithful.
+    pub fn export_portable_metadata(&self) -> Result<String> {
+        let conn = self.lock()?;
+        let mut out = serde_json::Map::new();
+        for table in PORTABLE_METADATA_TABLES {
+            let mut stmt = conn.prepare(&format!("SELECT * FROM {table}"))?;
+            let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+            let ncol = cols.len();
+            let rows = stmt
+                .query_map([], |row| {
+                    let mut vals = Vec::with_capacity(ncol);
+                    for i in 0..ncol {
+                        vals.push(value_ref_to_json(row.get_ref(i)?));
+                    }
+                    Ok(serde_json::Value::Array(vals))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            out.insert(
+                (*table).to_string(),
+                serde_json::json!({ "columns": cols, "rows": rows }),
+            );
+        }
+        Ok(serde_json::Value::Object(out).to_string())
+    }
+
+    /// Import metadata produced by [`export_portable_metadata`], upserting (`INSERT OR REPLACE`).
+    /// Only the allow-listed portable tables are touched; any other key in the JSON is ignored, so
+    /// a tampered bundle cannot write arbitrary tables. Returns the number of rows written.
+    pub fn import_portable_metadata(&self, json: &str) -> Result<usize> {
+        let parsed: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| StoreError::Json(e.to_string()))?;
+        let conn = self.lock()?;
+        let mut written = 0usize;
+        for table in PORTABLE_METADATA_TABLES {
+            let Some(t) = parsed.get(*table) else {
+                continue;
+            };
+            let (Some(cols), Some(rows)) = (
+                t.get("columns").and_then(|c| c.as_array()),
+                t.get("rows").and_then(|r| r.as_array()),
+            ) else {
+                continue;
+            };
+            let col_names: Vec<&str> = cols.iter().filter_map(|c| c.as_str()).collect();
+            if col_names.is_empty() {
+                continue;
+            }
+            let placeholders = vec!["?"; col_names.len()].join(",");
+            let sql = format!(
+                "INSERT OR REPLACE INTO {table} ({}) VALUES ({placeholders})",
+                col_names.join(",")
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            for row in rows {
+                let Some(arr) = row.as_array() else { continue };
+                if arr.len() != col_names.len() {
+                    continue;
+                }
+                let params: Vec<rusqlite::types::Value> =
+                    arr.iter().map(json_to_sql_value).collect();
+                stmt.execute(rusqlite::params_from_iter(params.iter()))?;
+                written += 1;
+            }
+        }
+        Ok(written)
     }
 
     /// Create a new session row and return its id.
@@ -2527,5 +2630,35 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert!(store.benched_models(500).unwrap().is_benched("m"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn portable_metadata_round_trips_health_only() {
+        // Source store with a real health row + a private message that must NOT be exported.
+        let src = Store::open_in_memory().unwrap();
+        src.bench_model("gemini::x", 9_999_999_999, "rate-limited")
+            .unwrap();
+        let sid = src.create_session(".", "default").unwrap();
+        src.add_message(&sid, 0, Role::User, "SECRET_PRIVATE_CHAT", None)
+            .unwrap();
+
+        let json = src.export_portable_metadata().unwrap();
+        assert!(json.contains("gemini::x"), "health row exported: {json}");
+        assert!(
+            !json.contains("SECRET_PRIVATE_CHAT"),
+            "allow-list: messages must never be in the metadata export"
+        );
+        assert!(!json.contains("\"message\""), "no session tables exported");
+
+        // Import into a fresh store reconstructs the health row; an injected non-allow-listed table
+        // in the JSON is ignored (only the 1 health row is written).
+        let tampered = json.replace(
+            "\"model_health\"",
+            "\"message\":{\"columns\":[\"id\",\"content\"],\"rows\":[[\"m\",\"EVIL\"]]},\"model_health\"",
+        );
+        let dst = Store::open_in_memory().unwrap();
+        let n = dst.import_portable_metadata(&tampered).unwrap();
+        assert_eq!(n, 1, "only the allow-listed model_health row is imported");
+        assert!(dst.benched_models(500).unwrap().is_benched("gemini::x"));
     }
 }
