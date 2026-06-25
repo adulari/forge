@@ -339,6 +339,46 @@ forge mcp import             # wizard: scan installed AI CLIs
 forge auth anthropic         # store an API key in the OS keyring
 ```
 
+### Move your install to another machine — `forge migrate`
+
+Copy a full Forge install (config + skills + commands + MCP servers + hooks + model
+metadata) to another PC or server. The bundle is a plain **directory** — move it with
+`scp -r`, `rsync`, or a USB stick, then import on the other side.
+
+```bash
+# On the old machine — write a bundle:
+forge migrate export ./forge-bundle                       # config + skills + MCP + model metadata
+forge migrate export ./forge-bundle --include-sessions    # + full session history & usage
+forge migrate export ./forge-bundle --include-keys        # + API keys (PLAINTEXT — see below)
+
+# Move it, then on the new machine:
+forge migrate import ./forge-bundle                        # restores into this machine's config
+forge migrate import ./forge-bundle --force                # also replace existing session history
+
+# Or do it in one step over SSH (forge must be installed on the target):
+forge migrate push user@server --include-keys
+```
+
+What's included:
+
+| Data | Default | Flag |
+| --- | --- | --- |
+| config, skills, commands, MCP servers, hooks | ✅ always | — |
+| model metadata (health / context windows / pricing) | ✅ always | — |
+| session history + usage | ❌ | `--include-sessions` |
+| API keys | ❌ | `--include-keys` |
+
+- **`--include-keys` writes your API keys in PLAINTEXT** into `secrets.json` inside the
+  bundle. Forge prints a warning, restores them into the new machine's keyring on import,
+  and reminds you to delete the bundle afterwards. Move it only over a trusted channel — or
+  omit the flag and re-run `forge auth <provider>` on the new machine.
+- Import **never clobbers existing session history** without `--force`; an incoming db is
+  saved alongside as `forge.imported.db` instead.
+- The model-metadata export is an explicit **allow-list** (health/context/pricing only), so
+  a session-free bundle can never leak transcripts.
+
+See [docs/features/migrate.md](docs/features/migrate.md) for the bundle layout and details.
+
 ---
 
 ## Planning Mode
@@ -599,6 +639,7 @@ Key sections: `[mesh]` (routing, budget, conservation, failover), `[permissions]
 | [`docs/architecture/02-architecture.md`](./docs/architecture/02-architecture.md) | System design with C4 diagrams |
 | [`docs/architecture/decisions/`](./docs/architecture/decisions/) | Architecture Decision Records |
 | [`docs/features/`](./docs/features/) | Per-feature design docs |
+| [`docs/features/migrate.md`](./docs/features/migrate.md) | `forge migrate` — copy a full install to another machine |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | How to build, test, and contribute |
 
 ---

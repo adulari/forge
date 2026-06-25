@@ -94,5 +94,6 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Git { cmd } => git_cmd(cmd),
         Command::Nl { query, mode } => nl_cmd(query.join(" "), mode).await,
         Command::Skill { sub } => skill_cmd(sub).await,
+        Command::Migrate { cmd } => migrate_cmd(cmd).await,
     }
 }
