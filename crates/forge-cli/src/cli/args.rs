@@ -339,6 +339,54 @@ pub(crate) enum Command {
         #[command(subcommand)]
         sub: SkillCmd,
     },
+    /// Copy a full Forge install (config, skills, MCP, model metadata; optionally keys + history)
+    /// to another machine. The bundle is a directory — move it with scp -r / rsync / USB.
+    Migrate {
+        #[command(subcommand)]
+        cmd: MigrateCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum MigrateCmd {
+    /// Write the install into a bundle directory DEST (config + skills + MCP + model metadata).
+    ///
+    /// Examples:
+    ///   forge migrate export ./forge-bundle
+    ///   forge migrate export ./forge-bundle --include-keys --include-sessions
+    Export {
+        /// Destination directory for the bundle (created if missing).
+        dest: std::path::PathBuf,
+        /// Also bundle API keys — WRITTEN IN PLAINTEXT. Move + delete the bundle carefully.
+        #[arg(long)]
+        include_keys: bool,
+        /// Also bundle full session history + usage (the whole db). Off by default (private/large).
+        #[arg(long)]
+        include_sessions: bool,
+    },
+    /// Restore an install from a bundle directory SRC produced by `export`.
+    ///
+    /// Example:  forge migrate import ./forge-bundle
+    Import {
+        /// Bundle directory to restore from.
+        src: std::path::PathBuf,
+        /// Replace an existing session db instead of preserving it (default keeps your history).
+        #[arg(long)]
+        force: bool,
+    },
+    /// Export then copy to TARGET over SSH and run the remote import (forge must be on the remote).
+    ///
+    /// Example:  forge migrate push me@server --include-keys
+    Push {
+        /// SSH target, e.g. `user@host`.
+        target: String,
+        /// Include API keys (PLAINTEXT in transit/temp). See `export --include-keys`.
+        #[arg(long)]
+        include_keys: bool,
+        /// Include full session history + usage.
+        #[arg(long)]
+        include_sessions: bool,
+    },
 }
 
 #[derive(Subcommand)]
