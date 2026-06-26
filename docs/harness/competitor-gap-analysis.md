@@ -50,9 +50,11 @@ Ranked by (leverage × certainty) ÷ effort. S/M/L = effort. Each maps to a v1.0
    writes of `*.env` and paths outside the project worktree by default (allowlist to override). Closes
    a real secret-leak / exfiltration footgun. Routes through Forge's temper gate, not around it.
 
-5. **Provider-aware subagent fan-out cap** (S) — *openclaude `GITHUB_COPILOT_MAX_SUBAGENTS`.* A
-   per-provider max-concurrent-subagents cap so a burst of parallel subagents can't nuke a single
-   subscription's quota. Forge ranks quota but doesn't cap fan-out. Cheap; protects the bridge thesis.
+5. ~~**Provider-aware subagent fan-out cap**~~ **DONE (#238).** `[mesh.subagents] max_per_provider`
+   (default 2): each child acquires a per-provider semaphore (keyed by `provider_of(routed_model)`)
+   in addition to the global `max_concurrency`, so a burst of children routed to one subscription/key
+   is throttled while different providers still run in parallel. Acquired provider-first to avoid
+   head-of-line blocking; `0` disables. Unit-tested (serializes same-provider; parallel when off).
 
 ### Tier 2 — medium, structural quality (P0.2 → P1)
 
@@ -62,10 +64,10 @@ Ranked by (leverage × certainty) ÷ effort. S/M/L = effort. Each maps to a v1.0
    terminate-vs-loop. Folds Forge's scattered failover/compaction/cap-retry recovery into one
    auditable, unit-testable place (synthetic outcomes, no live model). Enables #1, #7 cleanly.
 
-7. **Direct-path goal-verification gate** (M) — *openclaude `stopHooks.ts`.* Forge's objective-
-   verification gate exists only on the CLI bridge (v0.4.1). Pull it onto the direct-API loop: at turn
-   end, if the active goal isn't met, inject a blocking nudge and continue instead of stopping (cap
-   re-drives). Gate behind plan/agent mode to keep cheap turns cheap.
+7. ~~**Direct-path goal-verification gate**~~ **DONE (#237).** Extracted to one shared completion
+   authority (`completion_gate` pure fn + `Session::run_completion_gate`) used by both the CLI-bridge
+   and direct-API arms of `run_model_loop`; a direct model marking every task Done without inspecting
+   real state is now gated identically to a bridge. Unit-tested; the bridge arm calls the same helper.
 
 8. **Token-budget continuation w/ diminishing-returns stop** (M) — *openclaude `tokenBudget.ts`.*
    When a turn used < ~90% of budget and emitted no tool calls but the goal isn't verified, nudge to
