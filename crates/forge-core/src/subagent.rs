@@ -555,6 +555,15 @@ pub async fn orchestrate(
 
     let full_registry = ToolRegistry::with_core_tools();
 
+    // Per-provider concurrency sub-cap: a burst of children all routed to ONE provider (a
+    // claude/codex subscription bridge, or a single metered key) would otherwise run in parallel up
+    // to the global `max_concurrency` and hammer that one quota. Each child also acquires a permit
+    // from its provider's semaphore (sized by `max_per_provider`), so same-provider fan-out is
+    // throttled while different providers still run in parallel. `0` disables the sub-cap.
+    let max_per_provider = ctx.config.mesh.subagents.max_per_provider;
+    let mut provider_sems: std::collections::HashMap<String, Arc<Semaphore>> =
+        std::collections::HashMap::new();
+
     // Create each child session + announce Start up front (so a UI shows the whole batch as
     // running immediately), then spawn the work bounded by a concurrency permit.
     for (i, req) in requests.into_iter().enumerate() {
@@ -571,6 +580,17 @@ pub async fn orchestrate(
             model: &child_model,
         });
         ids.push(child_id.clone());
+
+        // Resolve this child's provider semaphore (get-or-create), sized by `max_per_provider`.
+        // Done on the orchestrator (the routing model is already known) so the task just acquires it.
+        let provider_sem = if max_per_provider > 0 {
+            let provider = forge_config::provider_of(&child_model).to_string();
+            Some(Arc::clone(provider_sems.entry(provider).or_insert_with(
+                || Arc::new(Semaphore::new(max_per_provider)),
+            )))
+        } else {
+            None
+        };
 
         // Decide whether this child gets an isolated worktree. We create the WorktreeGuard here
         // (on the orchestrator task, before spawning) so any creation error is visible immediately
@@ -601,6 +621,13 @@ pub async fn orchestrate(
         let merge_lock = Arc::clone(&merge_lock);
         let repo_root = ctx.repo_root.clone();
         tokio::spawn(async move {
+            // Acquire the provider sub-cap FIRST (block here without holding a global permit, so a
+            // saturated provider can't head-of-line-block children bound for OTHER providers), then
+            // the global concurrency permit. Both are held for the child's lifetime.
+            let _provider_permit = match provider_sem {
+                Some(ps) => ps.acquire_owned().await.ok(),
+                None => None,
+            };
             let _permit = sem.acquire_owned().await;
             // Forward streamed text/reasoning as live progress for this child's UI row.
             let mut on_delta = |ev: StreamEvent| {
@@ -1034,5 +1061,121 @@ mod tests {
         let args = json!({"cmd": "ls", "cwd": "/other/dir"});
         let rewritten = rewrite_args_for_worktree(&args, root);
         assert_eq!(rewritten["cwd"].as_str().unwrap(), "/other/dir");
+    }
+
+    // --- Provider-aware fan-out cap (competitor-gap #5): a burst of children all routed to ONE
+    // provider must not run more than `max_per_provider` at once, so a single subscription/key
+    // quota isn't hammered in parallel even when the global concurrency cap is higher. ---
+
+    /// Records the peak number of `complete` calls in flight at once.
+    struct ConcurrencyProbe {
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for ConcurrencyProbe {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[forge_types::Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.active.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            // Hold the slot long enough that, without the cap, all children would overlap.
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            self.active.fetch_sub(1, SeqCst);
+            Ok(forge_provider::ModelResponse {
+                content: "child done".into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn per_provider_cap_throttles_same_provider_fanout() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(ConcurrencyProbe {
+            active: Arc::clone(&active),
+            peak: Arc::clone(&peak),
+        });
+        // Every child routes to the SAME provider (`openai::`), so they share one provider permit.
+        let router = Arc::new(FixedRouter {
+            model: "openai::gpt-test".into(),
+            fallbacks: vec![],
+        });
+        let mut ctx = ctx_with(provider, router, store);
+        ctx.config.mesh.subagents.max_per_provider = 1; // serialize same-provider children
+        let requests: Vec<_> = (0..4)
+            .map(|i| AgentRequest {
+                agent: "general".into(),
+                task: format!("t{i}"),
+            })
+            .collect();
+        let mut sink = |_: Lifecycle| {};
+        // Global cap 8 (>= the 4 children): only the PER-PROVIDER cap can hold them back.
+        let (_out, ok) = orchestrate(
+            &ctx,
+            "parent",
+            requests,
+            BudgetState::default(),
+            8,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert!(ok, "all children should succeed");
+        assert_eq!(
+            peak.load(SeqCst),
+            1,
+            "max_per_provider=1 must serialize children sharing a provider (peak in-flight)"
+        );
+    }
+
+    #[tokio::test]
+    async fn per_provider_cap_disabled_lets_same_provider_fanout_run_parallel() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(ConcurrencyProbe {
+            active: Arc::clone(&active),
+            peak: Arc::clone(&peak),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "openai::gpt-test".into(),
+            fallbacks: vec![],
+        });
+        let mut ctx = ctx_with(provider, router, store);
+        ctx.config.mesh.subagents.max_per_provider = 0; // disabled → only the global cap applies
+        let requests: Vec<_> = (0..4)
+            .map(|i| AgentRequest {
+                agent: "general".into(),
+                task: format!("t{i}"),
+            })
+            .collect();
+        let mut sink = |_: Lifecycle| {};
+        let (_out, ok) = orchestrate(
+            &ctx,
+            "parent",
+            requests,
+            BudgetState::default(),
+            8,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert!(ok);
+        assert!(
+            peak.load(SeqCst) > 1,
+            "with the per-provider cap off and a high global cap, same-provider children run in parallel"
+        );
     }
 }
