@@ -211,6 +211,50 @@ fn export_copies_agent_md_files_then_skips_existing() {
 }
 
 #[test]
+fn copy_catalog_assets_preserves_command_namespace() {
+    // A subdir command `git/commit.md` loads as the namespaced name `git:commit`. Copying it must
+    // preserve the subdirectory (→ commands/git/commit.md), not flatten to commands/commit.md —
+    // otherwise the namespace is lost and two `commit.md` from different namespaces collide.
+    let root = std::env::temp_dir().join(format!("forge-ns-{}", forge_types::new_id()));
+    let src = root.join("commands");
+    let cmd_dst = root.join("out/commands");
+    let skill_dst = root.join("out/skills");
+    std::fs::create_dir_all(src.join("git")).unwrap();
+    std::fs::create_dir_all(src.join("db")).unwrap();
+    std::fs::write(src.join("git/commit.md"), "git commit helper\n").unwrap();
+    std::fs::write(src.join("db/commit.md"), "db commit helper\n").unwrap();
+    std::fs::write(src.join("top.md"), "a top-level command\n").unwrap();
+
+    let sources = forge_skills::Sources {
+        commands: vec![forge_skills::ScopedDir {
+            scope: forge_skills::Scope::User,
+            path: src.clone(),
+        }],
+        skills: vec![],
+    };
+    let cat = forge_skills::Catalog::load(&sources);
+    let counts = copy_catalog_assets(&cat, &cmd_dst, &skill_dst);
+
+    assert_eq!(
+        counts.copied_commands, 3,
+        "both namespaced commands + the top-level one copied"
+    );
+    // Namespace preserved as a subdirectory — the two same-named commands DON'T collide.
+    assert!(
+        cmd_dst.join("git/commit.md").exists(),
+        "git namespace preserved"
+    );
+    assert!(
+        cmd_dst.join("db/commit.md").exists(),
+        "db namespace preserved"
+    );
+    assert!(cmd_dst.join("top.md").exists(), "flat command unchanged");
+    // The old bug flattened both to a single commands/commit.md (one clobbering the other).
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn loop_stops_on_sentinel_or_iteration_cap() {
     // Keeps looping while the model hasn't signalled done and we're under the cap.
     assert!(loop_stop_reason(Some("still working on it"), 1).is_none());
