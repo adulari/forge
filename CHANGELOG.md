@@ -6,6 +6,17 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.14] - 2026-06-26
+
+### Fixed
+- **More HTTPS-on-a-CA-less-host panics swept.** Following 0.4.13 (forge-mcp), the remaining
+  `reqwest::Client::new()`/`builder()` sites that trust the OS cert store and panic at construction
+  on a bare container / minimal image are fixed: the ollama embedder (`forge-index/embed.rs` — it
+  panics even though ollama is plain HTTP, since the panic is in TLS-backend setup, not at connect)
+  and the three `web_fetch`/`web_search` clients (`forge-tools/web.rs`). Each crate gets a local
+  bundled-CA helper seeded with `webpki-root-certs` (mirrors forge-provider/forge-mcp, which they
+  can't depend on). Forge now does HTTPS everywhere without a system trust store.
+
 ## [0.4.13] - 2026-06-26
 
 ### Fixed
