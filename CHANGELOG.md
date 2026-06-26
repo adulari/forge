@@ -6,6 +6,16 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.16] - 2026-06-26
+
+### Fixed
+- **Mouse text-selection no longer drifts on wide glyphs (CJK / emoji).** A selection records the
+  screen **cell** column, but the extractor sliced the line's `[char]` using that cell offset as a
+  char index — and a CJK ideograph or emoji is 2 cells but 1 char, so every boundary shifted right by
+  one per wide glyph before it (and could slice past the string). Added a width-aware
+  `cell_to_char_index` (walks chars summing their `unicode-width`) and convert the selection bounds
+  before slicing, so the copied text matches what was highlighted (`crates/forge-tui/src/app.rs`).
+
 ## [0.4.15] - 2026-06-26
 
 ### Added
