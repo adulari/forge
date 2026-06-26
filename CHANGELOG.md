@@ -6,6 +6,15 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.18] - 2026-06-26
+
+### Added
+- **`docs/benchmarks/results.md` — the measured "proven with metrics" record.** Consolidates the
+  harness's evidence: the bridge-resume efficiency result (~92% fewer prompt bytes over a 6-re-drive
+  turn, with the deterministic test + live e2e to reproduce), the harness conformance matrix (each
+  reliability guard + how to run it), and where the Docker-gated SWE-bench resolve-rate run plugs in.
+  Separates in-repo CI proofs from the external gold-standard run.
+
 ## [0.4.17] - 2026-06-26
 
 ### Fixed
