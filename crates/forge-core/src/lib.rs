@@ -3055,7 +3055,16 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                     .iter()
                     .all(|c| self.is_concurrent_readonly(&c.name));
             if concurrent_batch {
-                self.run_readonly_batch(&msg_id, &resp.tool_calls).await?;
+                // Feed the failure-loop guard the same way the serial path does, so a concurrent
+                // batch that keeps failing the same way (different args each step) is caught instead
+                // of burning the budget to the step cap.
+                let classified = self.run_readonly_batch(&msg_id, &resp.tool_calls).await?;
+                for (name, kind) in classified {
+                    match kind {
+                        Some(k) => *failure_counts.entry((name, k)).or_insert(0) += 1,
+                        None => failure_counts.retain(|(nm, _), _| nm != &name),
+                    }
+                }
             } else {
                 // Execute each requested tool through the permission broker, serially.
                 for call in &resp.tool_calls {
@@ -3095,8 +3104,8 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             // Failure-loop guard: a tool that keeps failing the SAME way (across differing args) is
             // making no progress and burning the step/token budget — invisible to the identical-call
             // doom-loop above. Two-stage like that guard: nudge a change of approach once, then halt
-            // if it persists. (Only the serial path populates `failure_counts`; the concurrent
-            // read-only batch is cheap and already covered by the identical-call guard.)
+            // if it persists. (BOTH the serial path and the concurrent read-only batch populate
+            // `failure_counts`, so a batch failing the same way every step is caught here too.)
             const FAILURE_LOOP_THRESHOLD: usize = 3;
             if let Some((tool, kind, n)) = failure_counts
                 .iter()
@@ -3846,11 +3855,14 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
     /// asking), don't snapshot, and queue no hints. Only used when all calls qualify and no hooks
     /// are configured (PreToolUse/PostToolUse run on every call and must stay serial); otherwise the
     /// caller falls back to the serial [`invoke_tool`] path.
+    /// Returns each call's `(name, failure_kind)` in original order so the caller can feed the
+    /// failure-loop guard exactly as the serial path does — a concurrent batch that keeps failing the
+    /// same way (e.g. two reads of ever-changing missing paths every step) must still be caught.
     async fn run_readonly_batch(
         &mut self,
         msg_id: &str,
         calls: &[forge_types::ToolCall],
-    ) -> Result<(), CoreError> {
+    ) -> Result<Vec<(String, Option<FailureKind>)>, CoreError> {
         struct Pending {
             id: String,
             name: String,
@@ -3903,7 +3915,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             futures::future::join_all(futs).await
         };
         // Phase 3 (serial): surface + persist + append each result in the ORIGINAL order, so every
-        // tool_call_id is answered in sequence.
+        // tool_call_id is answered in sequence. Also classify each result for the failure-loop guard.
+        let mut classified = Vec::with_capacity(pend.len());
         for (p, (result, ok)) in pend.iter().zip(results) {
             self.presenter.emit(PresenterEvent::ToolResult {
                 name: p.name.clone(),
@@ -3918,6 +3931,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 if p.allowed { "allowed" } else { "denied" },
                 if ok { "ok" } else { "error" },
             )?;
+            classified.push((p.name.clone(), classify_tool_failure(&result)));
             let seq = self.next_seq();
             self.store.add_message_full(
                 &self.id,
@@ -3930,7 +3944,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             )?;
             self.transcript.push(Message::tool_result(&p.id, result));
         }
-        Ok(())
+        Ok(classified)
     }
 
     async fn invoke_tool(
@@ -6221,6 +6235,169 @@ mod tests {
         assert!(
             warnings.iter().any(|w| w.contains("kept failing") && w.contains("after a nudge")),
             "the failure-loop guard should halt a model failing the same way; warnings: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn completion_gate_covers_its_four_outcomes() {
+        // Pure decision table for the completion authority (no I/O, no mocks).
+        // verify_attempts=0 → must verify before accepting any "done" claim.
+        assert!(matches!(
+            completion_gate(0, 2, true, false),
+            CompletionGate::Reverify
+        ));
+        // A real inspection ran on a verify turn → accept cleanly.
+        assert!(matches!(
+            completion_gate(1, 2, true, true),
+            CompletionGate::AcceptClean
+        ));
+        // Verify turn ran but did NO real work to check (pure analysis) → accept, calm note.
+        assert!(matches!(
+            completion_gate(1, 2, false, false),
+            CompletionGate::AcceptNoArtifacts
+        ));
+        // Budget spent, real work existed but was never inspected → accept, flag UNVERIFIED.
+        assert!(matches!(
+            completion_gate(2, 2, true, false),
+            CompletionGate::AcceptUnverified
+        ));
+    }
+
+    /// Yields TWO read_file calls (a concurrent read-only batch) with DIFFERENT missing paths every
+    /// step — so the identical-call doom-loop never fires (signature changes) and, before the fix,
+    /// the concurrent batch path didn't feed the failure-loop guard either, letting it burn to the
+    /// step cap. The failure-loop guard must now catch it.
+    struct ConcurrentFailureProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for ConcurrentFailureProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_types::{new_id, ToolCall, Usage};
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mk = |suffix: &str| ToolCall {
+                id: new_id(),
+                name: "read_file".into(),
+                args: serde_json::json!({"path": format!("does-not-exist-{n}-{suffix}.rs")}),
+            };
+            Ok(forge_provider::ModelResponse {
+                content: "reading two more files".into(),
+                tool_calls: vec![mk("a"), mk("b")],
+                usage: Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_batch_failure_loop_is_caught() {
+        // Regression for the concurrent-batch failure-tracking gap: two read_file calls run as a
+        // concurrent read-only batch, both NotFound, different paths each step. Must halt via the
+        // failure-loop guard, not run to the step cap.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(ConcurrentFailureProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools(),
+            Box::new(capture),
+            Config::default(),
+            ".",
+        )
+        .unwrap();
+
+        session.run_turn("read the files").await.unwrap();
+
+        let warnings: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                PresenterEvent::Warning(w) => Some(w.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("kept failing") && w.contains("after a nudge")),
+            "the failure-loop guard must catch a concurrent batch failing the same way; warnings: {warnings:?}"
+        );
+    }
+
+    /// Yields a tool call every single step forever (unique args so no doom/failure guard fires) —
+    /// only the step cap can stop it.
+    struct EndlessToolProvider;
+    #[async_trait::async_trait]
+    impl Provider for EndlessToolProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_types::{new_id, ToolCall, Usage};
+            Ok(forge_provider::ModelResponse {
+                content: "still working".into(),
+                tool_calls: vec![ToolCall {
+                    id: new_id(),
+                    // A real successful read each step with a UNIQUE range → no doom/failure guard,
+                    // forcing the step cap to be the thing that stops the turn.
+                    name: "read_file".into(),
+                    args: serde_json::json!({"path": "Cargo.toml", "start_line": 1, "end_line": 1}),
+                }],
+                usage: Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn step_cap_halts_a_runaway_turn() {
+        // The step cap is the primary infinite-loop backstop. Pin it: with max_steps=2 and a model
+        // that always wants another tool call, the turn must stop at the cap (not spin to default 100).
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut config = Config::default();
+        config.mesh.max_steps = 2;
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(EndlessToolProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools(),
+            Box::new(capture),
+            config,
+            ".",
+        )
+        .unwrap();
+
+        // Must RETURN (the cap stops it) rather than loop forever.
+        session.run_turn("keep reading").await.unwrap();
+
+        let warnings: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                PresenterEvent::Warning(w) => Some(w.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            warnings.iter().any(|w| w.contains("step limit")),
+            "the step cap should stop a runaway turn; warnings: {warnings:?}"
         );
     }
 
