@@ -2008,7 +2008,7 @@ mod tests {
         // results accumulate, and the bridge re-drives a few times.
         let big_system = "S".repeat(4000); // lattice + preamble + project context, etc.
         let mut messages = vec![
-            Message::system(&big_system),
+            Message::system(big_system),
             Message::user("Do the multi-step task."),
         ];
 
@@ -2025,7 +2025,7 @@ mod tests {
             }
             sent = messages.len();
             // The bridge produced a (chunky) assistant turn + a tool result; then a re-drive nudge.
-            messages.push(Message::assistant(&"A".repeat(1500)));
+            messages.push(Message::assistant("A".repeat(1500)));
             messages.push(Message::tool_result("t", "T".repeat(800)));
             messages.push(Message::system("The plan is NOT finished — continue."));
         }
