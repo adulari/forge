@@ -600,10 +600,21 @@ async fn prepare_and_run(
             let mut session = crate::build_session(false, Some(Mode::Bypass), false, None, model)
                 .await
                 .context("building session")?;
-            session
-                .run_turn(&inst.problem_statement)
-                .await
-                .context("running the agent turn")?;
+            // Bound the in-process Forge turn the SAME way the external CLIs are bounded. Without
+            // this the Forge path was unbounded: a non-converging run on a hard instance was observed
+            // making 500+ tool calls over 22 minutes while claude-cli's own internal limits kept it
+            // to ~1 minute. On timeout we keep whatever edits + usage the turn produced and submit
+            // the partial patch (a non-empty attempt still scores; an unsolved one was unsolved
+            // anyway).
+            let turn = session.run_turn(&inst.problem_statement);
+            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), turn).await {
+                Ok(res) => {
+                    res.context("running the agent turn")?;
+                }
+                Err(_) => eprintln!(
+                    "  forge turn hit the {timeout_secs}s timeout — submitting partial work"
+                ),
+            }
             // Reliable even for bridge providers — read from Forge's own usage DB for THIS session.
             let (inp, out, cost) = session.session_usage_db();
             (inp, out, cost, true)
