@@ -67,13 +67,24 @@ bug (the direct-path verification gate silently failing, fixed in v0.4.6).
 | Guarantee | What's asserted | Test |
 |---|---|---|
 | No phantom "done" (direct + bridge) | a model claiming every task done must PROVE it with a real tool-grounded check, else re-drive / flag UNVERIFIED | `direct_gate_*`, `bridge_completion_*`, `verification_reopens_*` |
+| Completion-gate decision table | the pure completion authority returns the right outcome for all 4 input cases (Reverify / AcceptClean / AcceptNoArtifacts / AcceptUnverified) | `completion_gate_covers_its_four_outcomes` |
 | Doom-loop halt | identical tool call repeated → nudge then HALT, not run to the cap | `doom_loop_halts_a_model_repeating_the_same_call` |
-| Failure-loop halt | same error KIND across differing args → halt where the doom-loop can't see it | `failure_loop_halts_a_model_failing_the_same_way` |
+| Oscillation halt | a non-consecutive `A,B,A,B` tool-call ping-pong (evades the consecutive doom-loop AND the failure-loop) → halt | `doom_loop_halts_a_model_oscillating_between_two_calls` |
+| Failure-loop halt (serial **and** concurrent) | same error KIND across differing args → halt; now also when the calls run as a concurrent read-only batch | `failure_loop_halts_a_model_failing_the_same_way`, `concurrent_batch_failure_loop_is_caught` |
+| Step cap | a runaway turn that always wants another tool call stops at `max_steps`, never spins | `step_cap_halts_a_runaway_turn` |
 | Empty-response | bounded nudges then stop — never spin forever | `empty_response_is_nudged_then_stops_not_loops` |
-| Tool-call-as-text | narrated `<invoke>` that didn't execute → nudge, then end loudly (no phantom success) | `tool_call_written_as_text_never_silently_succeeds` |
-| Untrusted-input fuzz | adversarial model output / bridge stdout / prompt-cap never panic + hold their contracts | `recovery_never_panics_*`, `bridge_line_parsers_never_panic_*`, `clamp_to_chars_never_*` |
+| Tool-call-as-text (direct) | narrated `<invoke>` that didn't execute → nudge, then end loudly (no phantom success) | `tool_call_written_as_text_never_silently_succeeds` |
+| Tool-call-as-text (**bridge**) | a bridge model that writes a tool call as prose → recovered + executed (no 553× spiral), and NOT double-executed if the CLI already ran it natively | `recovers_prose_tool_call_the_bridge_did_not_execute`, `prose_recovery_skipped_when_cli_ran_a_native_tool` |
+| Untrusted-input fuzz / no panics | adversarial model output (incl. malformed `<parameter>` tags), bridge stdout, prompt-cap never panic + hold their contracts | `recovery_never_panics_*`, `malformed_parameter_tag_does_not_panic`, `bridge_line_parsers_never_panic_*`, `clamp_to_chars_never_*` |
 
 **Reproduce:** `cargo test -p forge-core -p forge-provider` (all run in CI on every PR).
+
+**Why this is the differentiator.** Each row is a failure mode a real coding model produces on a real
+task (we hit the 553× prose-spiral and the malformed-`<parameter>` panic in actual SWE-bench runs).
+A raw `claude`/`codex`/`aider` loop has no equivalent guard for most of these — it either spins to a
+token-budget death, crashes the turn, or "succeeds" having done nothing. Forge's harness turns each
+into a bounded, observable, test-pinned outcome. That is the concrete, reproducible sense in which
+Forge is a better *harness* than the CLI it wraps — not a claim, a suite you can run.
 
 ---
 

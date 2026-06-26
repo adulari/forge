@@ -6,6 +6,25 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.46] - 2026-06-27
+
+### Fixed
+- **Concurrent read-only batch now feeds the failure-loop guard** (`crates/forge-core/src/lib.rs`).
+  A batch of ≥2 read-only calls ran concurrently but its results never reached `failure_counts`, so a
+  model issuing two `read_file`s with different missing paths every step evaded BOTH the identical-call
+  doom-loop (signature changes) and the failure-loop (concurrent path untracked) — burning the
+  step/token budget to the cap. `run_readonly_batch` now returns per-call failure classifications and
+  the caller folds them in, exactly like the serial path.
+
+### Added (tests — proving existing guards)
+- `step_cap_halts_a_runaway_turn` pins the primary infinite-loop backstop (`max_steps`).
+- `concurrent_batch_failure_loop_is_caught` proves the fix above.
+- `completion_gate_covers_its_four_outcomes` — pure decision table for the completion authority.
+- `docs/benchmarks/results.md` §2 conformance table extended with every new guard (oscillation, bridge
+  prose-recovery + double-exec guard, concurrent-batch failure-loop, step cap, completion-gate,
+  malformed-`<parameter>` panic-safety), each row backed by a deterministic test.
+
+
 ## [0.4.45] - 2026-06-27
 
 ### Fixed
