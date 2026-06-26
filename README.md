@@ -36,16 +36,17 @@ $ forge lattice query "UserRepository"
 | **LSP feedback** | Live diagnostics from a language server fed back after edits so the model self-corrects (`[lsp]`, opt-in; rust/ts/js/python/go) |
 | **Autofix loop** | Run lint/test after edits and self-heal on failure, up to N iterations (`[autofix]`, opt-in) |
 | **Architect mode** | Dual-model turns — strong planner drafts a plan, cheaper editor applies it (`[mesh] architect_mode`, opt-in) |
+| **Harness reliability** | Objective completion gate — a model can't claim "done" without a real tool-grounded state check (same authority on direct-API **and** subscription-bridge turns); doom-loop + repeated-failure guards; text-leaked tool-call recovery; never reports a phantom success |
 | **Context** | `@file` mentions inject file contents; project memory auto-loaded from `.forge/AGENTS.md` (scaffold with `/init`); Lattice auto-injection |
 | **Vision** | Attach images by `/image <path>` or paste them straight into the input bar as inline blocks |
 | **Assay** | Parallel critic crew, adversarial verification, ranked findings, git scopes (diff/branch/since), lens selection, auto-diff vs prior run; opt-in auto-review gate over a turn's diff (`[assay] auto_review`, warn/block) |
 | **MCP** | Client for external MCP servers (stdio + HTTP/SSE), OAuth 2.0 + PKCE, deferred loading, allowlist gating |
 | **TUI** | Full-screen (alternate-screen) by default with a scrollable transcript + pinned panels (`--inline` to opt out); ratatui live progress, cost meter, context-window token gauge, fuzzy command palette, dynamic `/config` settings editor (every setting, searchable), unified activity viewer (subagents + critics), session/checkpoint pickers, `/usage` + `/mesh` overlays, `/model` picker, `/effort` reasoning knob |
-| **Skills & Commands** | Markdown prompt templates + skill methodology injection; Claude Code format compatible |
-| **Subagents** | Parallel fan-out (`spawn_agents`), mesh-routed children, live TUI tree, depth-limited, opt-in git-worktree isolation for write-capable children |
+| **Skills & Commands** | Markdown prompt templates + skill methodology injection; Claude Code format compatible; `forge import <tool>` ↔ `forge skill export` round-trip for moving/sharing your library |
+| **Subagents** | Parallel fan-out (`spawn_agents`), mesh-routed children, live TUI tree, depth-limited, per-provider concurrency cap so a burst can't drain one subscription's quota, opt-in git-worktree isolation for write-capable children |
 | **Session Management** | Checkpoints, `/undo` with file restore, session replay + JSON export, transcript diff, assay run history |
 | **Remote control** | Drive a session from a phone/desktop browser (`/remote`) — LAN, loopback, or public tunnel |
-| **Hooks** | Pre/post tool-use shell hooks — block (pre) or observe (post) any tool call; fires on both direct and CLI-bridge paths, including MCP tool calls |
+| **Hooks** | Pre/post tool-use shell hooks — block, observe, **rewrite args**, or **inject model-visible context** (`{action: rewrite\|inject\|block\|allow}`) on any tool call; fires on both direct and CLI-bridge paths, including MCP tool calls |
 | **Cost** | Prompt caching, per-model pricing fetched from OpenRouter (cache-read aware), persistent cross-restart usage store |
 | **Git** | Optional model-aware co-author attribution on commits + PR bodies |
 | **Safety** | Permission broker, per-tool rules, diff preview before write, shadow file snapshots, unoverridable denylist; opt-in OS shell sandbox (Linux Landlock, `[shell] sandbox`) |
@@ -335,6 +336,7 @@ forge assay compare a1 b2    # diff findings: fixed / new / still-open
 forge commands               # list discovered commands + skills
 forge import claude          # migrate ~/.claude commands/skills/agents
 forge import codex           # migrate ~/.codex/prompts as commands
+forge skill export ./bundle  # export your commands/skills/agents (inverse of import)
 forge mcp                    # MCP server status
 forge mcp import             # wizard: scan installed AI CLIs
 forge auth anthropic         # store an API key in the OS keyring
