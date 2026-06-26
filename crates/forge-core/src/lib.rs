@@ -3949,6 +3949,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             for n in outcome.notes {
                 self.presenter.emit(PresenterEvent::Warning(n));
             }
+            // Queue any hook-injected context as a model-visible system hint (drained into the
+            // transcript after the tool result), so a hook can feed the model extra context.
+            for ctx in outcome.injected_context {
+                self.pending_hints.push(ctx);
+            }
             if let Some(reason) = outcome.blocked {
                 let result = format!("blocked by hook: {reason}");
                 self.presenter.emit(PresenterEvent::ToolResult {
@@ -4097,6 +4102,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             for n in outcome.notes {
                 self.presenter.emit(PresenterEvent::Warning(n));
             }
+            // Queue any hook-injected context as a model-visible system hint (drained into the
+            // transcript after the tool result), so a hook can feed the model extra context.
+            for ctx in outcome.injected_context {
+                self.pending_hints.push(ctx);
+            }
         }
 
         // Shell error interceptor (shell-error-interceptor.md): on a failed shell command,
@@ -4148,6 +4158,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             .await;
             for n in outcome.notes {
                 self.presenter.emit(PresenterEvent::Warning(n));
+            }
+            // Queue any hook-injected context as a model-visible system hint (drained into the
+            // transcript after the tool result), so a hook can feed the model extra context.
+            for ctx in outcome.injected_context {
+                self.pending_hints.push(ctx);
             }
             if let Some(reason) = outcome.blocked {
                 let result = format!("blocked by hook: {reason}");
@@ -4252,6 +4267,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             .await;
             for n in outcome.notes {
                 self.presenter.emit(PresenterEvent::Warning(n));
+            }
+            // Queue any hook-injected context as a model-visible system hint (drained into the
+            // transcript after the tool result), so a hook can feed the model extra context.
+            for ctx in outcome.injected_context {
+                self.pending_hints.push(ctx);
             }
         }
 
