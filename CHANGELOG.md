@@ -6,6 +6,17 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-06-26
+
+### Added
+- **A reproducible metric for the bridge-resume efficiency win.** claude's own token accounting hides
+  the saving (it prompt-caches the repeated transcript), so a deterministic test
+  (`resume_sends_dramatically_fewer_prompt_bytes_over_a_turn`) measures what Forge actually controls:
+  the prompt bytes streamed to the CLI's stdin across a multi-re-drive turn. Result: **~92% fewer
+  prompt bytes** (a 4000-char system preamble + accumulating assistant/tool turns over 6 re-drives:
+  ~59.7 KB sent without resume vs ~4.2 KB with). This is the concrete "proven with metrics" backing
+  for the 0.4.9/0.4.10 claude + codex session resume (`crates/forge-provider/src/cli_provider.rs`).
+
 ## [0.4.10] - 2026-06-26
 
 Bridge efficiency, part 2: codex session resume.
