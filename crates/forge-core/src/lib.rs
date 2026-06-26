@@ -6270,6 +6270,120 @@ mod tests {
         );
     }
 
+    /// Bridge provider for the completeness conformance test: call 0 runs a read-only tool (so the
+    /// turn did real work), then every later call yields (content, no tool call) — the model thinks
+    /// it's done.
+    struct CompletenessYieldProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for CompletenessYieldProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let tool_calls = if n == 0 {
+                vec![forge_types::ToolCall {
+                    id: "1".into(),
+                    name: "read_file".into(),
+                    args: serde_json::json!({ "path": "Cargo.toml" }),
+                }]
+            } else {
+                vec![]
+            };
+            Ok(forge_provider::ModelResponse {
+                content: if n == 0 {
+                    "checking".into()
+                } else {
+                    "all done".into()
+                },
+                tool_calls,
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn completeness_redrive_fires_once_when_verify_completeness_on() {
+        // Opt-in `mesh.verify_completeness`: when a CLI-bridge turn that did real work yields, the
+        // harness injects ONE completeness re-drive (a final diff-review nudge) before accepting done,
+        // and only ONCE — the `completeness_checked` one-shot guard prevents a loop.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut config = Config::default();
+        config.mesh.verify_completeness = true;
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(CompletenessYieldProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            Arc::new(FixedRouter {
+                model: "claude-cli::opus".into(),
+                fallbacks: vec![],
+            }),
+            ToolRegistry::with_core_tools(),
+            Box::new(capture),
+            config,
+            ".",
+        )
+        .unwrap();
+
+        let _ = session.run_turn("fix the bug").await.unwrap();
+
+        let fired = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("completeness check")))
+            .count();
+        assert_eq!(
+            fired, 1,
+            "completeness re-drive must fire exactly once (one-shot)"
+        );
+    }
+
+    #[tokio::test]
+    async fn completeness_redrive_silent_when_verify_completeness_off() {
+        // Default (off): no completeness re-drive — the opt-in mode adds nothing to the default path.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(CompletenessYieldProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            Arc::new(FixedRouter {
+                model: "claude-cli::opus".into(),
+                fallbacks: vec![],
+            }),
+            ToolRegistry::with_core_tools(),
+            Box::new(capture),
+            Config::default(),
+            ".",
+        )
+        .unwrap();
+
+        let _ = session.run_turn("fix the bug").await.unwrap();
+
+        let fired =
+            events.lock().unwrap().iter().any(
+                |e| matches!(e, PresenterEvent::Warning(w) if w.contains("completeness check")),
+            );
+        assert!(
+            !fired,
+            "completeness must not fire when verify_completeness is off"
+        );
+    }
+
     /// Always returns an empty response (no text, no tool call) — a model glitch / narrate-then-stall.
     struct EmptyResponseProvider;
     #[async_trait::async_trait]
