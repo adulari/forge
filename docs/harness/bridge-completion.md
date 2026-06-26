@@ -30,9 +30,12 @@ All in `forge-core` `run_model_loop` (the `is_cli_bridge` arm) + the `cli_provid
    (counted in the stream sink via `tools_ran`) **or** close a task — or the turn **HALTS loudly**
    instead of re-driving. A bridge that just re-narrates without acting therefore cannot loop. This is
    the guard the old "nudge the bridge" approach lacked (it spiralled).
-3. **Objective verification gate.** When the bridge reports *every* task Done, Forge forces a
+3. **Objective verification gate.** When a model reports *every* task Done, Forge forces a
    verification turn: "PROVE it — run a real inspection tool (`shell git/gh/ls/cat`, `read_file`) and
    look at the actual output; reopen anything not truly done." Self-reported "done" is never trusted.
+   This is **one shared completion authority** (`completion_gate` / `run_completion_gate`) used by the
+   CLI-bridge arm *and* the direct-API arm of `run_model_loop`, so the two paths can't diverge — a
+   direct API model that marks every task Done without inspecting is gated exactly like a bridge.
 4. **Inspection requirement.** A verification turn that just re-marks `update_tasks` without inspecting
    does **not** count (`inspect_ran` counts tools other than `update_tasks`/`present_plan`). Forge
    re-prompts up to `MAX_VERIFY_ATTEMPTS`; if the model still never inspects, the turn ends **flagged
