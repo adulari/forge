@@ -124,6 +124,15 @@ Then at most 4 subagents are in-flight at any moment (semaphore-bounded)
 And the other 46 queue; total spawned in one turn is capped by `max_fanout` (default 16),
     beyond which extra specs are rejected with a "fan-out cap reached" result
 
+# Provider-aware fan-out cap (negative — one subscription's quota hammered in parallel)
+Given max_concurrency = 8 and max_per_provider = 2, and 6 children that all route to the same
+    provider (e.g. a claude/codex subscription bridge)
+When the fan-out runs
+Then at most 2 of those children are in-flight at once (the per-provider semaphore), even though the
+    global cap would allow 8 — so a single subscription/key quota isn't burned in parallel
+And children routed to a DIFFERENT provider are not held back by that provider's semaphore
+And setting max_per_provider = 0 disables the sub-cap (global cap only)
+
 # Per-subagent budget cap (negative — runaway cost)
 Given a subagent with budget_usd = 0.05 that has spent 0.05
 When its loop is about to make another model call

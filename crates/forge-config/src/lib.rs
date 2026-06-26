@@ -1020,6 +1020,13 @@ pub struct SubagentsConfig {
     /// always skip this. Off by default (requires the repo to be a git work tree).
     #[serde(default)]
     pub worktree_isolation: bool,
+    /// Max child agents that may run concurrently *on the same provider*. A burst of subagents all
+    /// routed to one subscription (claude/codex bridge) or one metered key would otherwise hammer a
+    /// single quota in parallel — the global `max_concurrency` doesn't see provider. This sub-cap
+    /// throttles per provider so fan-out spreads the load (and protects the subscription thesis).
+    /// `0` disables the per-provider cap (global cap only).
+    #[serde(default = "default_max_per_provider")]
+    pub max_per_provider: usize,
 }
 
 fn default_subagents_enabled() -> bool {
@@ -1032,6 +1039,9 @@ fn default_max_concurrency() -> usize {
     4
 }
 fn default_max_depth() -> usize {
+    2
+}
+fn default_max_per_provider() -> usize {
     2
 }
 fn default_agents_dir() -> String {
@@ -1047,6 +1057,7 @@ impl Default for SubagentsConfig {
             max_depth: default_max_depth(),
             agents_dir: default_agents_dir(),
             worktree_isolation: false,
+            max_per_provider: default_max_per_provider(),
         }
     }
 }
