@@ -6,6 +6,24 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.31] - 2026-06-26
+
+### Changed
+- **File watching now WORKS on WSL2 `/mnt/*` (9p) and other remote filesystems — via polling instead
+  of being disabled.** 0.4.27 stopped the hang by *skipping* the watcher on a non-native filesystem
+  (with a "move the project onto the Linux filesystem" caveat). Now, instead of disabling, the watcher
+  transparently switches to a **polling backend** on those filesystems (`9p`/`v9fs`, `fuse*`,
+  `cifs`/`smb*`, `nfs*`): it stat-walks the project tree on a 2s timer (ordinary file ops that work
+  over 9p) rather than registering recursive inotify watches (the per-entry RPCs that block
+  uninterruptibly on 9p). So auto-reindex works on a Windows-drive project with **no caveat and no
+  manual `forge lattice update`**. Content-comparison is on so even same-size edits are caught. Native
+  filesystems keep the efficient inotify backend unchanged.
+- **Watcher setup is now fully fire-and-forget**, so neither inotify registration nor the polling
+  backend's synchronous initial tree scan (slow over a remote link) can gate TUI startup at all — a
+  detached thread owns the watcher for the process lifetime. Removes the previous 5s setup deadline.
+  The polling backend is unit-tested end-to-end (an external edit is reindexed) alongside the inotify
+  one (`crates/forge-index/src/watch.rs`, `crates/forge-cli/src/cli/commands/run.rs`).
+
 ## [0.4.30] - 2026-06-26
 
 ### Changed
