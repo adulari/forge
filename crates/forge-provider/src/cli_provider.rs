@@ -609,7 +609,11 @@ fresh investigation.";
 /// keep their own tools).
 fn apply_harness_preamble(harness: bool, verify_completeness: bool, prompt: String) -> String {
     if harness {
-        let extra = if verify_completeness {
+        // FORGE_COMPLETENESS_LOOP (A/B harness): when set, completeness is delivered by the core
+        // loop's one-shot re-drive instead of this always-on preamble clause — so suppress the clause
+        // here to compare the two mechanisms cleanly. Temporary experiment seam.
+        let loop_mode = std::env::var_os("FORGE_COMPLETENESS_LOOP").is_some();
+        let extra = if verify_completeness && !loop_mode {
             COMPLETENESS_CLAUSE
         } else {
             ""
