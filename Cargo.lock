@@ -738,6 +738,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
+name = "calculator"
+version = "0.4.34"
+
+[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1713,7 +1717,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "forge-cli"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1754,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "forge-config"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -1775,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "forge-core"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "async-trait",
  "forge-config",
@@ -1803,7 +1807,7 @@ dependencies = [
 
 [[package]]
 name = "forge-index"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "async-trait",
  "forge-config",
@@ -1842,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "forge-lsp"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "forge-config",
  "serde",
@@ -1855,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mcp"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "forge-config",
  "forge-types",
@@ -1871,7 +1875,7 @@ dependencies = [
 
 [[package]]
 name = "forge-mesh"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "async-trait",
  "forge-config",
@@ -1881,7 +1885,7 @@ dependencies = [
 
 [[package]]
 name = "forge-provider"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "async-trait",
  "forge-config",
@@ -1901,7 +1905,7 @@ dependencies = [
 
 [[package]]
 name = "forge-skills"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "forge-types",
  "tracing",
@@ -1909,7 +1913,7 @@ dependencies = [
 
 [[package]]
 name = "forge-store"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "chrono",
  "forge-types",
@@ -1920,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "forge-tools"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "async-trait",
  "forge-index",
@@ -1940,7 +1944,7 @@ dependencies = [
 
 [[package]]
 name = "forge-tui"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "crossterm",
  "forge-types",
@@ -1956,7 +1960,7 @@ dependencies = [
 
 [[package]]
 name = "forge-types"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "serde",
  "serde_json",
@@ -7094,7 +7098,7 @@ dependencies = [
 
 [[package]]
 name = "xtasks"
-version = "0.4.33"
+version = "0.4.34"
 dependencies = [
  "anyhow",
  "forge-config",

@@ -6,6 +6,23 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.34] - 2026-06-26
+
+### Added
+- **`lattice.inject_body_hits` — tunable context front-loading.** Controls how many top-ranked symbol
+  *bodies* get injected into a turn's prompt (default 3; previously hardcoded). Raising it front-loads
+  more task-relevant code so the model reads from context instead of `search`/`read_file`-ing for it.
+  Measured on SWE-bench Lite: aggressive front-loading (14 bodies) took Forge-on-bridge from ~1.9×
+  *worse* tokens than the raw `claude` CLI to **rough parity** (tied 4/10 resolve, ~equal tokens, at
+  N=10). Honest caveat documented in `docs/benchmarks/results.md`: on a 3-instance light-repo subset it
+  looked like a 44% token win that did **not** generalize — small-N benchmarks mislead.
+
+### Fixed
+- **`forge bench swe` now bounds the in-process Forge agent by `--timeout-secs`.** Only the external
+  CLI path was bounded; the Forge path ran `run_turn` unwrapped, so a non-converging run could spin for
+  20+ minutes (observed 500+ tool calls). It now times out like the external agents and submits the
+  partial patch (`crates/forge-cli/src/bench.rs`).
+
 ## [0.4.33] - 2026-06-26
 
 ### Fixed

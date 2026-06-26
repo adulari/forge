@@ -77,24 +77,38 @@ bug (the direct-path verification gate silently failing, fixed in v0.4.6).
 
 ---
 
-## 3. SWE-bench resolve rate — first real run (N=3, directional only)
+## 3. SWE-bench resolve rate — Forge-on-bridge vs claude-cli (N=10, fair accounting)
 
-Same instances through `--agent forge --model claude-cli::sonnet` (Forge harness on the claude bridge,
-harness mode, forced model — no mesh) vs `--agent claude-code --model sonnet` (claude's own CLI),
-scored by the official `swebench` Docker evaluator. Runbook: [`swe-bench.md`](./swe-bench.md).
+`--agent forge --model claude-cli::sonnet` (Forge harness on the claude bridge, harness mode, forced
+model — no mesh) vs `--agent claude-code --model sonnet` (claude's own CLI), same instances, scored by
+the official `swebench` Docker evaluator. Runbook: [`swe-bench.md`](./swe-bench.md).
 
-**First run — SWE-bench Lite, 3 instances (requests, flask, pylint):**
+**SWE-bench Lite, 10 instances (requests/flask/pylint/sphinx/pytest ×2), aggressive front-loading on
+(`lattice.inject_body_hits = 14`):**
 
-| | resolved | tokens on the shared solve (pylint) | wall (pylint) |
+| | resolved | total tokens | avg wall |
 |---|---|---|---|
-| Forge-on-bridge | **1/3** | 11,718 out | 301s |
-| claude-cli direct | **1/3** | **2,405 out** | **49s** |
+| Forge-on-bridge | **4/10** | **3.72M** | 295s |
+| claude-cli direct | **4/10** | 3.97M | **66s** |
 
-Both solved `pylint-5859`; both failed `requests-1963` and `flask-4045` (incomplete fixes — the model
-under-scoped the issue; e.g. flask: got the blueprint-name dot check, missed the *endpoint* dot
-check). **Tied on resolve, and Forge was less efficient** (see the correction banner for the
-fair full-token numbers). N=3 is far too small to conclude — it is a directional baseline, not a
-verdict. A larger run (10–20+ instances) is needed before any resolve-rate claim.
+**Honest verdict: roughly parity.** Tied on resolve (4/4 — and on *different* instances: Forge
+uniquely solves `pylint-5859` with **231k** tokens where claude-cli **fails after 834k**; claude-cli
+uniquely solves `requests-2148`). Tokens within ~6% (Forge lower in aggregate, but with large
+per-instance variance both ways). Forge is **slower** on average — dominated by two non-converging
+instances (547s and 1341s) that made **500+ and 330+ tool calls**; strip those and Forge averages
+~130s. The slowness is per-call MCP latency × an unbounded explore/fix loop, not the protocol itself.
+
+**What moved the needle: context front-loading.** Injecting the top task-relevant symbol *bodies* into
+the prompt (so the model reads from context instead of `search`/`read_file`-ing) took Forge from
+**~1.9× *worse* tokens** (conservative 3-body default) to **parity** here. Caveat learned the hard way:
+on a 3-instance light-repo subset this looked like a **44% token win** — it did **not** generalize to
+the heavier repos. Small-N benchmarks mislead; trust N≥10.
+
+**Open work toward a decisive win** (Forge is now competitive, not ahead): the remaining gap is the
+unbounded tool-call loop on hard instances — a harness convergence/turn-budget guard (cap the 500-call
+runaways) is the clear next lever, and it helps real interactive use too. `forge bench swe` now bounds
+the in-process Forge turn by `--timeout-secs` (it previously only bounded the external-CLI path, which
+is why one instance ran 22 minutes).
 
 ---
 
