@@ -261,33 +261,29 @@ pub(crate) async fn build_session_with(
                      — open a project folder (one with a .git) to enable auto-reindex",
                 ),
                 Some(root) => {
-                    // Set up the watcher on a DETACHED thread with a short deadline so a
-                    // slow/blocking filesystem can NEVER gate TUI startup (a recursive inotify
-                    // registration on WSL2's 9p DrvFs blocks uninterruptibly in the 9p RPC — it used
-                    // to hang `forge chat` on a blank screen). spawn_watcher already refuses known
-                    // non-native filesystems fast; this timeout is the backstop for anything else (a
-                    // locked dir, an exotic remote mount). Overrun the deadline → continue without a
-                    // watcher; retrieval is unaffected.
+                    // Build the watcher on a FULLY detached thread that OWNS it for the process
+                    // lifetime, so NOTHING about watcher setup can gate TUI startup — not a recursive
+                    // inotify registration (which blocks uninterruptibly on WSL2's 9p DrvFs and used
+                    // to hang `forge chat`), and not the polling backend's synchronous initial tree
+                    // scan (slow over a remote/9p link). On a non-native fs spawn_watcher transparently
+                    // uses polling so auto-reindex still works there. We don't hand the handle back to
+                    // the session: for `forge chat` the session IS the process, so a thread holding it
+                    // until exit is the same lifetime. A setup error is non-fatal (retrieval works) and
+                    // intentionally silent — no "watcher disabled" caveat for the user.
                     let lat2 = Arc::clone(lat);
-                    let (tx, rx) = std::sync::mpsc::channel();
                     std::thread::spawn(move || {
-                        let res = forge_index::spawn_watcher(
+                        if let Ok(_watcher) = forge_index::spawn_watcher(
                             lat2,
                             &root,
                             std::time::Duration::from_millis(400),
-                        );
-                        let _ = tx.send(res);
-                    });
-                    match rx.recv_timeout(std::time::Duration::from_secs(5)) {
-                        Ok(Ok(w)) => session.set_lattice_watcher(Some(w)),
-                        Ok(Err(e)) => {
-                            session.notify_error(&format!("lattice watcher disabled: {e}"))
+                        ) {
+                            // Park forever, keeping `_watcher` alive (dropping it stops watching);
+                            // the OS reclaims the thread + handle on process exit.
+                            loop {
+                                std::thread::park();
+                            }
                         }
-                        Err(_) => session.notify_error(
-                            "lattice watcher setup is slow (remote/locked filesystem) — disabled; \
-                             retrieval still works",
-                        ),
-                    }
+                    });
                 }
             }
         }
