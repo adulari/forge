@@ -1996,6 +1996,51 @@ mod tests {
     }
 
     #[test]
+    fn resume_sends_dramatically_fewer_prompt_bytes_over_a_turn() {
+        use forge_types::Message;
+        // The efficiency win is in what FORGE writes to the subprocess stdin each call: resume OFF
+        // re-renders the WHOLE (growing) transcript every turn; resume ON sends just the new delta.
+        // (claude's own token accounting hides this because it prompt-caches the repeat — the saving
+        // is the prompt Forge has to serialize + stream, which also shrinks claude's work.) This is
+        // deterministic — no live CLI — so it documents the win as a reproducible number.
+        //
+        // Simulate a realistic harness turn: a big system preamble + several assistant turns + tool
+        // results accumulate, and the bridge re-drives a few times.
+        let big_system = "S".repeat(4000); // lattice + preamble + project context, etc.
+        let mut messages = vec![
+            Message::system(&big_system),
+            Message::user("Do the multi-step task."),
+        ];
+
+        let mut off_bytes = 0usize; // full transcript re-rendered every call
+        let mut on_bytes = 0usize; // fresh full render once, then deltas
+        let mut sent = 0usize; // resume high-water mark
+        for turn in 0..6 {
+            // Each call: OFF always re-renders everything; ON renders the delta (after the 1st call).
+            off_bytes += render_prompt(&messages).len();
+            if turn == 0 {
+                on_bytes += render_prompt(&messages).len();
+            } else {
+                on_bytes += render_resume_delta(&messages[sent..]).len();
+            }
+            sent = messages.len();
+            // The bridge produced a (chunky) assistant turn + a tool result; then a re-drive nudge.
+            messages.push(Message::assistant(&"A".repeat(1500)));
+            messages.push(Message::tool_result("t", "T".repeat(800)));
+            messages.push(Message::system("The plan is NOT finished — continue."));
+        }
+        let pct = (off_bytes - on_bytes) * 100 / off_bytes;
+        // Document the measured win (visible with --nocapture); assert it's a large reduction.
+        println!(
+            "bridge resume prompt bytes over 6 re-drives: OFF={off_bytes} ON={on_bytes} ({pct}% fewer)"
+        );
+        assert!(
+            on_bytes * 4 < off_bytes,
+            "resume should cut prompt bytes by well over half (OFF={off_bytes}, ON={on_bytes})"
+        );
+    }
+
+    #[test]
     fn only_claude_resumes_and_it_is_toggleable() {
         assert!(
             CliProvider::claude_code().resumes(),
