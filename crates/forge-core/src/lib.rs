@@ -2401,6 +2401,9 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         // turn that just re-marks `update_tasks` without inspecting doesn't count (the C8 hole — a
         // model told to lie re-confirmed done without checking). Bounded so it can't loop.
         let mut verify_attempts = 0usize;
+        // One-shot guard for the opt-in completeness re-drive (`mesh.verify_completeness`): fired at
+        // most once per turn so it can't loop. See the bridge-yield branch below.
+        let mut completeness_checked = false;
         // Direct path only: the `inspect_ran` count at the moment the verify nudge was last issued.
         // An inspection that runs AFTER this point is the model responding to the request to verify
         // (on the direct path, tools run in separate steps from the text claim, so a step-local
@@ -2727,6 +2730,40 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             .to_string(),
                     ));
                 } else if forge_provider::is_cli_bridge(&active_model) {
+                    // Loop-gated completeness (opt-in `mesh.verify_completeness`): the bridge yielded.
+                    // Before accepting "done", fire ONE bounded final-diff review — the model worked
+                    // the turn normally (no completeness pressure throughout, which is what tripled
+                    // tokens in the always-on preamble form), and now does a single targeted re-check
+                    // against every requirement. One-shot (`completeness_checked`) so it can't loop;
+                    // gated on a turn that ran real tools (so there's an actual change to review).
+                    if self.config.mesh.verify_completeness
+                        && !completeness_checked
+                        && inspect_ran.load(std::sync::atomic::Ordering::Relaxed) > 0
+                    {
+                        completeness_checked = true;
+                        self.presenter.emit(PresenterEvent::Warning(
+                            "completeness check — reviewing the change against every requirement before finishing"
+                                .to_string(),
+                        ));
+                        const COMPLETENESS_NUDGE: &str = "Before finishing, do ONE final review (a \
+                            single bounded pass — do NOT re-explore the codebase): run `git diff` once \
+                            to see your COMPLETE change, re-read the original request and write the \
+                            distinct requirements/cases it lists (issues routinely specify several, \
+                            e.g. \"reject a dotted blueprint name AND a dotted endpoint\"), and for \
+                            each confirm your diff already handles it. Only if the diff is MISSING a \
+                            requirement, add that specific fix — otherwise finish. A change that \
+                            handles only the first of several cases is INCOMPLETE.";
+                        let nseq = self.next_seq();
+                        let _ = self.store.add_message(
+                            &self.id,
+                            nseq,
+                            Role::System,
+                            COMPLETENESS_NUDGE,
+                            None,
+                        );
+                        self.transcript.push(Message::system(COMPLETENESS_NUDGE));
+                        continue;
+                    }
                     // A CLI bridge is a ONE-SHOT subprocess: claude-cli/codex runs its own internal
                     // tool loop and EXITS, so forge can't keep a single invocation going. That let a
                     // long plan stop half-done — the bridge does a few steps (merge + tag), exits
