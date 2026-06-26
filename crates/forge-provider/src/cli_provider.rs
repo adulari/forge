@@ -593,8 +593,8 @@ the goal is fully achieved and every task is resolved.";
 /// Optional, opt-in (`mesh.verify_completeness`) clause appended to the harness preamble. It makes
 /// the model re-read the request and check its change against EVERY requirement before finishing —
 /// which measurably raises resolve rate on under-scoped fixes (SWE-bench: 4/10 → 6/10, beating the
-/// raw CLI) but costs ~3× the tokens (more re-reading + re-verification). Default OFF: a "max-resolve,
-/// higher-cost" mode users opt into, not the default tax.
+/// raw CLI) at ~1.85× the tokens (a bounded one-pass diff review — 6/10 vs the raw CLI's 4/10 on N=10).
+/// Default OFF: a "max-resolve, higher-cost" mode users opt into, not the default tax.
 const COMPLETENESS_CLAUSE: &str = "\n\n\
 Completeness — do ONE final review before you finish (a single bounded pass — do NOT re-explore the \
 codebase): (1) run `git diff` once to see your COMPLETE change; (2) re-read the request and write the \
