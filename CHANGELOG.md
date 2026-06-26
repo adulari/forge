@@ -6,6 +6,15 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.38] - 2026-06-26
+
+### Added
+- **Conformance tests for the opt-in loop-gated completeness re-drive.** Two deterministic run-loop
+  tests with a scripted bridge provider (runs a read-only tool, then yields) lock the behavior shipped
+  in 0.4.37: the completeness re-drive fires **exactly once** when `mesh.verify_completeness` is on (the
+  one-shot guard prevents a loop), and **never** when it's off (the default path is unchanged)
+  (`crates/forge-core/src/lib.rs`).
+
 ## [0.4.37] - 2026-06-26
 
 ### Changed
