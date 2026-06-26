@@ -2393,6 +2393,11 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         // turn that just re-marks `update_tasks` without inspecting doesn't count (the C8 hole — a
         // model told to lie re-confirmed done without checking). Bounded so it can't loop.
         let mut verify_attempts = 0usize;
+        // Direct path only: the `inspect_ran` count at the moment the verify nudge was last issued.
+        // An inspection that runs AFTER this point is the model responding to the request to verify
+        // (on the direct path, tools run in separate steps from the text claim, so a step-local
+        // signal can't see it). Carried across steps; reset implicitly by being re-stamped each nudge.
+        let mut inspect_at_last_verify: u64 = 0;
         // Completed-task count observed at the last bridge re-drive check — the other half of the
         // progress signal (a re-run that closes a task but happens to run no fresh tool still counts
         // as progress).
@@ -2888,14 +2893,26 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         // the bridge gate guards against; the direct path had no such guard before.
                         let did_real_work =
                             inspect_ran.load(std::sync::atomic::Ordering::Relaxed) > 0;
-                        let inspected_this_turn =
-                            inspect_ran.load(std::sync::atomic::Ordering::Relaxed) > inspect_before;
+                        // Unlike the bridge (which runs its whole tool loop INSIDE one `complete()`
+                        // call, so an inspection lands in the same step as the final text), a direct
+                        // model runs each tool in a SEPARATE step from the text "done" claim. So a
+                        // step-local "did this step inspect?" is ALWAYS false at this gate, which would
+                        // wrongly flag a genuinely-verified turn as UNVERIFIED. Instead ask: did an
+                        // inspection run SINCE we last asked for verification? `inspect_at_last_verify`
+                        // is the inspect count captured when the verify nudge was (re)issued.
+                        let inspected_since_verify = verify_attempts > 0
+                            && inspect_ran.load(std::sync::atomic::Ordering::Relaxed)
+                                > inspect_at_last_verify;
                         if self.run_completion_gate(
                             &mut verify_attempts,
                             did_real_work,
-                            inspected_this_turn,
+                            inspected_since_verify,
                         ) == CompletionGate::Reverify
                         {
+                            // Mark where the next verification window starts: any inspection AFTER
+                            // this point counts as responding to the nudge.
+                            inspect_at_last_verify =
+                                inspect_ran.load(std::sync::atomic::Ordering::Relaxed);
                             continue;
                         }
                     }
@@ -2946,6 +2963,22 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                     ));
                     hit_step_cap = false;
                     break;
+                }
+            }
+
+            // Count the tools the DIRECT path is about to run, so the completion-verification gate's
+            // progress + inspection signals work for direct models. The stream sink only increments
+            // these for tools the PROVIDER surfaces as `ToolStarted` events — which the bridge does
+            // (its tool loop runs inside one `complete()`), but a direct genai provider does NOT: it
+            // returns tool calls in `resp.tool_calls` and the loop executes them here. Without this,
+            // `inspect_ran` stays 0 on the direct path and the gate can't tell an inspection from a
+            // bare "done" claim. Bridge turns return an empty `tool_calls` (their tools ran inside the
+            // subprocess), so this adds nothing for them — no double counting. `update_tasks`/
+            // `present_plan` are bookkeeping, not inspections (same rule as the stream sink).
+            for call in &resp.tool_calls {
+                tools_ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if !call.name.ends_with("update_tasks") && !call.name.ends_with("present_plan") {
+                    inspect_ran.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
 
@@ -5696,6 +5729,202 @@ mod tests {
             .iter()
             .any(|e| matches!(e, PresenterEvent::Tasks(t) if t.len() == 2));
         assert!(emitted, "a Tasks event was emitted for the TUI");
+    }
+
+    /// Direct-path completion-verification gate (the shared `completion_gate`, ported from the
+    /// bridge in #237). Scripts a direct model that does real work + marks every task Done, then —
+    /// on the forced verification turn — runs a real inspection tool. The turn must be ACCEPTED, not
+    /// flagged UNVERIFIED. This exercises the two direct-path fixes together: (1) the loop counts the
+    /// tools a direct model runs (`inspect_ran`/`tools_ran`, which the stream sink only fed for
+    /// bridges), and (2) the gate measures inspection SINCE the verify request, not step-locally.
+    struct VerifyByInspectingProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for VerifyByInspectingProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_provider::ModelResponse;
+            use forge_types::{new_id, ToolCall, Usage};
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let usage = Usage::default();
+            let read = || ToolCall {
+                id: new_id(),
+                name: "read_file".into(),
+                args: serde_json::json!({"path": "Cargo.toml"}),
+            };
+            let resp = match n {
+                // Real work (an inspection) + mark the only task Done.
+                0 => ModelResponse {
+                    content: "starting".into(),
+                    tool_calls: vec![
+                        read(),
+                        ToolCall {
+                            id: new_id(),
+                            name: "update_tasks".into(),
+                            args: serde_json::json!({"tasks": [{"title": "the task", "status": "done"}]}),
+                        },
+                    ],
+                    usage,
+                    quotas: Vec::new(),
+                },
+                // Claim done (text). The gate must force a verification turn here.
+                1 => ModelResponse {
+                    content: "all done".into(),
+                    tool_calls: vec![],
+                    usage,
+                    quotas: Vec::new(),
+                },
+                // Respond to the verify nudge by actually inspecting.
+                2 => ModelResponse {
+                    content: "checking the real state".into(),
+                    tool_calls: vec![read()],
+                    usage,
+                    quotas: Vec::new(),
+                },
+                // Now claim done again — having inspected since the request, this must be accepted.
+                _ => ModelResponse {
+                    content: "verified — all done".into(),
+                    tool_calls: vec![],
+                    usage,
+                    quotas: Vec::new(),
+                },
+            };
+            Ok(resp)
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_gate_accepts_when_the_model_inspects_during_verification() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(VerifyByInspectingProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools(),
+            Box::new(capture),
+            Config::default(),
+            ".",
+        )
+        .unwrap();
+
+        session.run_turn("do the task").await.unwrap();
+
+        let warnings: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                PresenterEvent::Warning(w) => Some(w.clone()),
+                _ => None,
+            })
+            .collect();
+        // The gate fired (a verification turn was forced)…
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("verifying with a real state check")),
+            "the verification gate should have forced a state check; warnings: {warnings:?}"
+        );
+        // …and because the model actually inspected during verification, completion is ACCEPTED —
+        // it must NOT be flagged UNVERIFIED (the bug: a step-local signal never saw the inspection).
+        assert!(
+            !warnings.iter().any(|w| w.contains("UNVERIFIED")),
+            "a model that inspected during verification must not be flagged UNVERIFIED; warnings: {warnings:?}"
+        );
+    }
+
+    /// The negative half: a direct model that claims done but NEVER inspects, even after being asked,
+    /// must end flagged UNVERIFIED — the gate can't be satisfied by re-asserting "done".
+    struct ClaimsDoneNeverInspectsProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for ClaimsDoneNeverInspectsProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_provider::ModelResponse;
+            use forge_types::{new_id, ToolCall, Usage};
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let usage = Usage::default();
+            let resp = if n == 0 {
+                ModelResponse {
+                    content: "working".into(),
+                    tool_calls: vec![
+                        ToolCall {
+                            id: new_id(),
+                            name: "read_file".into(),
+                            args: serde_json::json!({"path": "Cargo.toml"}),
+                        },
+                        ToolCall {
+                            id: new_id(),
+                            name: "update_tasks".into(),
+                            args: serde_json::json!({"tasks": [{"title": "the task", "status": "done"}]}),
+                        },
+                    ],
+                    usage,
+                    quotas: Vec::new(),
+                }
+            } else {
+                // Every subsequent turn: just re-assert done, never inspect.
+                ModelResponse {
+                    content: "it's all done, trust me".into(),
+                    tool_calls: vec![],
+                    usage,
+                    quotas: Vec::new(),
+                }
+            };
+            Ok(resp)
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_gate_flags_unverified_when_the_model_never_inspects() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(ClaimsDoneNeverInspectsProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools(),
+            Box::new(capture),
+            Config::default(),
+            ".",
+        )
+        .unwrap();
+
+        session.run_turn("do the task").await.unwrap();
+
+        let warnings: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                PresenterEvent::Warning(w) => Some(w.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            warnings.iter().any(|w| w.contains("UNVERIFIED")),
+            "a model that did real work but refuses to verify must end flagged UNVERIFIED; warnings: {warnings:?}"
+        );
     }
 
     /// Stalls on the 2nd call (text, no tool call) while a task is still in_progress, then — once
