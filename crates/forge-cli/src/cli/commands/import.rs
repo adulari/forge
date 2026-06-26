@@ -160,13 +160,22 @@ pub(crate) fn copy_catalog_assets(
     let mut counts = ImportCounts::default();
     std::fs::create_dir_all(cmd_dst).ok();
     for cmd in cat.all_commands() {
-        let Some(fname) = cmd.path.file_name() else {
-            continue;
-        };
-        let dest = cmd_dst.join(fname);
+        // Preserve the command's NAMESPACE (its source subdirectory). A subdir command `git/commit.md`
+        // loads as the namespaced name `git:commit`; copying it by bare file name flattened it to
+        // `commit.md`, dropping the namespace (so `/git:commit` became `/commit`) and risking a
+        // collision with another `commit.md` from a different namespace. Rebuild the relative path
+        // from the namespaced name (`git:commit` → `git/commit.md`) so the layout round-trips.
+        let rel = format!(
+            "{}.md",
+            cmd.name.replace(':', std::path::MAIN_SEPARATOR_STR)
+        );
+        let dest = cmd_dst.join(rel);
         if dest.exists() {
             counts.skipped_commands += 1;
             continue;
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).ok();
         }
         if std::fs::copy(&cmd.path, &dest).is_ok() {
             counts.copied_commands += 1;
