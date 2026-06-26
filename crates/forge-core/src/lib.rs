@@ -337,6 +337,51 @@ impl FailureKind {
     }
 }
 
+/// Decision of the completion-verification gate for a turn that reported every tracked task Done.
+/// A self-reported "all done" is exactly what produced the phantom release (claimed merged + tagged
+/// while nothing ran), so completion must be PROVEN with a real state check, not asserted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionGate {
+    /// Force another tool-grounded verification turn (the caller pushes the verify nudge + loops).
+    Reverify,
+    /// A real inspection ran — accept cleanly, no note.
+    AcceptClean,
+    /// Nothing external to check (a pure-analysis answer) — accept with a calm note.
+    AcceptNoArtifacts,
+    /// Verification budget spent but real work existed and was never checked — accept, flag loudly.
+    AcceptUnverified,
+}
+
+/// Decide whether an "all tasks Done" claim is accepted or must be re-verified with a real state
+/// check. Pure (no I/O) so it is unit-testable; the caller emits the warning and pushes the nudge.
+///
+/// * `verify_attempts`    — verification turns already spent on the CURRENT claim (0 = first claim).
+/// * `did_real_work`      — the turn ran ≥1 inspectable tool at some point, so there IS external
+///   state to check (a pure-reasoning turn has none — requiring an inspection would over-fire).
+/// * `inspected_this_turn`— the just-observed turn ran an inspection tool (a real check), as opposed
+///   to merely re-asserting "done" by re-marking the task list (the C8 hole).
+///
+/// Shared by the CLI-bridge and direct-API paths so both have ONE completion authority: "done"
+/// means a tool proved it. Mirrors the original bridge-only gate exactly.
+fn completion_gate(
+    verify_attempts: usize,
+    max_attempts: usize,
+    did_real_work: bool,
+    inspected_this_turn: bool,
+) -> CompletionGate {
+    if verify_attempts > 0 && (inspected_this_turn || !did_real_work) {
+        if inspected_this_turn {
+            CompletionGate::AcceptClean
+        } else {
+            CompletionGate::AcceptNoArtifacts
+        }
+    } else if verify_attempts < max_attempts {
+        CompletionGate::Reverify
+    } else {
+        CompletionGate::AcceptUnverified
+    }
+}
+
 /// Classify a tool RESULT string as a failure of a given kind, or `None` if it looks like a success.
 ///
 /// Anchored on the markers Forge actually produces for failures (`invoke_tool` returns `"error: …"`
@@ -2209,6 +2254,65 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             .map_err(CoreError::Store)
     }
 
+    /// Run the completion-verification gate for a turn that reported every tracked task Done.
+    /// Emits the user-facing warning, pushes the verify nudge on [`CompletionGate::Reverify`], and
+    /// returns the decision so the caller can `continue` (re-verify) or fall through (accept). Both
+    /// the CLI-bridge and direct-API paths call this, so the completion authority can't diverge.
+    fn run_completion_gate(
+        &mut self,
+        verify_attempts: &mut usize,
+        did_real_work: bool,
+        inspected_this_turn: bool,
+    ) -> CompletionGate {
+        const MAX_VERIFY_ATTEMPTS: usize = 2;
+        // Tool-name-neutral so the SAME nudge works for the bridge (tools are `mcp__forge__*`) and
+        // the direct path (`shell`/`read_file`) — the model maps "run a shell command / read a file"
+        // to whichever names its toolset exposes.
+        const VERIFY_NUDGE: &str = "You reported every task Done. Before this turn can end, you \
+             MUST PROVE it: call an inspection tool that reads the real state — run a shell command \
+             (`git log` / `git tag` / `gh run list` / `gh release view` / `ls` / `cat`) or read a \
+             file — and look at the actual output. Re-marking the task list is NOT verification; you \
+             must run a real check. If the output shows ANY task is not actually complete, mark it \
+             not done and finish it. (If a task has no external artifact to check — a pure analysis \
+             answer — say so and restate the result.) Only after confirming every task, state \
+             exactly what you checked and stop.";
+        let gate = completion_gate(
+            *verify_attempts,
+            MAX_VERIFY_ATTEMPTS,
+            did_real_work,
+            inspected_this_turn,
+        );
+        match gate {
+            CompletionGate::Reverify => {
+                *verify_attempts += 1;
+                self.presenter.emit(PresenterEvent::Warning(format!(
+                    "all tasks reported done — verifying with a real state check before finishing ({}/{MAX_VERIFY_ATTEMPTS})",
+                    *verify_attempts
+                )));
+                let nseq = self.next_seq();
+                let _ = self
+                    .store
+                    .add_message(&self.id, nseq, Role::System, VERIFY_NUDGE, None);
+                self.transcript.push(Message::system(VERIFY_NUDGE));
+            }
+            CompletionGate::AcceptNoArtifacts => {
+                self.presenter.emit(PresenterEvent::Warning(
+                    "completion not tool-verified (no external artifacts to check) — accepting the reported result"
+                        .to_string(),
+                ));
+            }
+            CompletionGate::AcceptUnverified => {
+                self.presenter.emit(PresenterEvent::Warning(
+                    "completion could NOT be tool-verified — the model reported done without \
+                     inspecting real state. Treat this result as UNVERIFIED."
+                        .to_string(),
+                ));
+            }
+            CompletionGate::AcceptClean => {}
+        }
+        gate
+    }
+
     /// Shared model↔tool inner loop used by both the primary turn and the autofix re-run.
     ///
     /// * `active_model` – the model to start with; updated by failover.
@@ -2699,52 +2803,17 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         //     verification pass with a calm "not tool-verified" note instead.
                         // `did_real_work` is cumulative over the whole turn; `inspected_this_turn`
                         // is whether the turn just observed ran an inspection tool.
-                        const MAX_VERIFY_ATTEMPTS: usize = 2;
                         let did_real_work =
                             inspect_ran.load(std::sync::atomic::Ordering::Relaxed) > 0;
-                        if verify_attempts > 0 && (inspected_this_turn || !did_real_work) {
-                            // Accept: a real check ran, OR there was no external work to tool-verify.
-                            if !inspected_this_turn && !did_real_work {
-                                self.presenter.emit(PresenterEvent::Warning(
-                                    "completion not tool-verified (no external artifacts to check) — accepting the reported result"
-                                        .to_string(),
-                                ));
-                            }
-                            // fall through to terminal
-                        } else if verify_attempts < MAX_VERIFY_ATTEMPTS {
-                            // Either the first "all done" claim (verify_attempts == 0), or a
-                            // work-producing turn that re-asserted done WITHOUT inspecting (the C8
-                            // hole) — force another tool-grounded verification.
-                            verify_attempts += 1;
-                            self.presenter.emit(PresenterEvent::Warning(format!(
-                                "all tasks reported done — verifying with a real state check before finishing ({verify_attempts}/{MAX_VERIFY_ATTEMPTS})"
-                            )));
-                            let nudge = "You reported every task Done. Before this turn can end, you \
-                                         MUST PROVE it: call an inspection tool that reads the real \
-                                         state — `mcp__forge__shell` (`git log`/`git tag`/`gh run \
-                                         list`/`gh release view`/`ls`/`cat`) or `mcp__forge__read_file` \
-                                         — and look at the actual output. Re-marking update_tasks is \
-                                         NOT verification; you must run a real check. If the output \
-                                         shows ANY task is not actually complete, mark it not done \
-                                         and finish it. (If a task has no external artifact to check — \
-                                         a pure analysis answer — say so and restate the result.) Only \
-                                         after confirming every task, state exactly what you checked and stop.";
-                            let nseq = self.next_seq();
-                            let _ =
-                                self.store
-                                    .add_message(&self.id, nseq, Role::System, nudge, None);
-                            self.transcript.push(Message::system(nudge));
+                        if self.run_completion_gate(
+                            &mut verify_attempts,
+                            did_real_work,
+                            inspected_this_turn,
+                        ) == CompletionGate::Reverify
+                        {
                             continue;
-                        } else {
-                            // Work was done but the verification turns never ran a real check (a
-                            // model that won't verify, e.g. one told to lie). Do NOT silently report
-                            // success — end LOUDLY flagging the completion as unverified.
-                            self.presenter.emit(PresenterEvent::Warning(
-                                "completion could NOT be tool-verified — the model reported done without \
-                                 inspecting real state. Treat this result as UNVERIFIED."
-                                    .to_string(),
-                            ));
                         }
+                        // else: accepted (clean / no-artifacts / unverified) — fall through to terminal.
                     }
                 } else {
                     // Honest-failure guard: a direct model wrote a tool call as TEXT (e.g.
@@ -2790,24 +2859,45 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         .filter(|t| !matches!(t.status, forge_types::TodoStatus::Done))
                         .count();
                     const MAX_CONTINUE_NUDGES: usize = 4;
-                    if unfinished > 0 && continue_nudges < MAX_CONTINUE_NUDGES {
-                        continue_nudges += 1;
-                        self.presenter.emit(PresenterEvent::Warning(format!(
-                            "model stopped with {unfinished} task(s) unfinished — continuing it ({continue_nudges}/{MAX_CONTINUE_NUDGES})"
-                        )));
-                        let nudge = "You ended your reply, but tasks on your list are NOT yet \
-                                     Done. The turn is not over — do not stop. Continue now: call \
-                                     the next tool to make progress on the remaining work. Only \
-                                     finish once every task is resolved; if one is genuinely \
-                                     complete or impossible, mark it Done via update_tasks and say \
-                                     why. Do not reply again without either calling a tool or \
-                                     marking a task Done.";
-                        let nseq = self.next_seq();
-                        let _ = self
-                            .store
-                            .add_message(&self.id, nseq, Role::System, nudge, None);
-                        self.transcript.push(Message::system(nudge));
-                        continue;
+                    if unfinished > 0 {
+                        // Work is still open — any earlier "all done" verification is stale.
+                        verify_attempts = 0;
+                        if continue_nudges < MAX_CONTINUE_NUDGES {
+                            continue_nudges += 1;
+                            self.presenter.emit(PresenterEvent::Warning(format!(
+                                "model stopped with {unfinished} task(s) unfinished — continuing it ({continue_nudges}/{MAX_CONTINUE_NUDGES})"
+                            )));
+                            let nudge = "You ended your reply, but tasks on your list are NOT yet \
+                                         Done. The turn is not over — do not stop. Continue now: call \
+                                         the next tool to make progress on the remaining work. Only \
+                                         finish once every task is resolved; if one is genuinely \
+                                         complete or impossible, mark it Done via update_tasks and say \
+                                         why. Do not reply again without either calling a tool or \
+                                         marking a task Done.";
+                            let nseq = self.next_seq();
+                            let _ =
+                                self.store
+                                    .add_message(&self.id, nseq, Role::System, nudge, None);
+                            self.transcript.push(Message::system(nudge));
+                            continue;
+                        }
+                    } else if !self.tasks.is_empty() {
+                        // Every tracked task reported Done — same completion authority as the bridge:
+                        // don't accept the model's say-so, force ONE tool-grounded state check first.
+                        // A self-reported "done" without an inspection is exactly the phantom-completion
+                        // the bridge gate guards against; the direct path had no such guard before.
+                        let did_real_work =
+                            inspect_ran.load(std::sync::atomic::Ordering::Relaxed) > 0;
+                        let inspected_this_turn =
+                            inspect_ran.load(std::sync::atomic::Ordering::Relaxed) > inspect_before;
+                        if self.run_completion_gate(
+                            &mut verify_attempts,
+                            did_real_work,
+                            inspected_this_turn,
+                        ) == CompletionGate::Reverify
+                        {
+                            continue;
+                        }
                     }
                 }
                 final_text = resp.content;
@@ -8547,6 +8637,57 @@ mod tests {
             None
         );
         assert_eq!(classify_tool_failure("file written"), None);
+    }
+
+    #[test]
+    fn completion_gate_forces_a_real_check_before_accepting_done() {
+        const MAX: usize = 2;
+        // First "all done" claim is never accepted — force a verification turn regardless of
+        // whether the turn happened to inspect (the claim itself hasn't been re-checked yet).
+        assert_eq!(
+            completion_gate(0, MAX, true, false),
+            CompletionGate::Reverify
+        );
+        assert_eq!(
+            completion_gate(0, MAX, true, true),
+            CompletionGate::Reverify
+        );
+        assert_eq!(
+            completion_gate(0, MAX, false, false),
+            CompletionGate::Reverify
+        );
+
+        // After ≥1 verification attempt: a turn that actually ran an inspection is accepted cleanly.
+        assert_eq!(
+            completion_gate(1, MAX, true, true),
+            CompletionGate::AcceptClean
+        );
+
+        // Work existed but the verification turn re-asserted done WITHOUT inspecting (the C8 hole):
+        // not yet at the cap, so force one more real check rather than accept.
+        assert_eq!(
+            completion_gate(1, MAX, true, false),
+            CompletionGate::Reverify
+        );
+
+        // No external artifacts to check (pure-analysis turn): accept with the calm note, since
+        // requiring a tool inspection would over-fire.
+        assert_eq!(
+            completion_gate(1, MAX, false, false),
+            CompletionGate::AcceptNoArtifacts
+        );
+
+        // Verification budget spent while real work existed and was never tool-checked: accept but
+        // flag UNVERIFIED rather than silently report success.
+        assert_eq!(
+            completion_gate(MAX, MAX, true, false),
+            CompletionGate::AcceptUnverified
+        );
+        // …but a turn that DID inspect at the cap is still a clean accept.
+        assert_eq!(
+            completion_gate(MAX, MAX, true, true),
+            CompletionGate::AcceptClean
+        );
     }
 
     #[test]
