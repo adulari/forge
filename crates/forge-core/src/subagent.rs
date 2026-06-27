@@ -288,6 +288,11 @@ pub async fn run_subagent(
     ctx: &AgentCtx,
     child_id: &str,
     agent: &ResolvedAgent,
+    // Routed ONCE by the caller (orchestrate) — that's the model its per-provider concurrency permit
+    // was acquired for. Re-routing here could pick a DIFFERENT provider (if another child benched the
+    // first in between), so the child would hold provider A's permit while hammering provider B,
+    // silently bypassing B's cap. Take the decision as a parameter to keep route↔permit consistent.
+    decision: RoutingDecision,
     budget: BudgetState,
     on_delta: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> Result<SubagentOutcome, CoreError> {
@@ -320,9 +325,7 @@ pub async fn run_subagent(
         specs.push(spawn_agents_spec(ctx.config.mesh.subagents.max_agents));
     }
 
-    // Routing: an agent type may pin a tier; otherwise route the task through the mesh.
-    let decision = route_child(ctx, agent, budget).await;
-
+    // `decision` is now a parameter (routed once by the caller); no second route_child here.
     let mut transcript = vec![Message::system(&agent.system_prompt), Message::user(task)];
     let mut seq: i64 = 0;
     let mut next_seq = || {
@@ -581,8 +584,10 @@ pub async fn orchestrate(
         let child_id = ctx
             .store
             .create_child_session(".", &mode_label, parent_id)?;
-        // Route up front (deterministic, no API call) so the panel shows the model immediately.
-        let child_model = route_child(ctx, &resolved, budget).await.model;
+        // Route up front (deterministic, no API call) so the panel shows the model immediately AND
+        // the child runs against the SAME model its provider permit is acquired for (routed once).
+        let decision = route_child(ctx, &resolved, budget).await;
+        let child_model = decision.model.clone();
         on_event(Lifecycle::Start {
             id: &child_id,
             agent: &resolved.name,
@@ -647,8 +652,15 @@ pub async fn orchestrate(
                 };
                 let _ = tx.send(ChildMsg::Progress { index: i, snippet });
             };
-            let outcome =
-                run_subagent(&child_ctx, &child_id, &resolved, budget, &mut on_delta).await;
+            let outcome = run_subagent(
+                &child_ctx,
+                &child_id,
+                &resolved,
+                decision,
+                budget,
+                &mut on_delta,
+            )
+            .await;
             let (mut text, mut ok) = match outcome {
                 Ok(out) => (out.final_text, out.ok),
                 Err(e) => (format!("error: subagent failed: {e}"), false),
@@ -968,9 +980,17 @@ mod tests {
             tier: None,
         };
         let mut sink = |_: StreamEvent| {};
-        let out = run_subagent(&ctx, &child, &agent, BudgetState::default(), &mut sink)
-            .await
-            .expect("subagent must recover via failover, not error");
+        let decision = route_child(&ctx, &agent, BudgetState::default()).await;
+        let out = run_subagent(
+            &ctx,
+            &child,
+            &agent,
+            decision,
+            BudgetState::default(),
+            &mut sink,
+        )
+        .await
+        .expect("subagent must recover via failover, not error");
         assert!(out.ok, "subagent succeeded on the fallback");
         assert_eq!(out.final_text, "child done");
         assert!(
