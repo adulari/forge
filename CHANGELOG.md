@@ -6,6 +6,16 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.48] - 2026-06-27
+
+### Docs
+- **`docs/harness/why-forge-is-a-better-harness.md`** — the honest, test-backed case that Forge's
+  harness beats the loop inside the raw CLI it wraps: a failure-mode table where every row cites a
+  deterministic conformance test, the fair-accounted N=20 SWE-bench resolve numbers, the routing/
+  failover/permission features the raw CLIs lack, and a plain statement of where Forge does NOT win
+  (raw token efficiency). Linked from the README. No new claims — every row maps to an existing test
+  or measured result.
+
 ## [0.4.47] - 2026-06-27
 
 ### Added
