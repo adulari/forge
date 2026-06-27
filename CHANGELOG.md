@@ -6,6 +6,14 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.68] - 2026-06-27
+
+### Tests (harness quality)
+- **Pinned that `mesh.self_review` still fires when enabled.** The self-review pass is off by default
+  (it regressed when on-by-default) but must stay wired; added `self_review_runs_after_an_edit_turn_when_enabled`
+  so the gated feature can't silently rot. (Also confirmed the autofix iteration-cap is already
+  test-pinned by `autofix_iteration_cap_halts_the_self_heal_loop` — the v1.0 plan's "TODO" for it was stale.)
+
 ## [0.4.67] - 2026-06-27
 
 ### Changed (store — connection pool)
