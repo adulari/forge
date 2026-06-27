@@ -9849,6 +9849,57 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `mesh.self_review` is off by default (it regressed when on-by-default), but must stay WIRED:
+    /// when enabled, a turn that edited runs a review pass that re-checks the diff before finishing.
+    /// Pin that it actually fires + announces itself, so the gated feature can't silently rot.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn self_review_runs_after_an_edit_turn_when_enabled() {
+        let dir = std::env::temp_dir().join(format!("forge-selfreview-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("f.py");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        // MeshConfig has no `Default` (Config builds it explicitly), so take the default mesh and
+        // flip just `self_review`.
+        let base_mesh = Config::default().mesh;
+        let config = Config {
+            permission_mode: forge_types::PermissionMode::AcceptEdits, // auto-allow the write
+            mesh: forge_config::MeshConfig {
+                self_review: true,
+                ..base_mesh
+            },
+            ..Config::default()
+        };
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(EditOnceThenDoneProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                path: path.to_string_lossy().into_owned(),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools(),
+            Box::new(capture),
+            config,
+            ".",
+        )
+        .unwrap();
+
+        session.run_turn("write the file").await.unwrap();
+
+        let warned = events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("self-review")));
+        assert!(
+            warned,
+            "the self-review pass must run + announce itself when mesh.self_review is enabled"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn autofix_stage_skipped_when_no_edits() {
