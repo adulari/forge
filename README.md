@@ -14,6 +14,10 @@ is down, and is *measurably* more reliable than the raw vendor CLIs.**
 [![Built with Rust](https://img.shields.io/badge/built_with-Rust-dea584.svg)](https://www.rust-lang.org/)
 [![Conformance tests](https://img.shields.io/badge/harness_conformance-324_tests-brightgreen.svg)](docs/harness/why-forge-is-a-better-harness.md)
 
+<br>
+
+**[🚀 Install](#install)** &nbsp;·&nbsp; **[⚡ Quickstart](#quick-start)** &nbsp;·&nbsp; **[🧠 Why Forge](#why-forge)** &nbsp;·&nbsp; **[📊 Benchmarks](#benchmarks)** &nbsp;·&nbsp; **[⚔️ vs. Others](#comparison)** &nbsp;·&nbsp; **[✨ Features](#feature-overview)** &nbsp;·&nbsp; **[📚 Docs](#documentation)**
+
 </div>
 
 <p align="center">
@@ -55,6 +59,8 @@ a measurable, not marketing, advantage.
 
 ---
 
+<a id="benchmarks"></a>
+
 ## 📊 Proof: same model, better results
 
 The honest test of a harness: run the **same model** Forge bridges (`claude sonnet`) *through* Forge
@@ -76,6 +82,8 @@ the current build; the larger N=20 run holds the same direction (11 vs 9).
 > section**: **[Why Forge is a better harness →](docs/harness/why-forge-is-a-better-harness.md)**
 
 ---
+
+<a id="comparison"></a>
 
 ## ⚔️ Forge vs. the alternatives
 
