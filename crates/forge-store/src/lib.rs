@@ -510,7 +510,7 @@ impl Store {
         let (i, o): (i64, i64) = conn.query_row(
             "SELECT COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0)
              FROM usage u JOIN message m ON m.id = u.message_id
-             WHERE m.session_id = ?1",
+             WHERE m.session_id = ?1 AND m.active = 1",
             [session_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
@@ -524,7 +524,7 @@ impl Store {
         let conn = self.lock()?;
         let n: i64 = conn.query_row(
             "SELECT COUNT(*) FROM usage u JOIN message m ON m.id = u.message_id
-             WHERE m.session_id = ?1",
+             WHERE m.session_id = ?1 AND m.active = 1",
             [session_id],
             |r| r.get(0),
         )?;
@@ -2300,6 +2300,45 @@ mod tests {
             2,
             "message_count excludes soft-deleted messages"
         );
+    }
+
+    #[test]
+    fn session_tokens_and_step_count_exclude_deactivated_messages() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        let m1 = store.add_message(&sid, 0, Role::User, "q", None).unwrap();
+        store
+            .record_usage(
+                &sid,
+                &m1,
+                &Usage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let m2 = store
+            .add_message(&sid, 1, Role::Assistant, "a", Some("m"))
+            .unwrap();
+        store
+            .record_usage(
+                &sid,
+                &m2,
+                &Usage {
+                    input_tokens: 20,
+                    output_tokens: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(store.session_step_count(&sid).unwrap(), 2);
+        assert_eq!(store.session_tokens(&sid).unwrap(), (30, 15));
+
+        // Undo turn 2: its usage must drop out of both the token counter and the steps metric.
+        store.deactivate_messages_from(&sid, 1).unwrap();
+        assert_eq!(store.session_step_count(&sid).unwrap(), 1);
+        assert_eq!(store.session_tokens(&sid).unwrap(), (10, 5));
     }
 
     #[test]

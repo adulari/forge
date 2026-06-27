@@ -640,9 +640,13 @@ fn strip_ansi(s: &str) -> String {
                         break;
                     }
                 }
-            } else {
-                // other escape (e.g. ESC c, ESC =): drop the next char defensively
-                chars.next();
+            } else if let Some(next) = chars.next() {
+                // other escape: drop the next char defensively (ESC c, ESC =). For the 3-byte
+                // charset-designation form `ESC <intermediate 0x20-0x2f> <final>` (e.g. `ESC ( B`,
+                // emitted by ncurses/box-drawing tools) drop the final byte too, or it leaks.
+                if ('\x20'..='\x2f').contains(&next) {
+                    chars.next();
+                }
             }
         } else {
             out.push(c);
@@ -700,6 +704,16 @@ mod tests {
         // OSC (ESC ] … BEL/ST) used to leak its payload — only `]` was dropped.
         assert_eq!(strip_ansi("\x1b]0;my title\x07hello"), "hello"); // BEL-terminated
         assert_eq!(strip_ansi("\x1b]8;;http://x\x1b\\link"), "link"); // ST-terminated hyperlink
+    }
+
+    #[test]
+    fn strip_ansi_drops_three_byte_charset_sequences() {
+        // `ESC ( B` / `ESC ) 0` (charset designation, emitted by ncurses/box-drawing tools) are
+        // 3 bytes — the final byte used to leak. 2-byte escapes (ESC c, ESC =) must still work.
+        assert_eq!(strip_ansi("\x1b(Btext"), "text");
+        assert_eq!(strip_ansi("\x1b)0text"), "text");
+        assert_eq!(strip_ansi("\x1b=text"), "text");
+        assert_eq!(strip_ansi("\x1bctext"), "text");
     }
 
     #[test]

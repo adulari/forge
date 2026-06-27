@@ -169,7 +169,14 @@ fn parse_span(span: &str, idx: usize) -> Option<ToolCall> {
     let mut rest = span;
     while let Some(p) = rest.find("<parameter") {
         let after = &rest[p..];
-        let pname = attr_value(after, "name")?;
+        // A `<parameter>` with no name attribute must SKIP that tag, not abort the whole call —
+        // otherwise one malformed param drops a recovered tool call and the bridge phantom-succeeds.
+        // (Sister fn parse_parameter_tags already honors this contract.)
+        let Some(pname) = attr_value(after, "name") else {
+            let Some(gt) = after.find('>') else { break };
+            rest = &after[gt + 1..];
+            continue;
+        };
         let gt = after.find('>')? + 1;
         let val_end = after.find("</parameter>")?;
         // A malformed open tag (no closing `>`) makes the first `>` land INSIDE `</parameter>`, so
@@ -335,6 +342,20 @@ mod tests {
         assert_eq!(calls[0].args["n"], 5);
         assert_eq!(calls[0].args["msg"], "hello world");
         assert_eq!(calls[0].args["on"], true);
+    }
+
+    #[test]
+    fn nameless_parameter_tag_does_not_drop_the_whole_call() {
+        // A `<parameter>` with no name must be SKIPPED, not abort the recovered call — otherwise one
+        // malformed param drops the tool call and the bridge phantom-succeeds.
+        let text = "<invoke name=\"shell\">\
+            <parameter>no_name_here</parameter>\
+            <parameter name=\"command\">ls -la</parameter></invoke>";
+        let (calls, cleaned) = recover_text_tool_calls(text);
+        assert_eq!(calls.len(), 1, "call survives one nameless parameter");
+        assert_eq!(calls[0].name, "shell");
+        assert_eq!(calls[0].args["command"], "ls -la");
+        assert!(!cleaned.contains("<invoke"));
     }
 
     #[test]
