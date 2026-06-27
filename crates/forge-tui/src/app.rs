@@ -390,6 +390,10 @@ pub struct App {
     /// Screen geometry of the floating "jump to bottom" bar (row, col0, width) when shown, for
     /// click hit-testing. `None` when at the bottom (bar hidden).
     jump_bar_geom: std::cell::Cell<Option<(u16, u16, u16)>>,
+    /// Full-screen viewer scroll geometry `(wrapped_len, body_h)` of the selected entry, written by
+    /// the (immutable-`&self`) render path so `viewer_key` can re-enable follow when the user scrolls
+    /// back to the bottom (it has no other way to know the wrapped length at keypress time).
+    viewer_geom: std::cell::Cell<Option<(usize, u16)>>,
     /// Active text selection in transcript coords: (wrapped_row, col) anchor + cursor. `None` when
     /// nothing is selected. Highlighted in the transcript and copied to the clipboard on release.
     selection: Option<(TextPos, TextPos)>,
@@ -1747,6 +1751,9 @@ impl App {
     /// is open). Esc closes it. ↑↓/PgUp/PgDn scroll, ←→/Tab switch entry, g/G top/tail.
     pub fn viewer_key(&mut self, key: KeyKind) -> bool {
         let n = self.activity_len().max(1);
+        // Read render-recorded scroll geometry BEFORE the mutable borrow of `viewer` (Cell::get
+        // needs `&self`). Lets a downward scroll that reaches the tail re-arm follow.
+        let geom = self.viewer_geom.get();
         let Some(v) = self.viewer.as_mut() else {
             return false;
         };
@@ -1756,12 +1763,18 @@ impl App {
                 v.follow = false;
                 v.scroll = v.scroll.saturating_sub(1);
             }
-            KeyKind::Down => v.scroll = v.scroll.saturating_add(1),
+            KeyKind::Down => {
+                v.scroll = v.scroll.saturating_add(1);
+                Self::viewer_refollow_at_tail(v, geom);
+            }
             KeyKind::PageUp => {
                 v.follow = false;
                 v.scroll = v.scroll.saturating_sub(10);
             }
-            KeyKind::PageDown => v.scroll = v.scroll.saturating_add(10),
+            KeyKind::PageDown => {
+                v.scroll = v.scroll.saturating_add(10);
+                Self::viewer_refollow_at_tail(v, geom);
+            }
             KeyKind::Home => {
                 v.follow = false;
                 v.scroll = 0;
@@ -1785,7 +1798,10 @@ impl App {
                 v.follow = false;
                 v.scroll = v.scroll.saturating_sub(1);
             }
-            KeyKind::Char('j') | KeyKind::Char(' ') => v.scroll = v.scroll.saturating_add(1),
+            KeyKind::Char('j') | KeyKind::Char(' ') => {
+                v.scroll = v.scroll.saturating_add(1);
+                Self::viewer_refollow_at_tail(v, geom);
+            }
             KeyKind::Char('g') => {
                 v.follow = false;
                 v.scroll = 0;
@@ -1797,6 +1813,19 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    /// When a downward scroll reaches the tail (last full page), clamp and re-arm follow so new
+    /// activity auto-tails again — matching the full-screen browser (transcript.rs) and `End`/`G`.
+    /// `geom` is `(wrapped_len, body_h)` recorded by the render path; absent → leave follow as-is.
+    fn viewer_refollow_at_tail(v: &mut ViewerState, geom: Option<(usize, u16)>) {
+        if let Some((wrapped_len, body_h)) = geom {
+            let max_scroll = wrapped_len.saturating_sub(body_h as usize);
+            if v.scroll >= max_scroll {
+                v.scroll = max_scroll;
+                v.follow = true;
+            }
+        }
     }
 
     /// Clear the full-screen transcript (`/clear`, `/new`): wipe the rendered log, the activity
@@ -1982,10 +2011,23 @@ impl App {
         let ((r0, c0), (r1, c1)) = if a <= b { (a, b) } else { (b, a) };
         let width = self.transcript_geom.get()?.width;
         self.ensure_wrapped_main(width);
+        self.ensure_stream_cache(width);
         let cache = self.wrap_cache.borrow();
+        let stream = self.stream_cache.borrow();
+        let committed = cache.rows.len();
         let mut out = String::new();
         for r in r0..=r1 {
-            let Some(line) = cache.rows.get(r) else { break };
+            // The rendered transcript is the committed wrap-cache followed by the live streaming
+            // edge; a selection can span that boundary, so pull each row from whichever side it
+            // falls in. Without the streaming side, a copy ending in the in-flight reply was cut off.
+            let line = if r < committed {
+                cache.rows.get(r)
+            } else if self.streaming_active {
+                stream.rows.get(r - committed)
+            } else {
+                None
+            };
+            let Some(line) = line else { break };
             let chars: Vec<char> = line.spans.iter().flat_map(|s| s.content.chars()).collect();
             // c0/c1 are CELL columns; convert to char indices so wide glyphs don't drift the bounds.
             let start_cell = if r == r0 { c0 as usize } else { 0 };
@@ -2482,6 +2524,16 @@ pub fn render_live(frame: &mut Frame, app: &App) {
         let views = app.activity_views();
         let scroll = if v.follow { usize::MAX / 2 } else { v.scroll };
         let a = frame.area();
+        // Record the scroll geometry so `viewer_key` can re-enable follow at the tail. `body_h`
+        // mirrors `transcript_lines` (2 header + 1 footer rows reserved).
+        let wrapped_len = views
+            .get(v.selected)
+            .map(|view| {
+                crate::transcript::wrap_lines(&view.lines, a.width.saturating_sub(1) as usize).len()
+            })
+            .unwrap_or(0);
+        let body_h = a.height.saturating_sub(3).max(1);
+        app.viewer_geom.set(Some((wrapped_len, body_h)));
         frame.render_widget(
             Paragraph::new(crate::transcript::transcript_lines(
                 &views, v.selected, scroll, a.height, a.width,
@@ -2490,6 +2542,7 @@ pub fn render_live(frame: &mut Frame, app: &App) {
         );
         return;
     }
+    app.viewer_geom.set(None);
     const MIN_STREAM: u16 = 1;
     // The input box grows with wrapped/multiline content (capped); the stream area absorbs the
     // change, so the inline viewport's total height is untouched (never resized at runtime).
@@ -4812,6 +4865,57 @@ mod tests {
         assert!(
             input_text_rows(&wide, 80) > input_text_rows(&narrow, 80),
             "wide glyphs must occupy more wrapped rows than the same count of ascii"
+        );
+    }
+
+    #[test]
+    fn viewer_down_at_tail_reenables_follow() {
+        // Bug-hunt 6 (deferred): the inline viewer never re-armed follow on a downward scroll.
+        let mut app = App {
+            viewer: Some(ViewerState {
+                selected: 0,
+                scroll: 79,
+                follow: false,
+            }),
+            ..Default::default()
+        };
+        app.viewer_geom.set(Some((100, 20))); // wrapped_len=100, body_h=20 → max_scroll=80
+        app.viewer_key(KeyKind::Down); // 79 → 80 reaches the tail
+        let v = app.viewer.as_ref().unwrap();
+        assert!(v.follow, "reaching the tail must re-arm follow");
+        assert_eq!(v.scroll, 80, "scroll clamps to the tail");
+        app.viewer_key(KeyKind::Up);
+        assert!(
+            !app.viewer.as_ref().unwrap().follow,
+            "scrolling up pauses follow again"
+        );
+    }
+
+    #[test]
+    fn selection_spans_committed_and_streaming_rows() {
+        // Bug-hunt 6 (deferred): a copy that ran into the live streaming reply was cut at the
+        // committed/stream boundary because `selection_text` only read the wrap cache.
+        let app = App {
+            main_log: vec![TextLine::from("AAA")],
+            streaming: "BBB".to_string(),
+            streaming_active: true,
+            // Select committed row 0 ("AAA") through the whole streaming row 1.
+            selection: Some(((0, 0), (1, 100))),
+            ..Default::default()
+        };
+        app.transcript_geom.set(Some(TranscriptGeom {
+            col0: 0,
+            row0: 0,
+            width: 80,
+            height: 24,
+            scroll: 0,
+        }));
+        let sel = app
+            .selection_text()
+            .expect("a selection spanning the boundary yields text");
+        assert!(
+            sel.contains("AAA") && sel.contains("BBB"),
+            "selection must include the streaming tail, got: {sel:?}"
         );
     }
 
