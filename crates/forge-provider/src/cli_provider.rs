@@ -277,6 +277,13 @@ pub struct CliProvider {
     /// session-reload cost. Default on for claude; `FORGE_PERSISTENT_BRIDGE=0` or
     /// [`with_persistent(false)`](Self::with_persistent) opts out. Falls back to the one-shot path
     /// whenever the live session can't be (re)established BEFORE any turn output.
+    ///
+    /// **Why claude-only** (probed 2026-06-27, codex 0.141 / agy 1.0.12; see
+    /// docs/features/persistent-bridge-transport.md):
+    /// - **agy** has no streaming-input mode at all — only `--print` (one prompt, then exits).
+    /// - **codex** `exec` reads stdin once then exits; its `exec-server --listen stdio` speaks
+    ///   JSON-RPC but is an unimplemented STUB — every turn method (`thread/new`, …) returns
+    ///   `-32601 "exec-server stub does not implement … yet"`. Blocked upstream, not on us.
     persistent: bool,
     /// The live persistent session, if one is running (claude only). A `tokio` mutex because the
     /// guard is held across the turn's stdout read (an `.await`); one turn at a time per provider,
