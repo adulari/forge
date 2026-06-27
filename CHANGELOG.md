@@ -6,6 +6,28 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.62] - 2026-06-27
+
+### Fixed (bug-hunt batch 7 — provider + store + tools)
+- **A nameless `<parameter>` no longer drops a whole recovered tool call.** `tool_recovery::parse_span`
+  used `attr_value(after, "name")?`, so a `<parameter>` with no `name` aborted the entire `<invoke>` —
+  the recovered call vanished and the bridge phantom-succeeds (the exact failure prose-recovery exists
+  to prevent). It now skips the malformed tag and continues, matching `parse_parameter_tags`' contract.
+  Test: `nameless_parameter_tag_does_not_drop_the_whole_call`.
+- **Session token / step counts exclude soft-deleted messages.** `session_tokens` and
+  `session_step_count` joined `usage`→`message` on `session_id` only, so undone/compacted (`active=0`)
+  turns still inflated the live TUI token counter and the Lattice "steps" benchmark metric. Added
+  `AND m.active = 1`, consistent with every other session-scoped query. Test:
+  `session_tokens_and_step_count_exclude_deactivated_messages`.
+- **`strip_ansi` no longer leaks a byte from 3-byte charset-designation escapes.** `ESC ( B` / `ESC ) 0`
+  (emitted by ncurses/box-drawing tools — tree, pagers, top) are 3 bytes; only 2 were consumed, leaking
+  the final byte into model-facing output. The final byte is dropped when the post-`ESC` byte is an
+  intermediate `0x20..=0x2f`; 2-byte escapes (`ESC c`, `ESC =`) are unaffected. Test:
+  `strip_ansi_drops_three_byte_charset_sequences`.
+
+(A 4th candidate — `watch.rs should_reindex` treating `./`-prefixed paths as dot-dirs — was triaged
+real-but-lower-certainty and deferred.)
+
 ## [0.4.61] - 2026-06-27
 
 ### Fixed (bug-hunt batch 6 — TUI)
