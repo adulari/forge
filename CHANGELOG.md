@@ -6,6 +6,16 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.56] - 2026-06-27
+
+### Fixed (bug-hunt batch 3 — config)
+- **A stdio MCP server's extra secret env vars were silently dropped.** `server_from_json` keyed the
+  captured secret by the server NAME and `McpAuth` has one keyring slot per server (`mcp:<name>`), so
+  a stdio server declaring two secret env vars had the first silently overwritten by the second
+  (last-wins). Now the first is kept deterministically and any extra is flagged loudly in the import
+  notes — and never dropped into plain env (which would expose it). Multiple secrets need separate
+  servers. Test: `stdio_server_with_two_secret_envs_keeps_one_and_flags_the_extra`.
+
 ## [0.4.55] - 2026-06-27
 
 ### Fixed (bug-hunt batch 3 — index cross-repo contamination)

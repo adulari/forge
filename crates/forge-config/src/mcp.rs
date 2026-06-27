@@ -246,6 +246,18 @@ fn server_from_json(name: &str, spec: &serde_json::Value, out: &mut ParsedServer
             for (k, v) in env_obj {
                 let val = v.as_str().unwrap_or("");
                 if looks_secret(k) && !val.is_empty() {
+                    // One keyring slot per server (`mcp:<name>`), so only the FIRST secret env can be
+                    // stored. A second one used to SILENTLY overwrite the first (last-wins) — now it's
+                    // kept deterministically (first-wins) and any extra is flagged loudly, NOT dropped
+                    // into plain env (which would expose it). Multiple secrets need separate servers.
+                    if auth.is_some() {
+                        out.notes.push(format!(
+                            "server '{name}': IGNORING extra secret env '{k}' — a stdio server has \
+                             one keyring slot ('{keyring_key}'), already used. Split into separate \
+                             servers (one secret each) so '{k}' isn't lost."
+                        ));
+                        continue;
+                    }
                     // Capture the value for the keyring; reference it by env-var name. At connect,
                     // the resolved token is injected into the child's env under `k`.
                     out.secrets.insert(name.to_string(), val.to_string());
@@ -710,6 +722,36 @@ Authorization = "Bearer SECRET-TOKEN"
             .map(String::as_str);
         assert_eq!(helm_secret, Some("X"));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn stdio_server_with_two_secret_envs_keeps_one_and_flags_the_extra() {
+        // A stdio server has ONE keyring slot. Two secret env vars used to silently last-wins; now
+        // exactly one is stored and the extra is flagged (not dropped into plain env where it'd leak).
+        let root = serde_json::json!({ "mcpServers": {
+            "multi": {
+                "command": "run-it",
+                "env": { "API_KEY": "k1", "AUTH_TOKEN": "k2" }
+            }
+        }});
+        let p = servers_from_json(&root);
+        assert!(
+            p.secrets.contains_key("multi"),
+            "the first secret is still captured"
+        );
+        let server = p.servers.iter().find(|s| s.name == "multi").unwrap();
+        // Neither secret leaks into plain env.
+        if let McpTransport::Stdio { env, .. } = &server.transport {
+            assert!(!env.contains_key("API_KEY"));
+            assert!(!env.contains_key("AUTH_TOKEN"));
+        } else {
+            panic!("stdio");
+        }
+        assert!(
+            p.notes.iter().any(|n| n.contains("IGNORING extra secret")),
+            "the extra secret must be flagged loudly; notes: {:?}",
+            p.notes
+        );
     }
 
     #[test]
