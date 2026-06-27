@@ -6,6 +6,17 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.55] - 2026-06-27
+
+### Fixed (bug-hunt batch 3 — index cross-repo contamination)
+- **Lattice PageRank + repo-map were not scoped to the project.** The store is global (one DB across
+  every project), but `recompute_pagerank` and the repo-map ran UNSCOPED queries
+  (`lattice_node_ids_and_names`, `lattice_ref_edges`, `lattice_nodes_ranked`) that scanned every
+  project's rows. So a reference to `foo` in projectA distributed PageRank to all `foo` nodes across
+  ALL projects, and projectB's map could list projectA's symbols. All three queries now take a
+  `repo_root` and `JOIN lattice_file … WHERE f.repo_root = ?` — matching the already-scoped impact/ref
+  queries. Test: `map_and_pagerank_are_scoped_to_their_own_repo_root`.
+
 ## [0.4.54] - 2026-06-27
 
 ### Fixed (bug-hunt batch 3 — mcp, index, skills)
