@@ -6,6 +6,16 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.64] - 2026-06-27
+
+### Docs
+- **Persistent bridge transport scope documented** (`docs/features/persistent-bridge-transport.md`):
+  why P1 is claude-only. Probed all three CLIs — **agy** 1.0.12 has no streaming-input mode (only
+  one-shot `--print`); **codex** 0.141 `exec-server --listen stdio` speaks JSON-RPC but is an
+  unimplemented STUB (`initialize` works, but every turn method returns `-32601 "exec-server stub
+  does not implement … yet"`), so a persistent codex transport is blocked upstream, not on Forge.
+  Recorded the same on the `CliProvider::persistent` field so it reads as deliberate.
+
 ## [0.4.63] - 2026-06-27
 
 ### Added (P1 — persistent bridge transport)
