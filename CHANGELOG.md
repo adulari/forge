@@ -6,6 +6,21 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.67] - 2026-06-27
+
+### Changed (store — connection pool)
+- **`forge-store` moved from a single `Mutex<Connection>` to an `r2d2` connection pool**, so the TUI
+  run loop, subagents, and the lattice indexer no longer serialize every read behind one lock —
+  WAL-backed file DBs now serve concurrent reads from separate pooled connections. Writes still
+  serialize (SQLite's one-writer rule) but wait on the existing `busy_timeout` instead of failing.
+  - To avoid `r2d2_sqlite` (which pins an older `rusqlite`/`libsqlite3-sys` and would link a second
+    bundled SQLite), the pool uses a hand-rolled `ManageConnection` over our `rusqlite` 0.40 that
+    applies the per-connection pragmas on every open.
+  - In-memory stores (tests) pin to a single never-recycled connection — each `:memory:` open is a
+    fresh empty DB, so recycling would silently lose data. All 35 store tests pass, plus a new
+    `pool_handles_concurrent_threads_on_a_file_db` (8 threads × 20 writes land with no
+    "database is locked"). The public `Store` API is unchanged.
+
 ## [0.4.66] - 2026-06-27
 
 ### Fixed (TUI — the two deferred bug-hunt-6 bugs)

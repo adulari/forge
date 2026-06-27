@@ -3,7 +3,6 @@
 //! All persistence in Forge goes through this crate.
 
 use std::path::Path;
-use std::sync::Mutex;
 
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, TimeZone};
 use forge_types::{Role, TaskTier, ToolCall, Usage};
@@ -82,6 +81,8 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
     #[error("store lock poisoned")]
     Lock,
+    #[error("connection pool: {0}")]
+    Pool(String),
     #[error("portable metadata JSON: {0}")]
     Json(String),
 }
@@ -123,7 +124,48 @@ fn json_to_sql_value(v: &serde_json::Value) -> rusqlite::types::Value {
 pub type ModelPriceRow = (String, f64, f64, Option<f64>);
 
 pub struct Store {
-    conn: Mutex<Connection>,
+    pool: r2d2::Pool<SqliteManager>,
+}
+
+/// How the pool opens a fresh connection. `:memory:` makes a DISTINCT empty DB on every open, so an
+/// in-memory pool is pinned to a single never-recycled connection (see [`Store::build`]).
+#[derive(Clone)]
+enum ConnSource {
+    File(std::path::PathBuf),
+    Memory,
+}
+
+/// An [`r2d2::ManageConnection`] over OUR `rusqlite` 0.40. Hand-rolled instead of pulling
+/// `r2d2_sqlite`, which pins an older `rusqlite`/`libsqlite3-sys` and would link a SECOND bundled
+/// SQLite (symbol clash). Applies the per-connection pragmas (busy_timeout, foreign_keys) every time
+/// the pool opens a connection, so a pooled read carries the same settings the old single conn did.
+struct SqliteManager {
+    source: ConnSource,
+}
+
+impl r2d2::ManageConnection for SqliteManager {
+    type Connection = Connection;
+    type Error = rusqlite::Error;
+
+    fn connect(&self) -> std::result::Result<Connection, rusqlite::Error> {
+        let conn = match &self.source {
+            ConnSource::File(p) => Connection::open(p)?,
+            ConnSource::Memory => Connection::open_in_memory()?,
+        };
+        // WAL still allows only one writer; without a busy_timeout a concurrent writer (the TUI vs
+        // the mcp-serve bridge, or now two pooled connections) hits SQLITE_BUSY immediately.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(conn)
+    }
+
+    fn is_valid(&self, conn: &mut Connection) -> std::result::Result<(), rusqlite::Error> {
+        conn.execute_batch("SELECT 1")
+    }
+
+    fn has_broken(&self, _conn: &mut Connection) -> bool {
+        false
+    }
 }
 
 /// Migrate `subscription_usage` from its old single-column PK to the composite
@@ -171,45 +213,65 @@ fn migrate_subscription_usage(conn: &Connection) -> rusqlite::Result<()> {
 impl Store {
     /// Open (creating if needed) a database file and run migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let conn = Connection::open(path)?;
-        Self::init(conn)
+        Self::build(ConnSource::File(path.as_ref().to_path_buf()))
     }
 
     /// In-memory store, primarily for tests.
     pub fn open_in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
+        Self::build(ConnSource::Memory)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
-        conn.pragma_update(None, "journal_mode", "WAL")?;
-        conn.pragma_update(None, "foreign_keys", "ON")?;
-        // Forge runs multiple processes against the same global db (the TUI plus the
-        // `mcp-serve` bridge subprocess). WAL still allows only one writer at a time, so a
-        // concurrent writer hits SQLITE_BUSY immediately without this — surfacing as
-        // "database is locked" and, in the field, a mid-turn session crash. Wait instead.
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        // Migrate before schema so old DBs get the composite PK before CREATE TABLE IF NOT EXISTS no-ops.
-        let _ = migrate_subscription_usage(&conn);
-        conn.execute_batch(schema::SCHEMA)?;
-        // Best-effort migrations for databases created before these columns existed
-        // (errors on already-present columns are expected and ignored).
-        for stmt in [
-            "ALTER TABLE message ADD COLUMN tool_calls_json TEXT",
-            "ALTER TABLE message ADD COLUMN tool_call_id TEXT",
-            "ALTER TABLE message ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
-            "ALTER TABLE session ADD COLUMN parent_session_id TEXT",
-            "ALTER TABLE session ADD COLUMN view_snapshot TEXT",
-            "ALTER TABLE lattice_node ADD COLUMN pagerank REAL NOT NULL DEFAULT 0.0",
-        ] {
-            let _ = conn.execute(stmt, []);
+    fn build(source: ConnSource) -> Result<Self> {
+        let in_memory = matches!(source, ConnSource::Memory);
+        let manager = SqliteManager { source };
+        let builder = r2d2::Pool::builder().test_on_check_out(false);
+        // A small pool lets WAL reads run concurrently instead of serializing behind a single mutex
+        // (the TUI run loop, subagents, and the lattice indexer all touch the store). An in-memory
+        // store, by contrast, is pinned to ONE connection that is never recycled — every `:memory:`
+        // open is a fresh empty DB, so dropping/recreating it would silently lose all data.
+        let pool = if in_memory {
+            builder
+                .max_size(1)
+                .min_idle(Some(1))
+                .idle_timeout(None)
+                .max_lifetime(None)
+                .build(manager)
+        } else {
+            builder.max_size(8).build(manager)
         }
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        .map_err(|e| StoreError::Pool(e.to_string()))?;
+
+        // Run migrations ONCE on a single pooled connection (for in-memory this is THE connection).
+        // File DBs persist `journal_mode = WAL` and the schema, so later pooled connections inherit
+        // them; per-connection pragmas (busy_timeout, foreign_keys) are set in `SqliteManager`.
+        {
+            let conn = pool.get().map_err(|e| StoreError::Pool(e.to_string()))?;
+            if !in_memory {
+                conn.pragma_update(None, "journal_mode", "WAL")?;
+            }
+            // Migrate before schema so old DBs get the composite PK before CREATE TABLE IF NOT EXISTS no-ops.
+            let _ = migrate_subscription_usage(&conn);
+            conn.execute_batch(schema::SCHEMA)?;
+            // Best-effort migrations for databases created before these columns existed
+            // (errors on already-present columns are expected and ignored).
+            for stmt in [
+                "ALTER TABLE message ADD COLUMN tool_calls_json TEXT",
+                "ALTER TABLE message ADD COLUMN tool_call_id TEXT",
+                "ALTER TABLE message ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE session ADD COLUMN parent_session_id TEXT",
+                "ALTER TABLE session ADD COLUMN view_snapshot TEXT",
+                "ALTER TABLE lattice_node ADD COLUMN pagerank REAL NOT NULL DEFAULT 0.0",
+            ] {
+                let _ = conn.execute(stmt, []);
+            }
+        }
+        Ok(Self { pool })
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
-        self.conn.lock().map_err(|_| StoreError::Lock)
+    /// Check out a pooled connection. Named `lock` for continuity with the call sites; the returned
+    /// `PooledConnection` derefs to `rusqlite::Connection` and returns itself to the pool on drop.
+    fn lock(&self) -> Result<r2d2::PooledConnection<SqliteManager>> {
+        self.pool.get().map_err(|e| StoreError::Pool(e.to_string()))
     }
 
     /// Export machine-agnostic model metadata (health cooldowns, context windows, pricing) as JSON,
@@ -2719,6 +2781,42 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         assert!(store.benched_models(500).unwrap().is_benched("m"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pool_handles_concurrent_threads_on_a_file_db() {
+        // The connection pool must let several threads touch the store at once (file DB + WAL +
+        // busy_timeout) without "database is locked" — the point of moving off one Mutex<Connection>.
+        use std::sync::Arc;
+        let dir = std::env::temp_dir().join(forge_types::new_id());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("forge.db");
+        let store = Arc::new(Store::open(&path).unwrap());
+        let sid = store.create_session("/tmp", "default").unwrap();
+
+        let mut handles = Vec::new();
+        for t in 0..8i64 {
+            let s = Arc::clone(&store);
+            let sid = sid.clone();
+            handles.push(std::thread::spawn(move || {
+                for j in 0..20i64 {
+                    s.list_sessions().unwrap();
+                    s.message_count(&sid).unwrap();
+                    // Unique seq per (thread, iter) so concurrent writers don't collide on the PK.
+                    s.add_message(&sid, t * 100 + j, Role::User, "x", None)
+                        .unwrap();
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            store.message_count(&sid).unwrap(),
+            160,
+            "all 8×20 concurrent writes landed"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
