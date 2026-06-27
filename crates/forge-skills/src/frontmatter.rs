@@ -44,7 +44,7 @@ pub fn split(raw: &str) -> (Option<&str>, &str) {
     let rest = &s[lead..];
     let first_line_len = rest.find('\n').map(|i| i + 1).unwrap_or(rest.len());
     if rest[..first_line_len].trim_end() != "---" {
-        return (None, raw);
+        return (None, s); // `s`, not `raw` — keep the BOM stripped out of the body
     }
     let fm_start = lead + first_line_len;
     let after = &s[fm_start..];
@@ -58,7 +58,7 @@ pub fn split(raw: &str) -> (Option<&str>, &str) {
         }
         off += line.len();
     }
-    (None, raw) // no closing fence → treat the whole file as body (lenient)
+    (None, s) // no closing fence → treat the whole file as body (lenient); `s` keeps the BOM stripped
 }
 
 /// Parse a frontmatter block. Handles `key: value`, inline `[a, b]` and block (`- item`) lists,
@@ -140,4 +140,26 @@ fn strip_quotes(s: &str) -> &str {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_strips_bom_from_the_body_when_no_frontmatter() {
+        // A BOM-prefixed file with no fence must yield a body WITHOUT the BOM (it used to return the
+        // raw string, leaking U+FEFF into the prompt the model sees).
+        let (fm, body) = split("\u{feff}just a prompt body");
+        assert!(fm.is_none());
+        assert_eq!(body, "just a prompt body");
+        assert!(!body.starts_with('\u{feff}'));
+    }
+
+    #[test]
+    fn split_still_parses_frontmatter_after_a_bom() {
+        let (fm, body) = split("\u{feff}---\ntitle: x\n---\nbody");
+        assert_eq!(fm, Some("title: x\n"));
+        assert_eq!(body, "body");
+    }
 }

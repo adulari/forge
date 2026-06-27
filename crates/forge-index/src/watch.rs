@@ -102,8 +102,14 @@ fn build_watcher(
 /// A changed path is worth reindexing only if it's a supported source file and none of its path
 /// components is a skipped directory (build output, `.git`, `node_modules`, …).
 fn should_reindex(path: &Path) -> bool {
+    // Only the DIRECTORY components are skip-tested — not the filename. `is_skippable_dir` treats any
+    // dot-prefixed name as a skipped dir, so checking the final component wrongly excluded dotfile
+    // SOURCE files (`.eslintrc.js`, a hidden `.foo.rs`) that the initial `update()` walk DID index
+    // (it only applies the skip to directory entries), leaving the watcher unable to refresh them.
     let skipped = path
-        .components()
+        .parent()
+        .into_iter()
+        .flat_map(|p| p.components())
         .filter_map(|c| c.as_os_str().to_str())
         .any(is_skippable_dir);
     if skipped {
@@ -220,6 +226,23 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static N: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn should_reindex_allows_dotfile_source_but_skips_dot_dirs() {
+        // A dot-prefixed SOURCE file must be reindexed (the initial walk indexes it); only a
+        // dot/skip DIRECTORY in the path excludes it.
+        assert!(
+            should_reindex(Path::new("src/.hidden.rs")),
+            "dotfile source"
+        );
+        assert!(should_reindex(Path::new(".eslintrc.js")), "dotfile at root");
+        assert!(!should_reindex(Path::new(".git/config.rs")), "inside .git");
+        assert!(
+            !should_reindex(Path::new("node_modules/x.js")),
+            "vendor dir"
+        );
+        assert!(!should_reindex(Path::new("src/a.txt")), "unsupported ext");
+    }
 
     #[test]
     fn external_edit_is_reindexed_automatically() {
