@@ -6,6 +6,25 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.61] - 2026-06-27
+
+### Fixed (bug-hunt batch 6 — TUI)
+- **Input box no longer hides the cursor on wide glyphs.** `input_text_rows` estimated wrapped rows
+  from `chars().count()`, but ratatui wraps on terminal cells. A CJK/emoji glyph is 2 cells but 1
+  char, so a line of wide glyphs under-counted its rows and the cursor dropped below the visible
+  input box. Now counts `unicode_width::UnicodeWidthStr::width`. Test:
+  `input_text_rows_counts_cell_width_not_chars`.
+- **Full-screen transcript browser re-follows at the visual bottom, not a page past it.** The browse
+  loop clamped scroll to `wrapped_len - 1` and re-enabled auto-follow only there, but `transcript_lines`
+  renders a `body_h = height - 3` window and clamps display scroll to `wrapped_len - body_h`. After
+  scrolling up, returning to the tail left follow OFF for a full extra page (the bottom already showed,
+  but new content wouldn't tail). The loop now mirrors the render's `body_h` math for both the clamp
+  and the re-follow threshold.
+
+Two further bug-hunt-6 TUI items (inline-viewer follow re-enable; selection across the
+committed-cache/streaming-tail boundary) need wider plumbing and are deferred to a follow-up rather
+than rushed.
+
 ## [0.4.60] - 2026-06-27
 
 ### Fixed (bug-hunt batch 5 — provider + store)
