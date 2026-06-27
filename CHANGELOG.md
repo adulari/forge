@@ -6,6 +6,19 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.66] - 2026-06-27
+
+### Fixed (TUI — the two deferred bug-hunt-6 bugs)
+- **Inline activity viewer re-enables follow at the tail.** `Down`/`j`/`space`/`PageDown` scrolled but
+  never re-armed auto-follow, so returning to the bottom left new activity un-tailed until you pressed
+  `End`/`G`. The render path now records the viewer's scroll geometry `(wrapped_len, body_h)`; a
+  downward scroll that reaches the last page clamps and re-arms follow (matching the full-screen
+  browser). Test: `viewer_down_at_tail_reenables_follow`.
+- **Text selection spans the committed/streaming boundary.** `selection_text` only read the committed
+  wrap cache, so a copy that ran into the live streaming reply was cut off at the boundary. It now
+  pulls rows from the streaming edge too (the rendered transcript is `wrap_cache` + `stream_cache`).
+  Test: `selection_spans_committed_and_streaming_rows`.
+
 ## [0.4.65] - 2026-06-27
 
 ### Changed (disk hygiene)
