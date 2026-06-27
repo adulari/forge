@@ -618,6 +618,12 @@ impl McpManager {
             ));
         }
         self.mark(server, ServerStatus::Reconnecting);
+        // Drop the dead peer so the NEXT call's `peer_for` returns `None` and enters the `reconnect()`
+        // path. `mark()` only updates status; without clearing the stale `Some(peer)` here, lazy
+        // reconnect was permanently unreachable after a mid-session drop — every later call failed.
+        if let Some(c) = self.conns.lock().unwrap().get_mut(server) {
+            c.peer = None;
+        }
         McpCallOutcome::err(format!("mcp: {server} disconnected ({msg})"))
     }
 
