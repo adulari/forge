@@ -6,6 +6,16 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.59] - 2026-06-27
+
+### Fixed (bug-hunt batch 4 — subagent routing)
+- **Subagent provider concurrency cap could be bypassed after a failover.** `orchestrate` routed each
+  child to size/acquire its per-provider permit, then `run_subagent` routed AGAIN internally — and if a
+  concurrent child benched the first model in between, the second route returned a different provider,
+  so the child held provider A's permit while running every call against provider B (silently
+  exceeding B's cap, the guard that stops a burst from draining one subscription). Each child is now
+  routed ONCE and the `RoutingDecision` is threaded into `run_subagent`.
+
 ## [0.4.58] - 2026-06-27
 
 ### Fixed (bug-hunt batch 4 — worktree, subagent, assay, compaction)
