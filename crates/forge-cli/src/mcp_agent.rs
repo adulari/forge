@@ -423,7 +423,7 @@ impl ServerHandler for ForgeAgentServer {
                     _ => forge_types::AssayScope::Repo,
                 };
 
-                let source = match bundle_scoped_source(&scope, 200_000) {
+                let source = match bundle_scoped_source(&scope, 800_000) {
                     Ok(s) if !s.trim().is_empty() => s,
                     Ok(_) => {
                         return Ok(CallToolResult::error(vec![Content::text(
