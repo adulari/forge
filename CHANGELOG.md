@@ -6,7 +6,27 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
-## [1.1.2] - 2026-06-28
+## [1.2.0] - 2026-06-28
+
+### Added
+- **In-turn wait-for-reset on rate limits.** When the best-ranked model is rate-limited with a SHORT
+  reset (per-minute free tiers — NIM/Groq/Gemini), Forge now waits out the reset and retries the SAME
+  model instead of immediately degrading to a lower-ranked (or paid) one. Bounded by a per-turn wait
+  budget (2) and a cap on the reset length (75s) — a long/hourly/daily quota still falls through to
+  normal failover, so the turn never blocks indefinitely. Completes the rate-limit handling from
+  v1.1.2 (short cooldown) and v1.1.1 (strict-credit).
+
+### Changed
+- **Non-chat models are excluded from the routable catalog.** Image/video generation (imagen, veo,
+  lyria), audio/TTS (voxtral, orpheus, whisper), embeddings, reranking, OCR, and moderation/safety
+  classifiers can't serve `/chat/completions`, so they only churned failover and showed as a
+  heuristic "—". They're now filtered from EVERY discovery source (genai list, OpenRouter, the custom
+  `/v1/models` listers) via `forge_config::is_non_chat_model`. Multimodal CHAT models (…-vision,
+  …-vl, flash) are kept.
+- **The benchmark cache is now global** (`~/.local/share/forge/benchmarks.json`) instead of
+  project-local (`.forge/benchmarks.json`), so Artificial Analysis scores — which are model-wide —
+  are shared across every project and refreshed once, not re-fetched per repo. The legacy project
+  file is still read as a fallback so existing scores aren't lost on upgrade.
 
 ### Fixed
 - **Rate-limited free models come back in ~1 min, not 5.** The default bench cooldown when a 429

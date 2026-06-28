@@ -118,17 +118,9 @@ pub async fn list_custom_models(namespace: &str) -> Result<Vec<String>, Provider
     Ok(data
         .iter()
         .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
-        .filter(|id| !is_non_chat_model_id(id))
         .map(|id| format!("{namespace}::{id}"))
+        .filter(|id| !forge_config::is_non_chat_model(id))
         .collect())
-}
-
-/// Heuristic for ids that are clearly embedding / reranking / vision-encoder models (not chat
-/// completers), so they're excluded from the routable catalog. Conservative — only patterns that
-/// are unambiguously non-conversational.
-fn is_non_chat_model_id(id: &str) -> bool {
-    let l = id.to_ascii_lowercase();
-    l.contains("embed") || l.contains("rerank") || l.contains("/bge") || l.contains("embedqa")
 }
 
 /// Whether `namespace` has a genai adapter that can LIST its models (i.e. [`list_models`] can work).
@@ -1007,19 +999,6 @@ mod tests {
         assert!(is_discoverable("groq"));
         // The OpenRouter alias normalizes to its adapter too.
         assert!(is_discoverable("openrouter"));
-    }
-
-    #[test]
-    fn non_chat_model_ids_are_filtered_from_live_listing() {
-        // Embedding / reranking ids can't serve chat completions — excluded from the routable catalog.
-        assert!(is_non_chat_model_id("baai/bge-m3"));
-        assert!(is_non_chat_model_id("nvidia/llama-3.2-nv-embedqa-1b-v2"));
-        assert!(is_non_chat_model_id("nvidia/llama-3.2-nv-rerankqa-1b-v2"));
-        assert!(is_non_chat_model_id("nvidia/nv-embed-v1"));
-        // Chat / coding / reasoning models are kept.
-        assert!(!is_non_chat_model_id("deepseek-ai/deepseek-v4-pro"));
-        assert!(!is_non_chat_model_id("openai/gpt-oss-120b"));
-        assert!(!is_non_chat_model_id("meta/llama-3.3-70b-instruct"));
     }
 
     #[test]

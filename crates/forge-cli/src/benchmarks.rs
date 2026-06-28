@@ -8,7 +8,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use forge_mesh::BenchmarkScores;
 use serde_json::{json, Value};
 
-const CACHE_PATH: &str = ".forge/benchmarks.json";
+/// Legacy project-local cache path (pre-1.2). Still READ as a fallback so an existing project's
+/// scores aren't lost on upgrade; new writes go to the global path.
+const LEGACY_CACHE_PATH: &str = ".forge/benchmarks.json";
+
+/// The benchmark cache lives in the GLOBAL data dir (`~/.local/share/forge/benchmarks.json`), not
+/// per-project — AA scores are model-wide, so every project should share one cache and one refresh
+/// (a project-local file re-fetched on every new repo and could go stale independently).
+fn cache_path() -> std::path::PathBuf {
+    forge_config::data_dir()
+        .map(|d| d.join("benchmarks.json"))
+        .unwrap_or_else(|| std::path::PathBuf::from(LEGACY_CACHE_PATH))
+}
 /// Safety backstop only: scores move slowly, so we normally DON'T re-fetch — the trigger is a new
 /// catalog model with no rating yet. This long TTL just guarantees the dataset can't go infinitely
 /// stale even if the model set never changes.
@@ -102,7 +113,9 @@ struct Cache {
 }
 
 fn load_cache() -> Option<Cache> {
-    let body = std::fs::read_to_string(CACHE_PATH).ok()?;
+    let body = std::fs::read_to_string(cache_path())
+        .or_else(|_| std::fs::read_to_string(LEGACY_CACHE_PATH))
+        .ok()?;
     let v: Value = serde_json::from_str(&body).ok()?;
     let fetched = v.get("fetched_at").and_then(Value::as_i64)?;
     let rows = v
@@ -138,9 +151,12 @@ fn save_cache(rows: &[Row], unrated: &[String]) {
         .map(|(n, i, c)| json!({ "name": n, "intelligence": i, "coding": c }))
         .collect();
     let doc = json!({ "fetched_at": now(), "models": models, "unrated": unrated });
-    let _ = std::fs::create_dir_all(".forge");
+    let path = cache_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     if let Ok(bytes) = serde_json::to_vec_pretty(&doc) {
-        let _ = std::fs::write(CACHE_PATH, bytes);
+        let _ = std::fs::write(&path, bytes);
     }
 }
 

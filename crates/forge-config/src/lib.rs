@@ -895,6 +895,11 @@ pub struct MeshConfig {
     /// connection) and fail over, instead of hanging the turn forever. `0` disables the watchdog.
     #[serde(default = "default_stream_idle_timeout_secs")]
     pub stream_idle_timeout_secs: u64,
+    /// Longest rate-limit reset (seconds) Forge will WAIT OUT in-turn to retry the best model rather
+    /// than degrade to a lower-ranked one (per-minute free tiers: NIM/Groq/Gemini). A reset longer
+    /// than this falls through to failover. `0` disables in-turn waiting entirely.
+    #[serde(default = "default_rate_limit_wait_secs")]
+    pub rate_limit_wait_secs: u64,
     /// Max model↔tool rounds in a single turn. This is a *runaway guard*, not a functional limit:
     /// like Claude Code / Codex, the agent loop runs until the model stops calling tools — a turn
     /// should normally finish well under this. Hitting it pauses the turn with a visible warning
@@ -1050,6 +1055,12 @@ fn default_self_review() -> bool {
 
 fn default_failover_cooldown_secs() -> u64 {
     60
+}
+
+fn default_rate_limit_wait_secs() -> u64 {
+    // Covers the common per-minute free-tier reset (NIM/Groq/Gemini ~60s) plus slack; a longer
+    // (hourly/daily) quota exceeds this and falls through to failover instead of blocking the turn.
+    75
 }
 
 fn default_stream_idle_timeout_secs() -> u64 {
@@ -1238,6 +1249,7 @@ impl Default for Config {
                 auto_discover: default_auto_discover(),
                 failover: default_failover(),
                 failover_cooldown_secs: default_failover_cooldown_secs(),
+                rate_limit_wait_secs: default_rate_limit_wait_secs(),
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
                 max_steps: default_max_steps(),
                 subscription_conserve: default_subscription_conserve(),
@@ -2194,6 +2206,59 @@ pub fn has_search_key(provider: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether a `provider::model` id is a NON-chat model — image/video/audio generation, embeddings,
+/// reranking, OCR, moderation/safety, or extraction/detection — that can't serve `/chat/completions`
+/// and so should be excluded from the routable mesh catalog (otherwise it pollutes routing, never
+/// gets a chat-intelligence benchmark, and shows as a heuristic "—"). Conservative: matches only
+/// unambiguously non-conversational families. Multimodal CHAT models (…-vision, …-vl, flash) are
+/// kept — "vision"/"vl" are intentionally NOT in the deny list.
+pub fn is_non_chat_model(id: &str) -> bool {
+    let l = id.to_ascii_lowercase();
+    const DENY: &[&str] = &[
+        // Embedding / reranking.
+        "embed",
+        "embedqa",
+        "rerank",
+        "/bge",
+        "reranker",
+        // Image / video generation.
+        "imagen",
+        "veo-",
+        "veo3",
+        "lyria",
+        "nano-banana",
+        "diffusion",
+        "stable-diffusion",
+        "flux",
+        "text-to-image",
+        "image-generation",
+        // Audio / speech / TTS.
+        "whisper",
+        "voxtral",
+        "orpheus",
+        "-tts",
+        "tts-",
+        "text-to-speech",
+        "speech-to-text",
+        // OCR / document parsing / extraction / detection.
+        "-ocr",
+        "ocr-",
+        "mistral-ocr",
+        "deplot",
+        "-parse",
+        "parse-",
+        "gliner",
+        "detector",
+        // Moderation / safety classifiers.
+        "moderation",
+        "content-safety",
+        "llama-guard",
+        "shieldgemma",
+        "guard-",
+    ];
+    DENY.iter().any(|p| l.contains(p))
+}
+
 /// A human label + hint for a search provider, shown in `forge init` / `/config`.
 pub fn search_provider_label(provider: &str) -> &'static str {
     match provider {
@@ -2697,6 +2762,36 @@ mod tests {
             provider_of("nvidia::meta/llama-3.1-405b-instruct"),
             "nvidia"
         );
+    }
+
+    #[test]
+    fn non_chat_models_are_detected_but_chat_models_kept() {
+        for id in [
+            "gemini::imagen-4.0-generate-001",
+            "gemini::veo-3.0-generate-001",
+            "gemini::gemini-embedding-001",
+            "mistral::mistral-ocr-latest",
+            "mistral::voxtral-mini-2507",
+            "mistral::mistral-moderation-2411",
+            "groq::canopylabs/orpheus-v1-english",
+            "nvidia::baai/bge-m3",
+            "nvidia::nvidia/nemotron-parse",
+            "openrouter::meta-llama/llama-guard-4-12b",
+        ] {
+            assert!(is_non_chat_model(id), "{id} should be non-chat");
+        }
+        // Real chat / coding / multimodal-CHAT models are kept.
+        for id in [
+            "nvidia::minimaxai/minimax-m3",
+            "nvidia::deepseek-ai/deepseek-v4-pro",
+            "nvidia::meta/llama-3.3-70b-instruct",
+            "nvidia::google/gemma-4-31b-it",
+            "gemini::gemini-3.5-flash",
+            "nvidia::meta/llama-3.2-90b-vision-instruct",
+            "openrouter::qwen/qwen3.5-397b-a17b",
+        ] {
+            assert!(!is_non_chat_model(id), "{id} is a chat model, must be kept");
+        }
     }
 
     #[test]

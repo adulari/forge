@@ -222,6 +222,11 @@ const CHARS_PER_TOKEN: usize = 3;
 /// reaches failover quickly, but a one-off blip doesn't needlessly switch models.
 const MAX_TRANSIENT_RETRIES: u32 = 2;
 
+/// Max times per turn Forge will WAIT for a rate-limited model to reset and retry it (rather than
+/// failing over to a lower-ranked model). Bounds total in-turn blocking. The per-wait length cap is
+/// `mesh.rate_limit_wait_secs` (0 disables waiting).
+const MAX_RATE_LIMIT_WAITS: u32 = 2;
+
 /// Render a sequence of messages into TUI [`ReplayItem`](forge_tui::ReplayItem)s — user prompts,
 /// assistant text, tool calls (with args), tool results (matched to their call's name via
 /// `tool_call_id`), and the compaction marker. Shared by the model-facing replay
@@ -2409,6 +2414,9 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         // succeeds on a second attempt). Reset to 0 whenever we switch to a different model, so the
         // budget is per-model, not per-turn — "don't give up instantly" before failing over.
         let mut transient_retries = 0u32;
+        // Bounds in-turn waits for a rate-limited model to RESET (per-minute free tiers). Per turn,
+        // not per model: a few short waits total, so the turn can't block indefinitely.
+        let mut rate_limit_waits = 0u32;
 
         let mut final_text = String::new();
         let mut context_tokens: u64 = 0;
@@ -2643,6 +2651,33 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             )));
                             tokio::time::sleep(backoff).await;
                             continue;
+                        }
+                        // Rate-limit on the current (best-ranked) model with a SHORT reset: WAIT for
+                        // it to reset and retry the SAME model instead of degrading to a lower-ranked
+                        // (or, pre-strict, paid) one. This is the per-minute free-tier case
+                        // (NIM/Groq/Gemini) — "retry when it's reset", not an instant fall to a worse
+                        // model. Bounded by a per-turn wait budget and a cap on the reset length, so a
+                        // long/daily quota (or a model that stays limited) still falls through to the
+                        // normal bench + failover below.
+                        let wait_cap =
+                            std::time::Duration::from_secs(self.config.mesh.rate_limit_wait_secs);
+                        if e.is_rate_limited()
+                            && !wait_cap.is_zero()
+                            && rate_limit_waits < MAX_RATE_LIMIT_WAITS
+                        {
+                            let reset = e.cooldown(default_cooldown);
+                            if reset <= wait_cap {
+                                rate_limit_waits += 1;
+                                self.presenter.emit(PresenterEvent::Warning(format!(
+                                    "{active_model}: rate-limited — waiting {}s for reset, then retrying",
+                                    reset.as_secs().max(1)
+                                )));
+                                self.presenter.emit(PresenterEvent::ModelSearch {
+                                    model: active_model.clone(),
+                                });
+                                tokio::time::sleep(reset).await;
+                                continue;
+                            }
                         }
                         let reason = e.reason();
                         // A PERMANENT incapability (no tool support / unaffordable) excludes the
@@ -8801,6 +8836,63 @@ mod tests {
         }
     }
 
+    /// Rate-limits the first `fail_first` calls with a tiny `retry_after`, then answers — to prove
+    /// the in-turn wait-for-reset retries the SAME model instead of degrading to a fallback.
+    struct RateLimitThenOkProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        fail_first: usize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for RateLimitThenOkProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.fail_first {
+                return Err(forge_provider::ProviderError::RateLimited {
+                    message: "429 rate limited".into(),
+                    retry_after: Some(std::time::Duration::from_millis(10)),
+                });
+            }
+            on_event(StreamEvent::Text(model.into()));
+            Ok(forge_provider::ModelResponse {
+                content: model.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_waits_for_reset_and_retries_the_same_model() {
+        // The per-minute free-tier case: the best model 429s with a short reset → wait it out and
+        // retry the SAME model rather than degrading to a lower-ranked fallback.
+        let provider = Arc::new(RateLimitThenOkProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_first: 1,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "best::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        session.config.mesh.rate_limit_wait_secs = 1; // re-enable waiting (10ms reset → instant)
+        let answer = session.run_turn("hi").await.unwrap();
+        assert_eq!(
+            answer, "best::model",
+            "waited for the reset and retried the best model; fallback unused"
+        );
+        assert!(
+            store.current_benched().unwrap().is_empty(),
+            "a model we waited out and recovered must not be benched"
+        );
+    }
+
     #[tokio::test]
     async fn transient_error_retries_same_model_before_failing_over() {
         // A 5xx/dropped-connection blip should be retried on the SAME model (it usually succeeds on
@@ -9085,13 +9177,17 @@ mod tests {
         router: Arc<dyn Router>,
     ) -> (Arc<Store>, Session) {
         let store = Arc::new(Store::open_in_memory().unwrap());
+        // Disable the in-turn rate-limit WAIT by default so failover tests don't real-sleep on a
+        // server `retry_after`; the wait path has its own test that re-enables it with a tiny reset.
+        let mut config = Config::default();
+        config.mesh.rate_limit_wait_secs = 0;
         let session = Session::start(
             Arc::clone(&store),
             provider,
             router,
             ToolRegistry::with_core_tools(),
             Box::new(HeadlessPresenter::new(false)),
-            Config::default(),
+            config,
             ".",
         )
         .unwrap();

@@ -195,6 +195,12 @@ pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mes
     // Dedup while preserving discovery order (a provider could list the same id twice).
     let mut seen = std::collections::HashSet::new();
     models.retain(|m| seen.insert(m.clone()));
+    // Drop NON-chat models (image/video/audio generation, embeddings, reranking, OCR, moderation):
+    // they can't serve chat completions, so routing them only churns failover, and they never get a
+    // chat-intelligence benchmark (showing as a heuristic "—"). Applies to EVERY source — genai
+    // `list_models`, OpenRouter, the custom `/v1/models` listers — so e.g. gemini imagen/veo,
+    // mistral voxtral/ocr, and groq orpheus never enter the catalog.
+    models.retain(|m| !forge_config::is_non_chat_model(m));
     // Drop any model/provider the user disabled (`[mesh] disabled`), so the mesh never routes to
     // or fails over onto it (known-issues.md: disable a flaky model without deleting its key).
     models.retain(|m| !forge_config::is_model_disabled(m, &config.mesh.disabled));
