@@ -732,6 +732,43 @@ and keep going."
                 Err(e) => app.note(&format!("⚠ failed to list memories: {e}")),
             }
         }
+        // `/self-mcp [enable|disable]` — toggle or set the self-MCP sub-agent live.
+        CommandAction::SelfMcp(explicit) => {
+            let current = forge_config::load().map(|c| c.self_mcp).unwrap_or(false);
+            let enable = explicit.unwrap_or(!current);
+            match forge_config::write_self_mcp(enable) {
+                Err(e) => app.note(&format!("⚠ self-mcp: failed to write config: {e}")),
+                Ok(_) => {
+                    if enable {
+                        let exe = std::env::current_exe()
+                            .unwrap_or_else(|_| std::path::PathBuf::from("forge"));
+                        let server = forge_config::McpServerConfig {
+                            name: "forge".to_string(),
+                            transport: forge_config::McpTransport::Stdio {
+                                command: exe.to_string_lossy().into_owned(),
+                                args: vec!["mcp".to_string(), "agent".to_string()],
+                                env: std::collections::HashMap::new(),
+                            },
+                            auth: None,
+                            enabled: true,
+                        };
+                        let mut s = session.lock().await;
+                        match s.add_mcp_server(server).await {
+                            Ok(()) => app.note(
+                                "self-MCP enabled — forge_chat / forge_assay now available \
+                                 as tools in this session",
+                            ),
+                            Err(e) => app.note(&format!(
+                                "self-MCP enabled in config but live connect failed: {e}"
+                            )),
+                        }
+                    } else {
+                        session.lock().await.remove_mcp_server("forge");
+                        app.note("self-MCP disabled — sub-Forge MCP server disconnected");
+                    }
+                }
+            }
+        }
         // Not a builtin → try the file-based command/skill catalog.
         CommandAction::Unknown(_) => {
             return dispatch_catalog(line, catalog, session, app, armed, trust_project, busy).await
