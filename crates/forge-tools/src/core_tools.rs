@@ -204,6 +204,22 @@ fn flexible_replace(content: &str, old: &str, new: &str) -> Option<String> {
     Some(out)
 }
 
+/// Count whitespace-insensitive matches of `old` in `content`, so a failed edit can report whether
+/// `old` was ambiguous (several near-matches) rather than simply missing.
+fn flex_match_count(content: &str, old: &str) -> usize {
+    let old_lines: Vec<&str> = old.lines().map(str::trim).collect();
+    if old_lines.is_empty() {
+        return 0;
+    }
+    let segs: Vec<&str> = content.split_inclusive('\n').collect();
+    if old_lines.len() > segs.len() {
+        return 0;
+    }
+    (0..=(segs.len() - old_lines.len()))
+        .filter(|&i| (0..old_lines.len()).all(|j| segs[i + j].trim() == old_lines[j]))
+        .count()
+}
+
 /// Anchored-block fallback for `edit_file`: the safety net for when a model paraphrases the *middle*
 /// of a block but reproduces its first and last lines closely. Matches the first and last non-empty
 /// trimmed lines of `old` as anchors and replaces the unique span between them — even if the interior
@@ -419,9 +435,29 @@ fn apply_edit(content: &str, old: &str, new: &str) -> Result<(String, &'static s
                 block_anchor_replace(content, old, new).map(|u| (u, " (matched on block anchors)"))
             })
             .ok_or_else(|| {
-                "`old` not found (also tried whitespace-insensitive and block-anchor matches; \
-                 add surrounding context so it matches exactly once)"
-                    .to_string()
+                // A whitespace-insensitive ambiguous match also lands here (flexible_replace
+                // returns None on >1 hit); surface that distinctly so the model adds context
+                // rather than re-reading in vain.
+                let flex_hits = flex_match_count(content, old);
+                if flex_hits > 1 {
+                    return format!(
+                        "`old` matches {flex_hits} places (ignoring whitespace) — ambiguous; \
+                         add surrounding context so it matches exactly once"
+                    );
+                }
+                let n_lines = old.lines().count();
+                let mut msg = format!(
+                    "`old` ({n_lines} lines) not found (also tried whitespace-insensitive and \
+                     block-anchor matches). The file may have changed — re-read the exact lines \
+                     with read_file and copy them verbatim into `old` before editing"
+                );
+                if n_lines > 40 {
+                    msg.push_str(
+                        "; `old` is large, so split it into several smaller edits, or use \
+                         write_file if you are creating a brand-new file",
+                    );
+                }
+                msg
             }),
         n => Err(format!(
             "`old` is ambiguous: {n} occurrences — add surrounding context"
@@ -1305,6 +1341,31 @@ mod tests {
         .unwrap();
         assert_eq!(out, "fn g() {\n    new();\n}\n");
         assert_eq!(note, " (matched on block anchors)");
+    }
+
+    #[test]
+    fn apply_edit_not_found_advises_rereading() {
+        let err = apply_edit("fn main() {}\n", "fn nope() {}", "x").unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+        assert!(err.contains("re-read"), "{err}");
+    }
+
+    #[test]
+    fn apply_edit_ambiguous_advises_adding_context() {
+        let err = apply_edit("let x = 1;\nlet x = 1;\n", "let x = 1;", "let x = 2;").unwrap_err();
+        assert!(err.contains("ambiguous"), "{err}");
+        assert!(err.contains("context"), "{err}");
+    }
+
+    #[test]
+    fn apply_edit_large_not_found_suggests_split_or_write_file() {
+        let old = (0..50)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let err = apply_edit("fn main() {}\n", &old, "x").unwrap_err();
+        assert!(err.contains("split"), "{err}");
+        assert!(err.contains("write_file"), "{err}");
     }
 
     #[test]
