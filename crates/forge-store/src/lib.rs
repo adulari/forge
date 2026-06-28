@@ -2054,6 +2054,14 @@ impl Store {
         Ok(())
     }
 
+    /// Clear agent_active on all sessions. Called at MCP server startup to reset flags left
+    /// by processes that were SIGKILLed before their Drop guard could run.
+    pub fn clear_all_agent_active(&self) -> Result<()> {
+        self.lock()?
+            .execute("UPDATE session SET agent_active = 0", [])?;
+        Ok(())
+    }
+
     /// Session IDs with agent_active = 1.
     pub fn active_agent_session_ids(&self) -> Result<Vec<String>> {
         let conn = self.lock()?;
