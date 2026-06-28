@@ -12,12 +12,14 @@ use ratatui::Frame;
 use crate::app::KeyKind;
 
 use ratatui::style::Color;
-const ORANGE: Color = Color::Rgb(255, 145, 60);
-const DIM: Color = Color::Rgb(110, 110, 120);
-const USER: Color = Color::Rgb(125, 180, 255);
-const OKGREEN: Color = Color::Rgb(120, 210, 140);
-const WARN: Color = Color::Rgb(235, 120, 110);
-const VERY_DIM: Color = Color::Rgb(80, 80, 90);
+const ORANGE: Color = Color::Rgb(255, 138, 48);
+const ACCENT: Color = Color::Rgb(82, 162, 255);
+const DIM: Color = Color::Rgb(82, 87, 108);
+const USER: Color = Color::Rgb(122, 183, 255);
+const OKGREEN: Color = Color::Rgb(92, 208, 122);
+const ERRRED: Color = Color::Rgb(243, 92, 92);
+const WARNYEL: Color = Color::Rgb(238, 188, 82);
+const VERY_DIM: Color = Color::Rgb(54, 58, 74);
 
 /// The editing control a row uses.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -339,7 +341,7 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
 
     let mut lines: Vec<TextLine> = Vec::with_capacity(h);
     lines.push(TextLine::from(vec![
-        Span::styled("  ⚒ config  ", Style::default().fg(ORANGE).bold()),
+        Span::styled("  ◈ config  ", Style::default().fg(ACCENT).bold()),
         Span::styled(
             format!("writing to {scope} scope"),
             Style::default().fg(USER),
@@ -378,7 +380,7 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
         match d {
             Disp::Header(g) => lines.push(TextLine::from(Span::styled(
                 format!("  {g}"),
-                Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ))),
             Disp::Row(ri) => {
                 let r = &ed.rows[*ri];
@@ -394,18 +396,18 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
                     };
                     Span::styled(
                         format!("{shown}▌"),
-                        Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
                     )
                 } else {
                     value_span(r, sel)
                 };
                 let label_style = if sel {
-                    Style::default().fg(ORANGE).bold()
+                    Style::default().fg(ACCENT).bold()
                 } else {
                     Style::default().fg(USER)
                 };
                 let mods = if r.modified {
-                    Span::styled(" ●", Style::default().fg(WARN))
+                    Span::styled(" ●", Style::default().fg(WARNYEL))
                 } else {
                     Span::raw("")
                 };
@@ -472,7 +474,11 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
 
     // Status (last save/reset result).
     if let Some(s) = &ed.status {
-        let color = if s.starts_with('✓') { OKGREEN } else { WARN };
+        let color = if s.starts_with('✓') {
+            OKGREEN
+        } else {
+            ERRRED
+        };
         lines.push(TextLine::from(Span::styled(
             format!("  {}", truncate(s, w.saturating_sub(4))),
             Style::default().fg(color),
