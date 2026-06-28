@@ -884,7 +884,11 @@ pub struct MeshConfig {
     /// turn transparently retries on the next-best healthy model. Set false for single-shot.
     #[serde(default = "default_failover")]
     pub failover: bool,
-    /// Default bench duration (seconds) when a rate-limited provider gives no `Retry-After`.
+    /// Default bench duration (seconds) when a transient failure (rate-limit / 5xx) gives no
+    /// server `Retry-After`. Kept short because free-tier rate limits typically reset per MINUTE
+    /// (NVIDIA NIM, Groq, Gemini RPM) — a long bench would strand the best free models and push
+    /// routing onto worse or paid ones for minutes. Providers that DO send `Retry-After` use that
+    /// exact value instead.
     #[serde(default = "default_failover_cooldown_secs")]
     pub failover_cooldown_secs: u64,
     /// Abort a model stream that goes silent for this many seconds (a half-open/stalled
@@ -1045,7 +1049,7 @@ fn default_self_review() -> bool {
 }
 
 fn default_failover_cooldown_secs() -> u64 {
-    300
+    60
 }
 
 fn default_stream_idle_timeout_secs() -> u64 {
