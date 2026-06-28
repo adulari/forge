@@ -131,7 +131,6 @@ fn browse<F: FnMut() -> Vec<TranscriptView>>(
 }
 
 // Brand palette (mirrors the per-module consts elsewhere in the crate).
-const ORANGE: Color = Color::Rgb(255, 138, 48);
 const ACCENT: Color = Color::Rgb(82, 162, 255);
 const DIM: Color = Color::Rgb(82, 87, 108);
 const TOOLCYAN: Color = Color::Rgb(75, 212, 218);

@@ -219,7 +219,7 @@ fn severity_color(sev: forge_types::Severity) -> Color {
 pub fn mcp_status_lines(servers: &[forge_types::McpServerLine]) -> Vec<Line<'static>> {
     if servers.is_empty() {
         return vec![Line::from(Span::styled(
-            "  ⚒ no MCP servers configured — declare them in .forge/mcp.toml (or `forge mcp import`)"
+            "  ◈ no MCP servers configured — declare them in .forge/mcp.toml (or `forge mcp import`)"
                 .to_string(),
             Style::default().fg(DIM),
         ))];
@@ -279,7 +279,7 @@ pub fn assay_report_lines(r: &forge_types::AssayReport) -> Vec<Line<'static>> {
     let mut out = vec![
         Line::from(Span::styled(
             format!(
-                "{INDENT}⚒ ASSAY REPORT  run {id8}  scope: {}",
+                "{INDENT}◈ ASSAY REPORT  run {id8}  scope: {}",
                 r.scope.label()
             ),
             Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
@@ -357,7 +357,7 @@ pub fn assay_report_lines(r: &forge_types::AssayReport) -> Vec<Line<'static>> {
 pub fn assay_report_plain(r: &forge_types::AssayReport) -> String {
     let [crit, high, med, low] = r.severity_counts();
     let id8: String = r.run_id.chars().take(8).collect();
-    let mut s = format!("\n⚒ ASSAY REPORT  run {id8}  scope: {}\n", r.scope.label());
+    let mut s = format!("\n◈ ASSAY REPORT  run {id8}  scope: {}\n", r.scope.label());
     s.push_str(&format!(
         "{} findings · {crit} critical · {high} high · {med} medium · {low} low · ${:.4}\n",
         r.findings.len(),

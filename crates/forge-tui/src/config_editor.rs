@@ -12,7 +12,6 @@ use ratatui::Frame;
 use crate::app::KeyKind;
 
 use ratatui::style::Color;
-const ORANGE: Color = Color::Rgb(255, 138, 48);
 const ACCENT: Color = Color::Rgb(82, 162, 255);
 const DIM: Color = Color::Rgb(82, 87, 108);
 const USER: Color = Color::Rgb(122, 183, 255);

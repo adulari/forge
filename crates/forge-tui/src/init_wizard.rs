@@ -19,12 +19,13 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::{Frame, Terminal};
 
-const ORANGE: Color = Color::Rgb(255, 145, 60);
-const USER: Color = Color::Rgb(125, 180, 255);
-const DIM: Color = Color::Rgb(110, 110, 120);
-const OKGREEN: Color = Color::Rgb(120, 210, 140);
-const WARNYEL: Color = Color::Rgb(235, 200, 110);
-const TOOLCYAN: Color = Color::Rgb(120, 200, 215);
+const ORANGE: Color = Color::Rgb(255, 138, 48);
+const ACCENT: Color = Color::Rgb(82, 162, 255);
+const USER: Color = Color::Rgb(122, 183, 255);
+const DIM: Color = Color::Rgb(82, 87, 108);
+const OKGREEN: Color = Color::Rgb(92, 208, 122);
+const WARNYEL: Color = Color::Rgb(238, 188, 82);
+const TOOLCYAN: Color = Color::Rgb(75, 212, 218);
 
 /// A key-based provider offered in the wizard.
 pub struct ProviderItem {
@@ -329,10 +330,10 @@ fn render(f: &mut Frame, state: &State) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ORANGE))
+        .border_style(Style::default().fg(ACCENT))
         .title(Span::styled(
-            " ⚒ Forge setup ",
-            Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+            " ◈ Forge setup ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     f.render_widget(block, area);
