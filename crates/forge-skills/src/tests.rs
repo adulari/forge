@@ -376,6 +376,35 @@ fn skill_body_and_resources_load_only_on_invoke() {
 }
 
 #[test]
+fn skill_resources_cannot_escape_skill_directory() {
+    let t = Tmp::new();
+    std::fs::write(t.root.join("user/skills/secret.txt"), "outside secret").unwrap();
+    t.skill(
+        "user",
+        "auditor",
+        "---\ndescription: audit\nresources: [../secret.txt, /etc/passwd]\n---\nMethodology body here.",
+    );
+
+    let cat = t.load();
+    let meta = cat.skill("auditor").unwrap().clone();
+    let skill = Skill::load(&meta);
+
+    assert!(
+        skill.resources.is_empty(),
+        "escaped resources must not be loaded: {:?}",
+        skill.resources
+    );
+    assert!(
+        skill
+            .warnings
+            .iter()
+            .any(|w| w.contains("escapes skill dir")),
+        "escape should be warned: {:?}",
+        skill.warnings
+    );
+}
+
+#[test]
 fn malformed_frontmatter_file_is_skipped_and_others_still_load() {
     let t = Tmp::new();
     t.cmd("user", "good", "---\ndescription: fine\n---\nbody");

@@ -140,7 +140,14 @@ impl Skill {
         };
         let mut resources = Vec::new();
         for res in &meta.resources {
-            match std::fs::read_to_string(meta.dir.join(res)) {
+            let Some(path) = safe_resource_path(&meta.dir, res) else {
+                warnings.push(format!(
+                    "skill {}: resource path escapes skill dir: {res}",
+                    meta.name
+                ));
+                continue;
+            };
+            match std::fs::read_to_string(path) {
                 Ok(c) => resources.push((res.clone(), c)),
                 Err(_) => warnings.push(format!("skill {}: missing resource {res}", meta.name)),
             }
@@ -163,6 +170,21 @@ impl Skill {
         }
         forge_native(&out)
     }
+}
+
+fn safe_resource_path(dir: &Path, res: &str) -> Option<PathBuf> {
+    let rel = Path::new(res);
+    if rel.is_absolute() {
+        return None;
+    }
+    rel.components()
+        .all(|c| {
+            matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+        .then(|| dir.join(rel))
 }
 
 /// The outcome of resolving a submitted line against the catalog.
