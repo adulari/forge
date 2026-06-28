@@ -957,6 +957,43 @@ impl LoopOutcome {
     }
 }
 
+impl std::ops::Deref for LoopOutcome {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for LoopOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl PartialEq for LoopOutcome {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text && self.stop_reason == other.stop_reason
+    }
+}
+
+impl PartialEq<str> for LoopOutcome {
+    fn eq(&self, other: &str) -> bool {
+        self.text == other
+    }
+}
+
+impl PartialEq<&str> for LoopOutcome {
+    fn eq(&self, other: &&str) -> bool {
+        self.text == *other
+    }
+}
+
+impl PartialEq<String> for LoopOutcome {
+    fn eq(&self, other: &String) -> bool {
+        &self.text == other
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
