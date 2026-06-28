@@ -9986,6 +9986,11 @@ mod tests {
         // session stays usable (no deadlock / frozen UI).
         use std::time::Duration;
         let store = Arc::new(Store::open_in_memory().unwrap());
+        // Disable auto-memory: its start-of-turn recall can invoke the embedder (a network call on
+        // CI) before the user message is persisted, which would race the 100ms abort window below.
+        // This test is about lock release, not memory.
+        let mut config = Config::default();
+        config.mesh.auto_memory = false;
         let session = Arc::new(tokio::sync::Mutex::new(
             Session::start(
                 store,
@@ -9993,7 +9998,7 @@ mod tests {
                 Arc::new(HeuristicRouter::new(Config::default())),
                 ToolRegistry::with_core_tools(),
                 Box::new(HeadlessPresenter::new(false)),
-                Config::default(),
+                config,
                 ".",
             )
             .unwrap(),
