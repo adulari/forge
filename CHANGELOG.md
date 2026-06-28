@@ -6,7 +6,17 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
-## [1.4.0] - 2026-06-28
+## [1.4.1] - 2026-06-28
+
+### Improved
+- **`edit_file` failures are now self-correcting instead of churning.** When `old` doesn't match
+  after the whitespace + block-anchor fallbacks, the error now tells the model the file may have
+  changed and to **re-read the exact lines with `read_file` and copy them verbatim**; if `old` is
+  large (>40 lines) it suggests **splitting into smaller edits or using `write_file`** for a new
+  file. A whitespace-insensitive *ambiguous* match (several near-matches) is now reported distinctly
+  ("matches N places — add surrounding context") instead of looking like a plain miss. New
+  `flex_match_count` + 3 tests. *(Built by Forge itself via the mesh — the first of the
+  dogfooding-friction fixes that make Forge better at building everything.)*
 
 ### Added
 - **Built-in auto-memory — Forge now remembers durable facts across sessions, per project.** A new
