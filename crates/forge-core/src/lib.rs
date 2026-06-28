@@ -2167,7 +2167,9 @@ Output ONLY that sentence — no preamble, no quotation marks.";
     /// as project-scoped memories (dedup + salience handled by the store). Best-effort: any
     /// budget/model failure is silently skipped so it can never derail the session. Recall of these
     /// happens at the start of a later session (see `run_turn_with`).
-    async fn capture_memories(&mut self, prompt: &str, final_text: &str) {
+    // Spawns memory capture as a detached task so it doesn't block turn completion — the spinner
+    // clears when the AI response finishes, not when the background capture finishes.
+    fn capture_memories(&self, prompt: &str, final_text: &str) {
         if !self.config.mesh.auto_memory || final_text.trim().is_empty() {
             return;
         }
@@ -2185,61 +2187,67 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         }
         let health = self.store.current_benched().unwrap_or_default();
         let quota = self.live_quota();
-        let decision = self
-            .router
-            .route_hinted(
-                "extract durable facts",
-                budget,
-                &health,
-                &quota,
-                Some(TaskTier::Trivial),
-                self.pinned_effort,
-            )
-            .await;
+        let provider = self.provider.clone();
+        let store = self.store.clone();
+        let router = self.router.clone();
+        let id = self.id.clone();
+        let config = self.config.clone();
+        let pinned_effort = self.pinned_effort;
         let user_snippet: String = prompt.chars().take(500).collect();
         let assistant_snippet: String = final_text.chars().take(1200).collect();
-        let messages = vec![
-            Message::system(Self::MEMORY_CAPTURE_SYSTEM),
-            Message::user(format!(
-                "User request:\n{user_snippet}\n\nAssistant response:\n{assistant_snippet}"
-            )),
-        ];
-        let mut sink = |_: StreamEvent| {};
-        let Ok(r) = self
-            .provider
-            .complete(&decision.model, &messages, &[], &mut sink)
-            .await
-        else {
-            return;
-        };
-        let _ = self
-            .store
-            .record_side_call_usage(&self.id, "memory", &r.usage);
-        let scope = memory_scope();
-        for line in r.content.lines().take(3) {
-            let line = line.trim().trim_start_matches(['-', '*', '•']).trim();
-            let Some((kind, text)) = line.split_once(':') else {
-                continue;
+        tokio::spawn(async move {
+            let decision = router
+                .route_hinted(
+                    "extract durable facts",
+                    budget,
+                    &health,
+                    &quota,
+                    Some(TaskTier::Trivial),
+                    pinned_effort,
+                )
+                .await;
+            let messages = vec![
+                Message::system(Session::MEMORY_CAPTURE_SYSTEM),
+                Message::user(format!(
+                    "User request:\n{user_snippet}\n\nAssistant response:\n{assistant_snippet}"
+                )),
+            ];
+            let mut on_event = |_: StreamEvent| {};
+            let Ok(r) = provider
+                .complete(&decision.model, &messages, &[], &mut on_event)
+                .await
+            else {
+                return;
             };
-            let kind = kind.trim().to_lowercase();
-            let kind = match kind.as_str() {
-                "preference" | "decision" | "fact" | "reference" => kind.as_str(),
-                _ => "fact",
-            };
-            let text = text.trim();
-            if text.len() >= 4 {
-                match embed_one(&self.config.lattice.embeddings, text).await {
-                    Some(emb) => {
-                        let _ = self
-                            .store
-                            .add_memory_with_embedding(&scope, kind, text, &self.id, &emb);
-                    }
-                    None => {
-                        let _ = self.store.add_memory(&scope, kind, text, &self.id);
+            let _ = store.record_side_call_usage(&id, "memory", &r.usage);
+            let scope = memory_scope();
+            // Collect lines into owned Strings before the per-line await to avoid holding
+            // a borrow across the embed_one await point.
+            let lines: Vec<String> = r.content.lines().take(3).map(str::to_string).collect();
+            for raw in lines {
+                let line = raw.trim().trim_start_matches(['-', '*', '•']).trim();
+                let Some((kind, text)) = line.split_once(':') else {
+                    continue;
+                };
+                let kind_norm = kind.trim().to_lowercase();
+                let kind_cat = match kind_norm.as_str() {
+                    "preference" | "decision" | "fact" | "reference" => kind_norm.as_str(),
+                    _ => "fact",
+                };
+                let text = text.trim();
+                if text.len() >= 4 {
+                    match embed_one(&config.lattice.embeddings, text).await {
+                        Some(emb) => {
+                            let _ =
+                                store.add_memory_with_embedding(&scope, kind_cat, text, &id, &emb);
+                        }
+                        None => {
+                            let _ = store.add_memory(&scope, kind_cat, text, &id);
+                        }
                     }
                 }
             }
-        }
+        });
     }
 
     async fn generate_recap(&mut self, prompt: &str, final_text: &str) {
@@ -3965,7 +3973,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             final_text: final_text.clone(),
         });
         self.generate_recap(prompt, &final_text).await;
-        self.capture_memories(prompt, &final_text).await;
+        self.capture_memories(prompt, &final_text);
         Ok(final_text)
     }
 
