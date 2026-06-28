@@ -5,6 +5,11 @@
 //!   - `forge_chat(message)` — send a prompt, get the full response (with tool-call metadata)
 //!   - `forge_status()` — inspect session ID, permission mode, active model, and tasks
 //!   - `forge_set_mode(mode)` — switch the session's permission mode at runtime
+//!   - `forge_interrupt()` — stop the in-flight `forge_chat` turn at its next await point
+//!
+//! `forge_chat` streams live progress as MCP logging notifications while it runs, so the
+//! orchestrating agent can watch the turn unfold and call `forge_interrupt` (concurrently —
+//! it never blocks on the session lock) to abort a turn that has gone off the rails.
 //!
 //! The session is persistent: history, memory, mesh routing, skills, MCP tools, and the code
 //! graph are all retained across calls — the orchestrating agent treats it as a stateful
@@ -99,11 +104,16 @@ struct ForgeAgentServer {
     event_tx: SharedEventSender,
     /// Shared with AgentPresenter — `forge_set_mode` writes here, presenter reads it.
     mode: Arc<Mutex<PermissionMode>>,
+    /// Signaled by `forge_interrupt` to abort the in-flight `forge_chat` turn. Using a
+    /// `Notify` (not the session lock) is deliberate: the interrupt handler must run while
+    /// `forge_chat` still holds the session lock for the whole turn.
+    interrupt: Arc<tokio::sync::Notify>,
 }
 
 const TOOL_CHAT: &str = "forge_chat";
 const TOOL_STATUS: &str = "forge_status";
 const TOOL_SET_MODE: &str = "forge_set_mode";
+const TOOL_INTERRUPT: &str = "forge_interrupt";
 
 fn schema(obj: serde_json::Value) -> Arc<JsonObject> {
     Arc::new(obj.as_object().cloned().unwrap_or_default())
@@ -220,6 +230,19 @@ impl ServerHandler for ForgeAgentServer {
                     "required": ["mode"]
                 })),
             ),
+            Tool::new(
+                TOOL_INTERRUPT.to_string(),
+                "Abort the `forge_chat` turn that is currently running. The turn stops at its \
+                 next await point and returns its partial result; the session stays intact, so \
+                 you can immediately `forge_chat` again to redirect it. Safe to call anytime — \
+                 a no-op if no turn is in flight. Use this when the streamed progress shows the \
+                 turn going the wrong way, looping, or burning budget."
+                    .to_string(),
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                })),
+            ),
         ];
         Ok(ListToolsResult {
             tools,
@@ -265,11 +288,19 @@ impl ServerHandler for ForgeAgentServer {
                     tool_calls
                 });
 
-                let result = session.run_turn_with(&message, &[], None).await;
+                // Race the turn against an interrupt signal. `notified()` registers its
+                // waiter on first poll (inside `select!`), so a later `forge_interrupt` wakes
+                // it; dropping the `run_turn_with` future on interrupt stops it at its current
+                // await point and releases the `&mut session` borrow.
+                let interrupt = Arc::clone(&self.interrupt);
+                let outcome = tokio::select! {
+                    r = session.run_turn_with(&message, &[], None) => Some(r),
+                    _ = interrupt.notified() => None,
+                };
                 *self.event_tx.lock().unwrap() = None;
                 let tool_calls = notify_task.await.unwrap_or_default();
-                match result {
-                    Ok(response) => {
+                match outcome {
+                    Some(Ok(response)) => {
                         let mut out = response;
                         if !tool_calls.is_empty() {
                             out.push_str(&format!(
@@ -279,8 +310,18 @@ impl ServerHandler for ForgeAgentServer {
                         }
                         Ok(CallToolResult::success(vec![Content::text(out)]))
                     }
-                    Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
+                    Some(Err(e)) => Ok(CallToolResult::error(vec![Content::text(format!(
                         "turn failed: {e}"
+                    ))])),
+                    None => Ok(CallToolResult::success(vec![Content::text(format!(
+                        "turn interrupted via forge_interrupt after {} tool call(s){}. Session \
+                         state is preserved — send a new forge_chat to continue or redirect.",
+                        tool_calls.len(),
+                        if tool_calls.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", tool_calls.join(", "))
+                        }
                     ))])),
                 }
             }
@@ -324,8 +365,19 @@ impl ServerHandler for ForgeAgentServer {
                 ))]))
             }
 
+            TOOL_INTERRUPT => {
+                // Wake the in-flight turn's `notified()` waiter (if any). Does not touch the
+                // session lock, so it runs even while `forge_chat` holds it for the whole turn.
+                self.interrupt.notify_waiters();
+                Ok(CallToolResult::success(vec![Content::text(
+                    "interrupt signaled — the active forge_chat turn (if any) will stop at its \
+                     next await point and return its partial result. No-op if no turn is running.",
+                )]))
+            }
+
             _ => Ok(CallToolResult::error(vec![Content::text(format!(
-                "unknown tool '{name}'. Available: {TOOL_CHAT}, {TOOL_STATUS}, {TOOL_SET_MODE}"
+                "unknown tool '{name}'. Available: {TOOL_CHAT}, {TOOL_STATUS}, {TOOL_SET_MODE}, \
+                 {TOOL_INTERRUPT}"
             ))])),
         }
     }
@@ -366,6 +418,7 @@ pub async fn run(session_id: Option<String>, cwd: Option<std::path::PathBuf>) ->
         session: Arc::new(tokio::sync::Mutex::new(session)),
         event_tx,
         mode,
+        interrupt: Arc::new(tokio::sync::Notify::new()),
     };
 
     let service = server.serve(stdio()).await?;
