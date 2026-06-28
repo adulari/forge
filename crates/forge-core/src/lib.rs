@@ -217,6 +217,11 @@ pub struct RewindOutcome {
 /// budget rather than overflowing.
 const CHARS_PER_TOKEN: usize = 3;
 
+/// Max same-model retries for a TRANSIENT provider failure (5xx / dropped stream / network blip)
+/// before benching the model and failing over. Small + backed off so a genuinely-down model still
+/// reaches failover quickly, but a one-off blip doesn't needlessly switch models.
+const MAX_TRANSIENT_RETRIES: u32 = 2;
+
 /// Render a sequence of messages into TUI [`ReplayItem`](forge_tui::ReplayItem)s — user prompts,
 /// assistant text, tool calls (with args), tool results (matched to their call's name via
 /// `tool_call_id`), and the compaction marker. Shared by the model-facing replay
@@ -2400,6 +2405,10 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         // Bounds the overflow self-heal (compact + retry the SAME model) so a transcript that can't
         // be shrunk enough eventually falls through to normal failover instead of looping.
         let mut compact_retries = 0usize;
+        // Bounds the same-model retry for transient errors (a 5xx / dropped connection that often
+        // succeeds on a second attempt). Reset to 0 whenever we switch to a different model, so the
+        // budget is per-model, not per-turn — "don't give up instantly" before failing over.
+        let mut transient_retries = 0u32;
 
         let mut final_text = String::new();
         let mut context_tokens: u64 = 0;
@@ -2614,6 +2623,27 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             self.emit_context_gauge(&active_model);
                             continue;
                         }
+                        // Same-model retry for a TRANSIENT failure (a 5xx / dropped stream / network
+                        // blip) before benching + failing over: these often succeed on a second
+                        // attempt, so switching models immediately needlessly degrades the turn. We
+                        // do NOT hot-retry a rate-limit (it would just 429 again — respect the
+                        // cooldown and fail over) or a permanent incapability (no point). Bounded +
+                        // backed off so a genuinely-down model still falls through to failover fast.
+                        if transient_retries < MAX_TRANSIENT_RETRIES
+                            && !e.is_permanent()
+                            && !e.is_rate_limited()
+                        {
+                            transient_retries += 1;
+                            let backoff =
+                                std::time::Duration::from_millis(500u64 << (transient_retries - 1));
+                            self.presenter.emit(PresenterEvent::Warning(format!(
+                                "{active_model}: {} — retry {transient_retries}/{MAX_TRANSIENT_RETRIES} in {}ms",
+                                e.reason(),
+                                backoff.as_millis()
+                            )));
+                            tokio::time::sleep(backoff).await;
+                            continue;
+                        }
                         let reason = e.reason();
                         // A PERMANENT incapability (no tool support / unaffordable) excludes the
                         // model for a long window so it isn't re-tried every turn (the "every model
@@ -2681,6 +2711,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                                     rationale: format!("failover from {active_model}"),
                                 });
                                 active_model = next;
+                                transient_retries = 0;
                                 continue;
                             }
                             // The routed chain is exhausted. Rather than hard-fail, make ONE
@@ -2699,6 +2730,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                                             .to_string(),
                                     });
                                     active_model = m;
+                                    transient_retries = 0;
                                     continue;
                                 }
                                 None => return Err(CoreError::NoHealthyModel),
@@ -8735,6 +8767,63 @@ mod tests {
         assert!(
             benched.is_empty(),
             "overflow must not bench the model: {benched:?}"
+        );
+    }
+
+    /// Fails the first `fail_first` calls with a NON-overflow transient outage, then answers — to
+    /// prove a transient 5xx/blip self-heals by retrying the SAME model, not by failing over.
+    struct TransientThenOkProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        fail_first: usize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for TransientThenOkProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.fail_first {
+                return Err(forge_provider::ProviderError::Unavailable(
+                    "502 bad gateway (transient)".into(),
+                ));
+            }
+            on_event(StreamEvent::Text(model.into()));
+            Ok(forge_provider::ModelResponse {
+                content: model.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_error_retries_same_model_before_failing_over() {
+        // A 5xx/dropped-connection blip should be retried on the SAME model (it usually succeeds on
+        // the next attempt) instead of immediately switching to a worse fallback. Two transient
+        // failures are within MAX_TRANSIENT_RETRIES, so the primary recovers and the fallback is
+        // never used — and the healthy model is not benched.
+        let provider = Arc::new(TransientThenOkProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_first: MAX_TRANSIENT_RETRIES as usize,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "good::model".into(),
+            fallbacks: vec!["fallback::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        let answer = session.run_turn("hi").await.unwrap();
+        assert_eq!(
+            answer, "good::model",
+            "primary recovered via same-model retry; fallback not used"
+        );
+        assert!(
+            store.current_benched().unwrap().is_empty(),
+            "a transient blip that recovered must not bench the model"
         );
     }
 
