@@ -15,16 +15,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::{PresenterEvent, QChoice};
 
-// Palette.
-const ORANGE: Color = Color::Rgb(255, 145, 60); // brand accent
-const USER: Color = Color::Rgb(125, 180, 255); // user messages
-const DIM: Color = Color::Rgb(110, 110, 120); // secondary text
-const OKGREEN: Color = Color::Rgb(120, 210, 140);
-const ERRRED: Color = Color::Rgb(240, 110, 110);
-const WARNYEL: Color = Color::Rgb(235, 200, 110);
-const TOOLCYAN: Color = Color::Rgb(120, 200, 215);
-const SELECT_BG: Color = Color::Rgb(48, 78, 128); // mouse text-selection highlight
-const STATUSBG: Color = Color::Rgb(28, 28, 34); // status bar background
+// ── Palette ──────────────────────────────────────────────────────────────────
+// Forge identity
+const ORANGE: Color = Color::Rgb(255, 138, 48); // forge brand — warm ember
+                                                // Electric blue primary accent (active states, model display, busy indicator)
+const ACCENT: Color = Color::Rgb(82, 162, 255); // electric blue
+                                                // Text
+const USER: Color = Color::Rgb(122, 183, 255); // user message headers
+const DIM: Color = Color::Rgb(82, 87, 108); // muted / secondary
+const TEXT: Color = Color::Rgb(208, 213, 224); // primary body text
+                                               // Semantic
+const OKGREEN: Color = Color::Rgb(92, 208, 122); // success / ok
+const ERRRED: Color = Color::Rgb(243, 92, 92); // error
+const WARNYEL: Color = Color::Rgb(238, 188, 82); // warning
+const TOOLCYAN: Color = Color::Rgb(75, 212, 218); // tools / lattice
+                                                  // Surfaces
+const SELECT_BG: Color = Color::Rgb(40, 70, 132); // mouse text-selection
+const STATUSBG: Color = Color::Rgb(14, 15, 21); // deep status-bar bg
+const SEPCOL: Color = Color::Rgb(38, 42, 62); // status-bar separator tint
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -257,6 +265,8 @@ pub struct App {
     /// Set while compaction is running, driving the animated progress band. `None` otherwise.
     pub compaction: Option<CompactionState>,
     pub done: bool,
+    /// Why the last turn ended; `None` before any turn completes or for lifecycle-only Done events.
+    pub last_stop_reason: Option<forge_types::StopReason>,
     /// The active operating temper label (e.g. "Guarded"), shown in the statusline.
     pub temper: String,
     /// The active reasoning-effort pin, when set by config or `/effort`.
@@ -1063,14 +1073,15 @@ impl App {
             }
             PresenterEvent::Recap { text } => {
                 self.flush.push(TextLine::from(vec![
-                    Span::styled("  ※ recap  ", Style::default().fg(ORANGE).bold()),
-                    Span::styled(text, Style::default().fg(Color::Rgb(205, 205, 215))),
+                    Span::styled("  ※ recap  ", Style::default().fg(ACCENT).bold()),
+                    Span::styled(text, Style::default().fg(TEXT)),
                 ]));
                 self.flush.push(TextLine::default());
             }
-            PresenterEvent::Done { .. } => {
+            PresenterEvent::Done { stop_reason, .. } => {
                 self.model_search = None;
                 self.done = true;
+                self.last_stop_reason = Some(stop_reason);
             }
             PresenterEvent::QuotaUpdate {
                 provider,
@@ -1290,9 +1301,9 @@ impl App {
                     .iter()
                     .map(|l| {
                         let style = if l.starts_with("── result") {
-                            Style::default().fg(ORANGE)
+                            Style::default().fg(TOOLCYAN)
                         } else {
-                            Style::default().fg(Color::Rgb(205, 205, 215))
+                            Style::default().fg(TEXT)
                         };
                         TextLine::from(Span::styled(l.clone(), style))
                     })
@@ -1921,7 +1932,7 @@ impl App {
         }
         self.ensure_stream_cache(width);
         let mut rows = self.stream_cache.borrow().rows.clone();
-        let cursor = Span::styled("▌", Style::default().fg(ORANGE));
+        let cursor = Span::styled("▌", Style::default().fg(ACCENT));
         match rows.last_mut() {
             Some(l) => l.spans.push(cursor),
             None => rows.push(TextLine::from(cursor)),
@@ -2315,9 +2326,9 @@ pub fn lattice_view_lines(
     }
     for (kind, name, path, line) in roots {
         out.push(TextLine::from(vec![
-            Span::styled("    ● ", Style::default().fg(ORANGE)),
+            Span::styled("    ● ", Style::default().fg(TOOLCYAN)),
             Span::styled(format!("{kind} "), Style::default().fg(DIM)),
-            Span::styled(name.clone(), Style::default().fg(ORANGE).bold()),
+            Span::styled(name.clone(), Style::default().fg(ACCENT).bold()),
             Span::styled(format!("  {path}:{line}"), Style::default().fg(DIM)),
         ]));
     }
@@ -2671,7 +2682,7 @@ fn render_palette(frame: &mut Frame, area: Rect, app: &App) {
             let selected = i == app.palette.selected;
             let marker = if selected { "▸ " } else { "  " };
             let name_style = if selected {
-                Style::default().fg(ORANGE).bold()
+                Style::default().fg(ACCENT).bold()
             } else {
                 Style::default().fg(USER)
             };
@@ -2738,7 +2749,7 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
     // Heading: title · live filter (or hint) · position.
     let mut head = vec![Span::styled(
         format!("  {} ", p.heading),
-        Style::default().fg(ORANGE).bold(),
+        Style::default().fg(ACCENT).bold(),
     )];
     if p.query.is_empty() {
         head.push(Span::styled("(type to filter)", Style::default().fg(DIM)));
@@ -2883,10 +2894,7 @@ fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
         let y = area.y + area.height - 1;
         let bar = Paragraph::new(TextLine::from(Span::styled(
             label,
-            Style::default()
-                .fg(Color::Rgb(20, 22, 28))
-                .bg(ORANGE)
-                .bold(),
+            Style::default().fg(STATUSBG).bg(ORANGE).bold(),
         )));
         frame.render_widget(bar, Rect::new(x, y, w, 1));
         app.jump_bar_geom.set(Some((y, x, w)));
@@ -2901,7 +2909,7 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
     if app.streaming_active {
         let line = TextLine::from(vec![
             Span::raw(format!("  {}", app.streaming)),
-            Span::styled("▌", Style::default().fg(ORANGE)),
+            Span::styled("▌", Style::default().fg(ACCENT)),
         ]);
         let para = Paragraph::new(line).wrap(Wrap { trim: false });
         let count = para.line_count(area.width) as u16;
@@ -2945,8 +2953,8 @@ fn render_activity_panel(frame: &mut Frame, area: Rect, app: &App) {
     };
     lines.push(TextLine::from(vec![
         Span::styled(
-            format!("  ⚒ activity ({})  ", views.len()),
-            Style::default().fg(ORANGE).bold(),
+            format!("  ◈ activity ({})  ", views.len()),
+            Style::default().fg(ACCENT).bold(),
         ),
         Span::styled(hint, Style::default().fg(DIM)),
     ]));
@@ -2970,7 +2978,7 @@ fn render_activity_panel(frame: &mut Frame, area: Rect, app: &App) {
         let marker = if selected { "▸" } else { " " };
         let (kind_glyph, kind_color) = match v.kind {
             ActivityKind::MainChat => ("●", TOOLCYAN),
-            ActivityKind::Subagent => ("⚒", ORANGE),
+            ActivityKind::Subagent => ("◈", ACCENT),
             ActivityKind::AssayCritic => ("⚖", WARNYEL),
         };
         let status_span = match v.status {
@@ -2979,7 +2987,7 @@ fn render_activity_panel(frame: &mut Frame, area: Rect, app: &App) {
             ActivityStatus::Skipped => Span::styled("⏭ ", Style::default().fg(DIM)),
         };
         let title_style = if selected {
-            Style::default().fg(ORANGE).bold()
+            Style::default().fg(ACCENT).bold()
         } else {
             Style::default().fg(kind_color).bold()
         };
@@ -3000,7 +3008,7 @@ fn render_activity_panel(frame: &mut Frame, area: Rect, app: &App) {
         lines.push(TextLine::from(vec![
             Span::styled(
                 head,
-                Style::default().fg(if selected { ORANGE } else { DIM }),
+                Style::default().fg(if selected { ACCENT } else { DIM }),
             ),
             status_span,
             Span::styled(format!("{} ", v.title), title_style),
@@ -3041,11 +3049,11 @@ fn tasks_panel_lines(tasks: &[forge_types::TodoItem], height: u16) -> Vec<TextLi
         .filter(|t| t.status == TodoStatus::Pending)
         .count();
     let header = format!(
-        "  ⚒ {total} tasks ({done_count} done, {in_progress_count} in progress, {open_count} open)"
+        "  ◈ {total} tasks ({done_count} done, {in_progress_count} in progress, {open_count} open)"
     );
     let mut lines = vec![TextLine::from(Span::styled(
         header,
-        Style::default().fg(ORANGE).bold(),
+        Style::default().fg(ACCENT).bold(),
     ))];
     let body_h = h.saturating_sub(1);
     // Prioritize: in-progress first, then pending, then done.
@@ -3081,8 +3089,8 @@ fn tasks_panel_lines(tasks: &[forge_types::TodoItem], height: u16) -> Vec<TextLi
         let t = &tasks[i];
         let (glyph, style) = match t.status {
             TodoStatus::Done => ("✔", Style::default().fg(DIM)),
-            TodoStatus::InProgress => ("◼", Style::default().fg(ORANGE).bold()),
-            TodoStatus::Pending => ("○", Style::default().fg(Color::Rgb(205, 205, 215))),
+            TodoStatus::InProgress => ("◼", Style::default().fg(ACCENT).bold()),
+            TodoStatus::Pending => ("○", Style::default().fg(TEXT)),
         };
         lines.push(TextLine::from(Span::styled(
             format!("  {glyph} {}", truncate(&t.title, 62)),
@@ -3100,13 +3108,17 @@ fn tasks_panel_lines(tasks: &[forge_types::TodoItem], height: u16) -> Vec<TextLi
 
 fn render_permission(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(p) = &app.prompt {
-        frame.render_widget(
-            Paragraph::new(TextLine::from(Span::styled(
-                format!(" » {p}   [y]es / [N]o "),
-                Style::default().fg(Color::Black).bg(WARNYEL).bold(),
-            ))),
-            area,
-        );
+        let line = TextLine::from(vec![
+            Span::styled(
+                " ◉ RESPOND ",
+                Style::default().fg(STATUSBG).bg(ORANGE).bold(),
+            ),
+            Span::styled(format!("  {p}  "), Style::default().fg(WARNYEL)),
+            Span::styled("[y]es", Style::default().fg(OKGREEN).bold()),
+            Span::styled(" / ", Style::default().fg(DIM)),
+            Span::styled("[N]o ", Style::default().fg(ERRRED).bold()),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
     }
 }
 
@@ -3137,11 +3149,21 @@ pub fn input_box_height(input: &str, box_width: u16) -> u16 {
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
+    let (border_col, title_text) = if app.busy {
+        (ACCENT, " ▸ working… ")
+    } else if app.prompt.is_some() {
+        (WARNYEL, " ◉ respond ")
+    } else {
+        (ORANGE, " ✦ message ")
+    };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ORANGE))
+        .border_style(Style::default().fg(border_col))
         .padding(Padding::horizontal(1))
-        .title(Span::styled(" message ", Style::default().fg(ORANGE)));
+        .title(Span::styled(
+            title_text,
+            Style::default().fg(border_col).bold(),
+        ));
 
     // Build one ratatui Line per explicit input line so pasted newlines render as separate rows;
     // long lines are then soft-wrapped by `Wrap`. Slash-command highlighting + block cursor apply
@@ -3211,7 +3233,7 @@ fn input_spans(input: &str) -> Vec<Span<'static>> {
             }
             out.push(Span::styled(
                 input[tok.start..tok.end].to_string(),
-                Style::default().fg(ORANGE).bold(),
+                Style::default().fg(ACCENT).bold(),
             ));
             if tok.end < input.len() {
                 out.push(Span::raw(input[tok.end..].to_string()));
@@ -3253,9 +3275,8 @@ fn line_spans_with_cursor(
             let tok_start = tok.start;
             let tok_end = tok.end;
 
-            // Helper: emit a styled tok-segment (orange bold).
             let tok_span = |s: &str| -> Span<'static> {
-                Span::styled(s.to_string(), Style::default().fg(ORANGE).bold())
+                Span::styled(s.to_string(), Style::default().fg(ACCENT).bold())
             };
 
             if col < tok_start {
@@ -3389,31 +3410,33 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
         return;
     }
     let area = f.area();
-    let w = (area.width as f32 * 0.82).ceil() as u16;
-    let h = (area.height as f32 * 0.72).ceil() as u16;
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect {
-        x,
-        y,
+    let target_w = (area.width as f32 * 0.44).ceil() as u16;
+    let frac = ((app.usage_overlay.anim_tick as f32) / 8.0).min(1.0);
+    let w = ((target_w as f32 * frac).ceil() as u16).max(2);
+    let drawer = Rect {
+        x: area.x + area.width.saturating_sub(w),
+        y: area.y,
         width: w,
-        height: h,
+        height: area.height,
     };
-
-    f.render_widget(ratatui::widgets::Clear, popup);
+    f.render_widget(ratatui::widgets::Clear, drawer);
 
     let spinner = SPINNER[(app.usage_overlay.anim_tick as usize) % SPINNER.len()];
     let title = if app.usage_overlay.loading {
-        format!(" {spinner} Usage  loading… ")
+        format!(" {spinner} usage  loading… ")
     } else {
-        format!(" {spinner} Usage ")
+        " ◈ usage ".to_string()
     };
     let block = Block::bordered()
-        .title(title)
-        .border_style(Style::default().fg(TOOLCYAN));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(title, Style::default().fg(ACCENT).bold()))
+        .border_style(Style::default().fg(ACCENT));
+    let inner = block.inner(drawer);
+    f.render_widget(block, drawer);
 
+    if w < 20 {
+        return;
+    }
     let chunks = Layout::vertical([Constraint::Length(7), Constraint::Min(0)]).split(inner);
 
     let o = &app.usage_overlay;
@@ -3585,14 +3608,13 @@ fn cost_cell(model: &str, cost: f64) -> String {
 
 /// A 14-cell colour-coded meter for a fraction, eased by `ease` (animation grow-in).
 fn mesh_meter(frac: f64, ease: f32, status: &str) -> Vec<Span<'static>> {
-    use ratatui::style::Color;
     let shown = (frac as f32 * ease).clamp(0.0, 1.0);
     let filled = (shown * 14.0).round() as usize;
     let col = match status {
-        "Exhausted" => Color::Red,
-        "Warning" => Color::Yellow,
-        _ if frac >= 0.6 => Color::Yellow,
-        _ => Color::Green,
+        "Exhausted" => ERRRED,
+        "Warning" => WARNYEL,
+        _ if frac >= 0.6 => WARNYEL,
+        _ => OKGREEN,
     };
     vec![
         Span::styled("█".repeat(filled), Style::default().fg(col)),
@@ -3616,36 +3638,39 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     if !app.mesh_overlay.open {
         return;
     }
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::Modifier;
     use ratatui::text::{Line, Text};
 
     let o = &app.mesh_overlay;
     let area = f.area();
-    let w = (area.width as f32 * 0.84).ceil() as u16;
-    let h = (area.height as f32 * 0.80).ceil() as u16;
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let popup = Rect {
-        x,
-        y,
+    let target_w = (area.width as f32 * 0.48).ceil() as u16;
+    let frac = ((o.anim_tick as f32) / 8.0).min(1.0);
+    let w = ((target_w as f32 * frac).ceil() as u16).max(2);
+    let drawer = Rect {
+        x: area.x + area.width.saturating_sub(w),
+        y: area.y,
         width: w,
-        height: h,
+        height: area.height,
     };
-    f.render_widget(ratatui::widgets::Clear, popup);
+    f.render_widget(ratatui::widgets::Clear, drawer);
 
     let settled = o.anim_tick >= o.settle_tick();
     let glyph = if settled {
-        "⚒"
+        "◈"
     } else {
         SPINNER[(o.anim_tick as usize) % SPINNER.len()]
     };
     let title = format!(" {glyph} mesh inspector ");
     let block = Block::bordered()
-        .title(title)
-        .border_style(Style::default().fg(TOOLCYAN));
-    let inner = block.inner(popup);
-    f.render_widget(block, popup);
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(title, Style::default().fg(ACCENT).bold()))
+        .border_style(Style::default().fg(ACCENT));
+    let inner = block.inner(drawer);
+    f.render_widget(block, drawer);
 
+    if w < 20 {
+        return;
+    }
     // Show loading spinner while bridge stats + routing explanation are fetched in background.
     if o.loading {
         let spinner = SPINNER[(o.anim_tick as usize) % SPINNER.len()];
@@ -3679,10 +3704,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         } else {
             format!("tier  {}   ({})", o.classified, o.reasons)
         };
-        top.push(Line::from(Span::styled(
-            tier,
-            Style::default().fg(Color::Cyan),
-        )));
+        top.push(Line::from(Span::styled(tier, Style::default().fg(ACCENT))));
         if !o.classifier.is_empty() {
             top.push(Line::from(vec![
                 Span::styled("cls   ", Style::default().fg(DIM)),
@@ -3710,11 +3732,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         top.push(Line::from(spans));
     }
     if !o.conserve_line.is_empty() {
-        let col = if o.conserve_fired {
-            Color::Yellow
-        } else {
-            Color::Gray
-        };
+        let col = if o.conserve_fired { WARNYEL } else { DIM };
         top.push(Line::from(Span::styled(
             format!("  conserve  {}", o.conserve_line),
             Style::default().fg(col),
@@ -3745,9 +3763,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
             if c.usable { "" } else { " · unusable" },
         );
         let base = if c.selected {
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD)
         } else if !c.usable {
             Style::default().fg(DIM)
         } else {
@@ -3779,9 +3795,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         Span::styled("pick  ", Style::default().fg(DIM)),
         Span::styled(
             o.pick.clone(),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD),
         ),
     ]));
     if !o.rationale.is_empty() {
@@ -3880,9 +3894,9 @@ fn render_compact_band(frame: &mut Frame, area: Rect, app: &App) {
         vec![
             Span::styled(
                 format!(" {spin} {label} "),
-                Style::default().fg(ORANGE).bold().bg(STATUSBG),
+                Style::default().fg(ACCENT).bold().bg(STATUSBG),
             ),
-            Span::styled(bar, Style::default().fg(ORANGE).bg(STATUSBG)),
+            Span::styled(bar, Style::default().fg(ACCENT).bg(STATUSBG)),
             Span::styled(
                 format!(" {pct}%  {elapsed:.1}s"),
                 Style::default().fg(DIM).bg(STATUSBG),
@@ -3955,7 +3969,7 @@ fn effort_status(effort: forge_types::EffortLevel) -> (&'static str, Style) {
         ),
         forge_types::EffortLevel::High => (
             "▲ effort high",
-            Style::default().fg(ORANGE).bold().bg(STATUSBG),
+            Style::default().fg(WARNYEL).bold().bg(STATUSBG),
         ),
         forge_types::EffortLevel::XHigh => (
             "▲▲ effort xhigh",
@@ -3967,7 +3981,7 @@ fn effort_status(effort: forge_types::EffortLevel) -> (&'static str, Style) {
 fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     let bg = Style::default().bg(STATUSBG);
     let w = area.width;
-    let sep = || Span::styled("  ·  ", Style::default().fg(DIM).bg(STATUSBG));
+    let sep = || Span::styled("  │  ", Style::default().fg(SEPCOL).bg(STATUSBG));
 
     let model = app
         .routing
@@ -3991,23 +4005,23 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         let f = SPINNER[app.tick % SPINNER.len()];
         line1.push(Span::styled(
             format!("{f} working"),
-            Style::default().fg(ORANGE).bg(STATUSBG),
+            Style::default().fg(ACCENT).bold().bg(STATUSBG),
         ));
         line1.push(sep());
     }
     if let (Some(t), true) = (tier, w >= 52) {
         line1.push(Span::styled(
             format!("[{t}] "),
-            Style::default().fg(ORANGE).bold().bg(STATUSBG),
+            Style::default().fg(DIM).bg(STATUSBG),
         ));
     }
     line1.push(Span::styled(
         model.to_string(),
-        Style::default().fg(Color::White).bg(STATUSBG),
+        Style::default().fg(ACCENT).bold().bg(STATUSBG),
     ));
     line1.push(sep());
     line1.push(Span::styled(
-        format!("${:.4}", app.cost_usd),
+        format!("◈ ${:.4}", app.cost_usd),
         Style::default().fg(OKGREEN).bold().bg(STATUSBG),
     ));
     if let Some(effort) = app.effort {
@@ -4039,6 +4053,25 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
             format!("⏳ {} queued", app.queued.len()),
             Style::default().fg(WARNYEL).bold().bg(STATUSBG),
         ));
+    }
+    if app.done && w >= 50 {
+        match app.last_stop_reason {
+            Some(forge_types::StopReason::MaxSteps) => {
+                line1.push(sep());
+                line1.push(Span::styled(
+                    "⚠ step limit — send `continue`",
+                    Style::default().fg(WARNYEL).bold().bg(STATUSBG),
+                ));
+            }
+            Some(forge_types::StopReason::BudgetExhausted) => {
+                line1.push(sep());
+                line1.push(Span::styled(
+                    "✕ budget cap",
+                    Style::default().fg(ERRRED).bold().bg(STATUSBG),
+                ));
+            }
+            _ => {}
+        }
     }
 
     let version = concat!("v", env!("CARGO_PKG_VERSION"));
@@ -4093,7 +4126,7 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
                     human(app.turn_out)
                 ),
                 Style::default()
-                    .fg(if app.busy { ORANGE } else { DIM })
+                    .fg(if app.busy { ACCENT } else { DIM })
                     .bg(STATUSBG),
             ));
         }

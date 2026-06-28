@@ -131,12 +131,12 @@ fn browse<F: FnMut() -> Vec<TranscriptView>>(
 }
 
 // Brand palette (mirrors the per-module consts elsewhere in the crate).
-const ORANGE: Color = Color::Rgb(255, 145, 60);
-const DIM: Color = Color::Rgb(110, 110, 120);
-const TOOLCYAN: Color = Color::Rgb(120, 200, 215);
-const WARNYEL: Color = Color::Rgb(235, 200, 110);
-const OKGREEN: Color = Color::Rgb(120, 210, 140);
-const VERY_DIM: Color = Color::Rgb(80, 80, 90);
+const ACCENT: Color = Color::Rgb(82, 162, 255);
+const DIM: Color = Color::Rgb(82, 87, 108);
+const TOOLCYAN: Color = Color::Rgb(75, 212, 218);
+const WARNYEL: Color = Color::Rgb(238, 188, 82);
+const OKGREEN: Color = Color::Rgb(92, 208, 122);
+const VERY_DIM: Color = Color::Rgb(54, 58, 74);
 
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() > max {
@@ -207,7 +207,7 @@ pub(crate) fn wrap_lines(lines: &[TextLine<'_>], width: usize) -> Vec<TextLine<'
 fn kind_theme(kind: ActivityKind) -> (&'static str, Color) {
     match kind {
         ActivityKind::MainChat => ("●", TOOLCYAN),
-        ActivityKind::Subagent => ("⚒", ORANGE),
+        ActivityKind::Subagent => ("◈", ACCENT),
         ActivityKind::AssayCritic => ("⚖", WARNYEL),
     }
 }
@@ -228,8 +228,8 @@ pub fn transcript_lines(
     if views.is_empty() {
         return vec![
             TextLine::from(Span::styled(
-                "  ⚒ activity",
-                Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+                "  ◈ activity",
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             )),
             TextLine::from(Span::styled("  no activity yet", Style::default().fg(DIM))),
         ];

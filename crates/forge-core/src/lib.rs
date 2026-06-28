@@ -14,7 +14,8 @@ use forge_store::Store;
 use forge_tools::ToolRegistry;
 use forge_tui::{Presenter, PresenterEvent};
 use forge_types::{
-    EffortLevel, Message, PermissionDecision, PermissionMode, PermissionRule, Role, TaskTier,
+    EffortLevel, LoopOutcome, Message, PermissionDecision, PermissionMode, PermissionRule, Role,
+    StopReason, TaskTier,
 };
 
 pub mod assay;
@@ -222,7 +223,7 @@ const CHARS_PER_TOKEN: usize = 3;
 /// A FREE function taking `&EmbeddingsConfig` (which is `Sync`) — NOT a `&self` method — so the
 /// `.await` doesn't hold a `&Session` borrow (`Session` is `!Sync`, which would make the turn future
 /// non-`Send`).
-async fn embed_one(cfg: &forge_config::EmbeddingsConfig, text: &str) -> Option<Vec<f32>> {
+pub async fn embed_one(cfg: &forge_config::EmbeddingsConfig, text: &str) -> Option<Vec<f32>> {
     let (embedder, _) = forge_provider::select_embedder(cfg)?;
     embedder
         .embed(&[text.to_string()])
@@ -873,6 +874,17 @@ impl Session {
         self.catalog.as_ref()
     }
 
+    /// Override the session's permission mode at runtime. Used by `forge mcp agent` so the
+    /// orchestrating agent can switch to bypass/accept-edits without restarting the session.
+    pub fn set_mode(&mut self, mode: PermissionMode) {
+        self.mode = mode;
+    }
+
+    /// The session's current permission mode.
+    pub fn mode(&self) -> PermissionMode {
+        self.mode
+    }
+
     /// Attach connected MCP servers (composition root). Their tools become advertisable via
     /// `tool_specs` and callable through `invoke_tool`, gated by the permission broker.
     pub fn set_mcp(&mut self, mcp: Option<Arc<forge_mcp::McpManager>>) {
@@ -1473,6 +1485,7 @@ impl Session {
             }
             self.presenter.emit(PresenterEvent::Done {
                 final_text: String::new(),
+                stop_reason: StopReason::FinalAnswer,
             });
         }
         Ok(())
@@ -1490,6 +1503,7 @@ impl Session {
             .emit(PresenterEvent::Warning(msg.to_string()));
         self.presenter.emit(PresenterEvent::Done {
             final_text: String::new(),
+            stop_reason: StopReason::FinalAnswer,
         });
     }
 
@@ -1523,6 +1537,9 @@ impl Session {
         specs.push(ask_user_spec());
         // The task-tracking tool — always advertised so the model can keep a live todo list.
         specs.push(update_tasks_spec());
+        // The on-demand memory tool — always advertised so the model can persist facts at any
+        // point during a turn, not just via end-of-turn auto-capture.
+        specs.push(remember_spec());
         // The plan-presentation tool — offered ONLY in planning mode, so the model proposes a plan
         // (rendered as an interactive card) instead of editing. Gating it to Plan mode also makes
         // the approve→Auto-edit→build flow non-recursive (the build turn can't re-propose a plan).
@@ -1548,8 +1565,8 @@ impl Session {
         specs
     }
 
-    /// Run one full turn: route -> (model -> tools)* -> final answer. Returns the answer.
-    pub async fn run_turn(&mut self, prompt: &str) -> Result<String, CoreError> {
+    /// Run one full turn: route -> (model -> tools)* -> final answer. Returns the outcome.
+    pub async fn run_turn(&mut self, prompt: &str) -> Result<LoopOutcome, CoreError> {
         self.run_turn_with(prompt, &[], None).await
     }
 
@@ -2167,9 +2184,16 @@ Output ONLY that sentence — no preamble, no quotation marks.";
     /// as project-scoped memories (dedup + salience handled by the store). Best-effort: any
     /// budget/model failure is silently skipped so it can never derail the session. Recall of these
     /// happens at the start of a later session (see `run_turn_with`).
-    async fn capture_memories(&mut self, prompt: &str, final_text: &str) {
+    // Spawns memory capture so it doesn't block turn completion — the spinner clears when the AI
+    // response finishes. Returns a JoinHandle so the caller can await it in one-shot mode (forge
+    // run) before the process exits; interactive turns drop the handle and it runs in background.
+    fn capture_memories(
+        &self,
+        prompt: &str,
+        final_text: &str,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         if !self.config.mesh.auto_memory || final_text.trim().is_empty() {
-            return;
+            return None;
         }
         let budget = BudgetState {
             spent_today_usd: self.store.spend_today_usd().unwrap_or(0.0),
@@ -2181,65 +2205,71 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             warn_fraction: self.config.mesh.warn_threshold,
         };
         if budget.status() == BudgetStatus::Exhausted {
-            return;
+            return None;
         }
         let health = self.store.current_benched().unwrap_or_default();
         let quota = self.live_quota();
-        let decision = self
-            .router
-            .route_hinted(
-                "extract durable facts",
-                budget,
-                &health,
-                &quota,
-                Some(TaskTier::Trivial),
-                self.pinned_effort,
-            )
-            .await;
+        let provider = self.provider.clone();
+        let store = self.store.clone();
+        let router = self.router.clone();
+        let id = self.id.clone();
+        let config = self.config.clone();
+        let pinned_effort = self.pinned_effort;
         let user_snippet: String = prompt.chars().take(500).collect();
         let assistant_snippet: String = final_text.chars().take(1200).collect();
-        let messages = vec![
-            Message::system(Self::MEMORY_CAPTURE_SYSTEM),
-            Message::user(format!(
-                "User request:\n{user_snippet}\n\nAssistant response:\n{assistant_snippet}"
-            )),
-        ];
-        let mut sink = |_: StreamEvent| {};
-        let Ok(r) = self
-            .provider
-            .complete(&decision.model, &messages, &[], &mut sink)
-            .await
-        else {
-            return;
-        };
-        let _ = self
-            .store
-            .record_side_call_usage(&self.id, "memory", &r.usage);
-        let scope = memory_scope();
-        for line in r.content.lines().take(3) {
-            let line = line.trim().trim_start_matches(['-', '*', '•']).trim();
-            let Some((kind, text)) = line.split_once(':') else {
-                continue;
+        Some(tokio::spawn(async move {
+            let decision = router
+                .route_hinted(
+                    "extract durable facts",
+                    budget,
+                    &health,
+                    &quota,
+                    Some(TaskTier::Trivial),
+                    pinned_effort,
+                )
+                .await;
+            let messages = vec![
+                Message::system(Session::MEMORY_CAPTURE_SYSTEM),
+                Message::user(format!(
+                    "User request:\n{user_snippet}\n\nAssistant response:\n{assistant_snippet}"
+                )),
+            ];
+            let mut on_event = |_: StreamEvent| {};
+            let Ok(r) = provider
+                .complete(&decision.model, &messages, &[], &mut on_event)
+                .await
+            else {
+                return;
             };
-            let kind = kind.trim().to_lowercase();
-            let kind = match kind.as_str() {
-                "preference" | "decision" | "fact" | "reference" => kind.as_str(),
-                _ => "fact",
-            };
-            let text = text.trim();
-            if text.len() >= 4 {
-                match embed_one(&self.config.lattice.embeddings, text).await {
-                    Some(emb) => {
-                        let _ = self
-                            .store
-                            .add_memory_with_embedding(&scope, kind, text, &self.id, &emb);
-                    }
-                    None => {
-                        let _ = self.store.add_memory(&scope, kind, text, &self.id);
+            let _ = store.record_side_call_usage(&id, "memory", &r.usage);
+            let scope = memory_scope();
+            // Collect lines into owned Strings before the per-line await to avoid holding
+            // a borrow across the embed_one await point.
+            let lines: Vec<String> = r.content.lines().take(3).map(str::to_string).collect();
+            for raw in lines {
+                let line = raw.trim().trim_start_matches(['-', '*', '•']).trim();
+                let Some((kind, text)) = line.split_once(':') else {
+                    continue;
+                };
+                let kind_norm = kind.trim().to_lowercase();
+                let kind_cat = match kind_norm.as_str() {
+                    "preference" | "decision" | "fact" | "reference" => kind_norm.as_str(),
+                    _ => "fact",
+                };
+                let text = text.trim();
+                if text.len() >= 4 {
+                    match embed_one(&config.lattice.embeddings, text).await {
+                        Some(emb) => {
+                            let _ =
+                                store.add_memory_with_embedding(&scope, kind_cat, text, &id, &emb);
+                        }
+                        None => {
+                            let _ = store.add_memory(&scope, kind_cat, text, &id);
+                        }
                     }
                 }
             }
-        }
+        }))
     }
 
     async fn generate_recap(&mut self, prompt: &str, final_text: &str) {
@@ -2763,11 +2793,11 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             transient_retries += 1;
                             let backoff =
                                 std::time::Duration::from_millis(500u64 << (transient_retries - 1));
-                            self.presenter.emit(PresenterEvent::Warning(format!(
-                                "{active_model}: {} — retry {transient_retries}/{MAX_TRANSIENT_RETRIES} in {}ms",
-                                e.reason(),
-                                backoff.as_millis()
-                            )));
+                            // Use ModelSearch (status-bar indicator, not chat history) so transient
+                            // retries don't spam the scrollback. The spinner already signals "working".
+                            self.presenter.emit(PresenterEvent::ModelSearch {
+                                model: active_model.clone(),
+                            });
                             tokio::time::sleep(backoff).await;
                             continue;
                         }
@@ -3470,7 +3500,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         prompt: &str,
         guidance: &[String],
         tier_override: Option<TaskTier>,
-    ) -> Result<String, CoreError> {
+    ) -> Result<LoopOutcome, CoreError> {
         // 1. Route the task (deterministic, no model call) and record why. The budget is
         // aggregated across ALL sessions for the current local day + week + month (FR-5), not one
         // session's running total.
@@ -3505,8 +3535,9 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             self.transcript.push(Message::system(&msg));
             self.presenter.emit(PresenterEvent::Done {
                 final_text: msg.clone(),
+                stop_reason: StopReason::BudgetExhausted,
             });
-            return Ok(msg);
+            return Ok(LoopOutcome::budget_exhausted(msg));
         }
 
         // Surface budget pressure before routing (FR-5).
@@ -3564,8 +3595,9 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             self.transcript.push(Message::system(&msg));
             self.presenter.emit(PresenterEvent::Done {
                 final_text: msg.clone(),
+                stop_reason: StopReason::FinalAnswer,
             });
-            return Ok(msg);
+            return Ok(LoopOutcome::final_answer(msg));
         }
 
         self.presenter.emit(PresenterEvent::Routing {
@@ -3632,6 +3664,16 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         )));
                     }
                 }
+            }
+
+            // Auto-orchestrate: inject the resource-routing framework once so the model surveys
+            // all available tools on every turn without requiring the user to /orchestrate.
+            if self.config.mesh.auto_orchestrate {
+                let guidance = forge_skills::orchestrate_system_guidance();
+                let oseq = self.next_seq();
+                self.store
+                    .add_message(&self.id, oseq, Role::System, guidance, None)?;
+                self.transcript.push(Message::system(guidance));
             }
 
             // When git co-authoring is on, prime the agent (once) to attribute its work to Forge.
@@ -3787,6 +3829,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let mut final_text = outcome.final_text;
         let mut context_tokens = outcome.context_tokens;
         let mut active_model = outcome.active_model;
+        let mut hit_step_cap = outcome.hit_step_cap;
 
         // A CLI-bridge model proposed a plan (the sink already rendered the card). Seed tasks,
         // persist it, and stash it for the approval flow below — the in-process path did this in
@@ -3903,6 +3946,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         final_text = fix_outcome.final_text;
                         context_tokens = fix_outcome.context_tokens;
                         active_model = fix_outcome.active_model;
+                        hit_step_cap = fix_outcome.hit_step_cap;
                         if fix_outcome.hit_step_cap {
                             self.presenter.emit(PresenterEvent::Warning(format!(
                                 "autofix: inner model loop hit the {max_steps}-step limit"
@@ -3963,10 +4007,23 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         });
         self.presenter.emit(PresenterEvent::Done {
             final_text: final_text.clone(),
+            stop_reason: if hit_step_cap {
+                StopReason::MaxSteps
+            } else {
+                StopReason::FinalAnswer
+            },
         });
         self.generate_recap(prompt, &final_text).await;
-        self.capture_memories(prompt, &final_text).await;
-        Ok(final_text)
+        // Await the handle so one-shot (forge run) exits only after capture completes. In
+        // interactive mode the spinner is already cleared and this is a brief background wait.
+        if let Some(handle) = self.capture_memories(prompt, &final_text) {
+            let _ = handle.await;
+        }
+        Ok(if hit_step_cap {
+            LoopOutcome::max_steps(final_text)
+        } else {
+            LoopOutcome::final_answer(final_text)
+        })
     }
 
     /// Build a unified diff of files written this turn (pre-turn blob vs current file), run the
@@ -4181,6 +4238,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             || name == UPDATE_TASKS_TOOL
             || name == PRESENT_PLAN_TOOL
             || name == USE_SKILL_TOOL
+            || name == REMEMBER_TOOL
         {
             return false;
         }
@@ -4318,6 +4376,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // methodology as the tool result so the model follows it; unknown name → a helpful error.
         if call.name == USE_SKILL_TOOL {
             return self.use_skill(msg_id, call);
+        }
+        // On-demand memory write — model calls this to persist a durable fact immediately,
+        // without waiting for end-of-turn auto-capture.
+        if call.name == REMEMBER_TOOL {
+            return self.remember(msg_id, call).await;
         }
         // External MCP tools (meta-tools + exposed server tools) are owned by the manager, not the
         // built-in registry. Route them here, still through the permission broker (mcp-client.md).
@@ -5007,6 +5070,62 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
 
     /// Load a Forge skill's methodology (the `use_skill` virtual tool) and return it as the tool
     /// result so the model applies it this turn. Unknown name → an error listing valid skills.
+    async fn remember(
+        &mut self,
+        msg_id: &str,
+        call: &forge_types::ToolCall,
+    ) -> Result<String, CoreError> {
+        let args_json = serde_json::to_string(&call.args)?;
+        let kind_raw = call
+            .args
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("fact");
+        let text = call
+            .args
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let kind_norm = kind_raw.trim().to_lowercase();
+        let kind_cat = match kind_norm.as_str() {
+            "preference" | "decision" | "fact" | "reference" => kind_norm.clone(),
+            _ => "fact".to_string(),
+        };
+        let (result, ok) = if text.len() < 4 {
+            (
+                "error: memory text too short (minimum 4 characters)".to_string(),
+                false,
+            )
+        } else {
+            let scope = memory_scope();
+            let cfg = self.config.lattice.embeddings.clone();
+            match embed_one(&cfg, &text).await {
+                Some(emb) => {
+                    let _ = self
+                        .store
+                        .add_memory_with_embedding(&scope, &kind_cat, &text, &self.id, &emb);
+                }
+                None => {
+                    let _ = self.store.add_memory(&scope, &kind_cat, &text, &self.id);
+                }
+            }
+            self.presenter
+                .emit(PresenterEvent::Warning(format!("◈ memory · {kind_cat}")));
+            (format!("memory saved: [{kind_cat}] {text}"), true)
+        };
+        self.store.record_tool_call(
+            msg_id,
+            &call.name,
+            &args_json,
+            &result,
+            "allowed",
+            if ok { "ok" } else { "error" },
+        )?;
+        Ok(result)
+    }
+
     fn use_skill(
         &mut self,
         msg_id: &str,
@@ -5055,6 +5174,36 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             if ok { "ok" } else { "error" },
         )?;
         Ok(result)
+    }
+}
+
+/// The on-demand memory-write virtual tool name.
+pub const REMEMBER_TOOL: &str = "remember";
+
+/// The `ToolSpec` advertised to the model for [`REMEMBER_TOOL`].
+pub fn remember_spec() -> ToolSpec {
+    ToolSpec {
+        name: REMEMBER_TOOL.to_string(),
+        description: "Persist a durable fact to memory so it's available in future sessions. \
+            Use proactively when you learn something worth remembering: a project decision, user \
+            preference, key architecture fact, or stable reference. Kind must be one of \
+            `preference`, `decision`, `fact`, or `reference`."
+            .to_string(),
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["preference", "decision", "fact", "reference"],
+                    "description": "memory category"
+                },
+                "text": {
+                    "type": "string",
+                    "description": "the fact to remember (1–2 sentences max)"
+                }
+            },
+            "required": ["kind", "text"]
+        }),
     }
 }
 
