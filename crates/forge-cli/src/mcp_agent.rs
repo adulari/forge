@@ -30,7 +30,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use forge_types::{PermissionMode, SideEffect};
+use forge_types::{PermissionMode, SideEffect, TaskTier};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, Content, JsonObject, ListToolsResult, LoggingLevel,
     LoggingMessageNotificationParam, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
@@ -41,6 +41,8 @@ use rmcp::{ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
 use serde_json::Value;
 use tokio::sync::mpsc;
 
+use crate::cli::commands::assay::bundle_scoped_source;
+use crate::cli::commands::models::discover_catalog;
 use crate::cli::commands::run::build_session_with;
 
 // ---------------------------------------------------------------------------
@@ -116,6 +118,7 @@ const TOOL_CHAT: &str = "forge_chat";
 const TOOL_STATUS: &str = "forge_status";
 const TOOL_SET_MODE: &str = "forge_set_mode";
 const TOOL_INTERRUPT: &str = "forge_interrupt";
+const TOOL_ASSAY: &str = "forge_assay";
 
 fn schema(obj: serde_json::Value) -> Arc<JsonObject> {
     Arc::new(obj.as_object().cloned().unwrap_or_default())
@@ -243,6 +246,30 @@ impl ServerHandler for ForgeAgentServer {
                 schema(serde_json::json!({
                     "type": "object",
                     "properties": {}
+                })),
+            ),
+            Tool::new(
+                TOOL_ASSAY.to_string(),
+                "Run an Assay (AI code-quality analysis) on the current session's working \
+                 directory. With `cleanup=false` (default) it produces a structured findings \
+                 report. With `cleanup=true` it runs the full Refine crew: for every confirmed \
+                 finding it spawns an agent to apply a fix, then verifies the result. Streams \
+                 live progress — watch via the TUI observer or MCP log notifications. Returns \
+                 a summary when done."
+                    .to_string(),
+                schema(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "cleanup": {
+                            "type": "boolean",
+                            "description": "true = full Refine (auto-fix findings); false = analysis report only"
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["repo", "diff", "branch"],
+                            "description": "what source to analyze: repo = full repo (default), diff = uncommitted changes, branch = changes vs main"
+                        }
+                    }
                 })),
             ),
         ];
@@ -384,9 +411,110 @@ impl ServerHandler for ForgeAgentServer {
                 )]))
             }
 
+            TOOL_ASSAY => {
+                let cleanup = args
+                    .get("cleanup")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let scope_str = args.get("scope").and_then(|v| v.as_str()).unwrap_or("repo");
+                let scope = match scope_str {
+                    "diff" => forge_types::AssayScope::Diff,
+                    "branch" => forge_types::AssayScope::Branch("main".into()),
+                    _ => forge_types::AssayScope::Repo,
+                };
+
+                let source = match bundle_scoped_source(&scope, 200_000) {
+                    Ok(s) if !s.trim().is_empty() => s,
+                    Ok(_) => {
+                        return Ok(CallToolResult::error(vec![Content::text(
+                            "assay: no analyzable source files in working directory",
+                        )]));
+                    }
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "assay: failed to bundle source: {e}"
+                        ))]));
+                    }
+                };
+
+                let config = forge_config::load().unwrap_or_default();
+                let pricing = forge_mesh::pricing::Pricing::from_config(&config);
+                let cat = discover_catalog(&config).await;
+                if cat.is_empty() {
+                    return Ok(CallToolResult::error(vec![Content::text(
+                        "assay: no models available — run `forge auth <provider>`",
+                    )]));
+                }
+                let store_for_health = crate::open_store()
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                let benched = store_for_health.current_benched().unwrap_or_default();
+                let chain = |tier| {
+                    let mut models: Vec<String> = cat
+                        .ranked_for(tier, &pricing, 8)
+                        .into_iter()
+                        .filter(|m| !benched.is_benched(m))
+                        .collect();
+                    if models.is_empty() {
+                        if let Some(m) = config.model_for(tier) {
+                            models.push(m.to_string());
+                        }
+                    }
+                    models
+                };
+                let models = forge_core::assay::TierModels {
+                    trivial: chain(TaskTier::Trivial),
+                    complex: chain(TaskTier::Complex),
+                };
+
+                let (tx, mut rx) = mpsc::unbounded_channel();
+                *self.event_tx.lock().unwrap() = Some(tx);
+
+                let peer = ctx.peer.clone();
+                let store = Arc::clone(&self.store);
+                let sid = self.session_id.clone();
+                let notify_task = tokio::spawn(async move {
+                    while let Some(event) = rx.recv().await {
+                        if let Some(notification) = event_notification(&event) {
+                            let _ = peer.notify_logging_message(notification).await;
+                        }
+                        if let Some(le) = crate::live_observer::to_live_event(&event) {
+                            if let Ok(json) = serde_json::to_string(&le) {
+                                let _ = store.append_live_event(&sid, &json);
+                            }
+                        }
+                    }
+                });
+
+                let src: std::sync::Arc<str> = std::sync::Arc::from(source.as_str());
+                let interrupt = Arc::clone(&self.interrupt);
+                let outcome = {
+                    let mut session = self.session.lock().await;
+                    tokio::select! {
+                        r = session.assay(src, models, vec![], scope, cleanup) => Some(r),
+                        _ = interrupt.notified() => None,
+                    }
+                };
+                *self.event_tx.lock().unwrap() = None;
+                let _ = notify_task.await;
+
+                match outcome {
+                    Some(Ok(())) => Ok(CallToolResult::success(vec![Content::text(if cleanup {
+                        "assay refine complete — findings have been auto-fixed".to_string()
+                    } else {
+                        "assay analysis complete — findings emitted as events".to_string()
+                    })])),
+                    Some(Err(e)) => Ok(CallToolResult::error(vec![Content::text(format!(
+                        "assay failed: {e}"
+                    ))])),
+                    None => Ok(CallToolResult::success(vec![Content::text(
+                        "assay interrupted".to_string(),
+                    )])),
+                }
+            }
+
             _ => Ok(CallToolResult::error(vec![Content::text(format!(
                 "unknown tool '{name}'. Available: {TOOL_CHAT}, {TOOL_STATUS}, {TOOL_SET_MODE}, \
-                 {TOOL_INTERRUPT}"
+                 {TOOL_INTERRUPT}, {TOOL_ASSAY}"
             ))])),
         }
     }
