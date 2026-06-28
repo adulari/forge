@@ -465,7 +465,7 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
         mesh_overview(&cat, &config, &quota);
         return Ok(());
     }
-    let e = router.explain(&prompt, budget, &health, &quota);
+    let e = router.explain(&prompt, budget, &health, &quota, None);
     if json {
         println!("{}", mesh_explanation_json(&e));
     } else {
@@ -546,7 +546,7 @@ pub(crate) fn mesh_overview(
     }
     println!("\nper-tier ranking (top 5):");
     for tier in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
-        let (_, rows) = cat.ranked_rows(tier, &pricing, false, 0, quota);
+        let (_, rows) = cat.ranked_rows(tier, &pricing, false, 0, quota, None);
         println!("  {}:", tier.as_str());
         for r in rows.iter().take(5) {
             println!(

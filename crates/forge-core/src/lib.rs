@@ -1566,7 +1566,13 @@ impl Session {
         let catalog = self.catalog.clone()?;
         let router = forge_mesh::HeuristicRouter::new(self.config.clone()).with_catalog(catalog);
         let health = self.store.current_benched().unwrap_or_default();
-        let mut exp = router.explain(prompt, self.budget_snapshot(), &health, &self.live_quota());
+        let mut exp = router.explain(
+            prompt,
+            self.budget_snapshot(),
+            &health,
+            &self.live_quota(),
+            self.pinned_effort(),
+        );
         use forge_config::ClassifierKind;
         exp.classifier_label = match self.config.mesh.classifier {
             ClassifierKind::Heuristic => "heuristic".to_string(),
@@ -1787,6 +1793,7 @@ Rules:\n\
                     &health,
                     &quota,
                     Some(TaskTier::Complex),
+                    self.pinned_effort,
                 )
                 .await;
             std::iter::once(d.model)
@@ -2059,6 +2066,7 @@ Rules:\n\
                 &health,
                 &quota,
                 Some(TaskTier::Trivial),
+                self.pinned_effort,
             )
             .await;
 
@@ -2158,6 +2166,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 &health,
                 &quota,
                 Some(TaskTier::Trivial),
+                self.pinned_effort,
             )
             .await;
         let user_snippet: String = prompt.chars().take(400).collect();
@@ -2247,6 +2256,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 &health,
                 &quota,
                 Some(TaskTier::Trivial),
+                self.pinned_effort,
             )
             .await;
         let messages = [
@@ -3376,7 +3386,14 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         let quota = self.live_quota();
         let decision = self
             .router
-            .route_hinted(prompt, budget, &health, &quota, tier_override)
+            .route_hinted(
+                prompt,
+                budget,
+                &health,
+                &quota,
+                tier_override,
+                self.pinned_effort,
+            )
             .await;
         // `/model <id>` override: use the pinned model instead of the mesh-routed pick; mesh still
         // classifies (for tier stats) but the actual call uses the pin.
@@ -8576,6 +8593,7 @@ mod tests {
             _budget: BudgetState,
             _health: &forge_types::ModelHealth,
             _quota: &forge_types::SubscriptionQuota,
+            _effort: Option<forge_types::EffortLevel>,
         ) -> forge_mesh::RoutingDecision {
             forge_mesh::RoutingDecision {
                 tier: forge_types::TaskTier::Trivial,

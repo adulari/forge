@@ -657,6 +657,20 @@ fn parse_secs(s: &str) -> Option<f64> {
     num.parse::<f64>().ok()
 }
 
+fn model_benefits_from_effort(model: &str) -> bool {
+    let m = model.to_lowercase();
+    let is_openai_reasoning = ["o1", "o1-", "o3", "o3-", "o4", "o4-", "gpt-5"]
+        .iter()
+        .any(|needle| m == *needle || m.contains(&format!("::{needle}")) || m.contains(needle));
+
+    is_openai_reasoning
+        || m.contains("thinking")
+        || m.contains("reasoning")
+        || m.contains("deepseek-r1")
+        || m.contains("r1-")
+        || m == "deepseek-r1"
+}
+
 #[async_trait]
 impl Provider for GenAiProvider {
     async fn complete(
@@ -703,19 +717,28 @@ impl Provider for GenAiProvider {
         if let Some(cap) = self.max_output_tokens {
             options = options.with_max_tokens(cap);
         }
+
+        let mut reasoning_engaged = false;
         // Apply the caller's reasoning-effort hint when set (e.g. from `/effort high`).
         if let Some(effort) = opts.effort {
-            let re = match effort {
-                EffortLevel::Low => ReasoningEffort::Low,
-                EffortLevel::Medium => ReasoningEffort::Medium,
-                EffortLevel::High => ReasoningEffort::High,
-                EffortLevel::XHigh => ReasoningEffort::XHigh,
-            };
-            options = options.with_reasoning_effort(re);
-        } else if let Some(temp) = opts.temperature {
-            // Low temperature for deterministic edits/patches — but ONLY when reasoning isn't
-            // engaged: thinking models reject (or ignore) a custom temperature, so effort wins.
-            options = options.with_temperature(temp as f64);
+            if model_benefits_from_effort(&model_name) {
+                let re = match effort {
+                    EffortLevel::Low => ReasoningEffort::Low,
+                    EffortLevel::Medium => ReasoningEffort::Medium,
+                    EffortLevel::High => ReasoningEffort::High,
+                    EffortLevel::XHigh => ReasoningEffort::XHigh,
+                };
+                options = options.with_reasoning_effort(re);
+                reasoning_engaged = true;
+            }
+        }
+
+        if !reasoning_engaged {
+            if let Some(temp) = opts.temperature {
+                // Low temperature for deterministic edits/patches — but ONLY when reasoning isn't
+                // engaged: thinking models reject (or ignore) a custom temperature, so effort wins.
+                options = options.with_temperature(temp as f64);
+            }
         }
 
         // Stall guards: a hung connection or a stream that goes silent must not freeze the
