@@ -330,6 +330,64 @@ impl McpManager {
         self.conns.lock().unwrap().is_empty()
     }
 
+    /// Connect a single server at runtime and add it to the live connection map. Returns `Ok` if
+    /// the server connected successfully (its tools are immediately callable); `Err` on timeout or
+    /// transport failure (the entry is still added as `Failed` so it shows in `mcp status`).
+    pub async fn connect_one(&self, server: &forge_config::McpServerConfig) -> Result<(), String> {
+        let name = server.name.clone();
+        let label = server.transport_label();
+        match tokio::time::timeout(self.connect_timeout, transport::serve(server)).await {
+            Ok(Ok(service)) => {
+                self.add_established(&name, label, service).await;
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                self.conns.lock().unwrap().insert(
+                    name.clone(),
+                    Connection {
+                        name,
+                        status: ServerStatus::Failed(e.clone()),
+                        transport_label: label,
+                        peer: None,
+                        service: None,
+                        tools: vec![],
+                        resources: vec![],
+                        prompts: vec![],
+                        reconnect_attempts: 0,
+                    },
+                );
+                Err(e)
+            }
+            Err(_) => {
+                let reason = format!(
+                    "connect timed out after {}s",
+                    self.connect_timeout.as_secs()
+                );
+                self.conns.lock().unwrap().insert(
+                    name.clone(),
+                    Connection {
+                        name,
+                        status: ServerStatus::Failed(reason.clone()),
+                        transport_label: label,
+                        peer: None,
+                        service: None,
+                        tools: vec![],
+                        resources: vec![],
+                        prompts: vec![],
+                        reconnect_attempts: 0,
+                    },
+                );
+                Err(reason)
+            }
+        }
+    }
+
+    /// Remove a server from the live connection map by name. The child process (if any) will be
+    /// dropped, which closes the stdio pipe and causes it to exit.
+    pub fn disconnect(&self, name: &str) {
+        self.conns.lock().unwrap().remove(name);
+    }
+
     /// The tools advertised to the model: just the fixed meta-tools (search / call / resources /
     /// prompt). Server tools are reached *through* `mcp_call`, never advertised individually — so
     /// the per-turn tool list stays tiny regardless of how many tools a server has (a 313-tool

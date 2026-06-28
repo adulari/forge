@@ -9,6 +9,7 @@ pub(crate) mod migrate;
 pub(crate) mod models;
 pub(crate) mod replay;
 pub(crate) mod run;
+pub(crate) mod self_mcp;
 pub(crate) mod skill;
 #[cfg(test)]
 mod tests;

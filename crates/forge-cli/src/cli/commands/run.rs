@@ -102,7 +102,25 @@ pub(crate) async fn build_session_with(
     }
     // Capture the MCP config before `config` is moved into the Session; connect after the session
     // is built so its presenter can show the connection status.
-    let mcp_config = config.mcp.clone();
+    let mut mcp_config = config.mcp.clone();
+    // Self-MCP: inject a sub-Forge MCP agent server so forge_chat / forge_assay are available
+    // as native tools. Skipped if already declared (prevents duplicate "forge" prefix).
+    if config.self_mcp && !mcp_config.servers.iter().any(|s| s.name == "forge") {
+        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("forge"));
+        mcp_config.servers.insert(
+            0,
+            forge_config::McpServerConfig {
+                name: "forge".to_string(),
+                transport: forge_config::McpTransport::Stdio {
+                    command: exe.to_string_lossy().into_owned(),
+                    args: vec!["mcp".to_string(), "agent".to_string()],
+                    env: std::collections::HashMap::new(),
+                },
+                auth: None,
+                enabled: true,
+            },
+        );
+    }
     let config_has_mcp = mcp_config.active_servers().next().is_some();
     let lattice_enabled = config.lattice.enabled;
     let config_lattice_watch = config.lattice.watch;

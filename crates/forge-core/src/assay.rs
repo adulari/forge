@@ -410,6 +410,12 @@ async fn complete_with_failover(
                 }
                 Err(e) => {
                     last = e.reason().to_string();
+                    // Context overflow: this prompt will always be too large for this model.
+                    // No retry (same input = same result) and no bench (the model is fine,
+                    // just the input is too big). Skip silently to the next model.
+                    if e.is_context_overflow() {
+                        break;
+                    }
                     // A 429 / 5xx is transient: wait (the server's retry-after, capped + jittered
                     // so concurrent critics don't retry in lockstep) and retry the SAME model
                     // rather than benching it — benching on a single 429 was skipping every later

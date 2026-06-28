@@ -144,7 +144,7 @@ pub(crate) async fn assay_run_cmd(
     };
 
     // --- Bundle source for the scope ---
-    let source = match bundle_scoped_source(&scope, 200_000) {
+    let source = match bundle_scoped_source(&scope, 800_000) {
         Ok(s) => s,
         Err(e) => anyhow::bail!("assay: {e}"),
     };
@@ -295,7 +295,7 @@ pub(crate) async fn spawn_assay(
     busy: &mut bool,
     busy_since: &mut std::time::Instant,
 ) -> Result<Option<tokio::task::JoinHandle<()>>> {
-    let source = match bundle_scoped_source(&scope, 200_000) {
+    let source = match bundle_scoped_source(&scope, 800_000) {
         Ok(s) => s,
         Err(e) => {
             app.note(&format!("assay: {e}"));

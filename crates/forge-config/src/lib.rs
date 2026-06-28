@@ -98,6 +98,11 @@ pub struct Config {
     /// Startup update check (GitHub releases). On by default; throttled to once a day.
     #[serde(default)]
     pub update: UpdateConfig,
+    /// When true, Forge starts a sub-Forge session as an MCP server so the agent can use
+    /// forge_chat / forge_assay as native tools (self-driving mode). Toggle with
+    /// `forge self enable` / `forge self disable`. Off by default.
+    #[serde(default)]
+    pub self_mcp: bool,
 }
 
 /// When a hook fires.
@@ -1330,6 +1335,7 @@ impl Default for Config {
             tui: TuiConfig::default(),
             local: LocalConfig::default(),
             update: UpdateConfig::default(),
+            self_mcp: false,
         }
     }
 }
@@ -1519,6 +1525,22 @@ fn write_settings_at(
     let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
     std::fs::write(path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
     Ok(())
+}
+
+/// Persist `self_mcp = true/false` to the global user config, preserving all other keys.
+/// Active on the next session start.
+pub fn write_self_mcp(enabled: bool) -> Result<PathBuf, ConfigError> {
+    let dir = config_dir().ok_or(ConfigError::NoConfigDir)?;
+    std::fs::create_dir_all(&dir).map_err(|e| ConfigError::Write(e.to_string()))?;
+    let path = dir.join("config.toml");
+    let mut root: toml::Table = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_default();
+    root.insert("self_mcp".to_string(), toml::Value::Boolean(enabled));
+    let body = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
+    std::fs::write(&path, body).map_err(|e| ConfigError::Write(e.to_string()))?;
+    Ok(path)
 }
 
 /// Persist only `permission_mode` to the user config TOML, preserving every other key (notably

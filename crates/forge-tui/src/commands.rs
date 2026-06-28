@@ -171,6 +171,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/remote [--lan | --local | --anywhere]",
     },
     Command {
+        name: "self-mcp",
+        desc: "toggle self-MCP mode: start/stop a sub-Forge MCP agent so the session can call forge_chat / forge_assay as tools",
+        usage: "/self-mcp [enable|disable]",
+    },
+    Command {
         name: "quit",
         desc: "exit Forge",
         usage: "/quit",
@@ -253,6 +258,8 @@ pub enum CommandAction {
     Remember(String),
     /// List this project's memories (`/memories`).
     Memories,
+    /// Toggle self-MCP mode (`/self-mcp [enable|disable]`). `None` = toggle current state.
+    SelfMcp(Option<bool>),
     Quit,
     /// Not a known command — the binary shows `unknown command: X`.
     Unknown(String),
@@ -528,6 +535,14 @@ pub fn parse_command(line: &str) -> CommandAction {
         "effort" => CommandAction::SetEffort((!arg.is_empty()).then_some(arg)),
         "remember" => CommandAction::Remember(arg.to_string()),
         "memories" => CommandAction::Memories,
+        "self-mcp" | "self" => {
+            let enable = match arg.to_lowercase().as_str() {
+                "enable" | "on" | "1" => Some(true),
+                "disable" | "off" | "0" => Some(false),
+                _ => None, // bare /self-mcp → toggle
+            };
+            CommandAction::SelfMcp(enable)
+        }
         "copy" | "yank" => {
             // `/copy` → last response; `/copy N` → Nth-latest. Non-numeric / <1 args fall back to 1.
             let nth = arg

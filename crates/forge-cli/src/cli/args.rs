@@ -373,6 +373,13 @@ pub(crate) enum Command {
         #[command(subcommand)]
         cmd: MigrateCmd,
     },
+    /// Enable or disable Forge's self-MCP mode: a sub-Forge session started as an MCP server
+    /// so the agent can call `forge_chat` / `forge_assay` as native tools (self-driving mode).
+    #[command(name = "self")]
+    SelfMcp {
+        #[command(subcommand)]
+        action: SelfMcpAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -415,6 +422,17 @@ pub(crate) enum MigrateCmd {
         #[arg(long)]
         include_sessions: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SelfMcpAction {
+    /// Enable self-MCP: Forge starts a sub-Forge agent as an MCP server at session startup,
+    /// making forge_chat / forge_assay / forge_interrupt available as tools.
+    Enable,
+    /// Disable self-MCP: stop injecting the sub-Forge MCP server at session startup.
+    Disable,
+    /// Show whether self-MCP is currently enabled.
+    Status,
 }
 
 #[derive(Subcommand)]

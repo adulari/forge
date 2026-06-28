@@ -1039,6 +1039,34 @@ impl Session {
         }
     }
 
+    /// Connect a new MCP server into the live session. Creates the manager if none exists yet
+    /// (e.g. the session was started with no MCP servers configured).
+    pub async fn add_mcp_server(
+        &mut self,
+        server: forge_config::McpServerConfig,
+    ) -> Result<(), CoreError> {
+        match &self.mcp {
+            Some(mgr) => mgr
+                .connect_one(&server)
+                .await
+                .map_err(CoreError::Internal)?,
+            None => {
+                let mut cfg = forge_config::McpConfig::default();
+                cfg.servers.push(server);
+                let mgr = forge_mcp::McpManager::connect_all(&cfg).await;
+                self.mcp = Some(Arc::new(mgr));
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove an MCP server from the live session by name. No-op if not connected.
+    pub fn remove_mcp_server(&self, name: &str) {
+        if let Some(mgr) = &self.mcp {
+            mgr.disconnect(name);
+        }
+    }
+
     /// The full discovered tool list for one MCP server (`forge mcp --tools <server>`).
     pub fn mcp_tool_lines(&self, server: &str) -> Vec<(String, String)> {
         self.mcp
