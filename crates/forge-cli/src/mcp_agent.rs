@@ -552,6 +552,8 @@ pub async fn run(session_id: Option<String>, cwd: Option<std::path::PathBuf>) ->
     session.set_mode(initial_mode);
 
     let store = Arc::new(crate::open_store()?);
+    // Clear flags left by processes that were SIGKILLed before their Drop guard ran.
+    let _ = store.clear_all_agent_active();
     let sid = session.id().to_string();
     let _ = store.set_session_agent_active(&sid, true);
 

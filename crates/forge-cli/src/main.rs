@@ -13,7 +13,7 @@ use forge_types::TaskTier;
 
 pub(crate) use cli::args::{
     AssayCmd, AssayFormat, BenchCmd, Cli, Command, ExportScope, FailOnSeverity, GitCmd,
-    ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, SkillCmd, SkillScope,
+    ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, SelfMcpAction, SkillCmd, SkillScope,
 };
 pub(crate) use cli::commands::assay::{assay_cmd, spawn_assay};
 pub(crate) use cli::commands::git::{git_cmd, maybe_install_git_hook, write_active_model};
@@ -35,6 +35,7 @@ pub(crate) use cli::commands::replay::{
 pub(crate) use cli::commands::run::{
     build_session, chat, fmt_age, nl_cmd, run, session_title, DoneGuard,
 };
+pub(crate) use cli::commands::self_mcp::self_mcp_cmd;
 pub(crate) use cli::commands::skill::{commands_cmd, skill_cmd};
 
 mod assay_output;
