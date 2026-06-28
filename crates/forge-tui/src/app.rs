@@ -15,16 +15,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::{PresenterEvent, QChoice};
 
-// Palette.
-const ORANGE: Color = Color::Rgb(255, 145, 60); // brand accent
-const USER: Color = Color::Rgb(125, 180, 255); // user messages
-const DIM: Color = Color::Rgb(110, 110, 120); // secondary text
-const OKGREEN: Color = Color::Rgb(120, 210, 140);
-const ERRRED: Color = Color::Rgb(240, 110, 110);
-const WARNYEL: Color = Color::Rgb(235, 200, 110);
-const TOOLCYAN: Color = Color::Rgb(120, 200, 215);
-const SELECT_BG: Color = Color::Rgb(48, 78, 128); // mouse text-selection highlight
-const STATUSBG: Color = Color::Rgb(28, 28, 34); // status bar background
+// ── Palette ──────────────────────────────────────────────────────────────────
+// Forge identity
+const ORANGE: Color = Color::Rgb(255, 138, 48); // forge brand — warm ember
+                                                // Electric blue primary accent (active states, model display, busy indicator)
+const ACCENT: Color = Color::Rgb(82, 162, 255); // electric blue
+                                                // Text
+const USER: Color = Color::Rgb(122, 183, 255); // user message headers
+const DIM: Color = Color::Rgb(82, 87, 108); // muted / secondary
+const TEXT: Color = Color::Rgb(208, 213, 224); // primary body text
+                                               // Semantic
+const OKGREEN: Color = Color::Rgb(92, 208, 122); // success / ok
+const ERRRED: Color = Color::Rgb(243, 92, 92); // error
+const WARNYEL: Color = Color::Rgb(238, 188, 82); // warning
+const TOOLCYAN: Color = Color::Rgb(75, 212, 218); // tools / lattice
+                                                  // Surfaces
+const SELECT_BG: Color = Color::Rgb(40, 70, 132); // mouse text-selection
+const STATUSBG: Color = Color::Rgb(14, 15, 21); // deep status-bar bg
 
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -1292,7 +1299,7 @@ impl App {
                         let style = if l.starts_with("── result") {
                             Style::default().fg(ORANGE)
                         } else {
-                            Style::default().fg(Color::Rgb(205, 205, 215))
+                            Style::default().fg(TEXT)
                         };
                         TextLine::from(Span::styled(l.clone(), style))
                     })
@@ -1921,7 +1928,7 @@ impl App {
         }
         self.ensure_stream_cache(width);
         let mut rows = self.stream_cache.borrow().rows.clone();
-        let cursor = Span::styled("▌", Style::default().fg(ORANGE));
+        let cursor = Span::styled("▌", Style::default().fg(ACCENT));
         match rows.last_mut() {
             Some(l) => l.spans.push(cursor),
             None => rows.push(TextLine::from(cursor)),
@@ -2945,8 +2952,8 @@ fn render_activity_panel(frame: &mut Frame, area: Rect, app: &App) {
     };
     lines.push(TextLine::from(vec![
         Span::styled(
-            format!("  ⚒ activity ({})  ", views.len()),
-            Style::default().fg(ORANGE).bold(),
+            format!("  ◈ activity ({})  ", views.len()),
+            Style::default().fg(ACCENT).bold(),
         ),
         Span::styled(hint, Style::default().fg(DIM)),
     ]));
@@ -3041,11 +3048,11 @@ fn tasks_panel_lines(tasks: &[forge_types::TodoItem], height: u16) -> Vec<TextLi
         .filter(|t| t.status == TodoStatus::Pending)
         .count();
     let header = format!(
-        "  ⚒ {total} tasks ({done_count} done, {in_progress_count} in progress, {open_count} open)"
+        "  ◈ {total} tasks ({done_count} done, {in_progress_count} in progress, {open_count} open)"
     );
     let mut lines = vec![TextLine::from(Span::styled(
         header,
-        Style::default().fg(ORANGE).bold(),
+        Style::default().fg(ACCENT).bold(),
     ))];
     let body_h = h.saturating_sub(1);
     // Prioritize: in-progress first, then pending, then done.
@@ -3082,7 +3089,7 @@ fn tasks_panel_lines(tasks: &[forge_types::TodoItem], height: u16) -> Vec<TextLi
         let (glyph, style) = match t.status {
             TodoStatus::Done => ("✔", Style::default().fg(DIM)),
             TodoStatus::InProgress => ("◼", Style::default().fg(ORANGE).bold()),
-            TodoStatus::Pending => ("○", Style::default().fg(Color::Rgb(205, 205, 215))),
+            TodoStatus::Pending => ("○", Style::default().fg(TEXT)),
         };
         lines.push(TextLine::from(Span::styled(
             format!("  {glyph} {}", truncate(&t.title, 62)),
@@ -3100,13 +3107,17 @@ fn tasks_panel_lines(tasks: &[forge_types::TodoItem], height: u16) -> Vec<TextLi
 
 fn render_permission(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(p) = &app.prompt {
-        frame.render_widget(
-            Paragraph::new(TextLine::from(Span::styled(
-                format!(" » {p}   [y]es / [N]o "),
-                Style::default().fg(Color::Black).bg(WARNYEL).bold(),
-            ))),
-            area,
-        );
+        let line = TextLine::from(vec![
+            Span::styled(
+                " ◉ RESPOND ",
+                Style::default().fg(STATUSBG).bg(ORANGE).bold(),
+            ),
+            Span::styled(format!("  {p}  "), Style::default().fg(WARNYEL)),
+            Span::styled("[y]es", Style::default().fg(OKGREEN).bold()),
+            Span::styled(" / ", Style::default().fg(DIM)),
+            Span::styled("[N]o ", Style::default().fg(ERRRED).bold()),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
     }
 }
 
@@ -3137,11 +3148,21 @@ pub fn input_box_height(input: &str, box_width: u16) -> u16 {
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
+    let (border_col, title_text) = if app.busy {
+        (ACCENT, " ▸ working… ")
+    } else if app.prompt.is_some() {
+        (WARNYEL, " ◉ respond ")
+    } else {
+        (ORANGE, " ✦ message ")
+    };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ORANGE))
+        .border_style(Style::default().fg(border_col))
         .padding(Padding::horizontal(1))
-        .title(Span::styled(" message ", Style::default().fg(ORANGE)));
+        .title(Span::styled(
+            title_text,
+            Style::default().fg(border_col).bold(),
+        ));
 
     // Build one ratatui Line per explicit input line so pasted newlines render as separate rows;
     // long lines are then soft-wrapped by `Wrap`. Slash-command highlighting + block cursor apply
@@ -3967,7 +3988,12 @@ fn effort_status(effort: forge_types::EffortLevel) -> (&'static str, Style) {
 fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     let bg = Style::default().bg(STATUSBG);
     let w = area.width;
-    let sep = || Span::styled("  ·  ", Style::default().fg(DIM).bg(STATUSBG));
+    let sep = || {
+        Span::styled(
+            "  │  ",
+            Style::default().fg(Color::Rgb(38, 42, 62)).bg(STATUSBG),
+        )
+    };
 
     let model = app
         .routing
@@ -3991,7 +4017,7 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         let f = SPINNER[app.tick % SPINNER.len()];
         line1.push(Span::styled(
             format!("{f} working"),
-            Style::default().fg(ORANGE).bg(STATUSBG),
+            Style::default().fg(ACCENT).bold().bg(STATUSBG),
         ));
         line1.push(sep());
     }
@@ -4003,11 +4029,11 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     }
     line1.push(Span::styled(
         model.to_string(),
-        Style::default().fg(Color::White).bg(STATUSBG),
+        Style::default().fg(ACCENT).bold().bg(STATUSBG),
     ));
     line1.push(sep());
     line1.push(Span::styled(
-        format!("${:.4}", app.cost_usd),
+        format!("◈ ${:.4}", app.cost_usd),
         Style::default().fg(OKGREEN).bold().bg(STATUSBG),
     ));
     if let Some(effort) = app.effort {
@@ -4093,7 +4119,7 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
                     human(app.turn_out)
                 ),
                 Style::default()
-                    .fg(if app.busy { ORANGE } else { DIM })
+                    .fg(if app.busy { ACCENT } else { DIM })
                     .bg(STATUSBG),
             ));
         }
