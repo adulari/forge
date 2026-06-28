@@ -6,6 +6,14 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- **The "working" spinner now stops the instant the response is done — it no longer waits on the
+  end-of-turn recap.** The recap (a separate trivial-tier summary call) was awaited inside the turn,
+  so the spinner kept ticking and the input/session stayed locked until it finished. The recap now
+  runs on a detached task (via a clonable presenter sink) after the turn returns: the spinner stops
+  and the next prompt is ready immediately, and the recap line streams in a moment later. Headless /
+  non-interactive runs keep the inline behaviour.
+
 ### Added
 - **Multiple API keys per provider, with round-robin rotation.** Every key-based provider (all except
   the CLI bridges) can hold several keys — run `forge auth <provider>` again to stack another. The
