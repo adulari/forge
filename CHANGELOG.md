@@ -6,6 +6,37 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-06-28
+
+### Added
+- **`forge mcp agent` — Forge-as-MCP-server.** Expose a persistent Forge session over stdio MCP so
+  any MCP-aware agent (Claude Code, another Forge instance) can drive it as a stateful coding agent.
+  Four tools: `forge_chat` (send prompt, stream progress notifications), `forge_status` (inspect
+  session), `forge_set_mode` (switch permission mode at runtime), `forge_interrupt` (abort an
+  in-flight turn mid-flight via `tokio::sync::Notify` without touching the session lock).
+  (`crates/forge-cli/src/mcp_agent.rs`)
+- **`LoopOutcome` — explicit turn stop reason.** `run_turn` / `run_turn_with` now return
+  `Result<LoopOutcome, CoreError>` instead of `Result<String, CoreError>`. `LoopOutcome` carries
+  `text: String` and `stop_reason: StopReason` (FinalAnswer / MaxSteps / BudgetExhausted /
+  Interrupted) so callers know why the turn ended without re-parsing warning text. Implements
+  `Deref<Target=str>`, `Display`, and `PartialEq<str/&str/String>` so existing test assertions
+  compile unchanged. (`crates/forge-types/src/lib.rs`, `crates/forge-core/src/lib.rs`)
+- **TUI statusline stop_reason indicator.** When a turn ends with `MaxSteps`, the statusline shows
+  an amber `⚠ step limit — send 'continue'`; `BudgetExhausted` shows a red `✕ budget cap`.
+  `PresenterEvent::Done` now carries `stop_reason` so the App stores and renders it.
+  (`crates/forge-tui/src/app.rs`, `crates/forge-tui/src/lib.rs`)
+- **`forge_interrupt` MCP tool.** Abort the in-flight `forge_chat` turn at its next await point via
+  `tokio::sync::Notify`; the session state is preserved and a partial result returned. The handler
+  never holds the session lock, so it runs concurrently with the ongoing turn.
+  (`crates/forge-cli/src/mcp_agent.rs`)
+- **`remember` virtual tool on MCP bridge path.** `mcp_serve.rs` now advertises and handles the
+  `remember` tool so bridge models (claude-cli, codex-cli) can write cross-session memories
+  mid-turn, at parity with the direct path. (`crates/forge-cli/src/mcp_serve.rs`)
+- **Embeddings default-on** with free Gemini `text-embedding-004` backend (falls back to OpenAI
+  then ollama then no-op). Fixed `#[serde(default)]` on `EmbeddingsConfig.enabled` that silently
+  kept embeddings off when the config section was partially specified.
+  (`crates/forge-config/src/lib.rs`)
+
 ### Docs
 - **README synced to the v1.6.x wave:** documented built-in auto-memory (capture/recall, `/remember`,
   `/memories`, `forge memory` CLI — with an honest "differentiated design, not benchmarked-best" note),
@@ -1663,7 +1694,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/florisvoskamp/forge/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/florisvoskamp/forge/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/florisvoskamp/forge/compare/v1.6.1...v1.7.0
 [0.4.4]: https://github.com/florisvoskamp/forge/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/florisvoskamp/forge/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/florisvoskamp/forge/compare/v0.4.1...v0.4.2
