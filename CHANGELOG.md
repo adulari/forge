@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-28
+
 ### Fixed
 - **The "working" spinner now stops the instant the response is done — it no longer waits on the
   end-of-turn recap.** The recap (a separate trivial-tier summary call) was awaited inside the turn,
