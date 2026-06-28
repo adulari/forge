@@ -655,7 +655,7 @@ impl Store {
     pub fn spend_by_model_today(&self) -> Result<Vec<(String, f64, u64, u64)>> {
         let (s, e) = day_bounds_local(chrono::Local::now());
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT COALESCE(m.model, '') as mdl,
                     COALESCE(SUM(u.cost_usd), 0.0),
                     COALESCE(SUM(u.input_tokens), 0),
@@ -691,28 +691,37 @@ impl Store {
     /// Today / week / month spend in a single query — 3× cheaper than calling the three
     /// individual helpers. Uses conditional aggregation over the widest window (month) so
     /// only one table scan runs; the `created_at` index makes it sub-millisecond.
+    /// Uses prepare_cached so the statement is compiled once per connection, not once per call.
     pub fn spend_summary_usd(&self) -> Result<(f64, f64, f64)> {
         let now = chrono::Local::now();
         let (day_s, day_e) = day_bounds_local(now);
         let (week_s, _) = week_bounds_local(now);
         let (month_s, month_e) = month_bounds_local(now);
-        Ok(self.lock()?.query_row(
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare_cached(
             "SELECT
                COALESCE(SUM(CASE WHEN created_at >= ?1 AND created_at < ?2 THEN cost_usd ELSE 0 END), 0.0),
                COALESCE(SUM(CASE WHEN created_at >= ?3 THEN cost_usd ELSE 0 END), 0.0),
                COALESCE(SUM(cost_usd), 0.0)
              FROM usage
              WHERE created_at >= ?4 AND created_at < ?5",
-            (day_s, day_e, week_s, month_s, month_e),
-            |row| Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?)),
-        )?)
+        )?;
+        Ok(
+            stmt.query_row((day_s, day_e, week_s, month_s, month_e), |row| {
+                Ok((
+                    row.get::<_, f64>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })?,
+        )
     }
 
     /// Per-model spend + token counts for the last 5 hours.
     pub fn spend_by_model_5h(&self) -> Result<Vec<(String, f64, u64, u64)>> {
         let (s, e) = rolling_hours_bounds(chrono::Local::now(), 5);
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT COALESCE(m.model, '') as mdl,
                     COALESCE(SUM(u.cost_usd), 0.0),
                     COALESCE(SUM(u.input_tokens), 0),
@@ -737,7 +746,7 @@ impl Store {
     pub fn spend_by_model_week(&self) -> Result<Vec<(String, f64, u64, u64)>> {
         let (s, e) = week_bounds_local(chrono::Local::now());
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT COALESCE(m.model, '') as mdl,
                     COALESCE(SUM(u.cost_usd), 0.0),
                     COALESCE(SUM(u.input_tokens), 0),
@@ -762,7 +771,7 @@ impl Store {
     pub fn spend_by_model_month(&self) -> Result<Vec<(String, f64, u64, u64)>> {
         let (s, e) = month_bounds_local(chrono::Local::now());
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT COALESCE(m.model, '') as mdl,
                     COALESCE(SUM(u.cost_usd), 0.0),
                     COALESCE(SUM(u.input_tokens), 0),
@@ -948,7 +957,8 @@ impl Store {
     /// Snapshot of models still benched as of `now` (epoch secs) — cooldown not yet elapsed.
     pub fn benched_models(&self, now: i64) -> Result<forge_types::ModelHealth> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare("SELECT model FROM model_health WHERE cooldown_until > ?1")?;
+        let mut stmt =
+            conn.prepare_cached("SELECT model FROM model_health WHERE cooldown_until > ?1")?;
         let set = stmt
             .query_map([now], |row| row.get::<_, String>(0))?
             .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
@@ -1213,7 +1223,7 @@ impl Store {
                 |row| row.get(0),
             )
             .ok();
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT role, content, model, tool_calls_json, tool_call_id
              FROM message WHERE session_id = ?1 AND active = 1 ORDER BY seq",
         )?;
@@ -2066,7 +2076,7 @@ impl Store {
     /// Fetch all events for `session_id` with `id > after_id`, in order.
     pub fn live_events_after(&self, session_id: &str, after_id: i64) -> Result<Vec<(i64, String)>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT id, payload_json FROM live_event WHERE session_id = ?1 AND id > ?2 ORDER BY id",
         )?;
         let rows = stmt.query_map((session_id, after_id), |row| {
