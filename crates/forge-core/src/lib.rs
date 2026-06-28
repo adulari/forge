@@ -2859,6 +2859,41 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         self.transcript.push(Message::system(nudge));
                         continue;
                     }
+                    // Nudges exhausted. An empty-responding model (e.g. some NIM models that stream
+                    // an empty final chunk, like kimi-k2.6 in the dogfooding run) is broken for this
+                    // turn — BENCH it and FAIL OVER to the next chain model instead of dead-ending
+                    // the turn short of a working model (the subscription bridge sat untried below).
+                    if failover_enabled {
+                        let _ = self.store.bench_for(
+                            &active_model,
+                            default_cooldown,
+                            "empty response (no text, no tool call)",
+                        );
+                        let mut picked = None;
+                        for next in chain.by_ref() {
+                            match self.admit_failover_model(&next).await {
+                                Ok(true) => {
+                                    picked = Some(next);
+                                    break;
+                                }
+                                Ok(false) => {}
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        if let Some(next) = picked {
+                            self.presenter.emit(PresenterEvent::Routing {
+                                tier: decision
+                                    .map(|d| d.tier.as_str().to_string())
+                                    .unwrap_or_default(),
+                                model: next.clone(),
+                                rationale: format!("failover from {active_model} (empty response)"),
+                            });
+                            active_model = next;
+                            transient_retries = 0;
+                            empty_nudges = 0;
+                            continue;
+                        }
+                    }
                     self.presenter.emit(PresenterEvent::Warning(
                         "model returned an empty response (no text, no tool call) — stopping the turn"
                             .to_string(),
@@ -7015,6 +7050,62 @@ mod tests {
         assert!(
             warnings.iter().any(|w| w.contains("stopping the turn")),
             "after the bounded nudges, an endlessly-empty model must stop; warnings: {warnings:?}"
+        );
+    }
+
+    /// Empty (no text/tool) for the `bad` models, echoes the model id otherwise — to prove an
+    /// empty-responding model FAILS OVER to the next chain model instead of dead-ending the turn.
+    struct EmptyForModelProvider {
+        bad: std::collections::HashSet<String>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for EmptyForModelProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            if self.bad.contains(model) {
+                return Ok(forge_provider::ModelResponse {
+                    content: String::new(),
+                    tool_calls: vec![],
+                    usage: forge_types::Usage::default(),
+                    quotas: Vec::new(),
+                });
+            }
+            on_event(StreamEvent::Text(model.into()));
+            Ok(forge_provider::ModelResponse {
+                content: model.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_response_fails_over_to_the_next_model() {
+        // Dogfooding bug: an empty-responding model (e.g. kimi-k2.6 via NIM streaming empty) used to
+        // stop the turn after the bounded nudges, dead-ending short of a working model. It must now
+        // bench the empty model and FAIL OVER to the next chain model instead.
+        let provider = Arc::new(EmptyForModelProvider {
+            bad: ["empty::model".to_string()].into_iter().collect(),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "empty::model".into(),
+            fallbacks: vec!["good::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        let answer = session.run_turn("do it").await.unwrap();
+        assert_eq!(
+            answer, "good::model",
+            "an empty response must fail over to the next model, not stop the turn"
+        );
+        assert!(
+            store.current_benched().unwrap().is_benched("empty::model"),
+            "the empty-responding model must be benched"
         );
     }
 

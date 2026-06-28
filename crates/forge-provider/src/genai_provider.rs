@@ -517,6 +517,14 @@ fn is_capability_failure(text: &str) -> bool {
         "can only afford",
         "insufficient credit",
         "insufficient_quota",
+        // A 402 surfaced via the STREAMING path (no typed HTTP status) — e.g. SambaNova:
+        // "A payment method is required to use `<model>`". Permanent for this key, so EXCLUDE the
+        // model rather than benching + retrying it as a transient outage (the churn dogfooding hit).
+        "payment required",
+        "payment method is required",
+        "payment_required",
+        "payment method to continue",
+        "add a payment method",
     ];
     if MARKERS.iter().any(|m| l.contains(m)) {
         return true;
