@@ -174,20 +174,65 @@ fn build_reqwest_client() -> reqwest::Client {
 /// namespace → Ollama fallback), so the resolver detects the namespace, strips it, and retargets the
 /// OpenAI adapter at the registered endpoint + key. All native namespaces
 /// (groq/gemini/cohere/open_router/opencode_go/github_copilot/mimo/minimax/…) pass through unchanged.
+/// Round-robin pool of API keys per provider, snapshotted from config at client-build time. It
+/// powers multi-key rotation: with several keys for one provider, requests round-robin across them
+/// to multiply a free tier's per-key rate limit and to fail over within the provider on a 429 (the
+/// retry lands on the next key). Rotation engages ONLY for providers with ≥2 keys — with a single
+/// key [`KeyPool::next`] returns `None` and the genai env-resolved default is used unchanged, so
+/// single-key (and paid, cache-sensitive) providers are unaffected.
+#[derive(Default)]
+pub(crate) struct KeyPool {
+    providers: std::collections::HashMap<String, (Vec<String>, std::sync::atomic::AtomicUsize)>,
+}
+
+impl KeyPool {
+    /// Snapshot every keyed provider that has ≥2 configured keys.
+    fn from_config() -> Self {
+        let mut providers = std::collections::HashMap::new();
+        for p in forge_config::known_key_providers() {
+            let keys = forge_config::api_keys(p);
+            if keys.len() >= 2 {
+                providers.insert(
+                    p.to_string(),
+                    (keys, std::sync::atomic::AtomicUsize::new(0)),
+                );
+            }
+        }
+        Self { providers }
+    }
+
+    /// The next key for `provider` (round-robin), or `None` when it has <2 keys (no rotation).
+    fn next(&self, provider: &str) -> Option<String> {
+        let (keys, cursor) = self.providers.get(provider)?;
+        let i = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % keys.len();
+        Some(keys[i].clone())
+    }
+}
+
 pub(crate) fn build_client() -> Client {
+    build_client_with(std::sync::Arc::new(KeyPool::from_config()))
+}
+
+/// Build the genai client with a key-rotation `pool` captured by the service-target resolver.
+pub(crate) fn build_client_with(pool: std::sync::Arc<KeyPool>) -> Client {
     let resolver = ServiceTargetResolver::from_resolver_fn(
-        |st: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
+        move |st: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
             // Custom OpenAI-compatible providers (no native genai adapter): genai keeps the full
             // `provider::model` string as the model name (unknown namespace → Ollama fallback), so
             // detect the namespace, strip it, and retarget the OpenAI adapter at the registered
             // endpoint + key. One match drives Cerebras, NVIDIA NIM, SambaNova, Mistral, … — adding
             // a provider is a row in `forge_config::CUSTOM_OPENAI_PROVIDERS`, no code change here.
+            // A rotated key (≥2 configured) is substituted; otherwise the env default is used.
             for cp in forge_config::custom_providers() {
                 if st.model.model_name.namespace_is(cp.namespace) {
                     let bare = st.model.model_name.namespace_and_name().1.to_string();
+                    let auth = pool
+                        .next(cp.namespace)
+                        .map(AuthData::from_single)
+                        .unwrap_or_else(|| AuthData::from_env(cp.env_var));
                     return Ok(ServiceTarget {
                         endpoint: Endpoint::from_owned(cp.endpoint.to_string()),
-                        auth: AuthData::from_env(cp.env_var),
+                        auth,
                         model: ModelIden::new(AdapterKind::OpenAI, bare),
                     });
                 }
@@ -208,6 +253,22 @@ pub(crate) fn build_client() -> Client {
                     endpoint: Endpoint::from_owned(ollama_v1_endpoint(&host)),
                     auth: AuthData::from_single("ollama"),
                     model: ModelIden::new(AdapterKind::OpenAI, bare),
+                });
+            }
+            // Native-adapter providers (groq/gemini/openai/…): genai has already set
+            // `auth = FromEnv(<default var>)`. Recover the Forge provider from that env-var name and,
+            // if it has ≥2 keys, substitute the next rotated key. Single-key providers fall through
+            // unchanged (cache locality preserved).
+            let rotated = match &st.auth {
+                AuthData::FromEnv(var) => {
+                    forge_config::provider_for_env_var(var).and_then(|p| pool.next(p))
+                }
+                _ => None,
+            };
+            if let Some(key) = rotated {
+                return Ok(ServiceTarget {
+                    auth: AuthData::from_single(key),
+                    ..st
                 });
             }
             Ok(st)
@@ -959,6 +1020,27 @@ mod tests {
         assert!(!is_non_chat_model_id("deepseek-ai/deepseek-v4-pro"));
         assert!(!is_non_chat_model_id("openai/gpt-oss-120b"));
         assert!(!is_non_chat_model_id("meta/llama-3.3-70b-instruct"));
+    }
+
+    #[test]
+    fn key_pool_round_robins_and_skips_single_key_providers() {
+        use std::sync::atomic::AtomicUsize;
+        let mut providers = std::collections::HashMap::new();
+        providers.insert(
+            "groq".to_string(),
+            (
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                AtomicUsize::new(0),
+            ),
+        );
+        let pool = KeyPool { providers };
+        // Round-robins across the three keys and wraps.
+        assert_eq!(pool.next("groq").as_deref(), Some("a"));
+        assert_eq!(pool.next("groq").as_deref(), Some("b"));
+        assert_eq!(pool.next("groq").as_deref(), Some("c"));
+        assert_eq!(pool.next("groq").as_deref(), Some("a"));
+        // A provider not in the pool (≤1 key) yields None → genai env default is used unchanged.
+        assert_eq!(pool.next("gemini"), None);
     }
 
     #[test]

@@ -37,6 +37,31 @@ are wired via a custom OpenAI-compatible endpoint resolver — see
 > live `/models` call fails (offline / endpoint down). Embedding & reranking ids are filtered out
 > (they can't serve chat completions).
 
+## Multiple keys per provider (rotation)
+
+Every key-based provider (all except the CLI bridges) supports **multiple API keys with round-robin
+rotation** — the simplest way to multiply a free tier's per-key rate limit and to survive a single
+key being throttled.
+
+```bash
+forge auth groq            # store a key
+forge auth groq            # run again to ADD another (keys accumulate)
+forge auth groq --list     # show count + masked fingerprints (…last4), never the keys
+forge auth groq --replace  # overwrite all stored keys with one
+forge auth --remove groq   # delete all stored keys
+```
+
+Keys can also come from the environment: a comma-separated `GROQ_API_KEY="k1,k2"`, or numbered
+siblings `GROQ_API_KEY_2`, `GROQ_API_KEY_3`, … (up to `_16`). Env + keyring keys are merged and
+de-duplicated.
+
+**Semantics:** rotation engages only when a provider has **≥2** keys — the provider client
+round-robins per request across the full list, so load spreads evenly and a 429-retry lands on the
+next key. With a single key nothing changes (the env-resolved key is used as-is, preserving
+prompt-cache locality). Note: rotating keys means requests hit different accounts, so providers that
+cache per-account (e.g. Anthropic prompt caching) won't share a cache across keys — only stack keys
+where the goal is throughput on a rate-limited free tier.
+
 ## Adding an OpenAI-compatible provider
 
 Any provider exposing a standard `/chat/completions` endpoint is one row in

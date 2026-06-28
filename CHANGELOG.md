@@ -7,6 +7,17 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Multiple API keys per provider, with round-robin rotation.** Every key-based provider (all except
+  the CLI bridges) can hold several keys — run `forge auth <provider>` again to stack another. The
+  provider client round-robins across them per request, multiplying a free tier's per-key rate limit
+  and landing a 429-retry on the next key. New `forge auth` flags: `--list` (masked count),
+  `--replace` (overwrite), and the default now APPENDS instead of overwriting. Keys also come from
+  the env as `VAR="k1,k2"` or numbered `VAR_2`/`VAR_3`/…. Rotation engages only at ≥2 keys, so
+  single-key (and cache-sensitive paid) providers are unchanged. See
+  [docs/features/free-models.md](docs/features/free-models.md#multiple-keys-per-provider-rotation).
+- **🆓 Recommended free providers** — a new README section (linked from the top nav) tiering every
+  free-tier provider with best models, rate limits, direct signup links, and the exact `forge auth`
+  command.
 - **NVIDIA NIM, SambaNova, and Mistral providers — free frontier models in the mesh.** Three new
   OpenAI-compatible providers wired through a generalized custom-endpoint resolver: `nvidia::`
   (DeepSeek-R1, Llama-3.1-405B, Nemotron-70B — free dev tier), `sambanova::` (DeepSeek-V3.1,

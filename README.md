@@ -97,6 +97,19 @@ over automatically when one is throttled. Keys are stored in your **OS keyring**
 **A solid all-free setup:** `groq` + `nvidia` + `gemini` — fast small-task routing, 100+ frontier
 models, and a 1M-context model, all at \$0. Add `cerebras`/`sambanova` for more headroom under load.
 
+**Stack multiple keys per provider to multiply free limits.** Run `forge auth <provider>` again to add
+another key — Forge round-robins across all of them, so two free Groq keys ≈ double the requests/min,
+and a throttled key's retry lands on the next one. Works for every provider (except CLI bridges).
+
+```bash
+forge auth groq            # add a key
+forge auth groq            # add another → Forge rotates across both
+forge auth groq --list     # "groq: 2 key(s) configured — …aB3x, …9kQ2"  (masked)
+forge auth groq --replace  # overwrite all with one key
+```
+
+You can also stack keys via env: `GROQ_API_KEY="k1,k2"` or numbered `GROQ_API_KEY_2`, `GROQ_API_KEY_3`.
+
 > Rate limits and free model lists shift month-to-month — these are mid-2026 figures; check each
 > provider's page for current terms. See [docs/features/free-models.md](docs/features/free-models.md)
 > for tier config and how to add any other OpenAI-compatible provider in one line.
