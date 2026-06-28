@@ -6,7 +6,20 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
-## [1.1.1] - 2026-06-28
+## [1.1.2] - 2026-06-28
+
+### Fixed
+- **Rate-limited free models come back in ~1 min, not 5.** The default bench cooldown when a 429
+  carried no `Retry-After` was 300s, so a per-minute free tier (NVIDIA NIM, Groq, Gemini RPM) got
+  parked for five minutes — long enough that routing abandoned all of that provider's high-ranked
+  free models and degraded to a weaker (or paid) one. Default cooldown is now **60s**; providers
+  that send `Retry-After` still use their exact value. (Pairs with the v1.1.1 strict-credit fix so
+  failover can't fall onto paid models in the meantime.)
+- **Transient errors retry the same model before failing over.** A one-off 5xx / dropped stream /
+  network blip used to bench the model and switch immediately; it now retries the SAME model up to
+  twice with backoff first (these usually succeed on a second attempt), only failing over if it
+  keeps failing. Rate-limits (respect the cooldown) and permanent incapabilities (no tool support /
+  402) still fail over at once — no pointless retries.
 
 ### Fixed
 - **`credit_mode = "strict"` now actually keeps paid models out of routing and failover.** It was
