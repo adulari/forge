@@ -30,7 +30,21 @@ fn bundled_client_builder() -> reqwest::ClientBuilder {
     let certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
         .iter()
         .filter_map(|der| reqwest::Certificate::from_der(der.as_ref()).ok());
-    reqwest::Client::builder().tls_certs_only(certs)
+    reqwest::Client::builder()
+        .tls_certs_only(certs)
+        .redirect(safe_redirect_policy())
+}
+
+fn safe_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            attempt.error("too many redirects")
+        } else if is_safe_url(attempt.url().as_str()).is_err() {
+            attempt.error("refusing redirect to private/local URL")
+        } else {
+            attempt.follow()
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +157,9 @@ fn is_private_ip(ip: IpAddr) -> bool {
                 || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
         }
         IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_ip(IpAddr::V4(v4));
+            }
             let seg = v6.segments();
             v6.is_loopback()
                 || v6.is_unspecified()
@@ -640,6 +657,7 @@ mod tests {
             "http://192.168.1.1/",
             "http://169.254.169.254/latest/meta-data/",
             "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
             "https://foo.local/",
             "file:///etc/passwd",
             "ftp://example.com/",
@@ -647,6 +665,34 @@ mod tests {
         ] {
             assert!(is_safe_url(bad).is_err(), "should reject {bad}");
         }
+    }
+
+    #[tokio::test]
+    async fn redirect_policy_rejects_private_targets() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0; 1024];
+            let _ = stream.read(&mut buf);
+            write!(
+                stream,
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{}/private\r\nContent-Length: 0\r\n\r\n",
+                addr.port()
+            )
+            .unwrap();
+        });
+
+        let client = bundled_client_builder().build().unwrap();
+        let err = client
+            .get(format!("http://127.0.0.1:{}/redir", addr.port()))
+            .send()
+            .await
+            .expect_err("redirect to a private target must be rejected");
+        handle.join().unwrap();
+        assert!(err.is_redirect(), "{err}");
     }
 
     #[test]
