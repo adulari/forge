@@ -4,7 +4,7 @@
 //! table, the quota snapshot, the conservation roll, and the final pick + fallback chain. The goal
 //! is to make "why did the mesh choose this?" answerable, and to verify the policy is behaving.
 
-use forge_types::{ModelHealth, QuotaStatus, SubscriptionQuota, TaskTier};
+use forge_types::{EffortLevel, ModelHealth, QuotaStatus, SubscriptionQuota, TaskTier};
 
 use crate::catalog::{self, ConserveDecision, ScoreRow};
 use crate::{score_prompt, BudgetState, HeuristicRouter, RouteHints};
@@ -63,6 +63,7 @@ impl HeuristicRouter {
         budget: BudgetState,
         health: &ModelHealth,
         quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
     ) -> RoutingExplanation {
         let cls = score_prompt(prompt);
         let hints = RouteHints::from_prompt(prompt);
@@ -73,7 +74,15 @@ impl HeuristicRouter {
         // table + conservation data must describe the tier that ACTUALLY drove the pick, not the
         // classified one — otherwise `/mesh` shows the Trivial pick ranked last among Complex rows
         // with a Complex-tier conservation probability.
-        let decision = self.decide(tier, cls.reasons.join(", "), budget, health, hints, quota);
+        let decision = self.decide(
+            tier,
+            cls.reasons.join(", "),
+            budget,
+            health,
+            hints,
+            quota,
+            effort,
+        );
         let routed_tier = decision.tier;
 
         let (conserve, rows) = if self.auto_active() {
@@ -83,6 +92,7 @@ impl HeuristicRouter {
                 hints.code_heavy,
                 hints.seed,
                 quota,
+                effort,
             )
         } else {
             (ConserveDecision::default(), Vec::new())
@@ -180,6 +190,7 @@ mod tests {
             BudgetState::default(),
             &ModelHealth::default(),
             &SubscriptionQuota::default(),
+            None,
         );
         // The explained pick must equal what the selected candidate row says, and the top usable
         // row must be the pick (the table is the decision, made legible).
@@ -203,6 +214,7 @@ mod tests {
             BudgetState::default(),
             &ModelHealth::default(),
             &quota,
+            None,
         );
         assert!(e.conserve.enabled);
         assert!(e.conserve.eligible, "a free frontier alternative exists");

@@ -3,7 +3,7 @@
 //! ranking; the async *discovery* (querying each provider's model list) lives in the binary
 //! (forge-cli), which has the provider client — forge-mesh stays free of that dependency.
 
-use forge_types::TaskTier;
+use forge_types::{EffortLevel, TaskTier};
 
 use crate::bench::BenchmarkScores;
 use crate::capability::{capability_score_b, is_frontier_b, CAPABLE_BENCH_THRESHOLD};
@@ -264,6 +264,9 @@ pub struct ScoreRow {
     rotation: u64,
     weight: u8,
     fine: f64,
+    pub bench_score: Option<f64>,
+    pub cost: f64,
+    pub speed: u8,
 }
 
 /// The full, inspectable conservation decision for a prompt (the data the `/mesh` inspector and
@@ -533,12 +536,14 @@ impl ModelCatalog {
             false,
             0,
             &forge_types::SubscriptionQuota::default(),
+            None,
         )
     }
 
     /// Prompt-aware ranking: cost-tiered capability score, with genuine ties broken by a
     /// per-prompt `seed` rotation across providers (fair spread) then id (stable). `code_heavy`
     /// applies the mild coding-provider prior. The single place the routing policy lives.
+    #[allow(clippy::too_many_arguments)]
     pub fn ranked_seeded(
         &self,
         tier: TaskTier,
@@ -547,6 +552,7 @@ impl ModelCatalog {
         code_heavy: bool,
         seed: u64,
         quota: &forge_types::SubscriptionQuota,
+        effort: Option<EffortLevel>,
     ) -> Vec<String> {
         // Proactive subscription conservation: for this prompt, decide whether to spread off the
         // subscription bridges onto a free-frontier model (so a complex/standard-heavy workload
@@ -561,7 +567,20 @@ impl ModelCatalog {
             self.bench.as_ref(),
         )
         .fired;
-        let mut scored: Vec<(f64, u8, u64, u8, f64, &String)> = self
+
+        struct ScoredModel<'a> {
+            id: &'a String,
+            route_score: f64,
+            cost_class: u8,
+            provider_rotation: u64,
+            model_weight: u8,
+            fine_capability: f64,
+            bench_score: Option<f64>,
+            cost: f64,
+            speed: u8,
+        }
+
+        let mut scored: Vec<ScoredModel> = self
             .models
             .iter()
             .filter(|m| is_routable(m))
@@ -571,33 +590,73 @@ impl ModelCatalog {
                 if conserve && is_subscription(m) {
                     score -= CONSERVE_PENALTY;
                 }
-                (
-                    score,
-                    cost_class(m, cost),
-                    provider_rotation(provider_of(m), seed),
-                    model_weight(m),
-                    fine_capability(m),
-                    m,
-                )
+                let bench_score = self.bench.as_ref().and_then(|b| b.score_for(m)).map(|s| {
+                    if code_heavy {
+                        s.coding
+                    } else {
+                        s.intelligence
+                    }
+                });
+                ScoredModel {
+                    id: m,
+                    route_score: score,
+                    cost_class: cost_class(m, cost),
+                    provider_rotation: provider_rotation(provider_of(m), seed),
+                    model_weight: model_weight(m),
+                    fine_capability: fine_capability(m),
+                    bench_score,
+                    cost,
+                    speed: crate::capability::speed_class(m),
+                }
             })
             .collect();
-        // Best score first; then cheaper cost-class; then the per-prompt provider rotation
-        // (spreads ties ACROSS providers); then — among tied same-provider siblings — the LIGHTER
-        // model (conserve the flagship: sonnet before opus); then the higher-version model within
-        // one weight class (never a lesser sibling); then id for a fully deterministic order.
-        scored.sort_by(|a, b| {
-            b.0.total_cmp(&a.0)
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| a.2.cmp(&b.2))
-                .then_with(|| a.3.cmp(&b.3))
-                .then_with(|| b.4.total_cmp(&a.4))
-                .then_with(|| a.5.cmp(b.5))
+
+        let active_effort = effort.unwrap_or(EffortLevel::Medium);
+        scored.sort_by(|a, b| match active_effort {
+            EffortLevel::High | EffortLevel::XHigh => {
+                if let (Some(sa), Some(sb)) = (a.bench_score, b.bench_score) {
+                    if (sa - sb).abs() >= 1.0 {
+                        return sb.total_cmp(&sa);
+                    }
+                }
+                b.route_score
+                    .total_cmp(&a.route_score)
+                    .then_with(|| a.cost_class.cmp(&b.cost_class))
+                    .then_with(|| a.provider_rotation.cmp(&b.provider_rotation))
+                    .then_with(|| a.model_weight.cmp(&b.model_weight))
+                    .then_with(|| b.fine_capability.total_cmp(&a.fine_capability))
+                    .then_with(|| a.id.cmp(b.id))
+            }
+            EffortLevel::Low => {
+                if let (Some(sa), Some(sb)) = (a.bench_score, b.bench_score) {
+                    if (sa - sb).abs() >= 1.0 {
+                        return sb.total_cmp(&sa);
+                    }
+                }
+                a.cost_class
+                    .cmp(&b.cost_class)
+                    .then_with(|| a.cost.total_cmp(&b.cost))
+                    .then_with(|| b.speed.cmp(&a.speed))
+                    .then_with(|| {
+                        b.route_score
+                            .total_cmp(&a.route_score)
+                            .then_with(|| a.provider_rotation.cmp(&b.provider_rotation))
+                            .then_with(|| a.model_weight.cmp(&b.model_weight))
+                            .then_with(|| b.fine_capability.total_cmp(&a.fine_capability))
+                            .then_with(|| a.id.cmp(b.id))
+                    })
+            }
+            EffortLevel::Medium => b
+                .route_score
+                .total_cmp(&a.route_score)
+                .then_with(|| a.cost_class.cmp(&b.cost_class))
+                .then_with(|| a.provider_rotation.cmp(&b.provider_rotation))
+                .then_with(|| a.model_weight.cmp(&b.model_weight))
+                .then_with(|| b.fine_capability.total_cmp(&a.fine_capability))
+                .then_with(|| a.id.cmp(b.id)),
         });
-        scored
-            .into_iter()
-            .take(top)
-            .map(|(_, _, _, _, _, m)| m.clone())
-            .collect()
+
+        scored.into_iter().take(top).map(|s| s.id.clone()).collect()
     }
 
     /// The full ranked candidate table for a tier with each model's score broken out — the data
@@ -612,6 +671,7 @@ impl ModelCatalog {
         code_heavy: bool,
         seed: u64,
         quota: &forge_types::SubscriptionQuota,
+        effort: Option<EffortLevel>,
     ) -> (ConserveDecision, Vec<ScoreRow>) {
         let decision = conserve_decision(
             &self.models,
@@ -634,6 +694,13 @@ impl ModelCatalog {
                 } else {
                     0.0
                 };
+                let bench_score = self.bench.as_ref().and_then(|b| b.score_for(m)).map(|s| {
+                    if code_heavy {
+                        s.coding
+                    } else {
+                        s.intelligence
+                    }
+                });
                 ScoreRow {
                     model: m.clone(),
                     provider: provider_of(m).to_string(),
@@ -646,17 +713,56 @@ impl ModelCatalog {
                     rotation: provider_rotation(provider_of(m), seed),
                     weight: model_weight(m),
                     fine: fine_capability(m),
+                    bench_score,
+                    cost,
+                    speed: crate::capability::speed_class(m),
                 }
             })
             .collect();
-        rows.sort_by(|a, b| {
-            b.final_score
+
+        let active_effort = effort.unwrap_or(EffortLevel::Medium);
+        rows.sort_by(|a, b| match active_effort {
+            EffortLevel::High | EffortLevel::XHigh => {
+                if let (Some(sa), Some(sb)) = (a.bench_score, b.bench_score) {
+                    if (sa - sb).abs() >= 1.0 {
+                        return sb.total_cmp(&sa);
+                    }
+                }
+                b.final_score
+                    .total_cmp(&a.final_score)
+                    .then_with(|| a.cost_class.cmp(&b.cost_class))
+                    .then_with(|| a.rotation.cmp(&b.rotation))
+                    .then_with(|| a.weight.cmp(&b.weight))
+                    .then_with(|| b.fine.total_cmp(&a.fine))
+                    .then_with(|| a.model.cmp(&b.model))
+            }
+            EffortLevel::Low => {
+                if let (Some(sa), Some(sb)) = (a.bench_score, b.bench_score) {
+                    if (sa - sb).abs() >= 1.0 {
+                        return sb.total_cmp(&sa);
+                    }
+                }
+                a.cost_class
+                    .cmp(&b.cost_class)
+                    .then_with(|| a.cost.total_cmp(&b.cost))
+                    .then_with(|| b.speed.cmp(&a.speed))
+                    .then_with(|| {
+                        b.final_score
+                            .total_cmp(&a.final_score)
+                            .then_with(|| a.rotation.cmp(&b.rotation))
+                            .then_with(|| a.weight.cmp(&b.weight))
+                            .then_with(|| b.fine.total_cmp(&a.fine))
+                            .then_with(|| a.model.cmp(&b.model))
+                    })
+            }
+            EffortLevel::Medium => b
+                .final_score
                 .total_cmp(&a.final_score)
                 .then_with(|| a.cost_class.cmp(&b.cost_class))
                 .then_with(|| a.rotation.cmp(&b.rotation))
                 .then_with(|| a.weight.cmp(&b.weight))
                 .then_with(|| b.fine.total_cmp(&a.fine))
-                .then_with(|| a.model.cmp(&b.model))
+                .then_with(|| a.model.cmp(&b.model)),
         });
         (decision, rows)
     }
@@ -1141,5 +1247,95 @@ mod tests {
         assert!(groups[0].models[0].id.contains("70b"));
         assert_eq!(groups[0].frontier(), 1);
         assert_eq!(groups[0].free(), 2);
+    }
+
+    fn effort_test_catalog(a_score: f64, b_score: f64) -> (ModelCatalog, Pricing) {
+        use crate::bench::BenchmarkScores;
+        use crate::pricing::ModelRate;
+        use std::collections::HashMap;
+
+        let mut rates = HashMap::new();
+        rates.insert(
+            "openai::model-a".to_string(),
+            ModelRate {
+                input_per_1k: 0.1,
+                output_per_1k: 0.1,
+                cache_read_per_1k: None,
+            },
+        );
+        rates.insert(
+            "openai::model-b".to_string(),
+            ModelRate {
+                input_per_1k: 0.001,
+                output_per_1k: 0.001,
+                cache_read_per_1k: None,
+            },
+        );
+
+        let mut bench = BenchmarkScores::new();
+        bench.insert("openai model-a", a_score, a_score);
+        bench.insert("openai model-b", b_score, b_score);
+
+        (
+            ModelCatalog::new(vec!["openai::model-a".into(), "openai::model-b".into()])
+                .with_benchmarks(Some(bench)),
+            Pricing::from_rates(rates),
+        )
+    }
+
+    #[test]
+    fn none_and_medium_effort_keep_existing_routing_order() {
+        use forge_types::{EffortLevel, SubscriptionQuota};
+
+        let (cat, pricing) = effort_test_catalog(25.0, 20.0);
+        let quota = SubscriptionQuota::default();
+        let none = cat.ranked_seeded(TaskTier::Complex, &pricing, 2, false, 0, &quota, None);
+        let medium = cat.ranked_seeded(
+            TaskTier::Complex,
+            &pricing,
+            2,
+            false,
+            0,
+            &quota,
+            Some(EffortLevel::Medium),
+        );
+
+        assert_eq!(none, medium);
+    }
+
+    #[test]
+    fn high_effort_prefers_higher_benchmark_over_lower_cost() {
+        use forge_types::{EffortLevel, SubscriptionQuota};
+
+        let (cat, pricing) = effort_test_catalog(25.0, 20.0);
+        let r = cat.ranked_seeded(
+            TaskTier::Complex,
+            &pricing,
+            2,
+            false,
+            0,
+            &SubscriptionQuota::default(),
+            Some(EffortLevel::High),
+        );
+
+        assert_eq!(r[0], "openai::model-a");
+    }
+
+    #[test]
+    fn low_effort_prefers_lower_cost_when_benchmark_gap_is_small() {
+        use forge_types::{EffortLevel, SubscriptionQuota};
+
+        let (cat, pricing) = effort_test_catalog(20.5, 20.0);
+        let r = cat.ranked_seeded(
+            TaskTier::Complex,
+            &pricing,
+            2,
+            false,
+            0,
+            &SubscriptionQuota::default(),
+            Some(EffortLevel::Low),
+        );
+
+        assert_eq!(r[0], "openai::model-b");
     }
 }
