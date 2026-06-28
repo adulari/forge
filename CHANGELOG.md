@@ -6,6 +6,19 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-06-28
+
+### Fixed (mesh robustness — surfaced by dogfooding)
+- **Empty-response models now fail over instead of dead-ending the turn.** A model that streams an
+  empty final chunk (e.g. some NIM models like kimi-k2.6) was nudged twice and then the turn
+  *stopped* — even with healthy fallback models (incl. the reliable subscription bridge) untried.
+  It now benches the empty model and fails over down the chain, so the turn reaches a working model.
+- **402 "Payment Required" via the streaming path is now treated as permanent (Capability).** A
+  paid model surfaced through streaming (e.g. SambaNova: "A payment method is required to use
+  `<model>`") was misclassified as a transient outage — retried twice and benched on a short
+  cooldown instead of excluded. Added payment-required markers to the capability classifier so such
+  a model is excluded immediately and failover moves on cleanly.
+
 ## [1.3.0] - 2026-06-28
 
 ### Added
