@@ -2771,11 +2771,11 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             transient_retries += 1;
                             let backoff =
                                 std::time::Duration::from_millis(500u64 << (transient_retries - 1));
-                            self.presenter.emit(PresenterEvent::Warning(format!(
-                                "{active_model}: {} — retry {transient_retries}/{MAX_TRANSIENT_RETRIES} in {}ms",
-                                e.reason(),
-                                backoff.as_millis()
-                            )));
+                            // Use ModelSearch (status-bar indicator, not chat history) so transient
+                            // retries don't spam the scrollback. The spinner already signals "working".
+                            self.presenter.emit(PresenterEvent::ModelSearch {
+                                model: active_model.clone(),
+                            });
                             tokio::time::sleep(backoff).await;
                             continue;
                         }
