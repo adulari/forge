@@ -190,7 +190,7 @@ failover, subscription bridging, *and* a test-pinned reliability layer in one bi
 | **Assay** | Parallel critic crew, adversarial verification, ranked findings, git scopes (diff/branch/since), lens selection, auto-diff vs prior run; opt-in auto-review gate over a turn's diff (`[assay] auto_review`, warn/block) |
 | **MCP** | Client for external MCP servers (stdio + HTTP/SSE), OAuth 2.0 + PKCE, deferred loading, allowlist gating |
 | **TUI** | Full-screen (alternate-screen) by default with a scrollable transcript + pinned panels (`--inline` to opt out); ratatui live progress, cost meter, context-window token gauge, fuzzy command palette, dynamic `/config` settings editor (every setting, searchable), unified activity viewer (subagents + critics), session/checkpoint pickers, `/usage` + `/mesh` overlays, `/model` picker, `/effort` reasoning knob |
-| **Skills & Commands** | Markdown prompt templates + skill methodology injection; Claude Code format compatible; `forge import <tool>` ↔ `forge skill export` round-trip for moving/sharing your library |
+| **Skills & Commands** | Markdown prompt templates + skill methodology injection; Claude Code format compatible; `forge import <tool>` ↔ `forge skill export` round-trip for moving/sharing your library; `/orchestrate` routes any task through the best available resource (skills → subagents → MCP → web → Lattice → direct), with `[mesh] auto_orchestrate = true` to apply this framework automatically on every turn |
 | **Subagents** | Parallel fan-out (`spawn_agents`), mesh-routed children, live TUI tree, depth-limited, per-provider concurrency cap so a burst can't drain one subscription's quota, opt-in git-worktree isolation for write-capable children |
 | **Session Management** | Checkpoints, `/undo` with file restore, session replay + JSON export, transcript diff, assay run history |
 | **Remote control** | Drive a session from a phone/desktop browser (`/remote`) — LAN, loopback, or public tunnel |
@@ -379,6 +379,7 @@ mode. `Ctrl+O` opens the activity viewer (main chat + subagents + critics).
 
 | Command | Description |
 |---------|-------------|
+| `/orchestrate <task>` | Route a task through the best available resources — checks skills first, then subagents, MCP tools, web, Lattice, or direct implementation. The model surveys all categories and picks the highest-level tool that fits |
 | `/plan <task>` | Planning mode — investigate read-only and propose a plan (no edits) |
 | `/execute` | Approve the proposed plan and carry it out (switches to Auto-edit); aliases `/approve`, `/go` |
 | `/init` | Scan the repo and write `.forge/AGENTS.md` project memory |
@@ -406,6 +407,31 @@ mode. `Ctrl+O` opens the activity viewer (main chat + subagents + critics).
 | `/config` | Dynamic settings editor — fuzzy-search + edit any setting (and API keys); Tab toggles user/project scope |
 | `/clear` | Clear the screen (keep the session) |
 | `/` | Open command palette (fuzzy-find skills + commands) |
+
+**`/orchestrate` — smart task routing**
+
+`/orchestrate <task>` tells the model to survey all available resources before acting:
+it checks installed skills first (via `use_skill`), then subagents for parallel work,
+MCP tools for integrations, web for current information, Lattice for code navigation, and
+direct shell/file tools last. The model picks the highest-level tool that fits and composes
+freely across categories.
+
+```
+/orchestrate add OpenTelemetry tracing to the HTTP layer
+/orchestrate find all places that call UserRepository and summarize the call patterns
+/orchestrate run a full code-quality review on the last branch diff
+```
+
+To apply this framework automatically on every turn without typing `/orchestrate`, enable
+`auto_orchestrate` in your config (opt-in):
+
+```toml
+# ~/.forge/config.toml  (or .forge/config.toml for project scope)
+[mesh]
+auto_orchestrate = true
+```
+
+Or toggle it live with `/config` → search "orchestrate".
 
 Type `@` to fuzzy-pick a file; the `@path` token's **contents** are injected into the turn on submit.
 

@@ -18,10 +18,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
-const ORANGE: Color = Color::Rgb(255, 145, 60);
-const DIM: Color = Color::Rgb(110, 110, 120);
-const OKGREEN: Color = Color::Rgb(120, 210, 140);
-const FG: Color = Color::Rgb(205, 205, 215);
+const ACCENT: Color = Color::Rgb(82, 162, 255);
+const DIM: Color = Color::Rgb(82, 87, 108);
+const OKGREEN: Color = Color::Rgb(92, 208, 122);
+const ERRRED: Color = Color::Rgb(243, 92, 92);
+const FG: Color = Color::Rgb(208, 213, 224);
 
 /// One selectable row: a primary `label` and a dim `hint` (e.g. transport + source).
 pub struct SelectItem {
@@ -125,12 +126,12 @@ fn draw_single(
             Constraint::Length(2),
         ])
         .split(f.area());
-    let pulse = if (tick / 6) % 2 == 0 { ORANGE } else { DIM };
+    let pulse = if (tick / 6) % 2 == 0 { ACCENT } else { DIM };
     let header = Line::from(vec![
-        Span::styled("⚒ ", Style::default().fg(pulse)),
+        Span::styled("◈ ", Style::default().fg(pulse)),
         Span::styled(
             title.to_string(),
-            Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
     ]);
     f.render_widget(Paragraph::new(header), chunks[0]);
@@ -152,7 +153,7 @@ fn draw_single(
             Style::default().fg(DIM)
         };
         lines.push(Line::from(vec![
-            Span::styled(caret, Style::default().fg(ORANGE)),
+            Span::styled(caret, Style::default().fg(ACCENT)),
             Span::styled(format!("{:<26}", item.label), label_style),
             Span::styled(item.hint.clone(), Style::default().fg(DIM)),
         ]));
@@ -166,11 +167,11 @@ fn draw_single(
         chunks[1],
     );
     let footer = Line::from(vec![
-        Span::styled("↑/↓", Style::default().fg(ORANGE)),
+        Span::styled("↑/↓", Style::default().fg(ACCENT)),
         Span::styled(" move   ", Style::default().fg(DIM)),
         Span::styled("enter", Style::default().fg(OKGREEN)),
         Span::styled(" select   ", Style::default().fg(DIM)),
-        Span::styled("esc", Style::default().fg(Color::Rgb(240, 110, 110))),
+        Span::styled("esc", Style::default().fg(ERRRED)),
         Span::styled(" cancel", Style::default().fg(DIM)),
     ]);
     f.render_widget(Paragraph::new(footer), chunks[2]);
@@ -240,18 +241,18 @@ fn draw(f: &mut ratatui::Frame, title: &str, items: &[SelectItem], state: &State
         ])
         .split(f.area());
 
-    // Header — the ⚒ pulses between orange and dim so the screen reads as "live".
+    // Header — the ◈ pulses between accent and dim so the screen reads as "live".
     let pulse = if (state.tick / 6) % 2 == 0 {
-        ORANGE
+        ACCENT
     } else {
         DIM
     };
     let n = state.checked.iter().filter(|&&c| c).count();
     let header = Line::from(vec![
-        Span::styled("⚒ ", Style::default().fg(pulse)),
+        Span::styled("◈ ", Style::default().fg(pulse)),
         Span::styled(
             title.to_string(),
-            Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("   {n}/{} selected", items.len()),
@@ -285,7 +286,7 @@ fn draw(f: &mut ratatui::Frame, title: &str, items: &[SelectItem], state: &State
             Style::default().fg(DIM)
         };
         lines.push(Line::from(vec![
-            Span::styled(caret, Style::default().fg(ORANGE)),
+            Span::styled(caret, Style::default().fg(ACCENT)),
             Span::styled(format!("{marker} "), Style::default().fg(marker_color)),
             Span::styled(format!("{:<18}", item.label), label_style),
             Span::styled(item.hint.clone(), Style::default().fg(DIM)),
@@ -302,15 +303,15 @@ fn draw(f: &mut ratatui::Frame, title: &str, items: &[SelectItem], state: &State
 
     // Footer keymap.
     let footer = Line::from(vec![
-        Span::styled("↑/↓", Style::default().fg(ORANGE)),
+        Span::styled("↑/↓", Style::default().fg(ACCENT)),
         Span::styled(" move   ", Style::default().fg(DIM)),
-        Span::styled("space", Style::default().fg(ORANGE)),
+        Span::styled("space", Style::default().fg(ACCENT)),
         Span::styled(" toggle   ", Style::default().fg(DIM)),
-        Span::styled("a/n", Style::default().fg(ORANGE)),
+        Span::styled("a/n", Style::default().fg(ACCENT)),
         Span::styled(" all/none   ", Style::default().fg(DIM)),
         Span::styled("enter", Style::default().fg(OKGREEN)),
         Span::styled(" import   ", Style::default().fg(DIM)),
-        Span::styled("esc", Style::default().fg(Color::Rgb(240, 110, 110))),
+        Span::styled("esc", Style::default().fg(ERRRED)),
         Span::styled(" cancel", Style::default().fg(DIM)),
     ]);
     f.render_widget(Paragraph::new(footer), chunks[2]);
