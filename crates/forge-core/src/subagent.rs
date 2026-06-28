@@ -279,7 +279,9 @@ pub async fn route_child(
                 .unwrap_or_default()
                 .with_plans(ctx.config.mesh.subscriptions.clone())
                 .with_conserve(ctx.config.mesh.subscription_conserve);
-            ctx.router.route(&agent.task, budget, &health, &quota).await
+            ctx.router
+                .route(&agent.task, budget, &health, &quota, None)
+                .await
         }
     }
 }
@@ -925,6 +927,7 @@ mod tests {
             _b: BudgetState,
             _h: &forge_types::ModelHealth,
             _q: &forge_types::SubscriptionQuota,
+            _effort: Option<forge_types::EffortLevel>,
         ) -> RoutingDecision {
             RoutingDecision {
                 tier: TaskTier::Standard,

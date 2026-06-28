@@ -699,7 +699,11 @@ pub(crate) async fn run_chat_tui(
             tui.insert_lines(banner);
         }
     }
-    app.temper = session.lock().await.temper().label().to_string();
+    {
+        let s = session.lock().await;
+        app.temper = s.temper().label().to_string();
+        app.effort = s.pinned_effort();
+    }
 
     // Discover file-based slash commands + skills (command-skill-system.md). Feed them into the
     // palette alongside the builtins; surface any malformed-file warnings once.

@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use forge_config::Config;
-use forge_types::{ModelHealth, SubscriptionQuota, TaskTier};
+use forge_types::{EffortLevel, ModelHealth, SubscriptionQuota, TaskTier};
 
 pub mod bench;
 pub mod capability;
@@ -110,6 +110,7 @@ pub trait Router: Send + Sync {
         budget: BudgetState,
         health: &ModelHealth,
         quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
     ) -> RoutingDecision;
 
     /// Route with an optional tier hint from an invoked command/skill (`tier:` frontmatter).
@@ -123,8 +124,9 @@ pub trait Router: Send + Sync {
         health: &ModelHealth,
         quota: &SubscriptionQuota,
         _tier_override: Option<TaskTier>,
+        effort: Option<EffortLevel>,
     ) -> RoutingDecision {
-        self.route(prompt, budget, health, quota).await
+        self.route(prompt, budget, health, quota, effort).await
     }
 }
 
@@ -455,6 +457,7 @@ impl HeuristicRouter {
         tier: TaskTier,
         hints: RouteHints,
         quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
     ) -> Vec<String> {
         if self.auto_active() {
             // Rank EVERY routable discovered model (not a top-N): the result feeds the failover
@@ -471,6 +474,7 @@ impl HeuristicRouter {
                 hints.code_heavy,
                 hints.seed,
                 quota,
+                effort,
             );
             if !ranked.is_empty() {
                 return ranked;
@@ -576,8 +580,9 @@ impl HeuristicRouter {
         health: &ModelHealth,
         hints: RouteHints,
         quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
     ) -> Vec<String> {
-        let candidates = self.candidates_for_tier(tier, hints, quota);
+        let candidates = self.candidates_for_tier(tier, hints, quota, effort);
         let mut usable: Vec<String> = candidates
             .iter()
             .filter(|m| self.is_usable(m, health, quota))
@@ -609,13 +614,14 @@ impl HeuristicRouter {
         health: &ModelHealth,
         hints: RouteHints,
         quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
     ) -> Vec<String> {
-        let mut chain = self.ordered_usable_for_tier(routed, health, hints, quota);
+        let mut chain = self.ordered_usable_for_tier(routed, health, hints, quota, effort);
         for tier in [TaskTier::Complex, TaskTier::Standard, TaskTier::Trivial] {
             if tier == routed {
                 continue;
             }
-            for m in self.ordered_usable_for_tier(tier, health, hints, quota) {
+            for m in self.ordered_usable_for_tier(tier, health, hints, quota, effort) {
                 if !chain.contains(&m) {
                     chain.push(m);
                 }
@@ -645,6 +651,7 @@ impl HeuristicRouter {
     /// Given an already-decided tier (from the heuristic OR an external classifier) + the
     /// reason it was chosen, apply pin / budget pressure / cost-aware candidate selection.
     /// Pure + sync, so any [`Router`] (incl. the LLM one) can reuse the whole selection path.
+    #[allow(clippy::too_many_arguments)]
     pub fn decide(
         &self,
         classified_tier: TaskTier,
@@ -653,20 +660,21 @@ impl HeuristicRouter {
         health: &ModelHealth,
         hints: RouteHints,
         quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
     ) -> RoutingDecision {
         let exhausted = budget.status() == BudgetStatus::Exhausted;
-        let cap_overrides_pin = self.config.mesh.budget.cap_overrides_pin;
+        let bg_override_pin = self.config.mesh.budget.cap_overrides_pin;
 
         // A pin bypasses classification unless an exhausted budget may override it.
         if let Some(pin) = self
             .pin
             .as_ref()
-            .filter(|_| !(exhausted && cap_overrides_pin))
+            .filter(|_| !(exhausted && bg_override_pin))
         {
             let mut why = "pinned via --model".to_string();
             // Fallbacks even for a pin: if the pinned model is rate-limited/down mid-turn we
             // still want to keep working.
-            let mut chain = self.build_chain(classified_tier, health, hints, quota);
+            let mut chain = self.build_chain(classified_tier, health, hints, quota, effort);
             let model = if self.is_usable(pin, health, quota) {
                 pin.clone()
             } else {
@@ -709,13 +717,13 @@ impl HeuristicRouter {
         // `routed_usable` lets us tell a same-tier pick (normal rationale) from a cross-tier
         // fallback ("fell back …") for the message.
         let auto = self.auto_active();
-        let routed_usable = self.ordered_usable_for_tier(tier, health, hints, quota);
-        let mut chain = self.build_chain(tier, health, hints, quota);
+        let routed_usable = self.ordered_usable_for_tier(tier, health, hints, quota, effort);
+        let mut chain = self.build_chain(tier, health, hints, quota, effort);
         match chain.first().cloned() {
             Some(model) => {
                 if routed_usable.contains(&model) {
                     let n = self.usable_count(
-                        &self.candidates_for_tier(tier, hints, quota),
+                        &self.candidates_for_tier(tier, hints, quota, effort),
                         health,
                         quota,
                     );
@@ -732,7 +740,7 @@ impl HeuristicRouter {
                     }
                 } else {
                     let original = self
-                        .candidates_for_tier(tier, hints, quota)
+                        .candidates_for_tier(tier, hints, quota, effort)
                         .first()
                         .cloned()
                         .unwrap_or_else(|| "unknown".into());
@@ -763,7 +771,7 @@ impl HeuristicRouter {
             }
             None => {
                 let original = self
-                    .candidates_for_tier(tier, hints, quota)
+                    .candidates_for_tier(tier, hints, quota, effort)
                     .first()
                     .cloned()
                     .unwrap_or_else(|| "unknown".into());
@@ -789,6 +797,7 @@ impl Router for HeuristicRouter {
         budget: BudgetState,
         health: &ModelHealth,
         quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
     ) -> RoutingDecision {
         let (tier, reason) = Self::classify(prompt);
         self.decide(
@@ -798,6 +807,7 @@ impl Router for HeuristicRouter {
             health,
             RouteHints::from_prompt(prompt),
             quota,
+            effort,
         )
     }
 
@@ -808,6 +818,7 @@ impl Router for HeuristicRouter {
         health: &ModelHealth,
         quota: &SubscriptionQuota,
         tier_override: Option<TaskTier>,
+        effort: Option<EffortLevel>,
     ) -> RoutingDecision {
         match tier_override {
             // A command/skill tier hint replaces classification but goes through the same
@@ -819,8 +830,9 @@ impl Router for HeuristicRouter {
                 health,
                 RouteHints::from_prompt(prompt),
                 quota,
+                effort,
             ),
-            None => self.route(prompt, budget, health, quota).await,
+            None => self.route(prompt, budget, health, quota, effort).await,
         }
     }
 }
@@ -842,11 +854,11 @@ mod tests {
         let tier = TaskTier::Complex;
 
         let ranked_usable: Vec<String> = r
-            .candidates_for_tier(tier, hints, &quota)
+            .candidates_for_tier(tier, hints, &quota, None)
             .into_iter()
             .filter(|m| r.is_usable(m, &health, &quota))
             .collect();
-        let chain = r.ordered_usable_for_tier(tier, &health, hints, &quota);
+        let chain = r.ordered_usable_for_tier(tier, &health, hints, &quota, None);
         assert_eq!(
             chain, ranked_usable,
             "failover order must equal mesh rank order with no provider interleaving"
@@ -876,7 +888,7 @@ mod tests {
             SubscriptionQuota::default(),
             RouteHints::default(),
         );
-        let chain = strict.build_chain(TaskTier::Standard, &health, hints, &quota);
+        let chain = strict.build_chain(TaskTier::Standard, &health, hints, &quota, None);
         // Paid, metered model is gone from the WHOLE chain (primary + every failover step).
         assert!(
             !chain.iter().any(|m| m == "gemini::gemini-2.5-pro"),
@@ -894,7 +906,7 @@ mod tests {
 
         // Control: under Normal (default) the paid model stays in the chain.
         let normal = mixed_router();
-        let normal_chain = normal.build_chain(TaskTier::Standard, &health, hints, &quota);
+        let normal_chain = normal.build_chain(TaskTier::Standard, &health, hints, &quota, None);
         assert!(
             normal_chain.iter().any(|m| m == "gemini::gemini-2.5-pro"),
             "normal mode keeps paid models routable"
@@ -935,15 +947,22 @@ mod tests {
             BudgetState::default(),
             &ModelHealth::default(),
             &SubscriptionQuota::default(),
+            None,
         )
         .await
         .model
     }
 
     async fn route_model_q(r: &HeuristicRouter, prompt: &str, q: &SubscriptionQuota) -> String {
-        r.route(prompt, BudgetState::default(), &ModelHealth::default(), q)
-            .await
-            .model
+        r.route(
+            prompt,
+            BudgetState::default(),
+            &ModelHealth::default(),
+            q,
+            None,
+        )
+        .await
+        .model
     }
 
     /// A conservation-enabled quota: both subs at `frac` of their window, given plan slugs, Ok
@@ -1081,6 +1100,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 Some(TaskTier::Complex),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex);
@@ -1093,6 +1113,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
                 None,
             )
             .await
@@ -1129,6 +1150,7 @@ mod tests {
                     BudgetState::default(),
                     &ModelHealth::default(),
                     &SubscriptionQuota::default(),
+                    None,
                 )
                 .await;
             assert_eq!(d.tier, TaskTier::Complex, "{p}");
@@ -1211,6 +1233,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &quota,
+                None,
             )
             .await;
         assert!(
@@ -1239,6 +1262,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &quota,
+                None,
             )
             .await;
         // Complex normally picks the subscription flagship; under quota pressure a non-subscription
@@ -1265,6 +1289,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &quota,
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex);
@@ -1298,7 +1323,13 @@ mod tests {
             "design a lock-free queue and prove it correct", // complex
         ] {
             let d = r
-                .route(p, BudgetState::default(), &ModelHealth::default(), &quota)
+                .route(
+                    p,
+                    BudgetState::default(),
+                    &ModelHealth::default(),
+                    &quota,
+                    None,
+                )
                 .await;
             assert!(
                 !is_subscription(&d.model),
@@ -1368,6 +1399,7 @@ mod tests {
                     BudgetState::default(),
                     &ModelHealth::default(),
                     &SubscriptionQuota::default(),
+                    None,
                 )
                 .await;
             println!("[{:?}] {} -> {}", d.tier, &p[..p.len().min(46)], d.model);
@@ -1383,6 +1415,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Trivial);
@@ -1489,6 +1522,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex);
@@ -1503,6 +1537,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Standard);
@@ -1521,6 +1556,7 @@ mod tests {
                 budget,
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Trivial);
@@ -1537,6 +1573,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex); // AC-6
@@ -1550,6 +1587,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Standard); // AC-5
@@ -1563,6 +1601,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Standard);
@@ -1576,6 +1615,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Trivial); // AC-7
@@ -1594,6 +1634,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.model, "openai::gpt-4o"); // AC-1
@@ -1619,6 +1660,7 @@ mod tests {
                 budget,
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         // pin ignored; trivial-tier model chosen (AC-2)
@@ -1642,6 +1684,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex, "tier still reflects difficulty");
@@ -1663,6 +1706,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(
@@ -1726,6 +1770,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Standard);
@@ -1751,6 +1796,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex);
@@ -1773,6 +1819,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Trivial);
@@ -1797,6 +1844,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.model, "openai::gpt-4o-mini", "{}", d.rationale);
@@ -1819,6 +1867,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.model, "openai::gpt-4o-mini");
@@ -1838,6 +1887,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.model, "claude-cli::");
@@ -1857,6 +1907,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.model, "claude-cli::");
@@ -1886,6 +1937,7 @@ mod tests {
                 BudgetState::default(),
                 &benched(&["anthropic::claude-opus-4-8"]),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex);
@@ -1916,6 +1968,7 @@ mod tests {
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert!(
@@ -1936,6 +1989,7 @@ mod tests {
             TaskTier::Complex,
             RouteHints::default(),
             &SubscriptionQuota::default(),
+            None,
         );
         let refs: Vec<&str> = everything.iter().map(String::as_str).collect();
         // Bench the complex candidates AND the cross-tier ones by benching all configured tiers.
@@ -1945,6 +1999,7 @@ mod tests {
                 t,
                 RouteHints::default(),
                 &SubscriptionQuota::default(),
+                None,
             ));
         }
         let all_refs: Vec<&str> = all.iter().map(String::as_str).collect();
@@ -1955,6 +2010,7 @@ mod tests {
                 BudgetState::default(),
                 &benched(&all_refs),
                 &SubscriptionQuota::default(),
+                None,
             )
             .await;
         assert!(d.fallbacks.is_empty());

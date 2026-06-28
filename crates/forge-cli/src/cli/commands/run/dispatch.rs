@@ -280,6 +280,7 @@ pub(crate) async fn dispatch_command(
             Some(ref s) => match forge_types::EffortLevel::parse(s) {
                 Some(e) => {
                     session.lock().await.set_effort(Some(e));
+                    app.apply(forge_tui::PresenterEvent::Effort(Some(e)));
                     app.note(&format!(
                         "◎ effort pinned: {} (clears with /effort)",
                         e.as_str()
@@ -293,6 +294,7 @@ pub(crate) async fn dispatch_command(
             },
             None => {
                 session.lock().await.set_effort(None);
+                app.apply(forge_tui::PresenterEvent::Effort(None));
                 app.note("◎ effort pin cleared — provider default restored");
             }
         },

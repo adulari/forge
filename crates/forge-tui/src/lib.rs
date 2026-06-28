@@ -245,6 +245,8 @@ pub enum PresenterEvent {
     /// The operating temper (permission mode) changed mid-turn — e.g. plan approval flipped the
     /// session into Auto-edit to build. Updates the statusline label live.
     Temper(String),
+    /// The active reasoning-effort pin changed. `None` means provider default.
+    Effort(Option<forge_types::EffortLevel>),
 }
 
 /// A rendering + interaction surface. Implementors decide how to display events and how
@@ -468,6 +470,7 @@ impl Presenter for HeadlessPresenter {
                 }
             }
             PresenterEvent::Temper(_) => {}
+            PresenterEvent::Effort(_) => {}
         }
     }
 

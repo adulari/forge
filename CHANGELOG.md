@@ -6,6 +6,22 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-28
+
+### Added
+- **The `/effort` slider now steers the whole mesh, not just the provider's reasoning param.** Effort
+  is threaded from `Session.pinned_effort` into the routing decision (Router trait → `decide` →
+  `ranked_seeded`), benchmark-driven:
+  - **Medium / unset** — routing is byte-identical to before (no change).
+  - **High / xHigh** — biases ranking toward the higher Artificial-Analysis-benchmarked model, but
+    ONLY when the score gap is meaningful (≥1.0); equal/unknown scores keep the normal order.
+  - **Low** — keeps the better model on a real quality gap, and prefers the cheaper/faster one only
+    on a near-tie.
+  Provider reasoning-effort is still sent, but only escalated for models that actually benefit
+  (`model_benefits_from_effort`: o-series/gpt-5/thinking/reasoning/DeepSeek-R1). The active effort is
+  shown as a colored, per-tier label in the TUI chat (`PresenterEvent::Effort`). New mesh tests pin
+  all three behaviors. *(Implemented by Forge itself via the mesh — dogfooding.)*
+
 ## [1.2.0] - 2026-06-28
 
 ### Added

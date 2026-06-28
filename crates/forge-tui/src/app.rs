@@ -259,6 +259,8 @@ pub struct App {
     pub done: bool,
     /// The active operating temper label (e.g. "Guarded"), shown in the statusline.
     pub temper: String,
+    /// The active reasoning-effort pin, when set by config or `/effort`.
+    pub effort: Option<forge_types::EffortLevel>,
     /// An in-flight AskUserQuestion: the choices + whether free text is allowed. The question
     /// text + options are already in scrollback; the input line collects the answer.
     question: Option<(Vec<QChoice>, bool)>,
@@ -1098,6 +1100,7 @@ impl App {
                 self.flush.extend(plan_card_lines(&plan));
             }
             PresenterEvent::Temper(label) => self.temper = label,
+            PresenterEvent::Effort(effort) => self.effort = effort,
         }
     }
 
@@ -3943,6 +3946,24 @@ fn fmt_dur(secs: u64) -> String {
     }
 }
 
+fn effort_status(effort: forge_types::EffortLevel) -> (&'static str, Style) {
+    match effort {
+        forge_types::EffortLevel::Low => ("effort low", Style::default().fg(TOOLCYAN).bg(STATUSBG)),
+        forge_types::EffortLevel::Medium => (
+            "effort medium",
+            Style::default().fg(WARNYEL).bold().bg(STATUSBG),
+        ),
+        forge_types::EffortLevel::High => (
+            "▲ effort high",
+            Style::default().fg(ORANGE).bold().bg(STATUSBG),
+        ),
+        forge_types::EffortLevel::XHigh => (
+            "▲▲ effort xhigh",
+            Style::default().fg(ERRRED).bold().bg(STATUSBG),
+        ),
+    }
+}
+
 fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     let bg = Style::default().bg(STATUSBG);
     let w = area.width;
@@ -3989,6 +4010,11 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         format!("${:.4}", app.cost_usd),
         Style::default().fg(OKGREEN).bold().bg(STATUSBG),
     ));
+    if let Some(effort) = app.effort {
+        let (label, style) = effort_status(effort);
+        line1.push(sep());
+        line1.push(Span::styled(label, style));
+    }
     // The active temper (operating mode), color-coded by how permissive it is.
     if !app.temper.is_empty() && w >= 46 {
         line1.push(sep());
@@ -4630,6 +4656,20 @@ mod tests {
         assert!(text.contains("openai::gpt-4o-mini"), "model in statusline");
         assert!(text.contains("$0.0042"), "cost in statusline");
         assert!(text.contains("standard"), "tier in statusline");
+    }
+
+    #[test]
+    fn statusline_shows_pinned_effort() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::Effort(Some(
+            forge_types::EffortLevel::XHigh,
+        )));
+        let text = screen_wh(&app, 100, LIVE_H);
+        assert!(text.contains("effort xhigh"), "effort in statusline");
+
+        app.apply(PresenterEvent::Effort(None));
+        let text = screen_wh(&app, 100, LIVE_H);
+        assert!(!text.contains("effort"), "cleared effort is hidden");
     }
 
     #[test]
