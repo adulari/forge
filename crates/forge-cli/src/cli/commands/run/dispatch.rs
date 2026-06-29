@@ -274,15 +274,15 @@ pub(crate) async fn dispatch_command(
             // Bare `/model` opens the interactive picker so the user can browse + select.
             open_models_pin_picker(session, app).await?;
         }
-        // `/effort [level]` pins the reasoning-effort level for subsequent turns.
-        // `/effort` (no arg) clears the pin and returns to the provider default.
+        // `/effort <level>` pins the reasoning-effort level for subsequent turns.
+        // `/effort` (bare) opens the interactive effort slider above the input bar.
         CommandAction::SetEffort(level) => match level {
             Some(ref s) => match forge_types::EffortLevel::parse(s) {
                 Some(e) => {
                     session.lock().await.set_effort(Some(e));
                     app.apply(forge_tui::PresenterEvent::Effort(Some(e)));
                     app.note(&format!(
-                        "◎ effort pinned: {} (clears with /effort)",
+                        "◎ effort pinned: {} — use /effort to adjust",
                         e.as_str()
                     ));
                 }
@@ -293,9 +293,8 @@ pub(crate) async fn dispatch_command(
                 }
             },
             None => {
-                session.lock().await.set_effort(None);
-                app.apply(forge_tui::PresenterEvent::Effort(None));
-                app.note("◎ effort pin cleared — provider default restored");
+                // Bare /effort → open the slider (same as Ctrl+R).
+                app.effort_slider = true;
             }
         },
         // `/models` opens the interactive model browser: a provider list (with global counts in

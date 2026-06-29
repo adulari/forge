@@ -271,6 +271,8 @@ pub struct App {
     pub temper: String,
     /// The active reasoning-effort pin, when set by config or `/effort`.
     pub effort: Option<forge_types::EffortLevel>,
+    /// True while the effort slider popup is visible above the input bar (Ctrl+R).
+    pub effort_slider: bool,
     /// An in-flight AskUserQuestion: the choices + whether free text is allowed. The question
     /// text + options are already in scrollback; the input line collects the answer.
     question: Option<(Vec<QChoice>, bool)>,
@@ -658,6 +660,8 @@ pub enum KeyKind {
     PageDown,
     /// Ctrl+End — jump the full-screen transcript to the bottom and resume following (shell-handled).
     JumpBottom,
+    /// Ctrl+R — toggle the effort-level slider popup above the input bar.
+    ToggleEffortSlider,
 }
 
 /// The result of feeding a keystroke to the input line.
@@ -832,6 +836,7 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::Tab
         | KeyKind::CycleTemper
         | KeyKind::ToggleSubagentDetail
+        | KeyKind::ToggleEffortSlider
         | KeyKind::PageUp
         | KeyKind::PageDown
         | KeyKind::JumpBottom => InputOutcome::Editing,
@@ -1360,6 +1365,33 @@ impl App {
         }
 
         views
+    }
+
+    /// Toggle the effort slider popup.
+    pub fn toggle_effort_slider(&mut self) {
+        self.effort_slider = !self.effort_slider;
+    }
+
+    /// Move the effort slider one step left (lower).
+    pub fn effort_slider_left(&mut self) {
+        use forge_types::EffortLevel::*;
+        let levels = [Low, Medium, High, XHigh];
+        let cur = self.effort.unwrap_or(Medium);
+        let i = levels.iter().position(|&l| l == cur).unwrap_or(1);
+        if i > 0 {
+            self.effort = Some(levels[i - 1]);
+        }
+    }
+
+    /// Move the effort slider one step right (higher).
+    pub fn effort_slider_right(&mut self) {
+        use forge_types::EffortLevel::*;
+        let levels = [Low, Medium, High, XHigh];
+        let cur = self.effort.unwrap_or(Medium);
+        let i = levels.iter().position(|&l| l == cur).unwrap_or(1);
+        if i + 1 < levels.len() {
+            self.effort = Some(levels[i + 1]);
+        }
     }
 
     /// Update the active temper label. The colored statusline segment is the live indicator —
@@ -2627,6 +2659,10 @@ pub fn render_live(frame: &mut Frame, app: &App) {
         render_transcript_area(frame, areas[0], app);
     } else {
         render_preview(frame, areas[0], app);
+    }
+    // Effort slider overlays the bottom of areas[0] when open (3 rows, anchored at its bottom).
+    if app.effort_slider {
+        render_effort_slider(frame, areas[0], app);
     }
     if activity_h > 0 {
         render_activity_panel(frame, areas[1], app);
@@ -3976,6 +4012,165 @@ fn effort_status(effort: forge_types::EffortLevel) -> (&'static str, Style) {
             Style::default().fg(ERRRED).bold().bg(STATUSBG),
         ),
     }
+}
+
+// ── Effort Slider ─────────────────────────────────────────────────────────────
+
+const EFFORT_SLIDER_H: u16 = 3;
+const EFFORT_LEVELS: [forge_types::EffortLevel; 4] = [
+    forge_types::EffortLevel::Low,
+    forge_types::EffortLevel::Medium,
+    forge_types::EffortLevel::High,
+    forge_types::EffortLevel::XHigh,
+];
+const EFFORT_LABELS: [&str; 4] = ["LOW", "MEDIUM", "HIGH", "✦ XHIGH"];
+
+/// Rainbow palette for XHigh animations — cycles through per tick + position.
+const XHIGH_COLORS: [Color; 7] = [
+    Color::Rgb(255, 80, 120), // rose
+    Color::Rgb(255, 138, 48), // ember
+    Color::Rgb(255, 220, 50), // gold
+    Color::Rgb(80, 230, 130), // neon-green
+    Color::Rgb(82, 162, 255), // electric-blue
+    Color::Rgb(180, 80, 255), // violet
+    Color::Rgb(255, 80, 220), // magenta
+];
+
+fn slider_idx(app: &App) -> usize {
+    let cur = app.effort.unwrap_or(forge_types::EffortLevel::Medium);
+    EFFORT_LEVELS.iter().position(|&l| l == cur).unwrap_or(1)
+}
+
+fn slider_border_color(idx: usize, tick: usize) -> Color {
+    match idx {
+        0 => Color::Rgb(60, 65, 90),
+        1 => TOOLCYAN,
+        2 => ORANGE,
+        _ => XHIGH_COLORS[tick % XHIGH_COLORS.len()],
+    }
+}
+
+fn slider_fill_color(idx: usize, tick: usize, pos: usize) -> Color {
+    match idx {
+        0 => Color::Rgb(90, 95, 120),
+        1 => TOOLCYAN,
+        2 => ORANGE,
+        _ => XHIGH_COLORS[(tick + pos) % XHIGH_COLORS.len()],
+    }
+}
+
+fn slider_handle_color(idx: usize, tick: usize) -> Color {
+    match idx {
+        0 => Color::Rgb(180, 185, 210),
+        1 => Color::Rgb(120, 245, 250),
+        2 => Color::Rgb(255, 185, 90),
+        _ => {
+            // Pulsing blue-white for XHigh
+            let phase = (tick % 10) as f32;
+            let t = (std::f32::consts::PI * phase / 10.0).sin();
+            let v = (180.0 + 75.0 * t) as u8;
+            Color::Rgb(v, v, 255)
+        }
+    }
+}
+
+fn slider_label_style(idx: usize, tick: usize) -> Style {
+    match idx {
+        0 => Style::default().fg(DIM),
+        1 => Style::default().fg(TOOLCYAN).bold(),
+        2 => Style::default().fg(ORANGE).bold(),
+        _ => Style::default()
+            .fg(XHIGH_COLORS[tick % XHIGH_COLORS.len()])
+            .bold(),
+    }
+}
+
+/// Draw the effort slider popup: 3 rows anchored at the BOTTOM of `area`.
+/// Row 0: top border with title.
+/// Row 1: track with 4 stops + animated fill + label.
+/// Row 2: bottom border with hint.
+fn render_effort_slider(frame: &mut Frame, area: Rect, app: &App) {
+    if area.height < EFFORT_SLIDER_H || area.width < 20 {
+        return;
+    }
+    let y0 = area.y + area.height - EFFORT_SLIDER_H;
+    let w = area.width as usize;
+    let idx = slider_idx(app);
+    let tick = app.tick;
+    let border_col = slider_border_color(idx, tick);
+
+    // ── Row 0: top border ────────────────────────────────────────────────────
+    let title = " ⚡ effort ";
+    let filler = w.saturating_sub(2 + title.chars().count());
+    let top = format!("╭{title}{:─<filler$}╮", "", filler = filler);
+    frame.render_widget(
+        Paragraph::new(TextLine::from(Span::styled(
+            top,
+            Style::default().fg(border_col),
+        ))),
+        Rect {
+            x: area.x,
+            y: y0,
+            width: area.width,
+            height: 1,
+        },
+    );
+
+    // ── Row 1: slider track ───────────────────────────────────────────────────
+    let label_text = EFFORT_LABELS[idx];
+    // inner = w - 2 borders - 1 left pad - 1 right pad - 1 label pad - label len
+    let label_len = label_text.chars().count();
+    let inner = w.saturating_sub(4 + 2 + label_len); // 4 = "│ " + " │", 2 = gaps around label
+    let track_w = inner.max(8);
+    // 4 stop positions evenly spaced
+    let stops: [usize; 4] = std::array::from_fn(|i| i * track_w.saturating_sub(1) / 3);
+
+    let mut spans: Vec<Span> = vec![Span::styled("│ ", Style::default().fg(border_col))];
+    for pos in 0..track_w {
+        let at_stop = stops.iter().position(|&s| s == pos);
+        let filled = stops.get(idx).map_or(false, |&s| pos <= s);
+        let (ch, style) = match at_stop {
+            Some(si) if si == idx => (
+                '●',
+                Style::default().fg(slider_handle_color(idx, tick)).bold(),
+            ),
+            Some(si) if si < idx => ('●', Style::default().fg(slider_fill_color(idx, tick, pos))),
+            Some(_) => ('○', Style::default().fg(DIM)),
+            None if filled => ('━', Style::default().fg(slider_fill_color(idx, tick, pos))),
+            None => ('─', Style::default().fg(DIM)),
+        };
+        spans.push(Span::styled(ch.to_string(), style));
+    }
+    spans.push(Span::styled("  ", Style::default()));
+    spans.push(Span::styled(label_text, slider_label_style(idx, tick)));
+    spans.push(Span::styled(" │", Style::default().fg(border_col)));
+
+    frame.render_widget(
+        Paragraph::new(TextLine::from(spans)),
+        Rect {
+            x: area.x,
+            y: y0 + 1,
+            width: area.width,
+            height: 1,
+        },
+    );
+
+    // ── Row 2: bottom border with hint ────────────────────────────────────────
+    let hint = " ←/→ adjust  Esc close ";
+    let filler2 = w.saturating_sub(2 + hint.chars().count());
+    let bot = format!("╰{hint}{:─<filler2$}╯", "", filler2 = filler2);
+    frame.render_widget(
+        Paragraph::new(TextLine::from(vec![Span::styled(
+            bot,
+            Style::default().fg(DIM),
+        )])),
+        Rect {
+            x: area.x,
+            y: y0 + 2,
+            width: area.width,
+            height: 1,
+        },
+    );
 }
 
 fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
