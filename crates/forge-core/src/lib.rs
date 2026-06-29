@@ -2175,7 +2175,7 @@ Rules:\n\
             session_in,
             session_out,
             context_tokens: self.estimated_transcript_tokens(),
-            context_limit: forge_mesh::pricing::context_limit(model),
+            context_limit: Some(self.effective_context_window(model)),
         });
     }
 
@@ -4182,7 +4182,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             session_in,
             session_out,
             context_tokens,
-            context_limit: forge_mesh::pricing::context_limit(&active_model),
+            context_limit: Some(self.effective_context_window(&active_model)),
         });
         self.presenter.emit(PresenterEvent::Done {
             final_text: final_text.clone(),
