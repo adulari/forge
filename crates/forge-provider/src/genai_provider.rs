@@ -22,6 +22,7 @@ use crate::{
 
 pub struct GenAiProvider {
     client: Client,
+    pool: std::sync::Arc<KeyPool>,
     /// Per-completion output cap (`mesh.max_output_tokens`). `None` → no cap (provider default,
     /// often a model's full 65k max — too much for a free/low-credit account, see the 402 churn).
     max_output_tokens: Option<u32>,
@@ -39,8 +40,10 @@ impl Default for GenAiProvider {
 
 impl GenAiProvider {
     pub fn new() -> Self {
+        let pool = std::sync::Arc::new(KeyPool::from_config());
         Self {
-            client: build_client(),
+            client: build_client_with(std::sync::Arc::clone(&pool)),
+            pool,
             max_output_tokens: None,
         }
     }
@@ -50,6 +53,7 @@ impl GenAiProvider {
     pub fn with_client(client: Client) -> Self {
         Self {
             client,
+            pool: std::sync::Arc::new(KeyPool::default()),
             max_output_tokens: None,
         }
     }
@@ -198,6 +202,11 @@ impl KeyPool {
         let (keys, cursor) = self.providers.get(provider)?;
         let i = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % keys.len();
         Some(keys[i].clone())
+    }
+
+    /// Whether `provider` has ≥2 keys and therefore supports intra-provider key rotation.
+    pub(crate) fn has_rotation(&self, provider: &str) -> bool {
+        self.providers.contains_key(provider)
     }
 }
 
@@ -752,14 +761,40 @@ impl Provider for GenAiProvider {
         // Stall guards: a hung connection or a stream that goes silent must not freeze the
         // turn forever. A timeout surfaces as `Unavailable` (retryable), so the mesh fails over
         // to the next model instead of spinning indefinitely (model-health-failover).
-        let res = tokio::time::timeout(
+        let first = tokio::time::timeout(
             CONNECT_TIMEOUT,
             self.client
-                .exec_chat_stream(model_name.as_str(), req, Some(&options)),
+                .exec_chat_stream(model_name.as_str(), req.clone(), Some(&options)),
         )
         .await
         .map_err(|_| stall_error("no response while connecting", CONNECT_TIMEOUT))?
-        .map_err(|e| classify_genai_error(&e))?;
+        .map_err(|e| classify_genai_error(&e));
+
+        // On 429: if this provider has ≥2 keys, retry once with the next key — the pool's
+        // AtomicUsize has already advanced so the service-target resolver picks the other key
+        // automatically. Surface the retry's result (success or any error) to the mesh.
+        let res = match first {
+            Err(ref e) if e.is_rate_limited() => {
+                let provider = model.split("::").next().unwrap_or("");
+                if self.pool.has_rotation(provider) {
+                    // Retry with the next key — the pool's AtomicUsize has already advanced so
+                    // the service-target resolver picks the other key automatically.
+                    tokio::time::timeout(
+                        CONNECT_TIMEOUT,
+                        self.client
+                            .exec_chat_stream(model_name.as_str(), req, Some(&options)),
+                    )
+                    .await
+                    .map_err(|_| stall_error("no response while connecting", CONNECT_TIMEOUT))?
+                    .map_err(|e| classify_genai_error(&e))?
+                } else if let Err(e) = first {
+                    return Err(e);
+                } else {
+                    unreachable!()
+                }
+            }
+            other => other?,
+        };
 
         let mut stream = res.stream;
         let mut content = String::new();
