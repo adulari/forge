@@ -101,6 +101,9 @@ fn stdio_command(command: &str, args: &[String]) -> tokio::process::Command {
     }
     let mut cmd = tokio::process::Command::new(command);
     cmd.args(args);
+    // MCP stdio protocol uses stdin/stdout only; null stderr so the child's startup
+    // output doesn't corrupt the TUI (raw mode + insert_before can't handle it).
+    cmd.stderr(std::process::Stdio::null());
     cmd
 }
 
