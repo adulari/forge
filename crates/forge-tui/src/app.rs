@@ -4354,13 +4354,21 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         // once it ends — like the per-response readout in Claude Code / Codex.
         let show_turn = app.busy || app.turn_ran;
         if show_turn {
-            line2.push(Span::styled(
+            // CLI bridge models (agy-cli, codex-cli, claude-cli) don't report API token usage;
+            // suppress the ↑/↓ counts when both are zero to avoid showing stale "↑0 ↓0".
+            let has_token_data = app.turn_in > 0 || app.turn_out > 0;
+            let turn_label = if has_token_data {
                 format!(
                     "⧖ {} ↑{} ↓{}",
                     fmt_dur(app.turn_elapsed_secs),
                     human(app.turn_in),
                     human(app.turn_out)
-                ),
+                )
+            } else {
+                format!("⧖ {}", fmt_dur(app.turn_elapsed_secs))
+            };
+            line2.push(Span::styled(
+                turn_label,
                 Style::default()
                     .fg(if app.busy { ACCENT } else { DIM })
                     .bg(STATUSBG),
