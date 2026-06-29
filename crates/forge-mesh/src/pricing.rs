@@ -216,9 +216,13 @@ pub fn context_limit(model: &str) -> Option<u32> {
     } else if mid_128k {
         128_000
     } else if has("deepseek") {
-        64_000
-    } else if has("qwen") || has("mistral") || has("mixtral") || has("gemma") {
+        // DeepSeek V2/V3/V4 all ship with a 128k context window.
+        128_000
+    } else if has("qwen") || has("mistral") || has("mixtral") {
         32_000
+    } else if has("gemma") {
+        // Gemma 2/3/4 have a 128k context window (early Gemma 1 was 8k but is not in the mesh).
+        128_000
     } else {
         // The subscription bridges carry no model name in their bare id (`claude-cli::`), so match
         // on the provider. The bare id is the CLI's default model; the mesh routes to the explicit
