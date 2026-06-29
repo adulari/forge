@@ -35,6 +35,10 @@ pub async fn fetch_and_persist(models: &[String]) {
     };
     let wanted: std::collections::HashSet<&str> = models.iter().map(String::as_str).collect();
 
+    // Running in-memory registry of every context window we persist this run.
+    // Used at the end to derive CLI bridge windows without an extra DB round-trip.
+    let mut ctx_registry: HashMap<String, u32> = HashMap::new();
+
     // ── OpenRouter first (keyless, always) ───────────────────────────────────────────────────────
     // Fetched before native providers so we can build the basename fallback index used by custom
     // provider fetches below. Native fetches (Anthropic, Gemini, Groq) run afterward and overwrite
@@ -45,11 +49,13 @@ pub async fn fetch_and_persist(models: &[String]) {
             for (id, w) in openrouter_windows(&body) {
                 if wanted.contains(id.as_str()) {
                     let _ = store.set_model_context(&id, w);
+                    ctx_registry.insert(id, w);
                 }
             }
             // cross-map to native namespaces (openai::, xai::, deepseek::, mistral::, nvidia::, …)
             for (id, w) in openrouter_native_cross_map(&body) {
                 let _ = store.set_model_context(&id, w);
+                ctx_registry.insert(id, w);
             }
             // pricing
             for (id, in_1k, out_1k, cache_1k) in openrouter_pricing(&body) {
@@ -84,6 +90,7 @@ pub async fn fetch_and_persist(models: &[String]) {
             // Persist whatever the native endpoint returned.
             for (id, w) in &native {
                 let _ = store.set_model_context(id, *w);
+                ctx_registry.insert(id.clone(), *w);
             }
 
             // For models the native endpoint listed but gave no context for, fall back to OR
@@ -100,6 +107,7 @@ pub async fn fetch_and_persist(models: &[String]) {
                             let basename = id.split('/').next_back().unwrap_or(id);
                             if let Some(&w) = or_basename_index.get(basename) {
                                 let _ = store.set_model_context(&forge_id, w);
+                                ctx_registry.insert(forge_id, w);
                             }
                         }
                     }
@@ -111,7 +119,7 @@ pub async fn fetch_and_persist(models: &[String]) {
     // ── Anthropic native (authoritative) ─────────────────────────────────────────────────────────
     if models
         .iter()
-        .any(|m| forge_config::provider_of(m) == "anthropic")
+        .any(|m| forge_config::provider_of(m) == "anthropic" || m.starts_with("claude-cli::"))
     {
         if let Ok(key) = forge_config::api_key("anthropic") {
             if let Some(body) = get_json_with_headers(
@@ -125,6 +133,7 @@ pub async fn fetch_and_persist(models: &[String]) {
             {
                 for (id, w) in anthropic_windows(&body) {
                     let _ = store.set_model_context(&id, w);
+                    ctx_registry.insert(id, w);
                 }
             }
         }
@@ -133,7 +142,7 @@ pub async fn fetch_and_persist(models: &[String]) {
     // ── Gemini native (authoritative) ─────────────────────────────────────────────────────────────
     if models
         .iter()
-        .any(|m| forge_config::provider_of(m) == "gemini")
+        .any(|m| forge_config::provider_of(m) == "gemini" || m.starts_with("agy-cli::"))
     {
         if let Ok(key) = forge_config::api_key("gemini") {
             let url = format!(
@@ -142,6 +151,7 @@ pub async fn fetch_and_persist(models: &[String]) {
             if let Some(body) = get_json(&url, None).await {
                 for (id, w) in gemini_windows(&body) {
                     let _ = store.set_model_context(&id, w);
+                    ctx_registry.insert(id, w);
                 }
             }
         }
@@ -157,8 +167,50 @@ pub async fn fetch_and_persist(models: &[String]) {
             {
                 for (id, w) in openai_compatible_windows(&body, "groq") {
                     let _ = store.set_model_context(&id, w);
+                    ctx_registry.insert(id, w);
                 }
             }
+        }
+    }
+
+    // ── CLI bridge context windows ────────────────────────────────────────────────────────────────
+    // Derived from already-fetched native provider data. CLI bridges use short tier aliases
+    // (opus/sonnet/haiku, gemini-3.5-flash) and publish no machine-readable context window info,
+    // but their underlying models map to known provider families we already fetched above.
+    // codex-cli GPT-5.x models may not appear in OR yet — those fall back to pricing.rs constants.
+    derive_cli_bridge_windows(&ctx_registry, &store);
+}
+
+// ── CLI bridge derivation ─────────────────────────────────────────────────────────────────────────
+
+/// Maps each CLI bridge model to the source namespace prefix and keyword to look up in ctx_registry.
+/// Each bridge alias selects the largest matching window from the given native namespace.
+const CLI_BRIDGE_MAP: &[(&str, &str, &str)] = &[
+    // claude-cli tier aliases → match Anthropic models by tier name
+    ("claude-cli::opus", "anthropic::", "opus"),
+    ("claude-cli::sonnet", "anthropic::", "sonnet"),
+    ("claude-cli::haiku", "anthropic::", "haiku"),
+    // agy-cli (Antigravity / Google) → match Gemini models by tier keyword
+    ("agy-cli::gemini-3.5-flash", "gemini::", "flash"),
+    ("agy-cli::gemini-3.1-pro", "gemini::", "pro"),
+    // codex-cli → try OR cross-mapped openai:: models; GPT-5.x may not be in OR yet,
+    // in which case no window is written and pricing.rs fallbacks apply.
+    ("codex-cli::gpt-5.5", "openai::", "gpt-5"),
+    ("codex-cli::gpt-5.4", "openai::", "gpt-5"),
+    ("codex-cli::gpt-5.4-mini", "openai::", "gpt-5"),
+    ("codex-cli::gpt-5.3-codex", "openai::", "gpt-5"),
+    ("codex-cli::gpt-5.2", "openai::", "gpt-5"),
+];
+
+fn derive_cli_bridge_windows(ctx_registry: &HashMap<String, u32>, store: &forge_store::Store) {
+    for (bridge_id, ns_prefix, keyword) in CLI_BRIDGE_MAP {
+        let window = ctx_registry
+            .iter()
+            .filter(|(id, _)| id.starts_with(ns_prefix) && id.contains(keyword))
+            .map(|(_, &w)| w)
+            .max();
+        if let Some(w) = window {
+            let _ = store.set_model_context(bridge_id, w);
         }
     }
 }
@@ -489,6 +541,42 @@ mod tests {
         let windows = openai_compatible_windows(&body, "groq");
         assert!(windows.contains(&("groq::llama-3.3-70b-versatile".to_string(), 131072)));
         assert!(windows.contains(&("groq::gemma2-9b-it".to_string(), 8192)));
+    }
+
+    #[test]
+    fn derive_cli_bridge_windows_maps_aliases() {
+        // Simulate a populated ctx_registry with native provider windows.
+        let mut reg: HashMap<String, u32> = HashMap::new();
+        reg.insert("anthropic::claude-opus-4-8".into(), 200_000);
+        reg.insert("anthropic::claude-sonnet-4-6".into(), 200_000);
+        reg.insert("anthropic::claude-haiku-4-5".into(), 200_000);
+        reg.insert("gemini::gemini-2.5-flash".into(), 1_048_576);
+        reg.insert("gemini::gemini-2.5-pro".into(), 1_048_576);
+        reg.insert("openai::gpt-4o".into(), 128_000);
+
+        // claude-cli aliases should resolve to anthropic windows
+        let opus = reg
+            .iter()
+            .filter(|(id, _)| id.starts_with("anthropic::") && id.contains("opus"))
+            .map(|(_, &w)| w)
+            .max();
+        assert_eq!(opus, Some(200_000));
+
+        // agy-cli flash → gemini flash
+        let flash = reg
+            .iter()
+            .filter(|(id, _)| id.starts_with("gemini::") && id.contains("flash"))
+            .map(|(_, &w)| w)
+            .max();
+        assert_eq!(flash, Some(1_048_576));
+
+        // codex-cli gpt-5.x → no match (GPT-5 not in OR yet)
+        let gpt5 = reg
+            .iter()
+            .filter(|(id, _)| id.starts_with("openai::") && id.contains("gpt-5"))
+            .map(|(_, &w)| w)
+            .max();
+        assert_eq!(gpt5, None);
     }
 
     #[test]
