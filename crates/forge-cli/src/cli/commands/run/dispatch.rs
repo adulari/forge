@@ -265,14 +265,21 @@ pub(crate) async fn dispatch_command(
         // `/model` with no arg opens the interactive model browser — selecting a model pins it.
         // Works while a turn is running (pin takes effect on the NEXT turn).
         CommandAction::PinModel(Some(model_id)) => {
-            let model_id = forge_provider::normalize_model_id(&model_id).into_owned();
-            let mut s = session.lock().await;
-            s.pin_model(Some(model_id.clone()));
-            app.note(&format!("⊕ model pinned: {model_id} (clears with /model)"));
+            // `/model <full-id>` (contains `::`) → pin immediately, no picker.
+            // `/model <partial>` → open the animated ModelPin picker pre-filtered.
+            if model_id.contains("::") {
+                let model_id = forge_provider::normalize_model_id(&model_id).into_owned();
+                let mut s = session.lock().await;
+                s.pin_model(Some(model_id.clone()));
+                app.note(&format!("⊕ model pinned: {model_id} (clear with /model)"));
+            } else {
+                open_model_pin_picker(session, app, &model_id).await?;
+            }
         }
         CommandAction::PinModel(None) => {
-            // Bare `/model` opens the interactive picker so the user can browse + select.
-            open_models_pin_picker(session, app).await?;
+            // Bare `/model` clears the model pin and returns to mesh auto-routing.
+            session.lock().await.pin_model(None);
+            app.note("⊕ model pin cleared — mesh auto-routing restored");
         }
         // `/effort <level>` pins the reasoning-effort level for subsequent turns.
         // `/effort` (bare) opens the interactive effort slider above the input bar.

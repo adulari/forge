@@ -2540,6 +2540,28 @@ fn models_row_color(row: &crate::commands::PickerRow) -> Color {
     }
 }
 
+/// Color a `/model` pin-picker row: "mesh" cycles through accent rainbow; subscription=green,
+/// frontier=orange, free=cyan, paid=yellow, benched=dim.
+fn model_pin_row_color(row: &crate::commands::PickerRow, tick: usize) -> Color {
+    if row.id == "mesh" {
+        // Animate through a short palette so it catches the eye.
+        const MESH_COLORS: [Color; 4] = [ACCENT, TOOLCYAN, OKGREEN, Color::Rgb(180, 80, 255)];
+        return MESH_COLORS[(tick / 8) % MESH_COLORS.len()];
+    }
+    let s = row.subtitle.to_lowercase();
+    if s.contains("subscription") {
+        OKGREEN
+    } else if s.contains("frontier") {
+        ORANGE
+    } else if s.contains("free") {
+        TOOLCYAN
+    } else if s.contains("benched") {
+        DIM
+    } else {
+        WARNYEL // paid
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     let s = s.replace('\n', " ");
     if s.chars().count() > max {
@@ -2817,14 +2839,19 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
     let start = p.selected.saturating_sub(list_h.saturating_sub(1));
     let tempers = p.kind == Some(crate::commands::PickerKind::Tempers);
     let models = p.kind == Some(crate::commands::PickerKind::Models);
+    let model_pin = p.kind == Some(crate::commands::PickerKind::ModelPin);
+    let tick = app.tick;
     for (i, row) in matches.iter().enumerate().skip(start).take(revealed) {
         let selected = i == p.selected;
         let marker = if selected { "▸ " } else { "  " };
-        // In the mode picker, color each row by its temper; in the models browser, by category.
+        // Color rows by kind: tempers by posture, models browser by category, model-pin picker
+        // by tier with the "mesh" row animated (cycles accent colors).
         let base = if tempers {
             temper_color(&row.title)
         } else if models {
             models_row_color(row)
+        } else if model_pin {
+            model_pin_row_color(row, tick)
         } else {
             USER
         };
@@ -2833,12 +2860,15 @@ fn render_picker(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             Style::default().fg(base)
         };
+        // ModelPin: add a tier badge between title and subtitle for at-a-glance scanning.
+        let subtitle_str = if model_pin {
+            truncate(&row.subtitle, 52)
+        } else {
+            truncate(&row.subtitle, 44)
+        };
         lines.push(TextLine::from(vec![
             Span::styled(format!("  {marker}{}", row.title), title_style),
-            Span::styled(
-                format!("  {}", truncate(&row.subtitle, 44)),
-                Style::default().fg(DIM),
-            ),
+            Span::styled(format!("  {subtitle_str}"), Style::default().fg(DIM)),
         ]));
     }
     frame.render_widget(Paragraph::new(lines), area);
@@ -4023,17 +4053,32 @@ const EFFORT_LEVELS: [forge_types::EffortLevel; 4] = [
     forge_types::EffortLevel::High,
     forge_types::EffortLevel::XHigh,
 ];
-const EFFORT_LABELS: [&str; 4] = ["LOW", "MEDIUM", "HIGH", "✦ XHIGH"];
+const EFFORT_LABELS: [&str; 4] = ["LOW", "MEDIUM", "HIGH", "XHIGH"];
 
-/// Rainbow palette for XHigh animations — cycles through per tick + position.
-const XHIGH_COLORS: [Color; 7] = [
-    Color::Rgb(255, 80, 120), // rose
-    Color::Rgb(255, 138, 48), // ember
-    Color::Rgb(255, 220, 50), // gold
-    Color::Rgb(80, 230, 130), // neon-green
+/// Sparkle chars that cycle at XHigh stop positions and handle.
+const SPARKLES: [char; 6] = ['✦', '✧', '⋆', '✺', '✼', '❋'];
+
+/// 12-color rainbow for XHigh — each track char gets a phase-shifted hue.
+const XHIGH_COLORS: [Color; 12] = [
+    Color::Rgb(255, 75, 110), // rose
+    Color::Rgb(255, 110, 55), // coral
+    Color::Rgb(255, 155, 30), // amber
+    Color::Rgb(255, 215, 45), // gold
+    Color::Rgb(190, 255, 55), // lime
+    Color::Rgb(75, 230, 125), // neon-green
+    Color::Rgb(35, 215, 215), // teal
     Color::Rgb(82, 162, 255), // electric-blue
-    Color::Rgb(180, 80, 255), // violet
-    Color::Rgb(255, 80, 220), // magenta
+    Color::Rgb(110, 95, 255), // indigo
+    Color::Rgb(185, 75, 255), // violet
+    Color::Rgb(255, 55, 255), // magenta
+    Color::Rgb(255, 75, 160), // hot-pink
+];
+
+/// Three-phase pulse for HIGH: orange → gold → hot-red.
+const HIGH_PULSE: [Color; 3] = [
+    Color::Rgb(255, 138, 48),
+    Color::Rgb(255, 210, 40),
+    Color::Rgb(245, 55, 35),
 ];
 
 fn slider_idx(app: &App) -> usize {
@@ -4043,134 +4088,130 @@ fn slider_idx(app: &App) -> usize {
 
 fn slider_border_color(idx: usize, tick: usize) -> Color {
     match idx {
-        0 => Color::Rgb(60, 65, 90),
+        0 => Color::Rgb(55, 60, 88),
         1 => TOOLCYAN,
-        2 => ORANGE,
+        2 => HIGH_PULSE[(tick / 5) % HIGH_PULSE.len()],
         _ => XHIGH_COLORS[tick % XHIGH_COLORS.len()],
     }
 }
 
 fn slider_fill_color(idx: usize, tick: usize, pos: usize) -> Color {
     match idx {
-        0 => Color::Rgb(90, 95, 120),
+        0 => Color::Rgb(85, 92, 118),
         1 => TOOLCYAN,
-        2 => ORANGE,
+        2 => HIGH_PULSE[(tick / 5) % HIGH_PULSE.len()],
         _ => XHIGH_COLORS[(tick + pos) % XHIGH_COLORS.len()],
     }
 }
 
 fn slider_handle_color(idx: usize, tick: usize) -> Color {
     match idx {
-        0 => Color::Rgb(180, 185, 210),
-        1 => Color::Rgb(120, 245, 250),
-        2 => Color::Rgb(255, 185, 90),
-        _ => {
-            // Pulsing blue-white for XHigh
-            let phase = (tick % 10) as f32;
-            let t = (std::f32::consts::PI * phase / 10.0).sin();
-            let v = (180.0 + 75.0 * t) as u8;
-            Color::Rgb(v, v, 255)
+        0 => Color::Rgb(175, 180, 208),
+        1 => Color::Rgb(115, 242, 248),
+        2 => {
+            let t = (tick % 12) as f32;
+            let pulse = (std::f32::consts::PI * t / 12.0).sin();
+            Color::Rgb(255, (120.0 + 110.0 * pulse) as u8, (30.0 * pulse) as u8)
         }
+        _ => XHIGH_COLORS[(tick * 3) % XHIGH_COLORS.len()],
     }
 }
 
 fn slider_label_style(idx: usize, tick: usize) -> Style {
     match idx {
         0 => Style::default().fg(DIM),
-        1 => Style::default().fg(TOOLCYAN).bold(),
-        2 => Style::default().fg(ORANGE).bold(),
+        1 => Style::default().fg(Color::Rgb(115, 242, 248)).bold(),
+        2 => Style::default()
+            .fg(HIGH_PULSE[(tick / 5) % HIGH_PULSE.len()])
+            .bold(),
         _ => Style::default()
-            .fg(XHIGH_COLORS[tick % XHIGH_COLORS.len()])
+            .fg(XHIGH_COLORS[(tick * 2) % XHIGH_COLORS.len()])
             .bold(),
     }
 }
 
-/// Draw the effort slider popup: 3 rows anchored at the BOTTOM of `area`.
-/// Row 0: top border with title.
-/// Row 1: track with 4 stops + animated fill + label.
-/// Row 2: bottom border with hint.
+/// Draw the effort slider popup: 3 rows anchored at the bottom of `area`.
+/// Uses ratatui Block for the border — alignment is exact regardless of width.
 fn render_effort_slider(frame: &mut Frame, area: Rect, app: &App) {
-    if area.height < EFFORT_SLIDER_H || area.width < 20 {
+    if area.height < EFFORT_SLIDER_H || area.width < 24 {
         return;
     }
-    let y0 = area.y + area.height - EFFORT_SLIDER_H;
-    let w = area.width as usize;
     let idx = slider_idx(app);
     let tick = app.tick;
     let border_col = slider_border_color(idx, tick);
 
-    // ── Row 0: top border ────────────────────────────────────────────────────
-    let title = " ⚡ effort ";
-    let filler = w.saturating_sub(2 + title.chars().count());
-    let top = format!("╭{title}{:─<filler$}╮", "", filler = filler);
-    frame.render_widget(
-        Paragraph::new(TextLine::from(Span::styled(
-            top,
-            Style::default().fg(border_col),
-        ))),
-        Rect {
-            x: area.x,
-            y: y0,
-            width: area.width,
-            height: 1,
-        },
-    );
+    let box_area = Rect {
+        x: area.x,
+        y: area.y + area.height - EFFORT_SLIDER_H,
+        width: area.width,
+        height: EFFORT_SLIDER_H,
+    };
 
-    // ── Row 1: slider track ───────────────────────────────────────────────────
+    let title_text = if idx == 3 {
+        let sp = SPARKLES[(tick / 2) % SPARKLES.len()];
+        format!(" {sp} effort {sp} ")
+    } else {
+        " ⚡ effort ".to_string()
+    };
+
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_col))
+        .title(Span::styled(
+            title_text,
+            Style::default().fg(border_col).bold(),
+        ))
+        .title_bottom(Span::styled(
+            " ←/→ adjust  Esc close ",
+            Style::default().fg(DIM),
+        ));
+
+    let inner = block.inner(box_area);
+    frame.render_widget(block, box_area);
+
+    // ── Track line in the 1-row inner area ───────────────────────────────────
     let label_text = EFFORT_LABELS[idx];
-    // inner = w - 2 borders - 1 left pad - 1 right pad - 1 label pad - label len
-    let label_len = label_text.chars().count();
-    let inner = w.saturating_sub(4 + 2 + label_len); // 4 = "│ " + " │", 2 = gaps around label
-    let track_w = inner.max(8);
-    // 4 stop positions evenly spaced
+    let label_len = label_text.chars().count() as u16;
+    // " " pad + track + "  " + label + " " pad = inner.width
+    let track_w = (inner.width.saturating_sub(1 + 2 + label_len + 1)) as usize;
+    if track_w < 4 {
+        return;
+    }
     let stops: [usize; 4] = std::array::from_fn(|i| i * track_w.saturating_sub(1) / 3);
 
-    let mut spans: Vec<Span> = vec![Span::styled("│ ", Style::default().fg(border_col))];
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
     for pos in 0..track_w {
         let at_stop = stops.iter().position(|&s| s == pos);
         let filled = stops.get(idx).map_or(false, |&s| pos <= s);
         let (ch, style) = match at_stop {
-            Some(si) if si == idx => (
-                '●',
-                Style::default().fg(slider_handle_color(idx, tick)).bold(),
-            ),
-            Some(si) if si < idx => ('●', Style::default().fg(slider_fill_color(idx, tick, pos))),
+            Some(si) if si == idx => {
+                let hcol = slider_handle_color(idx, tick);
+                let ch = if idx == 3 {
+                    SPARKLES[(tick * 2) % SPARKLES.len()]
+                } else {
+                    '●'
+                };
+                (ch, Style::default().fg(hcol).bold())
+            }
+            Some(si) if si < idx => {
+                let fcol = slider_fill_color(idx, tick, pos);
+                let ch = if idx == 3 {
+                    SPARKLES[(tick + si * 4) % SPARKLES.len()]
+                } else {
+                    '●'
+                };
+                (ch, Style::default().fg(fcol).bold())
+            }
             Some(_) => ('○', Style::default().fg(DIM)),
             None if filled => ('━', Style::default().fg(slider_fill_color(idx, tick, pos))),
             None => ('─', Style::default().fg(DIM)),
         };
         spans.push(Span::styled(ch.to_string(), style));
     }
-    spans.push(Span::styled("  ", Style::default()));
+    spans.push(Span::raw("  "));
     spans.push(Span::styled(label_text, slider_label_style(idx, tick)));
-    spans.push(Span::styled(" │", Style::default().fg(border_col)));
 
-    frame.render_widget(
-        Paragraph::new(TextLine::from(spans)),
-        Rect {
-            x: area.x,
-            y: y0 + 1,
-            width: area.width,
-            height: 1,
-        },
-    );
-
-    // ── Row 2: bottom border with hint ────────────────────────────────────────
-    let hint = " ←/→ adjust  Esc close ";
-    let filler2 = w.saturating_sub(2 + hint.chars().count());
-    let bot = format!("╰{hint}{:─<filler2$}╯", "", filler2 = filler2);
-    frame.render_widget(
-        Paragraph::new(TextLine::from(vec![Span::styled(
-            bot,
-            Style::default().fg(DIM),
-        )])),
-        Rect {
-            x: area.x,
-            y: y0 + 2,
-            width: area.width,
-            height: 1,
-        },
-    );
+    frame.render_widget(Paragraph::new(TextLine::from(spans)), inner);
 }
 
 fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
