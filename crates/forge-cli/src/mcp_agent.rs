@@ -544,7 +544,7 @@ pub async fn run(session_id: Option<String>, cwd: Option<std::path::PathBuf>) ->
         mode: Arc::clone(&mode),
     });
 
-    let session = build_session_with(presenter, false, None, session_id, None).await?;
+    let session = build_session_with(presenter, false, None, session_id, None, false).await?;
 
     // Apply the initial mode to the session (it may have been loaded with a different mode
     // from its stored config; in agent mode we always start permissive).
