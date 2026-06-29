@@ -6,6 +6,54 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-06-29
+
+### Added
+- **Auto-detect lint/test commands from project structure.** `forge_autofix` now inspects
+  `package.json`, `Cargo.toml`, `pyproject.toml`, etc. to determine the correct check command
+  instead of falling back to a hard-coded default. (`crates/forge-core/src/lib.rs`)
+- **Tool-failure loop guard + doom-loop detection.** Repeated identical tool-call failures trigger
+  a hard stop with a user-readable error instead of looping indefinitely. Doom-loop heuristic
+  detects N consecutive identical error payloads and breaks out. (`crates/forge-core/src/lib.rs`)
+- **TUI live observer mode for MCP-driven sessions.** When Forge is driven by an external MCP
+  client, the TUI can attach as a read-only observer: streaming progress, tool calls, and model
+  output in real time without interfering with the running session.
+  (`crates/forge-tui/src/app.rs`, `crates/forge-cli/src/cli/commands/run.rs`)
+- **`forge_assay` MCP tool.** New MCP tool that runs a bounded static analysis pass over a
+  source bundle and returns structured findings; exposes Forge's assay engine to external
+  MCP clients. (`crates/forge-cli/src/mcp_agent.rs`)
+
+### Changed
+- **SQLite WAL mode + pragmas.** Enabled WAL journal mode, `synchronous=NORMAL`, and
+  `busy_timeout=5000` on the session store for faster concurrent writes.
+  (`crates/forge-store/src/lib.rs`)
+- **Transaction batching for bulk inserts.** Multi-message DB writes now execute inside a single
+  transaction, cutting fsync overhead by up to 10× on turn-end flushes.
+  (`crates/forge-store/src/lib.rs`)
+- **`prepare_cached` on hot write paths.** `add_message_full`, `record_routing`, and
+  `record_tool_call` now use `prepare_cached` instead of re-compiling SQL on every call.
+  (`crates/forge-store/src/lib.rs`)
+- **Background update check in TUI mode.** The once-daily GitHub version probe is now spawned
+  off the startup path and delivers its notice via the TUI warning channel instead of blocking
+  before the interface appears. (`crates/forge-cli/src/update_check.rs`)
+- **Deduplicated config + catalog loads at startup.** `forge_config::load()` and
+  `forge_skills::Catalog::load()` are each called once at TUI startup; the TUI now reuses the
+  session's already-loaded `Arc<Catalog>` instead of constructing a second copy.
+  (`crates/forge-cli/src/cli/commands/run.rs`)
+- **Async codex bridge rollout.** Codex CLI-bridge turns now use async streaming, matching the
+  claude bridge, for lower latency and better cancellation.
+  (`crates/forge-provider/src/cli_provider.rs`)
+
+### Fixed
+- **Full-codebase security + stability sweep.** Four real bugs fixed: unvalidated shell-injection
+  vector in tool argument handling, integer overflow in token accounting, unchecked slice index
+  in transcript rewind, and a race in the MCP session lock during interrupt.
+  (`crates/forge-core/src/lib.rs`, `crates/forge-tools/src/shell.rs`)
+- **`/undo` on turns with autofix injections.** When `cargo check` triggered a synthetic
+  `Role::User` message mid-turn, `undo()` found the injected message instead of the real prompt,
+  leaving the snapshot range empty. Fixed by using a `-1` sentinel for "no turn yet" and
+  recomputing the transcript index correctly. (`crates/forge-core/src/lib.rs`)
+
 ## [1.7.0] - 2026-06-28
 
 ### Added
@@ -1706,7 +1754,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/florisvoskamp/forge/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/florisvoskamp/forge/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/florisvoskamp/forge/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/florisvoskamp/forge/compare/v1.6.1...v1.7.0
 [0.4.4]: https://github.com/florisvoskamp/forge/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/florisvoskamp/forge/compare/v0.4.2...v0.4.3
