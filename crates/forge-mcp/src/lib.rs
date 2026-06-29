@@ -144,16 +144,29 @@ pub struct McpManager {
     config: McpConfig,
     call_timeout: Duration,
     connect_timeout: Duration,
+    /// Fires `true` once `connect_active()` completes (all servers resolved). Callers can
+    /// subscribe via [`subscribe_done`] to re-announce status after the initial "connecting"
+    /// placeholder is shown.
+    connect_done: tokio::sync::watch::Sender<bool>,
 }
 
 impl McpManager {
     fn empty(config: &McpConfig) -> Self {
+        let (connect_done, _) = tokio::sync::watch::channel(false);
         Self {
             conns: Mutex::new(HashMap::new()),
             config: config.clone(),
             call_timeout: Duration::from_secs(config.call_timeout_secs.max(1)),
             connect_timeout: Duration::from_secs(config.connect_timeout_secs.max(1)),
+            connect_done,
         }
+    }
+
+    /// Subscribe to the initial-connect completion signal. The receiver holds `false` until
+    /// `connect_active()` finishes; then it's set to `true`. Use this to re-announce MCP status
+    /// after startup so the TUI shows the final connected/failed state instead of "connecting".
+    pub fn subscribe_done(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.connect_done.subscribe()
     }
 
     /// Connect to every enabled + allowlisted server concurrently, isolating failures: a server
@@ -264,6 +277,9 @@ impl McpManager {
                 }
             }
         }
+        // Signal that the initial connect pass is complete — subscribers (e.g. run_chat_tui)
+        // can now re-announce the final status instead of the "reconnecting" placeholder.
+        let _ = self.connect_done.send(true);
     }
 
     /// Given an initialized client connection, list its tools/resources/prompts, namespace them,
