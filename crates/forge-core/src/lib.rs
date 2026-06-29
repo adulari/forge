@@ -1043,6 +1043,13 @@ impl Session {
         }
     }
 
+    /// Subscribe to the MCP initial-connect completion signal. Returns `None` when no MCP servers
+    /// are configured. The returned receiver holds `false` until all servers have resolved
+    /// (connected or failed); then it's set to `true`. Use this to schedule a re-announce.
+    pub fn mcp_connect_done(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        self.mcp.as_ref().map(|m| m.subscribe_done())
+    }
+
     /// Connect a new MCP server into the live session. Creates the manager if none exists yet
     /// (e.g. the session was started with no MCP servers configured).
     pub async fn add_mcp_server(

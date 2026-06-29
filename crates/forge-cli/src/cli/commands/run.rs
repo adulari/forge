@@ -681,6 +681,7 @@ pub(crate) async fn run_chat_tui(
         ResumeMode::Id(id) => Some(id.clone()),
         ResumeMode::Fresh | ResumeMode::Picker => None,
     };
+    let tx_mcp = tx.clone(); // clone before tx is moved into ChannelPresenter
     let session = build_session_with(
         Box::new(ChannelPresenter::new(tx)),
         mock,
@@ -689,7 +690,33 @@ pub(crate) async fn run_chat_tui(
         pin,
     )
     .await?;
+    // Grab the MCP connect-done receiver before moving the session into the Arc. When the
+    // background connect_active() completes, re-announce so the TUI shows connected/failed
+    // state rather than the "reconnecting" placeholder from the initial announce.
+    let mcp_done_rx = session.mcp_connect_done();
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+    if let Some(mut rx) = mcp_done_rx {
+        let s = session.clone();
+        let tx2 = tx_mcp;
+        tokio::spawn(async move {
+            // Wait until connect_active() signals done (or 30s watchdog).
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                loop {
+                    if *rx.borrow() {
+                        break;
+                    }
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+            })
+            .await;
+            let status = s.lock().await.mcp_status();
+            if !status.is_empty() {
+                let _ = tx2.send(UiMsg::Event(forge_tui::PresenterEvent::McpStatus(status)));
+            }
+        });
+    }
 
     // Seed the mesh subscription quota at startup so routing + the overlays reflect usage from
     // outside Forge. Codex comes from its rollout files (fresh); claude's stale cache is only a
