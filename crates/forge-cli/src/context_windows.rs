@@ -183,11 +183,11 @@ pub async fn fetch_and_persist(models: &[String]) {
 
 // ── CLI bridge derivation ─────────────────────────────────────────────────────────────────────────
 
-/// claude-cli is the Claude Code subscription — always 200k regardless of what the Anthropic API
-/// reports. Using the API max would inflate the window if Anthropic ever ships a >200k model,
-/// and the subscription gate doesn't follow API limits.
-const CLAUDE_CLI_WINDOW: u32 = 200_000;
-const CLAUDE_CLI_ALIASES: &[&str] = &["opus", "sonnet", "haiku"];
+/// claude-cli is the Claude Code subscription. Windows are per-tier (not derived from the API):
+/// opus has 1M, sonnet and haiku are 200k. Using the API max would inflate these if Anthropic
+/// ships higher-context variants — the subscription gate doesn't follow raw API limits.
+const CLAUDE_CLI_ALIASES: &[(&str, u32)] =
+    &[("opus", 1_000_000), ("sonnet", 200_000), ("haiku", 200_000)];
 
 /// Maps agy-cli and codex-cli bridge models to the source namespace prefix and keyword to look up
 /// in ctx_registry. Each alias selects the largest matching window from the given native namespace.
@@ -205,9 +205,9 @@ const CLI_BRIDGE_MAP: &[(&str, &str, &str)] = &[
 ];
 
 fn derive_cli_bridge_windows(ctx_registry: &HashMap<String, u32>, store: &forge_store::Store) {
-    // claude-cli: subscription is always 200k — do not derive from API data.
-    for alias in CLAUDE_CLI_ALIASES {
-        let _ = store.set_model_context(&format!("claude-cli::{alias}"), CLAUDE_CLI_WINDOW);
+    // claude-cli: per-tier subscription windows — do not derive from API data.
+    for (alias, window) in CLAUDE_CLI_ALIASES {
+        let _ = store.set_model_context(&format!("claude-cli::{alias}"), *window);
     }
     // agy-cli / codex-cli: derive from fetched native provider data.
     for (bridge_id, ns_prefix, keyword) in CLI_BRIDGE_MAP {
@@ -551,12 +551,16 @@ mod tests {
     }
 
     #[test]
-    fn claude_cli_window_is_hardcoded_200k() {
-        // claude-cli subscription is always 200k regardless of what Anthropic API reports.
-        assert_eq!(CLAUDE_CLI_WINDOW, 200_000);
-        assert!(CLAUDE_CLI_ALIASES.contains(&"sonnet"));
-        assert!(CLAUDE_CLI_ALIASES.contains(&"opus"));
-        assert!(CLAUDE_CLI_ALIASES.contains(&"haiku"));
+    fn claude_cli_windows_are_tier_specific() {
+        let find = |alias: &str| {
+            CLAUDE_CLI_ALIASES
+                .iter()
+                .find(|(a, _)| *a == alias)
+                .map(|(_, w)| *w)
+        };
+        assert_eq!(find("opus"), Some(1_000_000));
+        assert_eq!(find("sonnet"), Some(200_000));
+        assert_eq!(find("haiku"), Some(200_000));
     }
 
     #[test]

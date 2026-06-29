@@ -3593,6 +3593,10 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                     }
                 }
             }
+            // Refresh the context gauge after every step so the statusline reflects the growing
+            // transcript in real-time rather than only updating at turn end. Zero API cost: uses
+            // the local token estimate, no model call.
+            self.emit_context_gauge(&active_model);
 
             // Failure-loop guard: a tool that keeps failing the SAME way (across differing args) is
             // making no progress and burning the step/token budget — invisible to the identical-call
