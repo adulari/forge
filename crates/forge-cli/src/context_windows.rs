@@ -119,7 +119,7 @@ pub async fn fetch_and_persist(models: &[String]) {
     // ── Anthropic native (authoritative) ─────────────────────────────────────────────────────────
     if models
         .iter()
-        .any(|m| forge_config::provider_of(m) == "anthropic" || m.starts_with("claude-cli::"))
+        .any(|m| forge_config::provider_of(m) == "anthropic")
     {
         if let Ok(key) = forge_config::api_key("anthropic") {
             if let Some(body) = get_json_with_headers(
@@ -183,13 +183,15 @@ pub async fn fetch_and_persist(models: &[String]) {
 
 // ── CLI bridge derivation ─────────────────────────────────────────────────────────────────────────
 
-/// Maps each CLI bridge model to the source namespace prefix and keyword to look up in ctx_registry.
-/// Each bridge alias selects the largest matching window from the given native namespace.
+/// claude-cli is the Claude Code subscription — always 200k regardless of what the Anthropic API
+/// reports. Using the API max would inflate the window if Anthropic ever ships a >200k model,
+/// and the subscription gate doesn't follow API limits.
+const CLAUDE_CLI_WINDOW: u32 = 200_000;
+const CLAUDE_CLI_ALIASES: &[&str] = &["opus", "sonnet", "haiku"];
+
+/// Maps agy-cli and codex-cli bridge models to the source namespace prefix and keyword to look up
+/// in ctx_registry. Each alias selects the largest matching window from the given native namespace.
 const CLI_BRIDGE_MAP: &[(&str, &str, &str)] = &[
-    // claude-cli tier aliases → match Anthropic models by tier name
-    ("claude-cli::opus", "anthropic::", "opus"),
-    ("claude-cli::sonnet", "anthropic::", "sonnet"),
-    ("claude-cli::haiku", "anthropic::", "haiku"),
     // agy-cli (Antigravity / Google) → match Gemini models by tier keyword
     ("agy-cli::gemini-3.5-flash", "gemini::", "flash"),
     ("agy-cli::gemini-3.1-pro", "gemini::", "pro"),
@@ -203,6 +205,11 @@ const CLI_BRIDGE_MAP: &[(&str, &str, &str)] = &[
 ];
 
 fn derive_cli_bridge_windows(ctx_registry: &HashMap<String, u32>, store: &forge_store::Store) {
+    // claude-cli: subscription is always 200k — do not derive from API data.
+    for alias in CLAUDE_CLI_ALIASES {
+        let _ = store.set_model_context(&format!("claude-cli::{alias}"), CLAUDE_CLI_WINDOW);
+    }
+    // agy-cli / codex-cli: derive from fetched native provider data.
     for (bridge_id, ns_prefix, keyword) in CLI_BRIDGE_MAP {
         let window = ctx_registry
             .iter()
@@ -544,25 +551,22 @@ mod tests {
     }
 
     #[test]
-    fn derive_cli_bridge_windows_maps_aliases() {
-        // Simulate a populated ctx_registry with native provider windows.
+    fn claude_cli_window_is_hardcoded_200k() {
+        // claude-cli subscription is always 200k regardless of what Anthropic API reports.
+        assert_eq!(CLAUDE_CLI_WINDOW, 200_000);
+        assert!(CLAUDE_CLI_ALIASES.contains(&"sonnet"));
+        assert!(CLAUDE_CLI_ALIASES.contains(&"opus"));
+        assert!(CLAUDE_CLI_ALIASES.contains(&"haiku"));
+    }
+
+    #[test]
+    fn derive_cli_bridge_windows_agy_and_codex() {
         let mut reg: HashMap<String, u32> = HashMap::new();
-        reg.insert("anthropic::claude-opus-4-8".into(), 200_000);
-        reg.insert("anthropic::claude-sonnet-4-6".into(), 200_000);
-        reg.insert("anthropic::claude-haiku-4-5".into(), 200_000);
         reg.insert("gemini::gemini-2.5-flash".into(), 1_048_576);
         reg.insert("gemini::gemini-2.5-pro".into(), 1_048_576);
         reg.insert("openai::gpt-4o".into(), 128_000);
 
-        // claude-cli aliases should resolve to anthropic windows
-        let opus = reg
-            .iter()
-            .filter(|(id, _)| id.starts_with("anthropic::") && id.contains("opus"))
-            .map(|(_, &w)| w)
-            .max();
-        assert_eq!(opus, Some(200_000));
-
-        // agy-cli flash → gemini flash
+        // agy-cli flash → gemini flash window
         let flash = reg
             .iter()
             .filter(|(id, _)| id.starts_with("gemini::") && id.contains("flash"))
@@ -570,7 +574,15 @@ mod tests {
             .max();
         assert_eq!(flash, Some(1_048_576));
 
-        // codex-cli gpt-5.x → no match (GPT-5 not in OR yet)
+        // agy-cli pro → gemini pro window
+        let pro = reg
+            .iter()
+            .filter(|(id, _)| id.starts_with("gemini::") && id.contains("pro"))
+            .map(|(_, &w)| w)
+            .max();
+        assert_eq!(pro, Some(1_048_576));
+
+        // codex-cli gpt-5.x → no match until GPT-5 appears in OR
         let gpt5 = reg
             .iter()
             .filter(|(id, _)| id.starts_with("openai::") && id.contains("gpt-5"))
