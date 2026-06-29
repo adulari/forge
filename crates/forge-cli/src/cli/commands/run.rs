@@ -761,6 +761,23 @@ pub(crate) async fn run_chat_tui(
     let mut app = App::default();
     app.fullscreen = fullscreen;
     app.transcript_follow = true;
+    // Wire statusline config from the loaded config.
+    app.statusline_config = tui_config.statusline.clone();
+    // Fetch current git branch for the GitBranch statusline widget (best-effort, non-fatal).
+    app.git_branch = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            }
+        });
     // Welcome banner only on a fresh session — resumes show the transcript separator instead. In
     // full-screen mode there's no native scrollback, so banner lines go into the transcript log.
     if matches!(resume_mode, ResumeMode::Fresh) {
