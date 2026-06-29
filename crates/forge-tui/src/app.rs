@@ -4376,7 +4376,10 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         }
         // Session running totals last (least critical — the per-turn figures are above): if the row
         // is too narrow this is what gets clipped, not the gauge.
-        if app.session_in > 0 || app.session_out > 0 {
+        // Only show when session differs from turn delta: on the first turn turn_base_in=0 so
+        // turn_in == session_in — showing both would be identical, useless duplication.
+        let session_differs = app.session_in != app.turn_in || app.session_out != app.turn_out;
+        if (app.session_in > 0 || app.session_out > 0) && (!show_turn || session_differs) {
             if line2.len() > 1 {
                 line2.push(sep());
             }
