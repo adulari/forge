@@ -90,6 +90,7 @@ pub(crate) async fn build_session_with(
     mode: Option<Mode>,
     resume: Option<String>,
     pin: Option<String>,
+    suppress_mcp_announce: bool,
 ) -> Result<Session> {
     // Make any keyring-stored provider keys visible to the provider client.
     forge_config::inject_provider_keys();
@@ -341,7 +342,7 @@ pub(crate) async fn build_session_with(
         let bg = std::sync::Arc::clone(&manager);
         tokio::spawn(async move { bg.connect_active().await });
         session.set_mcp(Some(manager));
-        if resume.is_none() {
+        if resume.is_none() && !suppress_mcp_announce {
             session.announce_mcp();
         }
     }
@@ -369,7 +370,7 @@ pub(crate) async fn build_session(
         }
         Box::new(HeadlessPresenter::default())
     };
-    build_session_with(presenter, mock, mode, resume, pin).await
+    build_session_with(presenter, mock, mode, resume, pin, false).await
 }
 
 pub(crate) async fn run(
@@ -530,6 +531,7 @@ pub(crate) async fn chat(
         mode,
         resume_id,
         pin,
+        false,
     )
     .await?;
     if std::io::stdin().is_terminal() {
@@ -688,6 +690,7 @@ pub(crate) async fn run_chat_tui(
         mode,
         resume_id,
         pin,
+        true, // suppress initial "reconnecting" announce; re-announce fires after connect_active
     )
     .await?;
     // Grab the MCP connect-done receiver before moving the session into the Arc. When the
