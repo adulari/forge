@@ -37,6 +37,15 @@ pub const RETENTION_HORIZON_SECS: i64 = 90 * 24 * 60 * 60;
 /// piggy-backed on session open stays cheap.
 const PRUNE_BATCH: usize = 50;
 
+/// How long a session with zero real (user) messages is kept before being eligible for
+/// [`Store::prune_empty`] — much shorter than [`RETENTION_HORIZON_SECS`] since an empty session
+/// carries nothing worth retaining. Long enough that the session currently being opened (which
+/// hasn't sent its first message yet) is never swept out from under itself.
+const EMPTY_SESSION_HORIZON_SECS: i64 = 10 * 60;
+
+/// Same cap rationale as [`PRUNE_BATCH`], applied to the empty-session sweep.
+const EMPTY_PRUNE_BATCH: usize = 200;
+
 /// Run live-event ring-buffer pruning only once every this many appends, instead of on every insert
 /// (the old per-insert correlated-subquery DELETE was O(n) on a hot path).
 const LIVE_EVENT_PRUNE_EVERY: u64 = 256;
@@ -566,7 +575,43 @@ impl Store {
         // Opportunistic, bounded retention sweep so the global append-only DB doesn't grow forever.
         // Best-effort: a prune failure must never block opening a session.
         let _ = self.prune(RETENTION_HORIZON_SECS, PRUNE_BATCH);
+        let _ = self.prune_empty(EMPTY_SESSION_HORIZON_SECS, EMPTY_PRUNE_BATCH);
         Ok(id)
+    }
+
+    /// Delete up to `max_sessions` sessions that have NEVER received a real (active, role='user')
+    /// message and were created more than `horizon_secs` ago (oldest first) — separate from
+    /// [`Store::prune`]'s much longer general retention horizon, since an empty session carries
+    /// nothing worth keeping at all. A process that spawns a session and exits (or crashes) before
+    /// the user ever sends a prompt — e.g. an `mcp agent` connection that's opened and torn down
+    /// without being used — otherwise leaves a permanent, empty row that clutters `forge sessions`
+    /// / the resume picker forever. Returns the number removed.
+    pub fn prune_empty(&self, horizon_secs: i64, max_sessions: usize) -> Result<usize> {
+        if max_sessions == 0 {
+            return Ok(0);
+        }
+        let cutoff = chrono::Utc::now().timestamp() - horizon_secs;
+        with_busy_retry(|| {
+            let conn = self.lock()?;
+            let ids: Vec<String> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id FROM session s WHERE s.created_at < ?1 AND s.agent_active = 0 \
+                     AND NOT EXISTS ( \
+                       SELECT 1 FROM message m \
+                       WHERE m.session_id = s.id AND m.role = 'user' AND m.active = 1 \
+                     ) ORDER BY s.created_at LIMIT ?2",
+                )?;
+                let v = stmt
+                    .query_map((cutoff, max_sessions as i64), |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                v
+            };
+            for id in &ids {
+                // ON DELETE CASCADE clears the dependent rows (messages → usage/routing/tool_call).
+                conn.execute("DELETE FROM session WHERE id = ?1", [id])?;
+            }
+            Ok(ids.len())
+        })
     }
 
     /// Delete up to `max_sessions` sessions whose `updated_at` is older than `horizon_secs` ago
@@ -1463,7 +1508,12 @@ impl Store {
     /// Past sessions, **most-recently-used first** (by newest message, falling back to creation
     /// time), so the picker lists the sessions you're likely to resume at the top. Excludes
     /// subagent child sessions (`parent_session_id IS NOT NULL`) so the picker and the
-    /// `forge sessions` command only surface top-level sessions.
+    /// `forge sessions` command only surface top-level sessions. Also excludes sessions that
+    /// never received a real (active, role='user') message — a session row is created eagerly
+    /// at process start (before [`Store::prune_empty`] has a chance to sweep it, and for a
+    /// session still in its first few minutes of life), so without this filter a process that
+    /// opens a session and exits/crashes before any prompt is sent — including one stuck in a
+    /// spawn loop, the original trigger for this — fills the picker with blank, useless entries.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
@@ -1474,6 +1524,10 @@ impl Store {
                     COALESCE((SELECT MAX(m.created_at) FROM message m WHERE m.session_id = s.id),
                              s.created_at) AS last_activity
              FROM session s WHERE s.parent_session_id IS NULL \
+             AND EXISTS ( \
+               SELECT 1 FROM message m \
+               WHERE m.session_id = s.id AND m.role = 'user' AND m.active = 1 \
+             ) \
              ORDER BY last_activity DESC, s.rowid DESC",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -3193,12 +3247,92 @@ mod tests {
     fn list_sessions_excludes_child_sessions() {
         let store = Store::open_in_memory().unwrap();
         let parent = store.create_session("/parent", "default").unwrap();
+        store
+            .add_message(&parent, 0, Role::User, "do the thing", None)
+            .unwrap();
         let _child = store
             .create_child_session("/child", "default", &parent)
             .unwrap();
         let sessions = store.list_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, parent);
+    }
+
+    #[test]
+    fn list_sessions_excludes_sessions_with_no_user_message() {
+        // A session row is created eagerly at process start, before any prompt is sent. A
+        // process that opens a session and exits/crashes before the user ever types anything
+        // (e.g. an `mcp agent` connection that's never used, or one caught in a spawn loop)
+        // must not pollute the picker with a blank entry.
+        let store = Store::open_in_memory().unwrap();
+        let _empty = store.create_session("/empty", "default").unwrap();
+        let used = store.create_session("/used", "default").unwrap();
+        store
+            .add_message(&used, 0, Role::User, "real prompt", None)
+            .unwrap();
+        let sessions = store.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1, "the empty session must not be listed");
+        assert_eq!(sessions[0].id, used);
+    }
+
+    #[test]
+    fn list_sessions_excludes_a_session_with_only_assistant_messages() {
+        // An assistant-only session (no role='user' row) is just as "never actually used" as a
+        // fully empty one — the filter checks role='user' specifically, not just any message.
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        store
+            .add_message(&sid, 0, Role::Assistant, "unsolicited", Some("opus"))
+            .unwrap();
+        assert!(store.list_sessions().unwrap().is_empty());
+    }
+
+    #[test]
+    fn prune_empty_removes_old_unused_sessions_but_keeps_recent_and_used_ones() {
+        let store = Store::open_in_memory().unwrap();
+        let old_empty = store.create_session("/old-empty", "default").unwrap();
+        let recent_empty = store.create_session("/recent-empty", "default").unwrap();
+        let old_used = store.create_session("/old-used", "default").unwrap();
+        store
+            .add_message(&old_used, 0, Role::User, "kept", None)
+            .unwrap();
+
+        // Backdate `old_empty` and `old_used` past the horizon; `recent_empty` stays fresh (as if
+        // just created this instant) so it must survive the sweep.
+        let past = chrono::Utc::now().timestamp() - 3600;
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session SET created_at = ?1 WHERE id IN (?2, ?3)",
+                rusqlite::params![past, old_empty, old_used],
+            )
+            .unwrap();
+
+        let removed = store.prune_empty(600, 50).unwrap();
+        assert_eq!(removed, 1, "only the old + empty session is eligible");
+
+        let remaining: Vec<String> = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        // recent_empty is filtered from list_sessions (no user message) but must still EXIST —
+        // prune_empty shouldn't have touched it.
+        assert!(remaining.contains(&old_used));
+        assert!(!remaining.contains(&old_empty));
+        let ids_after: Vec<String> = {
+            let conn = store.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id FROM session").unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert!(ids_after.contains(&recent_empty), "too young to prune");
+        assert!(!ids_after.contains(&old_empty), "old + empty: pruned");
+        assert!(ids_after.contains(&old_used), "has a real message: kept");
     }
 
     #[test]
