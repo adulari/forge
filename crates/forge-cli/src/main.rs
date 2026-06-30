@@ -3,7 +3,6 @@
 
 use std::io::IsTerminal;
 
-use anyhow::Result;
 use clap::Parser;
 
 use forge_core::Session;
@@ -115,9 +114,50 @@ fn init_tracing() {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     init_tracing();
 
     let cli = Cli::parse();
-    cli::dispatch::dispatch(cli.command).await
+    if let Err(e) = cli::dispatch::dispatch(cli.command).await {
+        print_top_level_error(&e);
+        std::process::exit(1);
+    }
+}
+
+/// Print a top-level error as a readable one-liner (Display + a compact cause chain) instead of the
+/// raw multi-line Debug anyhow dump, followed by a single next-step hint. Config/provider failures
+/// point at `forge doctor`.
+fn print_top_level_error(e: &anyhow::Error) {
+    let mut msg = format!("{e}");
+    let causes: Vec<String> = e.chain().skip(1).map(|c| c.to_string()).collect();
+    if !causes.is_empty() {
+        msg.push_str(&format!("  ({})", causes.join(": ")));
+    }
+    eprintln!("\x1b[31m✖ error:\x1b[0m {msg}");
+    eprintln!("  → {}", error_next_step(e));
+}
+
+/// One-line next-step hint for a failed command. Provider/config/auth failures get the `forge
+/// doctor` pointer; anything else gets a generic detail hint.
+fn error_next_step(e: &anyhow::Error) -> &'static str {
+    let text = e
+        .chain()
+        .map(|c| c.to_string().to_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let config_or_provider = [
+        "api key",
+        "provider",
+        "config",
+        "no usable model",
+        "auth",
+        "model",
+    ]
+    .iter()
+    .any(|k| text.contains(k));
+    if config_or_provider {
+        "run `forge doctor` to check your provider keys + config"
+    } else {
+        "run `forge doctor` for a health check, or re-run with RUST_LOG=debug for detail"
+    }
 }

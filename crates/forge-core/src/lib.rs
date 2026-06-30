@@ -3219,7 +3219,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             continue;
                         }
                     }
-                    self.presenter.emit(PresenterEvent::Warning(
+                    self.presenter.emit(PresenterEvent::Error(
                         "model returned an empty response (no text, no tool call) — stopping the turn"
                             .to_string(),
                     ));
@@ -3523,7 +3523,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                     );
                 } else {
                     // Still looping after the nudge → truly stuck; halt with a clear message.
-                    self.presenter.emit(PresenterEvent::Warning(
+                    self.presenter.emit(PresenterEvent::Error(
                         if is_oscillation {
                             "the model kept alternating between the same tool calls after a nudge — \
                              stopping to avoid a loop"
@@ -3775,7 +3775,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         // unknown prefixes — return has_api_key=true and pass through untouched.)
         if !forge_config::has_api_key(forge_config::provider_of(&routed_model)) {
             let msg = no_usable_model_message(&routed_model);
-            self.presenter.emit(PresenterEvent::Warning(msg.clone()));
+            self.presenter.emit(PresenterEvent::Error(msg.clone()));
             let seq = self.next_seq();
             self.store
                 .add_message(&self.id, seq, Role::User, prompt, None)?;
@@ -5870,6 +5870,7 @@ fn no_usable_model_message(routed_model: &str) -> String {
         "No usable model for this turn: the mesh routed to '{routed_model}', but provider \
          '{provider}' has no API key and no other model was usable ({have}).\n\
          Fix one of:\n  \
+         • forge setup     — guided first-run wizard (pick a provider, add a key)\n  \
          • forge auth      — add a provider API key\n  \
          • forge models    — see which models are actually usable right now\n  \
          • /model <id>     — pin a usable model for this session\n  \
@@ -6961,7 +6962,7 @@ mod tests {
             .unwrap()
             .iter()
             .filter_map(|e| match e {
-                PresenterEvent::Warning(w) => Some(w.clone()),
+                PresenterEvent::Warning(w) | PresenterEvent::Error(w) => Some(w.clone()),
                 _ => None,
             })
             .collect();
@@ -7043,7 +7044,7 @@ mod tests {
             .unwrap()
             .iter()
             .filter_map(|e| match e {
-                PresenterEvent::Warning(w) => Some(w.clone()),
+                PresenterEvent::Warning(w) | PresenterEvent::Error(w) => Some(w.clone()),
                 _ => None,
             })
             .collect();
@@ -7719,7 +7720,7 @@ mod tests {
             .unwrap()
             .iter()
             .filter_map(|e| match e {
-                PresenterEvent::Warning(w) => Some(w.clone()),
+                PresenterEvent::Warning(w) | PresenterEvent::Error(w) => Some(w.clone()),
                 _ => None,
             })
             .collect();
