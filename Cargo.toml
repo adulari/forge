@@ -65,7 +65,7 @@ regex = "1"
 # o200k_base / cl100k_base vocabularies in-crate, so it works fully offline.
 tiktoken-rs = "0.6"
 # default-features off + rustls: reuse genai's existing rustls stack (no OpenSSL C dep).
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls", "stream"] }
 # Remote control: a tiny HTTP + WebSocket server so a phone/desktop browser can drive the
 # running `forge chat` session. axum bundles hyper + tokio-tungstenite; the WS layer needs
 # `ws` (axum) which pulls tungstenite. qrcode renders a scan-to-connect matrix into the TUI.

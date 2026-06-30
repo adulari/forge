@@ -52,6 +52,11 @@ const MODEL_BUDGET: usize = 64 * 1024;
 /// Grace period between SIGTERM and SIGKILL on timeout (Unix process-group kill).
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
+/// Max wall-clock to wait for the stdout/stderr reader tasks to drain after the process exits.
+/// A backgrounded grandchild can inherit the pipe and keep it open after `sh` exits (e.g.
+/// `(sleep 30 &) ; echo done`), so the readers never hit EOF — this bounds that wait so a leaked
+/// pipe can't stall the agent turn forever. Mirrors the PTY path's reader-drain guard.
+const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub struct ShellTool {
@@ -238,7 +243,7 @@ async fn run_command_inner(
     let out_task = tokio::spawn(read_capped(stdout));
     let err_task = tokio::spawn(read_capped(stderr));
 
-    let (status_line, exit_code) =
+    let (status_line, exit_code, timed_out) =
         match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait()).await {
             Ok(Ok(status)) => {
                 let code = status.code();
@@ -248,17 +253,41 @@ async fn run_command_inner(
                         code.map(|c| c.to_string()).unwrap_or("signal".into())
                     ),
                     code,
+                    false,
                 )
             }
-            Ok(Err(e)) => (format!("error: {e}"), None),
+            Ok(Err(e)) => (format!("error: {e}"), None, false),
             Err(_) => {
                 terminate(&mut child, pgid).await;
-                (format!("timed out after {timeout_secs}s (killed)"), None)
+                (
+                    format!("timed out after {timeout_secs}s (killed)"),
+                    None,
+                    true,
+                )
             }
         };
 
-    let (out_bytes, out_capped) = out_task.await.unwrap_or_default();
-    let (err_bytes, err_capped) = err_task.await.unwrap_or_default();
+    // On the normal-exit path the shell (`sh -c`) can exit while a backgrounded grandchild keeps
+    // the stdout/stderr pipes open (e.g. `(sleep 30 &) ; echo done`). Kill the whole process group
+    // so those leaked descendants release the pipes — otherwise the readers below never see EOF.
+    // The timeout path already killed the group via `terminate`.
+    if !timed_out {
+        kill_process_group(pgid);
+    }
+
+    // Bound the reader joins: even after the group kill, a process that escaped the group could
+    // still hold a pipe open. A short timeout guarantees a leaked pipe can never stall the turn;
+    // we take whatever was captured so far. Mirrors the PTY path's reader-drain guard.
+    let (out_bytes, out_capped) = tokio::time::timeout(READER_DRAIN_TIMEOUT, out_task)
+        .await
+        .ok()
+        .and_then(std::result::Result::ok)
+        .unwrap_or_default();
+    let (err_bytes, err_capped) = tokio::time::timeout(READER_DRAIN_TIMEOUT, err_task)
+        .await
+        .ok()
+        .and_then(std::result::Result::ok)
+        .unwrap_or_default();
     let duration_ms = start.elapsed().as_millis();
 
     let body = render_streams(&out_bytes, &err_bytes);
@@ -580,6 +609,22 @@ fn put_in_own_process_group(cmd: &mut Command) {
     }
 }
 
+/// Best-effort SIGKILL of the child's process group, used on the *normal-exit* cleanup path to
+/// reap any backgrounded grandchild that outlived the shell and is still holding the output pipes
+/// open. Unlike [`terminate`] there is no SIGTERM/grace step (the main child has already exited and
+/// been reaped) and no `child.wait()` — this just nukes leaked descendants. A no-such-group error
+/// (the common case: nothing leaked) is harmless and swallowed. No-op on non-Unix.
+fn kill_process_group(pgid: Option<i32>) {
+    #[cfg(unix)]
+    if let Some(pg) = pgid {
+        unsafe { libc::kill(-pg, libc::SIGKILL) };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pgid;
+    }
+}
+
 /// Kill the child's whole process tree on timeout: SIGTERM→grace→SIGKILL on the process group
 /// (Unix); `taskkill /F /T` on Windows. The tree matters because `cmd /C`/`sh -c` spawn the real
 /// command as a child — killing only the shell would leave it running and hold the output pipes
@@ -789,6 +834,28 @@ mod tests {
         async fn bad_cwd_is_a_spawn_failure_not_a_panic() {
             let out = run_command("echo hi", "/no/such/dir/xyz", 5, &no_sandbox()).await;
             assert!(out.contains("failed to start"), "spawn failure: {out}");
+        }
+
+        /// A command that backgrounds a long-running process inheriting stdout must return
+        /// promptly with its real output, not hang on the leaked pipe. Before the fix the reader
+        /// task awaited with no timeout, so the inherited-stdout grandchild kept the pipe open and
+        /// the whole turn stalled for the full 30s sleep.
+        #[tokio::test]
+        async fn backgrounded_child_does_not_hang_on_normal_exit() {
+            let start = Instant::now();
+            let out = tokio::time::timeout(
+                Duration::from_secs(15),
+                run_command("(sleep 30 & ) ; echo done", ".", 30, &no_sandbox()),
+            )
+            .await
+            .expect("must return promptly, not hang on the inherited-stdout grandchild");
+            assert!(out.contains("done"), "real output returned: {out}");
+            assert!(out.contains("exit 0"), "shell exited cleanly: {out}");
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "must not wait for the backgrounded sleep, elapsed: {:?}",
+                start.elapsed()
+            );
         }
 
         #[tokio::test]

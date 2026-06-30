@@ -453,7 +453,7 @@ fn classify_genai_error(err: &genai::Error) -> ProviderError {
                         t.parse::<u64>()
                             .ok()
                             .map(std::time::Duration::from_secs)
-                            .or_else(|| parse_secs(t).map(std::time::Duration::from_secs_f64))
+                            .or_else(|| parse_secs(t).and_then(duration_from_secs))
                     })
                     .or_else(|| parse_retry_after_body(body));
                 classify_status(status.as_u16(), err.to_string(), body, retry_after)
@@ -642,12 +642,24 @@ fn parse_retry_after_body(body: &str) -> Option<std::time::Duration> {
     let lower = body.to_lowercase();
     for marker in ["retrydelay", "retry in", "retry after", "please retry in"] {
         if let Some(idx) = lower.find(marker) {
-            if let Some(secs) = parse_secs(&lower[idx + marker.len()..]) {
-                return Some(std::time::Duration::from_secs_f64(secs));
+            if let Some(d) = parse_secs(&lower[idx + marker.len()..]).and_then(duration_from_secs) {
+                return Some(d);
             }
         }
     }
     None
+}
+
+/// Build a `Duration` from a parsed seconds value, REJECTING non-finite / negative / absurd values
+/// instead of panicking. `Duration::from_secs_f64` panics on NaN, infinity, a negative, or a value
+/// too large to represent — an adversarial 429 body (`"retryDelay":"99999999999999999999s"`) would
+/// otherwise crash the error-classification / failover path. Caps at a day; no sane cooldown is
+/// longer, and clamping keeps a bogusly-huge hint from parking a model out of rotation forever.
+fn duration_from_secs(secs: f64) -> Option<std::time::Duration> {
+    if !secs.is_finite() || secs < 0.0 {
+        return None;
+    }
+    std::time::Duration::try_from_secs_f64(secs.min(86_400.0)).ok()
 }
 
 /// Pull the first floating-point number out of `s` (skipping leading quotes/colons/spaces),
@@ -800,6 +812,11 @@ impl Provider for GenAiProvider {
         let mut content = String::new();
         let mut usage = Usage::default();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
+        // Whether a proper finish/`End` event arrived. A stream that closes gracefully mid-generation
+        // yields `next() == None` with NO `End` — partial text, no tool calls, no usage — which is
+        // otherwise indistinguishable from a real completion. Track this so a silent truncation can
+        // be rejected as retryable instead of returned as a phantom success (see below).
+        let mut saw_end = false;
 
         // An *idle* timeout (per chunk), not a total cap: a long generation keeps emitting and
         // resets the clock; only a genuinely stalled stream trips it.
@@ -817,6 +834,7 @@ impl Provider for GenAiProvider {
                     on_event(StreamEvent::Reasoning(chunk.content.clone()));
                 }
                 ChatStreamEvent::End(end) => {
+                    saw_end = true;
                     if let Some(u) = &end.captured_usage {
                         // Cache-read tokens (subset of prompt_tokens) are billed at a fraction of
                         // the input rate; capture them so the mesh prices them correctly instead of
@@ -870,6 +888,18 @@ impl Provider for GenAiProvider {
             }
         }
 
+        // Phantom-success guard: if the stream ended WITHOUT any completion signal (no `End`/finish
+        // event, no usage) AND produced no tool calls, it was almost certainly truncated mid-flight
+        // (e.g. the connection closed cleanly just before a tool call). Returning the partial
+        // narration as `Ok` would make the mesh treat it as a final answer and stop acting. Surface
+        // a retryable error instead so failover/retry kicks in. A legitimately empty-but-finished
+        // response (an `End` event arrived) still succeeds.
+        if is_phantom_truncation(saw_end, !tool_calls.is_empty(), &usage) {
+            return Err(ProviderError::Unavailable(
+                "stream closed without a completion signal (truncated mid-generation)".to_string(),
+            ));
+        }
+
         Ok(ModelResponse {
             content,
             tool_calls,
@@ -877,6 +907,14 @@ impl Provider for GenAiProvider {
             quotas: Vec::new(),
         })
     }
+}
+
+/// Decide whether a finished stream is a silently-truncated phantom rather than a real completion.
+/// True (→ reject as retryable) only when NONE of the completion signals are present: no finish/
+/// `End` event, no tool calls, and zero usage. Any one of those means the provider actually
+/// finished (even an empty answer), so the response is kept.
+fn is_phantom_truncation(saw_end: bool, has_tool_calls: bool, usage: &Usage) -> bool {
+    !saw_end && !has_tool_calls && usage.input_tokens == 0 && usage.output_tokens == 0
 }
 
 #[cfg(test)]
@@ -1171,6 +1209,62 @@ mod tests {
             }
             other => panic!("expected RateLimited, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_retry_after_does_not_panic_on_malformed_values() {
+        // The bug: an unbounded digit run fed straight to `Duration::from_secs_f64`, which PANICS
+        // on a too-large / non-finite value. These adversarial 429 bodies must yield None (or a
+        // clamped, sane Duration), never crash the failover path.
+        for body in [
+            r#""retryDelay": "99999999999999999999s""#, // absurdly large → clamped/None, no panic
+            r#""retryDelay": "NaN""#,
+            r#""retryDelay": "-5""#,
+            r#""retryDelay": "inf""#,
+            r#""retryDelay": "1e400s""#,
+        ] {
+            let d = parse_retry_after_body(body);
+            // Whatever it returns, it must be a finite, day-bounded Duration (or None) — never panic.
+            if let Some(d) = d {
+                assert!(
+                    d <= std::time::Duration::from_secs(86_400),
+                    "retry-after must be clamped, got {d:?} for {body:?}"
+                );
+            }
+        }
+        // A huge value is dropped or clamped, not honored as-is.
+        assert!(
+            parse_retry_after_body(r#""retryDelay": "99999999999999999999s""#)
+                .map(|d| d <= std::time::Duration::from_secs(86_400))
+                .unwrap_or(true)
+        );
+        // duration_from_secs rejects the non-finite / negative cases outright.
+        assert_eq!(duration_from_secs(f64::NAN), None);
+        assert_eq!(duration_from_secs(f64::INFINITY), None);
+        assert_eq!(duration_from_secs(-1.0), None);
+        assert_eq!(
+            duration_from_secs(1e30),
+            Some(std::time::Duration::from_secs(86_400)),
+            "absurdly large values clamp to the day cap"
+        );
+    }
+
+    #[test]
+    fn phantom_truncation_rejects_silent_close_keeps_real_completions() {
+        let zero = Usage::default();
+        // No End, no tool calls, no usage → silent truncation, reject (retryable).
+        assert!(is_phantom_truncation(false, false, &zero));
+        // A finish/End event arrived → legit, even with an empty/zero-usage answer.
+        assert!(!is_phantom_truncation(true, false, &zero));
+        // Tool calls present (e.g. recovered from text) → legit even without an End event.
+        assert!(!is_phantom_truncation(false, true, &zero));
+        // Non-zero usage is itself a completion signal → legit.
+        let used = Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Usage::default()
+        };
+        assert!(!is_phantom_truncation(false, false, &used));
     }
 
     #[test]
