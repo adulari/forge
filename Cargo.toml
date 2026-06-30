@@ -8,7 +8,7 @@ edition = "2021"
 rust-version = "1.85"
 license = "MIT"
 authors = ["Floris Voskamp"]
-repository = "https://github.com/florisvoskamp/forge"
+repository = "https://github.com/Adulari/forge"
 description = "Fast, model-agnostic AI coding harness and CLI in Rust."
 
 [workspace.dependencies]
