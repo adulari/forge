@@ -14,7 +14,7 @@ use ratatui::text::Line as TextLine;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
-use crate::app::{self, banner_lines, handle_key, App, InputOutcome, KeyKind, LIVE_H};
+use crate::app::{self, handle_key, print_banner_direct, App, InputOutcome, KeyKind, LIVE_H};
 use crate::{Presenter, PresenterEvent};
 
 pub struct TuiPresenter {
@@ -35,6 +35,11 @@ impl TuiPresenter {
     }
 
     fn enter() -> io::Result<Self> {
+        // Print the banner BEFORE ratatui takes over the terminal so the terminal's native
+        // line-ending handling clears the full row width. If we used insert_before instead,
+        // ratatui's draw_lines_over_cleared diff skips default-style cells at cols 42+, leaving
+        // old terminal content (e.g. hook output) visible to the right of the 42-char logo.
+        print_banner_direct();
         let backend = CrosstermBackend::new(io::stdout());
         let terminal = Terminal::with_options(
             backend,
@@ -42,14 +47,10 @@ impl TuiPresenter {
                 viewport: Viewport::Inline(LIVE_H),
             },
         )?;
-        let width = terminal.size().map(|s| s.width).unwrap_or(80);
-        let banner = banner_lines(width);
-        let mut me = Self {
+        Ok(Self {
             terminal,
             app: App::default(),
-        };
-        me.insert_lines(banner);
-        Ok(me)
+        })
     }
 
     fn insert_lines(&mut self, lines: Vec<TextLine<'static>>) {

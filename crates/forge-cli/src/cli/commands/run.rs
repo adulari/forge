@@ -767,8 +767,8 @@ pub(crate) async fn run_chat_tui(
     pin: Option<String>,
 ) -> Result<()> {
     use forge_tui::{
-        banner_lines, handle_key, App, ChannelPresenter, ConfirmOutcome, InputOutcome, KeyKind,
-        Tui, UiMsg,
+        banner_lines, handle_key, print_banner_direct, App, ChannelPresenter, ConfirmOutcome,
+        InputOutcome, KeyKind, Tui, UiMsg,
     };
     use std::time::{Duration, Instant};
 
@@ -853,6 +853,15 @@ pub(crate) async fn run_chat_tui(
         });
     }
 
+    // Inline-mode banner: print BEFORE ratatui creates the inline viewport so the terminal's own
+    // line-ending handling clears the full row width. ratatui's draw_lines_over_cleared uses
+    // old.diff(&new) which skips default-style cells at cols 42+ (empty == empty in the diff),
+    // leaving old terminal content visible to the right of the 42-char logo when the terminal has
+    // prior content (e.g. Claude Code hook output). Full-screen has no scrollback; banner goes
+    // into the transcript log after Tui::new().
+    if matches!(resume_mode, ResumeMode::Fresh) && !fullscreen {
+        print_banner_direct();
+    }
     // Mouse capture (full-screen wheel scroll) is opt-in: it disables native click-drag text
     // selection, so it stays off unless the user enables `[tui] mouse_capture`.
     let mouse_capture = tui_config.tui.mouse_capture;
@@ -879,15 +888,11 @@ pub(crate) async fn run_chat_tui(
                 None
             }
         });
-    // Welcome banner only on a fresh session — resumes show the transcript separator instead. In
-    // full-screen mode there's no native scrollback, so banner lines go into the transcript log.
-    if matches!(resume_mode, ResumeMode::Fresh) {
+    // Full-screen banner goes into the transcript log (no native scrollback in full-screen mode).
+    // Inline banner was already printed directly to stdout above.
+    if matches!(resume_mode, ResumeMode::Fresh) && fullscreen {
         let banner = banner_lines(tui.width());
-        if fullscreen {
-            app.push_scrollback(banner);
-        } else {
-            tui.insert_lines(banner);
-        }
+        app.push_scrollback(banner);
     }
     {
         let s = session.lock().await;

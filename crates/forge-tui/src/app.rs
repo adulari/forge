@@ -2613,6 +2613,38 @@ pub fn banner_lines(width: u16) -> Vec<TextLine<'static>> {
     lines
 }
 
+/// Print the startup banner directly to stdout using raw ANSI escape codes, bypassing ratatui's
+/// `insert_before` / `draw_lines_over_cleared` path.
+///
+/// ratatui's `draw_lines_over_cleared` uses `old.diff(&new)` where old = `Buffer::empty` (all
+/// `Cell::EMPTY` = space + Reset style). The banner logo is 42 chars wide; the remaining columns
+/// on each logo row are also `Cell::EMPTY` in the new buffer, so the diff skips them and never
+/// writes to those terminal cells. If the terminal had prior content at those positions (e.g.
+/// Claude Code hook output from the same session), it bleeds through to the right of the logo.
+///
+/// By printing before ratatui creates the inline viewport, the terminal handles each `\n`
+/// naturally, clearing the rest of each row implicitly.
+pub fn print_banner_direct() {
+    use std::io::Write;
+    let width = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80);
+    let mut out = std::io::stdout();
+    // ORANGE bold = ESC[1;38;2;255;138;48m  DIM = ESC[38;2;82;87;108m  reset = ESC[0m
+    let orange = "\x1b[1;38;2;255;138;48m";
+    let dim = "\x1b[38;2;82;87;108m";
+    let reset = "\x1b[0m";
+    if width < WORDMARK_WIDTH {
+        let _ = writeln!(out, "\n{orange}⚒ FORGE{reset}");
+        let _ = writeln!(out, "{dim}model-mesh coding agent{reset}\n");
+    } else {
+        let _ = writeln!(out);
+        for row in FORGE_WORDMARK {
+            let _ = writeln!(out, "{orange}{row}{reset}");
+        }
+        let _ = writeln!(out, "\n{dim}{TAGLINE}{reset}\n");
+    }
+    let _ = out.flush();
+}
+
 /// Color for a temper label, by permissiveness (the at-a-glance posture cue): Read-only=blue,
 /// Ask=yellow, Auto-edit=green, Full=red. Unknown → cyan.
 fn temper_color(label: &str) -> Color {
