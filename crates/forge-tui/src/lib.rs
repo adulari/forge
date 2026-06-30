@@ -45,14 +45,14 @@ pub mod select;
 mod transcript;
 mod tui;
 pub use app::{
-    banner_lines, handle_key, lattice_view_lines, render_mesh_overlay, render_usage_overlay,
-    ActivityKind, ActivityStatus, App, InputOutcome, KeyKind, MeshCandRow, MeshOverlay,
-    MeshQuotaRow, RemoteSnapshot, ReplayItem, TranscriptView, UsageOverlay,
+    banner_lines, handle_key, input_cursor_up, lattice_view_lines, render_mesh_overlay,
+    render_usage_overlay, ActivityKind, ActivityStatus, App, InputOutcome, KeyKind, MeshCandRow,
+    MeshOverlay, MeshQuotaRow, RemoteSnapshot, ReplayItem, TranscriptView, UsageOverlay,
 };
 pub use commands::{
-    at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken, Command,
-    CommandAction, Palette, PaletteEntry, Picker, PickerKind, PickerRow, RemoteMode, SlashToken,
-    StatuslineAction, COMMANDS,
+    arg_values, at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken,
+    Command, CommandAction, Palette, PaletteEntry, Picker, PickerKind, PickerRow, RemoteMode,
+    SlashToken, StatuslineAction, COMMANDS,
 };
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
 pub use driver::{ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg};
@@ -139,6 +139,9 @@ pub enum PresenterEvent {
     AssistantDone,
     /// A non-fatal advisory (e.g. budget threshold reached).
     Warning(String),
+    /// A genuine failure (failed turn, provider hard-fail) — rendered distinctly from a benign
+    /// [`Warning`](PresenterEvent::Warning) so users can tell an error from an advisory.
+    Error(String),
     /// The mesh is failing over: `model` just failed and a replacement is being tried. Drives a
     /// single animated "finding a model" status indicator instead of one scrollback warning per
     /// hop — cleared automatically when real output (assistant text / a tool call) begins.
@@ -337,6 +340,10 @@ impl Presenter for HeadlessPresenter {
             }
             PresenterEvent::Warning(msg) => {
                 println!("  ⚠ {msg}");
+            }
+            PresenterEvent::Error(msg) => {
+                // Red + distinct glyph so a hard failure can't be mistaken for the yellow ⚠.
+                eprintln!("\x1b[31m  ✖ {msg}\x1b[0m");
             }
             PresenterEvent::ModelSearch { model } => {
                 // Headless has no animated indicator; a concise dim line keeps the failover record.

@@ -155,6 +155,10 @@ fn event_notification(
             LoggingLevel::Warning,
             serde_json::json!({ "event": "warning", "msg": msg }),
         ),
+        forge_tui::PresenterEvent::Error(msg) => (
+            LoggingLevel::Error,
+            serde_json::json!({ "event": "error", "msg": msg }),
+        ),
         forge_tui::PresenterEvent::Routing { tier, .. } => (
             LoggingLevel::Debug,
             serde_json::json!({ "event": "routing", "tier": tier }),

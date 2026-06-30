@@ -744,6 +744,35 @@ mod tests {
     }
 
     #[test]
+    fn diff_context_lines_are_readable_not_all_dim() {
+        // Equal/context lines must render readably (syntax-highlighted body), with DIM reserved for
+        // the gutter — not the whole line in the very-dim muted color.
+        let diff = FileDiff {
+            path: "src/a.rs".into(),
+            kind: DiffKind::Modified,
+            old: Some("fn context_anchor() {}\nlet x = 1;\n".into()),
+            new: Some("fn context_anchor() {}\nlet x = 2;\n".into()),
+            lang: Some("rust".into()),
+            binary: false,
+        };
+        let lines = diff_to_lines(&diff);
+        let ctx = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("context_anchor")))
+            .expect("context line present");
+        // The gutter (first span) may be DIM, but the body must carry a readable (non-DIM) fg.
+        let body_readable = ctx
+            .spans
+            .iter()
+            .skip(1)
+            .any(|s| !s.content.trim().is_empty() && s.style.fg != Some(DIM));
+        assert!(
+            body_readable,
+            "context body should be readable, not DIM: {ctx:?}"
+        );
+    }
+
+    #[test]
     fn diff_modified_has_gutters_and_hunk_header() {
         let diff = FileDiff {
             path: "src/a.rs".into(),
