@@ -58,7 +58,7 @@ dependencies = [
  "directories",
  "figment",
  "keyring",
- "rand 0.9.4",
+ "rand 0.10.1",
  "serde",
  "serde_json",
  "sha2 0.11.0",
