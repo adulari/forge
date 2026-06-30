@@ -157,7 +157,14 @@ fn path_to_uri(path: &Path) -> String {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     };
-    format!("file://{}", p.display())
+    // RFC 8089 file URIs use forward slashes and a leading `/` before the path. On Unix
+    // MAIN_SEPARATOR is `/` so this is a no-op; on Windows it turns `C:\a\b` into `/C:/a/b`,
+    // yielding `file:///C:/a/b` instead of the malformed `file://C:\a\b`.
+    let mut s = p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+    if !s.starts_with('/') {
+        s.insert(0, '/');
+    }
+    format!("file://{s}")
 }
 
 #[cfg(test)]
@@ -190,6 +197,172 @@ mod tests {
         fs::write(&file, "").unwrap();
         let found = repo_root(&file).unwrap();
         assert_eq!(found, dir.path());
+    }
+
+    fn empty_config() -> LspConfig {
+        LspConfig {
+            enabled: true,
+            timeout_ms: 100,
+            servers: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn server_for_lang_built_in_defaults() {
+        let reg = LspRegistry::from_config(&empty_config());
+        assert_eq!(
+            reg.server_for_lang("rust"),
+            Some(("rust-analyzer".to_string(), vec![]))
+        );
+        assert_eq!(
+            reg.server_for_lang("typescript"),
+            Some((
+                "typescript-language-server".to_string(),
+                vec!["--stdio".to_string()]
+            ))
+        );
+        // typescript and javascript share the same server.
+        assert_eq!(
+            reg.server_for_lang("javascript"),
+            reg.server_for_lang("typescript")
+        );
+        assert_eq!(
+            reg.server_for_lang("python"),
+            Some((
+                "pyright-langserver".to_string(),
+                vec!["--stdio".to_string()]
+            ))
+        );
+        assert_eq!(
+            reg.server_for_lang("go"),
+            Some(("gopls".to_string(), vec![]))
+        );
+        assert_eq!(reg.server_for_lang("cobol"), None);
+    }
+
+    #[test]
+    fn server_for_lang_config_overrides_default() {
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "rust".to_string(),
+            forge_config::LspServerEntry {
+                command: "my-analyzer".to_string(),
+                args: vec!["--flag".to_string()],
+            },
+        );
+        let cfg = LspConfig {
+            enabled: true,
+            timeout_ms: 100,
+            servers,
+        };
+        let reg = LspRegistry::from_config(&cfg);
+        assert_eq!(
+            reg.server_for_lang("rust"),
+            Some(("my-analyzer".to_string(), vec!["--flag".to_string()]))
+        );
+    }
+
+    #[test]
+    fn config_can_add_a_new_language() {
+        let mut servers = std::collections::HashMap::new();
+        servers.insert(
+            "ruby".to_string(),
+            forge_config::LspServerEntry {
+                command: "solargraph".to_string(),
+                args: vec!["stdio".to_string()],
+            },
+        );
+        let cfg = LspConfig {
+            enabled: true,
+            timeout_ms: 100,
+            servers,
+        };
+        let reg = LspRegistry::from_config(&cfg);
+        assert_eq!(
+            reg.server_for_lang("ruby"),
+            Some(("solargraph".to_string(), vec!["stdio".to_string()]))
+        );
+    }
+
+    #[test]
+    fn repo_root_finds_git_dir() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".git")).unwrap();
+        let nested = dir.path().join("a").join("b");
+        fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("x.rs");
+        fs::write(&file, "").unwrap();
+        assert_eq!(repo_root(&file).unwrap(), dir.path());
+    }
+
+    #[test]
+    fn repo_root_none_without_marker() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("loose.rs");
+        fs::write(&file, "").unwrap();
+        // A bare TempDir has no project marker above it within the temp tree.
+        assert!(repo_root(&file).is_none());
+    }
+
+    #[test]
+    fn repo_root_picks_nearest_ancestor() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
+        let inner = dir.path().join("sub");
+        fs::create_dir(&inner).unwrap();
+        fs::write(inner.join("package.json"), "{}").unwrap();
+        let file = inner.join("app.ts");
+        fs::write(&file, "").unwrap();
+        // Walks up only to the closest marker, not the outer Cargo.toml.
+        assert_eq!(repo_root(&file).unwrap(), inner);
+    }
+
+    #[test]
+    fn which_resolves_absolute_path_when_present() {
+        let dir = TempDir::new().unwrap();
+        let bin = dir.path().join("fake-lsp");
+        fs::write(&bin, "#!/bin/sh\n").unwrap();
+        assert_eq!(which(bin.to_str().unwrap()).unwrap(), bin);
+    }
+
+    #[test]
+    fn which_absolute_path_missing_is_none() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        assert!(which(missing.to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn which_bare_nonexistent_command_is_none() {
+        assert!(which("__forge_definitely_not_a_real_binary_zzz__").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_to_uri_absolute_has_file_scheme() {
+        let uri = path_to_uri(Path::new("/home/user/project/main.rs"));
+        assert_eq!(uri, "file:///home/user/project/main.rs");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn path_to_uri_absolute_has_file_scheme() {
+        // RFC 8089: a Windows drive path becomes file:///C:/... with forward slashes and a
+        // leading slash before the drive letter, never file://C:\... .
+        let uri = path_to_uri(Path::new(r"C:\home\user\main.rs"));
+        assert_eq!(uri, "file:///C:/home/user/main.rs");
+    }
+
+    #[test]
+    fn path_to_uri_relative_is_anchored_to_absolute() {
+        let uri = path_to_uri(Path::new("rel/file.rs"));
+        assert!(uri.starts_with("file:///"), "uri was: {uri}");
+        // Output URIs always use forward slashes, regardless of the host separator.
+        assert!(uri.ends_with("rel/file.rs"), "uri was: {uri}");
+        assert!(
+            !uri.contains('\\'),
+            "uri must not contain backslashes: {uri}"
+        );
     }
 
     #[tokio::test]

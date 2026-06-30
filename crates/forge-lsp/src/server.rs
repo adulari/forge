@@ -140,3 +140,124 @@ fn parse_diagnostic(v: &Value) -> Option<Diagnostic> {
         code,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn full_diag() -> Value {
+        json!({
+            "message": "cannot find value `x`",
+            "severity": 1,
+            "code": "E0425",
+            "range": {
+                "start": {"line": 4, "character": 8},
+                "end": {"line": 4, "character": 9}
+            }
+        })
+    }
+
+    #[test]
+    fn parse_full_diagnostic() {
+        let d = parse_diagnostic(&full_diag()).expect("valid diagnostic");
+        assert_eq!(d.severity, DiagnosticSeverity::Error);
+        assert_eq!(d.message, "cannot find value `x`");
+        assert_eq!(d.line, 4);
+        assert_eq!(d.character, 8);
+        assert_eq!(d.code.as_deref(), Some("E0425"));
+    }
+
+    #[test]
+    fn severity_int_maps_to_enum() {
+        let mut v = full_diag();
+        v["severity"] = json!(2);
+        assert_eq!(
+            parse_diagnostic(&v).unwrap().severity,
+            DiagnosticSeverity::Warning
+        );
+        v["severity"] = json!(3);
+        assert_eq!(
+            parse_diagnostic(&v).unwrap().severity,
+            DiagnosticSeverity::Information
+        );
+        v["severity"] = json!(4);
+        assert_eq!(
+            parse_diagnostic(&v).unwrap().severity,
+            DiagnosticSeverity::Hint
+        );
+    }
+
+    #[test]
+    fn missing_severity_defaults_to_error() {
+        // LSP allows omitting severity; Forge treats an unlabeled diagnostic as an error.
+        let mut v = full_diag();
+        v.as_object_mut().unwrap().remove("severity");
+        assert_eq!(
+            parse_diagnostic(&v).unwrap().severity,
+            DiagnosticSeverity::Error
+        );
+    }
+
+    #[test]
+    fn code_can_be_integer() {
+        let mut v = full_diag();
+        v["code"] = json!(2304);
+        assert_eq!(parse_diagnostic(&v).unwrap().code.as_deref(), Some("2304"));
+    }
+
+    #[test]
+    fn missing_code_is_none() {
+        let mut v = full_diag();
+        v.as_object_mut().unwrap().remove("code");
+        assert_eq!(parse_diagnostic(&v).unwrap().code, None);
+    }
+
+    #[test]
+    fn non_scalar_code_is_none() {
+        // A float/object code is not representable; degrade to None rather than panic.
+        let mut v = full_diag();
+        v["code"] = json!(1.5);
+        assert_eq!(parse_diagnostic(&v).unwrap().code, None);
+    }
+
+    #[test]
+    fn missing_message_is_rejected() {
+        let mut v = full_diag();
+        v.as_object_mut().unwrap().remove("message");
+        assert!(parse_diagnostic(&v).is_none());
+    }
+
+    #[test]
+    fn non_string_message_is_rejected() {
+        let mut v = full_diag();
+        v["message"] = json!(42);
+        assert!(parse_diagnostic(&v).is_none());
+    }
+
+    #[test]
+    fn missing_range_is_rejected() {
+        let mut v = full_diag();
+        v.as_object_mut().unwrap().remove("range");
+        assert!(parse_diagnostic(&v).is_none());
+    }
+
+    #[test]
+    fn missing_start_position_is_rejected() {
+        let mut v = full_diag();
+        v["range"]["start"] = Value::Null;
+        assert!(parse_diagnostic(&v).is_none());
+    }
+
+    #[test]
+    fn empty_object_is_rejected() {
+        assert!(parse_diagnostic(&json!({})).is_none());
+    }
+
+    #[test]
+    fn non_numeric_line_is_rejected() {
+        let mut v = full_diag();
+        v["range"]["start"]["line"] = json!("oops");
+        assert!(parse_diagnostic(&v).is_none());
+    }
+}

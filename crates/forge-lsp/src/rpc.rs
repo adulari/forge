@@ -45,7 +45,16 @@ pub async fn read_msg(reader: &mut BufReader<ChildStdout>) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{duplex, BufReader};
+    use tokio::io::{duplex, AsyncWriteExt, BufReader};
+
+    /// Frame `bytes` through a closed in-memory stream and return what `read_msg_inner` makes of it.
+    async fn parse_bytes(bytes: &[u8]) -> Option<Value> {
+        let (mut writer, reader) = duplex(64 * 1024);
+        writer.write_all(bytes).await.unwrap();
+        drop(writer);
+        let mut reader = BufReader::new(reader);
+        read_msg_inner(&mut reader).await
+    }
 
     #[tokio::test]
     async fn round_trip() {
@@ -62,5 +71,89 @@ mod tests {
         let result = read_msg_inner(&mut buf_reader).await.expect("should parse");
         assert_eq!(result["method"], "test");
         assert_eq!(result["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn write_msg_emits_content_length_header() {
+        let mut out: Vec<u8> = Vec::new();
+        let msg = serde_json::json!({"a": 1});
+        write_msg(&mut out, &msg).await.unwrap();
+        let body = serde_json::to_vec(&msg).unwrap();
+        let expected_header = format!("Content-Length: {}\r\n\r\n", body.len());
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with(&expected_header), "header was: {text:?}");
+        assert!(text.ends_with(&String::from_utf8(body).unwrap()));
+    }
+
+    #[tokio::test]
+    async fn eof_yields_none() {
+        assert!(parse_bytes(b"").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn headers_without_content_length_yield_none() {
+        // A complete header block (blank line) but no Content-Length => nothing to read.
+        assert!(parse_bytes(b"Content-Type: application/json\r\n\r\n")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_content_length_yields_none() {
+        assert!(parse_bytes(b"Content-Length: not-a-number\r\n\r\n{}")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn partial_body_yields_none() {
+        // Declares 100 bytes but only 2 follow => read_exact fails, must not panic.
+        assert!(parse_bytes(b"Content-Length: 100\r\n\r\n{}")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn garbage_body_yields_none() {
+        // 13-byte body that isn't valid JSON.
+        assert!(parse_bytes(b"Content-Length: 13\r\n\r\nnot-json-here")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn ignores_extra_headers_and_parses_body() {
+        let body = br#"{"jsonrpc":"2.0","id":7}"#;
+        let mut bytes = format!(
+            "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        bytes.extend_from_slice(body);
+        let v = parse_bytes(&bytes).await.expect("should parse");
+        assert_eq!(v["id"], 7);
+    }
+
+    #[tokio::test]
+    async fn reads_only_declared_body_then_stops() {
+        // Only `len` bytes belong to the first message; the rest is a second frame.
+        let body = br#"{"id":1}"#;
+        let mut bytes = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        bytes.extend_from_slice(body);
+        bytes.extend_from_slice(b"Content-Length: 8\r\n\r\n{\"id\":2}");
+        let v = parse_bytes(&bytes).await.expect("should parse first");
+        assert_eq!(v["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn handles_multibyte_utf8_body() {
+        // Content-Length is a BYTE count; a multibyte char must be framed by bytes, not chars.
+        let (mut writer, reader) = duplex(4096);
+        let msg = serde_json::json!({"msg": "café 你好"});
+        write_msg(&mut writer, &msg).await.unwrap();
+        drop(writer);
+        let mut reader = BufReader::new(reader);
+        let v = read_msg_inner(&mut reader).await.expect("should parse");
+        assert_eq!(v["msg"], "café 你好");
     }
 }
