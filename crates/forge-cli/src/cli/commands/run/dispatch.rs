@@ -150,6 +150,7 @@ pub(crate) async fn dispatch_command(
     let mutates = !matches!(
         action,
         CommandAction::Help
+            | CommandAction::Keys
             | CommandAction::Quit
             | CommandAction::Unknown(_)
             | CommandAction::ListSessions
@@ -168,6 +169,12 @@ pub(crate) async fn dispatch_command(
     }
     match action {
         CommandAction::Help => app.palette.open_with(""),
+        CommandAction::Keys => {
+            // Reuse the #362 keybind help overlay (read-only: edit a clone, discard) so `/keys`
+            // doesn't duplicate the F1/ShowHelp surface.
+            let mut tmp = app.keybinds.clone();
+            let _ = tui.run_fullscreen(|| forge_tui::run_keybind_configurator(&mut tmp));
+        }
         CommandAction::Quit => return Ok(DispatchOutcome::Quit),
         CommandAction::ClearScreen => {
             tui.clear_screen();

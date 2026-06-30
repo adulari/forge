@@ -182,26 +182,39 @@ pub(crate) async fn build_session_with(
         None
     };
 
-    // Validate the pinned model against the catalog so unknown ids fail fast with a clear message
-    // rather than a confusing provider "Resolver error" at the first API call.
-    if let (Some(id), Some(cat)) = (pin.as_deref(), catalog.as_ref()) {
-        if !cat.models().contains(&id.to_string()) {
-            let provider_prefix = id.split("::").next().unwrap_or(id);
-            let suggestions: Vec<&str> = cat
-                .models()
-                .iter()
-                .filter(|m| m.starts_with(provider_prefix))
-                .map(String::as_str)
-                .take(5)
-                .collect();
-            let hint = if suggestions.is_empty() {
-                format!("no '{provider_prefix}' models in catalog — run `forge models` to see what's available")
-            } else {
-                format!("try: {}", suggestions.join(", "))
-            };
-            presenter.emit(forge_tui::PresenterEvent::Warning(format!(
-                "unknown model '{id}' — {hint}"
-            )));
+    // Validate the pinned model so unknown ids fail fast with a clear message rather than a
+    // confusing provider "Resolver error" at the first API call.
+    if let Some(id) = pin.as_deref() {
+        let prefix = forge_config::provider_of(id);
+        // A prefixed id whose provider isn't a recognized one is clearly invalid — hard stop, even
+        // when discovery is off/timed-out and there's no catalog to check against (it would
+        // otherwise pass straight through to a raw resolver error every turn).
+        if !prefix.is_empty() && !is_known_provider_prefix(prefix) {
+            anyhow::bail!(
+                "unknown model '{id}': '{prefix}' is not a known provider. \
+                 Run `forge models` to see usable ids, or `forge auth` to add a provider."
+            );
+        }
+        // With a catalog, also flag a known-provider id that isn't in it (likely a typo). This
+        // stays a soft warning: a brand-new model may simply not be discovered yet.
+        if let Some(cat) = catalog.as_ref() {
+            if !cat.models().contains(&id.to_string()) {
+                let suggestions: Vec<&str> = cat
+                    .models()
+                    .iter()
+                    .filter(|m| m.starts_with(prefix))
+                    .map(String::as_str)
+                    .take(5)
+                    .collect();
+                let hint = if suggestions.is_empty() {
+                    format!("no '{prefix}' models in catalog — run `forge models` to see what's available")
+                } else {
+                    format!("try: {}", suggestions.join(", "))
+                };
+                presenter.emit(forge_tui::PresenterEvent::Warning(format!(
+                    "unknown model '{id}' — {hint}"
+                )));
+            }
         }
     }
 
@@ -389,15 +402,56 @@ pub(crate) async fn run(
     if prompt.trim().is_empty() {
         anyhow::bail!("empty prompt — usage: forge run \"<your task>\"");
     }
+    // A first-time user's `forge run "hi"` would otherwise dead-end with no provider; offer the
+    // guided wizard (no-ops on non-tty / once configured), same as `chat()`.
+    maybe_first_run_setup(mock)?;
     let mut session = build_session(mock, mode, tui, resume, pin).await?;
-    session
-        .run_turn(&prompt)
-        .await
-        .context("running agent turn")?;
-    // In the TUI, hold the final frame until the user quits (Esc / Ctrl-C).
+
+    // TUI mode handles its own Ctrl-C (crossterm) + spinner; keep it unchanged.
     if tui {
+        session
+            .run_turn(&prompt)
+            .await
+            .context("running agent turn")?;
+        // Hold the final frame until the user quits (Esc / Ctrl-C).
         let _ = session.read_line();
+        return Ok(());
     }
+
+    // Headless heartbeat: a long model call streams nothing until the first token, so tick
+    // "working… Ns" to stderr to show the turn is alive. Skipped for `--mock` (instant).
+    let heartbeat = (!mock).then(|| {
+        tokio::spawn(async {
+            let start = std::time::Instant::now();
+            let mut iv = tokio::time::interval(std::time::Duration::from_secs(2));
+            iv.tick().await; // immediate first tick — skip it
+            loop {
+                iv.tick().await;
+                eprint!("\r\x1b[2m⧖ working… {}s\x1b[0m", start.elapsed().as_secs());
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+            }
+        })
+    });
+
+    // Race the turn against Ctrl-C so a hard kill doesn't discard partial output: on interrupt we
+    // drop the turn future (it stops at its next await) and return what already streamed.
+    let result = {
+        let turn = session.run_turn(&prompt);
+        tokio::pin!(turn);
+        tokio::select! {
+            r = &mut turn => r.map(|_| ()).context("running agent turn"),
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\r\x1b[K\x1b[2m⧖ interrupted — stopping turn (partial output kept)\x1b[0m");
+                Ok(())
+            }
+        }
+    };
+    if let Some(h) = heartbeat {
+        h.abort();
+        eprint!("\r\x1b[K"); // clear the heartbeat line
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+    }
+    result?;
     Ok(())
 }
 
@@ -407,6 +461,7 @@ pub(crate) async fn nl_cmd(query: String, mode: Option<Mode>) -> Result<()> {
             "empty query — usage: forge nl \"what changed performance-wise since last week\""
         );
     }
+    maybe_first_run_setup(false)?;
     // Gather shell context so the model can run the right commands.
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -451,6 +506,14 @@ Environment:\n\
         .await
         .context("nl query")?;
     Ok(())
+}
+
+/// Whether `prefix` is a provider Forge recognizes — a key-based/custom provider, or one of the
+/// keyless ones (local `ollama`, the `claude-cli`/`codex-cli` bridges). Used to reject a clearly
+/// invalid `--model provider::id` even when no catalog is available to check the full id against.
+fn is_known_provider_prefix(prefix: &str) -> bool {
+    const KEYLESS: &[&str] = &["ollama", "claude-cli", "codex-cli"];
+    KEYLESS.contains(&prefix) || forge_config::known_key_providers().any(|p| p == prefix)
 }
 
 /// On a fresh machine (no keys, no bridge, no config) offer the `forge init` wizard before the
@@ -658,6 +721,23 @@ pub(crate) fn config_editor_rows() -> Vec<forge_tui::SettingRow> {
             source: d.source.to_string(),
         }
     }));
+    // Complex sections (hooks/mcp/permissions) can't be flattened to scalars, so list them
+    // read-only with an "edit in $EDITOR" jump — otherwise they're invisible in `/config`.
+    rows.extend(
+        forge_config::complex_sections()
+            .iter()
+            .map(|&section| forge_tui::SettingRow {
+                path: section.to_string(),
+                group: "Advanced (edit in $EDITOR)".to_string(),
+                label: section.to_string(),
+                help: Some(forge_config::complex_section_help(section).to_string()),
+                kind: forge_tui::RowKind::ReadOnly,
+                value: String::new(),
+                default: String::new(),
+                modified: false,
+                source: "config.toml".to_string(),
+            }),
+    );
     rows
 }
 
@@ -816,6 +896,8 @@ pub(crate) async fn run_chat_tui(
             } else {
                 e.description.clone()
             },
+            // File-based commands/skills take freeform input; no fixed usage hint.
+            usage: String::new(),
         })
         .collect();
     for w in catalog.warnings() {
@@ -1169,6 +1251,26 @@ pub(crate) async fn run_chat_tui(
                     forge_tui::ConfigAction::Reload => {
                         app.config_editor.rows = config_editor_rows();
                     }
+                    forge_tui::ConfigAction::EditFile => {
+                        // Jump to $EDITOR for a complex section (hooks/mcp/permissions). Tear down +
+                        // rebuild the terminal around the editor (same primitive as the keybind
+                        // configurator), then reload rows to reflect any edits.
+                        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+                        if let Some(dir) = forge_config::config_dir() {
+                            let path = dir.join("config.toml");
+                            let _ = tui.run_fullscreen(|| {
+                                std::process::Command::new(&editor)
+                                    .arg(&path)
+                                    .status()
+                                    .map(|_| ())
+                            });
+                            app.config_editor.rows = config_editor_rows();
+                            app.config_editor.status = Some(format!("edited {}", path.display()));
+                        } else {
+                            app.config_editor.status =
+                                Some("⚠ no config directory on this platform".to_string());
+                        }
+                    }
                     forge_tui::ConfigAction::Close | forge_tui::ConfigAction::None => {}
                 }
                 dirty = true;
@@ -1235,6 +1337,19 @@ pub(crate) async fn run_chat_tui(
 
             if matches!(key, KeyKind::ShowHelp) {
                 // Show help by opening the keybind configurator in read-only mode (clone, discard).
+                let mut tmp = app.keybinds.clone();
+                let _ = tui.run_fullscreen(|| forge_tui::run_keybind_configurator(&mut tmp));
+                dirty = true;
+                continue;
+            }
+
+            // `?` on an empty, idle prompt opens the keybind help (discoverability) — once the user
+            // has typed anything, `?` is a literal character and falls through to input handling.
+            if matches!(key, KeyKind::Char('?'))
+                && app.input.is_empty()
+                && !busy
+                && !app.palette.open
+            {
                 let mut tmp = app.keybinds.clone();
                 let _ = tui.run_fullscreen(|| forge_tui::run_keybind_configurator(&mut tmp));
                 dirty = true;
@@ -2143,8 +2258,16 @@ pub(crate) async fn run_chat_tui(
                     }
                     _ => {}
                 }
+            } else if let (true, Some(up)) = (
+                matches!(key, KeyKind::Up),
+                forge_tui::input_cursor_up(&app.input, app.input_cursor),
+            ) {
+                // Multiline draft, cursor below the first row: move the cursor up a line instead of
+                // clobbering the draft with history recall (history only fires from the first row).
+                app.input_cursor = up;
+                dirty = true;
             } else if matches!(key, KeyKind::Up) {
-                // Arrow-up: browse to the previous prompt history entry.
+                // Arrow-up on the first row (or single-line): browse the previous prompt history.
                 if history_pos.is_none() {
                     history_draft = app.input.clone();
                 }
@@ -3135,4 +3258,21 @@ fn find_starting_event_id(store: &forge_store::Store, session_id: &str) -> i64 {
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_provider_prefixes_accept_real_providers_and_keyless_bridges() {
+        assert!(is_known_provider_prefix("groq"));
+        assert!(is_known_provider_prefix("anthropic"));
+        assert!(is_known_provider_prefix("ollama"));
+        assert!(is_known_provider_prefix("claude-cli"));
+        assert!(is_known_provider_prefix("codex-cli"));
+        // Clearly-invalid prefixes are rejected so `--model` hard-stops without a catalog.
+        assert!(!is_known_provider_prefix("nonsense"));
+        assert!(!is_known_provider_prefix("gpt-5"));
+    }
 }

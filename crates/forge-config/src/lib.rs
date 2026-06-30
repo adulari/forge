@@ -1874,6 +1874,22 @@ impl SettingValue {
 /// Top-level sections that are NOT scalar-editable here — each has its own command/flow.
 const COMPLEX_SECTIONS: &[&str] = &["hooks", "mcp", "permissions"];
 
+/// The complex (table/array) config sections the flat `/config` editor can't surface as scalars.
+/// They're listed read-only there with an "edit in $EDITOR" jump so they're at least discoverable.
+pub fn complex_sections() -> &'static [&'static str] {
+    COMPLEX_SECTIONS
+}
+
+/// One-line description of a complex section, for its read-only `/config` row.
+pub fn complex_section_help(section: &str) -> &'static str {
+    match section {
+        "hooks" => "pre/post tool-use shell hooks — structured TOML, edit in $EDITOR",
+        "mcp" => "external MCP servers — edit in $EDITOR (or .mcp.json / .forge/mcp.toml)",
+        "permissions" => "allow/deny tool rules — structured TOML, edit in $EDITOR",
+        _ => "structured section — edit in $EDITOR",
+    }
+}
+
 /// Importance order for the editor: these path prefixes sort first (in this order); everything else
 /// follows alphabetically. New fields therefore appear automatically, just lower in the list until
 /// curated here.

@@ -32,6 +32,8 @@ pub enum RowKind {
     Text,
     /// A secret (API key): masked, edits route to the keyring.
     Secret,
+    /// A non-scalar section (hooks/mcp/permissions) shown read-only; Enter jumps to `$EDITOR`.
+    ReadOnly,
 }
 
 /// One editable setting row (the TUI-side mirror of `forge_config::SettingDescriptor`).
@@ -90,6 +92,9 @@ pub enum ConfigAction {
     },
     /// Scope toggled — reload rows.
     Reload,
+    /// Open the config file in `$EDITOR` (for a read-only complex section). The shell reloads
+    /// rows afterwards.
+    EditFile,
     /// Editor closed.
     Close,
 }
@@ -199,9 +204,9 @@ impl ConfigEditor {
                 self.project_scope = !self.project_scope;
                 ConfigAction::Reload
             }
-            // Del resets the selected setting to its default.
+            // Del resets the selected setting to its default (not secrets or read-only sections).
             KeyKind::DeleteForward => match self.selected_row() {
-                Some(r) if !r.is_secret() => ConfigAction::Reset {
+                Some(r) if !r.is_secret() && r.kind != RowKind::ReadOnly => ConfigAction::Reset {
                     path: r.path.clone(),
                 },
                 _ => ConfigAction::None,
@@ -226,6 +231,8 @@ impl ConfigEditor {
                     return ConfigAction::None;
                 };
                 match &r.kind {
+                    // Complex section: jump to $EDITOR (the shell owns the actual launch).
+                    RowKind::ReadOnly => ConfigAction::EditFile,
                     RowKind::Bool => ConfigAction::Save {
                         path: r.path.clone(),
                         value: (r.value != "true").to_string(),
@@ -312,6 +319,10 @@ fn value_span(r: &SettingRow, sel: bool) -> Span<'static> {
         }
         RowKind::Enum(_) => Span::styled(format!("‹ {} ›", r.value), style),
         RowKind::Secret => Span::styled(r.value.clone(), style),
+        RowKind::ReadOnly => Span::styled(
+            "↵ edit in $EDITOR".to_string(),
+            Style::default().fg(if sel { WARNYEL } else { DIM }),
+        ),
         _ => {
             let v = if r.value.is_empty() {
                 "—".to_string()
@@ -440,6 +451,7 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
             RowKind::Enum(o) => format!("one of: {}", o.join(" / ")),
             RowKind::Secret => "secret (keyring)".to_string(),
             RowKind::Text => "text".to_string(),
+            RowKind::ReadOnly => "section (↵ to edit in $EDITOR)".to_string(),
         };
         let dflt = if r.is_secret() {
             String::new()
@@ -493,6 +505,7 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
         match ed.selected_row().map(|r| &r.kind) {
             Some(RowKind::Bool) => "  Enter toggle · Del reset · Tab scope · Esc close",
             Some(RowKind::Enum(_)) => "  ←/→ change · Del reset · Tab scope · Esc close",
+            Some(RowKind::ReadOnly) => "  Enter edit in $EDITOR · Tab scope · Esc close",
             _ => "  Enter edit · Del reset · Tab scope · Esc close",
         }
     };

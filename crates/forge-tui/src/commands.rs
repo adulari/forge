@@ -19,6 +19,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/help",
     },
     Command {
+        name: "keys",
+        desc: "show keyboard shortcuts (also F1)",
+        usage: "/keys",
+    },
+    Command {
         name: "sessions",
         desc: "browse & resume past sessions",
         usage: "/sessions",
@@ -205,6 +210,8 @@ pub enum StatuslineAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {
     Help,
+    /// Open the keybind help overlay (`/keys`) — the read-only keybind list (same as F1/ShowHelp).
+    Keys,
     ListSessions,
     Resume(String),
     /// Pin a specific model for all subsequent turns in this session. `None` clears the pin
@@ -499,6 +506,7 @@ pub fn parse_command(line: &str) -> CommandAction {
     let arg = parts.next().unwrap_or("").trim().to_string();
     match name.as_str() {
         "help" | "h" | "?" => CommandAction::Help,
+        "keys" | "keybinds" | "shortcuts" => CommandAction::Keys,
         "sessions" | "ls" => CommandAction::ListSessions,
         "resume" | "r" => {
             if arg.is_empty() {
@@ -656,6 +664,10 @@ pub fn filter_commands(query: &str) -> Vec<&'static Command> {
 pub struct PaletteEntry {
     pub name: String,
     pub desc: String,
+    /// Usage/argument hint (e.g. `/effort [low|medium|high|xhigh]`). Empty for file-based commands
+    /// and skills that take freeform input; shown for the highlighted row so non-obvious args
+    /// (`/assay`, `/replay`, `/model`) are discoverable inline.
+    pub usage: String,
 }
 
 /// Inline command-palette state. Opens when the input line starts with `/`. The binary's render
@@ -696,6 +708,7 @@ impl Palette {
             .map(|c| PaletteEntry {
                 name: c.name.to_string(),
                 desc: c.desc.to_string(),
+                usage: c.usage.to_string(),
             })
             .collect();
         all.extend(self.extra.iter().cloned());
@@ -742,12 +755,48 @@ impl Palette {
             .map(|e| e.name)
     }
 
+    /// The highlighted row's usage/argument hint, shown inline in the palette. Empty when the
+    /// command has no non-obvious args.
+    pub fn selected_usage(&self) -> Option<String> {
+        self.matches()
+            .into_iter()
+            .nth(self.selected)
+            .map(|e| e.usage)
+            .filter(|u| !u.is_empty())
+    }
+
     /// Advance the reveal animation toward 1.0 (called per render tick while open).
     pub fn tick_anim(&mut self) {
         if self.open && self.anim < 1.0 {
             self.anim = (self.anim + 0.34).min(1.0);
         }
     }
+}
+
+/// Best-effort fixed argument values for a command, parsed from a `[a|b|c]` group in its usage
+/// string (e.g. `/effort [low|medium|high|xhigh]` → `["low","medium","high","xhigh"]`). Returns
+/// empty for commands whose args are freeform (paths, ids, prompts). Used to offer enum-value
+/// completion once the user has typed the command word + a space.
+pub fn arg_values(name: &str) -> Vec<&'static str> {
+    let usage = match COMMANDS.iter().find(|c| c.name == name) {
+        Some(c) => c.usage,
+        None => return Vec::new(),
+    };
+    let (open, close) = match (usage.find('['), usage.find(']')) {
+        (Some(o), Some(c)) if c > o + 1 => (o, c),
+        _ => return Vec::new(),
+    };
+    let inner = &usage[open + 1..close];
+    // Only treat it as a fixed enum when it's a clean `a|b|c` set (no spaces/sub-args like
+    // `[name]` or `[--flag <v>]`).
+    if !inner.contains('|') || inner.contains(' ') || inner.contains('<') {
+        return Vec::new();
+    }
+    inner
+        .split('|')
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .collect()
 }
 
 /// What an open [`Picker`] is selecting, so the render loop knows what `Enter` does.
@@ -873,6 +922,39 @@ impl Picker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn palette_carries_usage_and_exposes_selected_hint() {
+        let mut p = Palette::default();
+        p.open_with("effort");
+        // The /effort builtin carries a usage string with a fixed enum.
+        let m = p.matches();
+        let eff = m
+            .iter()
+            .find(|e| e.name == "effort")
+            .expect("effort present");
+        assert!(
+            eff.usage.contains("low"),
+            "usage hint retained, got {:?}",
+            eff.usage
+        );
+        // selected_usage surfaces the highlighted row's hint.
+        p.selected = m.iter().position(|e| e.name == "effort").unwrap();
+        assert_eq!(p.selected_usage().as_deref(), Some(eff.usage.as_str()));
+    }
+
+    #[test]
+    fn arg_values_parses_fixed_enums_only() {
+        // Clean `a|b|c` enum → parsed.
+        assert_eq!(arg_values("effort"), vec!["low", "medium", "high", "xhigh"]);
+        // Freeform args (`/model [<id>]`, `/replay <id> …`) → no fixed set.
+        assert!(arg_values("model").is_empty());
+        assert!(arg_values("replay").is_empty());
+        // `[--flag <v>]` style isn't a clean enum.
+        assert!(arg_values("remote").is_empty());
+        // Unknown command.
+        assert!(arg_values("nope").is_empty());
+    }
 
     fn rows() -> Vec<PickerRow> {
         vec![
@@ -1129,11 +1211,13 @@ mod tests {
                 PaletteEntry {
                     name: "review".into(),
                     desc: "file command".into(),
+                    usage: String::new(),
                 },
                 // Same name as a builtin: the builtin must win (no duplicate row).
                 PaletteEntry {
                     name: "clear".into(),
                     desc: "shadowing attempt".into(),
+                    usage: String::new(),
                 },
             ],
             ..Default::default()

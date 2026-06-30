@@ -425,6 +425,9 @@ pub struct App {
     /// Configurable keybinds loaded from config at startup. Synced into `Tui.keybinds` for
     /// `poll_event` matching; modified by the keybind configurator overlay.
     pub keybinds: forge_config::KeybindsConfig,
+    /// Last terminal width seen at render time, so scrollback-line builders (in `apply`, which has
+    /// no `Rect`) can size width-aware truncation. `Cell` because it's written from `&self` render.
+    last_width: std::cell::Cell<u16>,
 }
 
 /// A position in the wrapped transcript: `row` is the wrapped-row index in the cache, `col` the
@@ -956,12 +959,15 @@ impl App {
                 }
             }
             PresenterEvent::Warning(msg) => self.flush.push(warning_line(&msg)),
+            PresenterEvent::Error(msg) => self.flush.push(error_line(&msg)),
             PresenterEvent::ToolStart { name, args } => {
                 self.model_search = None;
-                self.flush.push(tool_start_line(&name, &args))
+                self.flush
+                    .push(tool_start_line(&name, &args, self.last_width.get()))
             }
             PresenterEvent::ToolResult { name, ok, summary } => {
-                self.flush.push(tool_result_line(&name, ok, &summary))
+                self.flush
+                    .push(tool_result_line(&name, ok, &summary, self.last_width.get()))
             }
             PresenterEvent::ContextInjected {
                 symbols,
@@ -974,8 +980,12 @@ impl App {
                 fix,
             } => {
                 self.pending_shell_fix = fix.clone();
-                self.flush
-                    .extend(shell_diagnosis_lines(&command, &diagnosis, fix.as_deref()));
+                self.flush.extend(shell_diagnosis_lines(
+                    &command,
+                    &diagnosis,
+                    fix.as_deref(),
+                    self.last_width.get(),
+                ));
             }
             PresenterEvent::Cost {
                 session_total_usd,
@@ -1056,8 +1066,13 @@ impl App {
                 summary,
                 cost_usd,
             } => {
-                self.flush
-                    .push(subagent_branch_line(&agent, ok, cost_usd, &summary));
+                self.flush.push(subagent_branch_line(
+                    &agent,
+                    ok,
+                    cost_usd,
+                    &summary,
+                    self.last_width.get(),
+                ));
                 if let Some(row) = self.subagents.iter_mut().find(|r| r.id == id) {
                     row.done = true;
                     row.cost = cost_usd;
@@ -1518,13 +1533,19 @@ impl App {
     }
 
     /// Flush accumulated reasoning into scrollback as a dim "thinking" block (once), if any.
-    /// When `show_thinking` is false the buffer is discarded silently (no scrollback line).
+    /// When `show_thinking` is false the block collapses to a single dim discoverability marker.
     fn flush_reasoning(&mut self) {
         if self.reasoning.is_empty() {
             return;
         }
         let text = std::mem::take(&mut self.reasoning);
         if !self.show_thinking {
+            // Collapsed-by-default: a one-line marker so the user knows reasoning happened and is
+            // toggleable, instead of silently discarding it (undiscoverable).
+            self.flush.push(TextLine::from(Span::styled(
+                "  💭 thinking… (/thinking to expand)",
+                Style::default().fg(DIM),
+            )));
             return;
         }
         let dim = Style::default().fg(DIM);
@@ -1685,10 +1706,12 @@ impl App {
                     self.flush.push(TextLine::default());
                 }
                 ReplayItem::Tool { name, args } => {
-                    self.flush.push(tool_start_line(name, args));
+                    self.flush
+                        .push(tool_start_line(name, args, self.last_width.get()));
                 }
                 ReplayItem::ToolResult { name, ok, summary } => {
-                    self.flush.push(tool_result_line(name, *ok, summary));
+                    self.flush
+                        .push(tool_result_line(name, *ok, summary, self.last_width.get()));
                 }
                 ReplayItem::Note(text) => self.flush.push(warning_line(text)),
             }
@@ -2383,12 +2406,20 @@ fn warning_line(msg: &str) -> TextLine<'static> {
     ))
 }
 
-fn tool_start_line(name: &str, args: &str) -> TextLine<'static> {
+fn error_line(msg: &str) -> TextLine<'static> {
+    TextLine::from(Span::styled(
+        format!("  ✖ {msg}"),
+        Style::default().fg(ERRRED).bold(),
+    ))
+}
+
+fn tool_start_line(name: &str, args: &str, width: u16) -> TextLine<'static> {
+    let cap = width_cap(width, 6 + name.chars().count(), 48);
     TextLine::from(vec![
         Span::styled("  ↳ ", Style::default().fg(TOOLCYAN)),
         Span::styled(name.to_string(), Style::default().fg(TOOLCYAN).bold()),
         Span::styled(
-            format!("  {}", truncate(args, 48)),
+            format!("  {}", truncate(args, cap)),
             Style::default().fg(DIM),
         ),
     ])
@@ -2473,10 +2504,14 @@ fn shell_diagnosis_lines(
     command: &str,
     diagnosis: &str,
     fix: Option<&str>,
+    width: u16,
 ) -> Vec<TextLine<'static>> {
     let mut lines = vec![TextLine::from(vec![
         Span::styled("  ⚠ shell failed ", Style::default().fg(ERRRED).bold()),
-        Span::styled(truncate(command, 56), Style::default().fg(DIM)),
+        Span::styled(
+            truncate(command, width_cap(width, 18, 56)),
+            Style::default().fg(DIM),
+        ),
     ])];
     for line in diagnosis.lines() {
         lines.push(TextLine::from(Span::styled(
@@ -2503,18 +2538,25 @@ fn subagent_header_line() -> TextLine<'static> {
 }
 
 /// One completed subagent as a branch of the group box.
-fn subagent_branch_line(agent: &str, ok: bool, cost_usd: f64, summary: &str) -> TextLine<'static> {
+fn subagent_branch_line(
+    agent: &str,
+    ok: bool,
+    cost_usd: f64,
+    summary: &str,
+    width: u16,
+) -> TextLine<'static> {
     let (mark, color) = if ok {
         ("✓", OKGREEN)
     } else {
         ("✗", ERRRED)
     };
+    let cap = width_cap(width, 18 + agent.chars().count(), 44);
     TextLine::from(vec![
         Span::styled("  ├─ ", Style::default().fg(DIM)),
         Span::styled(format!("{mark} "), Style::default().fg(color)),
         Span::styled(format!("[{agent}] "), Style::default().fg(TOOLCYAN)),
         Span::styled(format!("${cost_usd:.4}  "), Style::default().fg(DIM)),
-        Span::styled(truncate(summary, 44), Style::default().fg(DIM)),
+        Span::styled(truncate(summary, cap), Style::default().fg(DIM)),
     ])
 }
 
@@ -2528,16 +2570,17 @@ fn subagent_footer_line(n: usize, total_usd: f64) -> TextLine<'static> {
 
 /// A still-running subagent row for the live preview (animated spinner). Shows the child's live
 /// activity tail once it starts streaming, falling back to the task before then.
-fn tool_result_line(name: &str, ok: bool, summary: &str) -> TextLine<'static> {
+fn tool_result_line(name: &str, ok: bool, summary: &str, width: u16) -> TextLine<'static> {
     let (mark, color) = if ok {
         ("  ✓ ", OKGREEN)
     } else {
         ("  ✗ ", ERRRED)
     };
+    let cap = width_cap(width, 6 + name.chars().count(), 56);
     TextLine::from(vec![
         Span::styled(mark, Style::default().fg(color)),
         Span::styled(format!("{name}  "), Style::default().fg(color)),
-        Span::styled(truncate(summary, 56), Style::default().fg(DIM)),
+        Span::styled(truncate(summary, cap), Style::default().fg(DIM)),
     ])
 }
 
@@ -2629,6 +2672,14 @@ fn truncate(s: &str, max: usize) -> String {
     } else {
         s
     }
+}
+
+/// Width-aware truncation budget: scales with the terminal width but never drops below `min` (the
+/// old fixed cap, so narrow terminals are unchanged). `reserve` accounts for the columns already
+/// taken by the line's glyph/label prefix. A width of 0 (pre-first-render) falls back to 80.
+fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
+    let w = if width == 0 { 80 } else { width as usize };
+    w.saturating_sub(reserve).max(min)
 }
 
 // ---- Live region (pinned at the bottom; rendered every frame). ----
@@ -2804,10 +2855,27 @@ fn render_palette(frame: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::default().fg(USER)
             };
-            TextLine::from(vec![
+            let mut spans = vec![
                 Span::styled(format!("  {marker}/{}", c.name), name_style),
                 Span::styled(format!("  {}", c.desc), Style::default().fg(DIM)),
-            ])
+            ];
+            // Inline usage/arg hint on the highlighted row so non-obvious args (`/assay`,
+            // `/replay`, `/model`, and fixed-enum args like `/effort [low|…]`) are discoverable.
+            if selected && !c.usage.is_empty() {
+                spans.push(Span::styled(
+                    format!("   {}", c.usage),
+                    Style::default().fg(TOOLCYAN),
+                ));
+                // Best-effort enum-value completion candidates for fixed-arg commands.
+                let values = crate::commands::arg_values(&c.name);
+                if !values.is_empty() {
+                    spans.push(Span::styled(
+                        format!("   ⇥ {}", values.join(" · ")),
+                        Style::default().fg(DIM),
+                    ));
+                }
+            }
+            TextLine::from(spans)
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
@@ -2960,6 +3028,7 @@ fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 || area.width == 0 {
         return;
     }
+    app.last_width.set(area.width);
     let body_h = area.height as usize;
     // Memoized: only re-wraps the bulk log when it changed; the streaming edge is the cheap part.
     app.ensure_wrapped_main(area.width);
@@ -3030,17 +3099,17 @@ fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
+    app.last_width.set(area.width);
     // Only the in-flight reply edge lives here now; the task + subagent panels are their own
     // always-visible regions (see `render_live`), so streaming no longer hides them.
     if app.streaming_active {
-        let line = TextLine::from(vec![
-            Span::raw(format!("  {}", app.streaming)),
-            Span::styled("▌", Style::default().fg(ACCENT)),
-        ]);
-        let para = Paragraph::new(line).wrap(Wrap { trim: false });
-        let count = para.line_count(area.width) as u16;
-        let scroll = count.saturating_sub(area.height);
-        frame.render_widget(para.scroll((scroll, 0)), area);
+        // Reuse the full-screen streaming edge so the inline reply reflows + markdown-highlights
+        // exactly like the transcript, instead of a raw newline-collapsed blob.
+        let rows = app.streaming_edge(area.width);
+        let body_h = area.height as usize;
+        let start = rows.len().saturating_sub(body_h);
+        let visible: Vec<TextLine> = rows.into_iter().skip(start).collect();
+        frame.render_widget(Paragraph::new(visible), area);
     }
 }
 
@@ -3242,6 +3311,8 @@ fn render_permission(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled(format!("  {p}  "), Style::default().fg(WARNYEL)),
             Span::styled("[y]es", Style::default().fg(OKGREEN).bold()),
             Span::styled(" / ", Style::default().fg(DIM)),
+            Span::styled("[a]lways", Style::default().fg(OKGREEN).bold()),
+            Span::styled(" / ", Style::default().fg(DIM)),
             Span::styled("[N]o ", Style::default().fg(ERRRED).bold()),
         ]);
         frame.render_widget(Paragraph::new(line), area);
@@ -3272,6 +3343,26 @@ fn input_text_rows(input: &str, box_width: u16) -> u16 {
 /// Dynamic input-box height: grows from [`INPUT_H`] to [`INPUT_MAX_H`] with the wrapped content.
 pub fn input_box_height(input: &str, box_width: u16) -> u16 {
     (input_text_rows(input, box_width) + 2).clamp(INPUT_H, INPUT_MAX_H)
+}
+
+/// For a multiline input, the cursor position one logical line up (same column, snapped to a UTF-8
+/// boundary), or `None` when the cursor is on the first row — in which case the caller recalls
+/// prompt history instead of clobbering a multiline draft.
+pub fn input_cursor_up(input: &str, cursor: usize) -> Option<usize> {
+    let cursor = cursor.min(input.len());
+    if cursor == 0 || !input[..cursor].contains('\n') {
+        return None;
+    }
+    let line_start = input[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let col = cursor - line_start;
+    let prev_nl = line_start - 1; // the '\n' that ends the previous line
+    let prev_start = input[..prev_nl].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let prev_line = &input[prev_start..prev_nl];
+    let mut target = col.min(prev_line.len());
+    while target > 0 && !prev_line.is_char_boundary(target) {
+        target -= 1;
+    }
+    Some(prev_start + target)
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
@@ -3328,6 +3419,17 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
             spans.push(Span::raw(line.to_string()));
         }
         text_lines.push(TextLine::from(spans));
+    }
+
+    // Ghost placeholder on an empty, idle prompt — advertises the discoverability cues a new user
+    // would otherwise never find (`/` commands, `@` files, `?` keybind help).
+    if app.input.is_empty() && !app.busy && app.prompt.is_none() {
+        if let Some(first) = text_lines.first_mut() {
+            first.spans.push(Span::styled(
+                "Message…   / commands  ·  @ files  ·  ? keys",
+                Style::default().fg(DIM),
+            ));
+        }
     }
 
     // Scroll so the cursor row (bottom) stays visible once content exceeds the visible rows.
@@ -4318,7 +4420,10 @@ fn render_statusline_widget<'a>(
                 ));
             }
             spans.push(Span::styled(
-                model.to_string(),
+                // In-band display uses the short tail (e.g. `claude-opus-4-8`), matching the
+                // activity panel + transcript; the full `provider::model` id is only kept where
+                // disambiguation matters (cost lookup, routing rationale).
+                model_short(Some(model)),
                 Style::default().fg(ACCENT).bold().bg(STATUSBG),
             ));
             Some(spans)
@@ -4630,6 +4735,45 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    #[test]
+    fn model_short_strips_provider_prefix() {
+        assert_eq!(
+            model_short(Some("anthropic::claude-opus-4-8")),
+            "claude-opus-4-8"
+        );
+        assert_eq!(
+            model_short(Some("groq::llama-3.1-8b-instant")),
+            "llama-3.1-8b-instant"
+        );
+        // No prefix → unchanged; empty/None → placeholder.
+        assert_eq!(model_short(Some("opus")), "opus");
+        assert_eq!(model_short(Some("")), "…");
+        assert_eq!(model_short(None), "…");
+    }
+
+    #[test]
+    fn input_cursor_up_recalls_on_first_row_moves_otherwise() {
+        // Single-line / first-row cursor → None (caller recalls history).
+        assert_eq!(input_cursor_up("hello", 3), None);
+        assert_eq!(input_cursor_up("", 0), None);
+        // Multiline, cursor on the second line → moves up to the same column on line 1.
+        // "abc\nxy|z" : cursor at byte 6 (col 2 on line 2) → line 1 col 2 = byte 2.
+        assert_eq!(input_cursor_up("abc\nxyz", 6), Some(2));
+        // Column clamped when the previous line is shorter.
+        // "ab\nlongline|" cursor at end (col 8) → clamp to line-1 len (2) = byte 2.
+        assert_eq!(input_cursor_up("ab\nlongline", 11), Some(2));
+    }
+
+    #[test]
+    fn width_cap_scales_but_floors_at_min() {
+        // Wide terminal scales the budget above the old fixed min.
+        assert!(width_cap(200, 6, 48) > 48);
+        // Narrow terminal never drops below the min (old fixed cap preserved).
+        assert_eq!(width_cap(40, 6, 48), 48);
+        // Width 0 (pre-first-render) falls back to 80, not 0.
+        assert!(width_cap(0, 6, 48) >= 48);
+    }
+
     /// Render the pinned live region at its natural (dynamic) live height — so the sticky task +
     /// subagent panels get their own rows, exactly as the real I/O shell sizes the viewport.
     fn screen(app: &App) -> String {
@@ -4846,6 +4990,48 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    #[test]
+    fn error_event_renders_distinct_red_glyph_from_warning() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::Error("provider hard-fail".into()));
+        let lines = app.drain_flush();
+        let line = lines.first().expect("error line flushed");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains('✖'), "distinct error glyph: {text}");
+        assert!(text.contains("provider hard-fail"));
+        // Rendered in the error red, not the benign warning yellow.
+        assert!(
+            line.spans.iter().any(|s| s.style.fg == Some(ERRRED)),
+            "error styled red"
+        );
+
+        // A Warning still uses the benign yellow ⚠ — the two are visually distinct.
+        let mut app2 = App::default();
+        app2.apply(PresenterEvent::Warning("heads up".into()));
+        let wlines = app2.drain_flush();
+        let wtext: String = wlines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(wtext.contains('⚠') && !wtext.contains('✖'));
+    }
+
+    #[test]
+    fn reasoning_collapses_to_discoverable_marker_when_hidden() {
+        let mut app = App::default();
+        assert!(!app.show_thinking, "hidden by default");
+        app.apply(PresenterEvent::Reasoning("deep thoughts".into()));
+        app.apply(PresenterEvent::AssistantDone);
+        let text = flush_text(&mut app);
+        // Collapsed: a discoverability marker, not the raw reasoning text, not silence.
+        assert!(text.contains("thinking"), "collapsed marker shown: {text}");
+        assert!(
+            text.contains("/thinking"),
+            "tells the user how to expand: {text}"
+        );
+        assert!(
+            !text.contains("deep thoughts"),
+            "raw reasoning hidden when collapsed"
+        );
     }
 
     #[test]
@@ -5157,7 +5343,16 @@ mod tests {
             rationale: "x".into(),
         });
         let text = screen(&app);
-        assert!(text.contains("openai::gpt-4o-mini"), "model in statusline");
+        // In-band display uses the short tail (consistent with the panels/transcript), not the
+        // full `provider::model` id.
+        assert!(
+            text.contains("gpt-4o-mini"),
+            "short model in statusline: {text:?}"
+        );
+        assert!(
+            !text.contains("openai::gpt-4o-mini"),
+            "full id not shown in-band"
+        );
         assert!(text.contains("$0.0042"), "cost in statusline");
         assert!(text.contains("standard"), "tier in statusline");
     }
