@@ -318,7 +318,16 @@ impl Lattice {
         let rel = self.rel_path(path);
         let src = match std::fs::read_to_string(path) {
             Ok(s) => s,
-            Err(_) => return Ok(()), // unreadable (e.g. non-UTF8) — skip, don't fail the whole run
+            Err(_) => {
+                // Unreadable. If the file no longer EXISTS it was deleted — purge its row so its
+                // nodes/edges/refs (via FK cascade) don't survive as phantom symbols in
+                // query/impact. A still-present unreadable file (non-UTF8, transient lock) is
+                // skipped without failing the whole run.
+                if !path.exists() {
+                    let _ = self.store.delete_lattice_file(&self.repo_root, &rel);
+                }
+                return Ok(());
+            }
         };
         let hash = sha_hex(src.as_bytes());
         if self
@@ -1238,6 +1247,27 @@ mod tests {
         assert!(
             lat.query("alpha", 10).unwrap().is_empty(),
             "stale symbol removed"
+        );
+    }
+
+    #[test]
+    fn deleting_a_file_prunes_its_symbols_on_reindex() {
+        // When a watched source file is removed on disk, reindexing its path must purge the file's
+        // row (cascading its nodes/edges/refs) so query/impact don't keep returning phantom symbols.
+        let t = Tmp::new();
+        t.write("src/gone.rs", "pub fn doomed() {}\n");
+        let lat = lattice(&t.root);
+        lat.update().unwrap();
+        let p = t.root.join("src/gone.rs");
+        assert_eq!(lat.query("doomed", 10).unwrap().len(), 1);
+
+        std::fs::remove_file(&p).unwrap();
+        // The watcher routes a removed supported file through reindex_path; the file no longer
+        // exists, so its row is deleted rather than left stale.
+        lat.reindex_path(&p).unwrap();
+        assert!(
+            lat.query("doomed", 10).unwrap().is_empty(),
+            "deleted file's symbol must not linger as a phantom"
         );
     }
 
