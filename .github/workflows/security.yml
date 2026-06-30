@@ -25,17 +25,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: cargo audit
-        uses: rustsec/audit-check@v2
+      - uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+      # Fail on any vulnerability OR any unmaintained/unsound/yanked warning (--deny warnings),
+      # EXCEPT the documented unmaintained-transitive advisories below (kept in sync with
+      # deny.toml [advisories].ignore). Real vulnerabilities are FIXED via lockfile bumps, never
+      # ignored — e.g. quinn-proto RUSTSEC-2026-0185 and anyhow RUSTSEC-2026-0190.
+      - name: cargo audit
+        run: |
+          cargo audit --deny warnings \
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2024-0320 \
+            --ignore RUSTSEC-2025-0141 \
+            --ignore RUSTSEC-2025-0052
 
   deny:
     name: cargo deny (licenses + bans + advisories)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # `arguments: all` runs `cargo deny check all` (advisories + bans + licenses + sources).
+      # Do NOT pass --all-features — cargo-deny 0.19 has no such flag; feature handling is the
+      # `[graph] all-features` key in deny.toml. The action's default arg would otherwise error.
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-          arguments: --all-features
+          arguments: all
