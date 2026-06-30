@@ -352,7 +352,7 @@ pub(crate) async fn mcp_login(server: &str) -> Result<()> {
         let registered = forge_mcp::oauth::register_client(
             &http,
             &reg_ep,
-            &[redirect_uri.clone()],
+            std::slice::from_ref(&redirect_uri),
             &scopes,
             "Forge",
         )
