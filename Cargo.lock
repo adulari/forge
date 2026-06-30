@@ -1930,6 +1930,7 @@ dependencies = [
  "async-trait",
  "forge-index",
  "forge-types",
+ "futures",
  "globset",
  "landlock",
  "libc",

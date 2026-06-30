@@ -337,6 +337,23 @@ impl Store {
             if col_names.is_empty() {
                 continue;
             }
+            // The `table` is allow-listed, but `col_names` come straight from the (untrusted)
+            // migrate-bundle JSON and are `format!`-interpolated into the INSERT below. A tampered
+            // bundle could inject SQL via a crafted column name (e.g. `x); DROP TABLE message;--`).
+            // Validate every incoming column against the table's REAL schema (`pragma_table_info`)
+            // so the interpolated identifiers are provably members of the table — reject otherwise.
+            let valid_cols: std::collections::HashSet<String> = {
+                let mut info = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+                let cols = info
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<std::collections::HashSet<String>>>()?;
+                cols
+            };
+            if let Some(bad) = col_names.iter().find(|c| !valid_cols.contains(**c)) {
+                return Err(StoreError::Json(format!(
+                    "portable metadata for `{table}` names unknown column `{bad}` (rejected)"
+                )));
+            }
             let placeholders = vec!["?"; col_names.len()].join(",");
             let sql = format!(
                 "INSERT OR REPLACE INTO {table} ({}) VALUES ({placeholders})",
@@ -2977,6 +2994,42 @@ mod tests {
         let n = dst.import_portable_metadata(&tampered).unwrap();
         assert_eq!(n, 1, "only the allow-listed model_health row is imported");
         assert!(dst.benched_models(500).unwrap().is_benched("gemini::x"));
+    }
+
+    #[test]
+    fn portable_metadata_rejects_injected_column_names() {
+        // A tampered bundle names an allow-listed table but smuggles a SQL-injection column name
+        // that would be `format!`-interpolated into the INSERT. It must be rejected outright — and a
+        // legitimate column set must still import (regression guard for the validation).
+        let store = Store::open_in_memory().unwrap();
+
+        let evil = serde_json::json!({
+            "model_health": {
+                "columns": ["model", "x); DROP TABLE message;--"],
+                "rows": [["m", 1]]
+            }
+        })
+        .to_string();
+        let err = store
+            .import_portable_metadata(&evil)
+            .expect_err("an injected column name must be rejected");
+        assert!(
+            matches!(err, StoreError::Json(_)),
+            "expected a rejection error, got {err:?}"
+        );
+        // The `message` table is untouched (no DROP executed) — a normal write still works.
+        let sid = store.create_session(".", "default").unwrap();
+        store
+            .add_message(&sid, 0, Role::User, "still here", None)
+            .unwrap();
+
+        // A legitimate export round-trips cleanly through the now-stricter import.
+        let src = Store::open_in_memory().unwrap();
+        src.bench_model("openai::y", 9_999_999_999, "rate-limited")
+            .unwrap();
+        let good = src.export_portable_metadata().unwrap();
+        let n = store.import_portable_metadata(&good).unwrap();
+        assert_eq!(n, 1, "a legitimate column set still imports");
     }
 
     #[test]
