@@ -41,12 +41,16 @@ impl TuiPresenter {
         // old terminal content (e.g. hook output) visible to the right of the 42-char logo.
         print_banner_direct();
         let backend = CrosstermBackend::new(io::stdout());
-        let terminal = Terminal::with_options(
+        let mut terminal = Terminal::with_options(
             backend,
             TerminalOptions {
                 viewport: Viewport::Inline(LIVE_H),
             },
         )?;
+        // Clear the viewport region and force a full (non-diff) redraw on the first draw call.
+        // Without this, ratatui's diff skips default-style cells, letting old terminal content
+        // (e.g. hook output from the parent shell) bleed through every background cell.
+        terminal.clear()?;
         Ok(Self {
             terminal,
             app: App::default(),
