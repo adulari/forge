@@ -1948,6 +1948,7 @@ name = "forge-tui"
 version = "1.8.4"
 dependencies = [
  "crossterm",
+ "forge-config",
  "forge-types",
  "pulldown-cmark",
  "ratatui",
