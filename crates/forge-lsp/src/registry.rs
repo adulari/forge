@@ -157,7 +157,14 @@ fn path_to_uri(path: &Path) -> String {
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(path)
     };
-    format!("file://{}", p.display())
+    // RFC 8089 file URIs use forward slashes and a leading `/` before the path. On Unix
+    // MAIN_SEPARATOR is `/` so this is a no-op; on Windows it turns `C:\a\b` into `/C:/a/b`,
+    // yielding `file:///C:/a/b` instead of the malformed `file://C:\a\b`.
+    let mut s = p.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+    if !s.starts_with('/') {
+        s.insert(0, '/');
+    }
+    format!("file://{s}")
 }
 
 #[cfg(test)]
@@ -330,17 +337,32 @@ mod tests {
         assert!(which("__forge_definitely_not_a_real_binary_zzz__").is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn path_to_uri_absolute_has_file_scheme() {
         let uri = path_to_uri(Path::new("/home/user/project/main.rs"));
         assert_eq!(uri, "file:///home/user/project/main.rs");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn path_to_uri_absolute_has_file_scheme() {
+        // RFC 8089: a Windows drive path becomes file:///C:/... with forward slashes and a
+        // leading slash before the drive letter, never file://C:\... .
+        let uri = path_to_uri(Path::new(r"C:\home\user\main.rs"));
+        assert_eq!(uri, "file:///C:/home/user/main.rs");
+    }
+
     #[test]
     fn path_to_uri_relative_is_anchored_to_absolute() {
         let uri = path_to_uri(Path::new("rel/file.rs"));
         assert!(uri.starts_with("file:///"), "uri was: {uri}");
+        // Output URIs always use forward slashes, regardless of the host separator.
         assert!(uri.ends_with("rel/file.rs"), "uri was: {uri}");
+        assert!(
+            !uri.contains('\\'),
+            "uri must not contain backslashes: {uri}"
+        );
     }
 
     #[tokio::test]
