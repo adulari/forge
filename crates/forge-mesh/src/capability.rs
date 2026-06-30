@@ -18,11 +18,12 @@ pub(crate) fn quality_class(id: &str) -> u8 {
     let m = id.to_lowercase();
     // Small / fast FIRST: a size/speed marker (mini, haiku, -lite, -8b) downgrades even a
     // frontier-family name — `gpt-5.4-mini` and `gpt-4o-mini` are small, not frontier.
+    // Use "-mini" (with dash) not "mini" to avoid matching "minimaxai/minimax-*" (large models).
     if m.contains("-8b")
         || m.contains("-7b")
         || m.contains("-3b")
         || m.contains("-1b")
-        || m.contains("mini")
+        || m.contains("-mini")
         || m.contains("nano")
         || m.contains("haiku")
         || m.contains("instant")
@@ -226,5 +227,23 @@ mod tests {
         assert!(!is_frontier("claude-cli::haiku"));
         assert!(is_frontier("codex-cli::gpt-5.4"));
         assert!(is_frontier("claude-cli::opus"));
+    }
+
+    #[test]
+    fn minimax_is_not_classified_as_small() {
+        // "minimax" contains "mini" as a substring — guard against that false match.
+        // MiniMax M3 is a large frontier model; it must NOT get quality_class=1 (tiny/fast).
+        assert!(quality_class("nvidia::minimaxai/minimax-m3") > 1);
+        assert!(quality_class("nvidia::minimaxai/minimax-m2.7") > 1);
+        // Real -mini models must still be downgraded.
+        assert_eq!(quality_class("openai::gpt-4o-mini"), 1);
+        assert_eq!(quality_class("codex-cli::gpt-5.4-mini"), 1);
+        // trivial tier: minimax must NOT outscore a real fast model due to speed_class inflation.
+        let minimax = capability_score("nvidia::minimaxai/minimax-m3", TaskTier::Trivial);
+        let fast = capability_score("groq::llama-3.1-8b-instant", TaskTier::Trivial);
+        assert!(
+            fast >= minimax,
+            "trivial: a genuinely fast small model ({fast}) should beat minimax-m3 ({minimax})"
+        );
     }
 }
