@@ -8,11 +8,17 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use forge_types::SideEffect;
+use futures::StreamExt;
 use serde_json::{json, Value};
 
 use crate::{str_arg, Tool, ToolError};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(15);
+/// Hard byte cap on any fetched/searched HTTP body. `reqwest`'s `.text()` buffers the WHOLE body
+/// before our `max_chars` truncation runs, so a huge or slow response OOM-kills the process — the
+/// timeout bounds time, not bytes. We stream the body and stop at this cap instead. 5 MiB is far
+/// larger than any real HTML page yet far below an OOM threshold.
+const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
 const DEFAULT_MAX_CHARS: usize = 10_000;
 const DEFAULT_SEARCH_COUNT: u32 = 5;
 const MAX_SEARCH_COUNT: u32 = 10;
@@ -96,16 +102,57 @@ impl Tool for WebFetchTool {
             .await
             .map_err(|e| ToolError::Failed(format!("fetching {url}: {e}")))?;
         let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| ToolError::Failed(format!("reading body from {url}: {e}")))?;
+        let bytes = read_body_capped(resp, MAX_BODY_BYTES, url).await?;
         if !status.is_success() {
             return Err(ToolError::Failed(format!("{url} returned HTTP {status}")));
         }
 
+        let body = String::from_utf8_lossy(&bytes);
         let text = html_to_text(&body);
         Ok(truncate_chars(&text, max_chars))
+    }
+}
+
+/// Read an HTTP response body, streaming it chunk-by-chunk and STOPPING once `cap` bytes are
+/// buffered — so an unbounded or slow body can never OOM the process (unlike `resp.text()`, which
+/// buffers the whole thing first; the request timeout bounds time, not bytes). A `Content-Length`
+/// already over the cap short-circuits before any download. The returned bytes are capped, not the
+/// full body; the caller decodes them lossily and applies its own char-level truncation.
+async fn read_body_capped(
+    resp: reqwest::Response,
+    cap: usize,
+    url: &str,
+) -> Result<Vec<u8>, ToolError> {
+    if let Some(len) = resp.content_length() {
+        if len as usize > cap {
+            return Err(ToolError::Failed(format!(
+                "{url}: response body too large (declared {len} bytes exceeds the {cap}-byte cap)"
+            )));
+        }
+    }
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| ToolError::Failed(format!("reading body from {url}: {e}")))?;
+        if accumulate_capped(&mut buf, &chunk, cap) {
+            break;
+        }
+    }
+    Ok(buf)
+}
+
+/// Append `chunk` to `buf` without exceeding `cap` bytes. Returns `true` once the cap is reached
+/// (the caller should stop reading). Keeps the in-memory buffer hard-bounded regardless of how much
+/// the server sends.
+fn accumulate_capped(buf: &mut Vec<u8>, chunk: &[u8], cap: usize) -> bool {
+    let remaining = cap.saturating_sub(buf.len());
+    if chunk.len() >= remaining {
+        buf.extend_from_slice(&chunk[..remaining]);
+        true
+    } else {
+        buf.extend_from_slice(chunk);
+        false
     }
 }
 
@@ -372,7 +419,11 @@ impl SearchBackend for DuckDuckGo {
             .map_err(|e| ToolError::Failed(format!("duckduckgo request: {e}")))?;
         let html_status = html_resp.status();
         let html_ok = html_status == reqwest::StatusCode::OK;
-        let body = html_resp.text().await.unwrap_or_default();
+        // Byte-cap the body (same OOM guard as web_fetch); on any read error fall back to empty.
+        let body = read_body_capped(html_resp, MAX_BODY_BYTES, "duckduckgo")
+            .await
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
         if html_ok {
             let mut results = parse_ddg_results(&body);
             if !results.is_empty() {
@@ -708,6 +759,30 @@ mod tests {
         assert!(
             !text.contains('<') || text.contains("<3"),
             "tags stripped: {text}"
+        );
+    }
+
+    #[test]
+    fn accumulate_capped_stops_at_the_byte_cap() {
+        // Under the cap: appends fully, signals "keep reading".
+        let mut buf = Vec::new();
+        assert!(!accumulate_capped(&mut buf, b"hello", 100));
+        assert_eq!(buf, b"hello");
+
+        // Crossing the cap: takes only what fits and signals "stop".
+        let mut buf = vec![0u8; 8];
+        let hit = accumulate_capped(&mut buf, &[1u8; 10], 10);
+        assert!(hit, "must signal the cap was reached");
+        assert_eq!(buf.len(), 10, "buffer never exceeds the cap");
+
+        // A single oversized chunk is truncated to the cap, never buffered whole (the OOM guard).
+        let mut buf = Vec::new();
+        let hit = accumulate_capped(&mut buf, &vec![7u8; 50_000_000], 1024);
+        assert!(hit);
+        assert_eq!(
+            buf.len(),
+            1024,
+            "huge chunk truncated to cap, not buffered whole"
         );
     }
 
