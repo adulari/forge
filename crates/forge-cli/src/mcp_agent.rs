@@ -1,3 +1,5 @@
+// LoggingLevel/LoggingMessageNotificationParam deprecated by SEP-2577 in rmcp 2.0 but still functional.
+#![allow(deprecated)]
 //! `forge mcp agent` — expose a persistent Forge session as an MCP server on stdio.
 //!
 //! Another agent (Claude Code, another Forge instance) connects via `.mcp.json` and drives
