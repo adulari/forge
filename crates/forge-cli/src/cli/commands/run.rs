@@ -92,6 +92,30 @@ pub(crate) async fn build_session_with(
     pin: Option<String>,
     suppress_mcp_announce: bool,
 ) -> Result<Session> {
+    build_session_with_self_mcp(
+        presenter,
+        mock,
+        mode,
+        resume,
+        pin,
+        suppress_mcp_announce,
+        true,
+    )
+    .await
+}
+
+/// Build a session, optionally suppressing the self-MCP injection (see the `disable_self_mcp`
+/// doc below). `build_session_with` is the normal entrypoint (self-MCP allowed); `forge mcp
+/// agent` calls this directly with `disable_self_mcp = false` to break the recursion.
+pub(crate) async fn build_session_with_self_mcp(
+    presenter: Box<dyn Presenter>,
+    mock: bool,
+    mode: Option<Mode>,
+    resume: Option<String>,
+    pin: Option<String>,
+    suppress_mcp_announce: bool,
+    allow_self_mcp: bool,
+) -> Result<Session> {
     // Make any keyring-stored provider keys visible to the provider client.
     forge_config::inject_provider_keys();
     // …and the search-API key visible to the web_search tool.
@@ -105,8 +129,14 @@ pub(crate) async fn build_session_with(
     // is built so its presenter can show the connection status.
     let mut mcp_config = config.mcp.clone();
     // Self-MCP: inject a sub-Forge MCP agent server so forge_chat / forge_assay are available
-    // as native tools. Skipped if already declared (prevents duplicate "forge" prefix).
-    if config.self_mcp && !mcp_config.servers.iter().any(|s| s.name == "forge") {
+    // as native tools. Skipped if already declared (prevents duplicate "forge" prefix), and
+    // skipped entirely when `allow_self_mcp` is false — `forge mcp agent` builds its OWN session
+    // through this same function, and without this guard each spawned agent injected another
+    // "forge" MCP server pointing at `mcp agent`, which something then eagerly connected
+    // (spawned) immediately: a real, observed runaway self-fork chain (one child every
+    // ~200-300ms, no depth limit, OOM'd the machine in minutes). `forge mcp agent` IS the
+    // self-MCP tool surface already — it must never try to spawn another copy of itself.
+    if allow_self_mcp && config.self_mcp && !mcp_config.servers.iter().any(|s| s.name == "forge") {
         let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("forge"));
         mcp_config.servers.insert(
             0,

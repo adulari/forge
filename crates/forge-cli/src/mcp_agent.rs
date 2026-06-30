@@ -45,7 +45,7 @@ use tokio::sync::mpsc;
 
 use crate::cli::commands::assay::bundle_scoped_source;
 use crate::cli::commands::models::discover_catalog;
-use crate::cli::commands::run::build_session_with;
+use crate::cli::commands::run::build_session_with_self_mcp;
 
 // ---------------------------------------------------------------------------
 // Event stream: shared between the Presenter (writes) and the MCP handler (reads)
@@ -560,7 +560,11 @@ pub async fn run(session_id: Option<String>, cwd: Option<std::path::PathBuf>) ->
         mode: Arc::clone(&mode),
     });
 
-    let session = build_session_with(presenter, false, None, session_id, None, false).await?;
+    // allow_self_mcp = false: this process IS the self-MCP tool surface (`forge mcp agent`) — it
+    // must never inject another "forge" MCP server pointing at itself, or every spawned agent
+    // spawns another one recursively (see build_session_with_self_mcp's doc comment).
+    let session =
+        build_session_with_self_mcp(presenter, false, None, session_id, None, false, false).await?;
 
     // Apply the initial mode to the session (it may have been loaded with a different mode
     // from its stored config; in agent mode we always start permissive).
