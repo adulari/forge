@@ -16,6 +16,13 @@ const BENCH_INDEX_DIVISOR: f64 = 20.0;
 /// Coarse quality class inferred from a model id's family (0 = unknown/small … 3 = frontier).
 pub(crate) fn quality_class(id: &str) -> u8 {
     let m = id.to_lowercase();
+    // Explicit large-parameter counts override product-family naming conventions. A model that
+    // states its size as ≥100 B is frontier-class regardless of whether "small" appears in its
+    // product-line name (e.g. mistral-small-4-119b is 119 B despite "small" in the name).
+    // Checked BEFORE the small-marker group so the product name does not misclassify it.
+    if m.contains("-100b") || m.contains("-119b") || m.contains("-120b") || m.contains("-123b") {
+        return 3;
+    }
     // Small / fast FIRST: a size/speed marker (mini, haiku, -lite, -8b) downgrades even a
     // frontier-family name — `gpt-5.4-mini` and `gpt-4o-mini` are small, not frontier.
     // Use "-mini" (with dash) not "mini" to avoid matching "minimaxai/minimax-*" (large models).
@@ -227,6 +234,23 @@ mod tests {
         assert!(!is_frontier("claude-cli::haiku"));
         assert!(is_frontier("codex-cli::gpt-5.4"));
         assert!(is_frontier("claude-cli::opus"));
+    }
+
+    #[test]
+    fn large_param_count_overrides_small_product_name() {
+        // "mistral-small-4-119b" is 119 B — product-family "small" must NOT give it speed_class=3.
+        // Same false-speed-boost bug as minimax-m3 (which matched "mini"). The -119b guard fires
+        // first so these get quality_class=3 (frontier), speed_class=1.
+        assert_eq!(
+            quality_class("nvidia::mistralai/mistral-small-4-119b-2603"),
+            3,
+            "119 B model must be frontier despite 'small' in product name"
+        );
+        assert_eq!(quality_class("something::model-123b-instruct"), 3);
+        assert_eq!(quality_class("something::model-120b"), 3);
+        // Normal "small" models still downgrade.
+        assert_eq!(quality_class("mistral::mistral-small-2506"), 1);
+        assert_eq!(quality_class("openai::gpt-4o-mini"), 1);
     }
 
     #[test]
