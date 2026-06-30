@@ -35,6 +35,8 @@ version = 2
 # Permissive licenses only. Anything outside this set fails the build and must be reviewed before
 # the dependency is added.
 allow = [
+  # Forge itself is AGPL-3.0-only (workspace crates).
+  "AGPL-3.0-only",
   "MIT",
   "Apache-2.0",
   "Apache-2.0 WITH LLVM-exception",
