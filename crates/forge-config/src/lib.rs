@@ -115,6 +115,45 @@ pub struct Config {
     /// discovery + routing identically. Empty = inert.
     #[serde(default)]
     pub providers: ProvidersConfig,
+    /// Remote control server (`/remote`): drive this session from a phone or browser. `auto`
+    /// starts it at chat launch so the session is reachable without typing `/remote` first.
+    #[serde(default)]
+    pub remote: RemoteConfig,
+}
+
+/// `[remote]` config block — the phone/browser remote-control server (`remote-control.md`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RemoteConfig {
+    /// Auto-start exposure when `forge chat` launches. `off` (default) leaves remote control off
+    /// until you type `/remote`; `local` binds loopback (this machine only); `lan` binds the LAN
+    /// with self-signed HTTPS; `anywhere` opens a public tunnel (cloudflared/ngrok/bore).
+    #[serde(default)]
+    pub auto: RemoteAuto,
+}
+
+impl RemoteConfig {
+    /// The exposure to auto-start at chat launch, or `None` when remote control is left off.
+    pub fn startup_exposure(&self) -> Option<RemoteAuto> {
+        match self.auto {
+            RemoteAuto::Off => None,
+            other => Some(other),
+        }
+    }
+}
+
+/// How (if at all) remote control auto-starts at chat launch. Mirrors the `/remote` exposures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteAuto {
+    /// Off — remote control starts only when the user types `/remote`. Default.
+    #[default]
+    Off,
+    /// Loopback only (control from this machine).
+    Local,
+    /// LAN-reachable over self-signed HTTPS.
+    Lan,
+    /// Public tunnel (cloudflared / ngrok / bore) — reachable from any network.
+    Anywhere,
 }
 
 /// `[providers]` config block. Today just custom OpenAI-compatible endpoints; a home for future
@@ -1730,6 +1769,7 @@ impl Default for Config {
             statusline: StatuslineConfig::default(),
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
+            remote: RemoteConfig::default(),
         }
     }
 }
@@ -3627,6 +3667,43 @@ pub fn inject_provider_keys() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_config_defaults_to_off() {
+        let c = RemoteConfig::default();
+        assert_eq!(c.auto, RemoteAuto::Off);
+        assert!(c.startup_exposure().is_none(), "off => no auto-start");
+    }
+
+    #[test]
+    fn remote_config_parses_auto_exposure() {
+        let c: RemoteConfig = toml::from_str(r#"auto = "lan""#).unwrap();
+        assert_eq!(c.auto, RemoteAuto::Lan);
+        assert_eq!(c.startup_exposure(), Some(RemoteAuto::Lan));
+
+        let c: RemoteConfig = toml::from_str(r#"auto = "anywhere""#).unwrap();
+        assert_eq!(c.startup_exposure(), Some(RemoteAuto::Anywhere));
+
+        // Absent `auto` (empty block) => off.
+        let c: RemoteConfig = toml::from_str("").unwrap();
+        assert!(c.startup_exposure().is_none());
+    }
+
+    #[test]
+    fn config_accepts_remote_block() {
+        // A full config with a `[remote]` block round-trips through the loader's deserialize path.
+        let c: Config = toml::from_str(
+            r#"
+permission_mode = "accept-edits"
+[mesh]
+models = {}
+[remote]
+auto = "local"
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.remote.auto, RemoteAuto::Local);
+    }
 
     #[test]
     fn keybinds_default_has_all_actions() {

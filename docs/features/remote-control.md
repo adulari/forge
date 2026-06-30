@@ -1,16 +1,22 @@
 # Feature: remote control — drive `forge chat` from a phone/desktop browser
 
 > **Status (shipped):** `/remote` (alias `/rc`) slash command in the interactive TUI; an
-> in-process `axum` HTTP + WebSocket server (`crates/forge-cli/src/remote.rs`) bound to
-> `0.0.0.0:<ephemeral>` (LAN-reachable, default) or `127.0.0.1` (`--local`); a token-gated
-> single-page control surface (self-contained HTML/CSS/JS, no framework, responsive for
-> mobile + desktop); a `◉ remote` statusline segment that lights while active; a QR code
-> printed into the TUI scrollback so a phone can scan-to-connect. The server reuses the
-> running session's presenter channel — no second process, no IPC, no keys to configure.
+> in-process `axum` HTTP + WebSocket server (`crates/forge-cli/src/remote.rs`) with three
+> exposures — `--lan` (default, `0.0.0.0`, **self-signed HTTPS**), `--local` (`127.0.0.1`,
+> plain HTTP), and `--anywhere` (a public tunnel via cloudflared/ngrok/bore, no router
+> port-forwarding); a token-gated, **installable** single-page control surface
+> (self-contained HTML/CSS/JS, no framework) with **Chat / Tasks / Agents** tabs, tappable
+> permission + question-option buttons, quick-command chips, a session/cwd/exposure header,
+> live notifications, and a **PWA** (token-scoped manifest + service worker + icon) so it
+> adds to a phone home screen and runs standalone; a `◉ remote` statusline segment; a QR
+> code printed into the TUI scrollback. The wire is a versioned `Snapshot`/`RemoteInput`
+> protocol (`PROTOCOL_VERSION`); the page shows a "refresh to update" banner on a mismatch.
+> Auto-start is configurable (`[remote] auto`). The server reuses the running session's
+> presenter channel — no second process, no IPC, no keys to configure.
 >
-> **Deferred:** TLS (the token travels in cleartext over the URL path; use `--local` on
-> untrusted networks), a connection list / multi-client awareness, a config knob for the
-> bind address + default port, and full-transcript mirroring (the phone shows a bounded tail).
+> **Deferred:** image/file attachments from the phone, true push notifications while the app
+> is fully closed (live notifications fire while the page/PWA is open in the background), and
+> in-page session switching (one server drives the session that started it).
 
 > A new control surface layered onto the existing `run_chat_tui` loop. It adds *how a user
 > can drive a session* (a browser anywhere on the LAN, or loopback for a single machine) and
@@ -40,19 +46,32 @@ A request that doesn't match either route hits a 404 fallback that doesn't revea
 control is running. `--lan` (default) binds `0.0.0.0` so a phone on the same network can
 connect; `--local` binds loopback only.
 
-**Live state → browser:** each dirty frame the render loop builds a `Snapshot` (busy ·
-temper · tier · model · cost · context fill · the streaming reply's tail · a bounded ring
-of recent scrollback lines · any pending permission prompt or question) and publishes it
-on a `tokio::sync::watch` channel. The WS task forwards every change to each connected
-browser, so the control page mirrors the TUI statusline + conversation edge in real time.
+**Live state → browser:** each dirty frame the render loop builds a `Snapshot` (protocol
+version · session id · cwd · exposure · busy · temper · tier · model · cost · context fill ·
+the streaming reply's tail · a bounded ring of recent scrollback lines · the live task list ·
+running subagents · queued prompts · any pending permission prompt or question + its
+tappable options) and publishes it on a `tokio::sync::watch` channel. The WS task forwards
+every change to each connected browser, so the page mirrors the TUI statusline, transcript
+edge, **Tasks** panel, and **Agents** panel in real time. Because `watch` fans out to every
+subscriber and inputs share one `mpsc`, several phones + a desktop can drive one session at
+once with no per-client state — disconnect/reconnect is transparent (the page auto-retries).
 
 **Browser → session:** the page sends `RemoteInput` JSON (`{kind:"prompt",text}`,
-`{kind:"allow",yes}`, `{kind:"answer",text}`, `{kind:"interrupt"}`) over the WS. The render
-loop drains the input queue each iteration and injects each one through the *same* paths a
-local keystroke takes — a prompt runs `spawn_turn` (respecting the busy guard + prompt
-hooks), `allow` answers a pending permission, `answer` resolves an `AskUserQuestion`, and
-`interrupt` aborts the turn task. The permission gate, temper, and command dispatch are all
-unchanged — a remote prompt is indistinguishable from a local one.
+`{kind:"allow",yes}`, `{kind:"answer",text}`, `{kind:"interrupt"}`) over the WS. A prompt
+can be a plain task, a `/command`, or a `//`-escaped hook command — all routed through the
+*same* `dispatch_command` + prompt-hook + `spawn_turn` paths a local keystroke takes, so
+slash commands (`/plan`, `/compact`, `/diff`, `/model`, …), the busy guard, the permission
+gate, temper, and hooks all apply unchanged. `allow` answers a pending permission, `answer`
+resolves an `AskUserQuestion` (a tapped option button sends its 1-based index), and
+`interrupt` aborts the turn task. A remote prompt is indistinguishable from a local one.
+Inbound frames over `MAX_INPUT_BYTES` (256 KiB) are dropped to bound a hostile client.
+
+**PWA + notifications:** alongside `/<token>` and `/<token>/ws`, the server serves a
+token-scoped `manifest.webmanifest`, `sw.js` (service worker), and `icon.svg`, so the page
+installs to a home screen and launches standalone into *this* session's control surface.
+The page (with permission) raises a local notification when a permission/question appears or
+a turn completes while it's backgrounded — covering the "phone in pocket, PWA open" case
+without a push relay that would see the session.
 
 **Toggle:** `/remote` is a builtin command (`CommandAction::Remote { lan }`) that returns
 `DispatchOutcome::ToggleRemote`. The loop's `toggle_remote` helper starts the server (on)
@@ -83,21 +102,36 @@ determined adversary with a sniffer. Defenses:
   `Snapshot` (model name, cost, transcript tail, prompts). API keys never leave the
   process.
 
-**Known gap (deferred):** the default `--lan` bind is plain HTTP, so the token travels in
-cleartext and a LAN sniffer could capture it. TLS termination in-process (self-signed +
-show the fingerprint in the TUI) is the follow-up. Until then, `--local` is the safe choice
-on untrusted networks.
+- **TLS on the LAN.** `--lan` generates a self-signed certificate at startup and serves
+  HTTPS, so the token never travels in cleartext over the network; the cert's SHA-256
+  fingerprint is printed next to the connect URL for verification. `--local` stays plain
+  HTTP (loopback never leaves the machine); tunnels terminate TLS at the provider.
+- **Frame-size cap.** Inbound WebSocket frames are capped (`MAX_INPUT_BYTES`) so a hostile
+  or buggy client can't exhaust memory with a giant payload.
+- **`--anywhere` is loud.** Opening a public tunnel prints an explicit warning that anyone
+  with the link can drive the session — the path token is then the only gate.
+
+## 3a. Configuration
+
+`[remote] auto` controls auto-start at `forge chat` launch: `off` (default; start with
+`/remote`), `local`, `lan`, or `anywhere`. Example:
+
+```toml
+[remote]
+auto = "lan"   # session is reachable from a phone the moment chat starts
+```
 
 ## 4. Surfaces touched
 
 | Layer | Change |
 |---|---|
-| `forge-cli/src/remote.rs` (new) | Server, `Snapshot`/`RemoteInput` types, control page, QR renderer |
-| `forge-tui/src/app.rs` | `App.remote_active`, `question_prompt`, `recent_transcript` ring, `drain_flush_remote`, `remote_snapshot`, `print_lines`, statusline `◉ remote` segment |
-| `forge-tui/src/commands.rs` | `CommandAction::Remote { lan }`, `/remote` (alias `/rc`) parse + registry entry |
-| `forge-cli/src/main.rs` | `DispatchOutcome::ToggleRemote`, `toggle_remote`, remote input draining + snapshot broadcast in `run_chat_tui` |
-| `Cargo.toml` | `axum` (ws), `tokio-tungstenite`, `qrcode`; `tokio` `net` feature |
-| `forge-cli/tests/tui_e2e.rs` | `tui_remote_control_toggles_and_shows_statusline_indicator` |
+| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION`, the mobile control page (tabs/panels/option taps/chips), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
+| `forge-config/src/lib.rs` | `[remote]` block: `RemoteConfig` + `RemoteAuto` + `startup_exposure()` |
+| `forge-tui/src/app.rs` | `App.remote_active`, `question_prompt`, `recent_transcript` ring, `drain_flush_remote`, `remote_snapshot` (now incl. tasks/subagents/queued/question options), `print_lines`, statusline `◉ remote` segment |
+| `forge-tui/src/commands.rs` | `CommandAction::Remote { mode }`, `/remote` (alias `/rc`) parse + registry entry |
+| `forge-cli/src/cli/commands/run.rs` | `DispatchOutcome::ToggleRemote`, `toggle_remote`, `[remote] auto` startup, remote input draining + full-state snapshot broadcast in `run_chat_tui` |
+| `Cargo.toml` | `axum` (ws), `axum-server` (rustls), `rcgen`, `tokio-tungstenite`, `qrcode`; `tokio` `net` feature |
+| `forge-cli/src/remote.rs` (tests) | snapshot wire-shape, manifest/base/SW/exposure-mapping units + the `--ignored` real-socket page + WS + PWA round-trip |
 
 The stdin-prompt fix (`ef8a365`, feed CLI-bridge prompts via stdin to avoid `ARG_MAX`) is
 included on this branch — it's the prior commit this feature builds on.

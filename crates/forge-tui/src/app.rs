@@ -470,6 +470,10 @@ impl App {
     /// broadcast. Plain fields only (no ratatui types), so `forge-tui` needn't depend on the
     /// remote module — the caller maps this into the snapshot type.
     pub fn remote_snapshot(&self) -> RemoteSnapshot {
+        let (question_options, question_allow_other) = match &self.question {
+            Some((opts, allow_other)) => (opts.clone(), *allow_other),
+            None => (Vec::new(), false),
+        };
         RemoteSnapshot {
             busy: self.busy,
             done: self.done,
@@ -485,8 +489,26 @@ impl App {
             context_limit: self.context_limit,
             streaming: self.streaming.clone(),
             transcript: self.recent_transcript.iter().cloned().collect(),
+            tasks: self.tasks.clone(),
+            subagents: self
+                .subagents
+                .iter()
+                .map(|r| SubagentSnapshot {
+                    id: r.id.clone(),
+                    agent: r.agent.clone(),
+                    task: r.task.clone(),
+                    model: r.model.clone(),
+                    last: r.last.clone(),
+                    log: r.log.clone(),
+                    done: r.done,
+                    cost: r.cost,
+                })
+                .collect(),
+            queued: self.queued.clone(),
             permission_prompt: self.prompt.clone(),
             question: self.question_prompt.clone(),
+            question_options,
+            question_allow_other,
         }
     }
 }
@@ -506,8 +528,13 @@ pub struct RemoteSnapshot {
     pub context_limit: Option<u32>,
     pub streaming: String,
     pub transcript: Vec<String>,
+    pub tasks: Vec<forge_types::TodoItem>,
+    pub subagents: Vec<SubagentSnapshot>,
+    pub queued: Vec<String>,
     pub permission_prompt: Option<String>,
     pub question: Option<String>,
+    pub question_options: Vec<crate::QChoice>,
+    pub question_allow_other: bool,
 }
 
 /// One subagent's live row in the TUI.

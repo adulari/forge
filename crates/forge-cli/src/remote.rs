@@ -197,6 +197,19 @@ pub enum Exposure {
     Anywhere,
 }
 
+impl From<forge_config::RemoteAuto> for Exposure {
+    /// Map the `[remote] auto` config value to a server exposure. `Off` has no exposure (the
+    /// caller only converts after [`forge_config::RemoteConfig::startup_exposure`] returns
+    /// `Some`), so it falls back to the safest bind (loopback).
+    fn from(a: forge_config::RemoteAuto) -> Self {
+        match a {
+            forge_config::RemoteAuto::Lan => Exposure::Lan,
+            forge_config::RemoteAuto::Anywhere => Exposure::Anywhere,
+            forge_config::RemoteAuto::Local | forge_config::RemoteAuto::Off => Exposure::Local,
+        }
+    }
+}
+
 /// A public-tunnel provider Forge can drive if it's installed. Probed in priority order: the
 /// first one found on `PATH` is used. Each is free to run for a session; cloudflared/ngrok give
 /// HTTPS (the page's JS auto-picks `wss://`), bore gives plain TCP (`ws://`). All three proxy the
@@ -446,11 +459,56 @@ pub struct RemoteUrl {
     pub tls_fingerprint: Option<String>,
 }
 
+/// Wire-protocol version for the remote control page ⇄ server contract. Bumped whenever the
+/// [`Snapshot`] / [`RemoteInput`] shape changes in a way the page must know about; the page
+/// shows a "refresh to update" hint when its bundled version and the server's disagree.
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// Hard cap on a single inbound WebSocket frame (a [`RemoteInput`]). Inputs are short prompts or
+/// answers; anything larger is dropped to bound memory + parse cost from a hostile/buggy client.
+const MAX_INPUT_BYTES: usize = 256 * 1024;
+
+/// One tracked task in the live task list, projected for the wire (status as a stable word).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SnapTask {
+    pub title: String,
+    /// "pending" | "in_progress" | "done".
+    pub status: String,
+}
+
+/// One live subagent row, projected for the wire.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SnapSubagent {
+    pub agent: String,
+    pub task: String,
+    pub model: Option<String>,
+    /// Trailing edge of the child's streamed activity.
+    pub last: String,
+    pub done: bool,
+    pub cost: f64,
+}
+
+/// One selectable option of a pending AskUserQuestion, so the page can render tappable buttons
+/// instead of forcing the user to type a number on a phone keyboard.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SnapOption {
+    pub label: String,
+    pub description: String,
+}
+
 /// One frame of visible state broadcast to every connected browser, so the control page mirrors
 /// the TUI statusline + the tail of the conversation. Cheap to build (plain strings) and JSON, so
 /// a phone renders it without any client-side framework.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Snapshot {
+    /// Wire-protocol version (see [`PROTOCOL_VERSION`]); the page warns on a mismatch.
+    pub protocol: u32,
+    /// The active session id — shown in the header so the operator knows which session they drive.
+    pub session_id: String,
+    /// The working directory the session runs in (header context).
+    pub cwd: String,
+    /// How the server is exposed: "loopback" | "LAN" | "public (provider)".
+    pub exposure: String,
     pub busy: bool,
     pub done: bool,
     /// The active operating temper label (e.g. "Ask").
@@ -467,10 +525,20 @@ pub struct Snapshot {
     pub streaming: String,
     /// Recent finalized scrollback lines (plain text, newest last; bounded).
     pub transcript: Vec<String>,
+    /// The live task list (`update_tasks`) — drives the remote task panel.
+    pub tasks: Vec<SnapTask>,
+    /// Live subagents in the current `spawn_agents` batch.
+    pub subagents: Vec<SnapSubagent>,
+    /// Prompts the operator queued while a turn was running (shown so nothing looks dropped).
+    pub queued: Vec<String>,
     /// A pending permission prompt, if the turn is blocked on a y/n.
     pub permission_prompt: Option<String>,
     /// A pending AskUserQuestion, if the turn is blocked on a choice.
     pub question: Option<String>,
+    /// The options for a pending AskUserQuestion (tappable buttons on the page).
+    pub question_options: Vec<SnapOption>,
+    /// Whether the pending question accepts a free-text answer in addition to its options.
+    pub question_allow_other: bool,
     /// `true` once remote control has been turned off (tells the page to stop reconnecting).
     pub closed: bool,
 }
@@ -478,6 +546,10 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            protocol: PROTOCOL_VERSION,
+            session_id: String::new(),
+            cwd: String::new(),
+            exposure: String::new(),
             busy: false,
             done: false,
             temper: String::new(),
@@ -488,8 +560,13 @@ impl Default for Snapshot {
             context_limit: None,
             streaming: String::new(),
             transcript: Vec::new(),
+            tasks: Vec::new(),
+            subagents: Vec::new(),
+            queued: Vec::new(),
             permission_prompt: None,
             question: None,
+            question_options: Vec::new(),
+            question_allow_other: false,
             closed: false,
         }
     }
@@ -594,16 +671,24 @@ pub fn start(exposure: Exposure) -> std::io::Result<RemoteControl> {
     let (snapshot_tx, snapshot_rx) = watch::channel(Snapshot::default());
     let (input_tx, input_rx) = mpsc::channel::<RemoteInput>(64);
 
+    let base = format!("/{token}");
     let state = Arc::new(ServerState {
         snapshot_rx: snapshot_rx.clone(),
         input_tx,
+        base: base.clone(),
     });
 
     let app = Router::new()
-        // The control page (HTML) at /<token>.
-        .route(&format!("/{token}"), get(control_page))
+        // The control page (HTML) at /<token> and /<token>/ — the slashed form is the PWA
+        // `start_url` so the installed app launches inside the service-worker scope.
+        .route(&base, get(control_page))
+        .route(&format!("{base}/"), get(control_page))
         // The WebSocket at /<token>/ws — same token gates it.
-        .route(&format!("/{token}/ws"), get(ws_handler))
+        .route(&format!("{base}/ws"), get(ws_handler))
+        // PWA assets (token-scoped) so the page installs to a phone home screen + runs standalone.
+        .route(&format!("{base}/manifest.webmanifest"), get(manifest))
+        .route(&format!("{base}/sw.js"), get(service_worker))
+        .route(&format!("{base}/icon.svg"), get(icon))
         // A 404 for the root and wrong-token paths (don't leak that remote control is on).
         .fallback(fallback)
         .with_state(state);
@@ -744,14 +829,47 @@ pub async fn start_anywhere() -> std::io::Result<RemoteControl> {
 struct ServerState {
     snapshot_rx: watch::Receiver<Snapshot>,
     input_tx: mpsc::Sender<RemoteInput>,
+    /// The token-gated base path (`/<token>`) — injected into the page + manifest so every URL
+    /// (WS, PWA assets, start_url) is correct under a tunnel/LAN host without the page guessing.
+    base: String,
 }
 
 /// The single control page: a responsive, dependency-free HTML/CSS/JS shell that mirrors the
 /// statusline, shows the streaming reply + recent transcript, and sends inputs over the WS. It's
 /// intentionally one self-contained string so there's no static-asset serving to wire up. Takes
 /// the shared state (ignored) so axum's `Handler` bound is satisfied on a stateful router.
-async fn control_page(State(_): State<Arc<ServerState>>) -> Html<&'static str> {
-    Html(CONTROL_PAGE)
+async fn control_page(State(state): State<Arc<ServerState>>) -> Html<String> {
+    Html(CONTROL_PAGE.replace("__BASE__", &state.base))
+}
+
+/// The token-scoped PWA manifest (`start_url`/`scope` baked to this session's path).
+async fn manifest(State(state): State<Arc<ServerState>>) -> Response {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/manifest+json",
+        )],
+        manifest_json(&state.base),
+    )
+        .into_response()
+}
+
+/// The service worker that makes the page installable (its scope is this session's token path).
+async fn service_worker() -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/javascript")],
+        SERVICE_WORKER,
+    )
+        .into_response()
+}
+
+/// The app icon (inline SVG; no binary asset to serve).
+async fn icon() -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+        ICON_SVG,
+    )
+        .into_response()
 }
 
 /// A minimal 404 that doesn't reveal remote control is running.
@@ -805,6 +923,11 @@ async fn ws_session(socket: WebSocket, state: Arc<ServerState>) {
                 // Ping/Pong are handled by axum automatically; ignore Binary-as-ping noise.
                 _ => continue,
             };
+            // Drop oversized frames: a remote input is a short prompt/answer, never a megabyte.
+            // Caps memory + parse work from a hostile or buggy client on a public tunnel.
+            if text.len() > MAX_INPUT_BYTES {
+                continue;
+            }
             if let Ok(input) = serde_json::from_str::<RemoteInput>(&text) {
                 if input_tx.send(input).await.is_err() {
                     break; // render loop dropped the receiver (remote turned off)
@@ -865,158 +988,331 @@ const CONTROL_PAGE: &str = r##"<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#1c1c22">
+<meta name="theme-color" content="#16161c">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Forge">
+<link rel="manifest" href="__BASE__/manifest.webmanifest">
+<link rel="apple-touch-icon" href="__BASE__/icon.svg">
+<link rel="icon" href="__BASE__/icon.svg">
 <title>Forge remote</title>
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
+  :root { color-scheme: dark; --bg:#16161c; --panel:#1c1c22; --ink:#d8d8e0; --dim:#6e6e78; --acc:#ff913c; --ok:#78d28c; --no:#f06e6e; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; height: 100%; }
   body {
-    background: #16161c; color: #d8d8e0; font: 15px/1.5 -apple-system, system-ui, sans-serif;
-    display: flex; flex-direction: column; max-width: 760px; margin: 0 auto;
-    padding: env(safe-area-inset-top) 14px env(safe-area-inset-bottom);
+    background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, system-ui, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; max-width: 820px; margin: 0 auto; height: 100dvh;
+    padding: env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 4px);
   }
-  header { padding: 12px 0 6px; }
-  h1 { font-size: 16px; margin: 0; color: #ff913c; font-weight: 700; letter-spacing: .3px; }
+  #banner { display:none; background:#3a2a12; color:#ffd9a8; border:1px solid var(--acc);
+    border-radius:8px; padding:8px 10px; margin:8px 0 0; font-size:13px; }
+  header { display:flex; align-items:center; gap:8px; padding: 10px 2px 4px; }
+  h1 { font-size: 16px; margin: 0; color: var(--acc); font-weight: 700; letter-spacing:.3px; flex:1 1 auto; }
+  .iconbtn { background:none; border:none; font-size:18px; cursor:pointer; padding:4px; line-height:1; }
+  .meta { display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:12px; color:var(--dim);
+    padding:0 2px 2px; font-variant-numeric:tabular-nums; }
+  .badge { background:var(--panel); border-radius:6px; padding:2px 7px; }
+  .badge.pub { background:#3a1c1c; color:#ffb0b0; }
   .status {
-    background: #1c1c22; border-radius: 8px; padding: 7px 10px; margin: 8px 0;
-    font-size: 13px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
-    font-variant-numeric: tabular-nums;
+    background: var(--panel); border-radius: 8px; padding: 7px 10px; margin: 6px 0;
+    font-size: 13px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-variant-numeric: tabular-nums;
   }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: #78d28c; flex: 0 0 auto; }
-  .dot.busy { background: #ff913c; animation: pulse 1s infinite; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: 0 0 auto; }
+  .dot.busy { background: var(--acc); animation: pulse 1s infinite; }
   @keyframes pulse { 50% { opacity: .35; } }
-  .tier { color: #ff913c; font-weight: 600; }
-  .cost { color: #78d28c; font-weight: 600; }
-  .ctx { color: #6e6e78; }
-  .transcript {
-    flex: 1 1 auto; overflow-y: auto; background: #101015; border-radius: 8px;
-    padding: 10px 12px; margin: 8px 0; white-space: pre-wrap; word-break: break-word;
-    font-size: 14px; min-height: 120px;
-  }
-  .transcript div { padding: 2px 0; }
+  .tier { color: var(--acc); font-weight: 600; }
+  .cost { color: var(--ok); font-weight: 600; }
+  .ctx { color: var(--dim); }
+  .tabs { display:flex; gap:6px; margin:6px 0 0; }
+  .tab { flex:1 1 0; background:var(--panel); color:var(--dim); border:none; border-radius:8px 8px 0 0;
+    padding:9px 6px; font:inherit; font-size:13px; font-weight:600; cursor:pointer; }
+  .tab.on { color:var(--acc); background:#101015; box-shadow: inset 0 -2px 0 var(--acc); }
+  .tab .n { color:var(--ink); font-weight:700; }
+  .panel { flex:1 1 auto; overflow-y:auto; background:#101015; border-radius:0 0 8px 8px;
+    padding:10px 12px; margin:0 0 6px; min-height:120px; -webkit-overflow-scrolling:touch; }
+  #transcript { white-space: pre-wrap; word-break: break-word; font-size: 14px; }
+  #transcript div { padding: 2px 0; }
   .stream { color: #c8c8d0; font-style: italic; }
-  .prompt {
-    background: #1c1c22; border-radius: 8px; padding: 8px 10px; margin: 8px 0;
-    border: 1px solid #ff913c;
-  }
-  .prompt .q { font-weight: 700; color: #ff913c; }
-  .bar { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
-  button, input[type=text], .btn {
-    font: inherit; border: none; border-radius: 8px; padding: 10px 16px; cursor: pointer;
-  }
-  input[type=text] {
-    flex: 1 1 200px; background: #1c1c22; color: #fff; border: 1px solid #33333c;
-    min-width: 0;
-  }
-  input[type=text]:focus { outline: 2px solid #ff913c; }
-  .send { background: #ff913c; color: #1c1c22; font-weight: 700; }
-  .y { background: #78d28c; color: #1c1c22; font-weight: 700; }
-  .n { background: #f06e6e; color: #1c1c22; font-weight: 700; }
-  .esc { background: #33333c; color: #d8d8e0; }
-  .actions:empty { display: none; }
-  .conn { font-size: 12px; color: #6e6e78; text-align: center; padding: 4px 0 8px; }
-  .off { display: none; }
-  footer { font-size: 11px; color: #4a4a54; text-align: center; padding: 6px 0 2px; }
+  .empty { color: var(--dim); font-style: italic; padding: 8px 2px; }
+  .task { padding:4px 2px; display:flex; gap:8px; align-items:baseline; }
+  .task .g { color: var(--dim); }
+  .task.in_progress .g { color: var(--acc); }
+  .task.done .g { color: var(--ok); }
+  .task.done { color: var(--dim); text-decoration: line-through; }
+  .agent { border:1px solid #2a2a33; border-radius:8px; padding:8px 10px; margin:6px 0; }
+  .agent.done { opacity:.7; }
+  .agent .ah { font-weight:600; color:var(--acc); font-size:13px; }
+  .agent .at { color:var(--ink); font-size:13px; margin:2px 0; }
+  .agent .al { color:var(--dim); font-size:12px; white-space:pre-wrap; word-break:break-word; }
+  .actions:empty { display:none; }
+  .prompt { background: var(--panel); border-radius: 8px; padding: 8px 10px; margin: 6px 0; border: 1px solid var(--acc); }
+  .prompt .q { font-weight: 700; color: var(--acc); }
+  .opts { display:flex; flex-direction:column; gap:6px; margin:6px 0; }
+  .opt { text-align:left; background:#23232b; color:var(--ink); border:1px solid #33333c; border-radius:8px;
+    padding:10px 12px; cursor:pointer; display:flex; flex-direction:column; }
+  .opt b { color:var(--acc); }
+  .opt span { color:var(--dim); font-size:12px; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0 0; }
+  .chip { background:var(--panel); color:var(--ink); border:1px solid #33333c; border-radius:14px;
+    padding:6px 12px; font-size:13px; cursor:pointer; }
+  .chip.stop { color:var(--no); border-color:#52323a; }
+  .bar { display: flex; gap: 8px; margin: 8px 0 4px; flex-wrap: wrap; }
+  button, input[type=text], .btn { font: inherit; border: none; border-radius: 8px; padding: 11px 16px; cursor: pointer; }
+  input[type=text] { flex: 1 1 200px; background: var(--panel); color: #fff; border: 1px solid #33333c; min-width: 0; }
+  input[type=text]:focus { outline: 2px solid var(--acc); }
+  .send { background: var(--acc); color: #1c1c22; font-weight: 700; }
+  .y { background: var(--ok); color: #1c1c22; font-weight: 700; }
+  .n { background: var(--no); color: #1c1c22; font-weight: 700; }
+  .conn { font-size: 12px; color: var(--dim); text-align: center; padding: 2px 0 4px; }
+  footer { font-size: 11px; color: #4a4a54; text-align: center; padding: 4px 0 2px; }
 </style>
 </head>
 <body>
-<header><h1>⚒ Forge remote control</h1></header>
-<div class="status" id="status"><span class="dot" id="dot"></span>
+<div id="banner"></div>
+<header>
+  <h1>⚒ Forge</h1>
+  <button class="iconbtn" id="bell" title="notifications">🔕</button>
+</header>
+<div class="meta">
+  <span class="badge" id="expo">—</span>
+  <span id="cwd">—</span>
+  <span>· session <span id="sid">—</span></span>
+</div>
+<div class="status"><span class="dot" id="dot"></span>
   <span class="tier" id="tier">—</span><span id="model">—</span>
   <span class="cost" id="cost">$0.0000</span><span class="ctx" id="ctx"></span>
   <span class="ctx" id="temper"></span></div>
-<div class="transcript" id="transcript"></div>
+<div class="tabs">
+  <button class="tab on" data-tab="chat" id="tab-chat">Chat</button>
+  <button class="tab" data-tab="tasks" id="tab-tasks">Tasks <span class="n" id="tc"></span></button>
+  <button class="tab" data-tab="agents" id="tab-agents">Agents <span class="n" id="ac"></span></button>
+</div>
+<div class="panel" id="transcript"></div>
+<div class="panel" id="tasks" hidden></div>
+<div class="panel" id="agents" hidden></div>
 <div class="actions" id="actions"></div>
+<div class="chips">
+  <button class="chip stop" id="stop">⏹ Stop</button>
+  <button class="chip" onclick="chip('/plan')">/plan</button>
+  <button class="chip" onclick="chip('/compact')">/compact</button>
+  <button class="chip" onclick="chip('/diff')">/diff</button>
+  <button class="chip" onclick="chip('/model')">/model</button>
+</div>
 <div class="bar">
-  <input type="text" id="prompt" placeholder="type a task or /command…" autocomplete="off" enterkeyhint="send">
+  <input type="text" id="prompt" placeholder="type a task or /command…" autocomplete="off"
+    autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
   <button class="send" id="send">Send</button>
-  <button class="esc" id="stop">Stop</button>
 </div>
 <div class="conn" id="conn">connecting…</div>
 <footer>Forge remote control · turn off with <code>/remote</code> in the TUI</footer>
 
 <script>
-const wsUrl = window.location.pathname.replace(/\/$/, "") + "/ws";
+const BASE = "__BASE__";
+const PROTO = 2;
 const $ = (id) => document.getElementById(id);
-let ws = null, dead = false, sent = 0;
+let ws = null, dead = false, sent = 0, notif = false;
+let prev = { busy:false, prompt:false, question:false };
 
 function connect() {
   if (dead) return;
   const scheme = location.protocol === "https:" ? "wss://" : "ws://";
-  ws = new WebSocket(scheme + location.host + wsUrl);
+  ws = new WebSocket(scheme + location.host + BASE + "/ws");
   ws.onopen = () => { $("conn").textContent = "● connected"; };
   ws.onmessage = (e) => {
     let s; try { s = JSON.parse(e.data); } catch { return; }
     render(s);
     if (s.closed) { dead = true; $("conn").textContent = "remote control turned off — reconnect to the TUI"; ws.close(); }
   };
-  ws.onclose = () => {
-    if (dead) return;
-    $("conn").textContent = "reconnecting…";
-    setTimeout(connect, 1500);
-  };
+  ws.onclose = () => { if (dead) return; $("conn").textContent = "reconnecting…"; setTimeout(connect, 1500); };
   ws.onerror = () => ws.close();
 }
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 
 function render(s) {
+  if (s.protocol && s.protocol !== PROTO) {
+    $("banner").style.display = "block";
+    $("banner").textContent = "A newer Forge is running — refresh this page to update the remote UI.";
+  }
   $("dot").className = "dot" + (s.busy ? " busy" : "");
   $("tier").textContent = s.tier ? "[" + s.tier + "]" : "—";
   $("model").textContent = s.model || "—";
   $("cost").textContent = "$" + (s.cost_usd || 0).toFixed(4);
   $("temper").textContent = s.temper ? "◆ " + s.temper : "";
+  $("sid").textContent = (s.session_id || "").slice(0, 8) || "—";
+  $("cwd").textContent = baseName(s.cwd) || "—";
+  $("expo").textContent = s.exposure || "—";
+  $("expo").className = "badge" + ((s.exposure || "").indexOf("public") === 0 ? " pub" : "");
   if (s.context_tokens > 0) {
     const lim = s.context_limit ? "/" + fmt(s.context_limit) : "";
     $("ctx").textContent = "◷ " + fmt(s.context_tokens) + lim;
   } else { $("ctx").textContent = ""; }
+
+  renderTranscript(s);
+  renderTasks(s);
+  renderAgents(s);
+  renderActions(s);
+  notifyTransitions(s);
+}
+
+function renderTranscript(s) {
   const t = $("transcript");
-  // Only re-render when the transcript actually changed (avoid scroll jumps every frame).
   const body = (s.transcript || []).join("\n") + (s.streaming ? "\n" + s.streaming : "");
-  if (t._n !== sent + body.length) {
-    t.innerHTML = "";
-    (s.transcript || []).forEach(line => {
-      const d = document.createElement("div"); d.textContent = line; t.appendChild(d);
-    });
-    if (s.streaming) {
-      const d = document.createElement("div"); d.className = "stream"; d.textContent = s.streaming; t.appendChild(d);
-    }
-    t.scrollTop = t.scrollHeight;
-    t._n = sent + body.length;
-  }
+  if (t._n === sent + body.length) return; // unchanged
+  const nearBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 80;
+  t.innerHTML = "";
+  (s.transcript || []).forEach(line => { const d = document.createElement("div"); d.textContent = line; t.appendChild(d); });
+  if (s.streaming) { const d = document.createElement("div"); d.className = "stream"; d.textContent = s.streaming; t.appendChild(d); }
+  if (nearBottom) t.scrollTop = t.scrollHeight;
+  t._n = sent + body.length;
+}
+
+function renderTasks(s) {
+  const tasks = s.tasks || [];
+  $("tc").textContent = tasks.length ? tasks.filter(x => x.status === "done").length + "/" + tasks.length : "";
+  const el = $("tasks");
+  if (!tasks.length) { el.innerHTML = '<div class="empty">no tasks yet</div>'; return; }
+  el.innerHTML = "";
+  tasks.forEach(t => {
+    const d = document.createElement("div"); d.className = "task " + t.status;
+    const g = t.status === "done" ? "●" : (t.status === "in_progress" ? "◐" : "○");
+    d.innerHTML = '<span class="g">' + g + '</span><span>' + esc(t.title) + '</span>';
+    el.appendChild(d);
+  });
+}
+
+function renderAgents(s) {
+  const subs = s.subagents || [];
+  $("ac").textContent = subs.length ? "" + subs.length : "";
+  const el = $("agents");
+  if (!subs.length) { el.innerHTML = '<div class="empty">no subagents running</div>'; return; }
+  el.innerHTML = "";
+  subs.forEach(a => {
+    const d = document.createElement("div"); d.className = "agent" + (a.done ? " done" : "");
+    const head = esc(a.agent || "agent") + (a.model ? " · " + esc(a.model) : "") + (a.done ? " · done $" + (a.cost || 0).toFixed(4) : "");
+    d.innerHTML = '<div class="ah">' + (a.done ? "✓ " : "▸ ") + head + '</div>' +
+      '<div class="at">' + esc(a.task || "") + '</div>' +
+      '<div class="al">' + esc(a.last || "") + '</div>';
+    el.appendChild(d);
+  });
+}
+
+function renderActions(s) {
   const a = $("actions");
-  a.innerHTML = "";
   if (s.permission_prompt) {
     a.innerHTML = '<div class="prompt"><span class="q">⚠ ' + esc(s.permission_prompt) +
-      '</span></div><div class="bar"><button class="y" onclick="answer(true)">Yes (allow)</button>' +
-      '<button class="n" onclick="answer(false)">No (deny)</button></div>';
+      '</span></div><div class="bar"><button class="y" onclick="answer(true)">Allow</button>' +
+      '<button class="n" onclick="answer(false)">Deny</button></div>';
   } else if (s.question) {
-    a.innerHTML = '<div class="prompt"><span class="q">❓ ' + esc(s.question) +
-      '</span></div><div class="bar"><input type="text" id="ans" placeholder="answer…" enterkeyhint="done">' +
-      '<button class="send" onclick="sendAnswer()">Answer</button></div>';
+    let h = '<div class="prompt"><span class="q">❓ ' + esc(s.question) + '</span></div>';
+    const opts = s.question_options || [];
+    if (opts.length) {
+      h += '<div class="opts">';
+      opts.forEach((o, i) => {
+        h += '<button class="opt" onclick="pick(' + (i + 1) + ')"><b>' + esc(o.label) + '</b>' +
+          (o.description ? '<span>' + esc(o.description) + '</span>' : '') + '</button>';
+      });
+      h += '</div>';
+    }
+    if (!opts.length || s.question_allow_other) {
+      h += '<div class="bar"><input type="text" id="ans" placeholder="answer…" enterkeyhint="done">' +
+        '<button class="send" onclick="sendAnswer()">Answer</button></div>';
+    }
+    a.innerHTML = h;
+  } else {
+    a.innerHTML = "";
   }
 }
-function fmt(n) {
-  if (n >= 1e6) return (n/1e6).toFixed(1) + "M";
-  if (n >= 1e3) return (n/1e3).toFixed(1) + "k";
-  return "" + n;
+
+function notifyTransitions(s) {
+  const pPrompt = !!s.permission_prompt, pQuestion = !!s.question;
+  if (pPrompt && !prev.prompt) maybeNotify("Forge needs permission", s.permission_prompt);
+  if (pQuestion && !prev.question) maybeNotify("Forge has a question", s.question);
+  if (!s.busy && prev.busy && !pPrompt && !pQuestion) maybeNotify("Forge — turn complete", lastLine(s));
+  prev = { busy: !!s.busy, prompt: pPrompt, question: pQuestion };
 }
+function lastLine(s) { const t = s.transcript || []; return t.length ? t[t.length - 1] : ""; }
+
+function fmt(n) { if (n >= 1e6) return (n/1e6).toFixed(1)+"M"; if (n >= 1e3) return (n/1e3).toFixed(1)+"k"; return ""+n; }
 function esc(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
-function submit() {
-  const v = $("prompt").value;
-  if (!v.trim()) return;
-  send({kind:"prompt", text:v}); $("prompt").value = ""; sent++;
-}
+function baseName(p) { if (!p) return ""; const parts = (""+p).replace(/[\\/]+$/, "").split(/[\\/]/); return parts[parts.length-1] || p; }
+
+function submit() { const v = $("prompt").value; if (!v.trim()) return; send({kind:"prompt", text:v}); $("prompt").value=""; sent++; }
+function chip(cmd) { send({kind:"prompt", text:cmd}); }
 $("send").onclick = submit;
 $("prompt").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
 $("stop").onclick = () => send({kind:"interrupt"});
 window.answer = (yes) => send({kind:"allow", yes:!!yes});
-window.sendAnswer = () => { const v = $("ans").value; if (v.trim()) send({kind:"answer", text:v}); sent++; };
+window.pick = (n) => send({kind:"answer", text:""+n});
+window.sendAnswer = () => { const v = $("ans").value; if (v.trim()) { send({kind:"answer", text:v}); sent++; } };
+window.chip = chip;
+
+// Tabs
+document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
+  b.classList.add("on");
+  const which = b.dataset.tab;
+  $("transcript").hidden = which !== "chat";
+  $("tasks").hidden = which !== "tasks";
+  $("agents").hidden = which !== "agents";
+});
+
+// Notifications (live, while the page/PWA is open in the background)
+function paintBell() { $("bell").textContent = notif ? "🔔" : "🔕"; }
+$("bell").onclick = () => {
+  if (!("Notification" in window)) { $("bell").title = "notifications unsupported"; return; }
+  if (Notification.permission === "granted") { notif = !notif; paintBell(); return; }
+  Notification.requestPermission().then(p => { notif = (p === "granted"); paintBell(); });
+};
+function maybeNotify(title, body) {
+  if (notif && document.hidden && "Notification" in window && Notification.permission === "granted") {
+    try { new Notification(title, { body: (body||"").slice(0, 120), icon: BASE + "/icon.svg", tag: "forge-remote" }); } catch (e) {}
+  }
+}
+
+// PWA: register the token-scoped service worker so the page installs to a home screen.
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register(BASE + "/sw.js", { scope: BASE + "/" }).catch(() => {});
+}
+
 $("prompt").focus();
 connect();
 </script>
 </body>
 </html>"##;
+
+/// The token-scoped PWA service worker. Its presence + a `fetch` handler is what makes the control
+/// page installable to a phone home screen; it caches the shell (network-first) so a reconnect is
+/// instant. Live state flows over the WebSocket, never `fetch`, so there's nothing else to cache.
+const SERVICE_WORKER: &str = r#"const CACHE = "forge-remote-v2";
+self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener("fetch", (e) => {
+  const req = e.request;
+  if (req.method !== "GET") return;
+  e.respondWith(
+    fetch(req).then((res) => {
+      const copy = res.clone();
+      caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+      return res;
+    }).catch(() => caches.match(req))
+  );
+});
+"#;
+
+/// The app icon (inline SVG — no binary asset to serve). A hammer mark on the brand background;
+/// `sizes:"any"` in the manifest lets the single SVG satisfy every install target.
+const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" rx="5" fill="#16161c"/><g fill="none" stroke="#ff913c" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m15 12-8.5 8.5c-.83.83-2.17.83-3 0a2.12 2.12 0 0 1 0-3L12 9"/><path d="M17.64 15 22 10.64"/><path d="m20.91 11.7-1.25-1.25c-.6-.6-.93-1.4-.93-2.25v-.86L16.01 4.6a5.56 5.56 0 0 0-3.94-1.64H9l.92.82A6.18 6.18 0 0 1 12 8.4v1.56l2 2h2.47l2.26 1.91"/></g></svg>"##;
+
+/// Build the PWA manifest JSON for a token base path (e.g. `/<token>`). `start_url`/`scope` use
+/// the slashed form so the installed app launches inside the service-worker scope and runs
+/// standalone (no browser chrome) straight into this session's control page.
+fn manifest_json(base: &str) -> String {
+    format!(
+        r##"{{"name":"Forge remote control","short_name":"Forge","description":"Drive a Forge coding session from anywhere.","start_url":"{base}/","scope":"{base}/","display":"standalone","background_color":"#16161c","theme_color":"#16161c","orientation":"any","icons":[{{"src":"{base}/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}},{{"src":"{base}/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"maskable"}}]}}"##
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -1025,6 +1321,9 @@ mod tests {
     #[test]
     fn snapshot_serializes_to_json_with_all_fields() {
         let s = Snapshot {
+            session_id: "abc12345".into(),
+            cwd: "/home/u/proj".into(),
+            exposure: "LAN".into(),
             busy: true,
             temper: "Ask".into(),
             tier: Some("complex".into()),
@@ -1034,15 +1333,36 @@ mod tests {
             context_limit: Some(200_000),
             streaming: "thinking…".into(),
             transcript: vec!["you: hi".into(), "forge: hello".into()],
+            tasks: vec![SnapTask {
+                title: "build it".into(),
+                status: "in_progress".into(),
+            }],
+            subagents: vec![SnapSubagent {
+                agent: "general".into(),
+                task: "scan".into(),
+                model: Some("haiku".into()),
+                last: "reading…".into(),
+                done: false,
+                cost: 0.001,
+            }],
+            queued: vec!["next thing".into()],
             permission_prompt: Some("allow write_file".into()),
             question: None,
-            done: false,
-            closed: false,
+            question_options: vec![SnapOption {
+                label: "Yes".into(),
+                description: "do it".into(),
+            }],
+            question_allow_other: true,
+            ..Default::default()
         };
         // Snapshot is server→client (serialize only); confirm the wire shape carries every field
         // the control page's JS reads, so a schema drift is caught here rather than at runtime.
         let json = serde_json::to_string(&s).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["protocol"], PROTOCOL_VERSION);
+        assert_eq!(v["session_id"], "abc12345");
+        assert_eq!(v["cwd"], "/home/u/proj");
+        assert_eq!(v["exposure"], "LAN");
         assert_eq!(v["busy"], true);
         assert_eq!(v["tier"], "complex");
         assert_eq!(v["model"], "groq::llama-3.3-70b");
@@ -1050,8 +1370,15 @@ mod tests {
         assert_eq!(v["context_tokens"], 18200);
         assert_eq!(v["context_limit"], 200000);
         assert_eq!(v["transcript"][0], "you: hi");
+        assert_eq!(v["tasks"][0]["title"], "build it");
+        assert_eq!(v["tasks"][0]["status"], "in_progress");
+        assert_eq!(v["subagents"][0]["agent"], "general");
+        assert_eq!(v["subagents"][0]["done"], false);
+        assert_eq!(v["queued"][0], "next thing");
         assert_eq!(v["permission_prompt"], "allow write_file");
         assert_eq!(v["question"], serde_json::Value::Null);
+        assert_eq!(v["question_options"][0]["label"], "Yes");
+        assert_eq!(v["question_allow_other"], true);
         assert_eq!(v["closed"], false);
     }
 
@@ -1075,6 +1402,50 @@ mod tests {
             serde_json::from_str::<RemoteInput>(r#"{"kind":"interrupt"}"#).unwrap(),
             RemoteInput::Interrupt
         );
+    }
+
+    #[test]
+    fn manifest_is_token_scoped_valid_json() {
+        let m = manifest_json("/deadbeef");
+        let v: serde_json::Value = serde_json::from_str(&m).expect("manifest is valid JSON");
+        assert_eq!(v["start_url"], "/deadbeef/");
+        assert_eq!(v["scope"], "/deadbeef/");
+        assert_eq!(v["display"], "standalone");
+        assert_eq!(v["icons"][0]["src"], "/deadbeef/icon.svg");
+    }
+
+    #[test]
+    fn control_page_injects_base_path() {
+        let html = CONTROL_PAGE.replace("__BASE__", "/cafef00d");
+        assert!(!html.contains("__BASE__"), "all base placeholders replaced");
+        assert!(
+            html.contains(r#"const BASE = "/cafef00d";"#),
+            "JS BASE is the token path (WS + SW + manifest derive from it)"
+        );
+        assert!(
+            html.contains(r#"href="/cafef00d/manifest.webmanifest""#),
+            "manifest link is token-scoped"
+        );
+        assert!(
+            html.contains(r#"href="/cafef00d/icon.svg""#),
+            "icon link is token-scoped"
+        );
+    }
+
+    #[test]
+    fn service_worker_has_fetch_handler() {
+        // PWA installability requires a fetch handler; guard against accidentally dropping it.
+        assert!(SERVICE_WORKER.contains(r#"addEventListener("fetch""#));
+    }
+
+    #[test]
+    fn remote_auto_maps_to_exposure() {
+        use forge_config::RemoteAuto;
+        assert_eq!(Exposure::from(RemoteAuto::Local), Exposure::Local);
+        assert_eq!(Exposure::from(RemoteAuto::Lan), Exposure::Lan);
+        assert_eq!(Exposure::from(RemoteAuto::Anywhere), Exposure::Anywhere);
+        // Off never reaches `From` in practice (startup_exposure returns None), but map it safely.
+        assert_eq!(Exposure::from(RemoteAuto::Off), Exposure::Local);
     }
 
     #[test]
@@ -1213,6 +1584,33 @@ mod tests {
             let v: serde_json::Value = serde_json::from_str(&text).expect("snapshot is JSON");
             assert!(v.get("busy").is_some(), "snapshot has `busy`: {v}");
             assert!(v.get("model").is_some(), "snapshot has `model`: {v}");
+
+            // 4. PWA assets are served + token-scoped (so the page installs to a home screen).
+            let man = http
+                .get(format!(
+                    "http://127.0.0.1:{port}/{token}/manifest.webmanifest"
+                ))
+                .send()
+                .await
+                .expect("GET manifest");
+            assert_eq!(man.status(), 200, "manifest is 200");
+            let man_body = man.text().await.unwrap();
+            assert!(
+                man_body.contains(&format!("\"start_url\":\"/{token}/\"")),
+                "manifest start_url is token-scoped: {man_body}"
+            );
+            let sw = http
+                .get(format!("http://127.0.0.1:{port}/{token}/sw.js"))
+                .send()
+                .await
+                .expect("GET service worker");
+            assert_eq!(sw.status(), 200, "service worker is 200");
+            let icon = http
+                .get(format!("http://127.0.0.1:{port}/{token}/icon.svg"))
+                .send()
+                .await
+                .expect("GET icon");
+            assert_eq!(icon.status(), 200, "icon is 200");
             // All assertions passed — force-exit so the lingering server task + WS close
             // handshake can't stall the test runtime's shutdown (manual-only, --ignored).
             std::process::exit(0);

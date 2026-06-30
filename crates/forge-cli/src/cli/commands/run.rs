@@ -1101,6 +1101,19 @@ pub(crate) async fn run_chat_tui(
     }
     let mut observer: Option<ObserverState> = None;
 
+    // Stable session context for remote snapshots — captured once (cheap to clone each frame
+    // instead of re-locking the session in the hot render path).
+    let remote_session_id = session.lock().await.session_id().to_string();
+    let remote_cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+
+    // Default-on remote control: when `[remote] auto` is configured, start the server at chat
+    // startup so the session is reachable from a phone/browser without typing `/remote` first.
+    if let Some(auto) = tui_config.remote.startup_exposure() {
+        toggle_remote(&mut remote, &mut app, &mut tui, auto.into()).await?;
+    }
+
     while !quit {
         if let Some(obs) = &mut observer {
             if obs.last_poll.elapsed() >= std::time::Duration::from_millis(50) {
@@ -3033,7 +3046,23 @@ pub(crate) async fn run_chat_tui(
             }
             if dirty || busy {
                 let view = app.remote_snapshot();
+                let exposure = remote
+                    .as_ref()
+                    .map(|rc| {
+                        if let Some(t) = rc.tunnel {
+                            format!("public ({t})")
+                        } else if rc.url.url.starts_with("https") {
+                            "LAN".to_string()
+                        } else {
+                            "loopback".to_string()
+                        }
+                    })
+                    .unwrap_or_default();
                 let snap = remote::Snapshot {
+                    protocol: remote::PROTOCOL_VERSION,
+                    session_id: remote_session_id.clone(),
+                    cwd: remote_cwd.clone(),
+                    exposure,
                     busy: view.busy,
                     done: view.done,
                     temper: view.temper,
@@ -3044,8 +3073,43 @@ pub(crate) async fn run_chat_tui(
                     context_limit: view.context_limit,
                     streaming: view.streaming,
                     transcript: view.transcript,
+                    tasks: view
+                        .tasks
+                        .iter()
+                        .map(|t| remote::SnapTask {
+                            title: t.title.clone(),
+                            status: match t.status {
+                                forge_types::TodoStatus::Pending => "pending",
+                                forge_types::TodoStatus::InProgress => "in_progress",
+                                forge_types::TodoStatus::Done => "done",
+                            }
+                            .to_string(),
+                        })
+                        .collect(),
+                    subagents: view
+                        .subagents
+                        .iter()
+                        .map(|s| remote::SnapSubagent {
+                            agent: s.agent.clone(),
+                            task: s.task.clone(),
+                            model: s.model.clone(),
+                            last: s.last.clone(),
+                            done: s.done,
+                            cost: s.cost,
+                        })
+                        .collect(),
+                    queued: view.queued,
                     permission_prompt: view.permission_prompt,
                     question: view.question,
+                    question_options: view
+                        .question_options
+                        .iter()
+                        .map(|o| remote::SnapOption {
+                            label: o.label.clone(),
+                            description: o.description.clone(),
+                        })
+                        .collect(),
+                    question_allow_other: view.question_allow_other,
                     closed: false,
                 };
                 if let Some(rc) = remote.as_ref() {
