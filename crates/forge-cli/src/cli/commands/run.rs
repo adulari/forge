@@ -136,7 +136,35 @@ pub(crate) async fn build_session_with_self_mcp(
     // (spawned) immediately: a real, observed runaway self-fork chain (one child every
     // ~200-300ms, no depth limit, OOM'd the machine in minutes). `forge mcp agent` IS the
     // self-MCP tool surface already — it must never try to spawn another copy of itself.
-    if allow_self_mcp && config.self_mcp && !mcp_config.servers.iter().any(|s| s.name == "forge") {
+    if !allow_self_mcp {
+        // Not enough to just skip the dynamic injection below: `forge import claude` (or a
+        // user's own `.forge/mcp.toml`) can ALSO persist an explicit "forge" server entry
+        // (copied verbatim from a `.mcp.json` like the one this binary documents in its own
+        // `--help`). `forge mcp agent` loads the exact same `mcp_config` as every other
+        // session, so a persisted entry bypasses the injection guard entirely and still gets
+        // eagerly connected (= spawned) by `connect_active()` — this is what actually kept
+        // reproducing the fork bomb after the injection-only fix shipped. Strip any stdio
+        // server that resolves to THIS SAME BINARY invoked with `mcp agent`, regardless of
+        // what it's named in the config (covers a renamed entry too, not just literally
+        // "forge").
+        let self_exe_name = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()));
+        mcp_config.servers.retain(|s| {
+            let forge_config::McpTransport::Stdio { command, args, .. } = &s.transport else {
+                return true;
+            };
+            let is_self_binary = self_exe_name.as_deref().is_some_and(|n| {
+                std::path::Path::new(command)
+                    .file_name()
+                    .map(|f| f.to_string_lossy() == n)
+                    .unwrap_or(false)
+            });
+            let is_mcp_agent_invocation =
+                args.iter().any(|a| a == "mcp") && args.iter().any(|a| a == "agent");
+            !(is_self_binary && is_mcp_agent_invocation)
+        });
+    } else if config.self_mcp && !mcp_config.servers.iter().any(|s| s.name == "forge") {
         let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("forge"));
         mcp_config.servers.insert(
             0,
