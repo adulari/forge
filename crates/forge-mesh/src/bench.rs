@@ -107,6 +107,19 @@ impl BenchmarkScores {
         // share, not a model-family identifier. Without this exclusion, "coder" would let
         // deepseek-coder-v2 pick up Qwen2.5-Coder's bench score and vice-versa.
         const ROLE_WORDS: &[&str] = &["coder", "chat", "code", "instruct", "vision", "embed"];
+        // Numeric tokens (version numbers) in `want` — used below to refuse a cross-VERSION
+        // match. Without this, a brand-new release (`claude-sonnet-5`, no AA row yet) fuzzy-
+        // matches an OLDER sibling row purely on the shared "claude"+"sonnet" family words
+        // (neither token set's numbers overlap) and silently inherits its stale score — which
+        // also defeats `benchmarks::ensure`'s "no score yet → refetch" trigger, so the real
+        // Sonnet 5 row never gets picked up once AA publishes it. A bare alias with NO version
+        // number at all (`claude-cli::opus`) is unaffected — it's still meant to map to the
+        // current best Claude-Opus row.
+        let want_nums: Vec<&str> = want
+            .iter()
+            .filter(|t| t.chars().all(|c| c.is_ascii_digit()))
+            .map(String::as_str)
+            .collect();
         let mut best: Option<(usize, f64, BenchScore)> = None; // (overlap, intelligence, score)
         for (toks, score) in &self.entries {
             let shared = overlap(&want, toks);
@@ -116,7 +129,15 @@ impl BenchmarkScores {
                     && !ROLE_WORDS.contains(&t.as_str())
                     && toks.contains(t)
             });
-            if !family || shared < 2 {
+            let cand_nums: Vec<&str> = toks
+                .iter()
+                .filter(|t| t.chars().all(|c| c.is_ascii_digit()))
+                .map(String::as_str)
+                .collect();
+            let version_conflict = !want_nums.is_empty()
+                && !cand_nums.is_empty()
+                && !want_nums.iter().any(|n| cand_nums.contains(n));
+            if !family || shared < 2 || version_conflict {
                 continue;
             }
             // Prefer more shared tokens; break ties toward the higher-intelligence row (a bare
@@ -327,6 +348,36 @@ mod tests {
         );
         // The exact Qwen model still resolves correctly via the fuzzy path.
         assert!(b.score_for("openrouter::qwen/qwen2.5-coder-14b").is_some());
+    }
+
+    #[test]
+    fn fuzzy_score_for_does_not_cross_match_a_newer_unrated_version_to_an_older_row() {
+        // Real-world case: AA has scores for Sonnet 4.6 but not yet for a brand-new Sonnet 5 —
+        // before the version-conflict guard, score_for() fuzzy-matched on the shared
+        // "claude"+"sonnet" family words (ignoring that "5" vs "4"/"6" don't overlap) and
+        // silently handed Sonnet 5 the OLD model's score. That's wrong on its own, AND it
+        // defeats `benchmarks::ensure`'s "model has no score yet → refetch" trigger, so the
+        // real Sonnet 5 row would never get picked up once AA actually publishes it.
+        let mut b = BenchmarkScores::new();
+        b.insert(
+            "Claude Sonnet 4.6 (Adaptive Reasoning, Max Effort)",
+            47.2,
+            63.0,
+        );
+        assert!(
+            b.score_for("openrouter::anthropic/claude-sonnet-5")
+                .is_none(),
+            "an unrated newer version must not silently inherit an older version's score"
+        );
+        // A genuinely versionless alias is unaffected — still maps to the best Claude-Sonnet row.
+        assert!(b.score_for("claude-cli::sonnet").is_some());
+        // The exact version still resolves once AA actually publishes it (fast path, no fuzzy
+        // matching involved).
+        b.insert("Claude Sonnet 5", 65.0, 70.0);
+        let s = b
+            .score_for("openrouter::anthropic/claude-sonnet-5")
+            .unwrap();
+        assert_eq!(s.intelligence, 65.0);
     }
 
     #[test]
