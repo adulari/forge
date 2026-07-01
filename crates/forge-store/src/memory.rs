@@ -26,6 +26,12 @@ pub struct Memory {
 /// Jaccard token-overlap at or above this counts two memory texts as the same fact (dedup + bump).
 const DUP_JACCARD: f64 = 0.6;
 
+/// Max memories retained per scope. Unlike session/message, the `memory` table (schema.rs) has no
+/// automatic expiry otherwise, so a scope would accumulate rows forever; this both bounds storage
+/// growth and caps the cost of [`Store::find_duplicate_memory`]'s per-row Jaccard scan, which runs
+/// on every insert. Least-salient, then least-recently-updated, rows are evicted first past the cap.
+const MEMORY_SCOPE_CAP: i64 = 500;
+
 impl Store {
     /// Add a memory, or — if a near-duplicate already exists in the same scope — bump that one's
     /// salience + recency instead of inserting a second copy (auto-curation). Returns the row id.
@@ -53,6 +59,7 @@ impl Store {
             "INSERT INTO memory (id, scope, kind, text, source_session) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![id, scope, kind, text, source_session],
         )?;
+        self.evict_memories_over_cap(scope)?;
         Ok(id)
     }
 
@@ -89,6 +96,7 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![id, scope, kind, text, source_session, &bytes],
         )?;
+        self.evict_memories_over_cap(scope)?;
         Ok(id)
     }
 
@@ -109,6 +117,21 @@ impl Store {
             }
         }
         Ok(None)
+    }
+
+    /// Evict the least-salient (then least-recently-updated) rows of `scope` past
+    /// [`MEMORY_SCOPE_CAP`], so a scope's memory count — and the cost of
+    /// [`find_duplicate_memory`](Self::find_duplicate_memory)'s per-row scan — never grows
+    /// unbounded.
+    fn evict_memories_over_cap(&self, scope: &str) -> Result<()> {
+        self.lock()?.execute(
+            "DELETE FROM memory WHERE scope = ?1 AND id NOT IN ( \
+               SELECT id FROM memory WHERE scope = ?1 \
+               ORDER BY salience DESC, updated_at DESC LIMIT ?2 \
+             )",
+            rusqlite::params![scope, MEMORY_SCOPE_CAP],
+        )?;
+        Ok(())
     }
 
     /// All memories in a scope, most-salient + most-recent first.
@@ -372,6 +395,22 @@ mod tests {
             .unwrap();
         s.add_memory("p", "fact", "golf hotel india", "x").unwrap();
         assert_eq!(s.clear_memories("p").unwrap(), 2);
+    }
+
+    #[test]
+    fn add_memory_evicts_least_salient_past_scope_cap() {
+        let s = store();
+        for i in 0..(MEMORY_SCOPE_CAP + 5) {
+            // Token must be unique per row (tokenize drops alphanumeric runs under 3 chars, so a
+            // bare digit like "i" would collapse and every row would look like a duplicate).
+            s.add_memory("p", "fact", &format!("distinctfact{i}xyzzy"), "x")
+                .unwrap();
+        }
+        assert_eq!(
+            s.count_memories("p").unwrap(),
+            MEMORY_SCOPE_CAP,
+            "scope must never accumulate past the cap"
+        );
     }
 
     #[test]

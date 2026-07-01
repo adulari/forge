@@ -24,9 +24,9 @@ const SCHEMA_VERSION: i64 = 1;
 /// transaction a bounded number of times with a short backoff rather than dropping the row.
 const BUSY_RETRY_MAX: u32 = 8;
 
-/// Oversized `tool_call.result_json` (e.g. a full large-file read) is truncated to this many bytes
-/// at insert time, with a marker. Keeps the append-only global DB from growing without bound while
-/// preserving the head of the output for audit/replay.
+/// Oversized `tool_call.args_json`/`result_json` (e.g. a full large-file read or write) is truncated
+/// to this many bytes at insert time, with a marker. Keeps the append-only global DB from growing
+/// without bound while preserving the head of the args/output for audit/replay.
 const MAX_RESULT_JSON_BYTES: usize = 64 * 1024;
 
 /// Default retention horizon: sessions untouched for longer than this are eligible for opportunistic
@@ -96,8 +96,9 @@ fn with_busy_retry<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
     }
 }
 
-/// Truncate an oversized tool result to [`MAX_RESULT_JSON_BYTES`] on a char boundary, appending a
-/// marker noting how many bytes were elided. Returns the input unchanged when within the cap.
+/// Truncate an oversized tool args/result string to [`MAX_RESULT_JSON_BYTES`] on a char boundary,
+/// appending a marker noting how many bytes were elided. Returns the input unchanged when within
+/// the cap.
 fn cap_result_json(s: &str) -> std::borrow::Cow<'_, str> {
     if s.len() <= MAX_RESULT_JSON_BYTES {
         return std::borrow::Cow::Borrowed(s);
@@ -107,6 +108,14 @@ fn cap_result_json(s: &str) -> std::borrow::Cow<'_, str> {
         end -= 1;
     }
     std::borrow::Cow::Owned(format!("{}…[truncated {} bytes]", &s[..end], s.len() - end))
+}
+
+/// Escape `\`, `%`, and `_` in a caller-supplied string so it can be safely embedded in a SQL
+/// `LIKE` pattern (with `ESCAPE '\'`) as literal text rather than as wildcards.
+fn escape_like_pattern(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// How long a permanently-failed model (a [`Store::exclude_model`] capability exclusion) stays out
@@ -579,13 +588,15 @@ impl Store {
         Ok(id)
     }
 
-    /// Delete up to `max_sessions` sessions that have NEVER received a real (active, role='user')
-    /// message and were created more than `horizon_secs` ago (oldest first) — separate from
-    /// [`Store::prune`]'s much longer general retention horizon, since an empty session carries
-    /// nothing worth keeping at all. A process that spawns a session and exits (or crashes) before
-    /// the user ever sends a prompt — e.g. an `mcp agent` connection that's opened and torn down
-    /// without being used — otherwise leaves a permanent, empty row that clutters `forge sessions`
-    /// / the resume picker forever. Returns the number removed.
+    /// Delete up to `max_sessions` sessions that have NEVER received a real (role='user') message —
+    /// checked regardless of `active`, so a session whose sole user message was later soft-deleted
+    /// by `/undo` or a checkpoint restore (which only flips `active`, it never removes the row) is
+    /// still correctly recognized as having been used — and were created more than `horizon_secs`
+    /// ago (oldest first) — separate from [`Store::prune`]'s much longer general retention horizon,
+    /// since an empty session carries nothing worth keeping at all. A process that spawns a session
+    /// and exits (or crashes) before the user ever sends a prompt — e.g. an `mcp agent` connection
+    /// that's opened and torn down without being used — otherwise leaves a permanent, empty row that
+    /// clutters `forge sessions` / the resume picker forever. Returns the number removed.
     pub fn prune_empty(&self, horizon_secs: i64, max_sessions: usize) -> Result<usize> {
         if max_sessions == 0 {
             return Ok(0);
@@ -598,7 +609,7 @@ impl Store {
                     "SELECT id FROM session s WHERE s.created_at < ?1 AND s.agent_active = 0 \
                      AND NOT EXISTS ( \
                        SELECT 1 FROM message m \
-                       WHERE m.session_id = s.id AND m.role = 'user' AND m.active = 1 \
+                       WHERE m.session_id = s.id AND m.role = 'user' \
                      ) ORDER BY s.created_at LIMIT ?2",
                 )?;
                 let v = stmt
@@ -895,8 +906,9 @@ impl Store {
         permission: &str,
         status: &str,
     ) -> Result<()> {
-        // Cap oversized results (full file reads etc.) so the append-only global DB can't grow
-        // without bound; the head is preserved with a truncation marker for audit/replay.
+        // Cap oversized args/results (full file writes/reads etc.) so the append-only global DB
+        // can't grow without bound; the head is preserved with a truncation marker for audit/replay.
+        let args_json = cap_result_json(args_json);
         let result = cap_result_json(result);
         with_busy_retry(|| {
             let conn = self.lock()?;
@@ -904,7 +916,7 @@ impl Store {
                 "INSERT INTO tool_call (id, message_id, tool_name, args_json, result_json, permission, status)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?
-            .execute((forge_types::new_id(), message_id, tool_name, args_json, result.as_ref(), permission, status))?;
+            .execute((forge_types::new_id(), message_id, tool_name, args_json.as_ref(), result.as_ref(), permission, status))?;
             Ok(())
         })
     }
@@ -1509,11 +1521,13 @@ impl Store {
     /// time), so the picker lists the sessions you're likely to resume at the top. Excludes
     /// subagent child sessions (`parent_session_id IS NOT NULL`) so the picker and the
     /// `forge sessions` command only surface top-level sessions. Also excludes sessions that
-    /// never received a real (active, role='user') message — a session row is created eagerly
-    /// at process start (before [`Store::prune_empty`] has a chance to sweep it, and for a
-    /// session still in its first few minutes of life), so without this filter a process that
-    /// opens a session and exits/crashes before any prompt is sent — including one stuck in a
-    /// spawn loop, the original trigger for this — fills the picker with blank, useless entries.
+    /// never received a real (role='user') message — checked regardless of `active`, so a
+    /// session whose sole user message was later soft-deleted by `/undo` or a checkpoint restore
+    /// still counts as used — a session row is created eagerly at process start (before
+    /// [`Store::prune_empty`] has a chance to sweep it, and for a session still in its first
+    /// few minutes of life), so without this filter a process that opens a session and
+    /// exits/crashes before any prompt is sent — including one stuck in a spawn loop, the
+    /// original trigger for this — fills the picker with blank, useless entries.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
@@ -1526,7 +1540,7 @@ impl Store {
              FROM session s WHERE s.parent_session_id IS NULL \
              AND EXISTS ( \
                SELECT 1 FROM message m \
-               WHERE m.session_id = s.id AND m.role = 'user' AND m.active = 1 \
+               WHERE m.session_id = s.id AND m.role = 'user' \
              ) \
              ORDER BY last_activity DESC, s.rowid DESC",
         )?;
@@ -1546,11 +1560,15 @@ impl Store {
             .map_err(StoreError::from)
     }
 
-    /// Full session ids whose id starts with `prefix` (git-style abbreviation).
+    /// Full session ids whose id starts with `prefix` (git-style abbreviation). `prefix` is
+    /// matched literally: any `%`/`_`/`\` it contains is escaped so it can't act as a SQL LIKE
+    /// wildcard and broaden the match beyond a literal prefix.
     pub fn matching_session_ids(&self, prefix: &str) -> Result<Vec<String>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare("SELECT id FROM session WHERE id LIKE ?1 || '%'")?;
-        let rows = stmt.query_map([prefix], |row| row.get::<_, String>(0))?;
+        let escaped = escape_like_pattern(prefix);
+        let mut stmt =
+            conn.prepare("SELECT id FROM session WHERE id LIKE ?1 || '%' ESCAPE '\\'")?;
+        let rows = stmt.query_map([escaped], |row| row.get::<_, String>(0))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(StoreError::from)
     }
@@ -2789,6 +2807,17 @@ mod tests {
         assert!(store.matching_session_ids("zzzzzzzz").unwrap().is_empty());
     }
 
+    #[test]
+    fn matching_session_ids_treats_percent_and_underscore_as_literal() {
+        // `%` and `_` are SQL LIKE metacharacters; a prefix containing them must be matched
+        // literally, not as wildcards, or a lookup with those characters could match unrelated
+        // session ids.
+        let store = Store::open_in_memory().unwrap();
+        let _other = store.create_session("/other", "default").unwrap();
+        assert!(store.matching_session_ids("a%").unwrap().is_empty());
+        assert!(store.matching_session_ids("a_").unwrap().is_empty());
+    }
+
     // --- Assay runs + findings ---
 
     #[test]
@@ -3336,6 +3365,53 @@ mod tests {
     }
 
     #[test]
+    fn prune_empty_keeps_session_whose_user_message_was_soft_deleted() {
+        // /undo and checkpoint-restore soft-delete a message (active = 0) without removing the
+        // row (deactivate_messages_from). A session that genuinely received a user message and
+        // then had it rewound must NOT look "never used" to prune_empty — otherwise it gets
+        // permanently hard-deleted, taking real (soft-deleted) transcript + checkpoints with it.
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/undone", "default").unwrap();
+        store
+            .add_message(&sid, 0, Role::User, "real prompt", None)
+            .unwrap();
+        store.deactivate_messages_from(&sid, 0).unwrap();
+
+        // Backdate past the empty-session horizon, as if the sweep ran much later.
+        let past = chrono::Utc::now().timestamp() - 3600;
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session SET created_at = ?1 WHERE id = ?2",
+                rusqlite::params![past, sid],
+            )
+            .unwrap();
+
+        let removed = store.prune_empty(600, 50).unwrap();
+        assert_eq!(
+            removed, 0,
+            "a session with a soft-deleted user message was actually used and must survive"
+        );
+        assert!(store.session_exists(&sid).unwrap());
+    }
+
+    #[test]
+    fn list_sessions_includes_session_whose_user_message_was_soft_deleted() {
+        // Same "actually used" bar as list_sessions_excludes_sessions_with_no_user_message, but
+        // for a message that was soft-deleted after the fact — it must still count as used.
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/undone", "default").unwrap();
+        store
+            .add_message(&sid, 0, Role::User, "real prompt", None)
+            .unwrap();
+        store.deactivate_messages_from(&sid, 0).unwrap();
+        let sessions = store.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, sid);
+    }
+
+    #[test]
     fn clear_all_model_health_wipes_every_bench() {
         let store = Store::open_in_memory().unwrap();
         store.bench_model("a", 2000, "rate-limited").unwrap();
@@ -3760,6 +3836,37 @@ mod tests {
             "oversized result was truncated ({} < {})",
             stored.len(),
             huge.len()
+        );
+        assert!(stored.contains("truncated"), "carries a truncation marker");
+    }
+
+    #[test]
+    fn oversized_tool_args_are_capped() {
+        // args_json (e.g. a write_file/edit tool call passing the new file body as an argument)
+        // must be bounded the same way result_json is, or the same unbounded-growth problem the
+        // result cap exists to prevent recurs on the args side.
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        let mid = store
+            .add_message(&sid, 0, Role::Assistant, "x", None)
+            .unwrap();
+        let huge_args = "B".repeat(MAX_RESULT_JSON_BYTES * 3);
+        store
+            .record_tool_call(&mid, "write_file", &huge_args, "ok", "allowed", "ok")
+            .unwrap();
+        let conn = store.lock().unwrap();
+        let stored: String = conn
+            .query_row(
+                "SELECT args_json FROM tool_call WHERE message_id = ?1",
+                [&mid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            stored.len() < huge_args.len(),
+            "oversized args were truncated ({} < {})",
+            stored.len(),
+            huge_args.len()
         );
         assert!(stored.contains("truncated"), "carries a truncation marker");
     }
