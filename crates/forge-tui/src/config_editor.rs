@@ -10,6 +10,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::KeyKind;
+use forge_types::truncate_ellipsis as truncate;
 
 use ratatui::style::Color;
 const ACCENT: Color = Color::Rgb(82, 162, 255);
@@ -515,17 +516,6 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
     )));
 
     frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        format!(
-            "{}…",
-            s.chars().take(max.saturating_sub(1)).collect::<String>()
-        )
-    } else {
-        s.to_string()
-    }
 }
 
 #[cfg(test)]

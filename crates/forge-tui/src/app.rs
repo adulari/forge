@@ -2724,13 +2724,10 @@ fn model_pin_row_color(row: &crate::commands::PickerRow, tick: usize) -> Color {
     }
 }
 
+/// Flatten to one line, then delegate to the shared [`forge_types::truncate_ellipsis`] so the
+/// truncation-length semantics stay in lockstep with the rest of the codebase.
 fn truncate(s: &str, max: usize) -> String {
-    let s = s.replace('\n', " ");
-    if s.chars().count() > max {
-        format!("{}…", s.chars().take(max).collect::<String>())
-    } else {
-        s
-    }
+    forge_types::truncate_ellipsis(&s.replace('\n', " "), max)
 }
 
 /// Width-aware truncation budget: scales with the terminal width but never drops below `min` (the

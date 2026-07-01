@@ -8,6 +8,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use forge_config::{HookConfig, HookEvent};
+use forge_types::truncate_ellipsis as truncate;
 use tokio::io::AsyncWriteExt;
 
 /// The combined effect of running the hooks that matched one tool call + event.
@@ -470,14 +471,6 @@ async fn run_one(h: &HookConfig, payload: &str) -> Result<(i32, String, String),
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        s.chars().take(max).collect::<String>() + "…"
-    } else {
-        s.to_string()
-    }
 }
 
 #[cfg(test)]

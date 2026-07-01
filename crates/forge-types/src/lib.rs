@@ -813,6 +813,22 @@ pub fn new_id() -> String {
     Uuid::new_v4().to_string()
 }
 
+/// Truncate `s` to at most `max` characters, appending an ellipsis (`…`) when truncated. The
+/// ellipsis counts toward `max`, so the result is never longer than `max` characters. The single
+/// canonical implementation — forge-core and forge-tui each used to carry their own copy of this,
+/// with the copies having drifted (some took exactly `max` chars before the ellipsis, making the
+/// result `max + 1` chars long).
+pub fn truncate_ellipsis(s: &str, max: usize) -> String {
+    if s.chars().count() > max {
+        format!(
+            "{}…",
+            s.chars().take(max.saturating_sub(1)).collect::<String>()
+        )
+    } else {
+        s.to_string()
+    }
+}
+
 /// The argument keys a file-touching tool may use to name its target path. Centralized as a single
 /// source of truth so the permission broker, the secret denylist, the pre-write snapshot, and the
 /// in-process workspace confinement all key off the SAME set. A write tool that names its path arg
