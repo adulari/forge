@@ -1722,28 +1722,6 @@ pub(crate) async fn run_chat_tui(
                         if let Some(m) = &skipped {
                             skip_model_excludes.insert(m.clone());
                         }
-                        // `try_lock`, NEVER a blocking `.await`: this is the main render loop, and
-                        // a turn parked in a permission/question prompt holds this lock for the
-                        // whole prompt. Blocking here would wedge the entire loop before it ever
-                        // reaches the abort below that's needed to unblock that very prompt — the
-                        // same deadlock class as the remote-snapshot/usage-overlay fixes.
-                        //
-                        // Re-bench EVERY model skipped so far this turn, not just the current one:
-                        // `bench_for`'s cooldown is time-based, so re-issuing it here refreshes
-                        // every earlier skip's expiry too — otherwise cycling through several
-                        // models could let an early skip's bench lapse before the mesh has run out
-                        // of alternatives, and the retry could land back on it. On contention a
-                        // skip is simply not (re-)recorded this press; the abort+retry still
-                        // happens, and the next press tries again.
-                        if let Ok(s) = session.try_lock() {
-                            for m in &skip_model_excludes {
-                                let _ = s.store.bench_for(
-                                    m,
-                                    std::time::Duration::from_secs(180),
-                                    "user skipped via Ctrl+K",
-                                );
-                            }
-                        }
                         if let Some(h) = turn_handle.take() {
                             h.abort();
                         }
@@ -1765,17 +1743,38 @@ pub(crate) async fn run_chat_tui(
                                 None => "⏭ retrying on next model".to_string(),
                             });
                             turn_gen += 1;
-                            turn_handle = Some(spawn_turn_with(
-                                p,
-                                Vec::new(),
-                                None,
-                                &session,
-                                &done_tx,
-                                turn_gen,
-                                &mut app,
-                                &mut busy,
-                                &mut busy_since,
-                            ));
+                            // A custom spawn (not `spawn_turn_with`): the exclusions MUST be
+                            // benched inside the SAME lock acquisition that `run_turn_with` uses
+                            // to classify/route, immediately before it — not from the render loop
+                            // via `try_lock`, which raced the old (aborted, but not yet actually
+                            // torn down — `abort()` is cooperative, not immediate) turn task for
+                            // the same lock and lost almost every time, silently dropping the
+                            // exclusion and landing back on the very model just skipped.
+                            app.on_turn_start();
+                            app.submit_user(&p);
+                            app.done = false;
+                            app.tick = 0;
+                            busy = true;
+                            busy_since = std::time::Instant::now();
+                            let s = session.clone();
+                            let dt = done_tx.clone();
+                            let excludes: Vec<String> =
+                                skip_model_excludes.iter().cloned().collect();
+                            let gen = turn_gen;
+                            turn_handle = Some(tokio::spawn(async move {
+                                let _done = DoneGuard(dt, gen);
+                                let mut sess = s.lock().await;
+                                for m in &excludes {
+                                    let _ = sess.store.bench_for(
+                                        m,
+                                        std::time::Duration::from_secs(180),
+                                        "user skipped via Ctrl+K",
+                                    );
+                                }
+                                if let Err(e) = sess.run_turn_with(&p, &[], None).await {
+                                    sess.notify_error(&format!("turn failed: {e}"));
+                                }
+                            }));
                         } else {
                             app.note("⏭ turn aborted — no prompt to retry");
                         }
