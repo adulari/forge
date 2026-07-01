@@ -360,17 +360,29 @@ async fn git_clone(target: &str, git_ref: Option<&str>, token: Option<&str>) -> 
 }
 
 /// Choose the directory inside a clone that holds the skills: an explicit subdir, else a `skills/`
-/// subdir if present, else the repo root.
-fn pick_root(clone: &Path, subdir: Option<&str>) -> PathBuf {
+/// subdir if present, else the repo root. Rejects a `subdir` that is absolute or contains `..`
+/// components, which would otherwise let a crafted package/marketplace entry escape the clone
+/// directory and point `install_from` at an arbitrary path on disk.
+fn pick_root(clone: &Path, subdir: Option<&str>) -> Result<PathBuf> {
     if let Some(sub) = subdir {
-        return clone.join(sub);
+        let sub_path = Path::new(sub);
+        if sub_path.is_absolute()
+            || sub_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            anyhow::bail!(
+                "invalid package subdirectory '{sub}': must be a relative path with no '..' components"
+            );
+        }
+        return Ok(clone.join(sub_path));
     }
     let skills = clone.join("skills");
-    if skills.is_dir() {
+    Ok(if skills.is_dir() {
         skills
     } else {
         clone.to_path_buf()
-    }
+    })
 }
 
 /// Install every skill found in `root` (top-level `*.md` files and any directory containing a
@@ -450,7 +462,7 @@ pub(crate) async fn install_plugin(pkg: &str, marketplace_flag: Option<String>) 
         token.as_deref(),
     )
     .await?;
-    let root = pick_root(&clone.0, resolved.subdir.as_deref());
+    let root = pick_root(&clone.0, resolved.subdir.as_deref())?;
     if !root.exists() {
         anyhow::bail!(
             "package path '{}' not found in {}",
@@ -523,7 +535,13 @@ pub(crate) async fn update_installed(name: Option<&str>) -> Result<()> {
                 continue;
             }
         };
-        let root = pick_root(&clone.0, entry.subdir.as_deref());
+        let root = match pick_root(&clone.0, entry.subdir.as_deref()) {
+            Ok(root) => root,
+            Err(e) => {
+                eprintln!("  ✖ {name}: {e}");
+                continue;
+            }
+        };
         match install_from(&root, &skills_dir, true) {
             Ok(files) if !files.is_empty() => {
                 record_installed_at(
