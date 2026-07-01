@@ -2048,10 +2048,16 @@ pub fn write_keybind(action: &str, combo: &KeyCombo) -> Result<PathBuf, ConfigEr
     let keybinds = root
         .entry("keybinds".to_string())
         .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if !keybinds.is_table() {
+        *keybinds = toml::Value::Table(toml::Table::new());
+    }
     if let toml::Value::Table(kb) = keybinds {
         let binds = kb
             .entry("binds".to_string())
             .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if !binds.is_table() {
+            *binds = toml::Value::Table(toml::Table::new());
+        }
         if let toml::Value::Table(binds_t) = binds {
             let mut combo_t = toml::Table::new();
             combo_t.insert("key".to_string(), toml::Value::String(combo.key.clone()));
@@ -2162,9 +2168,9 @@ pub fn complex_section_help(section: &str) -> &'static str {
 const PRIORITY_PREFIXES: &[&str] = &[
     "permission_mode",
     "mesh.credit_mode",
-    "mesh.daily_cap_usd",
+    "mesh.daily_budget_usd",
     "mesh.monthly_cap_usd",
-    "mesh.weekly_cap_usd",
+    "mesh.weekly_budget_usd",
     "local.autostart",
     "local.model",
     "tui.fullscreen",
@@ -2253,8 +2259,8 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
     let curated = match path {
         "permission_mode" => Some(("Safety", "Permission mode")),
         "mesh.credit_mode" => Some(("Mesh & Cost", "Credit conservation")),
-        "mesh.daily_cap_usd" => Some(("Mesh & Cost", "Daily spend cap (USD)")),
-        "mesh.weekly_cap_usd" => Some(("Mesh & Cost", "Weekly spend cap (USD)")),
+        "mesh.daily_budget_usd" => Some(("Mesh & Cost", "Daily spend cap (USD)")),
+        "mesh.weekly_budget_usd" => Some(("Mesh & Cost", "Weekly spend cap (USD)")),
         "mesh.monthly_cap_usd" => Some(("Mesh & Cost", "Monthly spend cap (USD)")),
         "mesh.classifier" => Some(("Mesh & Cost", "Task classifier")),
         "mesh.classifier_model" => Some(("Mesh & Cost", "Classifier model")),
@@ -2450,8 +2456,8 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
     Some(match path {
         "permission_mode" => "Tool-safety posture for new sessions: default · accept-edits · bypass · plan.",
         "mesh.credit_mode" => "Subscription conservation: normal · frugal · strict (spread work off paid plans).",
-        "mesh.daily_cap_usd" => "Hard daily spend cap (USD) across sessions; the mesh downshifts/stops near it.",
-        "mesh.weekly_cap_usd" => "Hard weekly spend cap (USD). Empty = unlimited.",
+        "mesh.daily_budget_usd" => "Hard daily spend cap (USD) across sessions; the mesh downshifts/stops near it.",
+        "mesh.weekly_budget_usd" => "Hard weekly spend cap (USD). Empty = unlimited.",
         "mesh.monthly_cap_usd" => "Hard monthly spend cap (USD). Empty = unlimited.",
         "mesh.classifier" => "Task-tier classifier: heuristic (instant, no call) or llm (a cheap model labels each turn).",
         "mesh.classifier_model" => "Model the llm classifier calls — pick a $0/local one (e.g. ollama::… or a CLI bridge).",
@@ -2641,6 +2647,9 @@ fn write_subscriptions_at(
     let mesh = root
         .entry("mesh".to_string())
         .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if !mesh.is_table() {
+        *mesh = toml::Value::Table(toml::Table::new());
+    }
     if let toml::Value::Table(mesh_t) = mesh {
         let sub_t: toml::Table = subs
             .iter()
