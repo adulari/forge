@@ -21,28 +21,33 @@ pub struct OllamaEmbedder {
 }
 
 impl OllamaEmbedder {
-    pub fn new(endpoint: &str, model: &str) -> Self {
-        Self {
+    pub fn new(endpoint: &str, model: &str) -> Result<Self, LatticeError> {
+        Ok(Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             model: model.to_string(),
-            client: bundled_ca_client(),
-        }
+            client: bundled_ca_client()?,
+        })
     }
 }
 
 /// A reqwest client seeded with Mozilla's bundled root CAs. `reqwest::Client::new()` builds against
-/// the OS trust store and **panics at construction** on a host that has none (bare container / minimal
-/// image) — even for the plain-HTTP ollama endpoint, because the panic is in TLS-backend setup, not at
-/// connect time. Building from the bundled certs bypasses that. (forge-index can't depend on
-/// forge-provider, which has the same helper.)
-fn bundled_ca_client() -> reqwest::Client {
+/// the OS trust store and can fail at construction on a host that has none (bare container / minimal
+/// image) — even for the plain-HTTP ollama endpoint, because the failure is in TLS-backend setup, not
+/// at connect time. Building from the bundled certs bypasses that. (forge-index can't depend on
+/// forge-provider, which has the same helper.) Returns an error instead of panicking so an optional,
+/// user-enabled feature degrades gracefully rather than crashing the whole session.
+fn bundled_ca_client() -> Result<reqwest::Client, LatticeError> {
     let certs = webpki_root_certs::TLS_SERVER_ROOT_CERTS
         .iter()
         .filter_map(|der| reqwest::Certificate::from_der(der.as_ref()).ok());
     reqwest::Client::builder()
         .tls_certs_only(certs)
         .build()
-        .expect("reqwest client with bundled CA certificates")
+        .map_err(|e| {
+            LatticeError::Io(format!(
+                "building reqwest client with bundled CA certificates: {e}"
+            ))
+        })
 }
 
 #[async_trait]
