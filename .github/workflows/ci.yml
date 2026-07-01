@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Exempt from GitHub's GITHUB_TOKEN anti-recursion guard (unlike push/pull_request), so
+  # release.yml can manually dispatch a real "CI" run against its bot-opened brew-formula PR
+  # branch — that PR's own `pull_request` event never fires one, since it's opened with GITHUB_TOKEN.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}

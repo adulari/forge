@@ -59,7 +59,7 @@ if [[ "$BUILD" == 1 ]]; then
     -v forge-e2e-cargo:/usr/local/cargo/registry \
     -e CARGO_TARGET_DIR=/out \
     -w /src rust:1.85 \
-    bash -c "cargo build --release -p forge-cli" || { echo "container build failed" >&2; exit 1; }
+    bash -c "cargo build --release -p forge-agent" || { echo "container build failed" >&2; exit 1; }
   # Copy the built binary out of the named volume to a host path we can bind read-only.
   mkdir -p "$REPO/target-e2e/release"
   docker run --rm -v forge-e2e-target:/out -v "$REPO/target-e2e/release":/host alpine \
