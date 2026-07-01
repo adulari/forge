@@ -230,7 +230,7 @@ mod tests {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
             Ok(serde_json::Value::String(format!("agent done: {label}")))
         })
     }
@@ -269,9 +269,15 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert_eq!(out, "agent done: a / agent done: b");
+        // A slow/shared CI runner (observed 53ms on macOS CI against a 30ms sleep with a 45ms
+        // bound — a real environment-overhead margin issue, not a functional bug) needs a wider
+        // gap than a local dev box: sleep long enough, and bound generously enough, that
+        // scheduling overhead can't accidentally cross the serialized-vs-concurrent line.
+        // Serialized would take 100ms+ (2×50ms); concurrent should land close to 50-70ms even
+        // under heavy CI load.
         assert!(
-            elapsed < Duration::from_millis(45),
-            "expected concurrent execution (~30ms), took {elapsed:?} — looks serialized"
+            elapsed < Duration::from_millis(90),
+            "expected concurrent execution (~50-70ms), took {elapsed:?} — looks serialized"
         );
     }
 
