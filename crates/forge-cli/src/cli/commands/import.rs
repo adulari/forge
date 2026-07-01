@@ -569,13 +569,17 @@ pub(crate) fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io:
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        let ft = entry.file_type()?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        if from.is_dir() {
+        if ft.is_dir() {
             copy_dir(&from, &to)?;
-        } else {
+        } else if ft.is_file() {
             std::fs::copy(&from, &to)?;
         }
+        // symlinks/other are skipped — an untrusted source tree (e.g. a cloned
+        // marketplace package) could otherwise use them to escape `src` and copy
+        // arbitrary local files into the destination.
     }
     Ok(())
 }

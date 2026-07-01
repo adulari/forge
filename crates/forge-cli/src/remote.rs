@@ -620,22 +620,12 @@ impl Drop for RemoteControl {
 /// A random URL-safe token for path-gating the control page + WS. Lowercase hex is unambiguous
 /// on a phone keyboard and survives being embedded in a QR code.
 fn random_token() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // 16 hex chars (64 bits): enough entropy that a LAN peer can't guess it, short enough to
-    // scan. We don't pull a crate for this — SystemTime nanos + an address-unique counter is
-    // plenty for a session-scoped secret that's only valid while `forge chat` is running.
-    // `ThreadId::as_u64` is unstable, so we mix the process id + a static counter instead —
-    // the goal is just "not guessable by a LAN peer within the session's lifetime".
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id() as u128;
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
-    let mix = nanos ^ pid.wrapping_mul(0x9E37) ^ seq.wrapping_mul(0x1000_0003);
-    format!("{:016x}", mix as u64)
+    // 16 hex chars (64 bits) sourced from the OS CSPRNG via `rand::random` (already a workspace
+    // dependency — see `forge-config::oauth`). This is genuinely load-bearing under `--anywhere`,
+    // where the token is the sole authentication for a public, internet-reachable control
+    // channel, so it must not be derived from guessable/low-entropy inputs like the process
+    // start time or pid.
+    format!("{:016x}", rand::random::<u64>())
 }
 
 /// Best-effort LAN hostname for the connect URL. We keep it dependency-free and just return the
