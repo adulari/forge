@@ -375,9 +375,17 @@ fn fine_capability(id: &str) -> f64 {
     while i < bytes.len() && !bytes[i].is_ascii_digit() {
         i += 1;
     }
+    // Cap digits actually accumulated (not just `i`'s advance) so a long digit run in a model id
+    // (embedded hash, snowflake id, timestamp, ...) can't overflow the u32 accumulator; 9 digits
+    // safely fits (max 999,999,999 < u32::MAX) and is far beyond any real version number.
+    const MAX_DIGITS: u32 = 9;
     let mut major: u32 = 0;
+    let mut major_digits = 0u32;
     while i < bytes.len() && bytes[i].is_ascii_digit() {
-        major = major * 10 + (bytes[i] - b'0') as u32;
+        if major_digits < MAX_DIGITS {
+            major = major * 10 + (bytes[i] - b'0') as u32;
+            major_digits += 1;
+        }
         i += 1;
     }
     // An immediately-following `.` or `-` then digits is the minor version (`5.4`, `4-8`).
@@ -390,8 +398,10 @@ fn fine_capability(id: &str) -> f64 {
         i += 1;
         let (mut minor, mut digits) = (0u32, 0i32);
         while i < bytes.len() && bytes[i].is_ascii_digit() {
-            minor = minor * 10 + (bytes[i] - b'0') as u32;
-            digits += 1;
+            if (digits as u32) < MAX_DIGITS {
+                minor = minor * 10 + (bytes[i] - b'0') as u32;
+                digits += 1;
+            }
             i += 1;
         }
         frac = minor as f64 / 10f64.powi(digits);
@@ -1237,6 +1247,16 @@ mod tests {
             "4-8 → 4.8"
         );
         assert_eq!(fine_capability("ollama::llama3"), 3.0);
+    }
+
+    #[test]
+    fn fine_capability_does_not_overflow_on_long_digit_runs() {
+        // Regression: model ids are sourced from external provider/gateway catalogs and could
+        // contain a long digit run (embedded hash, snowflake id, timestamp, ...). The accumulator
+        // must not overflow `u32` (dev/test builds have `overflow-checks = true` and would panic).
+        let _ = fine_capability("openrouter::model-99999999999999999999");
+        let _ = fine_capability("openrouter::model-1.99999999999999999999");
+        let _ = fine_capability("openrouter::model-18446744073709551616");
     }
 
     #[test]

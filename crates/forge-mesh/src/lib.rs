@@ -326,13 +326,38 @@ fn effective_min_context(min_tokens: Option<u32>, effort: Option<EffortLevel>) -
     })
 }
 
+/// Whether `needle` occurs in `haystack` starting at a word boundary — i.e. not immediately
+/// preceded by an alphanumeric character. Plain `str::contains` lets short verbs like "port "
+/// match inside unrelated words that happen to end the same way (e.g. "port " inside "report ",
+/// "export "), so ACTION_VERBS and other short-verb checks must use this instead.
+fn contains_word_boundary(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut search_start = 0usize;
+    while let Some(rel_idx) = haystack[search_start..].find(needle) {
+        let abs_idx = search_start + rel_idx;
+        let preceded_by_alnum = haystack[..abs_idx]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric());
+        if !preceded_by_alnum {
+            return true;
+        }
+        search_start = abs_idx + needle.len();
+    }
+    false
+}
+
 /// Whether a prompt reads as a coding task (code fences, code tokens, or a dev-action verb) — the
 /// signal behind the mild coding-provider prior.
 fn is_code_heavy(prompt: &str) -> bool {
     let lower = prompt.to_lowercase();
     prompt.contains("```")
         || CODE_TOKENS.iter().any(|t| lower.contains(t))
-        || ACTION_VERBS.iter().any(|v| lower.contains(v))
+        || ACTION_VERBS
+            .iter()
+            .any(|v| contains_word_boundary(&lower, v))
 }
 
 /// Score a prompt's difficulty from weighted local signals (deterministic, no I/O). Capability
@@ -374,7 +399,10 @@ fn score_prompt(prompt: &str) -> Classification {
         pts += 3;
         reasons.push("code present");
     }
-    if ACTION_VERBS.iter().any(|v| lower.contains(v)) {
+    if ACTION_VERBS
+        .iter()
+        .any(|v| contains_word_boundary(&lower, v))
+    {
         pts += 2;
         reasons.push("dev-action verb");
     }
@@ -382,7 +410,10 @@ fn score_prompt(prompt: &str) -> Classification {
         pts += 2;
         reasons.push("multi-step scope");
     }
-    if lower.contains("test") || lower.contains("benchmark") || lower.contains("edge case") {
+    if contains_word_boundary(&lower, "test")
+        || lower.contains("benchmark")
+        || lower.contains("edge case")
+    {
         pts += 1;
         reasons.push("tests/edge-cases");
     }
@@ -788,11 +819,16 @@ impl HeuristicRouter {
                         .unwrap_or_else(|| "unknown".into());
                     // Report WHY the primary was skipped — `is_usable` has three failure modes and
                     // only one is a missing key; for a benched or quota-exhausted model the key IS
-                    // present, so "no usable key" was misleading.
+                    // present, so "no usable key" was misleading. A model can also be `is_usable`
+                    // but still dropped by the separate strict-credit-mode filter (a paid/metered
+                    // model policy exclusion, not a quota problem) — check that before defaulting
+                    // to "quota exhausted".
                     let reason = if !(self.model_available)(&original) {
                         "no usable key"
                     } else if health.is_benched(&original) {
                         "model benched"
+                    } else if !self.allowed_under_credit_mode(&original) {
+                        "excluded by strict credit mode"
                     } else {
                         "quota exhausted"
                     };
@@ -953,6 +989,46 @@ mod tests {
         assert!(
             normal_chain.iter().any(|m| m == "gemini::gemini-2.5-pro"),
             "normal mode keeps paid models routable"
+        );
+    }
+
+    #[tokio::test]
+    async fn strict_credit_mode_exclusion_reports_correct_fallback_reason() {
+        // Regression: a candidate that IS `is_usable` (key present, not benched, not exhausted)
+        // but gets dropped only by the separate strict-credit-mode filter must not be mislabeled
+        // "quota exhausted" in the fallback rationale — that's misleading since the provider
+        // quota is fine; it was simply disallowed by policy.
+        let mut c = Config::default();
+        c.mesh.models.insert(
+            TaskTier::Standard.as_str().into(),
+            forge_config::OneOrMany::Many(vec!["gemini::gemini-2.5-pro".to_string()]),
+        );
+        c.mesh.credit_mode = forge_types::CreditMode::Strict;
+        let r = HeuristicRouter::new(c).with_availability(|_| true);
+        let prompt = "add a new endpoint that returns the list of users as json".repeat(2);
+        let d = r
+            .route(
+                &prompt,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+            )
+            .await;
+        assert_eq!(d.tier, TaskTier::Standard);
+        assert_ne!(
+            d.model, "gemini::gemini-2.5-pro",
+            "strict mode must not pick the paid model"
+        );
+        assert!(
+            d.rationale.contains("excluded by strict credit mode"),
+            "{}",
+            d.rationale
+        );
+        assert!(
+            !d.rationale.contains("quota exhausted"),
+            "must not mislabel a credit-mode policy exclusion as quota exhaustion: {}",
+            d.rationale
         );
     }
 
@@ -2173,6 +2249,52 @@ mod tests {
             TaskTier::Trivial,
             "conversion is non-trivial work"
         );
+    }
+
+    #[test]
+    fn report_and_export_do_not_falsely_match_the_port_action_verb() {
+        // Regression: "port " (an ACTION_VERBS entry, to catch "port this module to Rust") is a
+        // substring of "report " and "export ", so naive `str::contains` gave these common words
+        // a spurious "dev-action verb" point and marked them code_heavy — unrelated to porting.
+        assert!(
+            !is_code_heavy("please generate a report for the crash"),
+            "\"report\" must not match the \"port \" action verb"
+        );
+        assert!(
+            !is_code_heavy("export the data to csv"),
+            "\"export\" must not match the \"port \" action verb"
+        );
+        for p in [
+            "please generate a report for the crash",
+            "export the data to csv",
+        ] {
+            assert!(
+                !score_prompt(p).reasons.contains(&"dev-action verb"),
+                "{p:?} must not score a dev-action verb point: {:?}",
+                score_prompt(p).reasons
+            );
+        }
+    }
+
+    #[test]
+    fn latest_fastest_and_contest_do_not_falsely_match_test() {
+        // Regression: `lower.contains("test")` also matched inside "latest"/"fastest"/"contest",
+        // spuriously adding a "tests/edge-cases" point unrelated to actual testing.
+        for p in [
+            "what is the latest version of this crate",
+            "pick the fastest algorithm here",
+            "there was a contest about this last year",
+        ] {
+            assert!(
+                !score_prompt(p).reasons.contains(&"tests/edge-cases"),
+                "{p:?} must not score a tests/edge-cases point: {:?}",
+                score_prompt(p).reasons
+            );
+        }
+        // Control: a real "test" mention still scores the point.
+        assert!(score_prompt("please add a test for this")
+            .reasons
+            .contains(&"tests/edge-cases"));
     }
 
     #[test]
