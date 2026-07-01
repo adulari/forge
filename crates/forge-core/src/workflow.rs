@@ -483,7 +483,7 @@ mod tests {
             use std::sync::atomic::Ordering::SeqCst;
             let now = self.active.fetch_add(1, SeqCst) + 1;
             self.peak.fetch_max(now, SeqCst);
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             self.active.fetch_sub(1, SeqCst);
             Ok(ModelResponse {
                 content: "child done".into(),
@@ -629,9 +629,12 @@ mod tests {
             3,
             "all 3 ran concurrently"
         );
+        // Same rationale as forge-workflow's own concurrency test (see its comment): a slow/shared
+        // CI runner needs a wide margin. Serialized would take 150ms+ (3×50ms); concurrent should
+        // land well under that even accounting for CI scheduling overhead.
         assert!(
-            elapsed < std::time::Duration::from_millis(80),
-            "3×30ms serialized would take ~90ms+; concurrent should take ~30-40ms, took {elapsed:?}"
+            elapsed < std::time::Duration::from_millis(120),
+            "3×50ms serialized would take ~150ms+; concurrent should take ~50-90ms, took {elapsed:?}"
         );
         assert_eq!(
             evs.iter()
