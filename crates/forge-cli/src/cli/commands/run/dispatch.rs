@@ -97,26 +97,36 @@ pub(crate) fn build_mesh_overlay(
                 spread_complex: q.spread_probability,
             })
             .collect(),
-        candidates: e
-            .candidates
-            .iter()
-            .take(12)
-            .map(|c| forge_tui::MeshCandRow {
-                rank: c.rank,
-                model: c.row.model.clone(),
-                score: c.row.final_score,
-                cost_tag: match c.row.cost_class {
-                    0 => "free",
-                    1 => "subscription",
-                    _ => "paid",
+        candidates: {
+            // Top 12 by score, but if the actual pick ranks below that (a lower-scoring row can
+            // still legitimately win once ineligible higher-scoring rows are filtered out by
+            // `decide()` — see `explain()`'s `usable` fix), always include it too. Otherwise the
+            // panel shows 12 rows with none marked `selected`, making a correct pick look like it
+            // came from nowhere.
+            let mut top: Vec<_> = e.candidates.iter().take(12).collect();
+            if !top.iter().any(|c| c.selected) {
+                if let Some(sel) = e.candidates.iter().find(|c| c.selected) {
+                    top.push(sel);
                 }
-                .to_string(),
-                frontier: c.row.frontier,
-                usable: c.usable,
-                selected: c.selected,
-                penalty: c.row.conserve_penalty,
-            })
-            .collect(),
+            }
+            top.into_iter()
+                .map(|c| forge_tui::MeshCandRow {
+                    rank: c.rank,
+                    model: c.row.model.clone(),
+                    score: c.row.final_score,
+                    cost_tag: match c.row.cost_class {
+                        0 => "free",
+                        1 => "subscription",
+                        _ => "paid",
+                    }
+                    .to_string(),
+                    frontier: c.row.frontier,
+                    usable: c.usable,
+                    selected: c.selected,
+                    penalty: c.row.conserve_penalty,
+                })
+                .collect()
+        },
         pick: e.pick.clone(),
         fallbacks: e.fallbacks.clone(),
         rationale: e.rationale.clone(),

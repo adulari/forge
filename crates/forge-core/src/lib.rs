@@ -22,6 +22,7 @@ pub mod assay;
 pub mod hooks;
 pub mod llm_router;
 pub mod permission;
+pub mod project_context;
 pub mod snapshot;
 pub mod subagent;
 pub mod tokens;
@@ -792,6 +793,10 @@ pub struct Session {
     /// runtime. `None` for a resumed session (already in the transcript) or when no file exists;
     /// `take()`-n on injection.
     cached_agents_md: Option<String>,
+    /// What project/codebase this session is operating in (project_context.rs) — read ONCE at
+    /// construction, same rationale as `cached_git_branch`, and passed to the mesh router on every
+    /// `route`/`route_hinted` call so it can weight self-hosting infrastructure work correctly.
+    project: forge_types::ProjectContext,
 }
 
 /// Parse `.git/HEAD` contents into a branch name (`ref: refs/heads/<branch>` → `<branch>`).
@@ -968,6 +973,9 @@ impl Session {
             } else {
                 read_project_agents_md()
             },
+            project: std::env::current_dir()
+                .map(|cwd| crate::project_context::compute(&cwd))
+                .unwrap_or_default(),
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
@@ -1883,6 +1891,7 @@ impl Session {
             &health,
             &self.live_quota(),
             self.pinned_effort(),
+            &self.project,
         );
         use forge_config::ClassifierKind;
         exp.classifier_label = match self.config.mesh.classifier {
@@ -1898,7 +1907,7 @@ impl Session {
             }
             ClassifierKind::Hybrid => {
                 let (_, confident, reason) =
-                    forge_mesh::HeuristicRouter::classify_confident(prompt);
+                    forge_mesh::HeuristicRouter::classify_confident(prompt, &self.project);
                 if confident {
                     format!("hybrid — heuristic confident ({reason}), no llm call")
                 } else {
@@ -2107,6 +2116,7 @@ Rules:\n\
                     &quota,
                     Some(TaskTier::Complex),
                     self.pinned_effort,
+                    &self.project,
                 )
                 .await;
             std::iter::once(d.model)
@@ -2389,6 +2399,7 @@ Rules:\n\
                 &quota,
                 Some(TaskTier::Trivial),
                 self.pinned_effort,
+                &self.project,
             )
             .await;
 
@@ -2505,6 +2516,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         let id = self.id.clone();
         let config = self.config.clone();
         let pinned_effort = self.pinned_effort;
+        let project = self.project.clone();
         let user_snippet: String = prompt.chars().take(500).collect();
         let assistant_snippet: String = final_text.chars().take(1200).collect();
         Some(tokio::spawn(async move {
@@ -2516,6 +2528,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                     &quota,
                     Some(TaskTier::Trivial),
                     pinned_effort,
+                    &project,
                 )
                 .await;
             let messages = vec![
@@ -2597,6 +2610,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 &quota,
                 Some(TaskTier::Trivial),
                 self.pinned_effort,
+                &self.project,
             )
             .await;
         let user_snippet: String = prompt.chars().take(400).collect();
@@ -2688,6 +2702,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 &quota,
                 Some(TaskTier::Trivial),
                 self.pinned_effort,
+                &self.project,
             )
             .await;
         let messages = [
@@ -3871,6 +3886,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 &quota,
                 effective_tier,
                 self.pinned_effort,
+                &self.project,
             )
             .await;
         // `/model <id>` override: use the pinned model instead of the mesh-routed pick; mesh still
@@ -9747,6 +9763,7 @@ mod tests {
             _health: &forge_types::ModelHealth,
             _quota: &forge_types::SubscriptionQuota,
             _effort: Option<forge_types::EffortLevel>,
+            _project: &forge_types::ProjectContext,
         ) -> forge_mesh::RoutingDecision {
             forge_mesh::RoutingDecision {
                 tier: forge_types::TaskTier::Trivial,

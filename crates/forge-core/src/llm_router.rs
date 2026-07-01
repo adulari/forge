@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use forge_mesh::{BudgetState, HeuristicRouter, RouteHints, Router, RoutingDecision};
 use forge_provider::Provider;
-use forge_types::{EffortLevel, Message, ModelHealth, SubscriptionQuota, TaskTier};
+use forge_types::{EffortLevel, Message, ModelHealth, ProjectContext, SubscriptionQuota, TaskTier};
 
 /// Hard ceiling on the classification call so a slow/hung model degrades to the heuristic.
 const CLASSIFY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -103,6 +103,7 @@ impl Router for LlmRouter {
         health: &ModelHealth,
         quota: &SubscriptionQuota,
         effort: Option<EffortLevel>,
+        project: &ProjectContext,
     ) -> RoutingDecision {
         let hints = RouteHints::from_prompt(prompt);
 
@@ -111,7 +112,7 @@ impl Router for LlmRouter {
         // signalled Complex ones (multiple reasoning terms). Only the uncertain middle — score
         // −3…7 — triggers the extra round-trip.
         if self.hybrid {
-            let (tier, confident, reason) = HeuristicRouter::classify_confident(prompt);
+            let (tier, confident, reason) = HeuristicRouter::classify_confident(prompt, project);
             if confident {
                 return self.fallback.decide(
                     tier,
@@ -153,7 +154,7 @@ impl Router for LlmRouter {
                 // Couldn't classify → deterministic heuristic, noted in the rationale.
                 let mut d = self
                     .fallback
-                    .route(prompt, budget, health, quota, effort)
+                    .route(prompt, budget, health, quota, effort, project)
                     .await;
                 d.rationale
                     .push_str(" (llm classify unavailable → heuristic)");
@@ -170,6 +171,7 @@ impl Router for LlmRouter {
         quota: &SubscriptionQuota,
         tier_override: Option<TaskTier>,
         effort: Option<EffortLevel>,
+        project: &ProjectContext,
     ) -> RoutingDecision {
         match tier_override {
             // An explicit command/skill tier hint skips the classifier model call entirely.
@@ -182,7 +184,10 @@ impl Router for LlmRouter {
                 quota,
                 effort,
             ),
-            None => self.route(prompt, budget, health, quota, effort).await,
+            None => {
+                self.route(prompt, budget, health, quota, effort, project)
+                    .await
+            }
         }
     }
 }
@@ -245,6 +250,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex); // AC-B1
@@ -260,6 +266,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         // heuristic catches the hard prompt
@@ -276,6 +283,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Trivial);
@@ -299,6 +307,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(
@@ -325,6 +334,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(
@@ -351,6 +361,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(
@@ -377,6 +388,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(
@@ -397,6 +409,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         // Heuristic gives Standard for this prompt.

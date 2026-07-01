@@ -510,7 +510,10 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
         mesh_overview(&cat, &config, &quota);
         return Ok(());
     }
-    let e = router.explain(&prompt, budget, &health, &quota, None);
+    let project = std::env::current_dir()
+        .map(|cwd| forge_core::project_context::compute(&cwd))
+        .unwrap_or_default();
+    let e = router.explain(&prompt, budget, &health, &quota, None, &project);
     if json {
         println!("{}", mesh_explanation_json(&e));
     } else {
@@ -662,8 +665,16 @@ pub(crate) fn print_mesh_explanation(e: &forge_mesh::RoutingExplanation) {
     }
 
     if !e.candidates.is_empty() {
-        println!("\ncandidates (top {}):", e.candidates.len().min(8));
-        for c in e.candidates.iter().take(8) {
+        // Top-8 by score can exclude the actual pick when higher rows are ineligible
+        // (credit_mode/context) — always include the selected row too.
+        let mut shown: Vec<_> = e.candidates.iter().take(8).collect();
+        if !shown.iter().any(|c| c.selected) {
+            if let Some(sel) = e.candidates.iter().find(|c| c.selected) {
+                shown.push(sel);
+            }
+        }
+        println!("\ncandidates (top {}):", shown.len());
+        for c in shown {
             let marker = if c.selected { "*" } else { " " };
             let pen = if c.row.conserve_penalty > 0.0 {
                 format!(" −{:.0}", c.row.conserve_penalty)
