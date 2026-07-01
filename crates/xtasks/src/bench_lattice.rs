@@ -81,7 +81,7 @@ struct Row {
 }
 
 #[allow(clippy::field_reassign_with_default)]
-fn bench_config(model: &str, cond: Condition) -> Config {
+fn bench_config(cond: Condition) -> Config {
     let mut cfg = Config::default();
     // Read-only posture: the tasks are questions, so the model only needs read tools; this avoids
     // any write/shell permission prompt blocking a headless run.
@@ -96,7 +96,6 @@ fn bench_config(model: &str, cond: Condition) -> Config {
     cfg.lattice.watch = false;
     cfg.lattice.embeddings.enabled = false;
     cond.apply(&mut cfg);
-    let _ = model;
     cfg
 }
 
@@ -117,6 +116,9 @@ pub async fn run() -> anyhow::Result<()> {
     forge_config::inject_provider_keys();
 
     let repo_root = std::env::current_dir()?;
+    let repo_root_str = repo_root
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("repo root path {:?} is not valid UTF-8", repo_root))?;
     eprintln!("[bench] model={model} reps={reps} conds={conds:?}");
     eprintln!("[bench] indexing {} ...", repo_root.display());
 
@@ -133,7 +135,7 @@ pub async fn run() -> anyhow::Result<()> {
         for task in TASKS {
             for rep in 0..reps {
                 let session_store = Arc::new(Store::open_in_memory()?);
-                let cfg = bench_config(&model, cond);
+                let cfg = bench_config(cond);
                 let router =
                     Arc::new(HeuristicRouter::new(cfg.clone()).with_pin(Some(model.clone())));
                 let mut session = Session::start(
@@ -143,7 +145,7 @@ pub async fn run() -> anyhow::Result<()> {
                     forge_tools::ToolRegistry::with_core_tools(),
                     Box::new(HeadlessPresenter::default()),
                     cfg,
-                    repo_root.to_str().unwrap(),
+                    repo_root_str,
                 )?;
                 if cond != Condition::Off {
                     session.set_lattice(Some(lattice.clone()));
@@ -151,7 +153,11 @@ pub async fn run() -> anyhow::Result<()> {
 
                 let sid = session.session_id().to_string();
                 if let Err(e) = session.run_turn(task.prompt).await {
-                    eprintln!("[bench] {cond:?}/{}/{rep} turn error: {e}", task.id);
+                    eprintln!(
+                        "[bench] {cond:?}/{}/{rep} turn error: {e} — excluded from report",
+                        task.id
+                    );
+                    continue;
                 }
                 let (input, output) = session_store.session_tokens(&sid)?;
                 let steps = session_store.session_step_count(&sid)?;
