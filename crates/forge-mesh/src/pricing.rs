@@ -178,8 +178,13 @@ pub fn context_limit(model: &str) -> Option<u32> {
     // All other providers must have their windows fetched from the provider's model endpoint
     // and persisted via `context_windows::fetch_and_persist`; `None` here tells the core to
     // use the DB-stored fetched value or fall back to `CONSERVATIVE_CONTEXT_WINDOW`.
-    match model.split("::").next().unwrap_or("") {
-        "claude-cli" => Some(200_000),
+    let (provider, bridge_model) = model.split_once("::").unwrap_or((model, ""));
+    match provider {
+        // Opus (4.6+) and Sonnet (4.5+) both GA'd to a 1M-token context window in March 2026 —
+        // Haiku has not. A flat per-provider figure silently under-assumed the real window once
+        // it grew past 200k.
+        "claude-cli" if bridge_model.contains("haiku") => Some(200_000),
+        "claude-cli" => Some(1_000_000),
         "codex-cli" => Some(272_000),
         "agy-cli" => Some(1_000_000),
         _ => None,
@@ -217,8 +222,11 @@ mod tests {
     #[test]
     fn context_limit_only_cli_bridges_everything_else_none() {
         // CLI bridges can't be queried via API — windows are hardcoded here only.
-        assert_eq!(context_limit("claude-cli::"), Some(200_000));
-        assert_eq!(context_limit("claude-cli::opus"), Some(200_000));
+        // Opus and Sonnet both GA'd to 1M context in March 2026; Haiku did not.
+        assert_eq!(context_limit("claude-cli::opus"), Some(1_000_000));
+        assert_eq!(context_limit("claude-cli::sonnet"), Some(1_000_000));
+        assert_eq!(context_limit("claude-cli::haiku"), Some(200_000));
+        assert_eq!(context_limit("claude-cli::"), Some(1_000_000));
         assert_eq!(context_limit("codex-cli::"), Some(272_000));
         assert_eq!(context_limit("codex-cli::gpt-5.5"), Some(272_000));
         assert_eq!(context_limit("agy-cli::"), Some(1_000_000));
