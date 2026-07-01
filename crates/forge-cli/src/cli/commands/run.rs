@@ -1248,10 +1248,19 @@ pub(crate) async fn run_chat_tui(
                     continue;
                 }
                 forge_tui::InputEvent::Scroll { up } => {
-                    // Mouse wheel (full-screen only): scroll the open activity viewer, else the
-                    // main transcript. A few rows per notch feels natural.
+                    // Mouse wheel: the mesh inspector overlay first (it captures all input while
+                    // open, same as its ↑/↓ key handling below), else the activity viewer
+                    // (full-screen), else the main transcript. A few rows per notch feels natural.
                     const STEP: usize = 3;
-                    if app.viewer.is_some() {
+                    if app.mesh_overlay.open {
+                        for _ in 0..STEP {
+                            if up {
+                                app.mesh_overlay.scroll = app.mesh_overlay.scroll.saturating_sub(1);
+                            } else {
+                                app.mesh_overlay.scroll = app.mesh_overlay.scroll.saturating_add(1);
+                            }
+                        }
+                    } else if app.viewer.is_some() {
                         let key = if up { KeyKind::Up } else { KeyKind::Down };
                         for _ in 0..STEP {
                             app.viewer_key(key);

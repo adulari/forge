@@ -665,9 +665,10 @@ pub(crate) fn print_mesh_explanation(e: &forge_mesh::RoutingExplanation) {
     }
 
     if !e.candidates.is_empty() {
-        // Top-8 by score can exclude the actual pick when higher rows are ineligible
-        // (credit_mode/context) — always include the selected row too.
-        let mut shown: Vec<_> = e.candidates.iter().take(8).collect();
+        // Only show candidates decide() could actually route to (see the TUI overlay's matching
+        // fix in dispatch.rs::build_mesh_overlay) — top-8 of the usable ones, always including the
+        // actual pick even if it ranks below that.
+        let mut shown: Vec<_> = e.candidates.iter().filter(|c| c.usable).take(8).collect();
         if !shown.iter().any(|c| c.selected) {
             if let Some(sel) = e.candidates.iter().find(|c| c.selected) {
                 shown.push(sel);
@@ -682,7 +683,7 @@ pub(crate) fn print_mesh_explanation(e: &forge_mesh::RoutingExplanation) {
                 String::new()
             };
             println!(
-                "  {marker} #{:<2} {:<34} score {:>6.2}  cap {:>5.2}  {}{}{}{}",
+                "  {marker} #{:<2} {:<34} score {:>6.2}  cap {:>5.2}  {}{}{}",
                 c.rank,
                 c.row.model,
                 c.row.final_score,
@@ -690,7 +691,6 @@ pub(crate) fn print_mesh_explanation(e: &forge_mesh::RoutingExplanation) {
                 cost_tag(c.row.cost_class),
                 pen,
                 if c.row.frontier { " · frontier" } else { "" },
-                if c.usable { "" } else { " · UNUSABLE" },
             );
         }
     }
