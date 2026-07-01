@@ -143,11 +143,16 @@ const COMPLEX_HINTS: &[&str] = &[
     "ultrathink",
     "think carefully",
     "step by step",
+    // Hyphenated form — a plain-string list can't normalize "step-by-step" to "step by step"
+    // without extra machinery, so both spellings are listed explicitly (matches the existing
+    // "in depth"/"in-depth" pair below).
+    "step-by-step",
     "in depth",
     "in-depth",
     "deep dive",
     "comprehensive",
     "thorough",
+    "think it through",
 ];
 /// Explicit "this is easy" hints — a strong pull toward Trivial (-5 pts).
 const TRIVIAL_HINTS: &[&str] = &[
@@ -193,6 +198,12 @@ const REASONING_TERMS: &[&str] = &[
     "evaluate",
     "vulnerabilit",
     "memory leak",
+    // Planning/proposal work is inherently a reasoning task — producing a good plan REQUIRES
+    // weighing approaches, not mechanically executing one. Catches the reported failure
+    // ("produce a step-by-step plan...") even without any other strong signal present.
+    "plan",
+    "propose",
+    "restructure",
 ];
 /// Medium-weight analytical signals (+3 pts each). A single term lifts to Standard; two
 /// or one + another signal reach Complex.
@@ -215,6 +226,8 @@ const ACTION_VERBS: &[&str] = &[
     "profile",
     "parallelize",
     "deploy",
+    "improve",
+    "valida",
     "wire ",
     "port ",
     "convert ",
@@ -223,7 +236,7 @@ const ACTION_VERBS: &[&str] = &[
     "create a ",
     "build a ",
 ];
-/// Trivial-edit patterns — a strong pull toward Trivial (-4 pts) regardless of length.
+/// Trivial-edit patterns — a strong pull toward Trivial (-8 pts) regardless of length.
 const TRIVIAL_PATTERNS: &[&str] = &[
     "typo",
     "rename",
@@ -349,6 +362,36 @@ fn contains_word_boundary(haystack: &str, needle: &str) -> bool {
     false
 }
 
+/// Whole-word match: `needle` must not be immediately preceded OR followed by an alphanumeric
+/// character. Stricter than `contains_word_boundary` (which only checks the leading side) —
+/// needed for single ambiguous words like "rename" that legitimately appear as a substring of an
+/// unrelated word ("a script that renames files" describes what the script DOES, not an
+/// instruction to rename something — `contains_word_boundary` alone still matches it since
+/// nothing precedes "rename" inside "renames" at that position other than a non-alnum boundary).
+fn contains_whole_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut search_start = 0usize;
+    while let Some(rel_idx) = haystack[search_start..].find(needle) {
+        let abs_idx = search_start + rel_idx;
+        let before_ok = haystack[..abs_idx]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
+        let after_idx = abs_idx + needle.len();
+        let after_ok = haystack[after_idx..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+        search_start = abs_idx + needle.len();
+    }
+    false
+}
+
 /// Whether a prompt reads as a coding task (code fences, code tokens, or a dev-action verb) — the
 /// signal behind the mild coding-provider prior.
 fn is_code_heavy(prompt: &str) -> bool {
@@ -432,8 +475,17 @@ fn score_prompt(prompt: &str) -> Classification {
         pts -= 5;
         reasons.push("explicit 'quick' hint");
     }
-    if TRIVIAL_PATTERNS.iter().any(|p| lower.contains(p)) {
-        pts -= 4;
+    if TRIVIAL_PATTERNS
+        .iter()
+        .any(|p| contains_whole_word(&lower, p))
+    {
+        // -8, not -4: an explicit trivial-edit pattern is a strong, deliberate signal (the user
+        // is describing a mechanical single-file edit) and should reliably win over ONE weak
+        // REASONING_TERMS hit from a word that's ambiguous outside its own context — e.g. "add a
+        // comment EXPLAINING this function" trips "explain" (+5, normally a strong Complex
+        // signal) despite the task itself being exactly what TRIVIAL_PATTERNS's "add a comment"
+        // describes. -4 left that case net-positive (Standard); -8 does not.
+        pts -= 8;
         reasons.push("trivial-edit pattern");
     }
 
@@ -918,6 +970,155 @@ impl Router for HeuristicRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ground-truth-labeled corpus for classifier accuracy — the "prove it" mechanism for a real,
+    /// live-reported failure: `score_prompt("produce a step-by-step plan to improve forge's mesh
+    /// task-classification system")` scored 0 (Trivial) despite being an obviously Complex,
+    /// self-referential planning task. Every entry is a realistic prompt shape actually seen or
+    /// plausible in normal usage — not synthetic keyword-stuffing — labeled by what the task
+    /// genuinely REQUIRES (per the classifier's own stated design principle), not by length or
+    /// surface phrasing. `classifier_accuracy_meets_bar` asserts against this corpus directly, so
+    /// it's both the regression guard and the numeric proof of any future change here.
+    const LABELED_CORPUS: &[(&str, TaskTier)] = &[
+        // --- Trivial: mechanical, single-file, no real decision-making ---
+        ("fix this typo", TaskTier::Trivial),
+        ("rename this variable to snake_case", TaskTier::Trivial),
+        ("bump the version to 1.2.3", TaskTier::Trivial),
+        ("add a comment explaining this function", TaskTier::Trivial),
+        ("remove this unused import", TaskTier::Trivial),
+        (
+            "what does this error mean: undefined variable x",
+            TaskTier::Trivial,
+        ),
+        ("say hi", TaskTier::Trivial),
+        ("what's 2+2", TaskTier::Trivial),
+        ("format this file with prettier", TaskTier::Trivial),
+        ("delete this commented-out line", TaskTier::Trivial),
+        ("reformat this JSON file", TaskTier::Trivial),
+        ("what does HTTP 429 mean", TaskTier::Trivial),
+        // --- Standard: real but bounded, single-concern changes ---
+        (
+            "add a retry-with-backoff wrapper around the HTTP client",
+            TaskTier::Standard,
+        ),
+        (
+            "write a unit test for the parse_config function",
+            TaskTier::Standard,
+        ),
+        (
+            "add input validation to the signup form",
+            TaskTier::Standard,
+        ),
+        (
+            "implement pagination for the /users endpoint",
+            TaskTier::Standard,
+        ),
+        (
+            "review the authentication flow for obvious issues",
+            TaskTier::Standard,
+        ),
+        ("compare these two sorting approaches", TaskTier::Standard),
+        (
+            "check the performance of this endpoint under load",
+            TaskTier::Standard,
+        ),
+        (
+            "add a CLI flag to skip the confirmation prompt",
+            TaskTier::Standard,
+        ),
+        (
+            "write a script that renames all .jpeg files to .jpg",
+            TaskTier::Standard,
+        ),
+        (
+            "port this Python script to a bash script",
+            TaskTier::Standard,
+        ),
+        // --- Complex: real design/reasoning/architectural stakes ---
+        ("investigate why the cache warms slowly", TaskTier::Complex),
+        (
+            "audit the permission checks in the auth module",
+            TaskTier::Complex,
+        ),
+        (
+            "debug the race condition in the scheduler",
+            TaskTier::Complex,
+        ),
+        (
+            "design a plan to migrate the database to Postgres",
+            TaskTier::Complex,
+        ),
+        ("architect a plugin system for the CLI", TaskTier::Complex),
+        (
+            "there is a memory leak in the connection pool, find it",
+            TaskTier::Complex,
+        ),
+        // The exact reported failure — hyphenated "step-by-step", no other strong keyword.
+        (
+            "produce a step-by-step plan to improve forge's mesh task-classification system",
+            TaskTier::Complex,
+        ),
+        (
+            "produce a step-by-step plan to improve the auth module",
+            TaskTier::Complex,
+        ),
+        (
+            "come up with a plan for refactoring the billing service",
+            TaskTier::Complex,
+        ),
+        (
+            "propose an approach for making the API idempotent",
+            TaskTier::Complex,
+        ),
+        (
+            "what's the best way to restructure this module — think it through",
+            TaskTier::Complex,
+        ),
+        (
+            "evaluate whether we should switch to a different ORM",
+            TaskTier::Complex,
+        ),
+        (
+            "think hard about the tradeoffs here before answering",
+            TaskTier::Complex,
+        ),
+        (
+            "give me an in-depth review of this design",
+            TaskTier::Complex,
+        ),
+        (
+            "investigate then fix the flaky test, explaining the root cause",
+            TaskTier::Complex,
+        ),
+        (
+            "re-evaluate our current difficulty tiers and check if this is the best setup",
+            TaskTier::Complex,
+        ),
+        (
+            "dig into why the mesh keeps under-routing tasks and fix it, proven with real testing",
+            TaskTier::Complex,
+        ),
+    ];
+
+    #[test]
+    fn classifier_accuracy_meets_bar() {
+        let mut failures = Vec::new();
+        for (prompt, expected) in LABELED_CORPUS {
+            let got = score_prompt(prompt).tier;
+            if got != *expected {
+                failures.push(format!("{prompt:?}: expected {expected:?}, got {got:?}"));
+            }
+        }
+        let accuracy = 1.0 - (failures.len() as f64 / LABELED_CORPUS.len() as f64);
+        assert!(
+            failures.is_empty(),
+            "classifier accuracy {:.1}% ({}/{} correct) — failures:\n{}",
+            accuracy * 100.0,
+            LABELED_CORPUS.len() - failures.len(),
+            LABELED_CORPUS.len(),
+            failures.join("\n")
+        );
+    }
 
     #[test]
     fn failover_chain_follows_mesh_rank_order_not_provider_interleave() {
