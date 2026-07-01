@@ -98,12 +98,12 @@ pub(crate) fn build_mesh_overlay(
             })
             .collect(),
         candidates: {
-            // Top 12 by score, but if the actual pick ranks below that (a lower-scoring row can
-            // still legitimately win once ineligible higher-scoring rows are filtered out by
-            // `decide()` — see `explain()`'s `usable` fix), always include it too. Otherwise the
-            // panel shows 12 rows with none marked `selected`, making a correct pick look like it
-            // came from nowhere.
-            let mut top: Vec<_> = e.candidates.iter().take(12).collect();
+            // Only show candidates `decide()` could actually route to — an unusable row (benched,
+            // exhausted, or excluded by credit_mode/context) is noise, not a real alternative.
+            // Top 12 of those by score; if the actual pick still ranks below that (ties, or a
+            // longer usable tail), always include it too, so the panel never shows 12 rows with
+            // none marked `selected`.
+            let mut top: Vec<_> = e.candidates.iter().filter(|c| c.usable).take(12).collect();
             if !top.iter().any(|c| c.selected) {
                 if let Some(sel) = e.candidates.iter().find(|c| c.selected) {
                     top.push(sel);
