@@ -1943,6 +1943,7 @@ name = "forge-agent-workflow"
 version = "2.2.0"
 dependencies = [
  "rquickjs",
+ "serde_json",
  "tokio",
 ]
 

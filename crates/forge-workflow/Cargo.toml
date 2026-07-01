@@ -12,4 +12,5 @@ name = "forge_workflow"
 
 [dependencies]
 tokio = { workspace = true }
+serde_json = { workspace = true }
 rquickjs = { version = "0.12", features = ["futures", "parallel"] }
