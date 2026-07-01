@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use forge_config::Config;
-use forge_types::{EffortLevel, ModelHealth, SubscriptionQuota, TaskTier};
+use forge_types::{EffortLevel, ModelHealth, ProjectContext, SubscriptionQuota, TaskTier};
 
 pub mod bench;
 pub mod capability;
@@ -108,6 +108,7 @@ pub struct RoutingDecision {
 /// is the set of currently-benched models to route around (failover).
 #[async_trait]
 pub trait Router: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     async fn route(
         &self,
         prompt: &str,
@@ -115,12 +116,14 @@ pub trait Router: Send + Sync {
         health: &ModelHealth,
         quota: &SubscriptionQuota,
         effort: Option<EffortLevel>,
+        project: &ProjectContext,
     ) -> RoutingDecision;
 
     /// Route with an optional tier hint from an invoked command/skill (`tier:` frontmatter).
     /// The default ignores the hint and delegates to [`Router::route`]; classifying routers
     /// override this to pin the tier (an explicit user `--model` pin still wins, handled in
     /// `decide`). A `None` hint is exactly today's behaviour.
+    #[allow(clippy::too_many_arguments)]
     async fn route_hinted(
         &self,
         prompt: &str,
@@ -129,8 +132,10 @@ pub trait Router: Send + Sync {
         quota: &SubscriptionQuota,
         _tier_override: Option<TaskTier>,
         effort: Option<EffortLevel>,
+        project: &ProjectContext,
     ) -> RoutingDecision {
-        self.route(prompt, budget, health, quota, effort).await
+        self.route(prompt, budget, health, quota, effort, project)
+            .await
     }
 }
 
@@ -204,6 +209,22 @@ const REASONING_TERMS: &[&str] = &[
     "plan",
     "propose",
     "restructure",
+];
+/// Core-infrastructure vocabulary — only a complexity signal when [`ProjectContext::is_self_hosting`]
+/// is true. In any OTHER project these are just ordinary words with no special stakes (a project
+/// with its own unrelated "router" module shouldn't get an unearned complexity bump); but when the
+/// agent is genuinely working on its own source, a task touching its own routing/classification
+/// logic carries real, wide-blast-radius stakes the raw prompt text alone can't convey.
+const SELF_HOSTING_INFRA_TERMS: &[&str] = &[
+    "mesh",
+    "router",
+    "routing",
+    "classifier",
+    "classification",
+    "task tier",
+    "model selection",
+    "provider adapter",
+    "harness",
 ];
 /// Medium-weight analytical signals (+3 pts each). A single term lifts to Standard; two
 /// or one + another signal reach Complex.
@@ -403,11 +424,12 @@ fn is_code_heavy(prompt: &str) -> bool {
             .any(|v| contains_word_boundary(&lower, v))
 }
 
-/// Score a prompt's difficulty from weighted local signals (deterministic, no I/O). Capability
-/// signals (reasoning terms, code, errors) can lift a *short* prompt to Complex; trivial-edit
-/// patterns and "quick" hints pull it down. Length is one capped signal, never the decider —
-/// this is the fix for the old length-bucket classifier.
-fn score_prompt(prompt: &str) -> Classification {
+/// Score a prompt's difficulty from weighted local signals (deterministic, no I/O of its own —
+/// `project` is computed once per session by the caller). Capability signals (reasoning terms,
+/// code, errors) can lift a *short* prompt to Complex; trivial-edit patterns and "quick" hints
+/// pull it down. Length is one capped signal, never the decider — this is the fix for the old
+/// length-bucket classifier.
+fn score_prompt(prompt: &str, project: &ProjectContext) -> Classification {
     let lower = prompt.to_lowercase();
 
     // An explicit "think hard" hint is a hard override — the user told us it's hard.
@@ -468,6 +490,10 @@ fn score_prompt(prompt: &str) -> Classification {
     if analysis_hits > 0 {
         pts += analysis_hits * 3;
         reasons.push("analytical signal");
+    }
+    if project.is_self_hosting && SELF_HOSTING_INFRA_TERMS.iter().any(|t| lower.contains(t)) {
+        pts += 5;
+        reasons.push("self-hosting: touches this agent's own core routing/infra");
     }
 
     // Trivial pulls (strong, regardless of length).
@@ -607,8 +633,8 @@ impl HeuristicRouter {
         self
     }
 
-    fn classify(prompt: &str) -> (TaskTier, String) {
-        let c = score_prompt(prompt);
+    fn classify(prompt: &str, project: &ProjectContext) -> (TaskTier, String) {
+        let c = score_prompt(prompt, project);
         (c.tier, c.reasons.join(", "))
     }
 
@@ -618,8 +644,8 @@ impl HeuristicRouter {
     /// fired. A near-boundary score (−3…7) is "uncertain" — hybrid classifiers should call an
     /// LLM to decide. This is the hook that makes [`ClassifierKind::Hybrid`] cheap: obvious
     /// Trivial / strongly-signalled Complex skip the extra model call entirely.
-    pub fn classify_confident(prompt: &str) -> (TaskTier, bool, String) {
-        let c = score_prompt(prompt);
+    pub fn classify_confident(prompt: &str, project: &ProjectContext) -> (TaskTier, bool, String) {
+        let c = score_prompt(prompt, project);
         // score == i32::MAX → COMPLEX_HINTS hard override (always confident).
         // score ≤ −4 → strong Trivial pull (TRIVIAL_PATTERNS or double TRIVIAL_HINTS).
         // score ≥ 8  → two or more strong Complex signals (REASONING_TERM + something else).
@@ -673,19 +699,6 @@ impl HeuristicRouter {
             u8::from(!(prefer && is_subscription(m))),
             CostKey(self.pricing.estimated_cost(m)),
         )
-    }
-
-    /// Count usable candidates (for the rationale).
-    fn usable_count(
-        &self,
-        candidates: &[String],
-        health: &ModelHealth,
-        quota: &SubscriptionQuota,
-    ) -> usize {
-        candidates
-            .iter()
-            .filter(|m| self.is_usable(m, health, quota))
-            .count()
     }
 
     /// Usable candidates for one tier, in preference order: the auto-discovered capability
@@ -847,11 +860,12 @@ impl HeuristicRouter {
         match chain.first().cloned() {
             Some(model) => {
                 if routed_usable.contains(&model) {
-                    let n = self.usable_count(
-                        &self.candidates_for_tier(tier, hints, quota, effort),
-                        health,
-                        quota,
-                    );
+                    // `routed_usable` (computed above) already applies the FULL routing filter
+                    // (usable + credit-mode + context-fit) — reuse its count rather than
+                    // `usable_count()`, which only checks `is_usable` and so overstates how many
+                    // candidates `decide()` actually considered (e.g. it counts paid models even
+                    // under `credit_mode = Strict`, where they're never actually routable).
+                    let n = routed_usable.len();
                     if auto {
                         why.push_str(&format!(
                             " — auto-selected best of {n} usable {} models: {model}",
@@ -928,8 +942,9 @@ impl Router for HeuristicRouter {
         health: &ModelHealth,
         quota: &SubscriptionQuota,
         effort: Option<EffortLevel>,
+        project: &ProjectContext,
     ) -> RoutingDecision {
-        let (tier, reason) = Self::classify(prompt);
+        let (tier, reason) = Self::classify(prompt, project);
         self.decide(
             tier,
             reason,
@@ -949,6 +964,7 @@ impl Router for HeuristicRouter {
         quota: &SubscriptionQuota,
         tier_override: Option<TaskTier>,
         effort: Option<EffortLevel>,
+        project: &ProjectContext,
     ) -> RoutingDecision {
         match tier_override {
             // A command/skill tier hint replaces classification but goes through the same
@@ -962,7 +978,10 @@ impl Router for HeuristicRouter {
                 quota,
                 effort,
             ),
-            None => self.route(prompt, budget, health, quota, effort).await,
+            None => {
+                self.route(prompt, budget, health, quota, effort, project)
+                    .await
+            }
         }
     }
 }
@@ -1104,7 +1123,7 @@ mod tests {
     fn classifier_accuracy_meets_bar() {
         let mut failures = Vec::new();
         for (prompt, expected) in LABELED_CORPUS {
-            let got = score_prompt(prompt).tier;
+            let got = score_prompt(prompt, &ProjectContext::default()).tier;
             if got != *expected {
                 failures.push(format!("{prompt:?}: expected {expected:?}, got {got:?}"));
             }
@@ -1117,6 +1136,43 @@ mod tests {
             LABELED_CORPUS.len() - failures.len(),
             LABELED_CORPUS.len(),
             failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn self_hosting_escalates_infra_talk_that_would_otherwise_be_trivial() {
+        // No REASONING_TERMS/ACTION_VERBS/ANALYSIS_TERMS hit here — outside a self-hosting
+        // session this scores 0 (Trivial). The self-hosting signal is the ONLY thing that
+        // should change the verdict, proving it actually does something rather than being
+        // decorative — the same words in an unrelated project must NOT get the bump.
+        let p = "look at the mesh routing code";
+        assert_eq!(
+            score_prompt(p, &ProjectContext::default()).tier,
+            TaskTier::Trivial,
+            "outside self-hosting, infra vocabulary alone must not escalate"
+        );
+        let self_hosting = ProjectContext {
+            project_name: Some("forge-agent".to_string()),
+            is_self_hosting: true,
+        };
+        assert_eq!(
+            score_prompt(p, &self_hosting).tier,
+            TaskTier::Complex,
+            "self-hosting must escalate the SAME prompt"
+        );
+    }
+
+    #[test]
+    fn self_hosting_does_not_escalate_unrelated_infra_talk_in_a_different_project() {
+        // A project that happens to use the words "mesh"/"router" for its OWN unrelated purpose
+        // (is_self_hosting: false) must not get the bump just because those words appear.
+        let unrelated = ProjectContext {
+            project_name: Some("some-other-app".to_string()),
+            is_self_hosting: false,
+        };
+        assert_eq!(
+            score_prompt("look at the mesh routing code", &unrelated).tier,
+            TaskTier::Trivial
         );
     }
 
@@ -1214,6 +1270,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Standard);
@@ -1268,6 +1325,7 @@ mod tests {
             &ModelHealth::default(),
             &SubscriptionQuota::default(),
             None,
+            &ProjectContext::default(),
         )
         .await
         .model
@@ -1280,6 +1338,7 @@ mod tests {
             &ModelHealth::default(),
             q,
             None,
+            &ProjectContext::default(),
         )
         .await
         .model
@@ -1421,6 +1480,7 @@ mod tests {
                 &SubscriptionQuota::default(),
                 Some(TaskTier::Complex),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex);
@@ -1435,6 +1495,7 @@ mod tests {
                 &SubscriptionQuota::default(),
                 None,
                 None,
+                &ProjectContext::default(),
             )
             .await
             .model;
@@ -1471,6 +1532,7 @@ mod tests {
                     &ModelHealth::default(),
                     &SubscriptionQuota::default(),
                     None,
+                    &ProjectContext::default(),
                 )
                 .await;
             assert_eq!(d.tier, TaskTier::Complex, "{p}");
@@ -1554,6 +1616,7 @@ mod tests {
                 &ModelHealth::default(),
                 &quota,
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert!(
@@ -1583,6 +1646,7 @@ mod tests {
                 &ModelHealth::default(),
                 &quota,
                 None,
+                &ProjectContext::default(),
             )
             .await;
         // Complex normally picks the subscription flagship; under quota pressure a non-subscription
@@ -1610,6 +1674,7 @@ mod tests {
                 &ModelHealth::default(),
                 &quota,
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex);
@@ -1649,6 +1714,7 @@ mod tests {
                     &ModelHealth::default(),
                     &quota,
                     None,
+                    &ProjectContext::default(),
                 )
                 .await;
             assert!(
@@ -1720,6 +1786,7 @@ mod tests {
                     &ModelHealth::default(),
                     &SubscriptionQuota::default(),
                     None,
+                    &ProjectContext::default(),
                 )
                 .await;
             println!("[{:?}] {} -> {}", d.tier, &p[..p.len().min(46)], d.model);
@@ -1736,6 +1803,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Trivial);
@@ -1747,25 +1815,31 @@ mod tests {
     fn hard_short_prompt_is_complex_despite_length() {
         // "design a lock-free queue" is 24 chars — the old <80 rule called this Trivial.
         assert_eq!(
-            score_prompt("design a lock-free queue").tier,
+            score_prompt("design a lock-free queue", &ProjectContext::default()).tier,
             TaskTier::Complex
         );
         assert_eq!(
-            score_prompt("prove this sort is stable").tier,
+            score_prompt("prove this sort is stable", &ProjectContext::default()).tier,
             TaskTier::Complex
         );
-        assert_eq!(score_prompt("debug this deadlock").tier, TaskTier::Complex);
+        assert_eq!(
+            score_prompt("debug this deadlock", &ProjectContext::default()).tier,
+            TaskTier::Complex
+        );
     }
 
     #[test]
     fn trivial_edit_stays_trivial_even_with_a_path() {
         assert_eq!(
-            score_prompt("rename foo to bar in utils.rs").tier,
+            score_prompt("rename foo to bar in utils.rs", &ProjectContext::default()).tier,
             TaskTier::Trivial
         );
-        assert_eq!(score_prompt("fix typo").tier, TaskTier::Trivial);
         assert_eq!(
-            score_prompt("bump version to 1.2.0").tier,
+            score_prompt("fix typo", &ProjectContext::default()).tier,
+            TaskTier::Trivial
+        );
+        assert_eq!(
+            score_prompt("bump version to 1.2.0", &ProjectContext::default()).tier,
             TaskTier::Trivial
         );
     }
@@ -1774,14 +1848,20 @@ mod tests {
     fn action_and_multistep_is_standard_not_complex() {
         let p = "write a function that validates email addresses against the RFC rules and \
                  returns which inputs were rejected, then wire it into the signup handler";
-        assert_eq!(score_prompt(p).tier, TaskTier::Standard); // AC-A3
+        assert_eq!(
+            score_prompt(p, &ProjectContext::default()).tier,
+            TaskTier::Standard
+        ); // AC-A3
     }
 
     #[test]
     fn long_prose_without_signals_is_not_auto_complex() {
         // Length alone is a capped nudge — 200 plain words must not force Complex.
         let p = "word ".repeat(200);
-        assert_ne!(score_prompt(&p).tier, TaskTier::Complex); // AC-A7
+        assert_ne!(
+            score_prompt(&p, &ProjectContext::default()).tier,
+            TaskTier::Complex
+        ); // AC-A7
     }
 
     #[test]
@@ -1791,7 +1871,12 @@ mod tests {
             "design a lock-free queue",
             "add a logging helper module",
         ] {
-            assert!(!score_prompt(p).reasons.is_empty(), "no reason for {p:?}");
+            assert!(
+                !score_prompt(p, &ProjectContext::default())
+                    .reasons
+                    .is_empty(),
+                "no reason for {p:?}"
+            );
         }
     }
 
@@ -1844,6 +1929,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex);
@@ -1859,6 +1945,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Standard);
@@ -1878,6 +1965,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Trivial);
@@ -1895,6 +1983,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex); // AC-6
@@ -1909,6 +1998,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Standard); // AC-5
@@ -1923,6 +2013,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Standard);
@@ -1937,6 +2028,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Trivial); // AC-7
@@ -1956,6 +2048,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.model, "openai::gpt-4o"); // AC-1
@@ -1982,6 +2075,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         // pin ignored; trivial-tier model chosen (AC-2)
@@ -2006,6 +2100,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex, "tier still reflects difficulty");
@@ -2028,6 +2123,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(
@@ -2092,6 +2188,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Standard);
@@ -2118,6 +2215,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex);
@@ -2141,6 +2239,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Trivial);
@@ -2166,6 +2265,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.model, "openai::gpt-4o-mini", "{}", d.rationale);
@@ -2189,6 +2289,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.model, "openai::gpt-4o-mini");
@@ -2209,6 +2310,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.model, "claude-cli::");
@@ -2229,6 +2331,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.model, "claude-cli::");
@@ -2259,6 +2362,7 @@ mod tests {
                 &benched(&["anthropic::claude-opus-4-8"]),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert_eq!(d.tier, TaskTier::Complex);
@@ -2290,6 +2394,7 @@ mod tests {
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert!(
@@ -2332,6 +2437,7 @@ mod tests {
                 &benched(&all_refs),
                 &SubscriptionQuota::default(),
                 None,
+                &ProjectContext::default(),
             )
             .await;
         assert!(d.fallbacks.is_empty());
@@ -2351,7 +2457,7 @@ mod tests {
             "there is a memory leak in the connection pool",
         ] {
             assert_eq!(
-                score_prompt(p).tier,
+                score_prompt(p, &ProjectContext::default()).tier,
                 TaskTier::Complex,
                 "expected Complex for {p:?}"
             );
@@ -2368,7 +2474,7 @@ mod tests {
             "is there a security issue here",
             "find the bottleneck in the rendering path",
         ] {
-            let tier = score_prompt(p).tier;
+            let tier = score_prompt(p, &ProjectContext::default()).tier;
             assert_ne!(
                 tier,
                 TaskTier::Trivial,
@@ -2381,19 +2487,31 @@ mod tests {
     fn combined_analysis_terms_reach_complex() {
         // Two ANALYSIS_TERMS signals (3+3 = 6 ≥ 5) → Complex.
         assert_eq!(
-            score_prompt("there is a performance bottleneck in the hot path").tier,
+            score_prompt(
+                "there is a performance bottleneck in the hot path",
+                &ProjectContext::default()
+            )
+            .tier,
             TaskTier::Complex,
             "performance + bottleneck → Complex"
         );
         // ANALYSIS_TERM + reasoning term → Complex.
         assert_eq!(
-            score_prompt("review and analyze the trade-offs in this design").tier,
+            score_prompt(
+                "review and analyze the trade-offs in this design",
+                &ProjectContext::default()
+            )
+            .tier,
             TaskTier::Complex,
             "review + analyze + trade-off → Complex"
         );
         // ANALYSIS_TERM + code → 3+3 = 6 → Complex.
         assert_eq!(
-            score_prompt("security review of this ```rust\nfn login() {}\n```").tier,
+            score_prompt(
+                "security review of this ```rust\nfn login() {}\n```",
+                &ProjectContext::default()
+            )
+            .tier,
             TaskTier::Complex,
             "security + code → Complex"
         );
@@ -2409,7 +2527,7 @@ mod tests {
             "do a thorough audit of the codebase",
         ] {
             assert_eq!(
-                HeuristicRouter::classify(p).0,
+                HeuristicRouter::classify(p, &ProjectContext::default()).0,
                 TaskTier::Complex,
                 "depth hint must force Complex for {p:?}"
             );
@@ -2420,19 +2538,23 @@ mod tests {
     fn minor_qualifier_cancels_complexity_signal() {
         // "minor" (−5) cancels a REASONING_TERM (+5) → net 0 → Trivial.
         assert_eq!(
-            score_prompt("minor refactor of this helper function").tier,
+            score_prompt(
+                "minor refactor of this helper function",
+                &ProjectContext::default()
+            )
+            .tier,
             TaskTier::Trivial,
             "minor + refactor: trivial qualifier must win"
         );
         // "small fix" (−5) cancels a reasoning term.
         assert_eq!(
-            score_prompt("small fix for the debug output").tier,
+            score_prompt("small fix for the debug output", &ProjectContext::default()).tier,
             TaskTier::Trivial,
             "small fix + debug: trivial qualifier must win"
         );
         // "briefly" (−5) cancels "explain" (+5).
         assert_eq!(
-            score_prompt("briefly explain this function").tier,
+            score_prompt("briefly explain this function", &ProjectContext::default()).tier,
             TaskTier::Trivial,
             "briefly + explain: trivial qualifier must win"
         );
@@ -2441,12 +2563,20 @@ mod tests {
     #[test]
     fn port_and_convert_are_standard_action_verbs() {
         assert_ne!(
-            score_prompt("port this Python module to Rust").tier,
+            score_prompt(
+                "port this Python module to Rust",
+                &ProjectContext::default()
+            )
+            .tier,
             TaskTier::Trivial,
             "porting is non-trivial work"
         );
         assert_ne!(
-            score_prompt("convert the callback API to async").tier,
+            score_prompt(
+                "convert the callback API to async",
+                &ProjectContext::default()
+            )
+            .tier,
             TaskTier::Trivial,
             "conversion is non-trivial work"
         );
@@ -2470,9 +2600,11 @@ mod tests {
             "export the data to csv",
         ] {
             assert!(
-                !score_prompt(p).reasons.contains(&"dev-action verb"),
+                !score_prompt(p, &ProjectContext::default())
+                    .reasons
+                    .contains(&"dev-action verb"),
                 "{p:?} must not score a dev-action verb point: {:?}",
-                score_prompt(p).reasons
+                score_prompt(p, &ProjectContext::default()).reasons
             );
         }
     }
@@ -2487,15 +2619,19 @@ mod tests {
             "there was a contest about this last year",
         ] {
             assert!(
-                !score_prompt(p).reasons.contains(&"tests/edge-cases"),
+                !score_prompt(p, &ProjectContext::default())
+                    .reasons
+                    .contains(&"tests/edge-cases"),
                 "{p:?} must not score a tests/edge-cases point: {:?}",
-                score_prompt(p).reasons
+                score_prompt(p, &ProjectContext::default()).reasons
             );
         }
         // Control: a real "test" mention still scores the point.
-        assert!(score_prompt("please add a test for this")
-            .reasons
-            .contains(&"tests/edge-cases"));
+        assert!(
+            score_prompt("please add a test for this", &ProjectContext::default())
+                .reasons
+                .contains(&"tests/edge-cases")
+        );
     }
 
     #[test]
@@ -2513,7 +2649,7 @@ mod tests {
             "remove this line and nothing else",
         ] {
             assert_eq!(
-                score_prompt(p).tier,
+                score_prompt(p, &ProjectContext::default()).tier,
                 TaskTier::Trivial,
                 "expected Trivial for {p:?}"
             );

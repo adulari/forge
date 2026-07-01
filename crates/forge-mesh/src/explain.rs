@@ -4,7 +4,9 @@
 //! table, the quota snapshot, the conservation roll, and the final pick + fallback chain. The goal
 //! is to make "why did the mesh choose this?" answerable, and to verify the policy is behaving.
 
-use forge_types::{EffortLevel, ModelHealth, QuotaStatus, SubscriptionQuota, TaskTier};
+use forge_types::{
+    EffortLevel, ModelHealth, ProjectContext, QuotaStatus, SubscriptionQuota, TaskTier,
+};
 
 use crate::catalog::{self, ConserveDecision, ScoreRow};
 use crate::{score_prompt, BudgetState, HeuristicRouter, RouteHints};
@@ -64,8 +66,9 @@ impl HeuristicRouter {
         health: &ModelHealth,
         quota: &SubscriptionQuota,
         effort: Option<EffortLevel>,
+        project: &ProjectContext,
     ) -> RoutingExplanation {
-        let cls = score_prompt(prompt);
+        let cls = score_prompt(prompt, project);
         let hints = RouteHints::from_prompt(prompt);
         let tier = cls.tier;
 
@@ -98,12 +101,20 @@ impl HeuristicRouter {
             (ConserveDecision::default(), Vec::new())
         };
 
+        // Match `decide()`'s REAL routing filter exactly (`ordered_usable_for_tier`) — not just
+        // `is_usable`. A row that's `is_usable` but paid under `credit_mode = Strict`, or whose
+        // context window doesn't fit, is something `decide()` would NEVER actually pick; showing
+        // it as `usable: true` here made the real pick (further down the list, first genuinely
+        // eligible row) look inconsistent with the table, when the pick was correct all along.
+        let min_context = crate::effective_min_context(budget.min_context_tokens, effort);
         let candidates = rows
             .into_iter()
             .enumerate()
             .map(|(i, row)| CandidateRow {
                 rank: i + 1,
-                usable: self.is_usable(&row.model, health, quota),
+                usable: self.is_usable(&row.model, health, quota)
+                    && self.allowed_under_credit_mode(&row.model)
+                    && self.context_fits(&row.model, min_context),
                 selected: row.model == decision.model,
                 row,
             })
@@ -191,6 +202,7 @@ mod tests {
             &ModelHealth::default(),
             &SubscriptionQuota::default(),
             None,
+            &ProjectContext::default(),
         );
         // The explained pick must equal what the selected candidate row says, and the top usable
         // row must be the pick (the table is the decision, made legible).
@@ -198,6 +210,48 @@ mod tests {
         assert_eq!(selected.row.model, e.pick);
         assert!(!e.candidates.is_empty());
         assert_eq!(e.classified_tier, TaskTier::Complex);
+    }
+
+    #[test]
+    fn candidate_usable_flag_matches_decides_real_credit_mode_filter() {
+        // Regression for a real bug: `CandidateRow.usable` only checked `is_usable` (key present +
+        // not benched), not the FULL filter `decide()` actually routes with (`is_usable` AND
+        // `allowed_under_credit_mode` AND `context_fits`). Under `credit_mode = Strict`, a paid
+        // model showed `usable: true` in the table (able to mislead a viewer into thinking it was a
+        // real candidate) while `decide()` silently skipped it — the real pick, further down the
+        // list, then looked "inconsistent" with a table that was itself wrong.
+        let mut config = Config::default();
+        config.mesh.credit_mode = forge_types::CreditMode::Strict;
+        let r = HeuristicRouter::new(config)
+            .with_availability(|_| true)
+            .with_catalog(ModelCatalog::new(vec![
+                "openrouter::openai/gpt-5.5".into(), // paid, non-subscription — excluded by Strict
+                "groq::llama-3.3-70b-versatile".into(), // free — still allowed
+            ]));
+        let e = r.explain(
+            "design and prove correct a lock-free queue",
+            BudgetState::default(),
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            None,
+            &ProjectContext::default(),
+        );
+        let paid_row = e
+            .candidates
+            .iter()
+            .find(|c| c.row.model == "openrouter::openai/gpt-5.5")
+            .expect("paid model still appears in the ranked table");
+        assert!(
+            !paid_row.usable,
+            "a paid model must show usable:false under credit_mode=Strict, matching decide()"
+        );
+        assert!(!paid_row.selected, "an unusable row can never be the pick");
+        // The pick must be a row the table ALSO marks usable (no more "pick isn't in the usable
+        // set" confusion) — and here that can only be the free groq model.
+        let selected = e.candidates.iter().find(|c| c.selected).unwrap();
+        assert!(selected.usable);
+        assert_eq!(selected.row.model, e.pick);
+        assert_eq!(e.pick, "groq::llama-3.3-70b-versatile");
     }
 
     #[test]
@@ -215,6 +269,7 @@ mod tests {
             &ModelHealth::default(),
             &quota,
             None,
+            &ProjectContext::default(),
         );
         assert!(e.conserve.enabled);
         assert!(e.conserve.eligible, "a free frontier alternative exists");

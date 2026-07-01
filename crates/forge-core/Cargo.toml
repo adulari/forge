@@ -24,6 +24,7 @@ forge-store.workspace = true
 forge-tui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml = "1.1"
 thiserror.workspace = true
 tracing.workspace = true
 globset.workspace = true

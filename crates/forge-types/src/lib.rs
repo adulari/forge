@@ -199,6 +199,22 @@ impl TaskTier {
     }
 }
 
+/// What project/codebase the current session is operating in — lets the mesh classifier reason
+/// about stakes beyond the raw prompt text. Computed once per session (see
+/// `forge_core::project_context::compute`, which needs file I/O this crate deliberately avoids)
+/// and passed into `Router::route`/`route_hinted` on every call.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectContext {
+    /// The project root's package name (from Cargo.toml `[package]`), if determinable.
+    pub project_name: Option<String>,
+    /// True when this project IS the same source tree the running binary was itself built from —
+    /// a structural comparison (compile-time package identity vs. the runtime project's own
+    /// Cargo.toml), not a keyword match on any one project's literal name. Used to weight
+    /// otherwise-ordinary infrastructure vocabulary ("mesh", "router", "classifier"...) as
+    /// higher-stakes only when the agent is actually touching its own core routing logic.
+    pub is_self_hosting: bool,
+}
+
 // ---- Assay: AI-slop / quality analysis (docs/features/analysis-mode.md) ----
 
 /// How serious a finding is.

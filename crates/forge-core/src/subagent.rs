@@ -279,8 +279,9 @@ pub async fn route_child(
                 .unwrap_or_default()
                 .with_plans(ctx.config.mesh.subscriptions.clone())
                 .with_conserve(ctx.config.mesh.subscription_conserve);
+            let project = crate::project_context::compute(&ctx.repo_root);
             ctx.router
-                .route(&agent.task, budget, &health, &quota, None)
+                .route(&agent.task, budget, &health, &quota, None, &project)
                 .await
         }
     }
@@ -941,6 +942,7 @@ mod tests {
             _h: &forge_types::ModelHealth,
             _q: &forge_types::SubscriptionQuota,
             _effort: Option<forge_types::EffortLevel>,
+            _project: &forge_types::ProjectContext,
         ) -> RoutingDecision {
             RoutingDecision {
                 tier: TaskTier::Standard,
