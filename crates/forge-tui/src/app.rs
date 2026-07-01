@@ -373,10 +373,17 @@ pub struct App {
     pub remote_active: bool,
     /// Cached git branch name (set at startup, not polled). Shown by the `GitBranch` widget.
     pub git_branch: Option<String>,
+    /// Cached project/repo directory name (set at startup, not polled). Shown by `RepoName`.
+    pub repo_name: Option<String>,
     /// Number of connected MCP servers (from the last `McpStatus` event). Shown by `McpStatus` widget.
     pub mcp_count: usize,
     /// Statusline layout loaded from config at startup. Drives `render_statusline`.
     pub statusline_config: forge_config::StatuslineConfig,
+    /// Latest stdout from each shell-backed `Custom` widget, keyed by its `shell` command string
+    /// (the command IS the id — two widgets configured with the same command share a cache entry,
+    /// which is harmless). Populated by a periodic background refresh in the render loop, never
+    /// blocking it: rendering only ever reads this cache.
+    pub custom_widget_cache: std::collections::HashMap<String, String>,
     /// A bounded plain-text ring buffer of the most recent finalized scrollback lines, so a
     /// remote-control snapshot can show the phone the tail of the conversation. Kept small (the
     /// full transcript lives in the terminal's native scrollback); newest is last.
@@ -1206,6 +1213,9 @@ impl App {
                     ("codex-cli", "weekly") => self.usage_overlay.codex_weekly_pct = pct,
                     _ => {}
                 }
+            }
+            PresenterEvent::CustomWidgetOutput { id, text } => {
+                self.custom_widget_cache.insert(id, text);
             }
             PresenterEvent::CompactionStarted { auto } => {
                 self.compaction = Some(CompactionState {
@@ -4241,20 +4251,24 @@ fn render_compact_band(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(TextLine::from(spans)).style(bg), area);
 }
 
-/// Returns 1 when idle (no session data), 2 once context / token data is available.
-/// Used by [`render_live`] to allocate the right number of rows for the status area.
-pub fn statusline_height(app: &App) -> u16 {
-    if app.context_tokens > 0
+/// Whether row 2 (turn timer / context gauge / session totals) has anything to show. Shared by
+/// `statusline_height` (to size the reserved area) and `render_statusline` (to decide whether to
+/// render it) so the two can never disagree about which row extra_rows starts on.
+fn statusline_wants_row2(app: &App) -> bool {
+    app.context_tokens > 0
         || app.context_limit.is_some()
         || app.session_in > 0
         || app.session_out > 0
         || app.busy
         || app.turn_ran
-    {
-        2
-    } else {
-        1
-    }
+}
+
+/// Returns 1 when idle (no session data), 2 once context / token data is available, plus one row
+/// per `statusline_config.extra_rows` entry (a static, config-driven count — see `extra_rows`'s
+/// doc comment). Used by [`render_live`] to allocate the right number of rows for the status area.
+pub fn statusline_height(app: &App) -> u16 {
+    let base = if statusline_wants_row2(app) { 2 } else { 1 };
+    base + app.statusline_config.extra_rows.len() as u16
 }
 
 /// Compact wall-clock duration for the turn timer: `Ns` under a minute, `MmSSs` under an hour,
@@ -4601,6 +4615,13 @@ fn render_statusline_widget<'a>(
                 Style::default().fg(DIM).bg(STATUSBG),
             )])
         }
+        W::RepoName => {
+            let repo = app.repo_name.as_deref()?;
+            Some(vec![Span::styled(
+                format!("⚑ {repo}"),
+                Style::default().fg(DIM).bg(STATUSBG),
+            )])
+        }
         W::QuotaClaude => {
             let pct = app.usage_overlay.claude_5h_pct?;
             let color = if pct >= 90.0 {
@@ -4638,7 +4659,27 @@ fn render_statusline_widget<'a>(
                 Style::default().fg(DIM).bg(STATUSBG),
             )])
         }
-        W::Custom { text } => {
+        W::Custom {
+            text,
+            shell: Some(cmd),
+            ..
+        } => {
+            let out = app
+                .custom_widget_cache
+                .get(cmd)
+                .map(String::as_str)
+                .unwrap_or(text);
+            if out.is_empty() {
+                return None;
+            }
+            Some(vec![Span::styled(
+                out.to_string(),
+                Style::default().fg(DIM).bg(STATUSBG),
+            )])
+        }
+        W::Custom {
+            text, shell: None, ..
+        } => {
             if text.is_empty() {
                 return None;
             }
@@ -4752,13 +4793,19 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // ── Row 2 ─────────────────────────────────────────────────────────────────
-    // Row 2: token timer, context gauge, session totals — unchanged from the original.
-    if area.height >= 2 {
+    // Row 2: token timer, context gauge, session totals — unchanged from the original. Gated on
+    // the same signal `statusline_height` used to decide whether to reserve this row at all (NOT
+    // on raw `area.height`, which now also grows for unrelated `extra_rows` — conflating the two
+    // would make row 2 swallow the row space actually meant for the first extra row whenever the
+    // app is otherwise idle).
+    let mut next_y = area.y + 1;
+    if statusline_wants_row2(app) {
         let row2 = Rect {
-            y: area.y + 1,
+            y: next_y,
             height: 1,
             ..area
         };
+        next_y += 1;
         let mut line2: Vec<Span> = vec![Span::styled(" ", bg)];
         // Per-turn timer + this-turn token deltas: live (orange) while the turn runs, frozen (dim)
         // once it ends — like the per-response readout in Claude Code / Codex.
@@ -4807,6 +4854,36 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
             ));
         }
         frame.render_widget(Paragraph::new(TextLine::from(line2)).style(bg), row2);
+    }
+
+    // ── Extra rows (user-configured) ────────────────────────────────────────────
+    // Each `extra_rows` entry is one more left-aligned row below row 1 (and row 2, if shown),
+    // using the same widget rendering + separator as row 1. `statusline_height` already reserved
+    // the space; `next_y` picks up wherever row 2 left off (or right after row 1 if row 2 didn't
+    // render this frame).
+    for row_widgets in &app.statusline_config.extra_rows {
+        let y = next_y;
+        if y >= area.y + area.height {
+            break;
+        }
+        next_y += 1;
+        let mut spans: Vec<Span> = vec![Span::styled(" ", bg)];
+        let mut first = true;
+        for widget in row_widgets {
+            if let Some(w_spans) = render_statusline_widget(widget, app, w) {
+                if !first {
+                    spans.push(widget_sep());
+                }
+                first = false;
+                spans.extend(w_spans);
+            }
+        }
+        let row = Rect {
+            y,
+            height: 1,
+            ..area
+        };
+        frame.render_widget(Paragraph::new(TextLine::from(spans)).style(bg), row);
     }
 }
 
@@ -6515,6 +6592,77 @@ mod tests {
         assert!(
             out.contains('—') || out.contains("untracked"),
             "default statusline renders: {out:?}"
+        );
+    }
+
+    #[test]
+    fn statusline_repo_name_widget_renders_when_set() {
+        let mut app = App {
+            repo_name: Some("forge".to_string()),
+            ..Default::default()
+        };
+        app.statusline_config
+            .left
+            .push(forge_config::StatuslineWidget::RepoName);
+        let out = screen(&app);
+        assert!(out.contains("forge"), "repo name not shown: {out:?}");
+
+        // Absent entirely when unset (widget returns None, doesn't render an empty tag).
+        app.repo_name = None;
+        let out = screen(&app);
+        assert!(
+            !out.contains('⚑'),
+            "repo glyph shown with no repo name: {out:?}"
+        );
+    }
+
+    #[test]
+    fn statusline_extra_rows_render_below_the_built_in_two() {
+        let mut app = App {
+            repo_name: Some("myrepo".to_string()),
+            ..Default::default()
+        };
+        app.statusline_config.extra_rows = vec![vec![forge_config::StatuslineWidget::RepoName]];
+        let out = screen_wh(&app, 80, LIVE_H);
+        assert!(
+            out.contains("myrepo"),
+            "extra row's widget not rendered: {out:?}"
+        );
+    }
+
+    #[test]
+    fn statusline_custom_shell_widget_shows_fallback_then_cached_output() {
+        let mut app = App::default();
+        app.statusline_config.left = vec![forge_config::StatuslineWidget::Custom {
+            text: "loading…".to_string(),
+            shell: Some("git rev-parse --short HEAD".to_string()),
+            refresh_secs: 5,
+        }];
+        let out = screen(&app);
+        assert!(out.contains("loading…"), "fallback text not shown: {out:?}");
+
+        app.custom_widget_cache.insert(
+            "git rev-parse --short HEAD".to_string(),
+            "a1b2c3d".to_string(),
+        );
+        let out = screen(&app);
+        assert!(out.contains("a1b2c3d"), "cached output not shown: {out:?}");
+        assert!(
+            !out.contains("loading…"),
+            "stale fallback still shown once cached: {out:?}"
+        );
+    }
+
+    #[test]
+    fn custom_widget_output_event_populates_cache() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::CustomWidgetOutput {
+            id: "echo hi".to_string(),
+            text: "hi".to_string(),
+        });
+        assert_eq!(
+            app.custom_widget_cache.get("echo hi").map(String::as_str),
+            Some("hi")
         );
     }
 }

@@ -810,10 +810,18 @@ and keep going."
                     forge_config::StatuslineWidget::TokensOut => "tokens_out".into(),
                     forge_config::StatuslineWidget::SessionTokens => "session_tokens".into(),
                     forge_config::StatuslineWidget::GitBranch => "git_branch".into(),
+                    forge_config::StatuslineWidget::RepoName => "repo_name".into(),
                     forge_config::StatuslineWidget::QuotaClaude => "quota_claude".into(),
                     forge_config::StatuslineWidget::QuotaCodex => "quota_codex".into(),
                     forge_config::StatuslineWidget::McpStatus => "mcp_status".into(),
-                    forge_config::StatuslineWidget::Custom { text } => {
+                    forge_config::StatuslineWidget::Custom {
+                        text,
+                        shell: Some(cmd),
+                        refresh_secs,
+                    } => format!(
+                        "custom(shell=\"{cmd}\", every {refresh_secs}s, fallback=\"{text}\")"
+                    ),
+                    forge_config::StatuslineWidget::Custom { text, .. } => {
                         format!("custom(\"{text}\")")
                     }
                 }
@@ -846,6 +854,7 @@ and keep going."
                         "tokens_out" => forge_config::StatuslineWidget::TokensOut,
                         "session_tokens" => forge_config::StatuslineWidget::SessionTokens,
                         "git_branch" | "branch" => forge_config::StatuslineWidget::GitBranch,
+                        "repo_name" | "repo" => forge_config::StatuslineWidget::RepoName,
                         "quota_claude" | "claude" => forge_config::StatuslineWidget::QuotaClaude,
                         "quota_codex" | "codex" => forge_config::StatuslineWidget::QuotaCodex,
                         "mcp_status" | "mcp" => forge_config::StatuslineWidget::McpStatus,
@@ -853,7 +862,9 @@ and keep going."
                             app.note(&format!(
                                 "⚠ unknown widget '{other}' — use: model, tier, session_cost, \
                                  effort, mode, turn_elapsed, tokens_in, tokens_out, \
-                                 session_tokens, git_branch, quota_claude, quota_codex, mcp_status"
+                                 session_tokens, git_branch, repo_name, quota_claude, \
+                                 quota_codex, mcp_status (custom/shell widgets are edited \
+                                 directly in the config file — see `/statusline edit`)"
                             ));
                             return Ok(DispatchOutcome::Handled);
                         }

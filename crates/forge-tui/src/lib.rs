@@ -237,6 +237,12 @@ pub enum PresenterEvent {
         window: String,
         fraction: f64,
     },
+    /// A shell-backed `Custom` statusline widget's periodic refresh completed. `id` is the
+    /// command string itself (see `StatuslineWidget::Custom`); `text` is its trimmed stdout.
+    CustomWidgetOutput {
+        id: String,
+        text: String,
+    },
     /// Compaction (summarizing older messages) started — drives the animated progress band in the
     /// TUI. `auto` distinguishes a silent auto-compact from an explicit `/compact`.
     CompactionStarted {
@@ -468,6 +474,7 @@ impl Presenter for HeadlessPresenter {
             PresenterEvent::Done { .. } => {}
             // Real-time quota updates are for the TUI overlay; headless ignores them.
             PresenterEvent::QuotaUpdate { .. } => {}
+            PresenterEvent::CustomWidgetOutput { .. } => {}
             PresenterEvent::CompactionStarted { auto } => {
                 println!("  ⟳ compacting{}…", if auto { " (auto)" } else { "" });
             }

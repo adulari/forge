@@ -1587,8 +1587,22 @@ pub enum StatuslineWidget {
     McpStatus,
     /// Tier bracket only "[tier]"
     Tier,
-    /// Static text / env-var substitution
-    Custom { text: String },
+    /// Current project/repo directory name "⚑ repo"
+    RepoName,
+    /// Static text, or — when `shell` is set — the cached stdout of a user-supplied shell
+    /// command, refreshed every `refresh_secs` (Starship-style custom module). `text` is the
+    /// fallback shown before the first refresh completes (or if `shell` is unset).
+    Custom {
+        text: String,
+        #[serde(default)]
+        shell: Option<String>,
+        #[serde(default = "default_custom_refresh_secs")]
+        refresh_secs: u64,
+    },
+}
+
+fn default_custom_refresh_secs() -> u64 {
+    5
 }
 
 /// Customizable statusline layout (left / center / right segments).
@@ -1607,6 +1621,11 @@ pub struct StatuslineConfig {
     /// Separator between widgets within a segment.
     #[serde(default = "default_sl_separator")]
     pub separator: String,
+    /// Additional left-aligned rows rendered below the built-in two (widgets + turn/gauge/session
+    /// totals). Each inner `Vec` is one row. Empty by default; grow this to fit more context —
+    /// the statusline's reserved height grows with it (see `statusline_height`).
+    #[serde(default)]
+    pub extra_rows: Vec<Vec<StatuslineWidget>>,
 }
 
 fn default_sl_left() -> Vec<StatuslineWidget> {
@@ -1629,6 +1648,7 @@ impl Default for StatuslineConfig {
             center: Vec::new(),
             right: Vec::new(),
             separator: default_sl_separator(),
+            extra_rows: Vec::new(),
         }
     }
 }
@@ -4359,12 +4379,49 @@ reason = "no privilege escalation"
             center: vec![],
             right: vec![StatuslineWidget::McpStatus],
             separator: " | ".to_string(),
+            extra_rows: vec![vec![StatuslineWidget::RepoName]],
         };
         let serialized = toml::to_string(&cfg).unwrap();
         let parsed: StatuslineConfig = toml::from_str(&serialized).unwrap();
         assert_eq!(parsed.left, cfg.left);
         assert_eq!(parsed.right, cfg.right);
         assert_eq!(parsed.separator, cfg.separator);
+        assert_eq!(parsed.extra_rows, cfg.extra_rows);
+    }
+
+    #[test]
+    fn statusline_custom_widget_shell_field_roundtrips_toml() {
+        let cfg = StatuslineConfig {
+            left: vec![StatuslineWidget::Custom {
+                text: "…".to_string(),
+                shell: Some("git rev-parse --short HEAD".to_string()),
+                refresh_secs: 30,
+            }],
+            center: vec![],
+            right: vec![],
+            separator: default_sl_separator(),
+            extra_rows: vec![],
+        };
+        let serialized = toml::to_string(&cfg).unwrap();
+        let parsed: StatuslineConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(parsed.left, cfg.left);
+    }
+
+    #[test]
+    fn statusline_custom_widget_shell_defaults_when_omitted() {
+        // A pre-existing `Custom { text = "..." }` config (no shell/refresh_secs) must still parse.
+        let toml_str = r#"
+            left = [{ custom = { text = "hello" } }]
+        "#;
+        let parsed: StatuslineConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            parsed.left,
+            vec![StatuslineWidget::Custom {
+                text: "hello".to_string(),
+                shell: None,
+                refresh_secs: 5,
+            }]
+        );
     }
 
     #[test]
