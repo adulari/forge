@@ -52,7 +52,7 @@ done
 SCRIPT="${1:-}"
 [[ -z "$SCRIPT" || ! -f "$SCRIPT" ]] && { echo "usage: $0 [--real] [--cols N] [--rows N] <script-file>" >&2; exit 2; }
 command -v tmux >/dev/null || { echo "tmux is required (the vt100 emulator)" >&2; exit 2; }
-[[ -x "$FORGE" ]] || { echo "building forge (release)…" >&2; (cd "$REPO" && cargo build --release -p forge-cli) || exit 1; }
+[[ -x "$FORGE" ]] || { echo "building forge (release)…" >&2; (cd "$REPO" && cargo build --release -p forge-agent) || exit 1; }
 
 SESSION="forge-drive-$$"
 WORK="$(mktemp -d)"

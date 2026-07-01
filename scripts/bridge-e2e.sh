@@ -20,13 +20,13 @@
 #   scripts/bridge-e2e.sh                          # claude-cli::haiku (cheapest subscription)
 #   BRIDGE_MODEL=codex-cli::gpt-5.4-mini scripts/bridge-e2e.sh
 #   scripts/bridge-e2e.sh --both                   # run on BOTH claude-cli::haiku and codex mini
-# Requires: a release build (cargo build --release -p forge-cli) and the bridge CLI installed+authed.
+# Requires: a release build (cargo build --release -p forge-agent) and the bridge CLI installed+authed.
 # Cost: subscription bridge only — NO direct-API credits. Use the CHEAPEST model (haiku / *-mini).
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${FORGE_BIN:-$REPO/target/release/forge}"
-[[ -x "$BIN" ]] || { echo "no forge binary at $BIN — run: cargo build --release -p forge-cli" >&2; exit 2; }
+[[ -x "$BIN" ]] || { echo "no forge binary at $BIN — run: cargo build --release -p forge-agent" >&2; exit 2; }
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/forge-bridge-e2e.XXXXXX")"
 MODELS=("${BRIDGE_MODEL:-claude-cli::haiku}")
 [[ "${1:-}" == "--both" ]] && MODELS=("claude-cli::haiku" "codex-cli::gpt-5.4-mini")

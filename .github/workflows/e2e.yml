@@ -40,17 +40,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build forge
-        run: cargo build --release -p forge-cli
+        run: cargo build --release --bin forge
 
       - name: doctor (diagnostics — never fails the job)
         continue-on-error: true
-        run: cargo run --release -q -p forge-cli -- doctor 2>&1 | tee doctor-${{ matrix.os }}.txt
+        run: cargo run --release -q --bin forge -- doctor 2>&1 | tee doctor-${{ matrix.os }}.txt
 
       - name: real turn
         run: |
           set -o pipefail
           echo "model: $E2E_MODEL"
-          cargo run --release -q -p forge-cli -- run \
+          cargo run --release -q --bin forge -- run \
             "Reply with exactly the single word: PONG" --model "$E2E_MODEL" \
             2>&1 | tee turn-${{ matrix.os }}.txt
           # Fail on the cross-platform failure signatures we care about.
