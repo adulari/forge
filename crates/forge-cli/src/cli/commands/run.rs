@@ -2806,10 +2806,16 @@ pub(crate) async fn run_chat_tui(
                         }
                         // `/command` anywhere on the line opens the palette; `@path` opens the
                         // file picker. They are mutually exclusive — slash wins at cursor.
-                        if let Some(tok) = forge_tui::slash_token_at(
-                            &app.input,
-                            app.input_cursor.min(app.input.len()),
-                        ) {
+                        // Cursor-anchored, same as `sync_palette_to_slash_token`: `slash_token_at`
+                        // falls back to the LAST slash token on the line when the cursor isn't
+                        // inside any token, so without this filter, typing args past a command
+                        // name (cursor now beyond the token) re-opened the palette on every
+                        // keystroke here — immediately closed again next keystroke by the OTHER
+                        // (correctly filtered) palette-open branch, producing a flash/reopen loop.
+                        let cur = app.input_cursor.min(app.input.len());
+                        let tok = forge_tui::slash_token_at(&app.input, cur)
+                            .filter(|t| cur >= t.start && cur <= t.end);
+                        if let Some(tok) = tok {
                             app.at_picker.close();
                             app.palette.open_with(&tok.name);
                         } else {
