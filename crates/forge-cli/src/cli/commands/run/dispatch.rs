@@ -75,6 +75,35 @@ pub(crate) fn build_mesh_overlay(
             e.conserve.roll, e.conserve.probability
         )
     };
+    // Only show candidates `decide()` could actually route to — an unusable row (benched,
+    // exhausted, or excluded by credit_mode/context) is noise, not a real alternative. Top 12 of
+    // those by score; if the actual pick still ranks below that (ties, or a longer usable tail),
+    // always include it too, so the panel never shows 12 rows with none marked `selected`.
+    let candidates: Vec<forge_tui::MeshCandRow> = {
+        let mut top: Vec<_> = e.candidates.iter().filter(|c| c.usable).take(12).collect();
+        if !top.iter().any(|c| c.selected) {
+            if let Some(sel) = e.candidates.iter().find(|c| c.selected) {
+                top.push(sel);
+            }
+        }
+        top.into_iter()
+            .map(|c| forge_tui::MeshCandRow {
+                rank: c.rank,
+                model: c.row.model.clone(),
+                score: c.row.final_score,
+                cost_tag: match c.row.cost_class {
+                    0 => "free",
+                    1 => "subscription",
+                    _ => "paid",
+                }
+                .to_string(),
+                frontier: c.row.frontier,
+                usable: c.usable,
+                selected: c.selected,
+                penalty: c.row.conserve_penalty,
+            })
+            .collect()
+    };
     forge_tui::MeshOverlay {
         open: true,
         loading: false,
@@ -97,41 +126,14 @@ pub(crate) fn build_mesh_overlay(
                 spread_complex: q.spread_probability,
             })
             .collect(),
-        candidates: {
-            // Only show candidates `decide()` could actually route to — an unusable row (benched,
-            // exhausted, or excluded by credit_mode/context) is noise, not a real alternative.
-            // Top 12 of those by score; if the actual pick still ranks below that (ties, or a
-            // longer usable tail), always include it too, so the panel never shows 12 rows with
-            // none marked `selected`.
-            let mut top: Vec<_> = e.candidates.iter().filter(|c| c.usable).take(12).collect();
-            if !top.iter().any(|c| c.selected) {
-                if let Some(sel) = e.candidates.iter().find(|c| c.selected) {
-                    top.push(sel);
-                }
-            }
-            top.into_iter()
-                .map(|c| forge_tui::MeshCandRow {
-                    rank: c.rank,
-                    model: c.row.model.clone(),
-                    score: c.row.final_score,
-                    cost_tag: match c.row.cost_class {
-                        0 => "free",
-                        1 => "subscription",
-                        _ => "paid",
-                    }
-                    .to_string(),
-                    frontier: c.row.frontier,
-                    usable: c.usable,
-                    selected: c.selected,
-                    penalty: c.row.conserve_penalty,
-                })
-                .collect()
-        },
+        candidates: candidates.clone(),
         pick: e.pick.clone(),
         fallbacks: e.fallbacks.clone(),
         rationale: e.rationale.clone(),
         anim_tick: 0,
-        scroll: 0,
+        // Start the browsing cursor on the actual pick, not row 0 — that's the row the user is
+        // most likely to want to look at first.
+        cursor: candidates.iter().position(|c| c.selected).unwrap_or(0),
     }
 }
 

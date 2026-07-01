@@ -190,8 +190,11 @@ pub struct MeshOverlay {
     /// Animation tick — drives the bar-fill ease and the row-by-row candidate reveal. Stops
     /// advancing once the reveal settles (so the spinner doesn't spin forever).
     pub anim_tick: u32,
-    /// Vertical scroll offset into the candidate list (↑/↓ while the overlay is open).
-    pub scroll: u16,
+    /// Index into `candidates` of the row ↑/↓ highlights (browsing, independent of `selected` —
+    /// the routed pick — which never moves). Clamped to `candidates.len() - 1` at render time.
+    /// The viewport scroll offset needed to keep this visible is derived at render time (render
+    /// takes `&App`, not `&mut App`, so it can't persist a scroll field across frames itself).
+    pub cursor: usize,
 }
 
 impl MeshOverlay {
@@ -4036,8 +4039,10 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     // --- candidate table (revealed row-by-row) + final pick ---
     let revealed = ((o.anim_tick as usize) / 2).min(o.candidates.len());
     let model_w = inner.width.saturating_sub(40).clamp(16, 48) as usize;
+    let cursor = o.cursor.min(o.candidates.len().saturating_sub(1));
+    let mut cursor_line = 0u16;
     let mut rows: Vec<Line> = Vec::new();
-    for c in o.candidates.iter().take(revealed.max(1)) {
+    for (i, c) in o.candidates.iter().take(revealed.max(1)).enumerate() {
         let marker = if c.selected { "▶" } else { " " };
         let pen = if c.penalty > 0.0 {
             format!(" −{:.0}", c.penalty)
@@ -4051,13 +4056,20 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
             if c.frontier { " · frontier" } else { "" },
             if c.usable { "" } else { " · unusable" },
         );
-        let base = if c.selected {
+        let mut base = if c.selected {
             Style::default().fg(OKGREEN).add_modifier(Modifier::BOLD)
         } else if !c.usable {
             Style::default().fg(DIM)
         } else {
             Style::default()
         };
+        // The browsing cursor (↑/↓) is independent of the routed pick (▶) — reverse video marks
+        // whichever row is currently highlighted, on top of whatever color the pick/usability
+        // already applied.
+        if i == cursor {
+            base = base.add_modifier(Modifier::REVERSED);
+            cursor_line = rows.len() as u16;
+        }
         rows.push(Line::from(vec![
             Span::styled(format!("{marker} #{:<2} ", c.rank), base),
             Span::styled(
@@ -4071,7 +4083,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
             Span::styled(format!("  {:>6.2}  ", c.score), base),
             Span::styled(
                 tag,
-                if c.selected {
+                if i == cursor || c.selected {
                     base
                 } else {
                     Style::default().fg(DIM)
@@ -4097,10 +4109,17 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         "↑/↓ scroll · Esc to close",
         Style::default().fg(DIM),
     )));
-    // Clamp the scroll so it can't run past the content.
+    // Auto-scroll to keep the cursor row on-screen: stay at the top until the cursor scrolls past
+    // the last visible row, then follow it exactly to the bottom edge. Purely a function of
+    // `cursor_line` + the viewport height — no state to persist across frames.
     let body_h = chunks[1].height;
     let max_scroll = (rows.len() as u16).saturating_sub(body_h);
-    let scroll = o.scroll.min(max_scroll);
+    let scroll = if cursor_line < body_h {
+        0
+    } else {
+        (cursor_line + 1).saturating_sub(body_h)
+    }
+    .min(max_scroll);
     f.render_widget(
         Paragraph::new(Text::from(rows)).scroll((scroll, 0)),
         chunks[1],
@@ -6112,7 +6131,7 @@ mod tests {
             fallbacks: vec!["codex-cli::gpt-5.5".into()],
             rationale: "auto-selected best".into(),
             anim_tick: 50, // fully revealed
-            scroll: 0,
+            cursor: 0,
         };
         let app = App {
             mesh_overlay,
