@@ -6,23 +6,59 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-07-01
+
 ### Added
-- **Remote control**: full mobile control parity — PWA, live panels, default-deny pairing.
+- **Remote control**: full mobile control parity — installable PWA (manifest + service worker),
+  live task/subagent/queued-prompt panels, tappable `AskUserQuestion` options, wire protocol
+  versioning, default-on `[remote] auto` startup config, and a 256 KiB inbound-frame cap.
 
 ### Changed
 - **Packaging**: crates renamed from `adforge-*` to `forge-agent-*` (binary install is now
   `cargo install forge-agent`); commit co-author trailers now attribute to `forge@adulari.dev`.
-- **License**: switched from MIT to AGPL-3.0-only.
+- **License**: switched from MIT to AGPL-3.0-only (Homebrew formula corrected to match).
 
 ### Fixed
 - **Mesh routing**: niche/stale 70B+ models no longer outrank Opus on the Complex tier;
   `score_for()` no longer cross-matches an unrated new model version against an old one;
-  `minimax-m3` size misclassification and incomplete Ollama size-tag coverage fixed.
-- **MCP**: `forge mcp agent` no longer injects itself as a self-MCP server; sessions left empty by
-  that bug are now pruned from the store.
+  `minimax-m3` size misclassification and incomplete Ollama size-tag coverage fixed; action-verb
+  matching now respects word boundaries (`"port"`/`"test"` no longer false-match inside
+  "report"/"latest"); version-digit accumulation capped against overflow; strict-mode fallback
+  rationale now respects credit-mode.
+- **MCP**: `forge mcp agent` no longer injects itself as a self-MCP server (the fork-bomb root
+  cause), including explicit self-MCP entries previously persisted into config; sessions left
+  empty by that bug are pruned from the store; post-handshake discovery is now timeout-bounded,
+  an SSE task leak is fixed, and reconnects are serialized.
+- **CLI**: symlink-following and path-traversal escapes closed in skill install (`import`,
+  `marketplace`); the remote-control pairing token is now CSPRNG-derived instead of time/pid-derived.
+- **Core**: undo/restore failures are surfaced instead of silently swallowed; a failing
+  `spawn_agents` child no longer orphans the rest of the batch; four independently-drifted
+  `truncate` helpers deduped into one char-safe implementation.
+- **Lattice (index)**: path-boundary scope check (a sibling directory sharing a name prefix no
+  longer false-matches); per-file update/prune errors are logged instead of aborting or being
+  silently swallowed; the embedder client no longer panics on init failure; definition-enclosure
+  lookup is O(n) instead of O(n²).
+- **LSP**: `initialize` is timeout-bounded, message size is capped, URIs are percent-encoded, and a
+  resource leak is plugged.
+- **Config**: the `/config` editor's field tables match the renamed budget-cap keys; a malformed
+  `[mesh]`/`[keybinds]` section now self-heals instead of silently dropping the write.
+- **Store**: soft-deleted sessions are no longer treated as empty (a data-loss fix); tool-arg and
+  memory growth are capped; `LIKE`-pattern metacharacters are escaped.
 - **Security hardening**: `search`/`glob`/`list_dir` tools confined to the workspace, IP-literal
-  SSRF blocked, and file reads capped; soft-deleted sessions no longer treated as empty; tool args
-  and memory growth capped; symlink/path-traversal escapes closed in skill install.
+  SSRF blocked, and large file reads capped.
+- **TUI**: the slash/`@` token scanner no longer panics on multi-byte UTF-8.
+- **Types**: `PermissionMode::from_label` accepts the canonical `"accept-edits"` key; stale
+  temper-mode doc comments corrected.
+- **Provider**: four CLI-bridge isolation/cleanup bugs closed.
+- **Skills**: bracket-wrapped LLM-generated descriptions are now quoted so assembled `SKILL.md`
+  frontmatter can't silently misparse them as a YAML list.
+- **xtasks**: `bench_lattice` no longer pollutes results with failed reps, no longer panics on
+  non-UTF-8 paths, and drops a dead parameter.
+- **Distribution**: Homebrew formula updated to a real released version with real checksums (was
+  pinned to a stale version with placeholder zero hashes); a Homebrew auto-merge deadlock and an
+  Assay-injection issue in CI are fixed.
+- **Docs**: 25 instances of stale crate names, versions, and design-vs-implementation drift
+  corrected across feature docs, architecture docs, and root docs.
 
 ## [2.0.0] - 2026-06-30
 
@@ -1902,7 +1938,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v1.8.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/Adulari/forge/compare/v2.0.0...v2.1.0
 [1.8.1]: https://github.com/Adulari/forge/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/Adulari/forge/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/Adulari/forge/compare/v1.6.1...v1.7.0
