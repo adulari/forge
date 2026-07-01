@@ -91,3 +91,14 @@ strip = true
 # Line-tables-only keeps file:line in backtraces/panics (enough for dev) at a fraction of the size.
 [profile.dev]
 debug = "line-tables-only"
+
+# Vendored + patched genai 0.6.5 (vendor/genai-0.6.5, src/ + Cargo.toml only, examples/tests
+# stripped): its plain-OpenAI streaming adapter only ever read `delta.tool_calls[0]`, silently
+# dropping every other parallel tool call in an SSE message that batched more than one (a shape
+# vLLM-based backends — e.g. NVIDIA NIM — commonly send). A later arguments-only delta for a
+# dropped index then created a fresh call with an empty name, producing "unknown tool ''" and
+# garbled arguments for every call after the first in a batch. Also fixed the sibling gap-fill
+# bug (`resize` cloning the wrong call's data into skipped indices). Drop this patch once
+# upstream genai ships an equivalent fix (https://github.com/jeremychone/rust-genai).
+[patch.crates-io]
+genai = { path = "vendor/genai-0.6.5" }
