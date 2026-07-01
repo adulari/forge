@@ -616,6 +616,16 @@ fn is_known_provider_prefix(prefix: &str) -> bool {
     KEYLESS.contains(&prefix) || forge_config::known_key_providers().any(|p| p == prefix)
 }
 
+/// The OS shell used to run a `StatuslineWidget::Custom` command — same choice as hooks (see
+/// `forge_core::hooks::hook_shell`), duplicated locally since it's three lines and pulling in a
+/// dependency for it would be overkill.
+fn shell_widget_shell() -> (&'static str, &'static str) {
+    #[cfg(windows)]
+    return ("cmd", "/C");
+    #[cfg(not(windows))]
+    ("sh", "-c")
+}
+
 /// On a fresh machine (no keys, no bridge, no config) offer the `forge init` wizard before the
 /// first chat. Skipped for `--mock`, non-interactive shells, and once anything is configured.
 /// Declining writes an (empty) config so we don't nag on every launch.
@@ -870,6 +880,7 @@ pub(crate) async fn run_chat_tui(
         ResumeMode::Fresh | ResumeMode::Picker => None,
     };
     let tx_mcp = tx.clone(); // clone before tx is moved into ChannelPresenter
+    let tx_custom = tx.clone(); // held for the render loop's shell-backed custom-widget refresh
     let session = build_session_with(
         Box::new(ChannelPresenter::new(tx)),
         mock,
@@ -972,6 +983,31 @@ pub(crate) async fn run_chat_tui(
             } else {
                 None
             }
+        });
+    // Repo/project name for the RepoName widget: the git top-level directory's name, falling back
+    // to the cwd's name outside a git repo (so the widget is still useful there).
+    app.repo_name = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
+        .and_then(|p| {
+            std::path::Path::new(&p)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
         });
     // Full-screen banner goes into the transcript log (no native scrollback in full-screen mode).
     // Inline banner was already printed directly to stdout above.
@@ -1111,6 +1147,11 @@ pub(crate) async fn run_chat_tui(
     // retrying the same request, independent of how much real time that takes.
     let mut skip_model_excludes: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+    // Last-spawned time per shell-backed custom statusline widget (keyed by its command string —
+    // see `StatuslineWidget::Custom`), so the refresh loop below spawns each on its own cadence
+    // instead of every frame.
+    let mut custom_widget_last_run: std::collections::HashMap<String, Instant> =
+        std::collections::HashMap::new();
     // Only redraw when state actually changed: idle frames cost nothing and the whole
     // conversation isn't rebuilt 16×/sec for no reason.
     let mut dirty = true;
@@ -3137,6 +3178,63 @@ pub(crate) async fn run_chat_tui(
             if t != app.tick {
                 app.tick = t;
                 dirty = true;
+            }
+        }
+        // Refresh shell-backed custom statusline widgets on their configured interval. Spawned
+        // detached (not awaited, doesn't touch the session lock), so a slow or hanging user
+        // command can never stall the render loop — a stuck one just keeps showing stale output.
+        {
+            let now = Instant::now();
+            let due: Vec<String> = app
+                .statusline_config
+                .left
+                .iter()
+                .chain(app.statusline_config.center.iter())
+                .chain(app.statusline_config.right.iter())
+                .chain(app.statusline_config.extra_rows.iter().flatten())
+                .filter_map(|widget| match widget {
+                    forge_config::StatuslineWidget::Custom {
+                        shell: Some(cmd),
+                        refresh_secs,
+                        ..
+                    } if custom_widget_last_run
+                        .get(cmd)
+                        .map(|last| now.duration_since(*last) >= Duration::from_secs(*refresh_secs))
+                        .unwrap_or(true) =>
+                    {
+                        Some(cmd.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            for cmd in due {
+                custom_widget_last_run.insert(cmd.clone(), now);
+                let tx = tx_custom.clone();
+                tokio::spawn(async move {
+                    const TIMEOUT: Duration = Duration::from_secs(5);
+                    let (sh, sh_flag) = shell_widget_shell();
+                    let Ok(child) = tokio::process::Command::new(sh)
+                        .arg(sh_flag)
+                        .arg(&cmd)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::null())
+                        .kill_on_drop(true) // a timeout drops the future → child killed, not orphaned
+                        .spawn()
+                    else {
+                        return;
+                    };
+                    if let Ok(Ok(out)) =
+                        tokio::time::timeout(TIMEOUT, child.wait_with_output()).await
+                    {
+                        if out.status.success() {
+                            let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                            let _ = tx.send(UiMsg::Event(
+                                forge_tui::PresenterEvent::CustomWidgetOutput { id: cmd, text },
+                            ));
+                        }
+                    }
+                });
             }
         }
         // Animate the effort slider's rainbow/pulse at XHigh even while idle.

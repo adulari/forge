@@ -499,16 +499,31 @@ The statusline is a row of **widgets** you can add, remove, or reorder — live 
 # ~/.forge/config.toml  (or .forge/config.toml for project scope)
 [statusline]
 left = ["model", "session_cost", "effort", "mode"]
-right = ["git_branch", "quota_claude", "mcp_status"]
+right = ["git_branch", "repo_name", "quota_claude", "mcp_status"]
 separator = "  │  "
 ```
 
 Available widgets: `model`, `tier`, `session_cost` (alias `cost`), `effort`, `mode` (alias `temper`),
 `turn_elapsed` (alias `elapsed`), `tokens_in`, `tokens_out`, `session_tokens`, `git_branch` (alias
-`branch`), `quota_claude` (alias `claude`), `quota_codex` (alias `codex`), `mcp_status` (alias `mcp`),
-`custom`. `/statusline layout` shows the current order · `/statusline toggle <widget>` adds/removes one
-from the right segment · `/statusline reset` restores the default · `/statusline edit` opens the raw
-config line. Changes apply immediately and persist to your config.
+`branch`), `repo_name` (alias `repo`), `quota_claude` (alias `claude`), `quota_codex` (alias `codex`),
+`mcp_status` (alias `mcp`), `custom`. `/statusline layout` shows the current order · `/statusline
+toggle <widget>` adds/removes one from the right segment · `/statusline reset` restores the default ·
+`/statusline edit` opens the raw config line. Changes apply immediately and persist to your config.
+
+`custom` widgets can be static text or a live shell command, refreshed on an interval — edited
+directly in the config (not via `/statusline toggle`, which only handles the built-in widgets):
+
+```toml
+# Static text
+left = [{ custom = { text = "hello" } }]
+# Shell-backed: runs `git rev-parse --short HEAD` every 30s, spawned off the render loop (never
+# blocks the UI); shows `text` until the first result arrives, and again if the command errors.
+right = [{ custom = { text = "…", shell = "git rev-parse --short HEAD", refresh_secs = 30 } }]
+```
+
+Rows are fully customizable too: `extra_rows` takes any number of additional widget lists, each
+rendered as its own row below the built-in two — grow it to fit as much as you want in the
+statusline.
 
 ---
 
