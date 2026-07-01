@@ -1199,9 +1199,16 @@ impl Session {
         // Turns are keyed by their user-message seq. Restore every snapshotted turn at/after the
         // boundary, newest first so an earlier turn's blob (pre-turn bytes) wins the final state.
         for seq in (db_seq..self.seq).rev() {
-            if let Ok(r) = snapshot::restore_turn(&self.checkpoint_root, &self.id, seq) {
-                restore.restored.extend(r.restored);
-                restore.warnings.extend(r.warnings);
+            match snapshot::restore_turn(&self.checkpoint_root, &self.id, seq) {
+                Ok(r) => {
+                    restore.restored.extend(r.restored);
+                    restore.warnings.extend(r.warnings);
+                    restore.failed.extend(r.failed);
+                }
+                // Surface the failure instead of silently discarding it — a caller that only
+                // checks `restore.restored`/`is_empty()` must still learn this turn's files may
+                // not have been reverted.
+                Err(e) => restore.failed.push(format!("turn {seq}: {e}")),
             }
         }
         self.store.deactivate_messages_from(&self.id, db_seq)?;

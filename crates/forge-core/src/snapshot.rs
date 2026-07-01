@@ -74,11 +74,15 @@ pub struct RestoreReport {
     /// Paths whose on-disk bytes differed from what Forge last wrote — restored anyway, but the
     /// user is told their manual edit was overwritten.
     pub warnings: Vec<String>,
+    /// Paths that failed to restore (e.g. an I/O error copying the blob back), with the error
+    /// message. The turn's snapshot dir is still consumed even when this is non-empty, so a
+    /// failure here never leaves a stale manifest to corrupt a later undo.
+    pub failed: Vec<String>,
 }
 
 impl RestoreReport {
     pub fn is_empty(&self) -> bool {
-        self.restored.is_empty() && self.warnings.is_empty()
+        self.restored.is_empty() && self.warnings.is_empty() && self.failed.is_empty()
     }
 }
 
@@ -229,15 +233,23 @@ pub fn restore_turn(root: &Path, session: &str, seq: i64) -> std::io::Result<Res
             }
             _ => {
                 if let Some(blob) = &entry.blob {
-                    std::fs::copy(dir.join(blob), path)?;
+                    // Record a failure and keep going instead of bailing out via `?`: an I/O error
+                    // on one file (permission denied, disk full, blob deleted) must not stop the
+                    // remaining files in this turn from being restored, and must not skip the
+                    // manifest cleanup below.
+                    if let Err(e) = std::fs::copy(dir.join(blob), path) {
+                        report.failed.push(format!("{}: {e}", entry.path));
+                        continue;
+                    }
                 }
             }
         }
         report.restored.push(entry.path.clone());
     }
-    // The turn's snapshot is consumed once restored. Remove it so that if this seq is later
-    // reused (a new turn after the rewind), `snapshot_before_write` starts fresh and captures the
-    // new pre-turn bytes instead of seeing a stale manifest entry ("first touch" against old data).
+    // The turn's snapshot is consumed once restore has been attempted — even for entries that
+    // failed above. Remove it so that if this seq is later reused (a new turn after the rewind),
+    // `snapshot_before_write` starts fresh and captures the new pre-turn bytes instead of seeing a
+    // stale manifest entry ("first touch" against old data).
     let _ = std::fs::remove_dir_all(&dir);
     Ok(report)
 }

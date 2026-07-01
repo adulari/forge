@@ -19,6 +19,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Terminal;
 
 use crate::app::{ActivityKind, ActivityStatus, TranscriptView};
+use forge_types::truncate_ellipsis as truncate;
 
 /// Run the full-screen activity transcript viewer on the alternate screen (so it never pollutes the
 /// chat's scrollback). `initial_selected` opens at that entry index (0-based). `refresh` is called
@@ -137,17 +138,6 @@ const TOOLCYAN: Color = Color::Rgb(75, 212, 218);
 const WARNYEL: Color = Color::Rgb(238, 188, 82);
 const OKGREEN: Color = Color::Rgb(92, 208, 122);
 const VERY_DIM: Color = Color::Rgb(54, 58, 74);
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        format!(
-            "{}…",
-            s.chars().take(max.saturating_sub(1)).collect::<String>()
-        )
-    } else {
-        s.to_string()
-    }
-}
 
 /// Wrap one styled line to `width` columns, preserving each span's style across the break. A blank
 /// line stays one blank line. Measures terminal CELL width (CJK/emoji = 2) so wide glyphs don't

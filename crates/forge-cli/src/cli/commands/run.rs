@@ -3375,6 +3375,9 @@ pub(crate) fn note_restore(app: &mut forge_tui::App, report: &forge_core::snapsh
             "⚠ {w} changed since Forge wrote it — overwrote your edit"
         ));
     }
+    for f in &report.failed {
+        app.note(&format!("✗ failed to restore {f}"));
+    }
 }
 
 /// A short relative age like "3m ago" / "2h ago" / "5d ago" from an epoch-second timestamp.

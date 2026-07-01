@@ -545,7 +545,10 @@ pub async fn orchestrate(
     let n = requests.len();
     let sem = Arc::new(Semaphore::new(max_concurrency.max(1)));
     let (tx, mut rx) = mpsc::unbounded_channel::<ChildMsg>();
-    let mut ids: Vec<String> = Vec::with_capacity(n);
+    // Indexed by request position (not push order) so a mid-batch skip below can't desync `ids`
+    // from the `index` values already-spawned children send back over `tx`.
+    let mut ids: Vec<String> = vec![String::new(); n];
+    let mut all_ok = true;
 
     // Serialize merge-back across concurrently-finishing children so `git apply` doesn't race on
     // the index. One merge at a time is fine: the patch itself is generated from the branch diff,
@@ -583,9 +586,20 @@ pub async fn orchestrate(
     // running immediately), then spawn the work bounded by a concurrency permit.
     for (i, req) in requests.into_iter().enumerate() {
         let resolved = resolve(&req, &ctx.agents);
-        let child_id = ctx
-            .store
-            .create_child_session(".", &mode_label, parent_id)?;
+        // A `?` here would abort the whole function — dropping `rx` and silently discarding the
+        // results (and spend) of every sibling child already `tokio::spawn`ed above. Skip just
+        // this request instead so the rest of the batch still runs and reports.
+        let child_id = match ctx.store.create_child_session(".", &mode_label, parent_id) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(
+                    "create_child_session failed for subagent request {i}: {e} — skipping this \
+                     agent, other children continue"
+                );
+                all_ok = false;
+                continue;
+            }
+        };
         // Route up front (deterministic, no API call) so the panel shows the model immediately AND
         // the child runs against the SAME model its provider permit is acquired for (routed once).
         let decision = route_child(ctx, &resolved, budget).await;
@@ -596,7 +610,7 @@ pub async fn orchestrate(
             task: &resolved.task,
             model: &child_model,
         });
-        ids.push(child_id.clone());
+        ids[i] = child_id.clone();
 
         // Resolve this child's provider semaphore (get-or-create), sized by `max_per_provider`.
         // Done on the orchestrator (the routing model is already known) so the task just acquires it.
@@ -707,7 +721,6 @@ pub async fn orchestrate(
     drop(tx); // close the channel once every task holds its own clone
 
     let mut slots: Vec<Option<(String, String)>> = vec![None; n];
-    let mut all_ok = true;
     while let Some(msg) = rx.recv().await {
         match msg {
             ChildMsg::Progress { index, snippet } => {
