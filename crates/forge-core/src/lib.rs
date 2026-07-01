@@ -26,6 +26,7 @@ pub mod project_context;
 pub mod snapshot;
 pub mod subagent;
 pub mod tokens;
+pub mod workflow;
 pub mod worktree;
 
 pub use llm_router::LlmRouter;
@@ -1808,6 +1809,7 @@ impl Session {
             specs.push(subagent::spawn_agents_spec(
                 self.config.mesh.subagents.max_agents,
             ));
+            specs.push(workflow::run_workflow_spec());
         }
         // The interactive question tool (AskUserQuestion) — always advertised so the model can
         // ask the user a focused question with suggested answers (docs/features/ask-user-question.md).
@@ -4673,6 +4675,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
     /// external MCP tool, present in the registry, and ReadOnly.
     fn is_concurrent_readonly(&self, name: &str) -> bool {
         if name == subagent::SPAWN_AGENTS_TOOL
+            || name == workflow::RUN_WORKFLOW_TOOL
             || name == ASK_USER_TOOL
             || name == UPDATE_TASKS_TOOL
             || name == PRESENT_PLAN_TOOL
@@ -4812,6 +4815,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // registry — intercept before the registry lookup (RFC subagent-orchestration).
         if call.name == subagent::SPAWN_AGENTS_TOOL {
             return self.spawn_agents(msg_id, call).await;
+        }
+        // Workflow scripts are core-owned for the same reason (docs/rfcs/forge-workflow.md).
+        if call.name == workflow::RUN_WORKFLOW_TOOL {
+            return self.run_workflow(msg_id, call).await;
         }
         // The interactive question tool is core-owned too (it needs the presenter).
         if call.name == ASK_USER_TOOL {
@@ -5430,6 +5437,109 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             None => combined,
         };
 
+        self.store.record_tool_call(
+            msg_id,
+            &call.name,
+            &args_json,
+            &combined,
+            "allowed",
+            if all_ok { "ok" } else { "error" },
+        )?;
+        Ok(combined)
+    }
+
+    /// Handle a `run_workflow` call: build the shared mesh-routed execution context (same shape
+    /// as `spawn_agents`') and hand the script off to `workflow::run`, converting its
+    /// `WorkflowEvent`s into the same `SubagentStart`/`Progress`/`Result` presenter events
+    /// `spawn_agents` uses (docs/rfcs/forge-workflow.md) — one flat activity feed either way.
+    async fn run_workflow(
+        &mut self,
+        msg_id: &str,
+        call: &forge_types::ToolCall,
+    ) -> Result<String, CoreError> {
+        let args_json = serde_json::to_string(&call.args)?;
+        let script_body = match call.args.get("script").and_then(|s| s.as_str()) {
+            Some(s) if !s.trim().is_empty() => s.to_string(),
+            _ => {
+                let result = "error: run_workflow requires a non-empty `script` string".to_string();
+                self.store.record_tool_call(
+                    msg_id, &call.name, &args_json, &result, "allowed", "error",
+                )?;
+                return Ok(result);
+            }
+        };
+
+        let budget = self.budget_snapshot();
+        let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
+            &self.config.mesh.subagents.agents_dir,
+        )));
+        let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let ctx = subagent::AgentCtx {
+            provider: Arc::clone(&self.provider),
+            router: Arc::clone(&self.router),
+            store: Arc::clone(&self.store),
+            config: self.config.clone(),
+            pricing: self.pricing.clone(),
+            mode: self.mode,
+            rules: self.rules.clone(),
+            depth: 0,
+            max_depth: self.config.mesh.subagents.max_depth,
+            agents,
+            worktree_root: None,
+            repo_root: repo_root.clone(),
+        };
+        let workflows_dir = repo_root.join(".forge").join("workflows");
+
+        let presenter = &mut self.presenter;
+        let on_event = |ev: workflow::WorkflowEvent| match ev {
+            workflow::WorkflowEvent::AgentStart {
+                id,
+                agent,
+                task,
+                model,
+            } => presenter.emit(PresenterEvent::SubagentStart {
+                id,
+                agent,
+                task,
+                model: Some(model),
+            }),
+            workflow::WorkflowEvent::AgentProgress { id, snippet } => {
+                presenter.emit(PresenterEvent::SubagentProgress { id, snippet })
+            }
+            workflow::WorkflowEvent::AgentDone {
+                id,
+                agent,
+                ok,
+                summary,
+                cost_usd,
+            } => presenter.emit(PresenterEvent::SubagentResult {
+                id,
+                agent,
+                ok,
+                summary,
+                cost_usd,
+            }),
+            workflow::WorkflowEvent::Log(msg) => presenter.emit(PresenterEvent::Warning(msg)),
+        };
+
+        let (value, all_ok) = workflow::run(
+            ctx,
+            self.id.clone(),
+            budget,
+            self.config.mesh.subagents.max_concurrency,
+            self.config.mesh.subagents.max_per_provider,
+            self.config.mesh.workflows.max_total_agents,
+            workflows_dir,
+            &script_body,
+            on_event,
+        )
+        .await
+        .map_err(CoreError::Internal)?;
+
+        let combined = match &value {
+            serde_json::Value::String(s) => s.clone(),
+            other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+        };
         self.store.record_tool_call(
             msg_id,
             &call.name,

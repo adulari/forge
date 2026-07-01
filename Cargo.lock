@@ -1757,6 +1757,7 @@ dependencies = [
  "forge-agent-tools",
  "forge-agent-tui",
  "forge-agent-types",
+ "forge-agent-workflow",
  "futures",
  "globset",
  "serde",

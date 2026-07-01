@@ -22,6 +22,7 @@ forge-skills.workspace = true
 forge-tools.workspace = true
 forge-store.workspace = true
 forge-tui.workspace = true
+forge-workflow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml = "1.1"

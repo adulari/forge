@@ -1214,6 +1214,10 @@ pub struct MeshConfig {
     /// Subagent orchestration (RFC subagent-orchestration): the `spawn_agents` tool.
     #[serde(default)]
     pub subagents: SubagentsConfig,
+    /// Workflow scripts (docs/rfcs/forge-workflow.md): the `run_workflow` tool. Concurrency is
+    /// shared with `subagents.max_concurrency`/`max_per_provider` — one real budget for both.
+    #[serde(default)]
+    pub workflows: WorkflowsConfig,
     /// Auto-discovery routing (docs/features/auto-discovery-mesh.md): when true (default), the
     /// mesh discovers the models the user can actually use and ranks the best per tier itself,
     /// rather than relying on the `[mesh.models]` lists. Set false to route strictly from the
@@ -1493,6 +1497,28 @@ impl Default for SubagentsConfig {
     }
 }
 
+/// Workflow-script settings (docs/rfcs/forge-workflow.md).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowsConfig {
+    /// Hard safety backstop on total `agent()` calls a single `run_workflow` script (including
+    /// any nested `workflow()` calls) may make — bounds a runaway or pathological loop, mirroring
+    /// the reference Workflow tool's own total-agent cap.
+    #[serde(default = "default_max_total_agents")]
+    pub max_total_agents: usize,
+}
+
+fn default_max_total_agents() -> usize {
+    200
+}
+
+impl Default for WorkflowsConfig {
+    fn default() -> Self {
+        Self {
+            max_total_agents: default_max_total_agents(),
+        }
+    }
+}
+
 fn default_warn_threshold() -> f64 {
     0.8
 }
@@ -1753,6 +1779,7 @@ impl Default for Config {
                 budget: BudgetBehavior::default(),
                 pricing: HashMap::new(),
                 subagents: SubagentsConfig::default(),
+                workflows: WorkflowsConfig::default(),
                 auto_discover: default_auto_discover(),
                 failover: default_failover(),
                 failover_cooldown_secs: default_failover_cooldown_secs(),
