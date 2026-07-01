@@ -75,11 +75,8 @@ pub fn select_embedder(cfg: &EmbeddingsConfig) -> Option<(Box<dyn Embedder>, Str
         return None;
     }
     match cfg.backend.as_str() {
-        "auto" => Some(auto_embedder(cfg)),
-        "ollama" => Some((
-            Box::new(OllamaEmbedder::new(&cfg.endpoint, &cfg.model)),
-            format!("ollama ({})", cfg.model),
-        )),
+        "auto" => auto_embedder(cfg),
+        "ollama" => ollama_embedder(cfg),
         provider => {
             if !forge_config::has_api_key(provider) {
                 return None;
@@ -95,13 +92,26 @@ pub fn select_embedder(cfg: &EmbeddingsConfig) -> Option<(Box<dyn Embedder>, Str
     }
 }
 
-fn auto_embedder(cfg: &EmbeddingsConfig) -> (Box<dyn Embedder>, String) {
+fn auto_embedder(cfg: &EmbeddingsConfig) -> Option<(Box<dyn Embedder>, String)> {
     match auto_candidate(forge_config::has_api_key) {
-        Some(model) => (Box::new(GenaiEmbedder::new(model)), model.to_string()),
-        None => (
-            Box::new(OllamaEmbedder::new(&cfg.endpoint, &cfg.model)),
+        Some(model) => Some((Box::new(GenaiEmbedder::new(model)), model.to_string())),
+        None => ollama_embedder(cfg),
+    }
+}
+
+/// Construct the local ollama backend, or `None` (logged) if the HTTP client itself couldn't be
+/// built — e.g. a host with no usable TLS trust store. Rare in practice (the bundled CA certs are
+/// static), but this keeps that failure a graceful "embeddings disabled" instead of a panic.
+fn ollama_embedder(cfg: &EmbeddingsConfig) -> Option<(Box<dyn Embedder>, String)> {
+    match OllamaEmbedder::new(&cfg.endpoint, &cfg.model) {
+        Ok(embedder) => Some((
+            Box::new(embedder) as Box<dyn Embedder>,
             format!("ollama ({})", cfg.model),
-        ),
+        )),
+        Err(e) => {
+            tracing::warn!(error = %e, "lattice: failed to construct ollama embedder, embeddings disabled");
+            None
+        }
     }
 }
 

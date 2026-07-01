@@ -370,9 +370,30 @@ fn extract_with(config: &TagsConfiguration, src: &str) -> Parsed {
             .then(b.span_end.cmp(&a.span_end))
     });
 
+    // Definitions are visited outer-to-inner (start asc, end desc for ties; see the sort above),
+    // so the definitions still "open" (not yet closed) at any point form a stack: the smallest
+    // enclosing definition for the next item is always on top of it. Tree-sitter spans are
+    // laminar (nested or disjoint, never partially overlapping), so once an open entry's span
+    // ends at or before the next item's start it can never enclose anything that follows and is
+    // popped for good. This makes placement O(n) total instead of the O(n^2) that an O(n) linear
+    // scan per definition used to cost.
     let mut defs: Vec<Def> = Vec::with_capacity(raw_defs.len());
+    let mut open: Vec<usize> = Vec::new();
     for rd in &raw_defs {
-        let parent = enclosing(&defs, rd.span_start, rd.span_end);
+        while let Some(&top) = open.last() {
+            if defs[top].span_end <= rd.span_start {
+                open.pop();
+            } else {
+                break;
+            }
+        }
+        // An identical-span entry can't be its own parent (mirrors the original strict
+        // "enclosing span is bigger" rule) — skip over any such duplicates on the stack.
+        let parent = open
+            .iter()
+            .rev()
+            .find(|&&i| defs[i].span_start != rd.span_start || defs[i].span_end != rd.span_end)
+            .copied();
         let qualname = match parent {
             Some(p) => format!("{}.{}", defs[p].qualname, rd.name),
             None => rd.name.clone(),
@@ -387,12 +408,45 @@ fn extract_with(config: &TagsConfiguration, src: &str) -> Parsed {
             line_start: rd.line_start,
             parent,
         });
+        open.push(defs.len() - 1);
+    }
+
+    // Same idea for references: sort by position and sweep once against the already
+    // start-sorted `defs`, maintaining the same kind of "open ancestors" stack, instead of
+    // scanning every definition for every reference (O(refs * defs) -> O(refs + defs)).
+    let mut ref_order: Vec<usize> = (0..raw_refs.len()).collect();
+    ref_order.sort_by_key(|&i| raw_refs[i].pos);
+    let mut from_by_ref: Vec<Option<usize>> = vec![None; raw_refs.len()];
+    let mut open: Vec<usize> = Vec::new();
+    let mut d = 0usize;
+    for &ri in &ref_order {
+        let pos = raw_refs[ri].pos;
+        while d < defs.len() && defs[d].span_start <= pos {
+            while let Some(&top) = open.last() {
+                if defs[top].span_end <= defs[d].span_start {
+                    open.pop();
+                } else {
+                    break;
+                }
+            }
+            open.push(d);
+            d += 1;
+        }
+        while let Some(&top) = open.last() {
+            if defs[top].span_end <= pos {
+                open.pop();
+            } else {
+                break;
+            }
+        }
+        from_by_ref[ri] = open.last().copied();
     }
 
     let refs = raw_refs
         .into_iter()
-        .map(|rr| Ref {
-            from: enclosing_point(&defs, rr.pos),
+        .enumerate()
+        .map(|(i, rr)| Ref {
+            from: from_by_ref[i],
             name: rr.name,
             kind: rr.kind,
             line: rr.line,
@@ -400,40 +454,6 @@ fn extract_with(config: &TagsConfiguration, src: &str) -> Parsed {
         .collect();
 
     Parsed { defs, refs }
-}
-
-/// Index of the smallest already-placed definition strictly enclosing `[start, end)` (excluding an
-/// identical span, so a def is never its own parent).
-fn enclosing(defs: &[Def], start: usize, end: usize) -> Option<usize> {
-    let mut best: Option<usize> = None;
-    for (i, d) in defs.iter().enumerate() {
-        let encloses = d.span_start <= start
-            && d.span_end >= end
-            && (d.span_end - d.span_start) > (end - start);
-        if encloses {
-            match best {
-                Some(b)
-                    if (defs[b].span_end - defs[b].span_start) <= (d.span_end - d.span_start) => {}
-                _ => best = Some(i),
-            }
-        }
-    }
-    best
-}
-
-/// Index of the smallest definition whose span contains byte offset `pos`.
-fn enclosing_point(defs: &[Def], pos: usize) -> Option<usize> {
-    let mut best: Option<usize> = None;
-    for (i, d) in defs.iter().enumerate() {
-        if d.span_start <= pos && pos < d.span_end {
-            match best {
-                Some(b)
-                    if (defs[b].span_end - defs[b].span_start) <= (d.span_end - d.span_start) => {}
-                _ => best = Some(i),
-            }
-        }
-    }
-    best
 }
 
 /// A one-line signature: the definition's text up to the body delimiter, collapsed to one line.
@@ -482,6 +502,39 @@ pub fn helper() -> String { String::new() }
             .expect("helper() call captured as a reference");
         let from = call.from.map(|i| p.defs[i].name.as_str());
         assert_eq!(from, Some("run_turn"), "ref attributed to enclosing def");
+    }
+
+    #[test]
+    fn many_flat_top_level_defs_and_refs_resolve_correctly() {
+        // Regression for the O(n) stack-based `enclosing`/`enclosing_point` rewrite: a file with
+        // many non-nested (flat, sibling) top-level definitions, mimicking generated bindings.
+        // Each function calls the previous one, so every reference must resolve to its own
+        // (correct) enclosing function, not some other sibling.
+        let mut src = String::from("def f0():\n    pass\n\n");
+        for i in 1..200 {
+            src.push_str(&format!("def f{i}():\n    return f{}()\n\n", i - 1));
+        }
+        let p = extract("gen.py", &src);
+        assert_eq!(p.defs.len(), 200, "all 200 flat definitions captured");
+        assert!(
+            p.defs.iter().all(|d| d.parent.is_none()),
+            "flat top-level defs have no parent"
+        );
+        for i in 1..200 {
+            // Each f{i-1} is called exactly once, by f{i}, so the name alone pins down the ref.
+            let target = format!("f{}", i - 1);
+            let call = p
+                .refs
+                .iter()
+                .find(|r| r.name == target)
+                .unwrap_or_else(|| panic!("call to {target} inside f{i} captured"));
+            let from = call.from.map(|idx| p.defs[idx].name.as_str());
+            assert_eq!(
+                from,
+                Some(format!("f{i}")).as_deref(),
+                "ref attributed to f{i}"
+            );
+        }
     }
 
     #[test]

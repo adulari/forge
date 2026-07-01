@@ -171,14 +171,24 @@ impl Lattice {
                 .unwrap_or_default();
             if lang_for_path(&name).is_some() {
                 seen.insert(self.rel_path(path));
-                self.index_file(path, &mut stats)?;
+                // A single file's store error (e.g. a transient SQLite lock) shouldn't abort the
+                // whole walk — log it and keep indexing the rest, matching index_file's own
+                // best-effort handling of unreadable files.
+                if let Err(e) = self.index_file(path, &mut stats) {
+                    tracing::warn!(file = %path.display(), error = %e, "lattice: failed to index file, skipping");
+                }
             }
         }
         // Purge files that vanished from the walk (deleted, or now under a skipped/nested-git dir).
+        // Best-effort: a failure here is logged rather than propagated, leaving stale rows for the
+        // next run rather than aborting the whole update.
         stats.files_pruned = self
             .store
             .prune_lattice_files_except(&self.repo_root, &seen)
-            .unwrap_or(0);
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "lattice: failed to prune stale files");
+                0
+            });
         // Also drop ORPHAN roots from the global store. Two cases:
         //  - dead: the root's directory no longer exists (e.g. a deleted `/tmp/swe-*/django` clone).
         //  - nested: the root sits UNDER the one we just walked. This walk (gitignore-aware) is
@@ -192,7 +202,10 @@ impl Lattice {
                     continue;
                 }
                 if !Path::new(&root).is_dir() || root.starts_with(&nested_prefix) {
-                    stats.files_pruned += self.store.prune_lattice_repo(&root).unwrap_or(0);
+                    stats.files_pruned += self.store.prune_lattice_repo(&root).unwrap_or_else(|e| {
+                        tracing::warn!(root = %root, error = %e, "lattice: failed to prune orphan repo root");
+                        0
+                    });
                 }
             }
         }
@@ -537,7 +550,17 @@ impl Lattice {
         max_depth: usize,
         scope: Option<&str>,
     ) -> Result<BlastRadius, LatticeError> {
-        let in_scope = |h: &NodeHit| scope.is_none_or(|s| h.rel_path.starts_with(s));
+        // A naive prefix check would let `--scope crates/forge-cli` also match a sibling like
+        // `crates/forge-cli-extra`; require the match to land on a path-component boundary.
+        let in_scope = |h: &NodeHit| {
+            scope.is_none_or(|s| {
+                let s = s.trim_end_matches('/');
+                h.rel_path == s
+                    || h.rel_path
+                        .strip_prefix(s)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+        };
         let roots = self.rows_to_hits(self.store.lattice_nodes_by_name(
             &self.repo_root,
             symbol,
@@ -1255,6 +1278,32 @@ mod tests {
             "crates/b reference must be excluded by the scope: {scoped:?}"
         );
         assert!(scoped.files.iter().all(|f| f.starts_with("crates/a")));
+    }
+
+    #[test]
+    fn impact_scope_does_not_match_sibling_dir_with_shared_prefix() {
+        // `--scope crates/forge-cli` must not also match `crates/forge-cli-extra` just because
+        // the latter's path starts with the same characters.
+        let t = Tmp::new();
+        t.write("crates/forge-cli/src/lib.rs", "pub fn dup() {}\n");
+        t.write(
+            "crates/forge-cli-extra/src/use.rs",
+            "use crate::dup;\npub fn extra_caller() { dup(); }\n",
+        );
+        let lat = lattice(&t.root);
+        lat.update().unwrap();
+
+        let scoped = lat
+            .impact_in_scope("dup", 3, Some("crates/forge-cli"))
+            .unwrap();
+        assert!(
+            !scoped.dependents.iter().any(|d| d.name == "extra_caller"),
+            "sibling dir with a shared prefix must be excluded: {scoped:?}"
+        );
+        assert!(scoped
+            .files
+            .iter()
+            .all(|f| f == "crates/forge-cli/src/lib.rs"));
     }
 
     #[test]
