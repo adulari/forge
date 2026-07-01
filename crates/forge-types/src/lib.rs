@@ -575,7 +575,9 @@ impl PermissionMode {
         match s.trim().to_lowercase().as_str() {
             "read-only" | "readonly" | "plan" => Some(PermissionMode::Plan),
             "ask" | "default" => Some(PermissionMode::Default),
-            "auto-edit" | "autoedit" | "acceptedits" => Some(PermissionMode::AcceptEdits),
+            "accept-edits" | "auto-edit" | "autoedit" | "acceptedits" => {
+                Some(PermissionMode::AcceptEdits)
+            }
             "full" | "bypass" => Some(PermissionMode::Bypass),
             _ => None,
         }
@@ -605,14 +607,14 @@ impl PermissionMode {
     }
 
     /// The next temper in the SHIFT+TAB cycle. The cycle covers the three everyday tempers and
-    /// **wraps** — `Bypass`/Unfettered is intentionally excluded (reachable only via explicit
-    /// `--mode unfettered`/config, never by tapping a key). From Unfettered, cycling re-enters
-    /// the safe loop at Guarded.
+    /// **wraps** — `Bypass`/Full is intentionally excluded (reachable only via explicit
+    /// `--mode bypass`/config, never by tapping a key). From Full, cycling re-enters
+    /// the safe loop at Ask.
     pub fn cycle_next(self) -> PermissionMode {
         match self {
-            PermissionMode::Default => PermissionMode::AcceptEdits, // Guarded → Smith
-            PermissionMode::AcceptEdits => PermissionMode::Plan,    // Smith → Survey
-            PermissionMode::Plan => PermissionMode::Default,        // Survey → Guarded (wrap)
+            PermissionMode::Default => PermissionMode::AcceptEdits, // Ask → Auto-edit
+            PermissionMode::AcceptEdits => PermissionMode::Plan,    // Auto-edit → Read-only
+            PermissionMode::Plan => PermissionMode::Default,        // Read-only → Ask (wrap)
             PermissionMode::Bypass => PermissionMode::Default,      // leave the unsafe temper
         }
     }
