@@ -72,8 +72,29 @@ deliberately **not** in `PORTABLE_METADATA_TABLES` (cwd + branches don't travel 
   fixed here — see `commit_worktree`), zero leftover worktrees, digest lists branches + replay
   pointers.
 
+## Shadow passes + the scoreboard (`--shadow`, `forge scoreboard`)
+
+`forge queue run --shadow` turns every successful drain into a routing lesson. After a task
+finishes `done`, the same task is re-run once in a throwaway worktree with
+`FORGE_MESH__CREDIT_MODE=strict` overlaid — the shadow child can only route to free or
+subscription models, so **a shadow never spends paid credit**. If the cheap model also finishes
+cleanly and produces committable changes, that's a win; either way the outcome lands in the same
+per-repo `duel_outcome` ledger `/duel` feeds, nudging future routing in this repo toward models
+that demonstrably handle its work (boost = `(wins − losses) × 0.5`, clamped ±2.0).
+
+`forge scoreboard` shows the ledger — wins, losses, and the exact boost routing applies:
+
+```
+model                            wins  losses   boost
+groq::llama-3.3-70b-versatile       4       1    +1.5
+deepseek::deepseek-chat             1       2    -0.5
+```
+
+Nothing from a shadow is kept: worktree and branch die with the guard; only the verdict remains.
+
 ## Deferred (next PRs)
 
 - `/queue` in the TUI + a digest card on the next `forge chat` after a drain.
 - `forge queue schedule` sugar (installs the OS timer directly instead of via `forge schedule`).
 - Parallel drains (needs per-provider fan-out caps at the mesh layer to be safe).
+- Diff-similarity scoring for shadows (beyond "finished cleanly + changed something").

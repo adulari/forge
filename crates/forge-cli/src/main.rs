@@ -31,7 +31,7 @@ pub(crate) use cli::commands::models::{
     models, save_catalog,
 };
 pub(crate) use cli::commands::provider::provider_cmd;
-pub(crate) use cli::commands::queue::queue_cmd;
+pub(crate) use cli::commands::queue::{queue_cmd, scoreboard_cmd};
 pub(crate) use cli::commands::replay::{
     open_store, replay_cmd, replay_rerun_cmd, resolve_resume_mode, resolve_session, sessions,
     ResumeMode,

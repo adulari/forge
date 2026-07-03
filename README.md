@@ -506,7 +506,9 @@ Task Scheduler on Windows. The headless analog to `/loop`/`/goal`.
 ```bash
 forge queue add "migrate the auth module to the new API" --budget 2.50
 forge queue run --gate high          # drain: one isolated worktree + result branch per task
+forge queue run --shadow             # …and teach the router: re-run winners on free models
 forge queue report                   # morning digest: status, branch, cost, replay pointer
+forge scoreboard                     # per-repo model wins/losses + the routing boost they earn
 ```
 
 Queue big tasks during the day; drain them overnight (point a `forge schedule` timer at

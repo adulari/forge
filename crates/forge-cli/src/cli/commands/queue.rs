@@ -20,7 +20,12 @@ pub(crate) fn queue_cmd(cmd: Option<QueueCmd>) -> Result<()> {
             model,
         }) => add_queue_cmd(task.join(" "), budget, mode, model),
         Some(QueueCmd::Remove { id }) => remove_queue_cmd(&id),
-        Some(QueueCmd::Run { gate, max, mock }) => run_queue_cmd(gate, max, mock),
+        Some(QueueCmd::Run {
+            gate,
+            max,
+            mock,
+            shadow,
+        }) => run_queue_cmd(gate, max, mock, shadow),
         Some(QueueCmd::Report) => report_queue_cmd(),
     }
 }
@@ -118,7 +123,7 @@ fn resolve_queue_id(store: &Store, prefix: &str) -> Result<String> {
 // layer (per-provider caps), not here.
 // ---------------------------------------------------------------------------
 
-fn run_queue_cmd(gate: Option<String>, max: Option<usize>, mock: bool) -> Result<()> {
+fn run_queue_cmd(gate: Option<String>, max: Option<usize>, mock: bool, shadow: bool) -> Result<()> {
     let cwd = canonical_cwd()?;
     let repo_root = git_repo_root(&cwd)
         .context("`forge queue run` needs a git repository (results are left as branches)")?;
@@ -144,7 +149,7 @@ fn run_queue_cmd(gate: Option<String>, max: Option<usize>, mock: bool) -> Result
         }
         println!("▶ {}  {}", &t.id[..8], truncate(&t.task, 70));
         let outcome = run_one_task(&t, &repo_root, &forge_exe, gate.as_deref(), mock);
-        let (status, session_id, branch, summary, cost, gate_note) = match outcome {
+        let (status, session_id, branch, summary, cost, gate_note, model) = match outcome {
             Ok(o) => (
                 o.status,
                 o.session_id,
@@ -152,12 +157,14 @@ fn run_queue_cmd(gate: Option<String>, max: Option<usize>, mock: bool) -> Result
                 o.summary,
                 o.cost_usd,
                 o.gate,
+                o.model,
             ),
             Err(e) => (
                 "failed".to_string(),
                 None,
                 None,
                 Some(format!("{e:#}")),
+                None,
                 None,
                 None,
             ),
@@ -179,6 +186,32 @@ fn run_queue_cmd(gate: Option<String>, max: Option<usize>, mock: bool) -> Result
             status,
             branch_note
         );
+
+        // The shadow pass: only after a comparison is possible (the primary finished `done`),
+        // and both sides of it get recorded — same table + boost math as /duel, so free models
+        // that prove themselves here rise in THIS repo's routing.
+        if shadow && status == "done" {
+            let repo_key = repo_root.display().to_string();
+            if let Some(m) = &model {
+                let _ = store.record_duel_outcome(&repo_key, m, true, &t.task);
+            }
+            match run_shadow_pass(&t, &repo_root, &forge_exe, mock) {
+                Ok((Some(shadow_model), won)) => {
+                    let _ = store.record_duel_outcome(&repo_key, &shadow_model, won, &t.task);
+                    println!(
+                        "  ⇄ shadow: {} {}",
+                        shadow_model,
+                        if won {
+                            "kept up — boosted"
+                        } else {
+                            "fell short"
+                        }
+                    );
+                }
+                Ok((None, _)) => println!("  ⇄ shadow: no model routed (skipped)"),
+                Err(e) => println!("  ⇄ shadow: skipped ({e:#})"),
+            }
+        }
         finished.push((status, t.task.clone()));
     }
 
@@ -201,6 +234,60 @@ struct TaskOutcome {
     summary: Option<String>,
     cost_usd: Option<f64>,
     gate: Option<String>,
+    /// The model that did the work (from the stream's routing events).
+    model: Option<String>,
+}
+
+/// Spawn one headless agent turn in `dir` and fold its NDJSON stream, killing it if the
+/// streamed cost crosses `budget`. `strict_free` overlays `FORGE_MESH__CREDIT_MODE=strict` so
+/// the child routes to free/subscription models only — the shadow path's no-paid-spend
+/// guarantee. Returns the folded stream, the exit status, and whether the budget tripped.
+#[allow(clippy::too_many_arguments)]
+fn spawn_task_run(
+    task: &str,
+    dir: &std::path::Path,
+    forge_exe: &std::path::Path,
+    mode: &str,
+    model: Option<&str>,
+    budget: Option<f64>,
+    mock: bool,
+    strict_free: bool,
+) -> Result<(StreamRun, std::process::ExitStatus, bool)> {
+    let mut cmd = std::process::Command::new(forge_exe);
+    cmd.arg("run")
+        .arg(task)
+        .args(["--output-format", "stream-json", "--mode", mode])
+        .current_dir(dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null());
+    if let Some(m) = model {
+        cmd.args(["--model", m]);
+    }
+    if mock {
+        cmd.arg("--mock");
+    }
+    if strict_free {
+        cmd.env("FORGE_MESH__CREDIT_MODE", "strict");
+    }
+    let mut child = cmd.spawn().context("spawning the task run")?;
+    let stdout = child.stdout.take().expect("piped stdout");
+
+    let mut run = StreamRun::default();
+    let mut over_budget = false;
+    for line in std::io::BufReader::new(stdout).lines() {
+        let Ok(line) = line else { break };
+        run.fold_line(&line);
+        if let (Some(cap), Some(cost)) = (budget, run.cost_usd) {
+            if cost > cap {
+                let _ = child.kill();
+                over_budget = true;
+                break;
+            }
+        }
+    }
+    let exit = child.wait().context("waiting for the task run")?;
+    Ok((run, exit, over_budget))
 }
 
 fn run_one_task(
@@ -217,37 +304,16 @@ fn run_one_task(
     // One headless agent turn inside the worktree. accept-edits unless the task pinned a mode:
     // the worktree IS the sandbox, and a prompt would hang forever with nobody watching.
     let mode = t.mode.as_deref().unwrap_or("accept-edits");
-    let mut cmd = std::process::Command::new(forge_exe);
-    cmd.arg("run")
-        .arg(&t.task)
-        .args(["--output-format", "stream-json", "--mode", mode])
-        .current_dir(guard.path())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .stdin(std::process::Stdio::null());
-    if let Some(m) = &t.model {
-        cmd.args(["--model", m]);
-    }
-    if mock {
-        cmd.arg("--mock");
-    }
-    let mut child = cmd.spawn().context("spawning the task run")?;
-    let stdout = child.stdout.take().expect("piped stdout");
-
-    let mut run = StreamRun::default();
-    let mut over_budget = false;
-    for line in std::io::BufReader::new(stdout).lines() {
-        let Ok(line) = line else { break };
-        run.fold_line(&line);
-        if let (Some(budget), Some(cost)) = (t.budget_usd, run.cost_usd) {
-            if cost > budget {
-                let _ = child.kill();
-                over_budget = true;
-                break;
-            }
-        }
-    }
-    let exit = child.wait().context("waiting for the task run")?;
+    let (run, exit, over_budget) = spawn_task_run(
+        &t.task,
+        guard.path(),
+        forge_exe,
+        mode,
+        t.model.as_deref(),
+        t.budget_usd,
+        mock,
+        false,
+    )?;
 
     // Gate BEFORE committing: assay's diff scope reads the uncommitted working tree.
     let mut gate_note = None;
@@ -305,7 +371,38 @@ fn run_one_task(
         summary: run.result.map(|s| truncate(&s, 400).to_string()),
         cost_usd: run.cost_usd,
         gate: gate_note,
+        model: run.model,
     })
+}
+
+/// The shadow pass: re-run a task that just finished `done`, in a fresh throwaway worktree,
+/// with `FORGE_MESH__CREDIT_MODE=strict` overlaid so the child can only route to free or
+/// subscription models — a shadow run never spends paid credit. Nothing is kept: the worktree
+/// and its branch die with the guard. Returns `(model, won)` where winning means the cheap
+/// model also finished cleanly AND produced committable changes — evidence, recorded into the
+/// same per-repo `duel_outcome` boosts that `/duel` feeds, that it can handle this repo's work.
+fn run_shadow_pass(
+    t: &forge_store::QueueTask,
+    repo_root: &std::path::Path,
+    forge_exe: &std::path::Path,
+    mock: bool,
+) -> Result<(Option<String>, bool)> {
+    let child_id = format!("shadow-{}", &t.id[..t.id.len().min(12)]);
+    let guard = forge_core::worktree::WorktreeGuard::create(repo_root, &child_id)
+        .map_err(|e| anyhow::anyhow!("creating shadow worktree: {e}"))?;
+    let (run, exit, _) = spawn_task_run(
+        &t.task,
+        guard.path(),
+        forge_exe,
+        "accept-edits",
+        None, // never the pinned model: the whole point is trying someone cheaper
+        t.budget_usd,
+        mock,
+        true,
+    )?;
+    let changed = forge_core::worktree::commit_worktree(guard.path())
+        .map_err(|e| anyhow::anyhow!("checking shadow results: {e}"))?;
+    Ok((run.model, exit.success() && changed))
 }
 
 fn report_queue_cmd() -> Result<()> {
@@ -352,6 +449,40 @@ fn report_queue_cmd() -> Result<()> {
     Ok(())
 }
 
+/// `forge scoreboard` — the per-repo model ledger behind routing's learned boosts. One source
+/// of truth (`duel_outcome` + the same boost math), fed by `/duel` arenas and `--shadow` passes.
+pub(crate) fn scoreboard_cmd() -> Result<()> {
+    let cwd = canonical_cwd()?;
+    let repo_key = git_repo_root(&cwd)
+        .map(|p| p.display().to_string())
+        .unwrap_or(cwd);
+    let store = open_store()?;
+    let rows = store
+        .model_scoreboard(&repo_key)
+        .context("reading the scoreboard")?;
+    if rows.is_empty() {
+        println!("no outcomes recorded for this repo yet");
+        println!("teach the router: run a `/duel <task>` or drain with `forge queue run --shadow`");
+        return Ok(());
+    }
+    println!("model scoreboard — {repo_key}");
+    println!("(boost is applied to mesh routing in this repo)\n");
+    println!(
+        "{:<40}  {:>4}  {:>6}  {:>6}",
+        "model", "wins", "losses", "boost"
+    );
+    for (model, wins, losses, boost) in rows {
+        println!(
+            "{:<40}  {:>4}  {:>6}  {:>+6.1}",
+            truncate(&model, 40),
+            wins,
+            losses,
+            boost
+        );
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested below). The stream-json fold is the contract with `forge run
 // --output-format stream-json`: init → session_id, usage → cumulative cost, result → final text.
@@ -363,6 +494,9 @@ struct StreamRun {
     session_id: Option<String>,
     cost_usd: Option<f64>,
     result: Option<String>,
+    /// The routed model — last `routing` event wins, so mid-run failover reports the model
+    /// that actually finished the work.
+    model: Option<String>,
 }
 
 impl StreamRun {
@@ -379,6 +513,9 @@ impl StreamRun {
                     .get("session_id")
                     .and_then(|s| s.as_str())
                     .map(str::to_string);
+            }
+            (Some("system"), Some("routing")) => {
+                self.model = v.get("model").and_then(|m| m.as_str()).map(str::to_string);
             }
             (Some("system"), Some("usage")) => {
                 self.cost_usd = v.get("total_cost_usd").and_then(|c| c.as_f64());
