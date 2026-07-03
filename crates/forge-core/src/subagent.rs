@@ -83,6 +83,57 @@ pub fn spawn_agents_spec(max_agents: usize) -> ToolSpec {
     }
 }
 
+pub const SEND_TO_AGENT_TOOL: &str = "send_to_agent";
+
+/// The `ToolSpec` for following up with a child agent spawned earlier this session (or in a
+/// previous turn of it) — the persistent-subagents half of the orchestration surface.
+pub fn send_to_agent_spec() -> ToolSpec {
+    ToolSpec {
+        name: SEND_TO_AGENT_TOOL.to_string(),
+        description: "Send a follow-up message to a child agent you spawned earlier with \
+             spawn_agents. The child keeps its full previous context (its investigation, its \
+             findings), so use this for iterative refinement — a clarifying question, a deeper \
+             dive on one finding — instead of re-spawning and re-explaining from scratch. \
+             Address it by the agent name used at spawn time (e.g. 'researcher') or a prefix \
+             of its child-session id. Returns the child's answer."
+            .to_string(),
+        schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "description": "the child's agent name from spawn_agents, or its session-id prefix; with duplicate names the most recent child answers"
+                },
+                "message": {
+                    "type": "string",
+                    "description": "the follow-up message for the child"
+                }
+            },
+            "required": ["agent", "message"]
+        }),
+    }
+}
+
+/// Resolve a `send_to_agent` address against a parent's children: exact title (agent-name)
+/// match wins with most-recent-first tiebreak, then an id-prefix match. Pure — unit-testable.
+pub fn resolve_child_address(
+    children: &[(String, Option<String>)],
+    address: &str,
+) -> Option<(String, String)> {
+    if let Some((id, name)) = children
+        .iter()
+        .rev()
+        .find(|(_, title)| title.as_deref() == Some(address))
+    {
+        return Some((id.clone(), name.clone().unwrap_or_default()));
+    }
+    let mut prefix_matches = children.iter().filter(|(id, _)| id.starts_with(address));
+    match (prefix_matches.next(), prefix_matches.next()) {
+        (Some((id, name)), None) => Some((id.clone(), name.clone().unwrap_or_default())),
+        _ => None,
+    }
+}
+
 /// One requested child agent, parsed from the `spawn_agents` arguments.
 pub struct AgentRequest {
     pub agent: String,
@@ -317,6 +368,72 @@ pub async fn run_subagent(
     on_delta: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> Result<SubagentOutcome, CoreError> {
     let task = agent.task.as_str();
+    // `decision` is a parameter (routed once by the caller); no second route_child here.
+    let transcript = vec![Message::system(&agent.system_prompt), Message::user(task)];
+    ctx.store.add_message(child_id, 0, Role::User, task, None)?;
+    run_agent_loop(
+        ctx, child_id, agent, decision, budget, transcript, 1, on_delta,
+    )
+    .await
+}
+
+/// Continue a previously-run child agent with a follow-up message (persistent subagents,
+/// gap-analysis #12): the child's transcript is rebuilt from its persisted session — nothing
+/// was retained in memory, so this works across parent turns AND across a resumed parent
+/// session — the follow-up is appended, and the same model↔tool loop runs again. The system
+/// prompt is re-resolved from the agent definition (it was never persisted), so a named agent
+/// type keeps its persona; an ad-hoc child gets the default subagent persona back.
+pub async fn resume_subagent(
+    ctx: &AgentCtx,
+    child_id: &str,
+    agent: &ResolvedAgent,
+    follow_up: &str,
+    decision: RoutingDecision,
+    budget: BudgetState,
+    on_delta: &mut (dyn FnMut(StreamEvent) + Send),
+) -> Result<SubagentOutcome, CoreError> {
+    let stored = ctx.store.load_messages(child_id)?;
+    let mut transcript = Vec::with_capacity(stored.len() + 2);
+    transcript.push(Message::system(&agent.system_prompt));
+    for m in stored {
+        transcript.push(match m.role {
+            Role::System => Message::system(&m.content),
+            Role::User => Message::user(&m.content),
+            Role::Assistant => Message::assistant_tool_calls(&m.content, m.tool_calls),
+            Role::Tool => Message::tool_result(m.tool_call_id.as_deref().unwrap_or(""), m.content),
+        });
+    }
+    transcript.push(Message::user(follow_up));
+    let seq = ctx.store.next_message_seq(child_id)?;
+    ctx.store
+        .add_message(child_id, seq, Role::User, follow_up, None)?;
+    run_agent_loop(
+        ctx,
+        child_id,
+        agent,
+        decision,
+        budget,
+        transcript,
+        seq + 1,
+        on_delta,
+    )
+    .await
+}
+
+/// The child model↔tool loop shared by a fresh [`run_subagent`] and a [`resume_subagent`]
+/// follow-up: same toolset resolution, same failover chain, same persistence — only the
+/// starting transcript and message-seq offset differ.
+#[allow(clippy::too_many_arguments)]
+async fn run_agent_loop(
+    ctx: &AgentCtx,
+    child_id: &str,
+    agent: &ResolvedAgent,
+    decision: RoutingDecision,
+    budget: BudgetState,
+    mut transcript: Vec<Message>,
+    seq_start: i64,
+    on_delta: &mut (dyn FnMut(StreamEvent) + Send),
+) -> Result<SubagentOutcome, CoreError> {
     // The agent type may widen the toolset beyond read-only; writes/shell still pass the
     // permission gate (where Ask→Deny in a child). The child can itself spawn subagents only
     // while there is depth budget left (RFC subagent-orchestration Phase 3c).
@@ -345,16 +462,12 @@ pub async fn run_subagent(
         specs.push(spawn_agents_spec(ctx.config.mesh.subagents.max_agents));
     }
 
-    // `decision` is now a parameter (routed once by the caller); no second route_child here.
-    let mut transcript = vec![Message::system(&agent.system_prompt), Message::user(task)];
-    let mut seq: i64 = 0;
+    let mut seq: i64 = seq_start;
     let mut next_seq = || {
         let n = seq;
         seq += 1;
         n
     };
-    ctx.store
-        .add_message(child_id, next_seq(), Role::User, task, None)?;
 
     let mut final_text = String::new();
     let mut ok = true;
@@ -640,6 +753,9 @@ pub async fn orchestrate(
                 continue;
             }
         };
+        // Name the child session after its resolved agent — the address `send_to_agent` resolves
+        // for follow-ups. Best-effort: an unnamed child is still reachable by id prefix.
+        let _ = ctx.store.set_session_title(&child_id, &resolved.name);
         // Route up front (deterministic, no API call) so the panel shows the model immediately AND
         // the child runs against the SAME model its provider permit is acquired for (routed once).
         let decision = route_child(ctx, &resolved, budget).await;

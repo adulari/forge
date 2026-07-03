@@ -91,10 +91,12 @@ Ranked by (leverage × certainty) ÷ effort. S/M/L = effort. Each maps to a v1.0
 
 ### Tier 3 — larger, differentiating (P1 → P4, stage later)
 
-12. **Persistent re-addressable subagents** (M) — *pi + openclaude coordinator.* Workers stay alive;
-    a coordinator `SendMessage`s follow-ups instead of re-spawning (keep the depth-1 guard). Unlocks
-    iterative coordinator→worker refinement without losing worker context. Extends `spawn_agents` to
-    return an `agent_id` + retain the `Session`.
+12. ~~**Persistent re-addressable subagents**~~ **DONE.** `send_to_agent {agent, message}` follows
+    up with a child spawned earlier: the child's transcript is rebuilt from its persisted session
+    (nothing retained in memory — works across parent turns AND resumes), the follow-up appends,
+    and the same child loop runs again. Children are named at spawn (session title = agent name);
+    addresses resolve by name (most-recent wins) or id prefix. Advertised on both the direct path
+    and the CLI bridge; the depth-1 guard stays structural (children never see the tool).
 
 13. **Session branching / fork-and-continue (`/tree`)** (M) — *pi.* Add a `parent_id` to the message
     table; a `forge tree` / TUI overlay to pick any past node, continue from there, switch branches.

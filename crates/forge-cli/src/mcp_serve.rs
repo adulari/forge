@@ -121,11 +121,19 @@ impl ServerHandler for ForgeMcp {
                 )
             })
             .collect();
-        // Advertise the subagent virtual tool only when enabled here.
+        // Advertise the subagent virtual tools only when enabled here — spawn_agents for fresh
+        // fan-out, send_to_agent for follow-ups to persisted children (persistent subagents).
         if let Some(s) = &self.subagents {
             let spec = subagent::spawn_agents_spec(s.max_agents);
             let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
             tools.push(Tool::new(spec.name, spec.description, Arc::new(schema)));
+            let follow = subagent::send_to_agent_spec();
+            let follow_schema: JsonObject = follow.schema.as_object().cloned().unwrap_or_default();
+            tools.push(Tool::new(
+                follow.name,
+                follow.description,
+                Arc::new(follow_schema),
+            ));
         }
         // Always advertise task tracking so a bridge model can maintain a visible todo list.
         let ts = forge_core::update_tasks_spec();
@@ -174,6 +182,11 @@ impl ServerHandler for ForgeMcp {
         // The subagent virtual tool — fan out to mesh-routed children in this process.
         if name == subagent::SPAWN_AGENTS_TOOL {
             return Ok(self.handle_spawn_agents(&args).await);
+        }
+        // Follow-ups to a persisted child (persistent subagents) — bridge parity with the
+        // direct path's Session::send_to_agent.
+        if name == subagent::SEND_TO_AGENT_TOOL {
+            return Ok(self.handle_send_to_agent(&args).await);
         }
 
         // Task tracking — persist the list to the parent session (id from ENV_SESSION) so the
@@ -441,6 +454,97 @@ impl ServerHandler for ForgeMcp {
 }
 
 impl ForgeMcp {
+    /// Bridge-side `send_to_agent`: resolve the child among the parent session's persisted
+    /// children, rebuild its transcript, and continue it — the same semantics as the direct
+    /// path's `Session::send_to_agent`, reported through the out-of-band sink instead of a
+    /// presenter.
+    async fn handle_send_to_agent(&self, args: &Value) -> CallToolResult {
+        let Some(s) = &self.subagents else {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "send_to_agent is not available here",
+            )]);
+        };
+        let address = args
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let message = args
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if address.is_empty() || message.is_empty() {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "error: send_to_agent needs both `agent` (name or id prefix) and `message`",
+            )]);
+        }
+        let children = s
+            .ctx
+            .store
+            .named_child_sessions(&s.parent_id)
+            .unwrap_or_default();
+        let Some((child_id, agent_name)) = subagent::resolve_child_address(&children, &address)
+        else {
+            let known: Vec<String> = children
+                .iter()
+                .map(|(id, t)| format!("{} ({})", t.as_deref().unwrap_or("unnamed"), &id[..8]))
+                .collect();
+            return CallToolResult::error(vec![ContentBlock::text(format!(
+                "error: no child agent matches '{address}'. Children this session: [{}] — \
+                 spawn one first with spawn_agents",
+                known.join(", ")
+            ))]);
+        };
+        let request = subagent::AgentRequest {
+            agent: agent_name.clone(),
+            task: message.clone(),
+        };
+        let resolved = subagent::resolve(&request, &s.ctx.agents);
+        let budget = BudgetState {
+            spent_today_usd: s.ctx.store.spend_today_usd().unwrap_or(0.0),
+            daily_cap_usd: self.config.mesh.daily_budget_usd,
+            spent_week_usd: s.ctx.store.spend_this_week_usd().unwrap_or(0.0),
+            weekly_cap_usd: self.config.mesh.weekly_budget_usd,
+            spent_month_usd: s.ctx.store.spend_this_month_usd().unwrap_or(0.0),
+            monthly_cap_usd: self.config.mesh.monthly_cap_usd,
+            warn_fraction: self.config.mesh.warn_threshold,
+            min_context_tokens: None,
+        };
+        let decision = subagent::route_child(&s.ctx, &resolved, budget).await;
+        let mut on_delta = |_: forge_provider::StreamEvent| {};
+        match subagent::resume_subagent(
+            &s.ctx,
+            &child_id,
+            &resolved,
+            &message,
+            decision,
+            budget,
+            &mut on_delta,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                let label = if agent_name.is_empty() {
+                    child_id[..8].to_string()
+                } else {
+                    agent_name
+                };
+                let text = format!("[{label}] {}", outcome.final_text);
+                if outcome.ok {
+                    CallToolResult::success(vec![ContentBlock::text(text)])
+                } else {
+                    CallToolResult::error(vec![ContentBlock::text(text)])
+                }
+            }
+            Err(e) => CallToolResult::error(vec![ContentBlock::text(format!(
+                "error: send_to_agent failed: {e}"
+            ))]),
+        }
+    }
+
     async fn handle_spawn_agents(&self, args: &Value) -> CallToolResult {
         let Some(s) = &self.subagents else {
             return CallToolResult::error(vec![ContentBlock::text(

@@ -1819,6 +1819,9 @@ impl Session {
             specs.push(subagent::spawn_agents_spec(
                 self.config.mesh.subagents.max_agents,
             ));
+            // Follow-ups to already-spawned children (persistent subagents). Advertised beside
+            // spawn_agents — a fresh session simply has no children yet and the tool says so.
+            specs.push(subagent::send_to_agent_spec());
             specs.push(workflow::run_workflow_spec());
         }
         // The interactive question tool (AskUserQuestion) — always advertised so the model can
@@ -4861,6 +4864,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         if call.name == subagent::SPAWN_AGENTS_TOOL {
             return self.spawn_agents(msg_id, call).await;
         }
+        // Follow-ups to a persisted child (persistent subagents) — also core-owned.
+        if call.name == subagent::SEND_TO_AGENT_TOOL {
+            return self.send_to_agent(msg_id, call).await;
+        }
         // Workflow scripts are core-owned for the same reason (docs/rfcs/forge-workflow.md).
         if call.name == workflow::RUN_WORKFLOW_TOOL {
             return self.run_workflow(msg_id, call).await;
@@ -5492,6 +5499,145 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             if all_ok { "ok" } else { "error" },
         )?;
         Ok(combined)
+    }
+
+    /// Handle a `send_to_agent` call: follow up with a child spawned earlier — this turn, a
+    /// previous turn, or before a resume — by rebuilding its persisted transcript and running
+    /// the same child loop again (persistent subagents, gap-analysis #12). The child keeps its
+    /// full prior context; the depth-1 guard stays structural (children never see this tool).
+    async fn send_to_agent(
+        &mut self,
+        msg_id: &str,
+        call: &forge_types::ToolCall,
+    ) -> Result<String, CoreError> {
+        let args_json = serde_json::to_string(&call.args)?;
+        let fail = |result: String, store: &Store| -> Result<String, CoreError> {
+            store.record_tool_call(msg_id, &call.name, &args_json, &result, "allowed", "error")?;
+            Ok(result)
+        };
+        let address = call
+            .args
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let message = call
+            .args
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if address.is_empty() || message.is_empty() {
+            return fail(
+                "error: send_to_agent needs both `agent` (name or id prefix) and `message`".into(),
+                &self.store,
+            );
+        }
+        let children = self.store.named_child_sessions(&self.id)?;
+        let Some((child_id, agent_name)) = subagent::resolve_child_address(&children, &address)
+        else {
+            let known: Vec<String> = children
+                .iter()
+                .map(|(id, t)| format!("{} ({})", t.as_deref().unwrap_or("unnamed"), &id[..8]))
+                .collect();
+            return fail(
+                format!(
+                    "error: no child agent matches '{address}'. Children this session: [{}] — \
+                     spawn one first with spawn_agents",
+                    known.join(", ")
+                ),
+                &self.store,
+            );
+        };
+
+        // Re-resolve the agent definition by its recorded name so a named type keeps its
+        // persona + toolset; the follow-up message becomes the routed "task".
+        let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
+            &self.config.mesh.subagents.agents_dir,
+        )));
+        let request = subagent::AgentRequest {
+            agent: agent_name.clone(),
+            task: message.clone(),
+        };
+        let resolved = subagent::resolve(&request, &agents);
+        let budget = BudgetState {
+            spent_today_usd: self.store.spend_today_usd()?,
+            daily_cap_usd: self.config.mesh.daily_budget_usd,
+            spent_week_usd: self.store.spend_this_week_usd()?,
+            weekly_cap_usd: self.config.mesh.weekly_budget_usd,
+            spent_month_usd: self.store.spend_this_month_usd()?,
+            monthly_cap_usd: self.config.mesh.monthly_cap_usd,
+            warn_fraction: self.config.mesh.warn_threshold,
+            min_context_tokens: None,
+        };
+        let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let ctx = subagent::AgentCtx {
+            provider: Arc::clone(&self.provider),
+            router: Arc::clone(&self.router),
+            store: Arc::clone(&self.store),
+            config: self.config.clone(),
+            pricing: self.pricing.clone(),
+            mode: self.mode,
+            rules: self.rules.clone(),
+            depth: 0,
+            max_depth: self.config.mesh.subagents.max_depth,
+            agents,
+            worktree_root: None,
+            repo_root,
+        };
+        let decision = subagent::route_child(&ctx, &resolved, budget).await;
+
+        self.presenter.emit(PresenterEvent::SubagentStart {
+            id: child_id.clone(),
+            agent: agent_name.clone(),
+            task: format!("↩ {message}"),
+            model: Some(decision.model.clone()),
+            phase: None,
+        });
+        let presenter = &mut self.presenter;
+        let mut on_delta = |ev: StreamEvent| {
+            if let StreamEvent::Text(snippet) | StreamEvent::Reasoning(snippet) = ev {
+                presenter.emit(PresenterEvent::SubagentProgress {
+                    id: child_id.clone(),
+                    snippet,
+                });
+            }
+        };
+        let outcome = subagent::resume_subagent(
+            &ctx,
+            &child_id,
+            &resolved,
+            &message,
+            decision,
+            budget,
+            &mut on_delta,
+        )
+        .await?;
+        let cost = self.store.session_cost(&child_id).unwrap_or(0.0);
+        self.presenter.emit(PresenterEvent::SubagentResult {
+            id: child_id.clone(),
+            agent: agent_name.clone(),
+            ok: outcome.ok,
+            summary: outcome.final_text.clone(),
+            cost_usd: cost,
+        });
+        let label = if agent_name.is_empty() {
+            child_id[..8].to_string()
+        } else {
+            agent_name
+        };
+        let result = format!("[{label}] {}", outcome.final_text);
+        self.store.record_tool_call(
+            msg_id,
+            &call.name,
+            &args_json,
+            &result,
+            "allowed",
+            if outcome.ok { "ok" } else { "error" },
+        )?;
+        Ok(result)
     }
 
     /// Handle a `run_workflow` call: build the shared mesh-routed execution context (same shape
@@ -9960,6 +10106,154 @@ mod tests {
 
         // Child usage rolled into the shared day budget (children did real model work).
         assert!(store.spend_today_usd().unwrap() > 0.0);
+    }
+
+    /// Parent: spawn once → follow up via send_to_agent → synthesize. Child: answers, then
+    /// answers the follow-up WITH its prior context (persistent subagents, gap-analysis #12).
+    struct SpawnThenFollowUpProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for SpawnThenFollowUpProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_provider::ModelResponse;
+            use forge_types::{new_id, ToolCall, Usage};
+            let usage = Usage {
+                input_tokens: 30,
+                output_tokens: 12,
+                cached_input_tokens: 0,
+                cost_usd: 0.0,
+            };
+            let is_subagent = messages
+                .iter()
+                .any(|m| m.role == Role::System && m.content.contains("subagent"));
+            if is_subagent {
+                let user_turns = messages.iter().filter(|m| m.role == Role::User).count();
+                // The follow-up turn must still SEE the first exchange — that's the whole point.
+                let has_context = messages
+                    .iter()
+                    .any(|m| m.role == Role::Assistant && m.content.contains("first finding"));
+                let content = if user_turns >= 2 {
+                    assert!(has_context, "follow-up child lost its prior transcript");
+                    "deeper: confirmed with prior context".to_string()
+                } else {
+                    "first finding: suspicious module".to_string()
+                };
+                on_event(StreamEvent::Text(content.clone()));
+                return Ok(ModelResponse {
+                    content,
+                    tool_calls: vec![],
+                    usage,
+                    quotas: Vec::new(),
+                });
+            }
+            let tool_rounds = messages.iter().filter(|m| m.role == Role::Tool).count();
+            let (content, calls) = match tool_rounds {
+                0 => (
+                    "delegating".to_string(),
+                    vec![ToolCall {
+                        id: new_id(),
+                        name: "spawn_agents".into(),
+                        args: serde_json::json!({
+                            "agents": [ { "agent": "scout", "task": "scan the auth module" } ]
+                        }),
+                    }],
+                ),
+                1 => (
+                    "following up".to_string(),
+                    vec![ToolCall {
+                        id: new_id(),
+                        name: "send_to_agent".into(),
+                        args: serde_json::json!({
+                            "agent": "scout",
+                            "message": "dig deeper on that finding"
+                        }),
+                    }],
+                ),
+                _ => {
+                    let c = "synthesized with follow-up".to_string();
+                    on_event(StreamEvent::Text(c.clone()));
+                    (c, vec![])
+                }
+            };
+            Ok(ModelResponse {
+                content,
+                tool_calls: calls,
+                usage,
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn send_to_agent_continues_a_persisted_child_with_its_context() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let config = tiered_config();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(SpawnThenFollowUpProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools(),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            ".",
+        )
+        .unwrap();
+        let parent_id = session.id().to_string();
+
+        let answer = session
+            .run_turn("investigate the auth module and follow up on findings")
+            .await
+            .unwrap();
+        assert!(answer.contains("synthesized"), "parent finished: {answer}");
+
+        // ONE child total: the follow-up reused the persisted child, no second spawn.
+        let children = store.named_child_sessions(&parent_id).unwrap();
+        assert_eq!(children.len(), 1, "follow-up must not create a new child");
+        let (child_id, title) = &children[0];
+        // Named at spawn — the send_to_agent address book works by this title.
+        assert_eq!(title.as_deref(), Some("scout"));
+
+        // The child transcript holds BOTH exchanges: task + first answer, follow-up + deeper
+        // answer (the provider itself asserts the follow-up turn saw the first finding).
+        let msgs = store.load_messages(child_id).unwrap();
+        let users: Vec<_> = msgs.iter().filter(|m| m.role == Role::User).collect();
+        assert_eq!(users.len(), 2, "task + follow-up persisted");
+        assert!(msgs
+            .iter()
+            .any(|m| m.role == Role::Assistant && m.content.contains("deeper: confirmed")));
+    }
+
+    #[test]
+    fn child_addresses_resolve_by_name_then_prefix_most_recent_first() {
+        use crate::subagent::resolve_child_address;
+        let children = vec![
+            ("aaa111".to_string(), Some("scout".to_string())),
+            ("bbb222".to_string(), Some("critic".to_string())),
+            ("ccc333".to_string(), Some("scout".to_string())),
+        ];
+        // Duplicate names: the most recent child answers.
+        assert_eq!(
+            resolve_child_address(&children, "scout"),
+            Some(("ccc333".into(), "scout".into()))
+        );
+        assert_eq!(
+            resolve_child_address(&children, "critic"),
+            Some(("bbb222".into(), "critic".into()))
+        );
+        // Unique id prefix works; an ambiguous or unknown address does not.
+        assert_eq!(
+            resolve_child_address(&children, "bbb"),
+            Some(("bbb222".into(), "critic".into()))
+        );
+        assert_eq!(resolve_child_address(&children, "zzz"), None);
+        let ambiguous = vec![("abc1".to_string(), None), ("abc2".to_string(), None)];
+        assert_eq!(resolve_child_address(&ambiguous, "abc"), None);
     }
 
     #[tokio::test]
