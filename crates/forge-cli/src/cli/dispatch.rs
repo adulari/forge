@@ -74,6 +74,14 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 replay_cmd(&ids, json)
             }
         }
+        Command::Fork {
+            session,
+            turn,
+            model,
+            rerun,
+            mock,
+        } => fork_cmd(&session, turn, model, rerun, mock).await,
+        Command::Tree => tree_cmd(),
         Command::Blame { file, line, json } => blame_cmd(&file, line, json),
         Command::Assay { sub } => assay_cmd(sub).await,
         Command::Bench { sub } => match sub {

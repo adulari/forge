@@ -230,3 +230,133 @@ pub(crate) async fn replay_rerun_cmd(ids: &[String]) -> Result<()> {
     );
     Ok(())
 }
+
+/// `forge fork <session> [--turn N] [--model id] [--rerun]` — the counterfactual: branch a past
+/// session BEFORE turn N, holding every earlier turn verbatim as fixed context, and re-ask that
+/// one prompt — optionally on a different model. Complements `forge replay --rerun` (which
+/// replays the WHOLE history fresh); a fork changes exactly one variable. Conversation-state
+/// only: files are not rewound (use `/checkpoint` for filesystem time travel).
+pub(crate) async fn fork_cmd(
+    session_prefix: &str,
+    turn: Option<usize>,
+    model: Option<String>,
+    rerun: bool,
+    mock: bool,
+) -> Result<()> {
+    let store = open_store()?;
+    let id = resolve_session(&store, session_prefix)?;
+    let entries = store.load_replay(&id).context("loading session")?;
+    let user_turns: Vec<(&forge_store::ReplayEntry, usize)> = entries
+        .iter()
+        .filter(|e| e.role == forge_types::Role::User)
+        .zip(1usize..)
+        .collect();
+    if user_turns.is_empty() {
+        anyhow::bail!("session {} has no user turns to fork at", &id[..8]);
+    }
+    let n = turn.unwrap_or(user_turns.len());
+    let Some((entry, _)) = user_turns.iter().find(|(_, i)| *i == n) else {
+        anyhow::bail!(
+            "turn {n} does not exist — session {} has {} user turn(s)",
+            &id[..8],
+            user_turns.len()
+        );
+    };
+    let prompt = entry.content.clone();
+    let at_seq = entry.seq;
+
+    let fork_id = store.fork_session(&id, at_seq).context("forking session")?;
+    let f8 = &fork_id[..8];
+    println!("✓ forked {} before turn {n} → {f8}", &id[..8]);
+    println!("  held constant: turns 1..{}", n.saturating_sub(1));
+    println!("  re-asking:     {}", replay_preview(&prompt));
+    drop(store); // release before a child process (or a rebuilt session) opens the DB
+
+    if rerun {
+        let forge_exe = std::env::current_exe().context("resolving the forge binary")?;
+        let mut cmd = std::process::Command::new(forge_exe);
+        cmd.arg("run").arg("--resume").arg(&fork_id).arg(&prompt);
+        if let Some(m) = &model {
+            cmd.args(["--model", m]);
+        }
+        if mock {
+            cmd.arg("--mock");
+        }
+        let status = cmd.status().context("running the forked turn")?;
+        if !status.success() {
+            anyhow::bail!("the forked turn failed — `forge replay {f8}` for what happened");
+        }
+        // The counterfactual card: original vs fork, aligned per turn. The shared prefix is
+        // identical by construction, so the diff IS the effect of the change.
+        let store = open_store()?;
+        let original = store.load_replay(&id)?;
+        let forked = store.load_replay(&fork_id)?;
+        let d = replay::diff(&original, &forked);
+        let a8 = &id[..id.len().min(8)];
+        print!("\n{}", replay::render_diff(a8, f8, &d));
+        print!("\n{}", replay::render_turn_diff(a8, f8, &original, &forked));
+    } else {
+        let pin = model
+            .as_deref()
+            .map(|m| format!(" --model {m}"))
+            .unwrap_or_default();
+        println!("  continue it:   forge chat --resume {f8}");
+        println!("  or re-run:     forge run --resume {f8}{pin} \"{prompt}\"");
+    }
+    Ok(())
+}
+
+/// `forge tree` — the fork lineage: every fork family (source + its counterfactual branches),
+/// labeled by first prompt. Sessions with no fork relation are left out — this is the branch
+/// view, `forge sessions` is the flat list.
+pub(crate) fn tree_cmd() -> Result<()> {
+    let store = open_store()?;
+    let nodes = store.fork_nodes().context("loading sessions")?;
+    let in_family: std::collections::HashSet<&str> = nodes
+        .iter()
+        .filter_map(|(_, from, ..)| from.as_deref())
+        .chain(
+            nodes
+                .iter()
+                .filter(|(_, from, ..)| from.is_some())
+                .map(|(id, ..)| id.as_str()),
+        )
+        .collect();
+    if in_family.is_empty() {
+        println!("no forks yet — `forge fork <session> --turn N [--model id] --rerun`");
+        return Ok(());
+    }
+    let label = |id: &str| -> String {
+        let first = store
+            .load_replay(id)
+            .ok()
+            .and_then(|e| replay::user_prompts(&e).into_iter().next())
+            .unwrap_or_default();
+        replay_preview(&first)
+    };
+    println!("fork tree — counterfactual branches\n");
+    for (id, from, _, _) in &nodes {
+        if from.is_some() || !in_family.contains(id.as_str()) {
+            continue; // roots only here; forks render nested below their source
+        }
+        println!("● {}  {}", &id[..8], label(id));
+        for (fid, ffrom, fseq, _) in &nodes {
+            if ffrom.as_deref() == Some(id.as_str()) {
+                let at = fseq.map(|s| format!(" @seq {s}")).unwrap_or_default();
+                println!("└─ {}{}  {}", &fid[..8], at, label(fid));
+            }
+        }
+    }
+    println!("\ncompare any pair: forge replay <a> <b>");
+    Ok(())
+}
+
+/// First line of a prompt, truncated for one-line tree/fork labels.
+fn replay_preview(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("");
+    let mut out: String = line.chars().take(72).collect();
+    if line.chars().count() > 72 {
+        out.push('…');
+    }
+    out
+}

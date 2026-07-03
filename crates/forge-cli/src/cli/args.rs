@@ -372,6 +372,28 @@ pub(crate) enum Command {
         #[arg(long)]
         rerun: bool,
     },
+    /// The counterfactual: branch a past session BEFORE turn N — every earlier turn held
+    /// verbatim as fixed context — and re-ask that one prompt, optionally on a different model.
+    /// (`forge replay --rerun` replays the whole history fresh; a fork changes ONE variable.)
+    /// Conversation-state only: files are not rewound.
+    Fork {
+        /// Session id, or a prefix of one (see `forge sessions`).
+        session: String,
+        /// 1-based user turn to re-ask (default: the session's last turn).
+        #[arg(long)]
+        turn: Option<usize>,
+        /// Pin the counterfactual turn to a specific model (e.g. `groq::llama-3.3-70b`).
+        #[arg(long)]
+        model: Option<String>,
+        /// Run the forked turn now and print the original-vs-fork diff (the counterfactual card).
+        #[arg(long)]
+        rerun: bool,
+        /// Forward --mock to the forked turn (offline deterministic provider; for tests/demos).
+        #[arg(long)]
+        mock: bool,
+    },
+    /// Show the fork lineage: each forked-from source with its counterfactual branches.
+    Tree,
     /// Trace lines of a file back to the session/model/turn that wrote them, from the store's
     /// own tool-call records (no git dependency). See docs/features/forge-blame.md.
     Blame {

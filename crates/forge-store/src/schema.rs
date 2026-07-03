@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS session (
     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     total_cost_usd  REAL NOT NULL DEFAULT 0,
-    parent_session_id TEXT          -- non-null for subagent child sessions (RFC subagent-orchestration)
+    parent_session_id TEXT,         -- non-null for subagent child sessions (RFC subagent-orchestration)
+    forked_from       TEXT,         -- counterfactual forks (forge fork): source session id
+    forked_at_seq     INTEGER       -- ...and the seq the copied prefix stops before (also migration_0006)
 );
 
 CREATE TABLE IF NOT EXISTS message (
