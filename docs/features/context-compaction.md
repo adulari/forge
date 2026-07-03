@@ -1,8 +1,10 @@
-# Feature: context compaction (`/compact`)
+# Feature: context compaction (`/compact` · `/uncompact`)
 
-> **Status: MVP shipped.** `/compact` summarizes the older part of the transcript into one
-> system message via a cheap model call, shrinking the live context sent on subsequent turns.
-> Pairs with the context-window gauge (tui-token-counter.md), which shows when to do it.
+> **Status: shipped, including auto-trigger, persistence, and undo.** `/compact` summarizes the
+> older part of the transcript into one system message via a cheap model call, shrinking the live
+> context sent on subsequent turns; it also fires automatically at 80% of the context gauge.
+> `/uncompact` reverses it — the full transcript is always recoverable. Pairs with the
+> context-window gauge (tui-token-counter.md).
 
 ## 1. Problem (JTBD)
 > When a session gets long, I want to fold the early history into a summary so I stop paying to
@@ -20,15 +22,24 @@ The gauge surfaces the fill level; compaction is the action that lowers it.
   system prompt that preserves decisions, facts, file paths, names, and open threads.
 - Runs as a **background task** like a turn (the spinner ticks; doesn't block the render loop).
 
+**Shipped since the MVP**
+- **Auto-trigger**: `auto_compact_if_needed()` runs when the context gauge crosses 80% —
+  prune pass first (§3a), summarize only if pruning didn't reclaim enough.
+- **Persistence**: compaction is durable across resume. Compacted messages are soft-deleted
+  (`message.active = 0`) and the summary stored as a `session_compaction` row; `load_messages`
+  reloads the compacted view, while the full history stays intact underneath.
+- **Undo — `/uncompact` (#471)**: restores the full pre-compaction transcript. One immediate
+  transaction reactivates the messages and drops the summary row
+  (`Store::uncompact_session_store`), then `Session::uncompact()` reloads the live transcript
+  and reports `before → after`. A no-op with a note when the session was never compacted.
+
 **Deferred**
-- **Auto-trigger** when the context gauge crosses a threshold (manual `/compact` only for now).
-- **Persisting** the compacted view: compaction edits the *live* in-memory transcript only; the
-  full history stays in the store, so a resumed session reloads the uncompacted transcript.
 - Pinning/protecting specific messages; configurable keep-count; summary-of-summaries.
 
 ## Non-goals
-- No change to cost math, the agent loop, or persistence schema. Compaction only reshapes the
-  in-memory `transcript` that the next turn sends.
+- No change to cost math or the agent loop. Compaction reshapes what the next turn sends (and
+  which store rows are active) — it never deletes history: the full transcript stays in the store
+  and `/uncompact` or `forge replay` can always reach it.
 
 ## 3. Acceptance criteria
 ```
@@ -75,4 +86,6 @@ while a turn is in flight.
 - [x] Trivial-tier model call; fixed information-preserving prompt.
 - [x] `/compact` command + palette entry; runs as a background task.
 - [x] Unit tests (fold + no-op); `cargo fmt` + `clippy -D warnings` clean.
-- [ ] (Deferred) auto-trigger on gauge threshold; persist across resume.
+- [x] Auto-trigger on gauge threshold (80%); zero-LLM prune pass first.
+- [x] Persist across resume (`message.active` soft-delete + `session_compaction` summary row).
+- [x] `/uncompact` undo (#471) — store + session tests, live TUI e2e.

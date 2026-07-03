@@ -6,6 +6,70 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Workflow scripts** (#453–#457): a sandboxed QuickJS engine runs JavaScript orchestration
+  scripts inside Forge — `agent()` spawns a mesh-routed subagent, `parallel()` fans out,
+  `pipeline()` streams items through stages with no barrier, `phase()`/`log()` narrate progress,
+  and `workflow()` nests saved scripts. Author, run, and list scripts with `/workflow`; saved
+  scripts live in `.forge/workflows/`. Script phases render as grouped sections in the activity
+  panel (#456).
+- **Dedicated workflow view** (#460): a full-screen animated view of a running workflow script —
+  phases, live agents, per-agent status, and cost, updating as the script executes.
+- **White-hot effort** (#462): `/effort whitehot` (aliases `ultra`, `max`) pins the top of the
+  effort scale — providers get their maximum reasoning setting *and* Forge auto-orchestrates any
+  genuinely multi-part task through a workflow script with a final adversarial-verification
+  phase. Fifth stop on the effort slider; `⚒ WHITE-HOT` statusline badge; routing inflates the
+  minimum context-window requirement 2× so small-window models don't get picked for deep work.
+- **`forge blame`** (#468): per-line AI provenance. Trace any line of a file back to the session,
+  model, and turn that wrote it (`forge blame src/lib.rs`), and with `--line N` get a why-card —
+  the originating user prompt, the assistant's reasoning, and a `forge replay` pointer for the
+  full turn. Latest-edit-wins matching over the recorded tool-call history; no git required.
+- **`/duel`** (#469): the model arena. Race up to 3 distinct-provider models on the same task in
+  parallel isolated worktrees, compare them on a diffstat/tests/duration/cost card, pick a winner
+  whose diff merges into the working tree — and the mesh records the outcome per repo, softly
+  boosting models that win here in future routing.
+- **`forge schedule`** (#470): recurring headless runs on a native OS timer — the cron analog to
+  `/loop`/`/goal`. `forge schedule add "<task>" --every 30m | --at 09:00 | --cron "<expr>"`
+  (plus `--mode`/`--model` per tick), `forge schedule list`, `forge schedule remove <id-prefix>`.
+  Installs a real systemd `--user` timer on Linux, a launchd agent on macOS, or a Task Scheduler
+  task on Windows; removing a schedule uninstalls the timer. A failed install rolls the schedule
+  back out of the store.
+- **`/uncompact`** (#471): undo a `/compact`. Restores the full pre-compaction transcript —
+  reactivates the soft-deleted messages and drops the summary in one transaction — and reloads
+  the live session from it. A no-op (with a note) when the session was never compacted.
+- **Statusline** (#451): `repo_name` widget, shell-backed `custom` modules (run a command on a
+  refresh interval, spawned off the render loop), and `extra_rows` for any number of additional
+  statusline rows.
+
+### Fixed
+- **Workflow engine hardening** (#458, #461, #463): runaway scripts can no longer hang or OOM
+  Forge — an interrupt handler bounds synchronous JS slices (30s), the heap is capped at 256 MiB,
+  JS→Rust value conversion is depth-capped (cyclic values abort cleanly instead of overflowing
+  the stack), and nested `workflow()` calls are capped; a script that returns nothing now yields
+  a digest of its agents' work instead of the string "null"; plus 3 TUI bugs found in live e2e
+  verification of workflow scripts.
+- **Subagent lifecycle** (#464): cancelling a turn (Esc) no longer leaks still-running child
+  agents — children abort with the parent; a panicked child no longer counts toward "all
+  children succeeded"; a whitespace-only child answer no longer counts as an answer; and a
+  depth-guard env-var race at spawn is gone (set once at process init).
+- **Worktree isolation data loss** (#469): child edits made in an isolated worktree were never
+  committed, so merge-back diffed an empty range and reported a "clean" merge while silently
+  dropping all of the child's work. Children now commit their edits before merge-back, on both
+  the subagent and duel paths.
+- **MCP agent mode** (#465): the `default` permission mode of the exposed MCP agent silently
+  auto-allowed *everything*, including external-side-effect tools. It now denies by default.
+- **Workflow view** (#466): interrupting a workflow no longer wedges the view in its "active"
+  state forever; the view resets on interrupt and at the next turn start.
+- **Activity panel** (#452): starting a new batch no longer wipes the previous finished batch
+  from the panel.
+- **Statusline** (#449): genuinely-free models are now distinguished from models whose cost is
+  merely untracked.
+- **Mock provider** (#459): `read_file` completion checks now consider file content, not just
+  the call having happened.
+- **CI** (#448, #467): dropped a redundant push-to-main workflow trigger; documented ignores for
+  the quick-xml DoS advisory pair (RUSTSEC-2026-0194/0195) — no upstream fix exists yet and both
+  dependents are on latest.
+
 ## [2.2.0] - 2026-07-01
 
 ### Added
