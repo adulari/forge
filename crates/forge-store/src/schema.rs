@@ -257,4 +257,19 @@ CREATE TABLE IF NOT EXISTS live_event (
     created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_live_event_session ON live_event(session_id, id);
+
+-- `forge schedule`: recurring OS-timer-driven `forge run` tasks (feature: forge-schedule). Local
+-- machine state only — deliberately not in PORTABLE_METADATA_TABLES (a cwd/OS-timer install
+-- doesn't travel with `forge migrate`). Also created in migration_0004 for pre-existing DBs.
+CREATE TABLE IF NOT EXISTS schedule (
+    id         TEXT PRIMARY KEY,
+    task       TEXT NOT NULL,
+    cwd        TEXT NOT NULL,
+    mode       TEXT,
+    model      TEXT,
+    cron       TEXT NOT NULL,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    last_run   INTEGER
+);
 "#;

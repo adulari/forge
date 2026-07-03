@@ -571,6 +571,13 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: SelfMcpAction,
     },
+    /// Register/list/remove recurring tasks that fire `forge run` on a native OS timer (systemd
+    /// on Linux, launchd on macOS, Task Scheduler on Windows) — the headless analog to
+    /// `/loop`/`/goal`. With no subcommand, lists registered schedules.
+    Schedule {
+        #[command(subcommand)]
+        cmd: Option<ScheduleCmd>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -865,6 +872,43 @@ pub(crate) enum MemoryCmd {
     },
     /// Delete every memory in the scope.
     Clear,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ScheduleCmd {
+    /// Register a recurring task and install the native OS timer that fires it. Exactly one of
+    /// `--every` / `--at` / `--cron` selects the schedule.
+    ///
+    /// Examples:
+    ///   forge schedule add "check the deploy" --every 30m
+    ///   forge schedule add "morning standup summary" --at 09:00
+    Add {
+        /// The prompt / task each tick runs (quote it).
+        task: Vec<String>,
+        /// Fire on a fixed interval: `<N><unit>` with unit s/m/h/d, e.g. `30m`, `1h`, `1d`.
+        #[arg(long, conflicts_with_all = ["at", "cron"])]
+        every: Option<String>,
+        /// Fire once a day at this local time (`HH:MM`).
+        #[arg(long, conflicts_with_all = ["every", "cron"])]
+        at: Option<String>,
+        /// Raw OS-native calendar expression (systemd `OnCalendar=` syntax on Linux; not
+        /// supported on macOS/Windows).
+        #[arg(long, conflicts_with_all = ["every", "at"])]
+        cron: Option<String>,
+        /// Permission mode passed to each `forge run` tick (e.g. `bypass`, `accept-edits`).
+        #[arg(long)]
+        mode: Option<String>,
+        /// Pin a specific model for each tick.
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// List registered schedules.
+    List,
+    /// Uninstall a schedule's OS timer and delete it (id or unambiguous prefix).
+    Remove {
+        /// Schedule id, or a prefix of one (see `forge schedule list`).
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]

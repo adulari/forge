@@ -16,7 +16,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -463,10 +463,33 @@ fn migration_0003(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Migration #4: `forge schedule` registry — recurring OS-timer-driven `forge run` tasks
+/// (feature: forge-schedule). Local machine state (deliberately NOT in
+/// [`PORTABLE_METADATA_TABLES`] — a `cwd`/OS-timer install doesn't travel with `forge migrate`).
+fn migration_0004(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schedule (
+            id         TEXT PRIMARY KEY,
+            task       TEXT NOT NULL,
+            cwd        TEXT NOT NULL,
+            mode       TEXT,
+            model      TEXT,
+            cron       TEXT NOT NULL,
+            enabled    INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            last_run   INTEGER
+         )",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
-const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] =
-    &[migration_0001, migration_0002, migration_0003];
+const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
+    migration_0001,
+    migration_0002,
+    migration_0003,
+    migration_0004,
+];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
 /// crash mid-run resumes cleanly. Refuses (with [`StoreError::SchemaTooNew`]) to open a DB written
@@ -2719,6 +2742,94 @@ impl Store {
         }
         Ok(res)
     }
+
+    // --- forge schedule: recurring OS-timer-driven `forge run` registry ---
+
+    /// Register a new schedule row. `id` is the caller-generated [`forge_types::new_id`] so the CLI
+    /// can print/use it before (and regardless of) the store round-trip.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_schedule(
+        &self,
+        id: &str,
+        task: &str,
+        cwd: &str,
+        mode: Option<&str>,
+        model: Option<&str>,
+        cron: &str,
+    ) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO schedule (id, task, cwd, mode, model, cron) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (id, task, cwd, mode, model, cron),
+        )?;
+        Ok(())
+    }
+
+    /// All registered schedules, oldest first.
+    pub fn list_schedules(&self) -> Result<Vec<Schedule>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, task, cwd, mode, model, cron, enabled, created_at, last_run \
+             FROM schedule ORDER BY created_at",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Schedule {
+                    id: r.get(0)?,
+                    task: r.get(1)?,
+                    cwd: r.get(2)?,
+                    mode: r.get(3)?,
+                    model: r.get(4)?,
+                    cron: r.get(5)?,
+                    enabled: r.get::<_, i64>(6)? != 0,
+                    created_at: r.get(7)?,
+                    last_run: r.get(8)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Schedule ids whose id starts with `prefix` (git-style prefix resolution, mirrors
+    /// [`Store::matching_session_ids`]).
+    pub fn matching_schedule_ids(&self, prefix: &str) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        let escaped = escape_like_pattern(prefix);
+        let mut stmt =
+            conn.prepare("SELECT id FROM schedule WHERE id LIKE ?1 || '%' ESCAPE '\\'")?;
+        let rows = stmt.query_map([escaped], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Delete a schedule row by its exact id. Returns `false` if no row matched.
+    pub fn remove_schedule(&self, id: &str) -> Result<bool> {
+        let n = self
+            .lock()?
+            .execute("DELETE FROM schedule WHERE id = ?1", [id])?;
+        Ok(n > 0)
+    }
+
+    /// Record the epoch-seconds timestamp of a schedule's most recent tick.
+    pub fn set_schedule_last_run(&self, id: &str, at: i64) -> Result<()> {
+        self.lock()?
+            .execute("UPDATE schedule SET last_run = ?1 WHERE id = ?2", (at, id))?;
+        Ok(())
+    }
+}
+
+/// One registered `forge schedule` row: a task, its working directory, and the cron/interval spec
+/// driving the OS timer that fires `forge run <task>`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Schedule {
+    pub id: String,
+    pub task: String,
+    pub cwd: String,
+    pub mode: Option<String>,
+    pub model: Option<String>,
+    pub cron: String,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub last_run: Option<i64>,
 }
 
 #[cfg(test)]
@@ -3642,6 +3753,48 @@ mod tests {
 
         // Boosts are scoped per-repo: a different repo sees nothing.
         assert!(store.duel_boosts("/some/other/repo").unwrap().is_empty());
+    }
+
+    #[test]
+    fn schedule_roundtrips_list_last_run_and_remove() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.list_schedules().unwrap().is_empty());
+
+        let id = forge_types::new_id();
+        store
+            .add_schedule(
+                &id,
+                "check the deploy",
+                "/home/user/proj",
+                Some("bypass"),
+                None,
+                "every:30m",
+            )
+            .unwrap();
+
+        let rows = store.list_schedules().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].task, "check the deploy");
+        assert_eq!(rows[0].cwd, "/home/user/proj");
+        assert_eq!(rows[0].mode.as_deref(), Some("bypass"));
+        assert_eq!(rows[0].model, None);
+        assert_eq!(rows[0].cron, "every:30m");
+        assert!(rows[0].enabled);
+        assert_eq!(rows[0].last_run, None);
+
+        let prefix: String = id.chars().take(8).collect();
+        assert_eq!(
+            store.matching_schedule_ids(&prefix).unwrap(),
+            vec![id.clone()]
+        );
+
+        store.set_schedule_last_run(&id, 12345).unwrap();
+        assert_eq!(store.list_schedules().unwrap()[0].last_run, Some(12345));
+
+        assert!(store.remove_schedule(&id).unwrap());
+        assert!(store.list_schedules().unwrap().is_empty());
+        assert!(!store.remove_schedule(&id).unwrap());
     }
 
     #[test]
