@@ -453,7 +453,12 @@ pub struct RemoteUrl {
 /// v3: `Snapshot` gained `prompt_seq`/`notes`/`revision`; `Allow`/`Answer` REQUIRE a `seq`
 /// echoing the snapshot's `prompt_seq` (a v2 page's seq-less answers are rejected by design —
 /// they can't prove which prompt they target).
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// v4: `Snapshot` gained `overlay` (the generic modal projection — palette / every picker /
+/// `@path` / config / usage / mesh / workflow) and `copy_text` (the `/copy` payload so the
+/// REMOTE device can copy it); `RemoteInput` gained the keystroke channel (`Key`) and the
+/// overlay verbs (`OverlaySelect`/`OverlayNav`/`OverlayFilter`/`OverlayCancel`).
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Hard cap on a single inbound WebSocket frame (a [`RemoteInput`]). Inputs are short prompts or
 /// answers; anything larger is dropped to bound memory + parse cost from a hostile/buggy client.
@@ -485,6 +490,41 @@ pub struct SnapSubagent {
 pub struct SnapOption {
     pub label: String,
     pub description: String,
+}
+
+/// One row of the projected modal overlay ([`SnapOverlay::rows`]): an opaque `id` the page echoes
+/// back in [`RemoteInput::OverlaySelect`], display strings, the cursor flag, and an optional
+/// group header (e.g. a workflow phase).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapRow {
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    pub selected: bool,
+    pub group: Option<String>,
+}
+
+/// The generic modal-overlay projection: whatever surface currently owns the TUI keyboard — the
+/// command palette, any picker kind, the `@path` picker, the `/config` wizard, or an
+/// informational overlay (`/usage`, `/mesh`, the workflow view) — rendered by the page as
+/// tappable rows / a filter box / a free-text box / a text body. This is the ONE mechanism that
+/// makes every slash command remote-drivable: any future picker only needs a projection arm, no
+/// new wire types. Mapped from `forge_tui::OverlaySnapshot` by the render loop.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapOverlay {
+    /// Stable discriminator: `"palette"`, `"picker:<kind>"`, `"config"`, `"overlay:usage"`,
+    /// `"overlay:mesh"`, `"overlay:workflow"`.
+    pub kind: String,
+    pub title: String,
+    pub rows: Vec<SnapRow>,
+    /// Cursor index into `rows` (server-authoritative — the page highlights, never moves it).
+    pub selected: usize,
+    /// `Some` when the overlay has a type-to-filter query ([`RemoteInput::OverlayFilter`]).
+    pub filter: Option<String>,
+    /// True while the overlay is collecting a free-form value (e.g. a `/config` field edit).
+    pub free_text: bool,
+    /// Pre-rendered text for informational overlays (usage / mesh / workflow narration).
+    pub body: Option<String>,
 }
 
 /// One frame of visible state broadcast to every connected browser, so the control page mirrors
@@ -535,6 +575,12 @@ pub struct Snapshot {
     pub question_options: Vec<SnapOption>,
     /// Whether the pending question accepts a free-text answer in addition to its options.
     pub question_allow_other: bool,
+    /// The open modal overlay (palette / picker / config / usage / mesh / workflow), if any —
+    /// see [`SnapOverlay`]. `None` when nothing modal is open.
+    pub overlay: Option<SnapOverlay>,
+    /// The most recent `/copy` payload, so the REMOTE device can put it on its own clipboard
+    /// (the host's clipboard is useless from a phone). Cleared on the next prompt.
+    pub copy_text: Option<String>,
     /// Identity of the currently pending permission prompt / question. Incremented every time a
     /// new prompt is installed; [`RemoteInput::Allow`]/[`RemoteInput::Answer`] must echo it back,
     /// and a mismatch is ignored — so a stale tap can never approve a NEWER (possibly more
@@ -573,6 +619,8 @@ impl Default for Snapshot {
             question: None,
             question_options: Vec::new(),
             question_allow_other: false,
+            overlay: None,
+            copy_text: None,
             prompt_seq: 0,
             notes: Vec::new(),
             revision: 0,
@@ -599,6 +647,52 @@ pub enum RemoteInput {
     Answer { text: String, seq: u64 },
     /// Esc-while-busy: stop the current turn (ignored when idle).
     Interrupt,
+    /// A named keystroke (see [`named_key`]) injected through the SAME key path a local
+    /// keystroke takes — the parity primitive for driving pickers/overlays. Dropped (with a
+    /// note) while a permission prompt / question is pending: those must be answered via the
+    /// seq-checked [`RemoteInput::Allow`]/[`RemoteInput::Answer`] only.
+    Key { key: String },
+    /// Move the open overlay's cursor onto the row with this `id`, then commit it exactly as a
+    /// local Enter would.
+    OverlaySelect { id: String },
+    /// Move the open overlay's cursor by `delta` rows (negative = up), as repeated ↑/↓ keys.
+    OverlayNav { delta: i32 },
+    /// Replace the open overlay's filter/query text (or the value being edited, when
+    /// [`SnapOverlay::free_text`] is set).
+    OverlayFilter { text: String },
+    /// Close the open overlay (Esc) — a no-op when nothing modal is open, so it can never
+    /// interrupt a turn or quit the host by accident.
+    OverlayCancel,
+}
+
+/// Map a wire key name to the TUI key it injects. The names are part of the v4 protocol:
+/// `Up | Down | Enter | Esc | Tab | BTab | PageUp | PageDown | Home | End | Backspace |
+/// Char:<c>`. `BTab` is SHIFT+TAB (the temper cycler). `None` for anything else — the drain
+/// notes and drops it rather than guessing.
+pub fn named_key(name: &str) -> Option<forge_tui::KeyKind> {
+    use forge_tui::KeyKind as K;
+    Some(match name {
+        "Up" => K::Up,
+        "Down" => K::Down,
+        "Enter" => K::Enter,
+        "Esc" => K::Esc,
+        "Tab" => K::Tab,
+        "BTab" => K::CycleTemper,
+        "PageUp" => K::PageUp,
+        "PageDown" => K::PageDown,
+        "Home" => K::Home,
+        "End" => K::End,
+        "Backspace" => K::Backspace,
+        _ => {
+            let c = name.strip_prefix("Char:")?;
+            let mut chars = c.chars();
+            let ch = chars.next()?;
+            if chars.next().is_some() {
+                return None; // exactly one char
+            }
+            K::Char(ch)
+        }
+    })
 }
 
 /// True when a remote Allow/Answer's echoed `seq` targets the prompt that is pending NOW (see
@@ -759,6 +853,10 @@ pub fn start(exposure: Exposure, host_override: Option<&str>) -> std::io::Result
         .route(&format!("{base}/"), get(control_page))
         // The WebSocket at /<token>/ws — same token gates it.
         .route(&format!("{base}/ws"), get(ws_handler))
+        // The page's script + stylesheet as separate token-scoped files, so the CSP needs no
+        // 'unsafe-inline' anywhere.
+        .route(&format!("{base}/app.js"), get(app_js))
+        .route(&format!("{base}/styles.css"), get(styles_css))
         // PWA assets (token-scoped) so the page installs to a phone home screen + runs standalone.
         .route(&format!("{base}/manifest.webmanifest"), get(manifest))
         .route(&format!("{base}/sw.js"), get(service_worker))
@@ -900,12 +998,13 @@ struct ServerState {
     base: String,
 }
 
-/// The `Content-Security-Policy` for the control page. Everything is same-origin; the inline
-/// `<script>`/`<style>` blocks need `'unsafe-inline'` until the Phase-2 asset split moves them to
-/// separate token-scoped files. `connect-src` must name the ws:/wss: schemes explicitly — some
-/// browsers don't fold WebSockets into `'self'`.
-const PAGE_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; \
-     style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; \
+/// The `Content-Security-Policy` for the control page. Everything is same-origin — the script,
+/// stylesheet, and service worker are separate token-scoped files (`remote_assets/`), so there is
+/// no `'unsafe-inline'` anywhere: an injected inline `<script>`/`onclick` can never execute.
+/// `connect-src` must name the ws:/wss: schemes explicitly — some browsers don't fold WebSockets
+/// into `'self'`.
+const PAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; \
+     img-src 'self' data:; connect-src 'self' ws: wss:; \
      frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
 /// The single control page: a responsive, dependency-free HTML/CSS/JS shell that mirrors the
@@ -926,6 +1025,20 @@ async fn control_page(State(state): State<Arc<ServerState>>) -> Response {
         CONTROL_PAGE.replace("__BASE__", &state.base),
     )
         .into_response()
+}
+
+/// The page's JavaScript (token-scoped, `__BASE__` injected like the page itself).
+async fn app_js(State(state): State<Arc<ServerState>>) -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/javascript")],
+        APP_JS.replace("__BASE__", &state.base),
+    )
+        .into_response()
+}
+
+/// The page's stylesheet (static — no token content).
+async fn styles_css() -> Response {
+    ([(axum::http::header::CONTENT_TYPE, "text/css")], STYLES_CSS).into_response()
 }
 
 /// The token-scoped PWA manifest (`start_url`/`scope` baked to this session's path).
@@ -1065,363 +1178,17 @@ pub fn qr_lines(url: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// The self-contained control page. Plain HTML + a little CSS + vanilla JS (no framework, no
-/// build step). Responsive: a one-column layout that's thumb-friendly on a phone and centered on
-/// a desktop. The JS opens the WS at `window.location.pathname + "/ws"`, renders snapshots, and
-/// sends `RemoteInput` JSON for the prompt box + action buttons.
-const CONTROL_PAGE: &str = r##"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#16161c">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Forge">
-<link rel="manifest" href="__BASE__/manifest.webmanifest">
-<link rel="apple-touch-icon" href="__BASE__/icon.svg">
-<link rel="icon" href="__BASE__/icon.svg">
-<title>Forge remote</title>
-<style>
-  :root { color-scheme: dark; --bg:#16161c; --panel:#1c1c22; --ink:#d8d8e0; --dim:#6e6e78; --acc:#ff913c; --ok:#78d28c; --no:#f06e6e; }
-  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-  html, body { margin: 0; height: 100%; }
-  body {
-    background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, system-ui, "Segoe UI", sans-serif;
-    display: flex; flex-direction: column; max-width: 820px; margin: 0 auto; height: 100dvh;
-    padding: env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 4px);
-  }
-  #banner { display:none; background:#3a2a12; color:#ffd9a8; border:1px solid var(--acc);
-    border-radius:8px; padding:8px 10px; margin:8px 0 0; font-size:13px; }
-  header { display:flex; align-items:center; gap:8px; padding: 10px 2px 4px; }
-  h1 { font-size: 16px; margin: 0; color: var(--acc); font-weight: 700; letter-spacing:.3px; flex:1 1 auto; }
-  .iconbtn { background:none; border:none; font-size:18px; cursor:pointer; padding:4px; line-height:1; }
-  .meta { display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:12px; color:var(--dim);
-    padding:0 2px 2px; font-variant-numeric:tabular-nums; }
-  .badge { background:var(--panel); border-radius:6px; padding:2px 7px; }
-  .badge.pub { background:#3a1c1c; color:#ffb0b0; }
-  .status {
-    background: var(--panel); border-radius: 8px; padding: 7px 10px; margin: 6px 0;
-    font-size: 13px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-variant-numeric: tabular-nums;
-  }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex: 0 0 auto; }
-  .dot.busy { background: var(--acc); animation: pulse 1s infinite; }
-  @keyframes pulse { 50% { opacity: .35; } }
-  .tier { color: var(--acc); font-weight: 600; }
-  .cost { color: var(--ok); font-weight: 600; }
-  .ctx { color: var(--dim); }
-  .tabs { display:flex; gap:6px; margin:6px 0 0; }
-  .tab { flex:1 1 0; background:var(--panel); color:var(--dim); border:none; border-radius:8px 8px 0 0;
-    padding:9px 6px; font:inherit; font-size:13px; font-weight:600; cursor:pointer; }
-  .tab.on { color:var(--acc); background:#101015; box-shadow: inset 0 -2px 0 var(--acc); }
-  .tab .n { color:var(--ink); font-weight:700; }
-  .panel { flex:1 1 auto; overflow-y:auto; background:#101015; border-radius:0 0 8px 8px;
-    padding:10px 12px; margin:0 0 6px; min-height:120px; -webkit-overflow-scrolling:touch; }
-  #transcript { white-space: pre-wrap; word-break: break-word; font-size: 14px; }
-  #transcript div { padding: 2px 0; }
-  .stream { color: #c8c8d0; font-style: italic; }
-  .empty { color: var(--dim); font-style: italic; padding: 8px 2px; }
-  .task { padding:4px 2px; display:flex; gap:8px; align-items:baseline; }
-  .task .g { color: var(--dim); }
-  .task.in_progress .g { color: var(--acc); }
-  .task.done .g { color: var(--ok); }
-  .task.done { color: var(--dim); text-decoration: line-through; }
-  .agent { border:1px solid #2a2a33; border-radius:8px; padding:8px 10px; margin:6px 0; }
-  .agent.done { opacity:.7; }
-  .agent .ah { font-weight:600; color:var(--acc); font-size:13px; }
-  .agent .at { color:var(--ink); font-size:13px; margin:2px 0; }
-  .agent .al { color:var(--dim); font-size:12px; white-space:pre-wrap; word-break:break-word; }
-  .actions:empty { display:none; }
-  .queued { color: var(--dim); font-size: 12px; padding: 2px 2px 4px; }
-  .prompt { background: var(--panel); border-radius: 8px; padding: 8px 10px; margin: 6px 0; border: 1px solid var(--acc); }
-  .prompt .q { font-weight: 700; color: var(--acc); }
-  .opts { display:flex; flex-direction:column; gap:6px; margin:6px 0; }
-  .opt { text-align:left; background:#23232b; color:var(--ink); border:1px solid #33333c; border-radius:8px;
-    padding:10px 12px; cursor:pointer; display:flex; flex-direction:column; }
-  .opt b { color:var(--acc); }
-  .opt span { color:var(--dim); font-size:12px; }
-  .chips { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0 0; }
-  .chip { background:var(--panel); color:var(--ink); border:1px solid #33333c; border-radius:14px;
-    padding:6px 12px; font-size:13px; cursor:pointer; }
-  .chip.stop { color:var(--no); border-color:#52323a; }
-  .bar { display: flex; gap: 8px; margin: 8px 0 4px; flex-wrap: wrap; }
-  button, input[type=text], .btn { font: inherit; border: none; border-radius: 8px; padding: 11px 16px; cursor: pointer; }
-  input[type=text] { flex: 1 1 200px; background: var(--panel); color: #fff; border: 1px solid #33333c; min-width: 0; }
-  input[type=text]:focus { outline: 2px solid var(--acc); }
-  .send { background: var(--acc); color: #1c1c22; font-weight: 700; }
-  .y { background: var(--ok); color: #1c1c22; font-weight: 700; }
-  .n { background: var(--no); color: #1c1c22; font-weight: 700; }
-  .conn { font-size: 12px; color: var(--dim); text-align: center; padding: 2px 0 4px; }
-  footer { font-size: 11px; color: #4a4a54; text-align: center; padding: 4px 0 2px; }
-</style>
-</head>
-<body>
-<div id="banner"></div>
-<header>
-  <h1>⚒ Forge</h1>
-  <button class="iconbtn" id="bell" title="notifications">🔕</button>
-</header>
-<div class="meta">
-  <span class="badge" id="expo">—</span>
-  <span id="cwd">—</span>
-  <span>· session <span id="sid">—</span></span>
-</div>
-<div class="status"><span class="dot" id="dot"></span>
-  <span class="tier" id="tier">—</span><span id="model">—</span>
-  <span class="cost" id="cost">$0.0000</span><span class="ctx" id="ctx"></span>
-  <span class="ctx" id="temper"></span></div>
-<div class="tabs">
-  <button class="tab on" data-tab="chat" id="tab-chat">Chat</button>
-  <button class="tab" data-tab="tasks" id="tab-tasks">Tasks <span class="n" id="tc"></span></button>
-  <button class="tab" data-tab="agents" id="tab-agents">Agents <span class="n" id="ac"></span></button>
-</div>
-<div class="panel" id="transcript"></div>
-<div class="panel" id="tasks" hidden></div>
-<div class="panel" id="agents" hidden></div>
-<div class="actions" id="actions"></div>
-<div class="chips">
-  <button class="chip stop" id="stop">⏹ Stop</button>
-  <button class="chip" onclick="chip('/plan')">/plan</button>
-  <button class="chip" onclick="chip('/compact')">/compact</button>
-  <button class="chip" onclick="chip('/diff')">/diff</button>
-  <button class="chip" onclick="chip('/model')">/model</button>
-</div>
-<div class="bar">
-  <input type="text" id="prompt" placeholder="type a task or /command…" autocomplete="off"
-    autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
-  <button class="send" id="send">Send</button>
-</div>
-<div class="conn" id="conn">connecting…</div>
-<footer>Forge remote control · turn off with <code>/remote</code> in the TUI</footer>
+/// The control page shell (HTML). Split into `remote_assets/` files (page/script/styles/SW)
+/// served as separate token-scoped routes so the CSP carries no 'unsafe-inline'. `__BASE__` is
+/// injected at serve time. The page renders the generic `overlay` projection (tappable rows,
+/// filter box, free-text box, text body) and sends `RemoteInput` JSON back over the WS.
+const CONTROL_PAGE: &str = include_str!("remote_assets/page.html");
 
-<script>
-const BASE = "__BASE__";
-const PROTO = 3;
-const $ = (id) => document.getElementById(id);
-let ws = null, dead = false, notif = false, curSeq = 0, retries = 0;
-let prev = { busy:false, prompt:false, question:false };
+/// The page's JavaScript (see [`CONTROL_PAGE`]) — `__BASE__` injected at serve time.
+const APP_JS: &str = include_str!("remote_assets/app.js");
 
-function connect() {
-  if (dead) return;
-  const scheme = location.protocol === "https:" ? "wss://" : "ws://";
-  ws = new WebSocket(scheme + location.host + BASE + "/ws");
-  ws.onopen = () => { retries = 0; $("conn").textContent = "● connected"; };
-  ws.onmessage = (e) => {
-    let s; try { s = JSON.parse(e.data); } catch { return; }
-    render(s);
-    if (s.closed) { dead = true; $("conn").textContent = "remote control turned off — reconnect to the TUI"; ws.close(); }
-  };
-  ws.onclose = () => {
-    if (dead) return;
-    retries++;
-    // After ~12s of failures the session is almost certainly gone (the server dies with the
-    // TUI) — say so instead of an infinite "reconnecting…", and back off to a slow retry.
-    $("conn").textContent = retries > 8
-      ? "session unreachable — reopen /remote from the TUI for a fresh link"
-      : "reconnecting…";
-    setTimeout(connect, retries > 8 ? 10000 : 1500);
-  };
-  ws.onerror = () => ws.close();
-}
-function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
-
-function render(s) {
-  if (s.protocol && s.protocol !== PROTO) {
-    $("banner").style.display = "block";
-    $("banner").textContent = s.protocol > PROTO
-      ? "A newer Forge is running — refresh this page to update the remote UI."
-      : "This page is newer than the running Forge — restart Forge in the terminal, then reload.";
-  }
-  curSeq = s.prompt_seq || 0;
-  $("dot").className = "dot" + (s.busy ? " busy" : "");
-  $("tier").textContent = s.tier ? "[" + s.tier + "]" : "—";
-  $("model").textContent = s.model || "—";
-  $("cost").textContent = "$" + (s.cost_usd || 0).toFixed(4);
-  $("temper").textContent = s.temper ? "◆ " + s.temper : "";
-  $("sid").textContent = (s.session_id || "").slice(0, 8) || "—";
-  $("cwd").textContent = baseName(s.cwd) || "—";
-  $("expo").textContent = s.exposure || "—";
-  $("expo").className = "badge" + ((s.exposure || "").indexOf("public") === 0 ? " pub" : "");
-  if (s.context_tokens > 0) {
-    const lim = s.context_limit ? "/" + fmt(s.context_limit) : "";
-    $("ctx").textContent = "◷ " + fmt(s.context_tokens) + lim;
-  } else { $("ctx").textContent = ""; }
-
-  renderTranscript(s);
-  renderTasks(s);
-  renderAgents(s);
-  renderActions(s);
-  notifyTransitions(s);
-}
-
-function renderTranscript(s) {
-  const t = $("transcript");
-  // Exact content signature — a length-based check missed equal-length ring
-  // rotations/replacements and left stale lines on screen.
-  const body = (s.transcript || []).join("\n") + (s.streaming ? "\n" + s.streaming : "");
-  if (t._sig === body) return; // unchanged
-  const nearBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 80;
-  t.innerHTML = "";
-  (s.transcript || []).forEach(line => { const d = document.createElement("div"); d.textContent = line; t.appendChild(d); });
-  if (s.streaming) { const d = document.createElement("div"); d.className = "stream"; d.textContent = s.streaming; t.appendChild(d); }
-  if (nearBottom) t.scrollTop = t.scrollHeight;
-  t._sig = body;
-}
-
-// Rebuild `el`'s contents via `fill`, but preserve scroll position across the rebuild — a plain
-// `innerHTML = ""` resets scrollTop to 0, which would yank the view back to the top every time a
-// new snapshot arrives (e.g. a subagent's `last` line updating mid-stream) while someone is
-// scrolled up reading earlier entries. Skips the rebuild entirely when `sig` is unchanged.
-function rebuildPreservingScroll(el, sig, fill) {
-  if (el._sig === sig) return;
-  el._sig = sig;
-  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-  const scrollTop = el.scrollTop;
-  fill();
-  el.scrollTop = nearBottom ? el.scrollHeight : scrollTop;
-}
-
-function renderTasks(s) {
-  const tasks = s.tasks || [];
-  $("tc").textContent = tasks.length ? tasks.filter(x => x.status === "done").length + "/" + tasks.length : "";
-  const el = $("tasks");
-  rebuildPreservingScroll(el, JSON.stringify(tasks), () => {
-    if (!tasks.length) { el.innerHTML = '<div class="empty">no tasks yet</div>'; return; }
-    el.innerHTML = "";
-    tasks.forEach(t => {
-      const d = document.createElement("div"); d.className = "task " + t.status;
-      const g = t.status === "done" ? "●" : (t.status === "in_progress" ? "◐" : "○");
-      d.innerHTML = '<span class="g">' + g + '</span><span>' + esc(t.title) + '</span>';
-      el.appendChild(d);
-    });
-  });
-}
-
-function renderAgents(s) {
-  const subs = s.subagents || [];
-  $("ac").textContent = subs.length ? "" + subs.length : "";
-  const el = $("agents");
-  rebuildPreservingScroll(el, JSON.stringify(subs), () => {
-    if (!subs.length) { el.innerHTML = '<div class="empty">no subagents running</div>'; return; }
-    el.innerHTML = "";
-    subs.forEach(a => {
-      const d = document.createElement("div"); d.className = "agent" + (a.done ? " done" : "");
-      const head = esc(a.agent || "agent") + (a.model ? " · " + esc(a.model) : "") + (a.done ? " · done $" + (a.cost || 0).toFixed(4) : "");
-      d.innerHTML = '<div class="ah">' + (a.done ? "✓ " : "▸ ") + head + '</div>' +
-        '<div class="at">' + esc(a.task || "") + '</div>' +
-        '<div class="al">' + esc(a.last || "") + '</div>';
-      el.appendChild(d);
-    });
-  });
-}
-
-function renderActions(s) {
-  const a = $("actions");
-  const queued = s.queued || [];
-  const notes = s.notes || [];
-  // Rebuild ONLY when the actionable state changed. This area holds live buttons + a free-text
-  // input; rebuilding it on every snapshot (streaming updates arrive continuously while busy)
-  // destroyed the nodes mid-tap ("tapped Allow, nothing happened") and wiped typed answers.
-  const sig = JSON.stringify([queued, notes, s.permission_prompt, s.question,
-    s.question_options, s.question_allow_other, s.prompt_seq]);
-  if (a._sig === sig) return;
-  a._sig = sig;
-  let h = queued.length
-    ? '<div class="queued">' + queued.map(q => "⏳ queued: " + esc(q)).join("<br>") + '</div>'
-    : "";
-  if (notes.length) {
-    h += '<div class="queued">' + notes.map(esc).join("<br>") + '</div>';
-  }
-  if (s.permission_prompt) {
-    h += '<div class="prompt"><span class="q">⚠ ' + esc(s.permission_prompt) +
-      '</span></div><div class="bar"><button class="y" onclick="answer(true)">Allow</button>' +
-      '<button class="n" onclick="answer(false)">Deny</button></div>';
-  } else if (s.question) {
-    h += '<div class="prompt"><span class="q">❓ ' + esc(s.question) + '</span></div>';
-    const opts = s.question_options || [];
-    if (opts.length) {
-      h += '<div class="opts">';
-      opts.forEach((o, i) => {
-        h += '<button class="opt" onclick="pick(' + (i + 1) + ')"><b>' + esc(o.label) + '</b>' +
-          (o.description ? '<span>' + esc(o.description) + '</span>' : '') + '</button>';
-      });
-      h += '</div>';
-    }
-    if (!opts.length || s.question_allow_other) {
-      h += '<div class="bar"><input type="text" id="ans" placeholder="answer…" enterkeyhint="done">' +
-        '<button class="send" onclick="sendAnswer()">Answer</button></div>';
-    }
-  }
-  a.innerHTML = h;
-}
-
-function notifyTransitions(s) {
-  const pPrompt = !!s.permission_prompt, pQuestion = !!s.question;
-  if (pPrompt && !prev.prompt) maybeNotify("Forge needs permission", s.permission_prompt);
-  if (pQuestion && !prev.question) maybeNotify("Forge has a question", s.question);
-  if (!s.busy && prev.busy && !pPrompt && !pQuestion) maybeNotify("Forge — turn complete", lastLine(s));
-  prev = { busy: !!s.busy, prompt: pPrompt, question: pQuestion };
-}
-function lastLine(s) { const t = s.transcript || []; return t.length ? t[t.length - 1] : ""; }
-
-function fmt(n) { if (n >= 1e6) return (n/1e6).toFixed(1)+"M"; if (n >= 1e3) return (n/1e3).toFixed(1)+"k"; return ""+n; }
-function esc(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
-function baseName(p) { if (!p) return ""; const parts = (""+p).replace(/[\\/]+$/, "").split(/[\\/]/); return parts[parts.length-1] || p; }
-
-function submit() { const v = $("prompt").value; if (!v.trim()) return; send({kind:"prompt", text:v}); $("prompt").value=""; }
-function chip(cmd) { send({kind:"prompt", text:cmd}); }
-$("send").onclick = submit;
-$("prompt").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
-$("stop").onclick = () => send({kind:"interrupt"});
-// Answers echo the prompt_seq their buttons were rendered from, so a stale tap can never
-// resolve a newer prompt that replaced this one.
-window.answer = (yes) => send({kind:"allow", yes:!!yes, seq:curSeq});
-window.pick = (n) => send({kind:"answer", text:""+n, seq:curSeq});
-window.sendAnswer = () => { const v = $("ans").value; if (v.trim()) send({kind:"answer", text:v, seq:curSeq}); };
-window.chip = chip;
-
-// Tabs
-document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
-  document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
-  b.classList.add("on");
-  const which = b.dataset.tab;
-  $("transcript").hidden = which !== "chat";
-  $("tasks").hidden = which !== "tasks";
-  $("agents").hidden = which !== "agents";
-});
-
-// Notifications (live, while the page/PWA is open in the background)
-function paintBell() { $("bell").textContent = notif ? "🔔" : "🔕"; }
-$("bell").onclick = () => {
-  if (!("Notification" in window)) { $("bell").title = "notifications unsupported"; return; }
-  if (Notification.permission === "granted") { notif = !notif; paintBell(); return; }
-  Notification.requestPermission().then(p => { notif = (p === "granted"); paintBell(); });
-};
-function maybeNotify(title, body) {
-  if (!(notif && document.hidden && "Notification" in window && Notification.permission === "granted")) return;
-  const opts = { body: (body||"").slice(0, 120), icon: BASE + "/icon.svg", tag: "forge-remote" };
-  // Android Chrome throws on the page-context Notification constructor — notifications must go
-  // through the service worker registration there. Fall back to the constructor elsewhere.
-  if (navigator.serviceWorker && navigator.serviceWorker.ready) {
-    navigator.serviceWorker.ready
-      .then(r => r.showNotification(title, opts))
-      .catch(() => { try { new Notification(title, opts); } catch (e) {} });
-  } else {
-    try { new Notification(title, opts); } catch (e) {}
-  }
-}
-
-// PWA: register the token-scoped service worker so the page installs to a home screen.
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register(BASE + "/sw.js", { scope: BASE + "/" }).catch(() => {});
-}
-
-$("prompt").focus();
-connect();
-</script>
-</body>
-</html>"##;
+/// The page's stylesheet (static).
+const STYLES_CSS: &str = include_str!("remote_assets/styles.css");
 
 /// The token-scoped PWA service worker. Its presence + a `fetch` handler is what makes the control
 /// page installable to a phone home screen; it caches non-navigation assets (network-first) so a
@@ -1432,34 +1199,7 @@ connect();
 /// showed a live-looking page stuck on "reconnecting…" forever. Instead the SW answers a failed
 /// navigation with an explicit "session ended — reopen /remote from the TUI" page. A stable
 /// origin that makes the install permanent is the Phase-4 daemon's job.
-const SERVICE_WORKER: &str = r#"const CACHE = "forge-remote-v3";
-const ENDED = `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Forge remote - session ended</title>
-<style>body{background:#16161c;color:#d8d8e0;font:16px/1.6 -apple-system,system-ui,sans-serif;
-display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center;
-padding:24px}b{color:#ff913c}</style></head><body><div><b>⚒ Forge</b><br><br>
-This remote session has ended.<br>Each session gets a fresh link: reopen <b>/remote</b> in the
-Forge TUI and scan the new QR code (or open the new URL).</div></body></html>`;
-self.addEventListener("install", () => self.skipWaiting());
-self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
-self.addEventListener("fetch", (e) => {
-  const req = e.request;
-  if (req.method !== "GET") return;
-  if (req.mode === "navigate") {
-    e.respondWith(fetch(req).catch(() =>
-      new Response(ENDED, { headers: { "Content-Type": "text/html; charset=utf-8" } })));
-    return;
-  }
-  e.respondWith(
-    fetch(req).then((res) => {
-      const copy = res.clone();
-      caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
-      return res;
-    }).catch(() => caches.match(req))
-  );
-});
-"#;
+const SERVICE_WORKER: &str = include_str!("remote_assets/sw.js");
 
 /// The app icon (inline SVG — no binary asset to serve). A hammer mark on the brand background;
 /// `sizes:"any"` in the manifest lets the single SVG satisfy every install target.
@@ -1513,6 +1253,22 @@ mod tests {
                 description: "do it".into(),
             }],
             question_allow_other: true,
+            overlay: Some(SnapOverlay {
+                kind: "picker:model_pin".into(),
+                title: "⊕ pin model".into(),
+                rows: vec![SnapRow {
+                    id: "groq::llama-3.3-70b".into(),
+                    label: "llama-3.3-70b".into(),
+                    detail: "free · 128k ctx".into(),
+                    selected: true,
+                    group: None,
+                }],
+                selected: 0,
+                filter: Some("lla".into()),
+                free_text: false,
+                body: None,
+            }),
+            copy_text: Some("fn main() {}".into()),
             prompt_seq: 7,
             notes: vec!["⚠ /remote can only be toggled from the TUI".into()],
             revision: 42,
@@ -1542,6 +1298,19 @@ mod tests {
         assert_eq!(v["question"], serde_json::Value::Null);
         assert_eq!(v["question_options"][0]["label"], "Yes");
         assert_eq!(v["question_allow_other"], true);
+        // v4: the generic overlay projection + the /copy payload ride in the snapshot.
+        assert_eq!(v["overlay"]["kind"], "picker:model_pin");
+        assert_eq!(v["overlay"]["title"], "⊕ pin model");
+        assert_eq!(v["overlay"]["rows"][0]["id"], "groq::llama-3.3-70b");
+        assert_eq!(v["overlay"]["rows"][0]["label"], "llama-3.3-70b");
+        assert_eq!(v["overlay"]["rows"][0]["detail"], "free · 128k ctx");
+        assert_eq!(v["overlay"]["rows"][0]["selected"], true);
+        assert_eq!(v["overlay"]["rows"][0]["group"], serde_json::Value::Null);
+        assert_eq!(v["overlay"]["selected"], 0);
+        assert_eq!(v["overlay"]["filter"], "lla");
+        assert_eq!(v["overlay"]["free_text"], false);
+        assert_eq!(v["overlay"]["body"], serde_json::Value::Null);
+        assert_eq!(v["copy_text"], "fn main() {}");
         assert_eq!(v["prompt_seq"], 7);
         assert_eq!(v["notes"][0], "⚠ /remote can only be toggled from the TUI");
         assert_eq!(v["revision"], 42);
@@ -1571,6 +1340,63 @@ mod tests {
             serde_json::from_str::<RemoteInput>(r#"{"kind":"interrupt"}"#).unwrap(),
             RemoteInput::Interrupt
         );
+    }
+
+    #[test]
+    fn v4_key_and_overlay_inputs_deserialize() {
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"key","key":"Up"}"#).unwrap(),
+            RemoteInput::Key { key: "Up".into() }
+        );
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"overlay_select","id":"mesh"}"#)
+                .unwrap(),
+            RemoteInput::OverlaySelect { id: "mesh".into() }
+        );
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"overlay_nav","delta":-3}"#).unwrap(),
+            RemoteInput::OverlayNav { delta: -3 }
+        );
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"overlay_filter","text":"llam"}"#)
+                .unwrap(),
+            RemoteInput::OverlayFilter {
+                text: "llam".into()
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"overlay_cancel"}"#).unwrap(),
+            RemoteInput::OverlayCancel
+        );
+    }
+
+    #[test]
+    fn named_keys_map_to_tui_keys() {
+        use forge_tui::KeyKind as K;
+        // The full v4 named-key table — each name is part of the wire protocol.
+        for (name, want) in [
+            ("Up", K::Up),
+            ("Down", K::Down),
+            ("Enter", K::Enter),
+            ("Esc", K::Esc),
+            ("Tab", K::Tab),
+            ("BTab", K::CycleTemper), // SHIFT+TAB = the temper cycler
+            ("PageUp", K::PageUp),
+            ("PageDown", K::PageDown),
+            ("Home", K::Home),
+            ("End", K::End),
+            ("Backspace", K::Backspace),
+            ("Char:x", K::Char('x')),
+            ("Char:/", K::Char('/')),
+            ("Char:é", K::Char('é')),
+        ] {
+            assert_eq!(named_key(name), Some(want), "named key {name}");
+        }
+        // Unknown names / malformed chars are dropped, never guessed.
+        assert_eq!(named_key("Delete"), None);
+        assert_eq!(named_key("Char:"), None);
+        assert_eq!(named_key("Char:ab"), None, "exactly one char");
+        assert_eq!(named_key(""), None);
     }
 
     #[test]
@@ -1688,10 +1514,6 @@ mod tests {
         let html = CONTROL_PAGE.replace("__BASE__", "/cafef00d");
         assert!(!html.contains("__BASE__"), "all base placeholders replaced");
         assert!(
-            html.contains(r#"const BASE = "/cafef00d";"#),
-            "JS BASE is the token path (WS + SW + manifest derive from it)"
-        );
-        assert!(
             html.contains(r#"href="/cafef00d/manifest.webmanifest""#),
             "manifest link is token-scoped"
         );
@@ -1699,26 +1521,99 @@ mod tests {
             html.contains(r#"href="/cafef00d/icon.svg""#),
             "icon link is token-scoped"
         );
+        assert!(
+            html.contains(r#"href="/cafef00d/styles.css""#),
+            "stylesheet link is token-scoped"
+        );
+        assert!(
+            html.contains(r#"src="/cafef00d/app.js""#),
+            "script src is token-scoped"
+        );
+        let js = APP_JS.replace("__BASE__", "/cafef00d");
+        assert!(
+            js.contains(r#"const BASE = "/cafef00d";"#),
+            "JS BASE is the token path (WS + SW + manifest derive from it)"
+        );
     }
 
     #[test]
-    fn control_page_speaks_protocol_v3() {
+    fn control_page_speaks_protocol_v4() {
         // The page's bundled protocol constant must track PROTOCOL_VERSION (mismatch = banner).
         assert!(
-            CONTROL_PAGE.contains(&format!("const PROTO = {PROTOCOL_VERSION};")),
+            APP_JS.contains(&format!("const PROTO = {PROTOCOL_VERSION};")),
             "page PROTO must equal PROTOCOL_VERSION"
         );
         // Answers must echo the prompt identity (seq) the buttons were rendered from.
+        assert!(APP_JS.contains("seq: curSeq"), "allow/answer carry seq");
         assert!(
-            CONTROL_PAGE.contains("seq:curSeq"),
-            "allow/answer carry seq"
-        );
-        assert!(
-            CONTROL_PAGE.contains("s.prompt_seq"),
+            APP_JS.contains("s.prompt_seq"),
             "page tracks the snapshot's prompt_seq"
         );
         // The mismatch banner covers BOTH directions (older page vs older server).
-        assert!(CONTROL_PAGE.contains("s.protocol > PROTO"));
+        assert!(APP_JS.contains("s.protocol > PROTO"));
+    }
+
+    #[test]
+    fn page_renders_the_generic_overlay_and_speaks_the_overlay_verbs() {
+        // The page must render `Snapshot::overlay` and send every v4 overlay verb + named keys.
+        for needle in [
+            "s.overlay",
+            r#"kind: "overlay_select""#,
+            r#"kind: "overlay_filter""#,
+            r#"kind: "overlay_cancel""#,
+            r#"kind: "key""#,
+        ] {
+            assert!(APP_JS.contains(needle), "app.js must contain {needle:?}");
+        }
+        // …and the /copy payload gets a copy-here button.
+        assert!(APP_JS.contains("copy_text"), "page reads copy_text");
+        assert!(
+            APP_JS.contains("navigator.clipboard"),
+            "copy uses the device clipboard"
+        );
+        // The overlay skeleton is in the HTML shell.
+        for id in ["overlay", "otitle", "ofilter", "orows", "obody", "ofree"] {
+            assert!(
+                CONTROL_PAGE.contains(&format!("id=\"{id}\"")),
+                "page has #{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn chips_row_has_no_dead_diff_and_gains_mode_and_help() {
+        // `/diff` never existed as a command — the chip was a dead affordance. /model, /mode and
+        // /help are picker/palette-backed and now fully remote-drivable via the overlay.
+        assert!(
+            !CONTROL_PAGE.contains("/diff"),
+            "the dead /diff chip is gone"
+        );
+        for cmd in ["/plan", "/compact", "/model", "/mode", "/help"] {
+            assert!(
+                CONTROL_PAGE.contains(&format!("data-cmd=\"{cmd}\"")),
+                "chip {cmd} present"
+            );
+        }
+    }
+
+    #[test]
+    fn csp_has_no_unsafe_inline_and_page_has_no_inline_handlers() {
+        assert!(
+            !PAGE_CSP.contains("unsafe-inline"),
+            "the asset split removed the last inline script/style: {PAGE_CSP}"
+        );
+        // Inline handlers would be dead under this CSP — make sure none sneak back in.
+        assert!(
+            !CONTROL_PAGE.contains("onclick="),
+            "no inline onclick attributes"
+        );
+        assert!(!CONTROL_PAGE.contains("<script>"), "no inline script block");
+        assert!(!CONTROL_PAGE.contains("<style>"), "no inline style block");
+        // …and the generated action buttons use data-act delegation, not inline handlers.
+        assert!(
+            !APP_JS.contains("onclick=\""),
+            "no generated inline handlers"
+        );
     }
 
     #[test]
@@ -1904,6 +1799,26 @@ mod tests {
                 .await
                 .expect("GET icon");
             assert_eq!(icon.status(), 200, "icon is 200");
+
+            // 5. The split page assets are served, token-scoped, with the base injected — the
+            //    CSP forbids inline script/style, so the page is dead without these.
+            let js = http
+                .get(format!("http://127.0.0.1:{port}/{token}/app.js"))
+                .send()
+                .await
+                .expect("GET app.js");
+            assert_eq!(js.status(), 200, "app.js is 200");
+            let js_body = js.text().await.unwrap();
+            assert!(
+                js_body.contains(&format!("const BASE = \"/{token}\";")),
+                "app.js BASE is token-scoped"
+            );
+            let css = http
+                .get(format!("http://127.0.0.1:{port}/{token}/styles.css"))
+                .send()
+                .await
+                .expect("GET styles.css");
+            assert_eq!(css.status(), 200, "styles.css is 200");
             // All assertions passed — force-exit so the lingering server task + WS close
             // handshake can't stall the test runtime's shutdown (manual-only, --ignored).
             std::process::exit(0);
