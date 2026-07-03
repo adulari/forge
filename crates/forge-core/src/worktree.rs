@@ -62,7 +62,7 @@ impl WorktreeGuard {
         // worktree shares the main build cache instead of compiling a fresh (multi-GB) `target/`
         // per child — which both wasted disk/time AND leaked if the process was killed before the
         // guard's Drop ran. Best-effort: a write failure just falls back to a private target.
-        // (`git diff HEAD..branch` drives merge-back, so this untracked file is never merged.)
+        // (`commit_worktree` explicitly excludes `.cargo` so this shim is never merged back.)
         write_shared_target_config(&worktree_path, repo_root);
 
         Ok(WorktreeGuard {
@@ -118,10 +118,65 @@ fn write_shared_target_config(worktree_path: &Path, repo_root: &Path) {
     );
 }
 
+/// Commit everything in the worktree's working tree onto its branch, returning whether anything
+/// was committed. A child agent's edits are plain uncommitted file writes — but
+/// [`merge_worktree_back`] diffs `HEAD..branch`, so WITHOUT this snapshot the branch tip still
+/// equals HEAD and every edit is silently dropped from the merge (a clean-looking merge that
+/// lost all the child's work — found live during `/duel` e2e; the isolation tests all committed
+/// manually, masking it). Call this after the child finishes, before diffing/merging its branch.
+pub fn commit_worktree(worktree_path: &Path) -> Result<bool, WorktreeError> {
+    let wt = worktree_path.to_str().unwrap_or(".");
+    // `:(exclude).cargo` keeps the shared-target shim (`write_shared_target_config`) out of the
+    // snapshot — it's worktree plumbing, and committing it would merge it into the main tree.
+    let add = Command::new("git")
+        .args(["-C", wt, "add", "-A", "--", ".", ":(exclude).cargo"])
+        .output()
+        .map_err(|e| WorktreeError::SpawnFailed(e.to_string()))?;
+    if !add.status.success() {
+        return Err(WorktreeError::NonZeroExit {
+            cmd: "add -A".into(),
+            stderr: String::from_utf8_lossy(&add.stderr).into_owned(),
+        });
+    }
+    // Staged-only emptiness check (`status --porcelain` would still list the excluded `.cargo`
+    // shim as untracked and force a doomed empty commit). Exit 0 = index matches HEAD.
+    let staged = Command::new("git")
+        .args(["-C", wt, "diff", "--cached", "--quiet"])
+        .status()
+        .map_err(|e| WorktreeError::SpawnFailed(e.to_string()))?;
+    if staged.success() {
+        return Ok(false);
+    }
+    // Explicit identity: the snapshot must never fail on a machine without git user.* config.
+    let commit = Command::new("git")
+        .args([
+            "-C",
+            wt,
+            "-c",
+            "user.name=forge",
+            "-c",
+            "user.email=forge@adulari.dev",
+            "commit",
+            "-m",
+            "forge: worktree snapshot",
+            "--no-gpg-sign",
+        ])
+        .output()
+        .map_err(|e| WorktreeError::SpawnFailed(e.to_string()))?;
+    if !commit.status.success() {
+        return Err(WorktreeError::NonZeroExit {
+            cmd: "commit".into(),
+            stderr: String::from_utf8_lossy(&commit.stderr).into_owned(),
+        });
+    }
+    Ok(true)
+}
+
 /// Apply the child's changes (diff between HEAD and `branch`) to the main working tree using a
 /// 3-way patch. On clean apply returns `Ok(MergeReport { conflicted_files: vec![] })`. On
 /// conflict (git apply exits non-zero but emits conflict markers) returns
 /// `Ok(MergeReport { conflicted_files })` with the list. Hard I/O or spawn failures are `Err`.
+/// Uncommitted worktree edits are invisible to this diff — run [`commit_worktree`] first.
 pub fn merge_worktree_back(repo_root: &Path, branch: &str) -> Result<MergeReport, WorktreeError> {
     // Produce the diff between HEAD and the branch tip.
     let diff_out = Command::new("git")
@@ -340,6 +395,52 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Regression: a child agent's edits are plain UNCOMMITTED file writes — production never
+    /// committed them, so merge_worktree_back's HEAD..branch diff was empty and every edit was
+    /// silently dropped ("clean" merge, work lost). All the other tests here commit manually,
+    /// which is exactly what masked the bug. commit_worktree + merge must round-trip the edit.
+    #[test]
+    fn uncommitted_child_edits_survive_snapshot_and_merge() {
+        if !git_available() {
+            return;
+        }
+        let repo = init_repo();
+        let wt_path = repo.join(".forge").join("worktrees").join("uncommitted");
+        let branch = "forge/subagent/uncommitted";
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                branch,
+                "HEAD",
+            ],
+            "worktree add",
+        )
+        .unwrap();
+
+        // The child writes but NEVER commits — exactly what run_subagent's tools do.
+        std::fs::write(wt_path.join("child.txt"), "uncommitted work\n").unwrap();
+
+        assert!(
+            commit_worktree(&wt_path).unwrap(),
+            "snapshot commits the edit"
+        );
+        assert!(
+            !commit_worktree(&wt_path).unwrap(),
+            "second snapshot is a no-op"
+        );
+        let report = merge_worktree_back(&repo, branch).unwrap();
+        assert!(report.conflicted_files.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("child.txt")).unwrap(),
+            "uncommitted work\n",
+            "the child's uncommitted edit must reach the main tree"
+        );
     }
 
     #[test]

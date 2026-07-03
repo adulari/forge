@@ -47,6 +47,9 @@ pub(crate) enum DispatchOutcome {
     },
     /// `/loop <task>` — run the task, then re-run each turn until the model signals completion.
     StartLoop { prompt: String },
+    /// `/duel <task>` — race 2-3 mesh models on the same task, each in its own worktree
+    /// (docs/features/duel.md), in a background task like a turn.
+    RunDuel { task: String },
     /// `/mesh` — overlay opened immediately; receiver delivers the computed `MeshOverlay` (None =
     /// no catalog).
     PendingMesh(tokio::sync::oneshot::Receiver<Option<forge_tui::MeshOverlay>>),
@@ -569,6 +572,16 @@ and keep going."
                 return Ok(DispatchOutcome::Handled);
             }
             return Ok(DispatchOutcome::StartLoop { prompt: text });
+        }
+        // `/duel <task>` — model arena: race 2-3 mesh models on the same task, each in its own
+        // isolated worktree, then pick a winner from a comparable picker.
+        CommandAction::Duel(text) => {
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                app.note("usage: /duel <task> — races 2-3 mesh models on the same task");
+                return Ok(DispatchOutcome::Handled);
+            }
+            return Ok(DispatchOutcome::RunDuel { task: text });
         }
         // `/replay <id>` — show a transcript inline; `/replay <a> <b>` diffs two sessions.
         CommandAction::Replay(id_a, id_b) => {

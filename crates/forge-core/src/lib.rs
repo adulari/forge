@@ -19,6 +19,7 @@ use forge_types::{
 };
 
 pub mod assay;
+pub mod duel;
 pub mod hooks;
 pub mod llm_router;
 pub mod permission;
@@ -5691,6 +5692,76 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             summary: format!("'{name}': {}", workflow::summary(&combined)),
         });
         Ok(combined)
+    }
+
+    /// Run `/duel <task>`: race up to `duel::MAX_CANDIDATES` mesh models on the SAME task, each in
+    /// its own isolated worktree (docs/features/duel.md). Unlike `run_workflow`/`spawn_agents`, the
+    /// result isn't a single tool answer for a model to read — it's a report plus the still-alive
+    /// worktree guards, returned to the CALLER (the TUI) so it can show a picker over the
+    /// candidates and merge the winner back once the user decides. Lifecycle events reuse the same
+    /// `Subagent*` presenter events `spawn_agents` uses, so a duel shows up in the same activity
+    /// panel.
+    pub async fn run_duel(
+        &mut self,
+        task: &str,
+    ) -> Result<(duel::DuelReport, Vec<worktree::WorktreeGuard>), CoreError> {
+        let budget = self.budget_snapshot();
+        let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
+            &self.config.mesh.subagents.agents_dir,
+        )));
+        let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let ctx = subagent::AgentCtx {
+            provider: Arc::clone(&self.provider),
+            router: Arc::clone(&self.router),
+            store: Arc::clone(&self.store),
+            config: self.config.clone(),
+            pricing: self.pricing.clone(),
+            mode: self.mode,
+            rules: self.rules.clone(),
+            depth: 0,
+            max_depth: self.config.mesh.subagents.max_depth,
+            agents,
+            worktree_root: None,
+            repo_root,
+        };
+        let parent_id = self.id.clone();
+
+        let presenter = &mut self.presenter;
+        let mut on_event = |ev: subagent::Lifecycle| match ev {
+            subagent::Lifecycle::Start {
+                id,
+                agent,
+                task,
+                model,
+            } => presenter.emit(PresenterEvent::SubagentStart {
+                id: id.to_string(),
+                agent: agent.to_string(),
+                task: task.to_string(),
+                model: Some(model.to_string()),
+                phase: Some("duel".to_string()),
+            }),
+            subagent::Lifecycle::Progress { id, snippet } => {
+                presenter.emit(PresenterEvent::SubagentProgress {
+                    id: id.to_string(),
+                    snippet: snippet.to_string(),
+                })
+            }
+            subagent::Lifecycle::Done {
+                id,
+                agent,
+                ok,
+                summary,
+                cost_usd,
+            } => presenter.emit(PresenterEvent::SubagentResult {
+                id: id.to_string(),
+                agent: agent.to_string(),
+                ok,
+                summary: summary.to_string(),
+                cost_usd,
+            }),
+        };
+
+        duel::run(&ctx, &parent_id, budget, task, &mut on_event).await
     }
 
     /// Handle an `ask_user` call: parse the question + options, ask the user through the
