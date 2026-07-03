@@ -15,7 +15,19 @@ CREATE TABLE IF NOT EXISTS session (
     total_cost_usd  REAL NOT NULL DEFAULT 0,
     parent_session_id TEXT,         -- non-null for subagent child sessions (RFC subagent-orchestration)
     forked_from       TEXT,         -- counterfactual forks (forge fork): source session id
-    forked_at_seq     INTEGER       -- ...and the seq the copied prefix stops before (also migration_0006)
+    forked_at_seq     INTEGER,      -- ...and the seq the copied prefix stops before (also migration_0006)
+    worktree_path     TEXT,         -- forge serve: the isolated worktree this session runs in (also migration_0008)
+    archived          INTEGER NOT NULL DEFAULT 0  -- forge serve: archived sessions are hidden from lists (also migration_0008)
+);
+
+-- Web-push subscriptions for the forge serve daemon (pre-added for actionable push
+-- notifications; also migration_0008).
+CREATE TABLE IF NOT EXISTS push_subscription (
+    id         TEXT PRIMARY KEY,
+    endpoint   TEXT NOT NULL,
+    p256dh     TEXT NOT NULL,
+    auth       TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 
 CREATE TABLE IF NOT EXISTS message (

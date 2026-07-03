@@ -52,19 +52,19 @@ use tokio::task::JoinHandle;
 // ---------------------------------------------------------------------------
 
 /// A self-signed certificate + private key generated at startup for the LAN HTTPS server.
-struct SelfSignedCert {
+pub(crate) struct SelfSignedCert {
     /// PEM-encoded certificate (fed to RustlsConfig).
-    cert_pem: Vec<u8>,
+    pub(crate) cert_pem: Vec<u8>,
     /// PEM-encoded private key (fed to RustlsConfig).
-    key_pem: Vec<u8>,
+    pub(crate) key_pem: Vec<u8>,
     /// SHA-256 fingerprint of the DER-encoded certificate, colon-separated uppercase hex.
     /// e.g. `"AB:CD:EF:…"` — shown to the user so they can verify the cert in their browser.
-    fingerprint: String,
+    pub(crate) fingerprint: String,
 }
 
 /// Generate a self-signed TLS certificate valid for the given SANs (Subject Alternative Names).
 /// Returns `Err` only if rcgen itself fails, which shouldn't happen with valid input.
-fn generate_self_signed(sans: Vec<String>) -> Result<SelfSignedCert, rcgen::Error> {
+pub(crate) fn generate_self_signed(sans: Vec<String>) -> Result<SelfSignedCert, rcgen::Error> {
     let rcgen::CertifiedKey { cert, signing_key } = rcgen::generate_simple_self_signed(sans)?;
 
     // DER bytes → SHA-256 fingerprint
@@ -229,7 +229,7 @@ impl From<forge_config::RemoteAuto> for Exposure {
 /// and approve shell commands (RCE). Its `http://` origin also breaks the PWA (no secure
 /// context → no service worker, no notifications).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TunnelKind {
+pub(crate) enum TunnelKind {
     /// `cloudflared tunnel --url http://localhost:PORT` → `https://<rand>.trycloudflare.com`.
     /// Free, no account, HTTPS, supports WebSocket. Preferred.
     Cloudflared,
@@ -250,7 +250,7 @@ impl TunnelKind {
     }
 
     /// A one-line human label for scrollback notes.
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Cloudflared => "cloudflared (trycloudflare.com)",
             Self::Ngrok => "ngrok",
@@ -308,7 +308,7 @@ impl TunnelKind {
 }
 
 /// Which tunnel provider (if any) is installed and on `PATH`. Probes each in priority order.
-fn detect_tunnel() -> Option<TunnelKind> {
+pub(crate) fn detect_tunnel() -> Option<TunnelKind> {
     TunnelKind::ALL
         .into_iter()
         .find(|k| which(k.binary()).is_some())
@@ -337,7 +337,7 @@ fn which(bin: &str) -> Option<std::path::PathBuf> {
 /// Spawn a tunnel of `kind` pointing at `local_port`. Returns the public URL (parsed from the
 /// tunnel's output) + the child handle (so the caller can kill it when remote control turns off).
 /// Fails if the child can't start or no URL appears within the timeout (the tunnel is then killed).
-async fn spawn_tunnel(
+pub(crate) async fn spawn_tunnel(
     kind: TunnelKind,
     local_port: u16,
 ) -> std::io::Result<(String, tokio::process::Child)> {
@@ -465,7 +465,15 @@ pub struct RemoteUrl {
 /// token-scoped `GET /<token>/api/history?before=<seq>&limit=<n>` pages the session's persisted
 /// transcript ([`HistoryRow`], newest first) so the page has unlimited scrollback while the
 /// snapshot transcript stays a short live tail.
-pub const PROTOCOL_VERSION: u32 = 5;
+///
+/// v6: the multi-session daemon (`forge serve`) — `Snapshot` gained `title` (the session's
+/// display name) and `worktree` (the isolated worktree path, when the session runs in one).
+/// The daemon serves the same page/assets at a STABLE origin (`/<daemon-token>/`), addresses
+/// sessions with `?session=<id>` on the WS + `/api/history`, and adds `GET|POST /api/sessions`
+/// plus `POST /api/sessions/:id/archive` for session control. The in-chat single-session
+/// `/remote` server carries the same fields (empty title / no worktree) and no `/api/sessions`
+/// route — the page detects daemon mode by probing that route.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// How many broadcast snapshots the per-server [`EventLog`] retains for reconnect replay. One
 /// entry per *changed* frame covers minutes of activity; a client that was away longer gets a
@@ -526,7 +534,7 @@ impl EventLog {
 
 /// Hard cap on a single inbound WebSocket frame (a [`RemoteInput`]). Inputs are short prompts or
 /// answers; anything larger is dropped to bound memory + parse cost from a hostile/buggy client.
-const MAX_INPUT_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_INPUT_BYTES: usize = 256 * 1024;
 
 /// One tracked task in the live task list, projected for the wire (status as a stable word).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -605,8 +613,13 @@ pub struct Snapshot {
     pub protocol: u32,
     /// The active session id — shown in the header so the operator knows which session they drive.
     pub session_id: String,
+    /// The session's display title (v6). Empty when unnamed (the page falls back to the id).
+    pub title: String,
     /// The working directory the session runs in (header context).
     pub cwd: String,
+    /// The isolated worktree the session runs in (v6), when created with `worktree: true` —
+    /// `None` for sessions running directly in their cwd.
+    pub worktree: Option<String>,
     /// How the server is exposed: "loopback" | "LAN" | "public (provider)".
     pub exposure: String,
     pub busy: bool,
@@ -669,7 +682,9 @@ impl Default for Snapshot {
         Self {
             protocol: PROTOCOL_VERSION,
             session_id: String::new(),
+            title: String::new(),
             cwd: String::new(),
+            worktree: None,
             exposure: String::new(),
             busy: false,
             done: false,
@@ -873,7 +888,7 @@ impl Drop for RemoteControl {
 
 /// A random URL-safe token for path-gating the control page + WS. Lowercase hex is unambiguous
 /// on a phone keyboard and survives being embedded in a QR code.
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     // 16 hex chars (64 bits) sourced from the OS CSPRNG via `rand::random` (already a workspace
     // dependency — see `forge-config::oauth`). This is genuinely load-bearing under `--anywhere`,
     // where the token is the sole authentication for a public, internet-reachable control
@@ -905,7 +920,7 @@ fn discover_lan_ip() -> Option<std::net::IpAddr> {
 /// The host to advertise for a `Lan` bind (URL, QR, cert SANs): the `[remote] host` config
 /// override wins (multi-homed/VPN machines where discovery picks the wrong interface), then the
 /// discovered outbound-interface IP, then the raw bind address as a last resort.
-fn lan_display_host(host_override: Option<&str>, addr: SocketAddr) -> String {
+pub(crate) fn lan_display_host(host_override: Option<&str>, addr: SocketAddr) -> String {
     host_override
         .map(str::to_string)
         .or_else(|| discover_lan_ip().map(|ip| ip.to_string()))
@@ -1134,7 +1149,7 @@ struct ServerState {
 /// no `'unsafe-inline'` anywhere: an injected inline `<script>`/`onclick` can never execute.
 /// `connect-src` must name the ws:/wss: schemes explicitly — some browsers don't fold WebSockets
 /// into `'self'`.
-const PAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; \
+pub(crate) const PAGE_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self'; \
      img-src 'self' data:; connect-src 'self' ws: wss:; \
      frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
@@ -1209,11 +1224,11 @@ async fn fallback() -> Response {
 
 /// Default / maximum page size for `GET /api/history` — what a phone can render and SQLite can
 /// serve without a hiccup.
-const HISTORY_PAGE_DEFAULT: usize = 60;
-const HISTORY_PAGE_MAX: usize = 200;
+pub(crate) const HISTORY_PAGE_DEFAULT: usize = 60;
+pub(crate) const HISTORY_PAGE_MAX: usize = 200;
 
 /// Clamp a requested history page size to `1..=`[`HISTORY_PAGE_MAX`].
-fn history_page_limit(requested: Option<usize>) -> usize {
+pub(crate) fn history_page_limit(requested: Option<usize>) -> usize {
     requested
         .unwrap_or(HISTORY_PAGE_DEFAULT)
         .clamp(1, HISTORY_PAGE_MAX)
@@ -1287,6 +1302,28 @@ async fn ws_handler(
 /// live — no gap, no flicker. When it can't (fresh connect, evicted, foreign counter), it gets
 /// ONE full snapshot flagged `resync: true` instead.
 async fn ws_session(socket: WebSocket, state: Arc<ServerState>, since: u64) {
+    pump_ws(
+        socket,
+        state.snapshot_rx.clone(),
+        state.events.clone(),
+        state.input_tx.clone(),
+        since,
+    )
+    .await
+}
+
+/// The transport-independent body of one connected WebSocket client: replay-from-rev (or a
+/// full `resync` snapshot), then live-follow the watch channel out and parse [`RemoteInput`]s
+/// in. Shared verbatim between the in-chat single-session server ([`ws_session`]) and the
+/// `forge serve` daemon's per-session WS route — the two differ only in WHERE the channels
+/// come from (a single server state vs. a session registry lookup).
+pub(crate) async fn pump_ws(
+    socket: WebSocket,
+    snapshot_rx: watch::Receiver<Snapshot>,
+    events: Arc<std::sync::Mutex<EventLog>>,
+    input_tx: mpsc::Sender<RemoteInput>,
+    since: u64,
+) {
     use futures::stream::StreamExt;
     use futures::SinkExt;
 
@@ -1294,16 +1331,12 @@ async fn ws_session(socket: WebSocket, state: Arc<ServerState>, since: u64) {
     // Clone the receiver BEFORE reading the replay log: a frame broadcast between the two is
     // then guaranteed to be seen (in the log, in the watch, or both — the page dedupes on
     // revision), so a reconnect can never observe a gap.
-    let mut snap = state.snapshot_rx.clone();
+    let mut snap = snapshot_rx;
 
     let replay = if since == 0 {
         None
     } else {
-        state
-            .events
-            .lock()
-            .ok()
-            .and_then(|log| log.replay_after(since))
+        events.lock().ok().and_then(|log| log.replay_after(since))
     };
     match replay {
         Some(missed) => {
@@ -1351,7 +1384,6 @@ async fn ws_session(socket: WebSocket, state: Arc<ServerState>, since: u64) {
     });
 
     // Receive inputs from the browser; forward each to the render loop's channel.
-    let input_tx = state.input_tx.clone();
     let mut receive = tokio::spawn(async move {
         while let Some(Ok(msg)) = rx.next().await {
             let text = match msg {
@@ -1424,13 +1456,13 @@ pub fn qr_lines(url: &str) -> Option<Vec<String>> {
 /// served as separate token-scoped routes so the CSP carries no 'unsafe-inline'. `__BASE__` is
 /// injected at serve time. The page renders the generic `overlay` projection (tappable rows,
 /// filter box, free-text box, text body) and sends `RemoteInput` JSON back over the WS.
-const CONTROL_PAGE: &str = include_str!("remote_assets/page.html");
+pub(crate) const CONTROL_PAGE: &str = include_str!("remote_assets/page.html");
 
 /// The page's JavaScript (see [`CONTROL_PAGE`]) — `__BASE__` injected at serve time.
-const APP_JS: &str = include_str!("remote_assets/app.js");
+pub(crate) const APP_JS: &str = include_str!("remote_assets/app.js");
 
 /// The page's stylesheet (static).
-const STYLES_CSS: &str = include_str!("remote_assets/styles.css");
+pub(crate) const STYLES_CSS: &str = include_str!("remote_assets/styles.css");
 
 /// The token-scoped PWA service worker. Its presence + a `fetch` handler is what makes the control
 /// page installable to a phone home screen; it caches non-navigation assets (network-first) so a
@@ -1441,16 +1473,16 @@ const STYLES_CSS: &str = include_str!("remote_assets/styles.css");
 /// showed a live-looking page stuck on "reconnecting…" forever. Instead the SW answers a failed
 /// navigation with an explicit "session ended — reopen /remote from the TUI" page. A stable
 /// origin that makes the install permanent is the Phase-4 daemon's job.
-const SERVICE_WORKER: &str = include_str!("remote_assets/sw.js");
+pub(crate) const SERVICE_WORKER: &str = include_str!("remote_assets/sw.js");
 
 /// The app icon (inline SVG — no binary asset to serve). A hammer mark on the brand background;
 /// `sizes:"any"` in the manifest lets the single SVG satisfy every install target.
-const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" rx="5" fill="#16161c"/><g fill="none" stroke="#ff913c" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m15 12-8.5 8.5c-.83.83-2.17.83-3 0a2.12 2.12 0 0 1 0-3L12 9"/><path d="M17.64 15 22 10.64"/><path d="m20.91 11.7-1.25-1.25c-.6-.6-.93-1.4-.93-2.25v-.86L16.01 4.6a5.56 5.56 0 0 0-3.94-1.64H9l.92.82A6.18 6.18 0 0 1 12 8.4v1.56l2 2h2.47l2.26 1.91"/></g></svg>"##;
+pub(crate) const ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect width="24" height="24" rx="5" fill="#16161c"/><g fill="none" stroke="#ff913c" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m15 12-8.5 8.5c-.83.83-2.17.83-3 0a2.12 2.12 0 0 1 0-3L12 9"/><path d="M17.64 15 22 10.64"/><path d="m20.91 11.7-1.25-1.25c-.6-.6-.93-1.4-.93-2.25v-.86L16.01 4.6a5.56 5.56 0 0 0-3.94-1.64H9l.92.82A6.18 6.18 0 0 1 12 8.4v1.56l2 2h2.47l2.26 1.91"/></g></svg>"##;
 
 /// Build the PWA manifest JSON for a token base path (e.g. `/<token>`). `start_url`/`scope` use
 /// the slashed form so the installed app launches inside the service-worker scope and runs
 /// standalone (no browser chrome) straight into this session's control page.
-fn manifest_json(base: &str) -> String {
+pub(crate) fn manifest_json(base: &str) -> String {
     format!(
         r##"{{"name":"Forge remote control","short_name":"Forge","description":"Drive a Forge coding session from anywhere.","start_url":"{base}/","scope":"{base}/","display":"standalone","background_color":"#16161c","theme_color":"#16161c","orientation":"any","icons":[{{"src":"{base}/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any"}},{{"src":"{base}/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"maskable"}}]}}"##
     )
@@ -1464,7 +1496,9 @@ mod tests {
     fn snapshot_serializes_to_json_with_all_fields() {
         let s = Snapshot {
             session_id: "abc12345".into(),
+            title: "fix the parser".into(),
             cwd: "/home/u/proj".into(),
+            worktree: Some("/home/u/proj/.forge/worktrees/abc12345".into()),
             exposure: "LAN".into(),
             busy: true,
             temper: "Ask".into(),
@@ -1522,7 +1556,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["protocol"], PROTOCOL_VERSION);
         assert_eq!(v["session_id"], "abc12345");
+        // v6: title + worktree ride in every frame (the daemon page header + session list).
+        assert_eq!(v["title"], "fix the parser");
         assert_eq!(v["cwd"], "/home/u/proj");
+        assert_eq!(v["worktree"], "/home/u/proj/.forge/worktrees/abc12345");
         assert_eq!(v["exposure"], "LAN");
         assert_eq!(v["busy"], true);
         assert_eq!(v["tier"], "complex");

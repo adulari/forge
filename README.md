@@ -310,7 +310,9 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
 - Context-window token gauge, fuzzy command palette, dynamic `/config` settings editor
 - Unified activity viewer (subagents + critics), dedicated animated workflow view, session/checkpoint pickers
 - `/usage` + `/mesh` overlays, `/model` picker, `/effort` knob, customizable statusline & keybinds
-- Remote control: drive a session from a phone/desktop browser (`/remote`)
+- Remote control: drive a session from a phone/desktop browser (`/remote`), or run the
+  `forge serve` daemon — N concurrent sessions, stable PWA origin, sessions survive disconnects,
+  create/switch/archive from the phone
 - `--inline` for native scrollback; `--mock` offline deterministic provider (no key needed)
 
 **🔒 Safety**
@@ -481,6 +483,26 @@ forge run "add tests for the payment service"
 forge run --tui "debug the startup crash"      # with live TUI
 forge run --mode bypass "apply all the diffs"  # no prompts
 ```
+
+### 📡 `forge serve` — multi-session daemon (remote control HQ)
+
+One headless process hosting any number of concurrent sessions, all driveable from the same
+phone/browser PWA at a **stable origin** — fixed port (`[remote] port`, default 7420) + a
+persisted daemon token — so the installed home-screen app keeps working forever. Sessions keep
+running when you disconnect; reconnects replay exactly what you missed. From the page: list
+sessions (busy dot, cost, last activity), create new ones (any directory, optional **isolated
+git worktree**), switch with a tap, archive when done.
+
+```bash
+forge serve                  # LAN, self-signed HTTPS (default)
+forge serve --local          # loopback only
+forge serve --anywhere       # public tunnel via cloudflared/ngrok
+forge serve --port 9000      # override the stable port
+forge serve --rotate-token   # revoke: mint a new daemon token (old links/PWAs die)
+```
+
+The in-chat `/remote` still works as the zero-setup single-session mode; `forge serve` is the
+always-on fleet. See `docs/features/remote-control.md`.
 
 ### 🩺 Setup, health, models, memory
 

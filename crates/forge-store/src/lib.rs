@@ -16,7 +16,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -529,6 +529,29 @@ fn migration_0007(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Migration #8: the `forge serve` multi-session daemon (docs/features/remote-control.md).
+/// `session.worktree_path` records the isolated worktree a daemon session runs in;
+/// `session.archived` hides a session from lists without deleting its history. The
+/// `push_subscription` table is pre-added for actionable web push (Phase 5) so enabling it
+/// later needs no migration. (`session.title` already exists — base schema.)
+fn migration_0008(conn: &Connection) -> rusqlite::Result<()> {
+    // Idempotent: on a fresh DB the base schema already carries these columns + table.
+    add_column_if_missing(conn, "ALTER TABLE session ADD COLUMN worktree_path TEXT")?;
+    add_column_if_missing(
+        conn,
+        "ALTER TABLE session ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
+    )?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS push_subscription (
+            id         TEXT PRIMARY KEY,
+            endpoint   TEXT NOT NULL,
+            p256dh     TEXT NOT NULL,
+            auth       TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         )",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -539,6 +562,7 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0005,
     migration_0006,
     migration_0007,
+    migration_0008,
 ];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
@@ -1826,8 +1850,10 @@ impl Store {
                     (SELECT content FROM message m WHERE m.session_id = s.id
                        AND m.role = 'user' AND m.active = 1 ORDER BY m.seq LIMIT 1),
                     COALESCE((SELECT MAX(m.created_at) FROM message m WHERE m.session_id = s.id),
-                             s.created_at) AS last_activity
+                             s.created_at) AS last_activity,
+                    s.title, s.worktree_path
              FROM session s WHERE s.parent_session_id IS NULL \
+             AND s.archived = 0 \
              AND EXISTS ( \
                SELECT 1 FROM message m \
                WHERE m.session_id = s.id AND m.role = 'user' \
@@ -1844,10 +1870,67 @@ impl Store {
                 message_count: row.get(5)?,
                 preview: row.get(6)?,
                 last_activity: row.get(7)?,
+                title: row.get(8)?,
+                worktree_path: row.get(9)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(StoreError::from)
+    }
+
+    /// Archive a session (`forge serve`): hidden from [`Store::list_sessions`] and the daemon's
+    /// session list, but its full history stays intact (nothing is deleted).
+    pub fn archive_session(&self, session_id: &str) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE session SET archived = 1 WHERE id = ?1",
+            [session_id],
+        )?;
+        Ok(())
+    }
+
+    /// Whether a session is archived. `Ok(false)` for unknown ids (nothing to un-hide).
+    pub fn session_archived(&self, session_id: &str) -> Result<bool> {
+        let n: i64 = self.lock()?.query_row(
+            "SELECT COUNT(*) FROM session WHERE id = ?1 AND archived = 1",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Record the isolated worktree a daemon session runs in (`forge serve` with `worktree:true`).
+    pub fn set_session_worktree(&self, session_id: &str, path: &str) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE session SET worktree_path = ?2 WHERE id = ?1",
+            (session_id, path),
+        )?;
+        Ok(())
+    }
+
+    /// The isolated worktree recorded for a session, if any.
+    pub fn session_worktree(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT worktree_path FROM session WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// A session's stored title, if any.
+    pub fn session_title(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT title FROM session WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
     }
 
     /// Full session ids whose id starts with `prefix` (git-style abbreviation). `prefix` is
@@ -2432,6 +2515,10 @@ pub struct SessionSummary {
     /// Unix seconds of the newest message (falls back to the session's creation time when the
     /// session has no messages). Drives the most-recently-used ordering + the picker's age column.
     pub last_activity: i64,
+    /// Stored session title (`forge serve` names sessions; subagents store their agent name here).
+    pub title: Option<String>,
+    /// The isolated worktree this session runs in, if created with `worktree:true` (migration_0008).
+    pub worktree_path: Option<String>,
 }
 
 // ---- Lattice: code-intelligence graph (code-intelligence.md) ----
@@ -4892,6 +4979,122 @@ mod tests {
             Ok(_) => panic!("expected SchemaTooNew, but the DB opened"),
         }
         cleanup(&path);
+    }
+
+    #[test]
+    fn migration_0008_applies_to_a_v7_db_and_is_idempotent() {
+        // A v7 DB (session table without worktree_path/archived, no push_subscription table)
+        // must upgrade to v8 with exactly migration_0008's changes — and a second open must be
+        // a clean no-op (idempotence).
+        let path = temp_db_path();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session (
+                     id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL,
+                     permission_mode TEXT NOT NULL,
+                     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                     updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                     total_cost_usd REAL NOT NULL DEFAULT 0,
+                     parent_session_id TEXT, forked_from TEXT, forked_at_seq INTEGER,
+                     view_snapshot TEXT, agent_active INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO session (id, cwd, permission_mode) VALUES ('s7', '/tmp', 'default');",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 7).unwrap();
+        }
+        for pass in ["first open (migrates)", "second open (idempotent)"] {
+            let store = Store::open(&path).unwrap_or_else(|e| panic!("{pass}: {e:?}"));
+            let conn = store.lock().unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION,
+                "{pass}: at v8"
+            );
+            // The new columns exist, defaulted, on the pre-existing row.
+            let (wt, archived): (Option<String>, i64) = conn
+                .query_row(
+                    "SELECT worktree_path, archived FROM session WHERE id = 's7'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(wt, None, "{pass}: worktree_path defaults NULL");
+            assert_eq!(archived, 0, "{pass}: archived defaults 0");
+            // The push_subscription table exists and is writable (pre-added for Phase 5).
+            conn.execute(
+                "INSERT OR REPLACE INTO push_subscription (id, endpoint, p256dh, auth)
+                 VALUES ('p1', 'https://push.example/x', 'key', 'auth')",
+                [],
+            )
+            .unwrap();
+        }
+        cleanup(&path);
+    }
+
+    #[test]
+    fn archived_sessions_are_hidden_from_list_sessions() {
+        let store = Store::open_in_memory().unwrap();
+        let a = store.create_session("/tmp", "default").unwrap();
+        let b = store.create_session("/tmp", "default").unwrap();
+        store.add_message(&a, 0, Role::User, "hi a", None).unwrap();
+        store.add_message(&b, 0, Role::User, "hi b", None).unwrap();
+        let ids: Vec<String> = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(ids.contains(&a) && ids.contains(&b), "both listed: {ids:?}");
+
+        store.archive_session(&a).unwrap();
+        assert!(store.session_archived(&a).unwrap());
+        assert!(!store.session_archived(&b).unwrap());
+        let ids: Vec<String> = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert!(!ids.contains(&a), "archived session hidden: {ids:?}");
+        assert!(ids.contains(&b), "live session still listed");
+        // History is intact — archive hides, never deletes.
+        assert_eq!(store.load_messages(&a).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn session_worktree_and_title_round_trip() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/repo", "default").unwrap();
+        assert_eq!(store.session_worktree(&sid).unwrap(), None);
+        store
+            .set_session_worktree(&sid, "/repo/.forge/worktrees/abc")
+            .unwrap();
+        assert_eq!(
+            store.session_worktree(&sid).unwrap().as_deref(),
+            Some("/repo/.forge/worktrees/abc")
+        );
+        assert_eq!(store.session_title(&sid).unwrap(), None);
+        store.set_session_title(&sid, "fix the parser").unwrap();
+        assert_eq!(
+            store.session_title(&sid).unwrap().as_deref(),
+            Some("fix the parser")
+        );
+        // list_sessions surfaces both (once the session has a user message).
+        store.add_message(&sid, 0, Role::User, "go", None).unwrap();
+        let row = store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == sid)
+            .unwrap();
+        assert_eq!(row.title.as_deref(), Some("fix the parser"));
+        assert_eq!(
+            row.worktree_path.as_deref(),
+            Some("/repo/.forge/worktrees/abc")
+        );
     }
 
     #[test]

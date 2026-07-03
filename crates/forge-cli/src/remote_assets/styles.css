@@ -120,3 +120,25 @@ footer { font-size: 11px; color: #4a4a54; text-align: center; padding: 4px 0 2px
 .tok-s { color: #78d28c; }
 .tok-c { color: #6e6e78; font-style: italic; }
 .tok-n { color: #7db8f0; }
+
+/* v6 — forge serve session control */
+.shead { display:flex; align-items:center; justify-content:space-between; gap:8px;
+  font-size:13px; font-weight:600; color:var(--dim); padding:2px 2px 8px; }
+.sessrow { display:flex; align-items:stretch; gap:6px; margin:0 0 6px; }
+.sessrow.cur .sessmain { border-color: var(--acc); }
+.sessmain { flex:1 1 auto; display:flex; align-items:center; gap:8px; text-align:left;
+  background:var(--bg); color:var(--ink); border:1px solid #2a2a32; border-radius:8px;
+  padding:9px 10px; font:inherit; font-size:13px; cursor:pointer; min-width:0; }
+.sessmain b { flex:0 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.sinfo { color:var(--dim); font-size:12px; white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; flex:1 1 auto; font-variant-numeric:tabular-nums; }
+.sdot { width:8px; height:8px; border-radius:50%; background:var(--ok); flex:0 0 auto; }
+.sdot.busy { background:var(--acc); animation: pulse 1s infinite; }
+.sarch { background:none; border:1px solid #2a2a32; color:var(--dim); border-radius:8px;
+  padding:0 10px; font:inherit; font-size:12px; cursor:pointer; }
+.sarch:active { color:var(--no); border-color:var(--no); }
+.snewform { display:flex; flex-direction:column; gap:6px; padding:8px 2px; }
+.snewform input[type="text"] { background:var(--bg); color:var(--ink); border:1px solid #2a2a32;
+  border-radius:8px; padding:9px 10px; font:inherit; font-size:13px; }
+.wtlabel { font-size:13px; color:var(--dim); display:flex; align-items:center; gap:6px; }
+#stitle { color:var(--ink); }

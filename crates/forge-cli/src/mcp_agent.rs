@@ -568,7 +568,8 @@ pub async fn run(session_id: Option<String>, cwd: Option<std::path::PathBuf>) ->
     // must never inject another "forge" MCP server pointing at itself, or every spawned agent
     // spawns another one recursively (see build_session_with_self_mcp's doc comment).
     let session =
-        build_session_with_self_mcp(presenter, false, None, session_id, None, false, false).await?;
+        build_session_with_self_mcp(presenter, false, None, session_id, None, false, false, None)
+            .await?;
 
     // Apply the initial mode to the session (it may have been loaded with a different mode
     // from its stored config; in agent mode we always start permissive).

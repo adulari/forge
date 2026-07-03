@@ -134,7 +134,15 @@ pub struct RemoteConfig {
     /// the discovered interface isn't the one the phone reaches (e.g. `host = "192.168.1.5"`).
     #[serde(default)]
     pub host: Option<String>,
+    /// The stable port `forge serve` (the multi-session daemon) listens on. Stable so the
+    /// installed PWA's origin never changes across daemon restarts. Defaults to 7420; the
+    /// in-chat `/remote` server is unaffected (it keeps its ephemeral per-session port).
+    #[serde(default)]
+    pub port: Option<u16>,
 }
+
+/// The default `forge serve` port when `[remote] port` is unset (see [`RemoteConfig::port`]).
+pub const DEFAULT_SERVE_PORT: u16 = 7420;
 
 impl RemoteConfig {
     /// The exposure to auto-start at chat launch, or `None` when remote control is left off.
@@ -143,6 +151,11 @@ impl RemoteConfig {
             RemoteAuto::Off => None,
             other => Some(other),
         }
+    }
+
+    /// The `forge serve` daemon port: `[remote] port`, else [`DEFAULT_SERVE_PORT`].
+    pub fn serve_port(&self) -> u16 {
+        self.port.unwrap_or(DEFAULT_SERVE_PORT)
     }
 }
 

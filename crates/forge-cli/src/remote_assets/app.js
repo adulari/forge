@@ -1,22 +1,49 @@
 "use strict";
 const BASE = "__BASE__";
-const PROTO = 5;
+const PROTO = 6;
 const $ = (id) => document.getElementById(id);
 let ws = null, dead = false, notif = false, curSeq = 0, retries = 0, curOverlay = null;
 // The /copy payload stashed outside the DOM (it can be large / contain anything).
 let copyPayload = "";
 let prev = { busy: false, prompt: false, question: false };
+// v6 multi-session daemon: when the server is `forge serve`, the page addresses ONE of its
+// sessions with `?session=<id>` and offers a session list (attach / create / archive). The
+// in-chat single-session server has no /api/sessions route — probing it is how the page knows
+// which world it's in. The attached session id survives reloads.
+const SESS_KEY = "forge-session:" + BASE;
+let daemon = false, curSession = sessionStorage.getItem(SESS_KEY) || "";
 // v5 reconnect/replay: the last snapshot revision this page rendered. Sent as `?rev=` on every
 // (re)connect so the server replays exactly the frames we missed — no gap, no flicker. Kept in
-// sessionStorage (keyed by the token base, so it can never target a different server) to survive
-// a page reload too.
-const REV_KEY = "forge-rev:" + BASE;
+// sessionStorage (keyed by the token base — and, under a daemon, the session id — so it can
+// never target a different server or session) to survive a page reload too.
+function revKeyFor(sid) { return "forge-rev:" + BASE + (sid ? ":" + sid : ""); }
+let REV_KEY = revKeyFor(curSession);
 let lastRev = Number(sessionStorage.getItem(REV_KEY) || 0) || 0;
+
+function boot() {
+  fetch(BASE + "/api/sessions", { cache: "no-store" })
+    .then(r => { if (!r.ok) throw new Error("single"); return r.json(); })
+    .then(rows => {
+      daemon = true;
+      $("btnSessions").hidden = false;
+      renderSessionList(rows);
+      if (curSession && rows.some(r => r.id === curSession)) {
+        connect();
+      } else {
+        curSession = "";
+        showSessions(true);
+      }
+      setInterval(pollSessions, 5000);
+    })
+    .catch(() => connect()); // the in-chat single-session server
+}
 
 function connect() {
   if (dead) return;
+  if (daemon && !curSession) return; // nothing attached yet — pick from the list
   const scheme = location.protocol === "https:" ? "wss://" : "ws://";
-  ws = new WebSocket(scheme + location.host + BASE + "/ws?rev=" + lastRev);
+  const sess = daemon && curSession ? "&session=" + encodeURIComponent(curSession) : "";
+  ws = new WebSocket(scheme + location.host + BASE + "/ws?rev=" + lastRev + sess);
   ws.onopen = () => { retries = 0; $("conn").textContent = "● connected"; };
   ws.onmessage = (e) => {
     let s; try { s = JSON.parse(e.data); } catch { return; }
@@ -29,7 +56,20 @@ function connect() {
       try { sessionStorage.setItem(REV_KEY, String(lastRev)); } catch (e2) {}
     }
     render(s);
-    if (s.closed) { dead = true; $("conn").textContent = "remote control turned off — reconnect to the TUI"; ws.close(); }
+    if (s.closed) {
+      if (daemon) {
+        // The session was archived (or the driver stopped) — back to the list; the daemon
+        // (and every other session) is still very much alive.
+        detach();
+        showSessions(true);
+        pollSessions();
+        $("conn").textContent = "session archived";
+      } else {
+        dead = true;
+        $("conn").textContent = "remote control turned off — reconnect to the TUI";
+        ws.close();
+      }
+    }
   };
   ws.onclose = () => {
     if (dead) return;
@@ -37,12 +77,118 @@ function connect() {
     // After ~12s of failures the session is almost certainly gone (the server dies with the
     // TUI) — say so instead of an infinite "reconnecting…", and back off to a slow retry.
     $("conn").textContent = retries > 8
-      ? "session unreachable — reopen /remote from the TUI for a fresh link"
+      ? (daemon ? "daemon unreachable — is forge serve running?"
+                : "session unreachable — reopen /remote from the TUI for a fresh link")
       : "reconnecting…";
     setTimeout(connect, retries > 8 ? 10000 : 1500);
   };
   ws.onerror = () => ws.close();
 }
+
+// --- v6 session control (forge serve) -------------------------------------------------------
+function detach() {
+  if (ws) { ws.onclose = null; try { ws.close(); } catch (e) {} ws = null; }
+  curSession = "";
+  try { sessionStorage.removeItem(SESS_KEY); } catch (e) {}
+}
+
+function attach(id) {
+  if (ws) { ws.onclose = null; try { ws.close(); } catch (e) {} ws = null; }
+  curSession = id;
+  try { sessionStorage.setItem(SESS_KEY, id); } catch (e) {}
+  REV_KEY = revKeyFor(id);
+  lastRev = Number(sessionStorage.getItem(REV_KEY) || 0) || 0;
+  retries = 0;
+  // The transcript belongs to the previous session — renderTranscript resets it when the new
+  // session id arrives, but clear eagerly so nothing stale flashes.
+  $("hist").innerHTML = ""; $("tail").innerHTML = ""; $("tail")._sig = "";
+  histSession = null; histOldest = null; histDone = false;
+  showSessions(false);
+  $("conn").textContent = "connecting…";
+  connect();
+}
+
+function pollSessions() {
+  if (!daemon || $("sessions").hidden) return;
+  fetch(BASE + "/api/sessions", { cache: "no-store" })
+    .then(r => r.json()).then(renderSessionList).catch(() => {});
+}
+
+function renderSessionList(rows) {
+  const el = $("slist");
+  const sig = JSON.stringify(rows);
+  if (el._sig === sig) return;
+  el._sig = sig;
+  el.innerHTML = "";
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">no sessions — create one below</div>';
+  }
+  rows.forEach(r => {
+    const d = document.createElement("div");
+    d.className = "sessrow" + (r.id === curSession ? " cur" : "");
+    const main = document.createElement("button");
+    main.className = "sessmain";
+    main.innerHTML = '<span class="sdot' + (r.busy ? " busy" : "") + '"></span><b>' +
+      esc(r.title || r.id.slice(0, 8)) + '</b><span class="sinfo">' +
+      esc(baseName(r.cwd)) + (r.worktree ? " · ⎇ worktree" : "") +
+      " · $" + (r.cost_usd || 0).toFixed(4) + " · " + age(r.last_activity) + '</span>';
+    main.onclick = () => attach(r.id);
+    const arch = document.createElement("button");
+    arch.className = "sarch";
+    arch.textContent = "archive";
+    arch.onclick = () => {
+      if (!confirm("Archive this session? It stops running (history is kept).")) return;
+      fetch(BASE + "/api/sessions/" + encodeURIComponent(r.id) + "/archive", { method: "POST" })
+        .then(() => { if (r.id === curSession) detach(); pollSessions(); })
+        .catch(() => {});
+    };
+    d.appendChild(main); d.appendChild(arch);
+    el.appendChild(d);
+  });
+}
+
+function age(t) {
+  if (!t) return "";
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - t));
+  if (s < 60) return s + "s ago";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+function showSessions(v) {
+  $("sessions").hidden = !v;
+  $("transcript").hidden = v;
+  $("tasks").hidden = true;
+  $("agents").hidden = true;
+  if (v) pollSessions();
+}
+
+$("btnSessions").onclick = () => showSessions($("sessions").hidden);
+$("snew").onclick = () => { $("snewform").hidden = !$("snewform").hidden; };
+$("ncreate").onclick = () => {
+  $("nerr").hidden = true;
+  const body = {
+    cwd: $("ncwd").value.trim() || null,
+    worktree: $("nwt").checked,
+    title: $("ntitle").value.trim() || null,
+  };
+  $("ncreate").disabled = true;
+  fetch(BASE + "/api/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  })
+    .then(r => r.json().then(j => ({ ok: r.ok, j })))
+    .then(({ ok, j }) => {
+      if (!ok) { $("nerr").textContent = j.error || "create failed"; $("nerr").hidden = false; return; }
+      $("snewform").hidden = true;
+      $("ncwd").value = ""; $("ntitle").value = ""; $("nwt").checked = false;
+      attach(j.id);
+    })
+    .catch(e => { $("nerr").textContent = "create failed: " + e; $("nerr").hidden = false; })
+    .finally(() => { $("ncreate").disabled = false; });
+};
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 
 function render(s) {
@@ -61,6 +207,7 @@ function render(s) {
   $("cost").textContent = "$" + (s.cost_usd || 0).toFixed(4);
   $("temper").textContent = s.temper ? "◆ " + s.temper : "";
   $("sid").textContent = (s.session_id || "").slice(0, 8) || "—";
+  $("stitle").textContent = s.title ? "· " + s.title : "";
   $("cwd").textContent = baseName(s.cwd) || "—";
   $("expo").textContent = s.exposure || "—";
   $("expo").className = "badge" + ((s.exposure || "").indexOf("public") === 0 ? " pub" : "");
@@ -555,6 +702,7 @@ document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
   document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
   b.classList.add("on");
   const which = b.dataset.tab;
+  $("sessions").hidden = true;
   $("transcript").hidden = which !== "chat";
   $("tasks").hidden = which !== "tasks";
   $("agents").hidden = which !== "agents";
@@ -587,4 +735,4 @@ if ("serviceWorker" in navigator) {
 }
 
 $("prompt").focus();
-connect();
+boot();

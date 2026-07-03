@@ -355,6 +355,31 @@ pub(crate) enum Command {
         #[arg(long)]
         model: Option<String>,
     },
+    /// Run the headless multi-session daemon: host any number of concurrent sessions,
+    /// driveable from a phone/browser at a STABLE origin (fixed port + persisted token, so the
+    /// installed PWA survives forever). Sessions keep running when every client disconnects;
+    /// create/attach/archive them from the page. See docs/features/remote-control.md.
+    Serve {
+        /// Bind loopback only (control from this machine, plain HTTP).
+        #[arg(long, conflicts_with = "anywhere")]
+        local: bool,
+        /// Bind the LAN with self-signed HTTPS (this is the default; accepted for symmetry).
+        #[arg(long, conflicts_with_all = ["local", "anywhere"])]
+        lan: bool,
+        /// Bind loopback and open a public tunnel (cloudflared/ngrok) so any network reaches it.
+        #[arg(long)]
+        anywhere: bool,
+        /// Listen port. Defaults to `[remote] port` from config, else 7420. Keep it stable —
+        /// the PWA install is bound to the origin.
+        #[arg(long)]
+        port: Option<u16>,
+        /// Regenerate the persisted daemon token (revocation: every installed PWA/link dies).
+        #[arg(long)]
+        rotate_token: bool,
+        /// New sessions use the offline deterministic mock provider (testing).
+        #[arg(long)]
+        mock: bool,
+    },
     /// List past sessions (newest first).
     Sessions,
     /// Replay a past session from the record: one id prints its turn-by-turn transcript
