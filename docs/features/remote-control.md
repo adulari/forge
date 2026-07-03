@@ -10,9 +10,22 @@
 > live notifications, and a **PWA** (token-scoped manifest + service worker + icon) so it
 > adds to a phone home screen and runs standalone; a `◉ remote` statusline segment; a QR
 > code printed into the TUI scrollback. The wire is a versioned `Snapshot`/`RemoteInput`
-> protocol (`PROTOCOL_VERSION`); the page shows a "refresh to update" banner on a mismatch.
-> Auto-start is configurable (`[remote] auto`). The server reuses the running session's
-> presenter channel — no second process, no IPC, no keys to configure.
+> protocol (`PROTOCOL_VERSION`, currently **4**); the page shows a "refresh to update" banner
+> on a mismatch. Auto-start is configurable (`[remote] auto`). The server reuses the running
+> session's presenter channel — no second process, no IPC, no keys to configure.
+>
+> **v4 — full command + picker parity:** every slash command, picker, palette, and overlay is
+> now usable from the browser through ONE generic mechanism (§2a): `Snapshot.overlay` projects
+> whichever modal surface owns the TUI keyboard (the command palette, every `PickerKind` —
+> sessions/checkpoints/tempers/assay/models/model-pin/resume-mode/copy-blocks/**duel winner** —
+> the `@path` picker, the `/config` wizard, and the `/usage`/`/mesh`/workflow views as text
+> bodies), and `RemoteInput` gained a keystroke channel (`key`) plus overlay verbs
+> (`overlay_select`/`overlay_nav`/`overlay_filter`/`overlay_cancel`) that inject through the
+> **same key path local keystrokes take**. `/copy` now ships its payload in
+> `Snapshot.copy_text` so the phone can copy it to its own clipboard. The page assets are
+> split into separate token-scoped files (`remote_assets/`), which let the CSP drop
+> `'unsafe-inline'` entirely. `/keys` is host-only by design (a blocking fullscreen
+> configurator on the host terminal) — the remote gets an explanatory note.
 >
 > **Deferred:** image/file attachments from the phone, true push notifications while the app
 > is fully closed (live notifications fire while the page/PWA is open in the background), and
@@ -63,17 +76,57 @@ share one `mpsc`, several phones + a desktop can drive one session at once with 
 per-client state — disconnect/reconnect is transparent (the page auto-retries).
 
 **Browser → session:** the page sends `RemoteInput` JSON (`{kind:"prompt",text}`,
-`{kind:"allow",yes,seq}`, `{kind:"answer",text,seq}`, `{kind:"interrupt"}`) over the WS. A
+`{kind:"allow",yes,seq}`, `{kind:"answer",text,seq}`, `{kind:"interrupt"}`, plus the v4
+keystroke channel `{kind:"key",key}` and the overlay verbs — see §2a) over the WS. A
 prompt can be a plain task, a `/command`, or a `//`-escaped hook command — all routed through
 the *same* `dispatch_command` + prompt-hook + `spawn_turn` paths a local keystroke takes, so
-slash commands (`/plan`, `/compact`, `/diff`, `/model`, …), the busy guard, the permission
-gate, temper, and hooks all apply unchanged. Prompts sent while a turn is running are
-**queued** to run after it, exactly like local typing. `allow` answers a pending permission,
-`answer` resolves an `AskUserQuestion` (a tapped option button sends its 1-based index), and
-`interrupt` aborts the turn task. `allow`/`answer` must echo the `prompt_seq` their buttons
-were rendered from — a mismatch (the prompt changed under the tap) is ignored, so a stale
-answer can never resolve a newer prompt. A remote prompt is indistinguishable from a local
-one. Inbound frames over `MAX_INPUT_BYTES` (256 KiB) are dropped to bound a hostile client.
+slash commands (`/plan`, `/compact`, `/model`, `/mode`, `/help`, …), the busy guard, the
+permission gate, temper, and hooks all apply unchanged. Prompts sent while a turn is running
+are **queued** to run after it, exactly like local typing. `allow` answers a pending
+permission, `answer` resolves an `AskUserQuestion` (a tapped option button sends its 1-based
+index), and `interrupt` aborts the turn task. `allow`/`answer` must echo the `prompt_seq`
+their buttons were rendered from — a mismatch (the prompt changed under the tap) is ignored,
+so a stale answer can never resolve a newer prompt. A remote prompt is indistinguishable from
+a local one. Inbound frames over `MAX_INPUT_BYTES` (256 KiB) are dropped to bound a hostile
+client.
+
+## 2a. The generic overlay protocol (v4)
+
+Nearly every previously-unreachable command failed the same way: it opened a picker/palette/
+overlay that mutates TUI-only state (`app.picker`, `app.palette`, `app.config_editor`, …)
+which was neither serialized into `Snapshot` nor driveable from the browser. v4 fixes the
+CLASS, not the instances, with two halves:
+
+- **Projection — `Snapshot.overlay` (`SnapOverlay`).** `App::remote_overlay()` (beside
+  `remote_snapshot()`) projects whichever modal surface currently owns the keyboard, with the
+  same precedence the key loop uses: workflow view → `/config` editor → palette → `/usage` →
+  `/mesh` → `@path` picker → picker. The shape is
+  `{kind, title, rows: [{id,label,detail,selected,group}], selected, filter, free_text, body}`:
+  tappable `rows` for selectable surfaces, `filter` when the surface has a type-to-filter
+  query, `free_text` while it's collecting a value (a `/config` field edit), and a
+  pre-rendered text `body` for informational overlays (usage tables, the mesh routing
+  verdict, workflow narration). Every `PickerKind` maps to a stable `kind` tag via one
+  exhaustive `picker_kind_wire` match — **a future picker becomes remote-drivable by adding
+  exactly one arm** (forgetting it is a compile error).
+- **Drive — the keystroke channel.** `key` injects a named key (`Up | Down | Enter | Esc |
+  Tab | BTab | PageUp | PageDown | Home | End | Backspace | Char:<c>`) into the head of the
+  SAME input loop local keystrokes flow through, so a remotely-committed picker produces the
+  identical `DispatchOutcome` handling. The overlay verbs are sugar over it:
+  `overlay_select{id}` moves the server-side cursor onto that row then synthesizes Enter;
+  `overlay_nav{delta}` becomes repeated ↑/↓ (bounded); `overlay_filter{text}` replaces the
+  overlay's query (or the value being edited when `free_text`); `overlay_cancel` is Esc *only
+  while something modal is open* — it can never interrupt a turn or quit the host. Two safety
+  guards on raw keys: they are dropped (with a note) while a permission prompt/question is
+  pending — those must go through the seq-checked `allow`/`answer` — and a bare Esc with
+  nothing to close is ignored rather than quitting the host TUI.
+
+Riding the mechanism with zero special cases: `/duel`'s winner pick (the Duel picker rows are
+the candidates; a tap merges the winner exactly as a local Enter), `/model`/`/models` pin +
+browse (provider drill-in included), `/mode` tempers, `/sessions`/`/resume`, `/checkpoints`/
+`/undo`, `/assay`, `/copy`'s block picker, `/config`, `/help` (the palette itself), and
+`@path` file mentions. The one special case is `/copy`'s payload: Enter still copies on the
+host, AND the text ships in `Snapshot.copy_text` so the page can offer a "Copy here" button
+for the phone's own clipboard.
 
 **PWA + notifications:** alongside `/<token>` and `/<token>/ws`, the server serves a
 token-scoped `manifest.webmanifest`, `sw.js` (service worker), and `icon.svg`, so the page
@@ -132,9 +185,15 @@ determined adversary with a sniffer. Defenses:
   Its `http://` origin also breaks the PWA (no secure context → no service worker or
   notifications). Only cloudflared and ngrok (both HTTPS end-to-end) are probed.
 - **Hardened page headers.** The control page ships `X-Frame-Options: DENY`, a
-  same-origin `Content-Security-Policy` (inline script/style allowed until the asset split),
-  and `Referrer-Policy: no-referrer` so the token-bearing URL never leaks via the Referer
+  same-origin `Content-Security-Policy` with **no `'unsafe-inline'`** (the v4 asset split
+  moved all script/style into separate token-scoped files, and the page uses zero inline
+  handlers — an injected `<script>`/`onclick` can never execute), and
+  `Referrer-Policy: no-referrer` so the token-bearing URL never leaks via the Referer
   header.
+- **Keystrokes can't bypass the prompt gate.** Remote `key` inputs are dropped while a
+  permission prompt / question is pending (those must go through the seq-checked
+  `allow`/`answer`), and a bare Esc with nothing modal open is ignored instead of quitting
+  the host TUI.
 - **Frame-size cap.** Inbound WebSocket frames are capped (`MAX_INPUT_BYTES`) so a hostile
   or buggy client can't exhaust memory with a giant payload.
 - **`--anywhere` is loud.** Opening a public tunnel prints an explicit warning that anyone
@@ -165,13 +224,14 @@ forever. A stable origin that makes installs permanent is the Phase-4 daemon's j
 
 | Layer | Change |
 |---|---|
-| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION`, the mobile control page (tabs/panels/option taps/chips), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
+| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (4), `SnapOverlay`/`SnapRow` + `named_key`, PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
+| `forge-cli/src/remote_assets/` | The control page split into `page.html` / `app.js` / `styles.css` / `sw.js` (served via `include_str!` as token-scoped routes; enables the no-`unsafe-inline` CSP); the page's generic overlay renderer + copy-here button |
 | `forge-config/src/lib.rs` | `[remote]` block: `RemoteConfig` (`auto`, `host`) + `RemoteAuto` + `startup_exposure()` |
-| `forge-tui/src/app.rs` | `App.remote_active`, `question_prompt`, `recent_transcript` ring, `drain_flush_remote`, `remote_snapshot` (now incl. tasks/subagents/queued/question options), `print_lines`, statusline `◉ remote` segment |
+| `forge-tui/src/app.rs` | `App.remote_active`, `question_prompt`, `recent_transcript` ring, `drain_flush_remote`, `remote_snapshot` (tasks/subagents/queued/question options), `remote_overlay()` + `OverlaySnapshot`/`OverlayRowSnapshot` + `picker_kind_wire`, `print_lines`, statusline `◉ remote` segment |
 | `forge-tui/src/commands.rs` | `CommandAction::Remote { mode }`, `/remote` (alias `/rc`) parse + registry entry |
-| `forge-cli/src/cli/commands/run.rs` | `DispatchOutcome::ToggleRemote`, `toggle_remote`, `[remote] auto` startup, remote input draining + full-state snapshot broadcast in `run_chat_tui` |
+| `forge-cli/src/cli/commands/run.rs` | `DispatchOutcome::ToggleRemote`, `toggle_remote`, `[remote] auto` startup, remote input draining + full-state snapshot broadcast in `run_chat_tui`; v4: `next_input_event` (remote keys join the local key loop), `apply_overlay_input` + `RemoteOverlayOp`, `/keys` host-only note, `remote_copy_text` |
 | `Cargo.toml` | `axum` (ws), `axum-server` (rustls), `rcgen`, `tokio-tungstenite`, `qrcode`; `tokio` `net` feature |
-| `forge-cli/src/remote.rs` (tests) | snapshot wire-shape, manifest/base/SW/exposure-mapping units + the `--ignored` real-socket page + WS + PWA round-trip |
+| tests | snapshot wire-shape (v4 incl. overlay/copy_text), named-key table, overlay-verb units, per-`PickerKind` projection units, an e2e-style remote drive of the `/model` pin picker asserting the pin changed, manifest/base/SW/exposure-mapping units + the `--ignored` real-socket page + WS + PWA + asset round-trip |
 
 The stdin-prompt fix (`ef8a365`, feed CLI-bridge prompts via stdin to avoid `ARG_MAX`) is
 included on this branch — it's the prior commit this feature builds on.
