@@ -473,7 +473,16 @@ pub struct RemoteUrl {
 /// plus `POST /api/sessions/:id/archive` for session control. The in-chat single-session
 /// `/remote` server carries the same fields (empty title / no worktree) and no `/api/sessions`
 /// route — the page detects daemon mode by probing that route.
-pub const PROTOCOL_VERSION: u32 = 6;
+///
+/// v7: review cards + upload. `Snapshot` gained `diff` (the structured per-file diff card — a
+/// pending write permission's "what will this touch", or the changes that landed this turn;
+/// see [`SnapDiff`]) and `plan` (the `present_plan` proposal projected as a card; see
+/// [`SnapPlan`]). `RemoteInput` gained `Attach` (a host-stored upload riding the next prompt —
+/// the drain side of the new token-scoped `POST /<t>/api/upload` multipart route, images
+/// becoming vision input and text files `@path` mentions). `GET /api/sessions` rows gained the
+/// fleet fields (`waiting`/`context_tokens`/`context_limit`) and sort waiting-on-decision
+/// first. Voice input is page-side only (Web Speech API) — nothing of it on the wire.
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// How many broadcast snapshots the per-server [`EventLog`] retains for reconnect replay. One
 /// entry per *changed* frame covers minutes of activity; a client that was away longer gets a
@@ -576,6 +585,58 @@ pub struct SnapRow {
     pub group: Option<String>,
 }
 
+/// One `@@` hunk of a [`SnapDiffFile`]: the unified-diff header (`@@ -a,b +c,d @@`, old/new
+/// line spans) plus body lines, each prefixed `+`/`-`/` ` (the gutter is the first character —
+/// the page styles on it and renders the rest verbatim).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapDiffHunk {
+    pub header: String,
+    pub lines: Vec<String>,
+}
+
+/// One file of the remote diff card. `adds`/`dels` count the WHOLE change; `hunks` carry at
+/// most ~40 lines per file (`skipped_lines` says how many more exist — the full content stays
+/// host-side, in the TUI scrollback and the tool result).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapDiffFile {
+    pub path: String,
+    /// "created" | "modified" | "deleted".
+    pub kind: String,
+    /// Non-UTF-8 target — no textual hunks, the page shows a one-line summary.
+    pub binary: bool,
+    pub adds: usize,
+    pub dels: usize,
+    pub hunks: Vec<SnapDiffHunk>,
+    pub skipped_lines: usize,
+}
+
+/// The structured diff card (v7): while a write permission is pending, the ONE proposed change
+/// that Allow would apply (`pending: true` — "what will this touch"); otherwise every change
+/// that landed this turn (capped to 10 files, `skipped_files` counting evictions).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapDiff {
+    pub pending: bool,
+    pub files: Vec<SnapDiffFile>,
+    pub skipped_files: usize,
+}
+
+/// One step of a projected plan card.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapPlanStep {
+    pub title: String,
+    pub detail: String,
+}
+
+/// The `present_plan` proposal projected as a card (v7). While the turn-end approval question
+/// is pending (its options include "Build it"), the page renders Approve/Revise/Cancel buttons
+/// that answer THAT question — the identical path a local choice takes.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapPlan {
+    pub title: String,
+    pub steps: Vec<SnapPlanStep>,
+    pub notes: Option<String>,
+}
+
 /// The generic modal-overlay projection: whatever surface currently owns the TUI keyboard — the
 /// command palette, any picker kind, the `@path` picker, the `/config` wizard, or an
 /// informational overlay (`/usage`, `/mesh`, the workflow view) — rendered by the page as
@@ -655,6 +716,10 @@ pub struct Snapshot {
     /// The open modal overlay (palette / picker / config / usage / mesh / workflow), if any —
     /// see [`SnapOverlay`]. `None` when nothing modal is open.
     pub overlay: Option<SnapOverlay>,
+    /// The structured diff card (v7) — see [`SnapDiff`]. `None` when nothing changed.
+    pub diff: Option<SnapDiff>,
+    /// The most recent plan proposal (v7) — see [`SnapPlan`].
+    pub plan: Option<SnapPlan>,
     /// The most recent `/copy` payload, so the REMOTE device can put it on its own clipboard
     /// (the host's clipboard is useless from a phone). Cleared on the next prompt.
     pub copy_text: Option<String>,
@@ -704,6 +769,8 @@ impl Default for Snapshot {
             question_options: Vec::new(),
             question_allow_other: false,
             overlay: None,
+            diff: None,
+            plan: None,
             copy_text: None,
             prompt_seq: 0,
             notes: Vec::new(),
@@ -767,6 +834,12 @@ pub enum RemoteInput {
     /// Close the open overlay (Esc) — a no-op when nothing modal is open, so it can never
     /// interrupt a turn or quit the host by accident.
     OverlayCancel,
+    /// A file stored by `POST /<t>/api/upload` should ride the NEXT prompt: an image becomes
+    /// vision input (`Session::attach_images`), a text file an `@path` mention prepended to the
+    /// next prompt. The drain confines `path` to the session's `.forge/uploads/` scratch area —
+    /// this input exists only as the upload route's delivery leg, so an arbitrary host path
+    /// (e.g. a WS client probing for secret files) is refused with a note.
+    Attach { path: String, image: bool },
 }
 
 /// Map a wire key name to the TUI key it injects. The names are part of the v4 protocol:
@@ -979,6 +1052,10 @@ pub fn start(
         events: events.clone(),
         history,
         base: base.clone(),
+        // The in-chat session runs in the process cwd, so uploads scratch under it.
+        upload_root: std::env::current_dir()
+            .ok()
+            .map(|d| d.join(".forge").join("uploads")),
     });
 
     let app = Router::new()
@@ -992,6 +1069,14 @@ pub fn start(
         // Token-scoped like everything else; this server drives ONE session, so no session
         // parameter exists yet (the multi-session daemon is Phase 4).
         .route(&format!("{base}/api/history"), get(history_page))
+        // File/image upload (v7): multipart, stored under `<cwd>/.forge/uploads/<session>/`,
+        // delivered to the render loop as a `RemoteInput::Attach` riding the next prompt. The
+        // per-route body limit replaces axum's 2 MB default (with headroom for boundaries).
+        .route(
+            &format!("{base}/api/upload"),
+            axum::routing::post(upload_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
+        )
         // The page's script + stylesheet as separate token-scoped files, so the CSP needs no
         // 'unsafe-inline' anywhere.
         .route(&format!("{base}/app.js"), get(app_js))
@@ -1142,6 +1227,9 @@ struct ServerState {
     /// The token-gated base path (`/<token>`) — injected into the page + manifest so every URL
     /// (WS, PWA assets, start_url) is correct under a tunnel/LAN host without the page guessing.
     base: String,
+    /// Where `POST /api/upload` stores files: `<cwd>/.forge/uploads` (a per-session subdirectory
+    /// is created under it). `None` when the cwd is unknown — uploads then answer 503.
+    upload_root: Option<std::path::PathBuf>,
 }
 
 /// The `Content-Security-Policy` for the control page. Everything is same-origin — the script,
@@ -1269,6 +1357,184 @@ async fn history_page(
             (axum::http::header::CACHE_CONTROL, "no-store"),
         ],
         serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// File/image upload (v7)
+// ---------------------------------------------------------------------------
+
+/// Hard cap on ONE uploaded file. Phone photos compress well under this; anything larger has no
+/// business riding a chat prompt.
+pub(crate) const UPLOAD_MAX_BYTES: usize = 10 * 1024 * 1024;
+
+/// The request-body limit for the upload route: the file cap plus headroom for multipart
+/// boundaries/headers and a couple of small siblings (e.g. a screenshot + a note file).
+pub(crate) const UPLOAD_BODY_LIMIT: usize = UPLOAD_MAX_BYTES + 2 * 1024 * 1024;
+
+/// Flatten an untrusted upload filename to a single safe path component: the final component
+/// only (no traversal), characters outside `[A-Za-z0-9._-]` replaced with `_`, leading dots
+/// stripped (no hidden files, no `..` remnants), length-capped, never empty.
+pub(crate) fn sanitize_upload_name(name: &str) -> String {
+    let last = name.rsplit(['/', '\\']).next().unwrap_or_default().trim();
+    let mut clean: String = last
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .skip_while(|&c| c == '.')
+        .take(80)
+        .collect();
+    if clean.is_empty() || clean.chars().all(|c| c == '_' || c == '.') {
+        clean = "upload".to_string();
+    }
+    clean
+}
+
+/// Is this upload an image (→ vision input) by declared content type or file extension?
+pub(crate) fn upload_is_image(content_type: Option<&str>, name: &str) -> bool {
+    if content_type.is_some_and(|t| t.starts_with("image/")) {
+        return true;
+    }
+    let ext = name.rsplit('.').next().unwrap_or_default().to_lowercase();
+    matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp")
+}
+
+/// Store one uploaded file under `dir` (created as needed): size-capped, name sanitized and
+/// timestamp-prefixed (collision-free, ordered), and non-images required to be UTF-8 text —
+/// only images and text files have an injection path into a prompt, so anything else is
+/// refused at the door instead of parked on disk. Returns the stored path + whether it's an
+/// image; errors are human-readable and map onto 4xx responses.
+pub(crate) fn store_upload(
+    dir: &std::path::Path,
+    name: &str,
+    content_type: Option<&str>,
+    bytes: &[u8],
+) -> Result<(std::path::PathBuf, bool), String> {
+    if bytes.is_empty() {
+        return Err("empty file".to_string());
+    }
+    if bytes.len() > UPLOAD_MAX_BYTES {
+        return Err(format!(
+            "file too large ({} bytes > {} max)",
+            bytes.len(),
+            UPLOAD_MAX_BYTES
+        ));
+    }
+    let image = upload_is_image(content_type, name);
+    if !image && std::str::from_utf8(bytes).is_err() {
+        return Err("only images and UTF-8 text files can ride a prompt".to_string());
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("upload dir: {e}"))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("{ts}-{}", sanitize_upload_name(name)));
+    std::fs::write(&path, bytes).map_err(|e| format!("writing upload: {e}"))?;
+    Ok((path, image))
+}
+
+/// `POST /<token>/api/upload` — multipart file/image upload for the in-chat single-session
+/// server (the daemon has its own session-addressed twin in `serve.rs`). Each stored file is
+/// delivered to the render loop as [`RemoteInput::Attach`] and rides the next prompt.
+async fn upload_handler(
+    State(state): State<Arc<ServerState>>,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let Some(root) = state.upload_root.clone() else {
+        return upload_error(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "uploads are unavailable (no working directory)",
+        );
+    };
+    let sid = state.snapshot_rx.borrow().session_id.clone();
+    if sid.is_empty() {
+        return upload_error(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "session not ready yet — retry in a moment",
+        );
+    }
+    let dir = root.join(sanitize_upload_name(&sid));
+    let mut stored: Vec<serde_json::Value> = Vec::new();
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => {
+                return upload_error(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    &format!("malformed multipart body: {e}"),
+                );
+            }
+        };
+        let name = field.file_name().unwrap_or("upload").to_string();
+        let content_type = field.content_type().map(str::to_string);
+        let bytes = match field.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                // axum surfaces the body-limit overflow here.
+                return upload_error(
+                    axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                    &format!("upload failed: {e}"),
+                );
+            }
+        };
+        match store_upload(&dir, &name, content_type.as_deref(), &bytes) {
+            Ok((path, image)) => {
+                let path_str = path.display().to_string();
+                if state
+                    .input_tx
+                    .send(RemoteInput::Attach {
+                        path: path_str.clone(),
+                        image,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return upload_error(
+                        axum::http::StatusCode::CONFLICT,
+                        "remote control is shutting down",
+                    );
+                }
+                stored.push(serde_json::json!({
+                    "name": sanitize_upload_name(&name),
+                    "path": path_str,
+                    "image": image,
+                }));
+            }
+            Err(msg) => {
+                return upload_error(axum::http::StatusCode::UNPROCESSABLE_ENTITY, &msg);
+            }
+        }
+    }
+    if stored.is_empty() {
+        return upload_error(axum::http::StatusCode::BAD_REQUEST, "no files in the body");
+    }
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        serde_json::json!({ "files": stored }).to_string(),
+    )
+        .into_response()
+}
+
+/// A JSON error body for the upload route (shape shared with the daemon's handlers).
+fn upload_error(status: axum::http::StatusCode, msg: &str) -> Response {
+    (
+        status,
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        serde_json::json!({ "error": msg }).to_string(),
     )
         .into_response()
 }
@@ -1544,6 +1810,30 @@ mod tests {
                 free_text: false,
                 body: None,
             }),
+            diff: Some(SnapDiff {
+                pending: true,
+                files: vec![SnapDiffFile {
+                    path: "src/a.rs".into(),
+                    kind: "modified".into(),
+                    binary: false,
+                    adds: 3,
+                    dels: 1,
+                    hunks: vec![SnapDiffHunk {
+                        header: "@@ -1,2 +1,4 @@".into(),
+                        lines: vec![" ctx".into(), "-old".into(), "+new".into()],
+                    }],
+                    skipped_lines: 12,
+                }],
+                skipped_files: 2,
+            }),
+            plan: Some(SnapPlan {
+                title: "Ship it".into(),
+                steps: vec![SnapPlanStep {
+                    title: "step 1".into(),
+                    detail: "do the thing".into(),
+                }],
+                notes: Some("risky".into()),
+            }),
             copy_text: Some("fn main() {}".into()),
             prompt_seq: 7,
             notes: vec!["⚠ /remote can only be toggled from the TUI".into()],
@@ -1589,6 +1879,24 @@ mod tests {
         assert_eq!(v["overlay"]["filter"], "lla");
         assert_eq!(v["overlay"]["free_text"], false);
         assert_eq!(v["overlay"]["body"], serde_json::Value::Null);
+        // v7: the structured diff card + the plan card ride in the snapshot.
+        assert_eq!(v["diff"]["pending"], true);
+        assert_eq!(v["diff"]["files"][0]["path"], "src/a.rs");
+        assert_eq!(v["diff"]["files"][0]["kind"], "modified");
+        assert_eq!(v["diff"]["files"][0]["binary"], false);
+        assert_eq!(v["diff"]["files"][0]["adds"], 3);
+        assert_eq!(v["diff"]["files"][0]["dels"], 1);
+        assert_eq!(
+            v["diff"]["files"][0]["hunks"][0]["header"],
+            "@@ -1,2 +1,4 @@"
+        );
+        assert_eq!(v["diff"]["files"][0]["hunks"][0]["lines"][2], "+new");
+        assert_eq!(v["diff"]["files"][0]["skipped_lines"], 12);
+        assert_eq!(v["diff"]["skipped_files"], 2);
+        assert_eq!(v["plan"]["title"], "Ship it");
+        assert_eq!(v["plan"]["steps"][0]["title"], "step 1");
+        assert_eq!(v["plan"]["steps"][0]["detail"], "do the thing");
+        assert_eq!(v["plan"]["notes"], "risky");
         assert_eq!(v["copy_text"], "fn main() {}");
         assert_eq!(v["prompt_seq"], 7);
         assert_eq!(v["notes"][0], "⚠ /remote can only be toggled from the TUI");
@@ -1781,6 +2089,110 @@ mod tests {
         assert_eq!(named_key("Char:"), None);
         assert_eq!(named_key("Char:ab"), None, "exactly one char");
         assert_eq!(named_key(""), None);
+    }
+
+    #[test]
+    fn v7_attach_input_deserializes() {
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(
+                r#"{"kind":"attach","path":"/tmp/x/.forge/uploads/s1/1-shot.png","image":true}"#
+            )
+            .unwrap(),
+            RemoteInput::Attach {
+                path: "/tmp/x/.forge/uploads/s1/1-shot.png".into(),
+                image: true
+            }
+        );
+    }
+
+    #[test]
+    fn upload_names_are_flattened_to_one_safe_component() {
+        // Traversal: only the final component survives, and `..` can't survive as dots.
+        assert_eq!(sanitize_upload_name("../../etc/passwd"), "passwd");
+        assert_eq!(sanitize_upload_name(r"..\..\evil.txt"), "evil.txt");
+        assert_eq!(sanitize_upload_name("a/b/../c.txt"), "c.txt");
+        // Hidden files / bare dots never survive.
+        assert_eq!(sanitize_upload_name(".."), "upload");
+        assert_eq!(sanitize_upload_name(".env"), "env");
+        // Shell-hostile characters are flattened; sane names pass through.
+        assert_eq!(sanitize_upload_name("my file (1).png"), "my_file__1_.png");
+        assert_eq!(sanitize_upload_name("report-v2.md"), "report-v2.md");
+        // Degenerate inputs still yield a usable name, bounded in length.
+        assert_eq!(sanitize_upload_name(""), "upload");
+        assert_eq!(sanitize_upload_name("///"), "upload");
+        assert!(sanitize_upload_name(&"x".repeat(500)).len() <= 80);
+    }
+
+    #[test]
+    fn store_upload_enforces_caps_and_types() {
+        let dir = std::env::temp_dir().join(format!("forge-upload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // A text file stores under a timestamp-prefixed sanitized name, inside `dir`.
+        let (path, image) =
+            store_upload(&dir, "../notes file.txt", Some("text/plain"), b"hello").unwrap();
+        assert!(!image);
+        assert!(path.starts_with(&dir), "never escapes the upload dir");
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        assert!(
+            name.ends_with("-notes_file.txt"),
+            "sanitized + prefixed: {name}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+
+        // Images are detected by content type OR extension — bytes go through unvalidated
+        // (the vision provider is the judge of image bytes, not us).
+        let (_, image) = store_upload(&dir, "shot.png", None, &[0x89, 0x50, 0x4e]).unwrap();
+        assert!(image, "extension marks an image");
+        let (_, image) = store_upload(&dir, "blob", Some("image/jpeg"), &[0xff, 0xd8]).unwrap();
+        assert!(image, "content type marks an image");
+
+        // Non-image binary is refused: only images and UTF-8 text have an injection path.
+        assert!(store_upload(
+            &dir,
+            "prog.bin",
+            Some("application/octet-stream"),
+            &[0x00, 0xff]
+        )
+        .is_err());
+        // Empty and oversized files are refused.
+        assert!(store_upload(&dir, "empty.txt", None, b"").is_err());
+        let big = vec![b'a'; UPLOAD_MAX_BYTES + 1];
+        assert!(store_upload(&dir, "big.txt", None, &big).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn page_renders_the_v7_cards_and_input_extras() {
+        // The page must render the plan + diff cards, upload, voice, and the fleet signals.
+        for needle in [
+            "function renderPlan",
+            "function renderDiff",
+            "\"Build it\"", // Approve answers core's resolve_plan_approval option by label
+            r#"BASE + "/api/upload""#,
+            "SpeechRecognition", // voice input, hidden where unsupported
+            "clipboardData",     // paste-an-image support
+            "r.waiting",         // fleet dashboard: waiting-on-decision signal
+            "needs decision",
+            "s.diff",
+            "s.plan",
+        ] {
+            assert!(APP_JS.contains(needle), "app.js must contain {needle:?}");
+        }
+        for id in [
+            "planbox", "psteps", "pok", "previse", "pcancel", "diffbox", "dfiles", "attach", "mic",
+            "file", "upchips",
+        ] {
+            assert!(
+                CONTROL_PAGE.contains(&format!("id=\"{id}\"")),
+                "page has #{id}"
+            );
+        }
+        // The mic transcribes into the prompt box — it must never auto-send.
+        assert!(!APP_JS.contains("rec.onresult = (e) => { submit"));
+        // Diff/plan cards are DOM-built via textContent (transcript-grade untrusted content).
+        assert!(APP_JS.contains("hd.textContent = hk.header"));
     }
 
     #[test]

@@ -132,7 +132,9 @@ struct DaemonState {
     push: Option<Arc<crate::push::PushNotifier>>,
 }
 
-/// One row of `GET /api/sessions`.
+/// One row of `GET /api/sessions` — the fleet dashboard's data. `waiting` is the killer signal
+/// (a permission prompt or question is blocking the turn until a human decides); the list is
+/// served with waiting sessions FIRST so the dashboard surfaces them without client-side logic.
 #[derive(serde::Serialize)]
 struct SessionRow {
     id: String,
@@ -140,10 +142,26 @@ struct SessionRow {
     cwd: String,
     worktree: Option<String>,
     busy: bool,
+    /// A permission prompt or question is pending — the session is blocked on a human.
+    waiting: bool,
     cost_usd: f64,
+    /// Context-window fill (v7 fleet fields), same numbers the statusline gauge shows.
+    context_tokens: u64,
+    context_limit: Option<u32>,
     model: String,
     created_at: i64,
     last_activity: i64,
+}
+
+/// Fleet ordering: waiting-on-decision first (they need a human NOW), then newest-created.
+/// Created-at (not last-activity) as the tiebreak keeps the list stable while sessions stream.
+fn sort_session_rows(rows: &mut [SessionRow]) {
+    rows.sort_by_key(|r| {
+        (
+            std::cmp::Reverse(r.waiting),
+            std::cmp::Reverse(r.created_at),
+        )
+    });
 }
 
 /// Body of `POST /api/sessions`.
@@ -297,6 +315,15 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
             post(archive_session),
         )
         .route(&format!("{base}/api/history"), get(history_page))
+        // File/image upload (v7): multipart, session-addressed, stored under the session's
+        // `.forge/uploads/<id>/` and delivered to its driver as `RemoteInput::Attach`. The
+        // per-route body limit replaces axum's 2 MB default.
+        .route(
+            &format!("{base}/api/upload"),
+            post(upload).layer(axum::extract::DefaultBodyLimit::max(
+                remote::UPLOAD_BODY_LIMIT,
+            )),
+        )
         .route(&format!("{base}/api/push/key"), get(push_key))
         .route(&format!("{base}/api/push/subscribe"), post(push_subscribe))
         .route(
@@ -387,13 +414,16 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             cwd: h.cwd.clone(),
             worktree: h.worktree.clone(),
             busy: snap.busy,
+            waiting: snap.permission_prompt.is_some() || snap.question.is_some(),
             cost_usd: snap.cost_usd,
+            context_tokens: snap.context_tokens,
+            context_limit: snap.context_limit,
             model: snap.model,
             created_at: h.created_at,
             last_activity: h.last_activity.load(std::sync::atomic::Ordering::Relaxed),
         });
     }
-    rows.sort_by_key(|r| std::cmp::Reverse(r.created_at));
+    sort_session_rows(&mut rows);
     json_response(&rows)
 }
 
@@ -672,6 +702,87 @@ async fn answer(
         return err_response(axum::http::StatusCode::CONFLICT, "session is shutting down");
     }
     json_response(&serde_json::json!({ "ok": true }))
+}
+
+/// Query for `POST /api/upload` — which session the files belong to.
+#[derive(serde::Deserialize)]
+struct UploadParams {
+    #[serde(default)]
+    session: String,
+}
+
+/// `POST /api/upload?session=<id>` — multipart file/image upload (v7). Files are stored under
+/// the session's own scratch area (`<session cwd>/.forge/uploads/<id>/`, names sanitized —
+/// see [`remote::store_upload`]) and delivered to its driver as [`remote::RemoteInput::Attach`]:
+/// images become vision input on the next turn, text files an `@path` mention.
+async fn upload(
+    State(state): State<Arc<DaemonState>>,
+    Query(params): Query<UploadParams>,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let Some(handle) = state.registry.get(&params.session).await else {
+        return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
+    };
+    let dir = std::path::Path::new(&handle.cwd)
+        .join(".forge")
+        .join("uploads")
+        .join(remote::sanitize_upload_name(&handle.session_id));
+    let mut stored: Vec<serde_json::Value> = Vec::new();
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => {
+                return err_response(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    &format!("malformed multipart body: {e}"),
+                );
+            }
+        };
+        let name = field.file_name().unwrap_or("upload").to_string();
+        let content_type = field.content_type().map(str::to_string);
+        let bytes = match field.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                // axum surfaces the body-limit overflow here.
+                return err_response(
+                    axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                    &format!("upload failed: {e}"),
+                );
+            }
+        };
+        match remote::store_upload(&dir, &name, content_type.as_deref(), &bytes) {
+            Ok((path, image)) => {
+                let path_str = path.display().to_string();
+                if handle
+                    .input_tx
+                    .send(remote::RemoteInput::Attach {
+                        path: path_str.clone(),
+                        image,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return err_response(
+                        axum::http::StatusCode::CONFLICT,
+                        "session is shutting down",
+                    );
+                }
+                stored.push(serde_json::json!({
+                    "name": remote::sanitize_upload_name(&name),
+                    "path": path_str,
+                    "image": image,
+                }));
+            }
+            Err(msg) => {
+                return err_response(axum::http::StatusCode::UNPROCESSABLE_ENTITY, &msg);
+            }
+        }
+    }
+    if stored.is_empty() {
+        return err_response(axum::http::StatusCode::BAD_REQUEST, "no files in the body");
+    }
+    json_response(&serde_json::json!({ "files": stored }))
 }
 
 /// Query for `GET /api/history` — Phase 3's route plus the session address.
@@ -1384,6 +1495,290 @@ mod tests {
             Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
             None => std::env::remove_var("XDG_CONFIG_HOME"),
         }
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fleet_rows_sort_waiting_first_and_carry_the_v7_fields() {
+        let mk = |id: &str, waiting: bool, created_at: i64| SessionRow {
+            id: id.into(),
+            title: String::new(),
+            cwd: "/w".into(),
+            worktree: None,
+            busy: !waiting,
+            waiting,
+            cost_usd: 0.5,
+            context_tokens: 18_200,
+            context_limit: Some(200_000),
+            model: "m".into(),
+            created_at,
+            last_activity: created_at,
+        };
+        let mut rows = vec![
+            mk("new-idle", false, 30),
+            mk("old-wait", true, 10),
+            mk("mid", false, 20),
+        ];
+        sort_session_rows(&mut rows);
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["old-wait", "new-idle", "mid"],
+            "waiting-on-decision beats recency; the rest stay newest-first"
+        );
+        // The wire shape carries the fleet fields the dashboard reads.
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&rows[0]).unwrap()).unwrap();
+        assert_eq!(v["waiting"], true);
+        assert_eq!(v["context_tokens"], 18_200);
+        assert_eq!(v["context_limit"], 200_000);
+        assert_eq!(v["cost_usd"], 0.5);
+        assert_eq!(v["last_activity"], 10);
+    }
+
+    /// The whole upload promise over a REAL driver + the REAL router: a multipart POST with a
+    /// hostile filename lands sanitized inside the session's `.forge/uploads/<id>/` scratch
+    /// area, the driver attaches it, and the NEXT prompt carries the file's content (`@path`
+    /// expansion) — plus an image upload arming vision input, and the reject paths (unknown
+    /// session, non-UTF-8 non-image).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upload_stores_sanitized_and_rides_the_next_prompt() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("forge-serve-upload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("upload-test.db"));
+
+        let registry = Arc::new(SessionRegistry::new());
+        let handle = registry
+            .insert(
+                spawn_session_driver(DriverSpec {
+                    cwd: dir.display().to_string(),
+                    worktree: None,
+                    title: "upload-e2e".into(),
+                    mock: true,
+                    model: None,
+                    resume: None,
+                    push: None,
+                })
+                .await
+                .unwrap(),
+            )
+            .await;
+        let state = Arc::new(DaemonState {
+            registry: registry.clone(),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            push: None,
+        });
+        let router = daemon_router(state);
+        let multipart = |session: &str, filename: &str, ctype: &str, body: &[u8]| {
+            let b = "XFORGEBOUNDARY";
+            let mut payload = format!(
+                "--{b}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+                 Content-Type: {ctype}\r\n\r\n"
+            )
+            .into_bytes();
+            payload.extend_from_slice(body);
+            payload.extend_from_slice(format!("\r\n--{b}--\r\n").as_bytes());
+            axum::http::Request::post(format!("/tok/api/upload?session={session}"))
+                .header("content-type", format!("multipart/form-data; boundary={b}"))
+                .body(axum::body::Body::from(payload))
+                .unwrap()
+        };
+
+        // Unknown session → 404 (session-scoped like every other route).
+        let resp = router
+            .clone()
+            .oneshot(multipart("ghost", "a.txt", "text/plain", b"x"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+
+        // A traversal-shaped filename stores FLATTENED inside the session's upload dir.
+        let resp = router
+            .clone()
+            .oneshot(multipart(
+                &handle.session_id,
+                "../../escape attempt.txt",
+                "text/plain",
+                b"upload-marker-content",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let stored = std::path::PathBuf::from(v["files"][0]["path"].as_str().unwrap());
+        let updir = dir
+            .join(".forge")
+            .join("uploads")
+            .join(remote::sanitize_upload_name(&handle.session_id));
+        assert!(
+            stored.starts_with(&updir),
+            "stored inside the session scratch area: {stored:?}"
+        );
+        assert!(stored
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with("-escape_attempt.txt"));
+        assert_eq!(v["files"][0]["image"], false);
+        assert_eq!(
+            std::fs::read(&stored).unwrap(),
+            b"upload-marker-content",
+            "content stored verbatim"
+        );
+
+        // …and an image upload alongside it (fake bytes are fine: images aren't UTF-8-gated).
+        let resp = router
+            .clone()
+            .oneshot(multipart(
+                &handle.session_id,
+                "shot.png",
+                "image/png",
+                &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        // The driver noted both attaches (📎 text mention + 🖼 vision input).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let s = handle.snapshot_rx.borrow().clone();
+            let t = s.transcript.join("\n");
+            if t.contains("📎 attached") && t.contains("🖼 image attached") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "attach notes never appeared; transcript: {t}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+
+        // The NEXT prompt rides with the text file @-mentioned — its content reaches the turn.
+        handle
+            .input_tx
+            .send(remote::RemoteInput::Prompt {
+                text: "use the attached notes".into(),
+            })
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let s = handle.snapshot_rx.borrow().clone();
+            let t = s.transcript.join("\n");
+            if !s.busy && t.contains("📎 included") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the uploaded file was never included; transcript: {t}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+
+        // Reject path: a non-image, non-UTF-8 body has no injection path → 422.
+        let resp = router
+            .clone()
+            .oneshot(multipart(
+                &handle.session_id,
+                "prog.bin",
+                "application/octet-stream",
+                &[0x00, 0xff, 0xfe],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+
+        handle.shutdown();
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The plan card end to end over a REAL driver (mock provider): `/plan` → the snapshot
+    /// carries `plan` + the approval question whose option 1 is "Build it" — and a remote
+    /// Answer("1") (exactly what the page's Approve button sends) approves it, switching the
+    /// temper and running the build turn, identical to a local choice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn plan_card_projects_and_remote_approve_builds() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("forge-serve-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("plan-test.db"));
+
+        let handle = spawn_session_driver(DriverSpec {
+            cwd: dir.display().to_string(),
+            worktree: None,
+            title: "plan-e2e".into(),
+            mock: true,
+            model: None,
+            resume: None,
+            push: None,
+        })
+        .await
+        .unwrap();
+        handle
+            .input_tx
+            .send(remote::RemoteInput::Prompt {
+                text: "/plan mock:plan the feature".into(),
+            })
+            .await
+            .unwrap();
+
+        // The proposal lands in the snapshot together with its approval question.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let pending = loop {
+            let s = handle.snapshot_rx.borrow().clone();
+            if s.plan.is_some() && s.question.is_some() {
+                break s;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "plan card + approval question never appeared; snapshot: {s:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        };
+        let plan = pending.plan.as_ref().unwrap();
+        assert!(!plan.title.is_empty());
+        assert!(!plan.steps.is_empty(), "steps rode the wire: {plan:?}");
+        assert_eq!(
+            pending.question_options.first().map(|o| o.label.as_str()),
+            Some("Build it"),
+            "the page's Approve button answers THIS option by number"
+        );
+
+        // Approve exactly like the page does: Answer("1") with the current seq.
+        handle
+            .input_tx
+            .send(remote::RemoteInput::Answer {
+                text: "1".into(),
+                seq: pending.prompt_seq,
+            })
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let s = handle.snapshot_rx.borrow().clone();
+            let t = s.transcript.join("\n");
+            if !s.busy && t.contains("plan approved — building in Auto-edit") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "approval never built; transcript: {t}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+
+        handle.shutdown();
         std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
     }

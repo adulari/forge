@@ -178,6 +178,81 @@ pub fn diff_to_lines(diff: &FileDiff) -> Vec<Line<'static>> {
     out
 }
 
+/// Cap on hunk lines carried per file in the remote diff projection ([`diff_file_snapshot`]).
+/// A phone card previews the change; anything beyond shows as "+N more lines" and the full
+/// content stays host-side (the TUI renders up to [`MAX_DIFF_LINES`]).
+pub const REMOTE_DIFF_MAX_HUNK_LINES: usize = 40;
+
+/// Project one [`FileDiff`] into the plain-data shape the remote snapshot carries — the SAME
+/// `similar`-computed hunks `diff_to_lines` renders locally (grouped ops, 3 context lines),
+/// minus the styling: hunk headers keep the `@@ -a,b +c,d @@` old/new line spans, body lines
+/// keep their `+`/`-`/` ` gutter as the first character. `adds`/`dels` count the WHOLE change
+/// (not just the carried lines); lines beyond `max_lines` are dropped into `skipped_lines` so
+/// the page can say "+N more".
+pub fn diff_file_snapshot(diff: &FileDiff, max_lines: usize) -> crate::DiffFileSnapshot {
+    let kind = match diff.kind {
+        DiffKind::Created => "created",
+        DiffKind::Modified => "modified",
+        DiffKind::Deleted => "deleted",
+    };
+    let mut snap = crate::DiffFileSnapshot {
+        path: diff.path.clone(),
+        kind: kind.to_string(),
+        binary: diff.binary,
+        adds: 0,
+        dels: 0,
+        hunks: Vec::new(),
+        skipped_lines: 0,
+    };
+    if diff.binary {
+        return snap;
+    }
+    let td = TextDiff::from_lines(
+        diff.old.as_deref().unwrap_or(""),
+        diff.new.as_deref().unwrap_or(""),
+    );
+    let mut emitted = 0usize;
+    for group in td.grouped_ops(3) {
+        let (Some(first), Some(last)) = (group.first(), group.last()) else {
+            continue;
+        };
+        let os = first.old_range().start;
+        let oe = last.old_range().end;
+        let ns = first.new_range().start;
+        let ne = last.new_range().end;
+        let mut lines: Vec<String> = Vec::new();
+        for op in &group {
+            for change in td.iter_changes(op) {
+                let sym = match change.tag() {
+                    ChangeTag::Delete => {
+                        snap.dels += 1;
+                        '-'
+                    }
+                    ChangeTag::Insert => {
+                        snap.adds += 1;
+                        '+'
+                    }
+                    ChangeTag::Equal => ' ',
+                };
+                if emitted < max_lines {
+                    let text = change.value().trim_end_matches('\n');
+                    lines.push(format!("{sym}{text}"));
+                    emitted += 1;
+                } else {
+                    snap.skipped_lines += 1;
+                }
+            }
+        }
+        if !lines.is_empty() {
+            snap.hunks.push(crate::DiffHunkSnapshot {
+                header: format!("@@ -{},{} +{},{} @@", os + 1, oe - os, ns + 1, ne - ns),
+                lines,
+            });
+        }
+    }
+    snap
+}
+
 /// Plain unified-diff text (no ANSI) for the headless/piped path.
 pub fn diff_to_plain(diff: &FileDiff) -> String {
     let mut s = format!("{}\n", diff_header(diff).trim_start());

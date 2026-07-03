@@ -10,7 +10,7 @@
 > live notifications, and a **PWA** (token-scoped manifest + service worker + icon) so it
 > adds to a phone home screen and runs standalone; a `◉ remote` statusline segment; a QR
 > code printed into the TUI scrollback. The wire is a versioned `Snapshot`/`RemoteInput`
-> protocol (`PROTOCOL_VERSION`, currently **5**); the page shows a "refresh to update" banner
+> protocol (`PROTOCOL_VERSION`, currently **7**); the page shows a "refresh to update" banner
 > on a mismatch. Auto-start is configurable (`[remote] auto`). The server reuses the running
 > session's presenter channel — no second process, no IPC, no keys to configure.
 >
@@ -36,9 +36,25 @@
 > scrollback (the live snapshot transcript stays a short tail). The page renders markdown with
 > a self-contained, CSP-safe syntax highlighter and tap-to-copy fenced blocks.
 >
-> **Deferred:** image/file attachments from the phone, true push notifications while the app
-> is fully closed (live notifications fire while the page/PWA is open in the background), and
-> in-page session switching (one server drives the session that started it).
+> **v7 — fleet dashboard + review cards + upload + voice (Phase 6, the endgame):** the
+> daemon's session list is a real **fleet dashboard** (`GET /api/sessions` grew
+> `waiting`/`context_tokens`/`context_limit`; sessions **waiting on a decision** sort first
+> and pulse red); `Snapshot.diff` is a **structured diff card** (per-file `@@` hunks with
+> old/new line spans, capped with "+N more" markers) shown as "what will this touch" on a
+> write permission prompt and as the landed latest-turn diff after; `Snapshot.plan` projects
+> the `present_plan` proposal as a **plan-approval card** whose Approve/Revise/Cancel buttons
+> answer the same seq-checked question a local choice does; `POST /<t>/api/upload` accepts
+> **multipart file/image uploads** (10 MB cap, names sanitized, stored under the session's
+> `.forge/uploads/`) that ride the next prompt — images as vision input, text files as
+> `@path` mentions — with an attach button + paste-an-image support in the input bar; and a
+> **voice input** mic button (Web Speech API, transcribe-never-send, hidden where
+> unsupported). See §2e.
+>
+> **Deferred (what actually remains):** a `forge attach <id>` thin TUI client (drive a
+> daemon session from another terminal), an end-to-end-encrypted tunnel channel (today a
+> tunnel provider terminates TLS and could observe traffic; E2E would blind it), cross-host
+> session handoff/teleport, and native mobile apps (Watch/Live Activities included) — the
+> installed PWA is deliberately the only client.
 
 > A new control surface layered onto the existing `run_chat_tui` loop. It adds *how a user
 > can drive a session* (a browser anywhere on the LAN, or loopback for a single machine) and
@@ -392,17 +408,71 @@ automated suite, which proves encryption/VAPID/triggers/debounce against a local
 endpoint): real vendor-endpoint delivery on a physical device (FCM/Mozilla/APNs behavior,
 OS-level notification display, action buttons on each platform's lock screen).
 
+## 2e. Fleet dashboard + review cards + upload + voice (Phase 6, v7)
+
+The final phase makes the phone a *decision surface*, not just a viewer.
+
+**Fleet dashboard.** `GET /api/sessions` rows grew `waiting` (a permission prompt or
+question is blocking the turn — read straight off each driver's live snapshot),
+`context_tokens`, and `context_limit`. The server sorts **waiting sessions first** (then
+newest-created, a stable tiebreak that doesn't reshuffle while sessions stream), so the
+dashboard's top row is always the session that needs a human NOW — red pulsing dot + a
+"needs decision" badge, alongside the busy/idle dot, title, cwd tail, ⎇ worktree badge,
+cost, token gauge, and last-activity age. Tap to attach. The page's existing 5-second list
+poll carries it; no extra protocol.
+
+**Structured diff card (`Snapshot.diff`).** Reuses exactly what the TUI already computes:
+the write-tool `preview()` `FileDiff` emitted as `PresenterEvent::Diff` *before* the
+permission gate, hunked by the same `similar` grouped-ops(3) pass `diff_to_lines` renders
+(`render::diff_file_snapshot` — no second diff implementation). The `App` keeps the preview
+as `pending_diff` until the tool's `ToolResult` resolves it: ok → it *landed* and joins the
+turn's `turn_diffs` (latest edit per path, capped at 10 files), failed/denied → dropped (the
+file was never touched). Projection: while a permission prompt is armed and a preview is
+pending, the card is that ONE proposed change flagged `pending` ("what will this touch" —
+rendered above the Allow/Deny buttons); otherwise it's the landed latest-turn diff. Payload
+caps: ~40 hunk lines/file + 10 files, with "+N more lines/files" markers; `adds`/`dels`
+always count the whole change. Cleared when the next user prompt starts a new turn.
+
+**Plan-approval card (`Snapshot.plan`).** `present_plan`'s `PlanProposal` (title, steps
+with details, notes) is retained on the `App` and projected every frame — the TUI's
+scrollback card is unreachable from a phone. Approval stays *exactly* the local path:
+core's turn-end `resolve_plan_approval` asks a question with options `Build it` / `Cancel`
+(+ free text = revise), and the page's **Approve & build** button answers that question by
+option number over the seq-checked `Answer` input; **Revise** opens a prefilled free-text
+box whose submission is the same free-text revision answer; **Cancel** answers the Cancel
+option. No new approval mechanism, no drift from `/execute` — one code path, verified e2e
+(mock `/plan` → card → remote `Answer("1")` → "plan approved — building in Auto-edit").
+
+**File/image upload (`POST /<t>/api/upload`).** Multipart (axum's `multipart` feature),
+token-scoped, session-addressed under the daemon (`?session=<id>`) and available on the
+in-chat server too. Files are size-capped (10 MB), filenames flattened to one sanitized,
+timestamp-prefixed component (traversal-proof — unit + route tested with hostile names),
+and stored under the session's own scratch area `<cwd>/.forge/uploads/<session>/`. Non-image
+non-UTF-8 bodies are refused (422): only images and text have an injection path. Delivery is
+a new `RemoteInput::Attach {path, image}` the drains handle: **images** → `Session::
+attach_images` (vision input on the next turn, the `/image` path's final leg), **text
+files** → an `@path` mention prepended to the next prompt (expanded by the same
+`expand_at_files` a typed mention uses — the remote prompt path now runs it too, closing a
+v4 parity gap). The drain *confines* `Attach` paths to the canonical uploads dir, so a WS
+client can't use it to read arbitrary host files. The page grows a 📎 attach button,
+paste-an-image support in the prompt box, and upload chips showing each file's state.
+
+**Voice input.** A 🎤 button in the input bar (Web Speech API): tap, speak, and the
+transcript lands **in the prompt box** — never auto-sent. Hidden where `SpeechRecognition`
+is unavailable. Zero dependencies, zero wire surface, CSP-safe (recognition runs in the
+browser engine, not against our origin).
+
 ## 4. Surfaces touched
 
 | Layer | Change |
 |---|---|
-| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (5), `SnapOverlay`/`SnapRow` + `named_key`, v5 `EventLog` + `?rev=` replay + `Snapshot.resync`, `GET /api/history` (`HistoryRow`/`HistoryProvider` seam), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
-| `forge-cli/src/remote_assets/` | The control page split into `page.html` / `app.js` / `styles.css` / `sw.js` (served via `include_str!` as token-scoped routes; enables the no-`unsafe-inline` CSP); the page's generic overlay renderer + copy-here button; v5: `?rev=` reconnect + sessionStorage revision + replay dedup, scroll-up history pagination (`#hist` above the live `#tail`), markdown renderer + syntax highlighter + fenced-block copy buttons |
+| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (7), `SnapOverlay`/`SnapRow` + `named_key`, v5 `EventLog` + `?rev=` replay + `Snapshot.resync`, `GET /api/history` (`HistoryRow`/`HistoryProvider` seam), v7 `SnapDiff`/`SnapPlan` + `RemoteInput::Attach` + `POST /api/upload` (`store_upload`/`sanitize_upload_name`, 10 MB cap), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
+| `forge-cli/src/remote_assets/` | The control page split into `page.html` / `app.js` / `styles.css` / `sw.js` (served via `include_str!` as token-scoped routes; enables the no-`unsafe-inline` CSP); the page's generic overlay renderer + copy-here button; v5: `?rev=` reconnect + sessionStorage revision + replay dedup, scroll-up history pagination (`#hist` above the live `#tail`), markdown renderer + syntax highlighter + fenced-block copy buttons; v7: fleet dashboard (waiting-first list, needs-decision badge, token gauge), plan + diff cards, 📎 upload button + paste-an-image + chips, 🎤 voice input |
 | `forge-config/src/lib.rs` | `[remote]` block: `RemoteConfig` (`auto`, `host`) + `RemoteAuto` + `startup_exposure()` |
 | `forge-store/src/lib.rs` | v5: `Store::load_history_page` + `HistoryRow` (user-facing transcript pages, newest first, `before`/`limit` windowed); Phase 5: `PushSubscription` + `upsert/delete/list_push_subscriptions` (endpoint-deduped) |
 | `forge-cli/src/push.rs` | Phase 5: VAPID keypair (persist 0600, ES256 JWTs), RFC 8291 `aes128gcm` encryption (verified against the §5 test vector), `PushNotifier` (fire-and-forget delivery, 404/410 pruning), pure `detect_trigger`/`should_push` decision fns |
-| `forge-cli/src/serve.rs` | Phase 5: `/api/push/key\|subscribe\|unsubscribe`, `/api/answer` (seq-validated HTTP answer), per-session WS client counting (the push debounce signal) |
-| `forge-tui/src/app.rs` | `App.remote_active`, `question_prompt`, `recent_transcript` ring, `drain_flush_remote`, `remote_snapshot` (tasks/subagents/queued/question options), `remote_overlay()` + `OverlaySnapshot`/`OverlayRowSnapshot` + `picker_kind_wire`, `print_lines`, statusline `◉ remote` segment |
+| `forge-cli/src/serve.rs` | Phase 5: `/api/push/key\|subscribe\|unsubscribe`, `/api/answer` (seq-validated HTTP answer), per-session WS client counting (the push debounce signal); v7: `SessionRow.waiting/context_tokens/context_limit` + waiting-first `sort_session_rows`, session-addressed `POST /api/upload` |
+| `forge-tui/src/app.rs` | `App.remote_active`, `question_prompt`, `recent_transcript` ring, `drain_flush_remote`, `remote_snapshot` (tasks/subagents/queued/question options), `remote_overlay()` + `OverlaySnapshot`/`OverlayRowSnapshot` + `picker_kind_wire`, `print_lines`, statusline `◉ remote` segment; v7: `pending_diff`/`turn_diffs` lifecycle (Diff → ToolResult), retained `plan`, `DiffSnapshot` types + `render::diff_file_snapshot` |
 | `forge-tui/src/commands.rs` | `CommandAction::Remote { mode }`, `/remote` (alias `/rc`) parse + registry entry |
 | `forge-cli/src/cli/commands/run.rs` | `DispatchOutcome::ToggleRemote`, `toggle_remote`, `[remote] auto` startup, remote input draining + full-state snapshot broadcast in `run_chat_tui`; v4: `next_input_event` (remote keys join the local key loop), `apply_overlay_input` + `RemoteOverlayOp`, `/keys` host-only note, `remote_copy_text`; v5: `RemoteControl::broadcast` (frame → event log + watch), the `HistoryProvider` closure over the session's store |
 | `Cargo.toml` | `axum` (ws), `axum-server` (rustls), `rcgen`, `tokio-tungstenite`, `qrcode`; `tokio` `net` feature |

@@ -408,6 +408,21 @@ pub struct App {
     /// Images resolved from the last submitted prompt, stashed so the user-turn echo can show a
     /// marker line per image (the placeholder was stripped from the text). Cleared by `submit_user`.
     last_submit_images: Vec<forge_types::ImageAttachment>,
+    /// The write-tool preview diff awaiting its tool's outcome. `PresenterEvent::Diff` is emitted
+    /// BEFORE the permission gate, so while `prompt` is armed this is exactly "what the pending
+    /// Allow would touch" — the remote diff card. The following `ToolResult` resolves it: ok →
+    /// moves into [`Self::turn_diffs`] (the change landed), failed/denied → dropped.
+    pending_diff: Option<DiffFileSnapshot>,
+    /// Capped projections of the file changes that actually LANDED this turn (latest edit per
+    /// path, at most [`REMOTE_DIFF_MAX_FILES`] files — older ones fold into
+    /// [`Self::turn_diffs_skipped`]). Cleared by `submit_user` (a new prompt starts a new turn).
+    turn_diffs: Vec<DiffFileSnapshot>,
+    /// How many landed file diffs were evicted over the [`REMOTE_DIFF_MAX_FILES`] cap this turn.
+    turn_diffs_skipped: usize,
+    /// The most recent plan proposal (`present_plan`), retained for the remote plan card — the
+    /// TUI renders its card straight into scrollback, but the phone needs it as live state.
+    /// Replaced by a newer proposal; cleared by `submit_user`.
+    pub plan: Option<forge_types::PlanProposal>,
     /// True when the terminal window has lost focus (FocusLost). Inverted sense so the derived
     /// `Default` (false) means *focused* — terminals don't always emit an initial FocusGained.
     /// Drives a hollow/dim input cursor while another window is in front.
@@ -561,7 +576,44 @@ impl App {
             question: self.question_prompt.clone(),
             question_options,
             question_allow_other,
+            diff: self.remote_diff(),
+            plan: self.plan.clone(),
         }
+    }
+
+    /// The remote diff card (v7). While a permission prompt is armed and a write preview is
+    /// pending, the card is that ONE proposed change (`pending: true` — review before Allow);
+    /// otherwise it's everything that landed this turn. `None` when there's nothing to show.
+    fn remote_diff(&self) -> Option<DiffSnapshot> {
+        if self.prompt.is_some() {
+            if let Some(d) = &self.pending_diff {
+                return Some(DiffSnapshot {
+                    pending: true,
+                    files: vec![d.clone()],
+                    skipped_files: 0,
+                });
+            }
+        }
+        if self.turn_diffs.is_empty() {
+            return None;
+        }
+        Some(DiffSnapshot {
+            pending: false,
+            files: self.turn_diffs.clone(),
+            skipped_files: self.turn_diffs_skipped,
+        })
+    }
+
+    /// Record a landed file change for the remote diff card: latest edit per path wins, and the
+    /// file list stays bounded ([`REMOTE_DIFF_MAX_FILES`]) — evictions fold into the "+N more
+    /// files" count instead of disappearing silently.
+    fn push_turn_diff(&mut self, d: DiffFileSnapshot) {
+        self.turn_diffs.retain(|e| e.path != d.path);
+        while self.turn_diffs.len() >= REMOTE_DIFF_MAX_FILES {
+            self.turn_diffs.remove(0);
+            self.turn_diffs_skipped += 1;
+        }
+        self.turn_diffs.push(d);
     }
 }
 
@@ -958,6 +1010,43 @@ impl App {
     }
 }
 
+/// How many landed file diffs a turn retains for the remote diff card. Older files are evicted
+/// into a "+N more files" count; the full history is always in the TUI scrollback + tool results.
+pub const REMOTE_DIFF_MAX_FILES: usize = 10;
+
+/// One `@@` hunk of a remotely-projected file diff: the unified-diff header (old/new line spans)
+/// plus its body lines, each prefixed `+` / `-` / ` ` (gutter as the first character).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DiffHunkSnapshot {
+    pub header: String,
+    pub lines: Vec<String>,
+}
+
+/// One file's change, projected for the remote wire (see `render::diff_file_snapshot`): full
+/// add/del counts, capped hunks, and how many hunk lines were dropped over the cap.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DiffFileSnapshot {
+    pub path: String,
+    /// "created" | "modified" | "deleted".
+    pub kind: String,
+    /// Non-UTF-8 target: no textual hunks, the page shows a one-line "binary file" summary.
+    pub binary: bool,
+    pub adds: usize,
+    pub dels: usize,
+    pub hunks: Vec<DiffHunkSnapshot>,
+    pub skipped_lines: usize,
+}
+
+/// The remote diff card: either the ONE proposed change a pending write permission would apply
+/// (`pending: true` — "what will this touch" before Allow), or every change that landed this
+/// turn (`pending: false`, capped to [`REMOTE_DIFF_MAX_FILES`] files).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DiffSnapshot {
+    pub pending: bool,
+    pub files: Vec<DiffFileSnapshot>,
+    pub skipped_files: usize,
+}
+
 /// A plain-data view of the live state, produced by [`App::remote_snapshot`] and mapped into the
 /// `remote::Snapshot` JSON by the render loop. Defined here (in forge-tui) so the pure render
 /// crate owns the projection without depending on the server module.
@@ -980,6 +1069,10 @@ pub struct RemoteSnapshot {
     pub question: Option<String>,
     pub question_options: Vec<crate::QChoice>,
     pub question_allow_other: bool,
+    /// The structured diff card (v7) — see [`DiffSnapshot`]. `None` when nothing changed.
+    pub diff: Option<DiffSnapshot>,
+    /// The most recent plan proposal (v7), for the remote plan-approval card.
+    pub plan: Option<forge_types::PlanProposal>,
 }
 
 /// One subagent's live row in the TUI.
@@ -1460,6 +1553,15 @@ impl App {
                     .push(tool_start_line(&name, &args, self.last_width.get()))
             }
             PresenterEvent::ToolResult { name, ok, summary } => {
+                // Resolve a pending write preview: the preview's tool ran to completion (the
+                // write path is synchronous between its Diff and its ToolResult), so ok means
+                // the change LANDED — promote it to the turn's diff card. A failed or denied
+                // write never touched the file: drop the preview.
+                if let Some(d) = self.pending_diff.take() {
+                    if ok {
+                        self.push_turn_diff(d);
+                    }
+                }
                 self.flush
                     .push(tool_result_line(&name, ok, &summary, self.last_width.get()))
             }
@@ -1652,6 +1754,13 @@ impl App {
                 }
             }
             PresenterEvent::Diff(diff) => {
+                // Stash the capped projection for the remote diff card (the diff arrives BEFORE
+                // the permission gate, so while `prompt` is armed this is exactly what a remote
+                // Allow would apply); the following ToolResult promotes or drops it.
+                self.pending_diff = Some(crate::render::diff_file_snapshot(
+                    &diff,
+                    crate::render::REMOTE_DIFF_MAX_HUNK_LINES,
+                ));
                 self.flush.extend(crate::render::diff_to_lines(&diff));
                 self.flush.push(TextLine::default());
             }
@@ -1739,6 +1848,9 @@ impl App {
             }
             PresenterEvent::PlanProposed(plan) => {
                 self.flush.extend(plan_card_lines(&plan));
+                // Retained as live state for the remote plan card (the scrollback card above is
+                // unreachable from a phone); the approve/revise question follows at turn end.
+                self.plan = Some(plan);
             }
             PresenterEvent::Temper(label) => self.temper = label,
             PresenterEvent::Effort(effort) => self.effort = effort,
@@ -2280,6 +2392,12 @@ impl App {
     /// (stashed by `resolve_paste_blocks`) are shown as a marker line each, so the conversation
     /// history reflects that an image was sent (terminals can't render the pixels inline here).
     pub fn submit_user(&mut self, line: &str) {
+        // A new prompt starts a new turn: the previous turn's diff card and plan card are
+        // history now (still in scrollback), so the remote projections reset here.
+        self.pending_diff = None;
+        self.turn_diffs.clear();
+        self.turn_diffs_skipped = 0;
+        self.plan = None;
         self.flush.push(header_line("you", USER));
         for l in line.lines() {
             self.flush.push(body_line(l));
@@ -6093,6 +6211,188 @@ mod tests {
         let snap = app.remote_snapshot();
         assert!(snap.permission_prompt.is_none());
         assert!(snap.question.is_none());
+    }
+
+    fn sample_diff(path: &str, old: &str, new: &str) -> forge_types::FileDiff {
+        forge_types::FileDiff {
+            path: path.into(),
+            kind: forge_types::DiffKind::Modified,
+            old: Some(old.into()),
+            new: Some(new.into()),
+            lang: Some("rust".into()),
+            binary: false,
+        }
+    }
+
+    fn write_result(app: &mut App, ok: bool) {
+        app.apply(crate::PresenterEvent::ToolResult {
+            name: "write_file".into(),
+            ok,
+            summary: if ok { "ok" } else { "denied" }.into(),
+        });
+    }
+
+    #[test]
+    fn remote_diff_card_tracks_preview_permission_and_landing() {
+        let mut app = App::default();
+        assert!(app.remote_snapshot().diff.is_none(), "no changes, no card");
+
+        // The write preview arrives BEFORE the permission gate — with the prompt armed, the
+        // card is the ONE pending change ("what will this touch" before Allow).
+        app.apply(crate::PresenterEvent::Diff(sample_diff(
+            "src/a.rs",
+            "old line\n",
+            "new line\n",
+        )));
+        app.prompt = Some("allow write_file (Write) [y/n/a=always]".into());
+        let diff = app.remote_snapshot().diff.expect("pending card");
+        assert!(diff.pending);
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].path, "src/a.rs");
+        assert_eq!(diff.files[0].kind, "modified");
+        assert_eq!((diff.files[0].adds, diff.files[0].dels), (1, 1));
+        let hunk = &diff.files[0].hunks[0];
+        assert!(
+            hunk.header.starts_with("@@ -"),
+            "line spans: {}",
+            hunk.header
+        );
+        assert!(
+            hunk.lines.iter().any(|l| l == "+new line"),
+            "{:?}",
+            hunk.lines
+        );
+        assert!(
+            hunk.lines.iter().any(|l| l == "-old line"),
+            "{:?}",
+            hunk.lines
+        );
+
+        // Allowed + ran ok → the change LANDED: the turn card carries it from now on.
+        app.prompt = None;
+        write_result(&mut app, true);
+        let diff = app.remote_snapshot().diff.expect("landed card");
+        assert!(!diff.pending);
+        assert_eq!(diff.files.len(), 1);
+
+        // A denied/failed write never touched the file: its preview is dropped.
+        app.apply(crate::PresenterEvent::Diff(sample_diff(
+            "src/b.rs", "x\n", "y\n",
+        )));
+        write_result(&mut app, false);
+        let diff = app.remote_snapshot().diff.expect("landed card unchanged");
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].path, "src/a.rs");
+
+        // A new user prompt starts a new turn: the card resets.
+        app.submit_user("next thing");
+        assert!(app.remote_snapshot().diff.is_none());
+    }
+
+    #[test]
+    fn remote_diff_card_caps_hunk_lines_and_files() {
+        let mut app = App::default();
+        // 200 changed lines → carried hunk lines cap at the per-file budget, the remainder is
+        // counted (the page shows "+N more"), and the add total stays exact.
+        let big_new: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        app.apply(crate::PresenterEvent::Diff(sample_diff(
+            "big.rs", "", &big_new,
+        )));
+        write_result(&mut app, true);
+        let d = app.remote_snapshot().diff.unwrap();
+        assert_eq!(d.files[0].adds, 200, "adds count the WHOLE change");
+        let carried: usize = d.files[0].hunks.iter().map(|h| h.lines.len()).sum();
+        assert_eq!(carried, crate::render::REMOTE_DIFF_MAX_HUNK_LINES);
+        assert_eq!(d.files[0].skipped_lines, 200 - carried);
+
+        // 12 more files land → the list holds the newest REMOTE_DIFF_MAX_FILES, evictions
+        // (big.rs + the two oldest) fold into skipped_files.
+        for i in 0..12 {
+            app.apply(crate::PresenterEvent::Diff(sample_diff(
+                &format!("f{i}.rs"),
+                "a\n",
+                "b\n",
+            )));
+            write_result(&mut app, true);
+        }
+        let d = app.remote_snapshot().diff.unwrap();
+        assert_eq!(d.files.len(), REMOTE_DIFF_MAX_FILES);
+        assert_eq!(d.skipped_files, 3);
+        assert_eq!(d.files.last().unwrap().path, "f11.rs");
+
+        // Re-editing a carried path replaces it in place (latest wins) — no new slot burned.
+        app.apply(crate::PresenterEvent::Diff(sample_diff(
+            "f11.rs", "b\n", "c\n",
+        )));
+        write_result(&mut app, true);
+        let d = app.remote_snapshot().diff.unwrap();
+        assert_eq!(d.files.len(), REMOTE_DIFF_MAX_FILES);
+        assert_eq!(d.skipped_files, 3, "a same-path re-edit evicts nothing");
+    }
+
+    #[test]
+    fn remote_diff_card_handles_binary_files() {
+        let mut app = App::default();
+        app.apply(crate::PresenterEvent::Diff(forge_types::FileDiff {
+            path: "logo.png".into(),
+            kind: forge_types::DiffKind::Created,
+            old: None,
+            new: Some("\u{fffd}bytes".into()),
+            lang: None,
+            binary: true,
+        }));
+        write_result(&mut app, true);
+        let d = app.remote_snapshot().diff.unwrap();
+        assert!(d.files[0].binary, "binary flag rides the wire");
+        assert!(d.files[0].hunks.is_empty(), "no textual hunks for binary");
+        assert_eq!(d.files[0].kind, "created");
+    }
+
+    #[test]
+    fn remote_plan_card_projects_and_clears_on_next_prompt() {
+        let mut app = App::default();
+        assert!(app.remote_snapshot().plan.is_none());
+        app.apply(crate::PresenterEvent::PlanProposed(
+            forge_types::PlanProposal {
+                title: "Ship it".into(),
+                steps: vec![forge_types::PlanStep {
+                    title: "step 1".into(),
+                    detail: "do the thing".into(),
+                }],
+                notes: Some("risky".into()),
+            },
+        ));
+        let p = app
+            .remote_snapshot()
+            .plan
+            .expect("plan retained as live state");
+        assert_eq!(p.title, "Ship it");
+        assert_eq!(p.steps.len(), 1);
+        assert_eq!(p.notes.as_deref(), Some("risky"));
+
+        // The approval question arrives at turn end; the page's Approve button answers its
+        // "Build it" option by number — the identical path a local choice takes.
+        let options = vec![
+            QChoice {
+                label: "Build it".into(),
+                description: "Switch to Auto-edit and implement the plan now".into(),
+            },
+            QChoice {
+                label: "Cancel".into(),
+                description: "Discard the plan; stay in planning mode".into(),
+            },
+        ];
+        app.set_question("Build this plan?", &options, true);
+        assert!(
+            app.remote_snapshot().plan.is_some(),
+            "card survives the question"
+        );
+        assert_eq!(app.resolve_question("1").as_deref(), Some("Build it"));
+        // The card stays visible through the build (no user submit happens on approval)…
+        assert!(app.remote_snapshot().plan.is_some());
+        // …and clears when the NEXT user prompt starts a new turn.
+        app.submit_user("another task");
+        assert!(app.remote_snapshot().plan.is_none());
     }
 
     fn overlay_picker_rows() -> Vec<crate::commands::PickerRow> {
