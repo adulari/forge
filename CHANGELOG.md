@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-07-03
+
 ### Added
 - **Workflow scripts** (#453–#457): a sandboxed QuickJS engine runs JavaScript orchestration
   scripts inside Forge — `agent()` spawns a mesh-routed subagent, `parallel()` fans out,
@@ -2039,7 +2041,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.3.0...HEAD
+[2.3.0]: https://github.com/Adulari/forge/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/Adulari/forge/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/Adulari/forge/compare/v2.0.0...v2.1.0
 [1.8.1]: https://github.com/Adulari/forge/compare/v1.8.0...v1.8.1
