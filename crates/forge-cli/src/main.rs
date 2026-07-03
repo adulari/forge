@@ -58,6 +58,7 @@ pub(crate) mod live_observer;
 mod local;
 mod mcp_agent;
 mod mcp_serve;
+mod push;
 mod remote;
 mod replay;
 mod serve;

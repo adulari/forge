@@ -7,6 +7,23 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Actionable Web Push — approve from the lock screen, self-hosted VAPID, no relay**: the
+  `forge serve` daemon now pushes a notification when a session **needs a decision**
+  (permission prompt / question), finishes a turn, or fails — even with the page closed and
+  the phone locked. Permission pushes carry **Allow/Deny actions** the service worker answers
+  itself over the new seq-validated `POST /<t>/api/answer` (stale seq = 409 no-op, exactly
+  like the WS path), so the agent is unblocked without opening the app. Fully self-hosted:
+  Forge mints its own VAPID (RFC 8292) keypair (persisted 0600 in the config dir) and
+  end-to-end encrypts every payload per RFC 8291 `aes128gcm` (in-tree RustCrypto
+  implementation, verified byte-for-byte against the RFC's test vector) before POSTing it
+  straight to the browser vendor's push endpoint — no Firebase project, no third-party relay,
+  the push service only ever sees ciphertext. Debounced (no push while any WS client is
+  attached), strictly best-effort (fire-and-forget, never delays the turn), dead
+  subscriptions (404/410) are pruned. The sessions panel gains an enable/disable push row
+  (iOS: install the PWA + trust the cert first — documented).
+- **Offline input queue**: prompts typed while the connection is down are no longer lost —
+  they queue locally (per server + session, surviving reloads), show as "📴 queued (offline)",
+  and flush in order on reconnect; bounded at 20 with a loud "queue full — N dropped" notice.
 - **`forge serve` — headless multi-session daemon with session control from the phone
   (protocol v6)**: one long-lived process hosts any number of concurrent sessions, each driven
   by a headless SessionDriver task (the same App + dispatch + turn machinery + remote-input

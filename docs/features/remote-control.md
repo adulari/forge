@@ -330,6 +330,68 @@ death timeout, and per-session URLs.
   session into a running daemon, and a `forge attach <id>` TUI thin client, are follow-ups on
   the same seam.
 
+## 2d. Actionable Web Push + offline input queue (Phase 5)
+
+Close the page, lock the phone — and still get told the moment a session **needs a decision**
+(permission prompt / AskUserQuestion), finishes a turn, or fails. A permission notification
+carries **Allow / Deny actions**: the service worker answers them itself over
+`POST /<t>/api/answer`, so the agent is unblocked from the lock screen without ever opening
+the app. Push is a `forge serve` feature (subscriptions bind to an origin; only the daemon's
+is stable).
+
+**Self-hosted, no relay.** Forge mints its own **VAPID (RFC 8292) P-256 keypair** once, into
+`<config>/vapid-key` (0600, next to `serve-token`). There is no Firebase project, no
+third-party relay account, no vendor SDK: the daemon POSTs each message **directly to the
+push endpoint the browser handed out** (that endpoint — run by the browser vendor — is how
+Web Push delivers to a sleeping device; it is unavoidable and, crucially, blind). Every
+payload is **end-to-end encrypted per RFC 8291** (`aes128gcm`: ECDH P-256 + HKDF-SHA256 +
+AES-128-GCM, fresh ephemeral key + salt per message), so the push service relays ciphertext
+it cannot read; the VAPID JWT (ES256, `aud` = endpoint origin, 12 h expiry) proves to the
+service that the POST comes from the key the subscription was created with. The
+implementation is in-tree (`forge-cli/src/push.rs`, RustCrypto `p256`/`hkdf`/`sha2`/
+`aes-gcm`) and is verified byte-for-byte against the RFC 8291 §5 test vector.
+
+**Routes.** `GET /<t>/api/push/key` (the `applicationServerKey`),
+`POST /<t>/api/push/subscribe` (stores `{endpoint, keys:{p256dh, auth}}`, deduped by
+endpoint, keys validated at the door), `POST /<t>/api/push/unsubscribe`. A push service
+answering 404/410 gets its subscription pruned automatically.
+
+**Triggers + debounce.** The session driver watches its own snapshot transitions
+(pure `push::detect_trigger`): a **new** `prompt_seq` with a pending permission/question
+pushes a decision card (TTL 5 min — a stale "Allow?" on a lock screen misleads); the `busy`
+falling edge pushes "turn complete" with a final-line preview, or "turn failed" when the turn
+surfaced a genuine error (TTL 1 h). A replaced prompt (seq bump) re-fires; the same pending
+prompt never does. **No push is sent while any WebSocket client is connected** to that
+session (`push::should_push`) — deliberately the simpler of the two debounce designs (the
+alternative, page-visibility reporting over the WS, adds protocol surface and still lies for
+unattended dashboards): a phone that locks or backgrounds the PWA drops its WS within
+seconds, so "a WS is attached" reliably means "someone is watching". Trade-off, documented: a
+desktop tab left open in the background suppresses pushes to the phone. Delivery is strictly
+best-effort — dispatched fire-and-forget with a 10 s box, never blocking or delaying the turn.
+
+**`/api/answer` = the WS `Allow`, over plain HTTP.** The notification action POSTs
+`{session, seq, allow}`; the daemon 404s an unknown session, 409s when no prompt is pending
+or the echoed `seq` is stale (the prompt changed after the notification rendered), and on
+success feeds the same seq-checked `RemoteInput::Allow` the driver re-validates — the exact
+stale-tap protection the WS path has.
+
+**Offline input queue.** Prompts typed while the WS is down no longer vanish: they land in
+`localStorage` (keyed by server + session, so a queue can never flush into a different
+session), render as "📴 queued (offline)" above the actions area, survive reloads, and flush
+**in order** on reconnect. Bounded at 20; past that, new input is dropped **loudly** (a
+"queue full — N dropped" line), never silently.
+
+**Enabling it.** The sessions panel (☰) grows a *push notifications* row showing the
+permission state with an Enable/Disable button — subscribe runs
+`Notification.requestPermission` → `PushManager.subscribe` (with the daemon's public key) →
+`POST subscribe`. **iOS caveat:** Safari only exposes push to an **installed** PWA (Share →
+Add to Home Screen) and only on an origin it trusts — the self-signed LAN cert must be
+installed/trusted on the device, or use `--anywhere` (the tunnel provider's real HTTPS makes
+this the low-friction path on iPhone). What remains manual to verify (not covered by the
+automated suite, which proves encryption/VAPID/triggers/debounce against a local mock push
+endpoint): real vendor-endpoint delivery on a physical device (FCM/Mozilla/APNs behavior,
+OS-level notification display, action buttons on each platform's lock screen).
+
 ## 4. Surfaces touched
 
 | Layer | Change |
@@ -337,7 +399,9 @@ death timeout, and per-session URLs.
 | `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (5), `SnapOverlay`/`SnapRow` + `named_key`, v5 `EventLog` + `?rev=` replay + `Snapshot.resync`, `GET /api/history` (`HistoryRow`/`HistoryProvider` seam), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
 | `forge-cli/src/remote_assets/` | The control page split into `page.html` / `app.js` / `styles.css` / `sw.js` (served via `include_str!` as token-scoped routes; enables the no-`unsafe-inline` CSP); the page's generic overlay renderer + copy-here button; v5: `?rev=` reconnect + sessionStorage revision + replay dedup, scroll-up history pagination (`#hist` above the live `#tail`), markdown renderer + syntax highlighter + fenced-block copy buttons |
 | `forge-config/src/lib.rs` | `[remote]` block: `RemoteConfig` (`auto`, `host`) + `RemoteAuto` + `startup_exposure()` |
-| `forge-store/src/lib.rs` | v5: `Store::load_history_page` + `HistoryRow` (user-facing transcript pages, newest first, `before`/`limit` windowed) |
+| `forge-store/src/lib.rs` | v5: `Store::load_history_page` + `HistoryRow` (user-facing transcript pages, newest first, `before`/`limit` windowed); Phase 5: `PushSubscription` + `upsert/delete/list_push_subscriptions` (endpoint-deduped) |
+| `forge-cli/src/push.rs` | Phase 5: VAPID keypair (persist 0600, ES256 JWTs), RFC 8291 `aes128gcm` encryption (verified against the §5 test vector), `PushNotifier` (fire-and-forget delivery, 404/410 pruning), pure `detect_trigger`/`should_push` decision fns |
+| `forge-cli/src/serve.rs` | Phase 5: `/api/push/key\|subscribe\|unsubscribe`, `/api/answer` (seq-validated HTTP answer), per-session WS client counting (the push debounce signal) |
 | `forge-tui/src/app.rs` | `App.remote_active`, `question_prompt`, `recent_transcript` ring, `drain_flush_remote`, `remote_snapshot` (tasks/subagents/queued/question options), `remote_overlay()` + `OverlaySnapshot`/`OverlayRowSnapshot` + `picker_kind_wire`, `print_lines`, statusline `◉ remote` segment |
 | `forge-tui/src/commands.rs` | `CommandAction::Remote { mode }`, `/remote` (alias `/rc`) parse + registry entry |
 | `forge-cli/src/cli/commands/run.rs` | `DispatchOutcome::ToggleRemote`, `toggle_remote`, `[remote] auto` startup, remote input draining + full-state snapshot broadcast in `run_chat_tui`; v4: `next_input_event` (remote keys join the local key loop), `apply_overlay_input` + `RemoteOverlayOp`, `/keys` host-only note, `remote_copy_text`; v5: `RemoteControl::broadcast` (frame → event log + watch), the `HistoryProvider` closure over the session's store |

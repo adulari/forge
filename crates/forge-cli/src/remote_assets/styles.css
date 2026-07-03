@@ -142,3 +142,10 @@ footer { font-size: 11px; color: #4a4a54; text-align: center; padding: 4px 0 2px
   border-radius:8px; padding:9px 10px; font:inherit; font-size:13px; }
 .wtlabel { font-size:13px; color:var(--dim); display:flex; align-items:center; gap:6px; }
 #stitle { color:var(--ink); }
+
+/* Phase 5 — actionable web push + offline input queue */
+#pushrow { margin-top: 10px; border-top: 1px solid #2a2a32; padding-top: 8px; }
+#pushrow .shead { padding-bottom: 2px; }
+#pushinfo { font-style: normal; font-size: 12px; }
+#offq { padding: 4px 2px; }
+.oqfull { color: var(--no); }

@@ -1,4 +1,4 @@
-const CACHE = "forge-remote-v5";
+const CACHE = "forge-remote-v6";
 const ENDED = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Forge remote - session ended</title>
@@ -27,4 +27,55 @@ self.addEventListener("fetch", (e) => {
       return res;
     }).catch(() => caches.match(req))
   );
+});
+
+// --- Actionable Web Push (forge serve) ------------------------------------------------------
+// The daemon encrypts every payload end-to-end (RFC 8291); by the time it reaches this handler
+// the browser has already decrypted it. Payload: { kind, session, title, body, seq } where kind
+// is "permission" | "question" | "done" | "failed". A permission push carries Allow/Deny
+// actions the notificationclick handler answers DIRECTLY over POST api/answer — no page needed,
+// so the agent can be unblocked from the lock screen.
+self.addEventListener("push", (e) => {
+  let d = {};
+  try { d = e.data ? e.data.json() : {}; } catch (err) {}
+  const kind = d.kind || "";
+  const head = kind === "permission" ? "Forge needs permission"
+    : kind === "question" ? "Forge has a question"
+    : kind === "failed" ? "Forge — turn failed"
+    : "Forge — turn complete";
+  const title = d.title ? head + " · " + d.title : head;
+  const actions = kind === "permission"
+    ? [{ action: "approve", title: "Allow" }, { action: "deny", title: "Deny" }]
+    : [{ action: "open", title: "Open" }];
+  e.waitUntil(self.registration.showNotification(title, {
+    body: d.body || "",
+    icon: new URL("icon.svg", self.registration.scope).href,
+    // One notification per pending decision: a replaced prompt overwrites the stale card
+    // instead of stacking; completions collapse per session.
+    tag: "forge-push:" + (d.session || "") + ":" + (kind === "done" || kind === "failed" ? "turn" : "ask"),
+    data: d,
+    actions,
+  }));
+});
+
+self.addEventListener("notificationclick", (e) => {
+  const d = e.notification.data || {};
+  e.notification.close();
+  if ((e.action === "approve" || e.action === "deny") && d.kind === "permission") {
+    // Answer straight from the notification — the seq the daemon sent rides back, so a stale
+    // tap on a replaced prompt is a server-side 409 no-op, exactly like the WS path.
+    e.waitUntil(fetch(new URL("api/answer", self.registration.scope).href, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ session: d.session || "", seq: d.seq || 0, allow: e.action === "approve" }),
+    }).catch(() => {}));
+    return;
+  }
+  // Default click / "Open": focus an existing page inside our scope, else open one.
+  e.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
+    for (const c of list) {
+      if (c.url.startsWith(self.registration.scope) && "focus" in c) return c.focus();
+    }
+    return self.clients.openWindow(self.registration.scope);
+  }));
 });

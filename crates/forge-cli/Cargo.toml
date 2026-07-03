@@ -57,6 +57,15 @@ flate2 = "1.1.9"
 tar = "0.4.46"
 rcgen = "0.14"
 rand = "0.10"
+# Actionable Web Push (docs/features/remote-control.md §2d): RFC 8291 aes128gcm payload
+# encryption + RFC 8292 VAPID JWTs, implemented on the audited RustCrypto stack (hkdf/hmac/
+# sha2/aes are already in the dependency tree via other crates; p256 + aes-gcm are the only
+# new leaves). No cloud relay: the encrypted message goes straight to the browser vendor's
+# push endpoint over the in-tree reqwest/rustls.
+p256 = { version = "0.13", features = ["ecdh"] }
+hkdf = "0.12"
+sha2 = "0.10"
+aes-gcm = "0.10"
 sysinfo = { workspace = true }
 self_update = { version = "0.44.0", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "reqwest", "rustls"] }
 
