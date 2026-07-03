@@ -383,9 +383,13 @@ pub fn recommend(specs: &SystemSpecs) -> Vec<&'static LocalModel> {
         .filter(|m| m.min_memory_gb <= budget)
         .collect();
     fits.sort_by(|a, b| {
-        b.quality
-            .cmp(&a.quality)
-            .then(b.params_b.partial_cmp(&a.params_b).unwrap())
+        b.quality.cmp(&a.quality).then(
+            // NaN-safe like `rank_candidates` below — `.unwrap()` here would panic the sort if
+            // a future edit ever computes `params_b` instead of using catalog literals.
+            b.params_b
+                .partial_cmp(&a.params_b)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
     fits
 }
