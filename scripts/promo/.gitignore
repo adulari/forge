@@ -2,3 +2,5 @@ node_modules/
 docs-out/
 .remotion/
 out/
+audio/*.m4a
+audio/*.wav

@@ -7,6 +7,7 @@
     "studio": "remotion studio",
     "render:main": "remotion render Promo docs-out/forge-promo.mp4 --codec=h264",
     "render:teaser": "remotion render Teaser docs-out/forge-promo-teaser.mp4 --codec=h264",
+    "render:vertical": "remotion render Vertical docs-out/forge-promo-vertical.mp4 --codec=h264",
     "still": "remotion still"
   },
   "dependencies": {

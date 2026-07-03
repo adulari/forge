@@ -96,7 +96,9 @@ export const MeshRouting: React.FC<{ dur: number }> = ({ dur }) => {
         }}
       >
         <span style={{ color: C.ember }}>↳ </span>
-        {frame < 150 ? "the router weighs difficulty · cost · quota" : frame < 246 ? "the top pick is rate limited…" : "…so Forge re-routes, instantly"}
+        {/* caption flips when the route starts drawing toward the pick (156),
+            not while the router is still scanning */}
+        {frame < 156 ? "the router weighs difficulty · cost · quota" : frame < 246 ? "the top pick is rate limited…" : "…so Forge re-routes, instantly"}
       </div>
 
       {/* connecting lines */}
@@ -225,7 +227,7 @@ export const MeshRouting: React.FC<{ dur: number }> = ({ dur }) => {
             </div>
             <div style={{ fontFamily: FONT, fontSize: 15, color: C.muted, marginTop: 3, marginLeft: 21 }}>{n.sub}</div>
             {red ? (
-              <div style={{ position: "absolute", right: -12, top: -16, fontFamily: FONT, fontWeight: 800, fontSize: 16, color: C.red, background: C.crust, border: `1.5px solid ${C.red}`, borderRadius: 8, padding: "3px 9px", opacity: 0.6 + flashPulse * 0.4 }}>
+              <div style={{ position: "absolute", right: -12, top: -20, fontFamily: FONT, fontWeight: 800, fontSize: 19, color: C.red, background: C.crust, border: `1.5px solid ${C.red}`, borderRadius: 8, padding: "3px 10px", opacity: 0.6 + flashPulse * 0.4, whiteSpace: "nowrap" }}>
                 429 rate limited
               </div>
             ) : null}
