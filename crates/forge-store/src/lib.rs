@@ -16,7 +16,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -482,6 +482,33 @@ fn migration_0004(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Migration #5: `forge queue` — the overnight-autopilot task queue (feature: queue-autopilot).
+/// Each row is one queued headless task; a drain (`forge queue run`) executes them in isolated
+/// worktrees and records the outcome (branch, cost, summary) back onto the row. Local machine
+/// state like `schedule` (cwd + branches don't travel), so NOT in [`PORTABLE_METADATA_TABLES`].
+fn migration_0005(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS queue_task (
+            id          TEXT PRIMARY KEY,
+            task        TEXT NOT NULL,
+            cwd         TEXT NOT NULL,
+            mode        TEXT,
+            model       TEXT,
+            budget_usd  REAL,
+            status      TEXT NOT NULL DEFAULT 'pending',
+            created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            started_at  INTEGER,
+            finished_at INTEGER,
+            session_id  TEXT,
+            branch      TEXT,
+            summary     TEXT,
+            cost_usd    REAL,
+            gate        TEXT
+         );
+         CREATE INDEX IF NOT EXISTS idx_queue_task_status ON queue_task(status)",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -489,6 +516,7 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0002,
     migration_0003,
     migration_0004,
+    migration_0005,
 ];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
@@ -2841,6 +2869,122 @@ impl Store {
             .execute("UPDATE schedule SET last_run = ?1 WHERE id = ?2", (at, id))?;
         Ok(())
     }
+
+    // --- forge queue: the overnight-autopilot task queue ---
+
+    /// Enqueue a task. `id` is caller-generated ([`forge_types::new_id`]) so the CLI can print it
+    /// immediately; the row starts in `pending`.
+    pub fn add_queue_task(
+        &self,
+        id: &str,
+        task: &str,
+        cwd: &str,
+        mode: Option<&str>,
+        model: Option<&str>,
+        budget_usd: Option<f64>,
+    ) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO queue_task (id, task, cwd, mode, model, budget_usd) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (id, task, cwd, mode, model, budget_usd),
+        )?;
+        Ok(())
+    }
+
+    /// All queue tasks, oldest first. `cwd` filters to one project when given (a drain only runs
+    /// the current repo's tasks; `forge queue list` shows everything with `None`).
+    pub fn list_queue_tasks(&self, cwd: Option<&str>) -> Result<Vec<QueueTask>> {
+        let conn = self.lock()?;
+        let sql = "SELECT id, task, cwd, mode, model, budget_usd, status, created_at, \
+                   started_at, finished_at, session_id, branch, summary, cost_usd, gate \
+                   FROM queue_task";
+        let map = |r: &rusqlite::Row<'_>| {
+            Ok(QueueTask {
+                id: r.get(0)?,
+                task: r.get(1)?,
+                cwd: r.get(2)?,
+                mode: r.get(3)?,
+                model: r.get(4)?,
+                budget_usd: r.get(5)?,
+                status: r.get(6)?,
+                created_at: r.get(7)?,
+                started_at: r.get(8)?,
+                finished_at: r.get(9)?,
+                session_id: r.get(10)?,
+                branch: r.get(11)?,
+                summary: r.get(12)?,
+                cost_usd: r.get(13)?,
+                gate: r.get(14)?,
+            })
+        };
+        let rows = match cwd {
+            Some(dir) => {
+                let mut stmt =
+                    conn.prepare(&format!("{sql} WHERE cwd = ?1 ORDER BY created_at"))?;
+                let rows = stmt.query_map([dir], map)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut stmt = conn.prepare(&format!("{sql} ORDER BY created_at"))?;
+                let rows = stmt.query_map([], map)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            }
+        };
+        Ok(rows)
+    }
+
+    /// Queue-task ids starting with `prefix` (git-style prefix resolution).
+    pub fn matching_queue_task_ids(&self, prefix: &str) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        let escaped = escape_like_pattern(prefix);
+        let mut stmt =
+            conn.prepare("SELECT id FROM queue_task WHERE id LIKE ?1 || '%' ESCAPE '\\'")?;
+        let rows = stmt.query_map([escaped], |row| row.get::<_, String>(0))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Delete a queue task by exact id, but never one mid-run. Returns `false` if nothing matched
+    /// (wrong id, or the row is `running`).
+    pub fn remove_queue_task(&self, id: &str) -> Result<bool> {
+        let n = self.lock()?.execute(
+            "DELETE FROM queue_task WHERE id = ?1 AND status != 'running'",
+            [id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Move a pending task to `running`, stamping `started_at`. Returns `false` when the row was
+    /// not pending (already claimed by a concurrent drain, or finished) — the caller skips it.
+    pub fn claim_queue_task(&self, id: &str, at: i64) -> Result<bool> {
+        let n = self.lock()?.execute(
+            "UPDATE queue_task SET status = 'running', started_at = ?1 \
+             WHERE id = ?2 AND status = 'pending'",
+            (at, id),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Record a finished task's outcome in one write.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish_queue_task(
+        &self,
+        id: &str,
+        status: &str,
+        at: i64,
+        session_id: Option<&str>,
+        branch: Option<&str>,
+        summary: Option<&str>,
+        cost_usd: Option<f64>,
+        gate: Option<&str>,
+    ) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE queue_task SET status = ?1, finished_at = ?2, session_id = ?3, \
+             branch = ?4, summary = ?5, cost_usd = ?6, gate = ?7 WHERE id = ?8",
+            (status, at, session_id, branch, summary, cost_usd, gate, id),
+        )?;
+        Ok(())
+    }
 }
 
 /// One registered `forge schedule` row: a task, its working directory, and the cron/interval spec
@@ -2856,6 +3000,29 @@ pub struct Schedule {
     pub enabled: bool,
     pub created_at: i64,
     pub last_run: Option<i64>,
+}
+
+/// One `forge queue` row: a queued headless task plus, once drained, its recorded outcome.
+/// `status` lifecycle: `pending` → `running` → `done` / `empty` (ran clean but changed nothing) /
+/// `gated` (assay gate tripped) / `over-budget` (killed at the cost cap, partial work kept) /
+/// `failed`. `gate` holds the assay verdict line when a gate ran.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueueTask {
+    pub id: String,
+    pub task: String,
+    pub cwd: String,
+    pub mode: Option<String>,
+    pub model: Option<String>,
+    pub budget_usd: Option<f64>,
+    pub status: String,
+    pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    pub session_id: Option<String>,
+    pub branch: Option<String>,
+    pub summary: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub gate: Option<String>,
 }
 
 #[cfg(test)]
@@ -3862,6 +4029,70 @@ mod tests {
         assert!(store.remove_schedule(&id).unwrap());
         assert!(store.list_schedules().unwrap().is_empty());
         assert!(!store.remove_schedule(&id).unwrap());
+    }
+
+    #[test]
+    fn queue_task_roundtrips_claim_finish_and_remove() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.list_queue_tasks(None).unwrap().is_empty());
+
+        let id = forge_types::new_id();
+        store
+            .add_queue_task(
+                &id,
+                "migrate the auth module",
+                "/home/user/proj",
+                Some("accept-edits"),
+                None,
+                Some(2.5),
+            )
+            .unwrap();
+        let other = forge_types::new_id();
+        store
+            .add_queue_task(&other, "other project task", "/elsewhere", None, None, None)
+            .unwrap();
+
+        // cwd filter separates projects; None sees both.
+        assert_eq!(store.list_queue_tasks(None).unwrap().len(), 2);
+        let rows = store.list_queue_tasks(Some("/home/user/proj")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, id);
+        assert_eq!(rows[0].status, "pending");
+        assert_eq!(rows[0].budget_usd, Some(2.5));
+
+        let prefix: String = id.chars().take(8).collect();
+        assert_eq!(
+            store.matching_queue_task_ids(&prefix).unwrap(),
+            vec![id.clone()]
+        );
+
+        // Claim is single-shot: the second attempt (a concurrent drain) loses.
+        assert!(store.claim_queue_task(&id, 100).unwrap());
+        assert!(!store.claim_queue_task(&id, 101).unwrap());
+        // A running task refuses removal.
+        assert!(!store.remove_queue_task(&id).unwrap());
+
+        store
+            .finish_queue_task(
+                &id,
+                "done",
+                200,
+                Some("sess-1"),
+                Some("autopilot/migrate-auth"),
+                Some("moved auth to the new module"),
+                Some(1.25),
+                None,
+            )
+            .unwrap();
+        let row = &store.list_queue_tasks(Some("/home/user/proj")).unwrap()[0];
+        assert_eq!(row.status, "done");
+        assert_eq!(row.started_at, Some(100));
+        assert_eq!(row.finished_at, Some(200));
+        assert_eq!(row.branch.as_deref(), Some("autopilot/migrate-auth"));
+        assert_eq!(row.cost_usd, Some(1.25));
+
+        assert!(store.remove_queue_task(&id).unwrap());
+        assert_eq!(store.list_queue_tasks(None).unwrap().len(), 1);
     }
 
     #[test]

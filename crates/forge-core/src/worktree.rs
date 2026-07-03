@@ -128,8 +128,20 @@ pub fn commit_worktree(worktree_path: &Path) -> Result<bool, WorktreeError> {
     let wt = worktree_path.to_str().unwrap_or(".");
     // `:(exclude).cargo` keeps the shared-target shim (`write_shared_target_config`) out of the
     // snapshot — it's worktree plumbing, and committing it would merge it into the main tree.
+    // `:(exclude).forge/checkpoints` likewise: the child session running INSIDE the worktree
+    // writes its per-turn checkpoint snapshots there, and without the exclusion they ride the
+    // snapshot into the parent tree / result branch (found live in `forge queue run --mock`).
     let add = Command::new("git")
-        .args(["-C", wt, "add", "-A", "--", ".", ":(exclude).cargo"])
+        .args([
+            "-C",
+            wt,
+            "add",
+            "-A",
+            "--",
+            ".",
+            ":(exclude).cargo",
+            ":(exclude).forge/checkpoints",
+        ])
         .output()
         .map_err(|e| WorktreeError::SpawnFailed(e.to_string()))?;
     if !add.status.success() {

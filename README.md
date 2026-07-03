@@ -254,6 +254,8 @@ You can also stack keys via env: `GROQ_API_KEY="k1,k2"` or numbered `GROQ_API_KE
   winner — routing learns per-repo from recorded wins
 - `forge blame`: per-line AI provenance — which model, session, prompt, and reasoning wrote any line
 - `forge schedule`: recurring headless runs on native OS timers (systemd / launchd / Task Scheduler)
+- `forge queue`: the overnight autopilot — queued tasks drain headless into isolated worktrees,
+  budget-capped + assay-gated, leaving review-ready `autopilot/*` branches and a morning digest
 - Assay: parallel adversarial critic crew with ranked, refuter-verified findings + CI gate
 - Cross-session auto-memory: typed durable facts, relevance-ranked recall
 - Vision input (`/image` or paste); `@file` context injection
@@ -498,6 +500,19 @@ forge schedule remove <id-prefix>    # uninstall the OS timer + delete
 
 Each tick fires `forge run` via a native OS timer — systemd `--user` on Linux, launchd on macOS,
 Task Scheduler on Windows. The headless analog to `/loop`/`/goal`.
+
+### 🌙 `forge queue` — the overnight autopilot
+
+```bash
+forge queue add "migrate the auth module to the new API" --budget 2.50
+forge queue run --gate high          # drain: one isolated worktree + result branch per task
+forge queue report                   # morning digest: status, branch, cost, replay pointer
+```
+
+Queue big tasks during the day; drain them overnight (point a `forge schedule` timer at
+`forge queue run`). Each task runs headless in its own git worktree — killed at the `--budget`
+cost cap, optionally assay-gated — and leaves a review-ready `autopilot/<slug>` branch. The drain
+fires a desktop notification when it finishes. No daemon.
 
 ### 🧰 Audit, migrate, MCP, skills
 

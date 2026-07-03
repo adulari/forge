@@ -13,7 +13,7 @@ use forge_types::TaskTier;
 pub(crate) use cli::args::{
     AssayCmd, AssayFormat, BenchCmd, Cli, Command, ExportScope, FailOnSeverity, GitCmd,
     ImportSource, LatticeOp, LocalCmd, McpCmd, McpTransportArg, Mode, OutputFormat, PluginCmd,
-    PluginMarketplaceCmd, ProviderCmd, ScheduleCmd, Scope, SelfMcpAction, SkillCmd,
+    PluginMarketplaceCmd, ProviderCmd, QueueCmd, ScheduleCmd, Scope, SelfMcpAction, SkillCmd,
 };
 pub(crate) use cli::commands::assay::{assay_cmd, spawn_assay};
 pub(crate) use cli::commands::blame::blame_cmd;
@@ -31,6 +31,7 @@ pub(crate) use cli::commands::models::{
     models, save_catalog,
 };
 pub(crate) use cli::commands::provider::provider_cmd;
+pub(crate) use cli::commands::queue::queue_cmd;
 pub(crate) use cli::commands::replay::{
     open_store, replay_cmd, replay_rerun_cmd, resolve_resume_mode, resolve_session, sessions,
     ResumeMode,

@@ -6,6 +6,25 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **`forge queue` — the overnight autopilot**: queue big tasks during the day
+  (`forge queue add "<task>" [--budget USD] [--mode m] [--model id]`), drain them headless
+  (`forge queue run [--gate high] [--max N]`) — each task runs a full agent turn in its own
+  isolated git worktree, cost-capped by killing the run at the budget, optionally assay-gated,
+  and leaves a review-ready `autopilot/<slug>` branch. `forge queue report` is the morning
+  digest (status, branch, cost, replay pointer); the drain fires a desktop notification when it
+  finishes. No daemon — point a `forge schedule` timer at `forge queue run` for true overnight
+  runs. Migration 0005 (`queue_task`, machine-local like `schedule`).
+- **Mock provider**: a `mock:write` / "create a file" trigger that does one `write_file`
+  round-trip — exercises diff-preview, worktree-commit, and queue-drain paths offline.
+
+### Fixed
+- **Worktree snapshots no longer leak session checkpoints**: the child session running inside an
+  isolated worktree writes `.forge/checkpoints/…` per turn, and `commit_worktree` swept those
+  into the snapshot — so subagent/duel merge-backs and queue result branches carried another
+  session's checkpoint plumbing. Now excluded like the `.cargo` shim (found live in
+  `forge queue run --mock` e2e).
+
 ## [2.3.0] - 2026-07-03
 
 ### Added

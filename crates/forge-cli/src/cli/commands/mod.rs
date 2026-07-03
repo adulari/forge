@@ -10,6 +10,7 @@ pub(crate) mod memory;
 pub(crate) mod migrate;
 pub(crate) mod models;
 pub(crate) mod provider;
+pub(crate) mod queue;
 pub(crate) mod replay;
 pub(crate) mod run;
 pub(crate) mod schedule;
