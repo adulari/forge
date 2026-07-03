@@ -62,4 +62,5 @@ self_update = { version = "0.44.0", default-features = false, features = ["archi
 
 [dev-dependencies]
 portable-pty = "0.9"
+tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

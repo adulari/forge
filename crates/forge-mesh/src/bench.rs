@@ -173,7 +173,9 @@ fn id_tokens(id: &str) -> Vec<String> {
 /// gateway path (`anthropic/claude-...`) is dropped to its last segment first, and any
 /// parenthetical decoration ("GPT-5.5 (xhigh)", "… (Opus 4.8 Fallback)") is stripped — that
 /// trailing junk would otherwise pollute the token set and cross-match unrelated models.
-fn tokens(s: &str) -> Vec<String> {
+/// Public because the context-window derivation matches bridge aliases to canonical fetched
+/// models with the same token vocabulary this module uses for benchmark rows.
+pub fn tokens(s: &str) -> Vec<String> {
     let s = strip_parens(s);
     let s = s.rsplit('/').next().unwrap_or(&s).to_lowercase();
     let mut out = Vec::new();
