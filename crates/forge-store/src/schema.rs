@@ -272,4 +272,27 @@ CREATE TABLE IF NOT EXISTS schedule (
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     last_run   INTEGER
 );
+
+-- `forge queue`: overnight-autopilot task queue (feature: queue-autopilot). Each row is one
+-- queued headless task; a drain executes them in isolated worktrees and records the outcome
+-- back onto the row. Local machine state only — deliberately not in PORTABLE_METADATA_TABLES
+-- (cwd + result branches don't travel). Also created in migration_0005 for pre-existing DBs.
+CREATE TABLE IF NOT EXISTS queue_task (
+    id          TEXT PRIMARY KEY,
+    task        TEXT NOT NULL,
+    cwd         TEXT NOT NULL,
+    mode        TEXT,
+    model       TEXT,
+    budget_usd  REAL,
+    status      TEXT NOT NULL DEFAULT 'pending',
+    created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    started_at  INTEGER,
+    finished_at INTEGER,
+    session_id  TEXT,
+    branch      TEXT,
+    summary     TEXT,
+    cost_usd    REAL,
+    gate        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_queue_task_status ON queue_task(status);
 "#;

@@ -89,6 +89,12 @@ impl Provider for MockProvider {
             || lu.contains("track tasks");
         // A response that contains a fenced code block (exercises the `/copy` block picker).
         let wants_code = lu.contains("mock:code") || lu.contains("code block");
+        // A file-writing turn (exercises write paths end-to-end: diff preview, worktree commits,
+        // `forge queue run --mock` result branches).
+        let wants_write = lu.contains("mock:write") || lu.contains("create a file");
+        let used_write = messages.iter().any(|m| {
+            m.role == Role::Assistant && m.tool_calls.iter().any(|c| c.name == "write_file")
+        });
 
         // Planning turn → render the plan card, then stop for approval.
         if wants_plan {
@@ -140,6 +146,30 @@ impl Provider for MockProvider {
                             {"title": "Apply the change", "status": "pending"},
                             {"title": "Verify the build", "status": "pending"},
                         ],
+                    }),
+                }],
+                30,
+                12,
+            ));
+        }
+
+        // File-writing turn → one write_file round-trip then a final answer.
+        if wants_write {
+            if used_write {
+                let content = "Done — the file is written.";
+                stream_words(content, on_event);
+                return Ok(resp(content, vec![], 42, 18));
+            }
+            let content = "Writing the file now.";
+            stream_words(content, on_event);
+            return Ok(resp(
+                content,
+                vec![ToolCall {
+                    id: new_id(),
+                    name: "write_file".to_string(),
+                    args: json!({
+                        "path": "mock-note.txt",
+                        "content": "deterministic mock output\n",
                     }),
                 }],
                 30,
