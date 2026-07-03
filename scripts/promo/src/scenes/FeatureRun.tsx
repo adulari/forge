@@ -1,9 +1,17 @@
 import React from "react";
 import { AbsoluteFill, Sequence, interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion";
 import { C, FONT, glow } from "../theme";
-import { Backdrop, edgeFade } from "../components/common";
+import { Backdrop } from "../components/common";
 
 const VIG = 120; // frames per vignette
+const XF = 14; // crossfade overlap between adjacent vignettes
+
+// Fade in over the first `d` frames, then hold fully opaque. Each vignette's
+// Sequence lingers XF frames past its slot, so the next vignette (rendered on
+// top) fades in over the still-opaque previous one — a real crossfade with no
+// fully-blank frame at any boundary.
+const fadeInHold = (frame: number, d = XF) =>
+  interpolate(frame, [0, d], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
 
 const Shell: React.FC<{
   tag: string;
@@ -16,7 +24,7 @@ const Shell: React.FC<{
   const tagS = spring({ frame: frame - 4, fps, config: { damping: 15 } });
   const capS = spring({ frame: frame - 14, fps, config: { damping: 200 } });
   return (
-    <AbsoluteFill style={{ opacity: edgeFade(frame, VIG, 10, 12) }}>
+    <AbsoluteFill style={{ opacity: fadeInHold(frame) }}>
       <div style={{ position: "absolute", top: 84, left: 0, right: 0, textAlign: "center", opacity: tagS, transform: `translateY(${(1 - tagS) * -12}px)` }}>
         <span style={{ fontFamily: FONT, fontWeight: 800, fontSize: 40, color: tint, textShadow: glow(tint, 0.5) }}>{tag}</span>
       </div>
@@ -216,14 +224,19 @@ const Fork: React.FC = () => {
 };
 
 export const FeatureRun: React.FC<{ dur: number }> = () => {
+  const frame = useCurrentFrame();
+  // Whole scene (backdrop included) fades in so it crossfades over the previous
+  // scene, which lingers XF frames underneath. Each vignette lingers XF frames
+  // past its slot so the next fades in over it. The last vignette lingers past
+  // the scene end so RemoteControl crossfades over it.
   return (
-    <AbsoluteFill>
+    <AbsoluteFill style={{ opacity: fadeInHold(frame) }}>
       <Backdrop tint={C.ember} />
-      <Sequence from={0} durationInFrames={VIG}><Duel /></Sequence>
-      <Sequence from={VIG} durationInFrames={VIG}><Workflows /></Sequence>
-      <Sequence from={VIG * 2} durationInFrames={VIG}><Autopilot /></Sequence>
-      <Sequence from={VIG * 3} durationInFrames={VIG}><Blame /></Sequence>
-      <Sequence from={VIG * 4} durationInFrames={VIG}><Fork /></Sequence>
+      <Sequence from={0} durationInFrames={VIG + XF}><Duel /></Sequence>
+      <Sequence from={VIG} durationInFrames={VIG + XF}><Workflows /></Sequence>
+      <Sequence from={VIG * 2} durationInFrames={VIG + XF}><Autopilot /></Sequence>
+      <Sequence from={VIG * 3} durationInFrames={VIG + XF}><Blame /></Sequence>
+      <Sequence from={VIG * 4} durationInFrames={VIG + XF}><Fork /></Sequence>
     </AbsoluteFill>
   );
 };

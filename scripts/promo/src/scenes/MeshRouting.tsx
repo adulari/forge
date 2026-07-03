@@ -24,8 +24,8 @@ const arcPath = (x1: number, y1: number, x2: number, y2: number) => {
 
 const Meter: React.FC<{ label: string; value: number; color: string }> = ({ label, value, color }) => (
   <div style={{ display: "flex", alignItems: "center", gap: 10, fontFamily: FONT, fontSize: 17 }}>
-    <span style={{ color: C.subtext, width: 78, textAlign: "right" }}>{label}</span>
-    <div style={{ width: 150, height: 9, background: C.crust, borderRadius: 5, overflow: "hidden" }}>
+    <span style={{ color: C.subtext, width: 110, textAlign: "right", whiteSpace: "nowrap", flexShrink: 0 }}>{label}</span>
+    <div style={{ width: 128, height: 9, background: C.crust, borderRadius: 5, overflow: "hidden", flexShrink: 0 }}>
       <div
         style={{
           width: `${value * 100}%`,

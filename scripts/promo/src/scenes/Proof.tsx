@@ -1,7 +1,7 @@
 import React from "react";
 import { AbsoluteFill, interpolate, spring, useCurrentFrame, useVideoConfig } from "remotion";
 import { C, FONT, glow } from "../theme";
-import { Backdrop, edgeFade } from "../components/common";
+import { Backdrop } from "../components/common";
 
 const Bar: React.FC<{
   label: string;
@@ -66,7 +66,7 @@ export const Proof: React.FC<{ dur: number }> = ({ dur }) => {
   const cardS = (i: number) => spring({ frame: frame - 140 - i * 10, fps, config: { damping: 15 } });
 
   return (
-    <AbsoluteFill style={{ opacity: edgeFade(frame, dur), justifyContent: "center", alignItems: "center", flexDirection: "column", gap: 54 }}>
+    <AbsoluteFill style={{ opacity: interpolate(frame, [0, 12], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" }), justifyContent: "center", alignItems: "center", flexDirection: "column", gap: 54 }}>
       <Backdrop tint={C.green} />
 
       <div style={{ textAlign: "center", opacity: titleS, transform: `translateY(${(1 - titleS) * 16}px)` }}>
