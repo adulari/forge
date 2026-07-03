@@ -300,8 +300,8 @@ pub(crate) async fn dispatch_command(
         // its filter. Resolving + swapping the session happens on Enter (picker_accept).
         CommandAction::Resume(prefix) => open_sessions_picker(app, &prefix)?,
         CommandAction::ListSessions => open_sessions_picker(app, "")?,
-        // `/model <id>` pins a specific model for the rest of this session.
-        // `/model` with no arg opens the interactive model browser — selecting a model pins it.
+        // `/model <id>` pins a specific model for the rest of this session; `/model <partial>`
+        // opens the pin picker pre-filtered; bare `/model` CLEARS the pin (see the arm below).
         // Works while a turn is running (pin takes effect on the NEXT turn).
         CommandAction::PinModel(Some(model_id)) => {
             // `/model <full-id>` (contains `::`) → pin immediately, no picker.

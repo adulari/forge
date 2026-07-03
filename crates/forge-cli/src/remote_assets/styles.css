@@ -1,5 +1,9 @@
 :root { color-scheme: dark; --bg:#16161c; --panel:#1c1c22; --ink:#d8d8e0; --dim:#6e6e78; --acc:#ff913c; --ok:#78d28c; --no:#f06e6e; }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+/* The page toggles panels via the `hidden` attribute. An author `display:flex` (e.g.
+   .overlaybox, .bar, .snewform) outranks the UA's plain `[hidden]{display:none}`, which left
+   "hidden" surfaces (empty overlay, free-text bar, new-session form) permanently on screen. */
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; }
 body {
   background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, system-ui, "Segoe UI", sans-serif;
@@ -78,7 +82,9 @@ footer { font-size: 11px; color: #4a4a54; text-align: center; padding: 4px 0 2px
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ox { background: none; border: 1px solid #33333c; color: var(--dim); border-radius: 8px;
   padding: 4px 10px; font-size: 13px; cursor: pointer; flex: 0 0 auto; }
-#ofilter { width: 100%; margin: 0 0 6px; padding: 8px 10px; font-size: 14px; }
+/* flex:0 0 auto beats the generic input rule's 200px flex-basis, which is a HEIGHT inside
+   this column flexbox — without it the filter box grows into a huge empty block. */
+#ofilter { width: 100%; margin: 0 0 6px; padding: 8px 10px; font-size: 14px; flex: 0 0 auto; }
 .orows { overflow-y: auto; -webkit-overflow-scrolling: touch; display: flex;
   flex-direction: column; gap: 4px; min-height: 0; }
 .orows:empty { display: none; }

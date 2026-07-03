@@ -2355,7 +2355,11 @@ mod tests {
         // persist the revision across reloads, dedupe the replay/live overlap, and honor
         // the resync flag.
         for needle in [
-            r#""/ws?rev=" + lastRev"#, // the handshake carries the last seen revision
+            // The handshake carries the last seen revision — but only once this page life has
+            // painted a frame. A cold reload restores lastRev from sessionStorage into a BLANK
+            // DOM; asking for "after lastRev" on an idle session then replays nothing and the
+            // page stays blank. rev=0 forces one full resync on the first paint.
+            r#""/ws?rev=" + (painted ? lastRev : 0)"#,
             "sessionStorage.getItem(REV_KEY", // …which survives a page reload
             "sessionStorage.setItem(REV_KEY",
             "s.revision <= lastRev", // replay/live overlap dedup
@@ -2367,8 +2371,15 @@ mod tests {
 
     #[test]
     fn page_paginates_history_and_renders_rich_transcript() {
-        // v5 full scrollback: scroll-up fetches older pages from the token-scoped history API…
-        for needle in [r#"BASE + "/api/history""#, "?before=", "histRow"] {
+        // v5 full scrollback: scroll-up fetches older pages from the token-scoped history API —
+        // and under a daemon the request must address the attached session explicitly (the
+        // shared route pages an empty id otherwise and scrollback never loads).
+        for needle in [
+            r#"BASE + "/api/history""#,
+            "?before=",
+            "histRow",
+            r#""/api/history" + q + sess"#,
+        ] {
             assert!(APP_JS.contains(needle), "app.js must contain {needle:?}");
         }
         // …and messages are rendered with the safe markdown renderer + built-in highlighter
@@ -2427,13 +2438,19 @@ mod tests {
 
     #[test]
     fn chips_row_has_no_dead_diff_and_gains_mode_and_help() {
-        // `/diff` never existed as a command — the chip was a dead affordance. /model, /mode and
-        // /help are picker/palette-backed and now fully remote-drivable via the overlay.
+        // `/diff` never existed as a command — the chip was a dead affordance. /models, /mode
+        // and /help are picker/palette-backed and fully remote-drivable via the overlay.
+        // (The chip is /models, NOT /model: bare `/model` silently CLEARS the model pin —
+        // a destructive tap, not a picker.)
         assert!(
             !CONTROL_PAGE.contains("/diff"),
             "the dead /diff chip is gone"
         );
-        for cmd in ["/plan", "/compact", "/model", "/mode", "/help"] {
+        assert!(
+            !CONTROL_PAGE.contains("data-cmd=\"/model\""),
+            "bare /model clears the pin — the chip must be /models"
+        );
+        for cmd in ["/plan", "/compact", "/models", "/mode", "/help"] {
             assert!(
                 CONTROL_PAGE.contains(&format!("data-cmd=\"{cmd}\"")),
                 "chip {cmd} present"

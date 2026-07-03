@@ -312,7 +312,9 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
 - `/usage` + `/mesh` overlays, `/model` picker, `/effort` knob, customizable statusline & keybinds
 - Remote control: drive a session from a phone/desktop browser (`/remote`), or run the
   `forge serve` daemon — N concurrent sessions, stable PWA origin, sessions survive disconnects,
-  create/switch/archive from the phone
+  create/switch/archive from the phone; fleet dashboard (waiting-on-decision sessions first),
+  permission + plan + diff review cards, file/image upload, voice input, an offline input queue,
+  and actionable web push (approve/deny from the lock screen)
 - `--inline` for native scrollback; `--mock` offline deterministic provider (no key needed)
 
 **🔒 Safety**
@@ -500,6 +502,14 @@ forge serve --anywhere       # public tunnel via cloudflared/ngrok
 forge serve --port 9000      # override the stable port
 forge serve --rotate-token   # revoke: mint a new daemon token (old links/PWAs die)
 ```
+
+Connecting a phone: open the printed URL (or scan the QR in the terminal), pick or create a
+session, and install the page as an app — Android Chrome: ⋮ → *Add to Home screen*; iOS Safari:
+Share → *Add to Home Screen* (on iOS the install is **required** before push works). Then enable
+push under ☰ → *push notifications*: permission prompts, questions, and finished turns reach the
+lock screen, and a permission push carries **Allow/Deny** actions you can answer without opening
+the page. Prompts typed while offline queue locally and flush in order on reconnect; a dropped
+connection replays exactly the frames you missed.
 
 The in-chat `/remote` still works as the zero-setup single-session mode; `forge serve` is the
 always-on fleet. See `docs/features/remote-control.md`.
