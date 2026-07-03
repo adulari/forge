@@ -1208,6 +1208,15 @@ pub(crate) async fn run_chat_tui(
     // Remote-facing notices (`Snapshot::notes`, bounded): feedback for inputs the remote drain
     // can't fully honor (e.g. `/remote` typed on the phone, stale answers).
     let mut remote_notes: Vec<String> = Vec::new();
+    // Keystrokes injected by remote clients (`RemoteInput::Key` + synthesized overlay commits),
+    // drained at the HEAD of the local key loop so they run through the exact same code path a
+    // local keystroke takes — identical modal routing, identical `DispatchOutcome` handling.
+    let mut remote_keys: std::collections::VecDeque<forge_tui::KeyKind> =
+        std::collections::VecDeque::new();
+    // The last `/copy` payload while remote is on (`Snapshot::copy_text`), so the PHONE can copy
+    // the text to its own clipboard — the host clipboard is unreachable from there. Cleared on
+    // the next remote prompt, like `remote_notes`.
+    let mut remote_copy_text: Option<String> = None;
     // Change-only broadcast: the last snapshot actually sent + its revision. While busy the loop
     // spins every 16ms; without this compare every iteration pushed an identical frame to every
     // connected browser (~60 frames/s of JSON for nothing).
@@ -1296,7 +1305,10 @@ pub(crate) async fn run_chat_tui(
         }
 
         // Drain *all* buffered keystrokes this iteration. Reading one per frame throttled
-        while let Some(ev) = tui.poll_event().context("reading input")? {
+        // input. Remote-injected keys (queued by the remote drain below, processed here on the
+        // next iteration) come FIRST so an overlay commit (cursor move + synthesized Enter)
+        // can't be interleaved by local typing — then the terminal's own events.
+        while let Some(ev) = next_input_event(&mut remote_keys, &mut tui)? {
             dirty = true;
             // Any input counts as activity: hold the cursor solid and restart the idle timer, so
             // the blink only resumes once typing pauses.
@@ -1722,6 +1734,9 @@ pub(crate) async fn run_chat_tui(
                             let chars = text.chars().count();
                             copy_selection(&mut clipboard, &text);
                             app.note(&format!("✓ copied last response ({chars} chars)"));
+                            if remote.is_some() {
+                                remote_copy_text = Some(text);
+                            }
                         }
                         DispatchOutcome::Quit => {
                             abort_turn_before_quit(
@@ -2110,6 +2125,9 @@ pub(crate) async fn run_chat_tui(
                                 app.note(&format!(
                                     "✓ copied response to clipboard ({chars} chars)"
                                 ));
+                                if remote.is_some() {
+                                    remote_copy_text = Some(text);
+                                }
                             }
                         }
                     }
@@ -2326,6 +2344,11 @@ pub(crate) async fn run_chat_tui(
                                     let chars = text.chars().count();
                                     copy_selection(&mut clipboard, &text);
                                     app.note(&format!("✓ copied to clipboard ({chars} chars)"));
+                                    // A remote client may have driven this picker — ship the
+                                    // payload in the snapshot so the phone can copy it too.
+                                    if remote.is_some() {
+                                        remote_copy_text = Some(text);
+                                    }
                                 }
                                 app.copy_candidates.clear();
                             } else if kind == forge_tui::PickerKind::Duel {
@@ -2411,7 +2434,8 @@ pub(crate) async fn run_chat_tui(
                                     last_poll: std::time::Instant::now(),
                                 });
                             } else {
-                                picker_accept(kind, &row, &session, &mut tui, &mut app).await?;
+                                picker_accept(kind, &row, &session, Some(&mut tui), &mut app)
+                                    .await?;
                             }
                         }
                     }
@@ -3006,6 +3030,9 @@ pub(crate) async fn run_chat_tui(
                                     app.note(&format!(
                                         "✓ copied response to clipboard ({chars} chars)"
                                     ));
+                                    if remote.is_some() {
+                                        remote_copy_text = Some(text);
+                                    }
                                 }
                             }
                         } else {
@@ -3144,8 +3171,24 @@ pub(crate) async fn run_chat_tui(
                 match input {
                     remote::RemoteInput::Prompt { text } => {
                         // A fresh prompt starts a fresh interaction — drop the previous notices
-                        // so "stale answer ignored" etc. don't linger on the page forever.
+                        // (and the served /copy payload) so they don't linger on the page forever.
                         remote_notes.clear();
+                        remote_copy_text = None;
+                        // `/keys` is host-only BY DESIGN: it runs a blocking fullscreen
+                        // configurator loop on the host terminal — dispatching it from here
+                        // would freeze the host TUI on a screen the remote can't see or drive.
+                        if !busy
+                            && matches!(
+                                forge_tui::parse_command(&text),
+                                forge_tui::CommandAction::Keys
+                            )
+                        {
+                            push_remote_note(
+                                &mut remote_notes,
+                                "⌨ /keys is host-only (a fullscreen keybind configurator on the host terminal)",
+                            );
+                            continue;
+                        }
                         if busy {
                             // Mid-turn: queue plain prompts to run after this turn, exactly like
                             // local typing (they used to be refused here, so the phone couldn't
@@ -3284,18 +3327,12 @@ pub(crate) async fn run_chat_tui(
                                 }
                                 DispatchOutcome::Handled => {}
                                 DispatchOutcome::PendingMesh(rx) => {
+                                    // The overlay opens loading=true and is projected into
+                                    // `Snapshot::overlay`, so the phone sees it live.
                                     mesh_load_rx = Some(rx);
-                                    push_remote_note(
-                                        &mut remote_notes,
-                                        "📊 /mesh opened on the TUI — overlays aren't remote-viewable yet",
-                                    );
                                 }
                                 DispatchOutcome::PendingUsage(rx) => {
                                     usage_load_rx = Some(rx);
-                                    push_remote_note(
-                                        &mut remote_notes,
-                                        "📊 /usage opened on the TUI — overlays aren't remote-viewable yet",
-                                    );
                                 }
                                 DispatchOutcome::ToggleRemote { .. } => {
                                     // Can't be honored here: this drain runs under the
@@ -3312,9 +3349,11 @@ pub(crate) async fn run_chat_tui(
                                     push_remote_note(
                                         &mut remote_notes,
                                         &format!(
-                                            "✓ copied to the HOST machine's clipboard ({chars} chars) — not this device"
+                                            "✓ copied on the host ({chars} chars) — tap “Copy here” below for this device"
                                         ),
                                     );
+                                    // Ship the payload in the snapshot so the PHONE can copy it.
+                                    remote_copy_text = Some(text);
                                 }
                             }
                         } else {
@@ -3391,6 +3430,54 @@ pub(crate) async fn run_chat_tui(
                             app.apply(forge_tui::PresenterEvent::AssistantDone);
                             app.note("⏹ remote interrupted — stopped responding");
                         }
+                    }
+                    remote::RemoteInput::Key { key } => {
+                        // The keystroke channel: inject through the SAME key path a local
+                        // keystroke takes (queued here, drained at the head of the key loop).
+                        // Two guards, both security/UX — never parity — motivated:
+                        // 1. While a permission prompt / question is pending, raw keys could
+                        //    resolve it WITHOUT the prompt_seq check that protects taps from
+                        //    approving a newer prompt they never saw — those must go through
+                        //    the seq-checked Allow/Answer inputs only.
+                        // 2. Esc with nothing modal open and no turn running QUITS the host
+                        //    TUI locally; remotely that's an accidental one-tap host kill.
+                        if pending.is_some() || app.awaiting_question() {
+                            push_remote_note(
+                                &mut remote_notes,
+                                "⚠ a prompt is pending — answer it with its buttons",
+                            );
+                        } else {
+                            match remote::named_key(&key) {
+                                Some(forge_tui::KeyKind::Esc)
+                                    if !busy && !any_remote_modal_open(&app) =>
+                                {
+                                    push_remote_note(
+                                        &mut remote_notes,
+                                        "Esc ignored — nothing to close (use /quit to exit the host)",
+                                    );
+                                }
+                                Some(k) => remote_keys.push_back(k),
+                                None => push_remote_note(
+                                    &mut remote_notes,
+                                    &format!("⚠ unknown key {key:?} ignored"),
+                                ),
+                            }
+                        }
+                    }
+                    remote::RemoteInput::OverlaySelect { id } => {
+                        remote_keys
+                            .extend(apply_overlay_input(&mut app, RemoteOverlayOp::Select(id)));
+                    }
+                    remote::RemoteInput::OverlayNav { delta } => {
+                        remote_keys
+                            .extend(apply_overlay_input(&mut app, RemoteOverlayOp::Nav(delta)));
+                    }
+                    remote::RemoteInput::OverlayFilter { text } => {
+                        remote_keys
+                            .extend(apply_overlay_input(&mut app, RemoteOverlayOp::Filter(text)));
+                    }
+                    remote::RemoteInput::OverlayCancel => {
+                        remote_keys.extend(apply_overlay_input(&mut app, RemoteOverlayOp::Cancel));
                     }
                 }
             }
@@ -3812,6 +3899,10 @@ pub(crate) async fn run_chat_tui(
                         })
                         .collect(),
                     question_allow_other: view.question_allow_other,
+                    // The generic overlay projection: whatever modal surface owns the TUI
+                    // keyboard (palette / any picker / config / usage / mesh / workflow).
+                    overlay: app.remote_overlay().map(map_overlay_snapshot),
+                    copy_text: remote_copy_text.clone(),
                     prompt_seq,
                     notes: remote_notes.clone(),
                     // Candidate carries the LAST revision so the equality compare below sees
@@ -4104,6 +4195,183 @@ pub(crate) fn spawn_duel(
     })
 }
 
+/// Map the TUI-side overlay projection into the remote wire type (kept apart so `forge-tui`
+/// never depends on the server module — same split as `RemoteSnapshot` → `Snapshot`).
+pub(crate) fn map_overlay_snapshot(o: forge_tui::OverlaySnapshot) -> remote::SnapOverlay {
+    remote::SnapOverlay {
+        kind: o.kind,
+        title: o.title,
+        rows: o
+            .rows
+            .into_iter()
+            .map(|r| remote::SnapRow {
+                id: r.id,
+                label: r.label,
+                detail: r.detail,
+                selected: r.selected,
+                group: r.group,
+            })
+            .collect(),
+        selected: o.selected,
+        filter: o.filter,
+        free_text: o.free_text,
+        body: o.body,
+    }
+}
+
+/// The next input event for the key loop: remote-injected keys first (so a remote overlay
+/// commit — cursor move + synthesized Enter — is never interleaved by local typing), then the
+/// terminal's own events. Remote keys become plain [`forge_tui::InputEvent::Key`]s here, so from
+/// this point on they are indistinguishable from local keystrokes — the ONE code path both take.
+fn next_input_event(
+    remote_keys: &mut std::collections::VecDeque<forge_tui::KeyKind>,
+    tui: &mut forge_tui::Tui,
+) -> Result<Option<forge_tui::InputEvent>> {
+    if let Some(k) = remote_keys.pop_front() {
+        return Ok(Some(forge_tui::InputEvent::Key(k)));
+    }
+    tui.poll_event().context("reading input")
+}
+
+/// True when any modal surface owns the keyboard — the same set `remote_overlay()` projects.
+pub(crate) fn any_remote_modal_open(app: &forge_tui::App) -> bool {
+    app.workflow.open
+        || app.config_editor.open
+        || app.palette.open
+        || app.usage_overlay.open
+        || app.mesh_overlay.open
+        || app.at_picker.open
+        || app.picker.open
+}
+
+/// A remote overlay verb, decoded from [`remote::RemoteInput`] by the drain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemoteOverlayOp {
+    /// Move the cursor onto the row with this id, then commit it (synthesized Enter).
+    Select(String),
+    /// Move the cursor by this many rows (negative = up), as repeated ↑/↓ keys.
+    Nav(i32),
+    /// Replace the overlay's filter/query text (or the value being edited, for free-text).
+    Filter(String),
+    /// Close the overlay (Esc) — a no-op when nothing modal is open.
+    Cancel,
+}
+
+/// Apply a remote overlay verb to the TOP-MOST open overlay (same precedence as
+/// `App::remote_overlay`) and return the keystrokes to inject through the normal key path.
+/// Select = set the cursor to the row with that id, then Enter — so a remotely committed picker
+/// produces the identical `DispatchOutcome` handling a local Enter does. All mutations here are
+/// cursor/filter state only; every side effect still happens in the shared key path.
+pub(crate) fn apply_overlay_input(
+    app: &mut forge_tui::App,
+    op: RemoteOverlayOp,
+) -> Vec<forge_tui::KeyKind> {
+    use forge_tui::KeyKind as K;
+    match op {
+        RemoteOverlayOp::Cancel => {
+            if any_remote_modal_open(app) {
+                vec![K::Esc]
+            } else {
+                Vec::new()
+            }
+        }
+        RemoteOverlayOp::Nav(delta) => {
+            if !any_remote_modal_open(app) || delta == 0 {
+                return Vec::new();
+            }
+            let key = if delta < 0 { K::Up } else { K::Down };
+            // Bounded: a hostile frame can't queue an unbounded key storm.
+            vec![key; delta.unsigned_abs().min(100) as usize]
+        }
+        RemoteOverlayOp::Filter(text) => {
+            if app.workflow.open || app.usage_overlay.open || app.mesh_overlay.open {
+                // Informational overlays have no filter.
+            } else if app.config_editor.open {
+                if app.config_editor.editing.is_some() {
+                    app.config_editor.editing = Some(text);
+                } else {
+                    app.config_editor.filter = text;
+                    app.config_editor.selected = 0;
+                }
+            } else if app.palette.open {
+                // Mirror local typing: the palette query IS the input line's slash token.
+                app.input = format!("/{text}");
+                app.input_cursor = app.input.len();
+                app.palette.query = text;
+                app.palette.selected = 0;
+                app.palette.clamp();
+            } else if app.at_picker.open {
+                app.at_picker.query = text;
+                app.at_picker.selected = 0;
+            } else if app.picker.open {
+                app.picker.query = text;
+                app.picker.selected = 0;
+                app.picker.clamp();
+            }
+            Vec::new()
+        }
+        RemoteOverlayOp::Select(id) => {
+            if app.workflow.open {
+                if let Some(idx) = app.workflow.rows.iter().position(|r| r.id == id) {
+                    app.workflow.selected = idx;
+                }
+                Vec::new() // Enter would zoom a transcript only the host can see
+            } else if app.config_editor.open {
+                if app.config_editor.editing.is_some() {
+                    return Vec::new(); // committing the edit is the free-text box's job
+                }
+                let matches = app.config_editor.matches();
+                if let Some(pos) = matches
+                    .iter()
+                    .position(|&i| app.config_editor.rows[i].path == id)
+                {
+                    app.config_editor.selected = pos;
+                    return vec![K::Enter];
+                }
+                Vec::new()
+            } else if app.palette.open {
+                let names: Vec<String> =
+                    app.palette.matches().into_iter().map(|e| e.name).collect();
+                if let Some(idx) = names.iter().position(|n| *n == id) {
+                    app.palette.selected = idx;
+                    // A leading `/command` input line is what makes the palette's Enter
+                    // dispatch (vs. accept-in-place) — materialize the pick exactly as typed.
+                    app.input = format!("/{id}");
+                    app.input_cursor = app.input.len();
+                    return vec![K::Enter];
+                }
+                Vec::new()
+            } else if app.usage_overlay.open {
+                Vec::new() // informational — rows aren't selectable
+            } else if app.mesh_overlay.open {
+                if let Some(idx) = app
+                    .mesh_overlay
+                    .candidates
+                    .iter()
+                    .position(|c| c.model == id)
+                {
+                    app.mesh_overlay.cursor = idx;
+                }
+                Vec::new() // browsing highlight only, same as local ↑/↓
+            } else if app.at_picker.open {
+                if let Some(idx) = app.at_picker.matches().iter().position(|p| **p == id) {
+                    app.at_picker.selected = idx;
+                    return vec![K::Enter];
+                }
+                Vec::new()
+            } else if app.picker.open {
+                if let Some(idx) = app.picker.matches().iter().position(|r| r.id == id) {
+                    app.picker.selected = idx;
+                    return vec![K::Enter];
+                }
+                Vec::new()
+            } else {
+                Vec::new()
+            }
+        }
+    }
+}
+
 /// Append a remote-facing notice (`Snapshot::notes`), keeping the ring bounded. These are state,
 /// not events — `watch` coalescing can drop intermediate snapshots, so a note must survive until
 /// the page has had a chance to render it.
@@ -4267,6 +4535,224 @@ fn find_starting_event_id(store: &forge_store::Store, session_id: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn picker_rows(ids: &[&str]) -> Vec<forge_tui::PickerRow> {
+        ids.iter()
+            .map(|id| forge_tui::PickerRow {
+                id: id.to_string(),
+                title: id.to_string(),
+                subtitle: String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn overlay_ops_are_noops_when_nothing_modal_is_open() {
+        let mut app = forge_tui::App::default();
+        // Cancel/Nav/Select must NEVER synthesize keys into an overlay-free session — a stray
+        // Esc would interrupt a busy turn or quit an idle host.
+        assert!(apply_overlay_input(&mut app, RemoteOverlayOp::Cancel).is_empty());
+        assert!(apply_overlay_input(&mut app, RemoteOverlayOp::Nav(3)).is_empty());
+        assert!(apply_overlay_input(&mut app, RemoteOverlayOp::Select("x".into())).is_empty());
+    }
+
+    #[test]
+    fn overlay_nav_and_cancel_map_to_arrow_and_esc_keys() {
+        use forge_tui::KeyKind as K;
+        let mut app = forge_tui::App::default();
+        app.picker.open_with(
+            forge_tui::PickerKind::Sessions,
+            "resume",
+            picker_rows(&["a", "b", "c"]),
+        );
+        assert_eq!(
+            apply_overlay_input(&mut app, RemoteOverlayOp::Nav(2)),
+            vec![K::Down, K::Down]
+        );
+        assert_eq!(
+            apply_overlay_input(&mut app, RemoteOverlayOp::Nav(-1)),
+            vec![K::Up]
+        );
+        assert_eq!(
+            apply_overlay_input(&mut app, RemoteOverlayOp::Nav(0)),
+            Vec::<K>::new()
+        );
+        // Bounded against a hostile delta.
+        assert_eq!(
+            apply_overlay_input(&mut app, RemoteOverlayOp::Nav(i32::MIN)).len(),
+            100
+        );
+        assert_eq!(
+            apply_overlay_input(&mut app, RemoteOverlayOp::Cancel),
+            vec![K::Esc]
+        );
+    }
+
+    #[test]
+    fn overlay_select_moves_the_picker_cursor_then_commits_with_enter() {
+        use forge_tui::KeyKind as K;
+        let mut app = forge_tui::App::default();
+        app.picker.open_with(
+            forge_tui::PickerKind::Tempers,
+            "switch operating mode",
+            picker_rows(&["Survey", "Guarded", "Smith"]),
+        );
+        let keys = apply_overlay_input(&mut app, RemoteOverlayOp::Select("Smith".into()));
+        assert_eq!(keys, vec![K::Enter], "select = cursor move + Enter");
+        assert_eq!(app.picker.selected_row().unwrap().id, "Smith");
+        // An id that isn't in the (filtered) rows commits nothing.
+        assert!(apply_overlay_input(&mut app, RemoteOverlayOp::Select("nope".into())).is_empty());
+    }
+
+    #[test]
+    fn overlay_filter_narrows_the_picker_and_select_respects_it() {
+        let mut app = forge_tui::App::default();
+        app.picker.open_with(
+            forge_tui::PickerKind::Sessions,
+            "resume",
+            picker_rows(&["alpha", "beta"]),
+        );
+        assert!(apply_overlay_input(&mut app, RemoteOverlayOp::Filter("bet".into())).is_empty());
+        assert_eq!(app.picker.query, "bet");
+        assert_eq!(app.picker.matches().len(), 1);
+        // "alpha" is filtered out → selecting it is a no-op, not a mis-commit of "beta".
+        assert!(apply_overlay_input(&mut app, RemoteOverlayOp::Select("alpha".into())).is_empty());
+    }
+
+    #[test]
+    fn overlay_select_on_the_palette_materializes_the_command_line() {
+        use forge_tui::KeyKind as K;
+        let mut app = forge_tui::App::default();
+        app.palette.open_with("");
+        let keys = apply_overlay_input(&mut app, RemoteOverlayOp::Select("model".into()));
+        assert_eq!(keys, vec![K::Enter]);
+        // The palette's Enter dispatches `app.input` when it starts with '/' — the select must
+        // have staged exactly what a local user would have typed.
+        assert_eq!(app.input, "/model");
+        assert_eq!(app.input_cursor, app.input.len());
+    }
+
+    #[test]
+    fn overlay_filter_writes_the_config_edit_buffer_while_editing() {
+        let mut app = forge_tui::App::default();
+        app.config_editor.open_with(vec![forge_tui::SettingRow {
+            path: "tui.fullscreen".into(),
+            label: "Full-screen".into(),
+            group: "tui".into(),
+            value: "true".into(),
+            ..Default::default()
+        }]);
+        // Not editing: filter narrows the row list.
+        apply_overlay_input(&mut app, RemoteOverlayOp::Filter("full".into()));
+        assert_eq!(app.config_editor.filter, "full");
+        // Editing: the same verb replaces the pending VALUE (the page's free-text box), which
+        // the synthesized Enter then commits through ConfigEditor::handle_key.
+        app.config_editor.editing = Some(String::new());
+        apply_overlay_input(&mut app, RemoteOverlayOp::Filter("false".into()));
+        assert_eq!(app.config_editor.editing.as_deref(), Some("false"));
+        assert_eq!(app.config_editor.filter, "full", "filter untouched");
+    }
+
+    #[test]
+    fn overlay_select_on_informational_overlays_moves_the_cursor_only() {
+        let mut app = forge_tui::App::default();
+        app.mesh_overlay.open = true;
+        app.mesh_overlay.candidates = vec![
+            forge_tui::MeshCandRow {
+                model: "a".into(),
+                ..Default::default()
+            },
+            forge_tui::MeshCandRow {
+                model: "b".into(),
+                ..Default::default()
+            },
+        ];
+        let keys = apply_overlay_input(&mut app, RemoteOverlayOp::Select("b".into()));
+        assert!(
+            keys.is_empty(),
+            "mesh rows are a browsing highlight, no Enter"
+        );
+        assert_eq!(app.mesh_overlay.cursor, 1);
+    }
+
+    /// The e2e-style drive of the parity mechanism: a remote client opens the `/model` picker,
+    /// navigates, and selects — and the session's model pin actually changes. Uses the REAL
+    /// pieces of the path: `apply_overlay_input` for the wire verbs, the picker's own
+    /// `move_up`/`move_down` (exactly what the key loop calls for ↑/↓), and `picker_accept`
+    /// (exactly what the key loop calls on Enter for `ModelPin`).
+    #[tokio::test]
+    async fn remote_drive_of_the_model_pin_picker_changes_the_pin() {
+        use forge_tui::KeyKind as K;
+        let config = forge_config::Config::default();
+        let session = Arc::new(tokio::sync::Mutex::new(
+            Session::start(
+                Arc::new(forge_store::Store::open_in_memory().unwrap()),
+                Arc::new(forge_provider::MockProvider),
+                Arc::new(forge_mesh::HeuristicRouter::new(config.clone())),
+                ToolRegistry::with_core_tools(),
+                Box::new(forge_tui::HeadlessPresenter::new(false)),
+                config,
+                ".",
+            )
+            .unwrap(),
+        ));
+        assert_eq!(session.lock().await.pinned_model(), None);
+
+        let mut app = forge_tui::App::default();
+        app.picker.open_with(
+            forge_tui::PickerKind::ModelPin,
+            "⊕ pin model",
+            picker_rows(&["mesh", "groq::llama-3.3-70b", "groq::qwen3-32b"]),
+        );
+        // The phone shows the projected overlay…
+        let overlay = app.remote_overlay().expect("picker projects");
+        assert_eq!(overlay.kind, "picker:model_pin");
+        assert_eq!(overlay.rows.len(), 3);
+
+        // …navigates down twice (OverlayNav{delta:2} → two Down keys through the key path)…
+        for key in apply_overlay_input(&mut app, RemoteOverlayOp::Nav(2)) {
+            match key {
+                K::Down => app.picker.move_down(),
+                K::Up => app.picker.move_up(),
+                other => panic!("nav synthesizes only arrows, got {other:?}"),
+            }
+        }
+        assert_eq!(app.picker.selected_row().unwrap().id, "groq::qwen3-32b");
+
+        // …then taps the llama row (OverlaySelect → cursor move + synthesized Enter).
+        let keys = apply_overlay_input(
+            &mut app,
+            RemoteOverlayOp::Select("groq::llama-3.3-70b".into()),
+        );
+        assert_eq!(keys, vec![K::Enter]);
+        let row = app.picker.selected_row().cloned().expect("row selected");
+        let kind = app.picker.kind.expect("picker kind");
+        app.picker.close();
+        picker_accept(kind, &row, &session, None, &mut app)
+            .await
+            .unwrap();
+        assert_eq!(
+            session.lock().await.pinned_model(),
+            Some("groq::llama-3.3-70b"),
+            "the remote pick pinned the model"
+        );
+
+        // And picking "mesh" the same way clears the pin again.
+        app.picker.open_with(
+            forge_tui::PickerKind::ModelPin,
+            "⊕ pin model",
+            picker_rows(&["mesh", "groq::llama-3.3-70b"]),
+        );
+        let keys = apply_overlay_input(&mut app, RemoteOverlayOp::Select("mesh".into()));
+        assert_eq!(keys, vec![K::Enter]);
+        let row = app.picker.selected_row().cloned().unwrap();
+        let kind = app.picker.kind.unwrap();
+        app.picker.close();
+        picker_accept(kind, &row, &session, None, &mut app)
+            .await
+            .unwrap();
+        assert_eq!(session.lock().await.pinned_model(), None, "pin cleared");
+    }
 
     #[test]
     fn known_provider_prefixes_accept_real_providers_and_keyless_bridges() {

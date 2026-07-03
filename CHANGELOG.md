@@ -7,6 +7,19 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Remote control: full command + picker parity (protocol v4)**: every slash command, picker,
+  palette, and overlay is now usable from the phone/browser through one generic mechanism —
+  `Snapshot.overlay` projects whichever modal surface owns the TUI keyboard (the command palette,
+  every picker kind incl. `/model` pin + `/models` browse, `/mode`, `/sessions`, `/checkpoints`,
+  `/assay`, `/copy` blocks, resume-mode, the **`/duel` winner pick**, `@path` mentions, the
+  `/config` wizard, and `/usage`/`/mesh`/workflow as text bodies), and `RemoteInput` gained a
+  keystroke channel + overlay verbs (select/nav/filter/cancel) that inject through the same key
+  path local keystrokes take — so a remote commit produces identical behavior, and any future
+  picker is remote-drivable by adding one projection arm. `/copy` now ships its payload in the
+  snapshot so the phone can copy it to its own clipboard; the dead `/diff` chip is gone (chips:
+  Stop, `/plan`, `/compact`, `/model`, `/mode`, `/help` — all functional); the embedded page was
+  split into separate token-scoped assets (`remote_assets/`), letting the CSP drop
+  `'unsafe-inline'` entirely; `/keys` stays host-only with an explanatory note.
 - **`/pr`** — turn the session's work into a pull request in one command: the agent branches (if
   on the default branch), stages the session's changes, commits, pushes, and opens the PR — whose
   body ends with a provenance section (session id + `forge replay` pointer, models used, spend)
