@@ -65,7 +65,9 @@ export const Wordmark: React.FC<{
         const lit = Math.max(0, Math.min(1, local / 2));
         const px = p.x * step;
         const py = p.y * step;
-        const opacity = 0.06 + lit * 0.94;
+        // Un-ignited pixels stay fully transparent; a nonzero floor rendered the
+        // trailing (not-yet-lit) letters as a faint ghost duplicate mid-sweep.
+        const opacity = lit;
         const fill = lit > 0.5 ? C.ember : C.emberDeep;
         return (
           <rect
