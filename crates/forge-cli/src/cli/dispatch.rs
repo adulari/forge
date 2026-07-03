@@ -74,6 +74,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                 replay_cmd(&ids, json)
             }
         }
+        Command::Blame { file, line, json } => blame_cmd(&file, line, json),
         Command::Assay { sub } => assay_cmd(sub).await,
         Command::Bench { sub } => match sub {
             BenchCmd::Swe {
