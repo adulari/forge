@@ -133,6 +133,12 @@ pub enum WorkflowEvent {
     Log(String),
 }
 
+/// Total `workflow()` invocations one `run_workflow` call may make, across every nesting level.
+/// The depth guard alone only bounds recursion LINEARLY — a saved script fanning out
+/// `workflow("self")` 1000× per level would construct ~depth^1000 fresh QuickJS runtimes (each
+/// its own `AsyncRuntime`) without ever touching `agent_counter`. This cap bounds the total.
+const MAX_TOTAL_WORKFLOWS: usize = 50;
+
 /// Shared state for one `run_workflow` call — closed over by every registered host function.
 struct WorkflowState {
     ctx: AgentCtx,
@@ -145,6 +151,7 @@ struct WorkflowState {
     tx: mpsc::UnboundedSender<WorkflowEvent>,
     agent_counter: Arc<AtomicUsize>,
     max_total_agents: usize,
+    workflow_counter: Arc<AtomicUsize>,
     workflows_dir: PathBuf,
 }
 
@@ -171,6 +178,7 @@ impl WorkflowState {
             tx,
             agent_counter: Arc::new(AtomicUsize::new(0)),
             max_total_agents,
+            workflow_counter: Arc::new(AtomicUsize::new(0)),
             workflows_dir,
         }
     }
@@ -193,6 +201,7 @@ impl WorkflowState {
             tx: self.tx.clone(),
             agent_counter: Arc::clone(&self.agent_counter),
             max_total_agents: self.max_total_agents,
+            workflow_counter: Arc::clone(&self.workflow_counter),
             workflows_dir: self.workflows_dir.clone(),
         }
     }
@@ -372,6 +381,14 @@ fn workflow_host_fn(state: Arc<WorkflowState>) -> forge_workflow::HostFunction {
             }
             if state.ctx.depth >= state.ctx.max_depth {
                 return Err("workflow() recursion depth limit reached".to_string());
+            }
+            // Depth bounds recursion linearly; this bounds total fan-out (each invocation is a
+            // whole fresh QuickJS runtime — see MAX_TOTAL_WORKFLOWS).
+            let n = state.workflow_counter.fetch_add(1, Ordering::SeqCst) + 1;
+            if n > MAX_TOTAL_WORKFLOWS {
+                return Err(format!(
+                    "workflow() exceeded its {MAX_TOTAL_WORKFLOWS}-invocation safety cap"
+                ));
             }
             let path = state.workflows_dir.join(format!("{name}.js"));
             let script = tokio::fs::read_to_string(&path)
@@ -1002,6 +1019,51 @@ mod tests {
             text.contains("path separators") || text.contains("error"),
             "path traversal rejected: {text}"
         );
+    }
+
+    /// The depth guard alone doesn't stop WIDE recursion — a script invoking `workflow()` in a
+    /// loop at a legal depth would construct one fresh QuickJS runtime per call, unbounded.
+    #[tokio::test]
+    async fn workflow_invocation_cap_stops_wide_fanout() {
+        let dir = ScratchDir::new("wf-cap");
+        std::fs::write(dir.0.join("leaf.js"), r#"return 1;"#).unwrap();
+
+        let mut ctx = ctx_with(Arc::new(EchoProvider), "openai::gpt-test");
+        ctx.max_depth = 2;
+        let (etx, _erx) = std::sync::mpsc::channel::<WorkflowEvent>();
+        let (value, ok) = run(
+            ctx,
+            "parent".to_string(),
+            BudgetState::default(),
+            8,
+            0,
+            200,
+            dir.0.clone(),
+            r#"
+            let count = 0;
+            try {
+                for (let i = 0; i < 60; i++) {
+                    await workflow("leaf");
+                    count++;
+                }
+            } catch (e) {
+                return "capped after " + count + ": " + e;
+            }
+            return "never capped (" + count + ")";
+            "#,
+            move |ev| {
+                let _ = etx.send(ev);
+            },
+        )
+        .await
+        .unwrap();
+        assert!(ok, "the script itself handled the cap error");
+        let text = value.as_str().unwrap();
+        assert!(
+            text.starts_with(&format!("capped after {MAX_TOTAL_WORKFLOWS}")),
+            "cap engaged exactly at the limit: {text}"
+        );
+        assert!(text.contains("safety cap"), "cap error text: {text}");
     }
 
     #[tokio::test]

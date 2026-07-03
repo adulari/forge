@@ -19,7 +19,9 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use rquickjs::prelude::{Async, Rest};
 use rquickjs::{
@@ -55,6 +57,51 @@ impl HostFunction {
     }
 }
 
+/// Hard execution limits for one script run. Scripts are model-authored fresh every turn, so
+/// runaway shapes are a WHEN, not an IF: a `while (true) {}` before the first `await` would
+/// otherwise hang the session unrecoverably (tokio task-abort can only fire at an await point,
+/// and a synchronous QuickJS interpretation never reaches one), and unbounded string/array
+/// growth would OOM the whole process rather than fail the one script.
+#[derive(Clone, Copy)]
+pub struct Limits {
+    /// QuickJS heap ceiling; an allocation past it fails and surfaces as a script error.
+    pub memory_bytes: usize,
+    /// Longest CONTINUOUS synchronous execution slice before the interpreter is interrupted.
+    /// Time suspended awaiting a host function does not count — only pure JS compute since the
+    /// last host-function return.
+    pub max_sync_ms: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            memory_bytes: 256 * 1024 * 1024,
+            max_sync_ms: 30_000,
+        }
+    }
+}
+
+/// Wall-clock bookkeeping for the synchronous-slice cap: the interrupt handler (called by
+/// QuickJS mid-interpretation) compares "now" against the last time control returned from a
+/// host function. Awaiting an `agent()` call for minutes is fine; computing in a tight JS loop
+/// for `max_sync_ms` without ever calling a host function is what gets interrupted.
+struct ExecClock {
+    started: Instant,
+    last_host_return_ms: AtomicU64,
+}
+
+impl ExecClock {
+    fn sync_elapsed_ms(&self) -> u64 {
+        (self.started.elapsed().as_millis() as u64)
+            .saturating_sub(self.last_host_return_ms.load(Ordering::Relaxed))
+    }
+
+    fn mark_host_return(&self) {
+        self.last_host_return_ms
+            .store(self.started.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+}
+
 /// Runs `script` (evaluated as an async-IIFE — a bare top-level `await` isn't valid outside a JS
 /// module) with the given host functions registered as globals, and returns whatever value the
 /// script's top-level promise resolves to. `Err` surfaces a script exception or a setup failure
@@ -63,7 +110,28 @@ pub async fn run_script(
     host_fns: Vec<HostFunction>,
     script: &str,
 ) -> Result<serde_json::Value, String> {
+    run_script_with_limits(host_fns, script, Limits::default()).await
+}
+
+/// [`run_script`] with explicit [`Limits`] — split out so tests (and any future config knob)
+/// can use tight limits without waiting out the production defaults.
+pub async fn run_script_with_limits(
+    host_fns: Vec<HostFunction>,
+    script: &str,
+    limits: Limits,
+) -> Result<serde_json::Value, String> {
     let rt = AsyncRuntime::new().map_err(|e| format!("failed to create JS runtime: {e}"))?;
+    rt.set_memory_limit(limits.memory_bytes).await;
+    let clock = Arc::new(ExecClock {
+        started: Instant::now(),
+        last_host_return_ms: AtomicU64::new(0),
+    });
+    {
+        let clock = Arc::clone(&clock);
+        let cap = limits.max_sync_ms;
+        rt.set_interrupt_handler(Some(Box::new(move || clock.sync_elapsed_ms() > cap)))
+            .await;
+    }
     // Drives the runtime's internal job queue for as long as `rt` (and this future) lives — this
     // is what lets multiple concurrently-awaited host-function calls (e.g. inside `parallel()`)
     // actually make progress at once, not just one at a time. `DriveFuture` only holds a WEAK
@@ -81,7 +149,7 @@ pub async fn run_script(
     let result = ctx
         .async_with(async |ctx| -> Result<serde_json::Value, String> {
             for host_fn in host_fns {
-                register(&ctx, host_fn)
+                register(&ctx, host_fn, Arc::clone(&clock))
                     .map_err(|e| format!("failed to register host function: {e}"))?;
             }
 
@@ -102,7 +170,19 @@ pub async fn run_script(
         })
         .await;
 
-    result
+    // A QuickJS interrupt surfaces as a bare "interrupted" — spell out what tripped it so the
+    // authoring model's retry fixes the loop instead of guessing.
+    result.map_err(|e| {
+        if e.to_lowercase().contains("interrupt") {
+            format!(
+                "{e} (the script computed for more than {}s straight without calling a host \
+                 function — an accidental infinite loop? — and was stopped)",
+                limits.max_sync_ms.max(1000) / 1000
+            )
+        } else {
+            e
+        }
+    })
 }
 
 /// Registers one host function as a JS global. The wrapper: convert each JS argument to JSON
@@ -115,18 +195,26 @@ pub async fn run_script(
 /// `ctx.clone()` from outside. Capturing an extra `Ctx` clone into more than one registered
 /// function's closure reliably corrupts QuickJS's GC bookkeeping (a real `JS_FreeRuntime`
 /// assertion failure, reproduced and bisected during development down to exactly this).
-fn register<'js>(ctx: &Ctx<'js>, host_fn: HostFunction) -> rquickjs::Result<()> {
+fn register<'js>(
+    ctx: &Ctx<'js>,
+    host_fn: HostFunction,
+    clock: Arc<ExecClock>,
+) -> rquickjs::Result<()> {
     let call = host_fn.call;
     let wrapped = move |ctx: Ctx<'js>, args: Rest<Value<'js>>| {
         let call = Arc::clone(&call);
+        let clock = Arc::clone(&clock);
         async move {
             let mut json_args = Vec::with_capacity(args.0.len());
             for arg in args.0 {
-                let json = js_to_json(&arg)
-                    .map_err(|e| rquickjs::Exception::throw_message(&ctx, &e.to_string()))?;
+                let json =
+                    js_to_json(&arg).map_err(|e| rquickjs::Exception::throw_message(&ctx, &e))?;
                 json_args.push(json);
             }
-            match call(json_args).await {
+            let result = call(json_args).await;
+            // Restart the synchronous-slice clock: whatever JS runs next counts from here.
+            clock.mark_host_return();
+            match result {
                 Ok(value) => Ok(JsonValue(value)),
                 Err(msg) => Err(rquickjs::Exception::throw_message(&ctx, &msg)),
             }
@@ -147,10 +235,27 @@ impl<'js> rquickjs::IntoJs<'js> for JsonValue {
     }
 }
 
+/// Deepest value nesting either conversion will walk. A cyclic JS object (`a.self = a`) makes
+/// the tree walk infinite — without this cap that's a Rust stack overflow, which ABORTS the
+/// whole process (no catchable panic). 64 is far beyond any legitimate agent-result shape.
+const MAX_VALUE_DEPTH: usize = 64;
+
 /// Native recursive conversion, `rquickjs::Value` -> `serde_json::Value`: no JS-level function
 /// invocation (see the module doc for why that matters), just type dispatch + native
-/// `Object`/`Array`/`String` accessors.
-fn js_to_json<'js>(value: &Value<'js>) -> rquickjs::Result<serde_json::Value> {
+/// `Object`/`Array`/`String` accessors. Errors are plain strings — both call sites turn them
+/// into a JS exception / script-error message anyway.
+fn js_to_json<'js>(value: &Value<'js>) -> Result<serde_json::Value, String> {
+    js_to_json_at(value, 0)
+}
+
+fn js_to_json_at<'js>(value: &Value<'js>, depth: usize) -> Result<serde_json::Value, String> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(format!(
+            "value nesting exceeds {MAX_VALUE_DEPTH} levels — cyclic objects (or absurdly deep \
+             ones) cannot cross the script/host boundary"
+        ));
+    }
+    let err = |e: rquickjs::Error| e.to_string();
     Ok(match value.type_of() {
         Type::Uninitialized | Type::Undefined | Type::Null => serde_json::Value::Null,
         Type::Bool => serde_json::Value::Bool(value.as_bool().unwrap_or(false)),
@@ -163,14 +268,15 @@ fn js_to_json<'js>(value: &Value<'js>) -> rquickjs::Result<serde_json::Value> {
                 .clone()
                 .into_string()
                 .expect("checked String type")
-                .to_string()?;
+                .to_string()
+                .map_err(err)?;
             serde_json::Value::String(s)
         }
         Type::Array => {
             let arr = value.clone().into_array().expect("checked Array type");
             let mut out = Vec::with_capacity(arr.len());
             for item in arr.iter::<Value>() {
-                out.push(js_to_json(&item?)?);
+                out.push(js_to_json_at(&item.map_err(err)?, depth + 1)?);
             }
             serde_json::Value::Array(out)
         }
@@ -180,9 +286,9 @@ fn js_to_json<'js>(value: &Value<'js>) -> rquickjs::Result<serde_json::Value> {
             let obj = value.clone().into_object().expect("checked Object type");
             let mut map = serde_json::Map::new();
             for key in obj.keys::<String>() {
-                let key = key?;
-                let v: Value = obj.get(&key)?;
-                map.insert(key, js_to_json(&v)?);
+                let key = key.map_err(err)?;
+                let v: Value = obj.get(&key).map_err(err)?;
+                map.insert(key, js_to_json_at(&v, depth + 1)?);
             }
             serde_json::Value::Object(map)
         }
@@ -191,8 +297,24 @@ fn js_to_json<'js>(value: &Value<'js>) -> rquickjs::Result<serde_json::Value> {
 }
 
 /// Native recursive conversion, `serde_json::Value` -> `rquickjs::Value` — the reverse of
-/// [`js_to_json`], same "no JS-level function invocation" rule.
+/// [`js_to_json`], same "no JS-level function invocation" rule and the same depth cap
+/// (`serde_json::Value` can't be cyclic, but host functions shouldn't be able to hand a script
+/// something the return trip would then refuse).
 fn json_to_js<'js>(ctx: &Ctx<'js>, value: &serde_json::Value) -> rquickjs::Result<Value<'js>> {
+    json_to_js_at(ctx, value, 0)
+}
+
+fn json_to_js_at<'js>(
+    ctx: &Ctx<'js>,
+    value: &serde_json::Value,
+    depth: usize,
+) -> rquickjs::Result<Value<'js>> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(rquickjs::Exception::throw_message(
+            ctx,
+            &format!("value nesting exceeds {MAX_VALUE_DEPTH} levels"),
+        ));
+    }
     Ok(match value {
         serde_json::Value::Null => Value::new_null(ctx.clone()),
         serde_json::Value::Bool(b) => Value::new_bool(ctx.clone(), *b),
@@ -201,14 +323,14 @@ fn json_to_js<'js>(ctx: &Ctx<'js>, value: &serde_json::Value) -> rquickjs::Resul
         serde_json::Value::Array(items) => {
             let arr = Array::new(ctx.clone())?;
             for (i, item) in items.iter().enumerate() {
-                arr.set(i, json_to_js(ctx, item)?)?;
+                arr.set(i, json_to_js_at(ctx, item, depth + 1)?)?;
             }
             arr.into_value()
         }
         serde_json::Value::Object(map) => {
             let obj = Object::new(ctx.clone())?;
             for (k, v) in map {
-                obj.set(k.as_str(), json_to_js(ctx, v)?)?;
+                obj.set(k.as_str(), json_to_js_at(ctx, v, depth + 1)?)?;
             }
             obj.into_value()
         }
@@ -302,6 +424,120 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("boom"), "error message preserved: {err}");
+    }
+
+    /// Regression guard for a process-abort class: a cyclic value walked by the recursive
+    /// converter used to blow the Rust stack (not a catchable panic — a hard abort of the whole
+    /// session). Returning it and passing it to a host function both cross the same boundary.
+    #[tokio::test]
+    async fn a_cyclic_return_value_errors_instead_of_crashing_the_process() {
+        let err = run_script(
+            vec![],
+            r#"(async () => { const a = {}; a.self = a; return a; })"#,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("nesting exceeds"), "explains the cap: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_cyclic_host_argument_rejects_cleanly() {
+        let echo = HostFunction::new("echo", |args| async move {
+            Ok(args.into_iter().next().unwrap_or(serde_json::Value::Null))
+        });
+        let err = run_script(
+            vec![echo],
+            r#"(async () => { const a = {}; a.self = a; return await echo(a); })"#,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("nesting exceeds"), "explains the cap: {err}");
+    }
+
+    #[tokio::test]
+    async fn legitimately_nested_values_still_round_trip_under_the_depth_cap() {
+        let echo = HostFunction::new("echo", |args| async move {
+            Ok(args.into_iter().next().unwrap_or(serde_json::Value::Null))
+        });
+        let out = run_script(
+            vec![echo],
+            r#"(async () => {
+                let v = { leaf: true };
+                for (let i = 0; i < 20; i++) v = { child: v };
+                const echoed = await echo(v);
+                let probe = echoed;
+                for (let i = 0; i < 20; i++) probe = probe.child;
+                return probe.leaf;
+            })"#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, serde_json::Value::Bool(true));
+    }
+
+    /// A synchronous `while(true){}` never reaches an await point, so tokio task-abort can't
+    /// stop it — only the QuickJS interrupt handler can. Without it this test would hang the
+    /// suite forever.
+    #[tokio::test]
+    async fn a_runaway_synchronous_loop_is_interrupted_not_hung() {
+        let start = Instant::now();
+        let err = run_script_with_limits(
+            vec![],
+            r#"(async () => { while (true) {} })"#,
+            Limits {
+                max_sync_ms: 200,
+                ..Limits::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_lowercase().contains("interrupt"),
+            "interrupt surfaced: {err}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "stopped promptly, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// The sync-slice clock restarts at every host-function return — long AWAITS must not trip
+    /// the cap, only long uninterrupted compute.
+    #[tokio::test]
+    async fn a_slow_host_call_does_not_trip_the_sync_slice_cap() {
+        let slow = HostFunction::new("slow", |_args| async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok(serde_json::Value::String("done".into()))
+        });
+        let out = run_script_with_limits(
+            vec![slow],
+            r#"(async () => { return await slow(); })"#,
+            Limits {
+                max_sync_ms: 200,
+                ..Limits::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out, "done");
+    }
+
+    #[tokio::test]
+    async fn unbounded_memory_growth_fails_the_script_not_the_process() {
+        let err = run_script_with_limits(
+            vec![],
+            r#"(async () => { let s = "x".repeat(1024); while (true) { s += s; } })"#,
+            Limits {
+                memory_bytes: 16 * 1024 * 1024,
+                ..Limits::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        // Either the allocator refuses (out of memory) or the interrupt fires first on a slow
+        // machine — both are acceptable "stopped cleanly" outcomes.
+        assert!(!err.is_empty());
     }
 
     /// The whole sandboxing guarantee: a script only ever gets the functions the caller
