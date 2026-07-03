@@ -139,5 +139,6 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Migrate { cmd } => migrate_cmd(cmd).await,
         Command::Plugin { cmd } => plugin_cmd(cmd).await,
         Command::SelfMcp { action } => self_mcp_cmd(action),
+        Command::Schedule { cmd } => schedule_cmd(cmd),
     }
 }
