@@ -116,6 +116,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/compact",
     },
     Command {
+        name: "uncompact",
+        desc: "restore full transcript after a /compact",
+        usage: "/uncompact",
+    },
+    Command {
         name: "lattice",
         desc: "show a symbol's code-intelligence subgraph (callers + provenance)",
         usage: "/lattice <symbol>",
@@ -266,6 +271,8 @@ pub enum CommandAction {
     ListCheckpoints,
     /// Summarize older transcript messages to free up context (`/compact`).
     Compact,
+    /// Restore the full pre-compaction transcript after a `/compact` (`/uncompact`).
+    Uncompact,
     /// Show the code-intelligence subgraph for a symbol (`/lattice <symbol>`).
     Lattice(String),
     /// Set a session goal and decompose it into a tracked task plan (`/goal <objective>`).
@@ -581,6 +588,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "checkpoint" | "cp" => CommandAction::Checkpoint((!arg.is_empty()).then_some(arg)),
         "checkpoints" => CommandAction::ListCheckpoints,
         "compact" => CommandAction::Compact,
+        "uncompact" => CommandAction::Uncompact,
         "lattice" | "lat" => CommandAction::Lattice(arg),
         "goal" | "objective" => CommandAction::Goal(arg),
         "loop" => CommandAction::Loop(arg),
@@ -1035,6 +1043,8 @@ mod tests {
         assert_eq!(parse_command("/mode"), CommandAction::Mode);
         assert_eq!(parse_command("/m"), CommandAction::Mode);
         assert_eq!(parse_command("/undo"), CommandAction::Undo);
+        assert_eq!(parse_command("/compact"), CommandAction::Compact);
+        assert_eq!(parse_command("/uncompact"), CommandAction::Uncompact);
         assert_eq!(
             parse_command("/checkpoints"),
             CommandAction::ListCheckpoints

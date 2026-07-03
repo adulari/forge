@@ -399,6 +399,20 @@ pub(crate) async fn dispatch_command(
         }
         // `/compact` makes a model call → run it as a background task so the spinner ticks.
         CommandAction::Compact => return Ok(DispatchOutcome::RunCompact),
+        // `/uncompact` makes no model call (pure store + in-memory restore) → handled inline,
+        // like `/undo`/`/checkpoint`, rather than spawned as a background task. On success
+        // `Session::uncompact` emits its own `PresenterEvent::Warning` (mirrors `compact`'s
+        // convention) — only the no-op case needs a note here, since that path returns before
+        // emitting anything.
+        CommandAction::Uncompact => {
+            let (before, after) = {
+                let mut s = session.lock().await;
+                s.uncompact().map_err(|e| anyhow::anyhow!("{e}"))?
+            };
+            if before == after {
+                app.note("● nothing to uncompact — this session was never compacted");
+            }
+        }
         // `/copy [N]` — resolve the Nth-latest assistant response and hand it to the loop to copy
         // (the loop owns the clipboard). N is 1-based from the most recent (1 = last response).
         CommandAction::Copy { nth } => {
