@@ -1,4 +1,5 @@
 pub(crate) mod assay;
+pub(crate) mod blame;
 pub(crate) mod git;
 pub(crate) mod import;
 pub(crate) mod lattice;

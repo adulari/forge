@@ -18,7 +18,7 @@ pub(crate) struct Cli {
 /// logical groups instead of one flat wall. Pure documentation — changes no behavior.
 const AFTER_HELP: &str = "\
 COMMAND GROUPS:
-  Run a task     run, chat, nl, sessions, replay
+  Run a task     run, chat, nl, sessions, replay, blame
   Models/mesh    models, mesh, benchmarks   (three views of routing — each --help cross-refs the others)
   Skills/plugins skill, plugin, commands, import   (plugin = canonical pack installer; skill = author/distil)
   Providers      auth, provider, local, setup/init, doctor
@@ -371,6 +371,20 @@ pub(crate) enum Command {
         /// your normal permission mode, exactly as `forge run` would. Single id only.
         #[arg(long)]
         rerun: bool,
+    },
+    /// Trace lines of a file back to the session/model/turn that wrote them, from the store's
+    /// own tool-call records (no git dependency). See docs/features/forge-blame.md.
+    Blame {
+        /// File to attribute, relative or absolute.
+        file: String,
+        /// Print the full provenance card for this one 1-based line instead of the whole-file
+        /// summary: model, session, timestamp, the user prompt that started the turn, the
+        /// assistant's own message, and a `forge replay <session-id>` pointer.
+        #[arg(long)]
+        line: Option<usize>,
+        /// Emit machine-readable JSON instead of the human-readable table.
+        #[arg(long)]
+        json: bool,
     },
     /// Inspect past assay runs stored in the database.
     Assay {

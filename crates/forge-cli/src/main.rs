@@ -16,6 +16,7 @@ pub(crate) use cli::args::{
     PluginMarketplaceCmd, ProviderCmd, Scope, SelfMcpAction, SkillCmd,
 };
 pub(crate) use cli::commands::assay::{assay_cmd, spawn_assay};
+pub(crate) use cli::commands::blame::blame_cmd;
 pub(crate) use cli::commands::git::{git_cmd, maybe_install_git_hook, write_active_model};
 pub(crate) use cli::commands::import::import_cmd;
 pub(crate) use cli::commands::lattice::lattice_cmd;
@@ -44,6 +45,7 @@ mod assay_output;
 mod balance;
 mod bench;
 mod benchmarks;
+mod blame;
 mod bridge_stats;
 mod cli;
 mod context_windows;

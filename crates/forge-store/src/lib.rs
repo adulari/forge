@@ -16,7 +16,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -108,6 +108,19 @@ fn cap_result_json(s: &str) -> std::borrow::Cow<'_, str> {
         end -= 1;
     }
     std::borrow::Cow::Owned(format!("{}…[truncated {} bytes]", &s[..end], s.len() - end))
+}
+
+/// Pull the top-level `"path"` string out of a tool call's `args_json`, for `forge blame`
+/// (docs/features/forge-blame.md). Cheap best-effort: only `write_file`/`edit_file` carry a
+/// `path` arg today, but this is generic over any tool's args so it doesn't need updating if
+/// another file-touching tool is added. Returns `None` on unparseable/truncated JSON or a
+/// missing/non-string `path` key, rather than erroring the caller.
+fn extract_path_arg(args_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(args_json)
+        .ok()?
+        .get("path")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Escape `\`, `%`, and `_` in a caller-supplied string so it can be safely embedded in a SQL
@@ -406,9 +419,36 @@ fn repair_duplicate_seqs(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Migration #2: add `tool_call.path` (`forge blame`, docs/features/forge-blame.md) so a
+/// write/edit tool call can be traced back to the file it touched without re-parsing
+/// `args_json` at query time. Backfills existing `write_file`/`edit_file` rows best-effort —
+/// a row whose `args_json` was truncated (see `MAX_RESULT_JSON_BYTES`) before reaching the
+/// `path` key, or that fails to parse, is left NULL rather than erroring the migration.
+fn migration_0002(conn: &Connection) -> rusqlite::Result<()> {
+    add_column_if_missing(conn, "ALTER TABLE tool_call ADD COLUMN path TEXT")?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_tool_call_path ON tool_call(path)")?;
+
+    let rows: Vec<(String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, args_json FROM tool_call \
+             WHERE tool_name IN ('write_file', 'edit_file') AND path IS NULL",
+        )?;
+        let v = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        v
+    };
+    for (id, args_json) in rows {
+        if let Some(path) = extract_path_arg(&args_json) {
+            conn.execute("UPDATE tool_call SET path = ?1 WHERE id = ?2", (path, id))?;
+        }
+    }
+    Ok(())
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
-const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[migration_0001];
+const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[migration_0001, migration_0002];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
 /// crash mid-run resumes cleanly. Refuses (with [`StoreError::SchemaTooNew`]) to open a DB written
@@ -906,6 +946,9 @@ impl Store {
         permission: &str,
         status: &str,
     ) -> Result<()> {
+        // Extracted from the UNCAPPED args string, before the cap below can truncate the tail
+        // and clip a late `path` key out of the JSON.
+        let path = extract_path_arg(args_json);
         // Cap oversized args/results (full file writes/reads etc.) so the append-only global DB
         // can't grow without bound; the head is preserved with a truncation marker for audit/replay.
         let args_json = cap_result_json(args_json);
@@ -913,10 +956,10 @@ impl Store {
         with_busy_retry(|| {
             let conn = self.lock()?;
             conn.prepare_cached(
-                "INSERT INTO tool_call (id, message_id, tool_name, args_json, result_json, permission, status)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO tool_call (id, message_id, tool_name, args_json, result_json, permission, status, path)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?
-            .execute((forge_types::new_id(), message_id, tool_name, args_json.as_ref(), result.as_ref(), permission, status))?;
+            .execute((forge_types::new_id(), message_id, tool_name, args_json.as_ref(), result.as_ref(), permission, status, path.as_deref()))?;
             Ok(())
         })
     }
@@ -1753,6 +1796,71 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// Every recorded `write_file`/`edit_file` call whose `path` matches (as a suffix) the given
+    /// `filename_suffix`, oldest first — the raw material `forge blame` (docs/features/forge-blame.md)
+    /// attributes source lines from. Joined to the owning session (for `cwd`, to resolve a relative
+    /// `path` the same way the tool did) and to the assistant message that made the call (for
+    /// `model`); `routing_decision.chosen_model` fills in when the message's own `model` is NULL
+    /// (older rows, or a message that predates routing being recorded for it).
+    pub fn file_edits(&self, filename_suffix: &str) -> Result<Vec<FileEditRow>> {
+        let conn = self.lock()?;
+        let pattern = escape_like_pattern(filename_suffix);
+        let mut stmt = conn.prepare(
+            "SELECT tc.tool_name, tc.args_json, tc.path, m.session_id, s.cwd,
+                    COALESCE(m.model, r.chosen_model), m.seq, tc.created_at
+             FROM tool_call tc
+             JOIN message m ON m.id = tc.message_id
+             JOIN session s ON s.id = m.session_id
+             LEFT JOIN routing_decision r ON r.message_id = m.id
+             WHERE tc.path IS NOT NULL
+               AND tc.tool_name IN ('write_file', 'edit_file')
+               AND tc.status = 'ok'
+               AND tc.path LIKE '%' || ?1 ESCAPE '\\'
+             ORDER BY tc.created_at ASC",
+        )?;
+        let rows = stmt.query_map([pattern], |row| {
+            Ok(FileEditRow {
+                tool_name: row.get(0)?,
+                args_json: row.get(1)?,
+                path: row.get(2)?,
+                session_id: row.get(3)?,
+                session_cwd: row.get(4)?,
+                model: row.get(5)?,
+                seq: row.get(6)?,
+                created_at: row.get(7)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// The provenance context of one turn: the nearest user prompt at or before `seq`, and the
+    /// content of the assistant message AT `seq` (the one that made the edit `forge blame` is
+    /// explaining). Either half is `None` if no matching row exists — e.g. `seq` is a virtual
+    /// subagent turn with no direct user prompt in this session.
+    pub fn turn_context(&self, session_id: &str, seq: i64) -> Result<TurnContext> {
+        let conn = self.lock()?;
+        let user_prompt = conn
+            .query_row(
+                "SELECT content FROM message WHERE session_id = ?1 AND role = 'user' AND seq <= ?2 \
+                 ORDER BY seq DESC LIMIT 1",
+                (session_id, seq),
+                |r| r.get(0),
+            )
+            .optional()?;
+        let assistant_content = conn
+            .query_row(
+                "SELECT content FROM message WHERE session_id = ?1 AND role = 'assistant' AND seq = ?2",
+                (session_id, seq),
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(TurnContext {
+            user_prompt,
+            assistant_content,
+        })
+    }
+
     // --- Assay runs + findings (docs/features/analysis-mode.md) ---
 
     /// Persist an assay run; returns its id. Add findings with [`add_finding`](Self::add_finding).
@@ -1934,6 +2042,30 @@ pub struct ReplayEntry {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cost_usd: Option<f64>,
+}
+
+/// One recorded `write_file`/`edit_file` tool call touching a file, as read back for
+/// `forge blame` (docs/features/forge-blame.md). `path` is exactly what the model passed —
+/// possibly relative to `session_cwd`, which the caller resolves the same way the tool did.
+#[derive(Debug, Clone)]
+pub struct FileEditRow {
+    pub tool_name: String,
+    pub args_json: String,
+    pub path: String,
+    pub session_id: String,
+    pub session_cwd: String,
+    pub model: Option<String>,
+    pub seq: i64,
+    pub created_at: i64,
+}
+
+/// The provenance context of a single turn, for `forge blame --line` (docs/features/forge-blame.md).
+#[derive(Debug, Clone, Default)]
+pub struct TurnContext {
+    /// The nearest user prompt at or before the turn's `seq`.
+    pub user_prompt: Option<String>,
+    /// The assistant message's own content at that `seq` (its reasoning/summary text).
+    pub assistant_content: Option<String>,
 }
 
 /// A persisted checkpoint (rewind point) of a session.
@@ -3869,6 +4001,187 @@ mod tests {
             huge_args.len()
         );
         assert!(stored.contains("truncated"), "carries a truncation marker");
+    }
+
+    #[test]
+    fn record_tool_call_populates_path_for_write_and_edit_but_not_others() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        let mid = store
+            .add_message(&sid, 0, Role::Assistant, "x", None)
+            .unwrap();
+        store
+            .record_tool_call(
+                &mid,
+                "write_file",
+                r#"{"path":"src/a.rs","content":"fn a() {}"}"#,
+                "wrote 10 bytes",
+                "allowed",
+                "ok",
+            )
+            .unwrap();
+        store
+            .record_tool_call(
+                &mid,
+                "read_file",
+                r#"{"path":"src/b.rs"}"#,
+                "ok",
+                "allowed",
+                "ok",
+            )
+            .unwrap();
+        let conn = store.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT tool_name, path FROM tool_call ORDER BY rowid")
+            .unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            rows[0],
+            ("write_file".to_string(), Some("src/a.rs".to_string()))
+        );
+        // read_file isn't in file_edits' tool_name filter, but the path column itself is
+        // populated generically from any args carrying a top-level "path" string.
+        assert_eq!(
+            rows[1],
+            ("read_file".to_string(), Some("src/b.rs".to_string()))
+        );
+    }
+
+    #[test]
+    fn migration_0002_backfills_path_on_pre_existing_rows() {
+        // A DB written before `tool_call.path` existed must have its historic write_file/edit_file
+        // rows backfilled from their args_json on upgrade, not just left NULL forever. Build the
+        // pre-0002 DB by hand: base schema + migration_0001 only, insert a row, THEN open it
+        // through `Store::open` so `migration_0002` runs and backfills it.
+        let path = temp_db_path();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(schema::SCHEMA).unwrap();
+            migration_0001(&conn).unwrap();
+            conn.pragma_update(None, "user_version", 1i64).unwrap();
+            conn.execute(
+                "INSERT INTO session (id, cwd, permission_mode) VALUES ('s1', '/tmp', 'default')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, seq, role, content) \
+                 VALUES ('m1', 's1', 0, 'assistant', 'x')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO tool_call (id, message_id, tool_name, args_json, result_json, permission, status) \
+                 VALUES ('tc1', 'm1', 'write_file', '{\"path\":\"src/old.rs\",\"content\":\"x\"}', 'ok', 'allowed', 'ok')",
+                [],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let conn = store.lock().unwrap();
+        let backfilled: String = conn
+            .query_row("SELECT path FROM tool_call WHERE id = 'tc1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(backfilled, "src/old.rs");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn file_edits_joins_model_session_and_matches_by_path_suffix() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/repo", "default").unwrap();
+        let mid = store
+            .add_message(
+                &sid,
+                0,
+                Role::Assistant,
+                "wrote it",
+                Some("anthropic::claude"),
+            )
+            .unwrap();
+        store
+            .record_tool_call(
+                &mid,
+                "write_file",
+                r#"{"path":"src/main.rs","content":"fn main() {}"}"#,
+                "wrote 14 bytes",
+                "allowed",
+                "ok",
+            )
+            .unwrap();
+        // A non-matching file and a failed call must not show up.
+        store
+            .record_tool_call(
+                &mid,
+                "write_file",
+                r#"{"path":"src/other.rs","content":"fn other() {}"}"#,
+                "wrote 16 bytes",
+                "allowed",
+                "ok",
+            )
+            .unwrap();
+        store
+            .record_tool_call(
+                &mid,
+                "write_file",
+                r#"{"path":"src/main.rs","content":"broken"}"#,
+                "permission denied",
+                "denied",
+                "error",
+            )
+            .unwrap();
+
+        let rows = store.file_edits("main.rs").unwrap();
+        assert_eq!(rows.len(), 1, "only the ok write_file to main.rs matches");
+        assert_eq!(rows[0].path, "src/main.rs");
+        assert_eq!(rows[0].session_cwd, "/repo");
+        assert_eq!(rows[0].model.as_deref(), Some("anthropic::claude"));
+        assert_eq!(rows[0].session_id, sid);
+    }
+
+    #[test]
+    fn file_edits_falls_back_to_routing_decision_when_message_model_is_null() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/repo", "default").unwrap();
+        let mid = store
+            .add_message(&sid, 0, Role::Assistant, "wrote it", None)
+            .unwrap();
+        store
+            .record_routing(&mid, TaskTier::Standard, "openai::gpt-4o", "rationale")
+            .unwrap();
+        store
+            .record_tool_call(
+                &mid,
+                "edit_file",
+                r#"{"path":"src/main.rs","old":"a","new":"b"}"#,
+                "ok",
+                "allowed",
+                "ok",
+            )
+            .unwrap();
+        let rows = store.file_edits("main.rs").unwrap();
+        assert_eq!(rows[0].model.as_deref(), Some("openai::gpt-4o"));
+    }
+
+    #[test]
+    fn turn_context_finds_nearest_user_prompt_and_the_assistant_reply() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/repo", "default").unwrap();
+        store
+            .add_message(&sid, 0, Role::User, "add a counter", None)
+            .unwrap();
+        store
+            .add_message(&sid, 1, Role::Assistant, "adding it now", Some("m"))
+            .unwrap();
+        let turn = store.turn_context(&sid, 1).unwrap();
+        assert_eq!(turn.user_prompt.as_deref(), Some("add a counter"));
+        assert_eq!(turn.assistant_content.as_deref(), Some("adding it now"));
     }
 
     #[test]
