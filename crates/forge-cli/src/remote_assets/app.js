@@ -1,6 +1,6 @@
 "use strict";
 const BASE = "__BASE__";
-const PROTO = 6;
+const PROTO = 7;
 const $ = (id) => document.getElementById(id);
 let ws = null, dead = false, notif = false, curSeq = 0, retries = 0, curOverlay = null;
 // The /copy payload stashed outside the DOM (it can be large / contain anything).
@@ -131,10 +131,17 @@ function renderSessionList(rows) {
     d.className = "sessrow" + (r.id === curSession ? " cur" : "");
     const main = document.createElement("button");
     main.className = "sessmain";
-    main.innerHTML = '<span class="sdot' + (r.busy ? " busy" : "") + '"></span><b>' +
-      esc(r.title || r.id.slice(0, 8)) + '</b><span class="sinfo">' +
+    // v7 fleet dashboard: waiting-on-decision is the killer signal (server sorts those first);
+    // tokens ride along so a filling context window is visible at a glance.
+    const dotCls = r.waiting ? " wait" : (r.busy ? " busy" : "");
+    main.innerHTML = '<span class="sdot' + dotCls + '"></span><b>' +
+      esc(r.title || r.id.slice(0, 8)) + '</b>' +
+      (r.waiting ? '<span class="sneeds">needs decision</span>' : "") +
+      '<span class="sinfo">' +
       esc(baseName(r.cwd)) + (r.worktree ? " · ⎇ worktree" : "") +
-      " · $" + (r.cost_usd || 0).toFixed(4) + " · " + age(r.last_activity) + '</span>';
+      " · $" + (r.cost_usd || 0).toFixed(4) +
+      (r.context_tokens ? " · ◷ " + fmt(r.context_tokens) : "") +
+      " · " + age(r.last_activity) + '</span>';
     main.onclick = () => attach(r.id);
     const arch = document.createElement("button");
     arch.className = "sarch";
@@ -223,6 +230,8 @@ function render(s) {
   renderTasks(s);
   renderAgents(s);
   renderOverlay(s);
+  renderPlan(s);
+  renderDiff(s);
   renderActions(s);
   notifyTransitions(s);
 }
@@ -569,15 +578,158 @@ function renderOverlay(s) {
   if (sel) sel.scrollIntoView({ block: "nearest" });
 }
 
+// --- v7 plan-approval card -------------------------------------------------------------------
+// `Snapshot.plan` is the present_plan proposal. While the turn-end approval question is pending
+// (its options come from core's resolve_plan_approval: "Build it" / "Cancel" + free text), the
+// card shows Approve/Revise/Cancel buttons that ANSWER that question — the same seq-checked
+// path a tapped option or typed revision takes locally, so the outcome is identical to /execute.
+let planApproveN = 0, planCancelN = 0;
+
+function planOptionN(s, label) {
+  if (!s.plan || !s.question) return 0;
+  const i = (s.question_options || []).findIndex(o => o.label === label);
+  return i < 0 ? 0 : i + 1; // options answer by 1-based number
+}
+
+function renderPlan(s) {
+  const box = $("planbox");
+  const p = s.plan;
+  if (!p) { if (!box.hidden) { box.hidden = true; box._sig = ""; } return; }
+  planApproveN = planOptionN(s, "Build it");
+  planCancelN = planOptionN(s, "Cancel");
+  const decidable = planApproveN > 0;
+  const sig = JSON.stringify([p, decidable, s.prompt_seq]);
+  if (box._sig === sig) return;
+  box._sig = sig;
+  box.hidden = false;
+  $("ptitle").textContent = p.title || "";
+  const ol = $("psteps");
+  ol.innerHTML = "";
+  (p.steps || []).forEach(st => {
+    const li = document.createElement("li");
+    const b = document.createElement("b");
+    b.textContent = st.title;
+    li.appendChild(b);
+    if (st.detail) {
+      const dd = document.createElement("span");
+      dd.textContent = st.detail;
+      li.appendChild(dd);
+    }
+    ol.appendChild(li);
+  });
+  $("pnotes").hidden = !p.notes;
+  if (p.notes) $("pnotes").textContent = "⚠ " + p.notes;
+  $("pbar").hidden = !decidable;
+  $("pcancel").hidden = planCancelN === 0;
+  if (!decidable) $("previsebar").hidden = true;
+}
+
+$("pok").onclick = () => {
+  if (planApproveN > 0) send({ kind: "answer", text: String(planApproveN), seq: curSeq });
+};
+$("pcancel").onclick = () => {
+  if (planCancelN > 0) send({ kind: "answer", text: String(planCancelN), seq: curSeq });
+};
+$("previse").onclick = () => {
+  const bar = $("previsebar");
+  bar.hidden = !bar.hidden;
+  if (!bar.hidden) {
+    const t = $("previsetext");
+    if (!t.value) t.value = "revise the plan: ";
+    t.focus();
+    try { t.setSelectionRange(t.value.length, t.value.length); } catch (e) {}
+  }
+};
+function submitRevise() {
+  const v = $("previsetext").value.trim();
+  if (!v) return;
+  // Free text answers the approval question → core runs a revision turn (local behavior).
+  send({ kind: "answer", text: v, seq: curSeq });
+  $("previsetext").value = "";
+  $("previsebar").hidden = true;
+}
+$("previseok").onclick = submitRevise;
+$("previsetext").addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); submitRevise(); }
+});
+
+// --- v7 structured diff card -----------------------------------------------------------------
+// `Snapshot.diff` is either the ONE proposed change a pending write permission would apply
+// (pending: true — review before tapping Allow) or everything that landed this turn. Hunks are
+// capped host-side; "+N more" markers say what was elided.
+function renderDiff(s) {
+  const box = $("diffbox");
+  const d = s.diff;
+  if (!d || !(d.files || []).length) { if (!box.hidden) { box.hidden = true; box._sig = ""; } return; }
+  const sig = JSON.stringify(d);
+  if (box._sig === sig) return;
+  box._sig = sig;
+  box.hidden = false;
+  box.classList.toggle("pend", !!d.pending);
+  $("dhead").textContent = d.pending
+    ? "⚠ proposed change — review before allowing"
+    : "✎ changes this turn";
+  const el = $("dfiles");
+  el.innerHTML = "";
+  d.files.forEach(f => {
+    const df = document.createElement("div");
+    df.className = "dfile";
+    const h = document.createElement("div");
+    h.className = "dfhead";
+    h.innerHTML = "<b>" + esc(f.path) + "</b><span class=\"dkind\">" + esc(f.kind) + "</span>" +
+      "<span class=\"dstat\"><span class=\"dadd\">+" + (f.adds || 0) + "</span> " +
+      "<span class=\"ddel\">−" + (f.dels || 0) + "</span></span>";
+    df.appendChild(h);
+    if (f.binary) {
+      const m = document.createElement("div");
+      m.className = "dmore";
+      m.textContent = "binary file";
+      df.appendChild(m);
+    } else {
+      const pre = document.createElement("pre");
+      pre.className = "dbody";
+      (f.hunks || []).forEach(hk => {
+        const hd = document.createElement("div");
+        hd.className = "dhunk";
+        hd.textContent = hk.header;
+        pre.appendChild(hd);
+        (hk.lines || []).forEach(l => {
+          const ln = document.createElement("div");
+          ln.className = l[0] === "+" ? "dadd" : (l[0] === "-" ? "ddel" : "dctx");
+          ln.textContent = l;
+          pre.appendChild(ln);
+        });
+      });
+      df.appendChild(pre);
+      if (f.skipped_lines) {
+        const m = document.createElement("div");
+        m.className = "dmore";
+        m.textContent = "… +" + f.skipped_lines + " more lines (full diff in the TUI)";
+        df.appendChild(m);
+      }
+    }
+    el.appendChild(df);
+  });
+  if (d.skipped_files) {
+    const m = document.createElement("div");
+    m.className = "dmore";
+    m.textContent = "… +" + d.skipped_files + " more files";
+    el.appendChild(m);
+  }
+}
+
 function renderActions(s) {
   const a = $("actions");
   const queued = s.queued || [];
   const notes = s.notes || [];
+  // When the plan card owns the pending question (Approve/Revise/Cancel above), the generic
+  // question UI would duplicate it — suppress it, the card's buttons answer the same seq.
+  const planOwns = planOptionN(s, "Build it") > 0;
   // Rebuild ONLY when the actionable state changed. This area holds live buttons + a free-text
   // input; rebuilding it on every snapshot (streaming updates arrive continuously while busy)
   // destroyed the nodes mid-tap ("tapped Allow, nothing happened") and wiped typed answers.
   const sig = JSON.stringify([queued, notes, s.permission_prompt, s.question,
-    s.question_options, s.question_allow_other, s.prompt_seq, s.copy_text]);
+    s.question_options, s.question_allow_other, s.prompt_seq, s.copy_text, planOwns]);
   if (a._sig === sig) return;
   a._sig = sig;
   let h = queued.length
@@ -594,6 +746,9 @@ function renderActions(s) {
     h += '<div class="prompt"><span class="q">⚠ ' + esc(s.permission_prompt) +
       '</span></div><div class="bar"><button class="y" data-act="allow" data-yes="1">Allow</button>' +
       '<button class="n" data-act="allow" data-yes="0">Deny</button></div>';
+  } else if (s.question && planOwns) {
+    // The plan card above carries the buttons; leave a one-line pointer only.
+    h += '<div class="prompt"><span class="q">⬡ ' + esc(s.question) + '</span></div>';
   } else if (s.question) {
     h += '<div class="prompt"><span class="q">❓ ' + esc(s.question) + '</span></div>';
     const opts = s.question_options || [];
@@ -637,6 +792,9 @@ function submit() {
     queueOffline(v);
   }
   $("prompt").value = "";
+  // The pending uploads ride this prompt — their chips are done informing.
+  uploads = [];
+  renderUploads();
 }
 
 // --- offline input queue --------------------------------------------------------------------
@@ -680,6 +838,84 @@ renderOfflineQueue();
 $("send").onclick = submit;
 $("prompt").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
 $("stop").onclick = () => send({kind:"interrupt"});
+
+// --- v7 file/image upload --------------------------------------------------------------------
+// POST __BASE__/api/upload (multipart, token-scoped, ?session= under a daemon). The host stores
+// the file in the session's .forge/uploads/ scratch area and attaches it to the NEXT prompt —
+// images as vision input, text files as an @path mention. Queued uploads render as chips.
+let uploads = [];
+$("attach").onclick = () => $("file").click();
+$("file").addEventListener("change", () => {
+  Array.from($("file").files || []).forEach(f => uploadFile(f));
+  $("file").value = "";
+});
+// Paste an image straight into the prompt box → it uploads like an attached file.
+$("prompt").addEventListener("paste", (e) => {
+  const items = Array.from((e.clipboardData && e.clipboardData.items) || []);
+  const imgs = items.filter(it => it.kind === "file" && it.type.indexOf("image/") === 0);
+  if (!imgs.length) return;
+  e.preventDefault();
+  imgs.forEach(it => {
+    const f = it.getAsFile();
+    if (f) uploadFile(f, f.name || "pasted-image.png");
+  });
+});
+
+function uploadFile(file, nameOverride) {
+  const name = nameOverride || file.name || "upload";
+  const chip = { name, state: "uploading…", failed: false };
+  uploads.push(chip);
+  renderUploads();
+  const fd = new FormData();
+  fd.append("file", file, name);
+  const q = daemon && curSession ? "?session=" + encodeURIComponent(curSession) : "";
+  fetch(BASE + "/api/upload" + q, { method: "POST", body: fd })
+    .then(r => r.json().then(j => ({ ok: r.ok, j })))
+    .then(({ ok, j }) => {
+      chip.failed = !ok;
+      chip.state = ok
+        ? ((j.files && j.files[0] && j.files[0].image) ? "image attached — rides the next prompt"
+                                                       : "attached — rides the next prompt")
+        : "failed: " + ((j && j.error) || "upload error");
+    })
+    .catch(e => { chip.failed = true; chip.state = "failed: " + e; })
+    .then(renderUploads);
+}
+
+function renderUploads() {
+  const el = $("upchips");
+  if (!uploads.length) { el.hidden = true; el.innerHTML = ""; return; }
+  el.hidden = false;
+  el.innerHTML = uploads
+    .map(u => (u.failed ? "⚠ " : "📎 ") + esc(u.name) + " · " + esc(u.state))
+    .join("<br>");
+}
+
+// --- v7 voice input --------------------------------------------------------------------------
+// Web Speech API: transcribe into the prompt box, NEVER auto-send. Hidden where unsupported
+// (Firefox, some WebViews). Recognition runs in the browser engine — nothing rides our wire.
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, recOn = false;
+if (SR) {
+  $("mic").hidden = false;
+  $("mic").onclick = () => {
+    if (recOn) { try { rec.stop(); } catch (e) {} return; }
+    rec = new SR();
+    rec.interimResults = false;
+    rec.continuous = false;
+    rec.onresult = (e) => {
+      const t = Array.from(e.results).map(r => r[0].transcript).join(" ").trim();
+      if (t) {
+        const p = $("prompt");
+        p.value = (p.value ? p.value.replace(/\s+$/, "") + " " : "") + t;
+        p.focus();
+      }
+    };
+    rec.onend = () => { recOn = false; $("mic").classList.remove("rec"); };
+    rec.onerror = () => { recOn = false; $("mic").classList.remove("rec"); };
+    try { rec.start(); recOn = true; $("mic").classList.add("rec"); } catch (e) {}
+  };
+}
 
 // Quick-command chips (all functional server-side: /model, /mode, /help open pickers/the palette
 // that render in the overlay panel above).

@@ -48,8 +48,9 @@ mod workflow_view;
 pub use app::{
     banner_lines, handle_key, input_cursor_up, lattice_view_lines, picker_kind_wire,
     print_banner_direct, render_mesh_overlay, render_usage_overlay, ActivityKind, ActivityStatus,
-    App, InputOutcome, KeyKind, MeshCandRow, MeshOverlay, MeshQuotaRow, OverlayRowSnapshot,
-    OverlaySnapshot, RemoteSnapshot, ReplayItem, TranscriptView, UsageOverlay,
+    App, DiffFileSnapshot, DiffHunkSnapshot, DiffSnapshot, InputOutcome, KeyKind, MeshCandRow,
+    MeshOverlay, MeshQuotaRow, OverlayRowSnapshot, OverlaySnapshot, RemoteSnapshot, ReplayItem,
+    TranscriptView, UsageOverlay,
 };
 pub use commands::{
     arg_values, at_token_at, filter_commands, parse_command, slash_token_at, AtPathPicker, AtToken,

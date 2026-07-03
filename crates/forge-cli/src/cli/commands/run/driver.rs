@@ -201,6 +201,9 @@ struct DriverState {
     prompt_seq: u64,
     notes: Vec<String>,
     copy_text: Option<String>,
+    /// Uploaded text files (`POST /api/upload`) waiting to ride the next prompt as `@path`
+    /// mentions — images go straight to `Session::attach_images` at Attach time instead.
+    pending_mentions: Vec<String>,
     remote_keys: std::collections::VecDeque<KeyKind>,
     mesh_load_rx: Option<tokio::sync::oneshot::Receiver<Option<forge_tui::MeshOverlay>>>,
     usage_load_rx: Option<tokio::sync::oneshot::Receiver<bridge_stats::BridgeStats>>,
@@ -296,6 +299,7 @@ async fn drive_session(
         prompt_seq: 0,
         notes: Vec::new(),
         copy_text: None,
+        pending_mentions: Vec::new(),
         remote_keys: std::collections::VecDeque::new(),
         mesh_load_rx: None,
         usage_load_rx: None,
@@ -559,6 +563,18 @@ impl DriverState {
                 let keys = apply_overlay_input(&mut self.app, RemoteOverlayOp::Cancel);
                 self.remote_keys.extend(keys);
             }
+            remote::RemoteInput::Attach { path, image } => {
+                let cwd = self.cwd.clone();
+                handle_remote_attach(
+                    &self.session,
+                    &mut self.app,
+                    &mut self.pending_mentions,
+                    &cwd,
+                    path,
+                    image,
+                )
+                .await;
+            }
         }
         Ok(())
     }
@@ -601,6 +617,8 @@ impl DriverState {
             self.handle_outcome(outcome);
             return Ok(());
         }
+        // Uploaded text files ride this prompt as @path mentions.
+        let line = prepend_attach_mentions(&mut self.pending_mentions, line);
         let hooks = self.session.lock().await.hooks().to_vec();
         match forge_core::hooks::run_prompt_hooks(&hooks, &line).await {
             Err(reason) => self

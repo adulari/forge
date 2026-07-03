@@ -1249,6 +1249,9 @@ pub(crate) async fn run_chat_tui(
     // the text to its own clipboard — the host clipboard is unreachable from there. Cleared on
     // the next remote prompt, like `remote_notes`.
     let mut remote_copy_text: Option<String> = None;
+    // Text files uploaded via POST /api/upload, waiting to ride the next remote prompt as
+    // `@path` mentions (images go straight to `Session::attach_images` instead).
+    let mut remote_attach_mentions: Vec<String> = Vec::new();
     // Change-only broadcast: the last snapshot actually sent + its revision. While busy the loop
     // spins every 16ms; without this compare every iteration pushed an identical frame to every
     // connected browser (~60 frames/s of JSON for nothing).
@@ -3392,22 +3395,59 @@ pub(crate) async fn run_chat_tui(
                                 }
                             }
                         } else {
+                            // Uploaded text files ride this prompt as @path mentions.
+                            let text = prepend_attach_mentions(&mut remote_attach_mentions, text);
                             let hooks = session.lock().await.hooks().to_vec();
                             if let Ok(prompt) =
                                 forge_core::hooks::run_prompt_hooks(&hooks, &text).await
                             {
+                                // Expand `@path` mentions exactly like the local submit path
+                                // (the remote prompt used to skip this — uploads made the gap
+                                // load-bearing).
+                                let (file_blocks, included, skipped) = expand_at_files(&prompt);
+                                if !included.is_empty() {
+                                    app.note(&format!("📎 included {}", included.join(", ")));
+                                }
+                                for s in &skipped {
+                                    app.note(&format!("⚠ skipped {s}"));
+                                }
                                 turn_gen += 1;
-                                turn_handle = Some(spawn_turn(
-                                    &prompt,
-                                    &session,
-                                    &done_tx,
-                                    turn_gen,
-                                    &mut app,
-                                    &mut busy,
-                                    &mut busy_since,
-                                ));
+                                turn_handle = Some(if file_blocks.is_empty() {
+                                    spawn_turn(
+                                        &prompt,
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                    )
+                                } else {
+                                    spawn_turn_with(
+                                        prompt.clone(),
+                                        file_blocks,
+                                        None,
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                    )
+                                });
                             }
                         }
+                    }
+                    remote::RemoteInput::Attach { path, image } => {
+                        handle_remote_attach(
+                            &session,
+                            &mut app,
+                            &mut remote_attach_mentions,
+                            &remote_cwd,
+                            path,
+                            image,
+                        )
+                        .await;
                     }
                     remote::RemoteInput::Allow { yes, seq } => {
                         // The seq must target the prompt pending NOW: a new prompt can be
@@ -4268,12 +4308,53 @@ pub(crate) fn build_snapshot_frame(
         // The generic overlay projection: whatever modal surface owns the keyboard
         // (palette / any picker / config / usage / mesh / workflow).
         overlay: app.remote_overlay().map(map_overlay_snapshot),
+        diff: view.diff.map(map_diff_snapshot),
+        plan: view.plan.map(|p| remote::SnapPlan {
+            title: p.title,
+            steps: p
+                .steps
+                .into_iter()
+                .map(|s| remote::SnapPlanStep {
+                    title: s.title,
+                    detail: s.detail,
+                })
+                .collect(),
+            notes: p.notes,
+        }),
         copy_text,
         prompt_seq,
         notes,
         revision,
         resync: false,
         closed: false,
+    }
+}
+
+/// Map the TUI-side diff projection into the remote wire type (same split as the overlay).
+pub(crate) fn map_diff_snapshot(d: forge_tui::DiffSnapshot) -> remote::SnapDiff {
+    remote::SnapDiff {
+        pending: d.pending,
+        files: d
+            .files
+            .into_iter()
+            .map(|f| remote::SnapDiffFile {
+                path: f.path,
+                kind: f.kind,
+                binary: f.binary,
+                adds: f.adds,
+                dels: f.dels,
+                hunks: f
+                    .hunks
+                    .into_iter()
+                    .map(|h| remote::SnapDiffHunk {
+                        header: h.header,
+                        lines: h.lines,
+                    })
+                    .collect(),
+                skipped_lines: f.skipped_lines,
+            })
+            .collect(),
+        skipped_files: d.skipped_files,
     }
 }
 
@@ -4462,6 +4543,66 @@ pub(crate) fn push_remote_note(notes: &mut Vec<String>, msg: &str) {
     notes.push(msg.to_string());
     while notes.len() > MAX_REMOTE_NOTES {
         notes.remove(0);
+    }
+}
+
+/// Prefix a remote prompt with the pending uploaded-text-file mentions (drained), so
+/// `expand_at_files` inlines their contents exactly like a locally typed `@path`.
+pub(crate) fn prepend_attach_mentions(mentions: &mut Vec<String>, text: String) -> String {
+    if mentions.is_empty() {
+        return text;
+    }
+    let m = mentions
+        .drain(..)
+        .map(|p| format!("@{p}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{m}\n{text}")
+}
+
+/// Handle a [`remote::RemoteInput::Attach`] (the delivery leg of `POST /api/upload`): an image
+/// becomes vision input on the session's next turn; a text file a pending `@path` mention.
+///
+/// The path is confined to the session's `.forge/uploads/` scratch area (canonicalized — no
+/// symlink or `..` escape): `Attach` exists only to deliver uploads, so a WS client injecting
+/// an arbitrary host path (`~/.ssh/id_rsa`) is refused with a note instead of read.
+pub(crate) async fn handle_remote_attach(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    app: &mut forge_tui::App,
+    mentions: &mut Vec<String>,
+    cwd: &str,
+    path: String,
+    image: bool,
+) {
+    let root = std::path::Path::new(cwd).join(".forge").join("uploads");
+    let confined = std::fs::canonicalize(&path)
+        .ok()
+        .zip(std::fs::canonicalize(&root).ok())
+        .map(|(p, r)| p.starts_with(&r))
+        .unwrap_or(false);
+    if !confined {
+        app.note("⚠ attach ignored — not a file from this session's upload area");
+        return;
+    }
+    if image {
+        match crate::image_input::load_image_file(&path) {
+            Ok((att, label)) => {
+                session.lock().await.attach_images(vec![att]);
+                app.note(&format!(
+                    "🖼 image attached ({label}) — rides the next prompt"
+                ));
+            }
+            Err(e) => app.note(&format!("⚠ image attach failed: {e}")),
+        }
+    } else {
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.clone());
+        mentions.push(path);
+        app.note(&format!(
+            "📎 attached {name} — included with the next prompt"
+        ));
     }
 }
 

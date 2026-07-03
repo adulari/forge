@@ -7,6 +7,29 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Remote control endgame — fleet dashboard, diff + plan review cards, file/image upload,
+  voice input (protocol v7)**: the daemon's session list is now a real **fleet dashboard** —
+  `GET /api/sessions` reports `waiting` (blocked on a permission/question decision),
+  context-window tokens and limit per session, and serves **waiting-on-decision sessions
+  first** (red pulsing dot + "needs decision" badge, then busy/idle, title, cwd, ⎇ worktree,
+  cost, token gauge, last activity — tap to attach). `Snapshot.diff` is a **structured diff
+  card** built from the same `similar` hunks the TUI renders (no second diff engine): while
+  a write permission is pending it shows exactly **what tapping Allow will touch** (per-file
+  `@@` hunks with old/new line spans), and after edits land it shows the latest-turn diff —
+  latest edit per path, capped at 10 files / ~40 hunk lines per file with "+N more" markers
+  (full content stays host-side); denied/failed writes never show as landed. `Snapshot.plan`
+  projects the `present_plan` proposal as a **plan-approval card** with Approve & build /
+  Revise / Cancel buttons that answer the existing seq-checked approval question — the
+  identical code path a local "Build it" choice takes (verified e2e over a real headless
+  driver). `POST /<t>/api/upload` accepts **multipart file/image uploads** from the page
+  (📎 button + paste-an-image + upload chips): 10 MB cap, filenames flattened to one
+  sanitized component (traversal-proof), stored under the session's own
+  `.forge/uploads/<id>/`, then attached to the next prompt — images as vision input, text
+  files as `@path` mentions (the remote prompt path now runs the same `@path` expansion as
+  local typing, closing a parity gap); non-image non-UTF-8 files are refused, and the drain
+  confines attach paths to the uploads dir so the input can't read arbitrary host files.
+  A 🎤 **voice input** button transcribes speech into the prompt box via the Web Speech API
+  (never auto-sends; hidden where unsupported; zero dependencies, CSP-safe).
 - **Actionable Web Push — approve from the lock screen, self-hosted VAPID, no relay**: the
   `forge serve` daemon now pushes a notification when a session **needs a decision**
   (permission prompt / question), finishes a turn, or fails — even with the page closed and

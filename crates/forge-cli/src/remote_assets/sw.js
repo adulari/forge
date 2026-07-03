@@ -1,4 +1,4 @@
-const CACHE = "forge-remote-v6";
+const CACHE = "forge-remote-v7";
 const ENDED = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Forge remote - session ended</title>

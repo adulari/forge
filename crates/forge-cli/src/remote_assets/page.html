@@ -67,7 +67,27 @@
     <button class="send" id="ofreeok">OK</button>
   </div>
 </div>
+<div class="planbox" id="planbox" hidden>
+  <div class="phead"><span class="ptag">⬡ PLAN</span><span id="ptitle"></span></div>
+  <ol class="psteps" id="psteps"></ol>
+  <div class="pnotes" id="pnotes" hidden></div>
+  <div class="bar pbar" id="pbar" hidden>
+    <button class="y" id="pok">Approve &amp; build</button>
+    <button class="send" id="previse">Revise</button>
+    <button class="n" id="pcancel">Cancel</button>
+  </div>
+  <div class="bar" id="previsebar" hidden>
+    <input type="text" id="previsetext" placeholder="what should change?" autocomplete="off"
+      autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
+    <button class="send" id="previseok">Send</button>
+  </div>
+</div>
+<div class="diffbox" id="diffbox" hidden>
+  <div class="dhead" id="dhead"></div>
+  <div class="dfiles" id="dfiles"></div>
+</div>
 <div class="queued" id="offq" hidden></div>
+<div class="queued" id="upchips" hidden></div>
 <div class="actions" id="actions"></div>
 <div class="chips">
   <button class="chip stop" id="stop">⏹ Stop</button>
@@ -78,6 +98,9 @@
   <button class="chip" data-cmd="/help">/help</button>
 </div>
 <div class="bar">
+  <button class="iconbtn barbtn" id="attach" title="attach a file or image">📎</button>
+  <button class="iconbtn barbtn" id="mic" title="voice input" hidden>🎤</button>
+  <input type="file" id="file" multiple accept="image/*,text/*,.md,.txt,.log,.json,.yaml,.yml,.toml,.csv,.patch,.diff" hidden>
   <input type="text" id="prompt" placeholder="type a task or /command…" autocomplete="off"
     autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
   <button class="send" id="send">Send</button>
