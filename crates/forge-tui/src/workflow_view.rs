@@ -125,6 +125,26 @@ impl WorkflowView {
         };
     }
 
+    /// The turn was aborted mid-run — `WorkflowFinished` will never arrive (the task that would
+    /// emit it died with the turn). Close the run out as interrupted here; otherwise `active`
+    /// sticks forever: the status band freezes with stale counts, `on_turn_start`'s reset is
+    /// skipped on every later turn, and any future `spawn_agents` batch is misrouted into this
+    /// dead run's row list instead of the activity panel.
+    pub fn on_interrupt(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        self.open = false;
+        for row in &mut self.rows {
+            if !row.done {
+                row.done = true;
+                row.ok = false;
+            }
+        }
+        self.finished = Some((false, "interrupted by user".to_string()));
+    }
+
     pub fn on_phase(&mut self, title: String) {
         self.phases.push(WfPhase { title });
     }
@@ -164,7 +184,10 @@ impl WorkflowView {
             let mut excess = self.rows.len() - MAX_ROWS;
             let selected_id = self.rows.get(self.selected).map(|r| r.id.clone());
             self.rows.retain(|r| {
-                let drop = excess > 0 && r.done;
+                // Never evict the selected row: the Enter-zoom renders whatever row sits at
+                // `selected`, so dropping it would silently swap the open transcript for a
+                // different agent's.
+                let drop = excess > 0 && r.done && selected_id.as_deref() != Some(r.id.as_str());
                 if drop {
                     excess -= 1;
                 }
@@ -599,12 +622,15 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
     }
 
     // ── Bottom: `log()` narration feed (tail), when the script has narrated anything. ──
+    let top_h = (top.len() as u16).min(inner.height.saturating_sub(2));
     let feed_h = if wf.logs.is_empty() {
         0
     } else {
-        (wf.logs.len().min(4) + 1) as u16
+        // Jointly clamped with `top_h` so header + feed can never request more rows than the
+        // area has — on a very short terminal the agent-row body (Min(1)) keeps its line
+        // instead of the solver squeezing sections unpredictably.
+        ((wf.logs.len().min(4) + 1) as u16).min(inner.height.saturating_sub(top_h + 1))
     };
-    let top_h = (top.len() as u16).min(inner.height.saturating_sub(2));
     let chunks = Layout::vertical([
         Constraint::Length(top_h),
         Constraint::Min(1),
@@ -701,6 +727,55 @@ mod tests {
         let (_, _, failed, cost) = wf.totals();
         assert_eq!(failed, 1);
         assert!(cost > 0.0);
+    }
+
+    /// Regression: Esc-interrupt aborts the turn task, so `WorkflowFinished` never arrives.
+    /// Without an explicit close-out, `active` stuck forever — frozen status band, and every
+    /// later `spawn_agents` batch misrouted into the dead run's row list.
+    #[test]
+    fn interrupt_closes_out_a_live_run() {
+        let mut wf = WorkflowView::default();
+        wf.begin(None);
+        started(&mut wf, "a", None);
+        started(&mut wf, "b", None);
+        wf.on_result("a", true, "done", 0.0);
+
+        wf.on_interrupt();
+        assert!(!wf.active, "no longer live");
+        assert!(!wf.band_visible(), "status band gone");
+        let (running, ok, failed, _) = wf.totals();
+        assert_eq!(running, 0, "no row left spinning forever");
+        assert_eq!(ok, 1, "already-finished row keeps its real outcome");
+        assert_eq!(failed, 1, "the interrupted row is not a success");
+        let (all_ok, note) = wf.finished.clone().expect("finished set");
+        assert!(!all_ok);
+        assert!(note.contains("interrupted"));
+
+        // Idempotent + a later real run still starts clean.
+        wf.on_interrupt();
+        wf.begin(Some("next".into()));
+        assert!(wf.active && wf.rows.is_empty());
+    }
+
+    /// Regression: the >MAX_ROWS eviction pass could drop the SELECTED row (if done and old),
+    /// silently retargeting an open Enter-zoom at a different agent's transcript.
+    #[test]
+    fn eviction_never_drops_the_selected_row() {
+        let mut wf = WorkflowView::default();
+        wf.begin(None);
+        started(&mut wf, "keep-me", None);
+        wf.on_result("keep-me", true, "done", 0.0);
+        wf.selected = 0; // zoom target: the first (oldest, done) row
+        for i in 0..MAX_ROWS + 10 {
+            let id = format!("r{i}");
+            started(&mut wf, &id, None);
+            wf.on_result(&id, true, "done", 0.0);
+        }
+        assert!(
+            wf.rows.iter().any(|r| r.id == "keep-me"),
+            "selected row survives eviction"
+        );
+        assert_eq!(wf.rows[wf.selected].id, "keep-me", "cursor still on it");
     }
 
     #[test]
