@@ -1,4 +1,4 @@
-const CACHE = "forge-remote-v4";
+const CACHE = "forge-remote-v5";
 const ENDED = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Forge remote - session ended</title>
@@ -12,6 +12,9 @@ self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener("fetch", (e) => {
   const req = e.request;
   if (req.method !== "GET") return;
+  // Live data (history pagination) must never be answered from cache — a cached page would
+  // hide new turns. Let the browser hit the network directly.
+  if (new URL(req.url).pathname.includes("/api/")) return;
   if (req.mode === "navigate") {
     e.respondWith(fetch(req).catch(() =>
       new Response(ENDED, { headers: { "Content-Type": "text/html; charset=utf-8" } })));

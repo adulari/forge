@@ -1,19 +1,33 @@
 "use strict";
 const BASE = "__BASE__";
-const PROTO = 4;
+const PROTO = 5;
 const $ = (id) => document.getElementById(id);
 let ws = null, dead = false, notif = false, curSeq = 0, retries = 0, curOverlay = null;
 // The /copy payload stashed outside the DOM (it can be large / contain anything).
 let copyPayload = "";
 let prev = { busy: false, prompt: false, question: false };
+// v5 reconnect/replay: the last snapshot revision this page rendered. Sent as `?rev=` on every
+// (re)connect so the server replays exactly the frames we missed — no gap, no flicker. Kept in
+// sessionStorage (keyed by the token base, so it can never target a different server) to survive
+// a page reload too.
+const REV_KEY = "forge-rev:" + BASE;
+let lastRev = Number(sessionStorage.getItem(REV_KEY) || 0) || 0;
 
 function connect() {
   if (dead) return;
   const scheme = location.protocol === "https:" ? "wss://" : "ws://";
-  ws = new WebSocket(scheme + location.host + BASE + "/ws");
+  ws = new WebSocket(scheme + location.host + BASE + "/ws?rev=" + lastRev);
   ws.onopen = () => { retries = 0; $("conn").textContent = "● connected"; };
   ws.onmessage = (e) => {
     let s; try { s = JSON.parse(e.data); } catch { return; }
+    // Dedupe on revision: a frame can arrive both in the reconnect replay and via the live
+    // stream (the server guarantees no GAP by overlapping the two, and we drop the overlap
+    // here). A resync frame always applies — its revision doesn't extend our stream.
+    if (!s.resync && !s.closed && s.revision && s.revision <= lastRev) return;
+    if (s.revision) {
+      lastRev = s.revision;
+      try { sessionStorage.setItem(REV_KEY, String(lastRev)); } catch (e2) {}
+    }
     render(s);
     if (s.closed) { dead = true; $("conn").textContent = "remote control turned off — reconnect to the TUI"; ws.close(); }
   };
@@ -64,17 +78,253 @@ function render(s) {
 }
 
 function renderTranscript(s) {
-  const t = $("transcript");
+  // A session change (/new, resume) invalidates the paginated history — it belongs to the
+  // session it was fetched from.
+  if (s.session_id && s.session_id !== histSession) {
+    if (histSession !== null) { $("hist").innerHTML = ""; histOldest = null; histDone = false; }
+    histSession = s.session_id;
+  }
+  // A true resync (unfillable gap) may have skipped turns: drop the accumulated history so a
+  // scroll-up refetches it from the store — which has everything that happened meanwhile.
+  if (s.resync && $("hist").childElementCount) {
+    $("hist").innerHTML = ""; histOldest = null; histDone = false;
+  }
+  const panel = $("transcript");
+  const tail = $("tail");
   // Exact content signature — a length-based check missed equal-length ring
-  // rotations/replacements and left stale lines on screen.
+  // rotations/replacements and left stale lines on screen. Only the live tail is rebuilt:
+  // the paginated history above it (#hist) accumulates and must survive every snapshot.
   const body = (s.transcript || []).join("\n") + (s.streaming ? "\n" + s.streaming : "");
-  if (t._sig === body) return; // unchanged
-  const nearBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 80;
-  t.innerHTML = "";
-  (s.transcript || []).forEach(line => { const d = document.createElement("div"); d.textContent = line; t.appendChild(d); });
-  if (s.streaming) { const d = document.createElement("div"); d.className = "stream"; d.textContent = s.streaming; t.appendChild(d); }
-  if (nearBottom) t.scrollTop = t.scrollHeight;
-  t._sig = body;
+  if (tail._sig === body) return; // unchanged
+  const nearBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight < 80;
+  tail.innerHTML = "";
+  (s.transcript || []).forEach(line => { const d = document.createElement("div"); d.textContent = line; tail.appendChild(d); });
+  if (s.streaming) {
+    // The streaming edge is the RAW reply text (unlike the pre-rendered tail lines), so it
+    // gets the full markdown treatment live.
+    const d = document.createElement("div"); d.className = "stream";
+    d.appendChild(mdRender(s.streaming));
+    tail.appendChild(d);
+  }
+  if (nearBottom) panel.scrollTop = panel.scrollHeight;
+  tail._sig = body;
+}
+
+// --- v5 full scrollback: paginated persisted history above the live tail -------------------
+// Scrolling to the top of the transcript fetches the next-older page from
+// GET __BASE__/api/history?before=<oldest seq>&limit=N and PREPENDS it, preserving the scroll
+// position. The live snapshot transcript stays a short tail; this is the real scrollback.
+let histSession = null, histOldest = null, histLoading = false, histDone = false;
+const HIST_PAGE = 60;
+
+$("transcript").addEventListener("scroll", () => {
+  if ($("transcript").scrollTop < 60) loadHistory();
+});
+
+function loadHistory() {
+  if (histLoading || histDone || !histSession) return;
+  histLoading = true;
+  $("histload").hidden = false;
+  const q = histOldest === null ? "?limit=" + HIST_PAGE : "?before=" + histOldest + "&limit=" + HIST_PAGE;
+  fetch(BASE + "/api/history" + q, { cache: "no-store" })
+    .then(res => { if (!res.ok) throw new Error("http " + res.status); return res.json(); })
+    .then(rows => {
+      if (!rows.length) { histDone = true; return; }
+      histOldest = rows[rows.length - 1].seq; // rows are newest-first
+      const panel = $("transcript"), hist = $("hist");
+      const beforeH = panel.scrollHeight;
+      const frag = document.createDocumentFragment();
+      rows.slice().reverse().forEach(r => frag.appendChild(histRow(r))); // oldest→newest
+      hist.insertBefore(frag, hist.firstChild);
+      // Preserve what the reader was looking at across the prepend.
+      panel.scrollTop += panel.scrollHeight - beforeH;
+      if (rows.length < HIST_PAGE) histDone = true;
+    })
+    .catch(() => {})
+    .finally(() => { histLoading = false; $("histload").hidden = true; });
+}
+
+function histRow(r) {
+  const d = document.createElement("div");
+  const note = r.visibility === "ui";
+  d.className = "msg " + (note ? "note" : (r.role === "user" ? "user" : "forge"));
+  const head = document.createElement("div");
+  head.className = "mrole";
+  head.textContent = (note ? "note" : (r.role === "user" ? "you" : "forge")) + (r.model ? " · " + r.model : "");
+  d.appendChild(head);
+  const body = document.createElement("div");
+  body.className = "mbody";
+  body.appendChild(mdRender(r.content));
+  d.appendChild(body);
+  return d;
+}
+
+// --- v5 rich transcript: a minimal, safe markdown renderer + syntax highlighter ------------
+// DOM is built via createElement/textContent ONLY — transcript content is never fed to
+// innerHTML, so it can't inject markup (the CSP is the second line of defense, not the first).
+// Supported: #-headings, fenced code (highlighted + tap-to-copy), -/*/1. lists, paragraphs;
+// inline `code`, **bold**, *italic*, and [links](…) rendered as their text (never live anchors).
+function mdRender(src) {
+  const frag = document.createDocumentFragment();
+  const lines = String(src || "").split("\n");
+  let i = 0, para = [];
+  const flushPara = () => {
+    if (!para.length) return;
+    const p = document.createElement("p");
+    p.appendChild(inlineMd(para.join("\n")));
+    frag.appendChild(p);
+    para = [];
+  };
+  while (i < lines.length) {
+    const l = lines[i];
+    const fence = l.match(/^\s*```([\w+-]*)\s*$/);
+    if (fence) {
+      flushPara();
+      const code = [];
+      i++;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) { code.push(lines[i]); i++; }
+      i++; // past the closing fence (or EOF)
+      frag.appendChild(codeBlock(code.join("\n"), fence[1].toLowerCase()));
+      continue;
+    }
+    const h = l.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      flushPara();
+      // h3..h6 — phone-sized headings, never a giant h1 inside a chat bubble.
+      const el = document.createElement("h" + Math.min(h[1].length + 2, 6));
+      el.appendChild(inlineMd(h[2]));
+      frag.appendChild(el);
+      i++; continue;
+    }
+    const li = l.match(/^\s*([-*]|\d+\.)\s+(.*)$/);
+    if (li) {
+      flushPara();
+      const ordered = /^\d/.test(li[1]);
+      const listEl = document.createElement(ordered ? "ol" : "ul");
+      while (i < lines.length) {
+        const m = lines[i].match(/^\s*([-*]|\d+\.)\s+(.*)$/);
+        if (!m || /^\d/.test(m[1]) !== ordered) break; // a marker change starts a new list
+        const item = document.createElement("li");
+        item.appendChild(inlineMd(m[2]));
+        listEl.appendChild(item);
+        i++;
+      }
+      frag.appendChild(listEl);
+      continue;
+    }
+    if (!l.trim()) { flushPara(); i++; continue; }
+    para.push(l);
+    i++;
+  }
+  flushPara();
+  return frag;
+}
+
+// Inline markdown: `code`, **bold**, *italic*, [text](url) → text. Everything lands in the DOM
+// as text nodes / textContent, so nothing in the source can become markup.
+function inlineMd(text) {
+  const frag = document.createDocumentFragment();
+  const re = /(`([^`]+)`)|(\*\*([^*]+)\*\*)|(\*([^*\s][^*]*)\*)|(\[([^\]]+)\]\(([^)]+)\))/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+    if (m[2] !== undefined) { const c = document.createElement("code"); c.textContent = m[2]; frag.appendChild(c); }
+    else if (m[4] !== undefined) { const b = document.createElement("b"); b.textContent = m[4]; frag.appendChild(b); }
+    else if (m[6] !== undefined) { const it = document.createElement("i"); it.textContent = m[6]; frag.appendChild(it); }
+    else if (m[8] !== undefined) frag.appendChild(document.createTextNode(m[8])); // link → its text
+    last = re.lastIndex;
+  }
+  if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+  return frag;
+}
+
+// A fenced block: highlighted <pre><code> + a tap-to-copy button (uses the DEVICE clipboard,
+// like the /copy bar).
+function codeBlock(code, lang) {
+  const wrap = document.createElement("div");
+  wrap.className = "codeblock";
+  const btn = document.createElement("button");
+  btn.className = "codecopy";
+  btn.type = "button";
+  btn.textContent = "copy";
+  btn.addEventListener("click", () => {
+    copyText(code);
+    btn.textContent = "copied";
+    setTimeout(() => { btn.textContent = "copy"; }, 1200);
+  });
+  const pre = document.createElement("pre");
+  const codeEl = document.createElement("code");
+  codeEl.appendChild(highlight(code, lang || ""));
+  pre.appendChild(codeEl);
+  wrap.appendChild(btn);
+  wrap.appendChild(pre);
+  return wrap;
+}
+
+// Keyword sets for the built-in highlighter (self-contained — no CDN can pass the CSP anyway).
+const HL_ALIAS = { ts: "js", tsx: "js", jsx: "js", javascript: "js", typescript: "js",
+  py: "python", python3: "python", rs: "rust", sh: "bash", shell: "bash", zsh: "bash",
+  console: "bash", golang: "go", jsonc: "json" };
+const HL_KW = {
+  rust: "as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while",
+  js: "async await break case catch class const continue default delete do else export extends false finally for from function if import in instanceof let new null of return static switch this throw true try typeof undefined var void while yield",
+  python: "and as assert async await break class continue def del elif else except False finally for from global if import in is lambda None nonlocal not or pass raise return self True try while with yield",
+  go: "break case chan const continue default defer else fallthrough false for func go goto if import interface map nil package range return select struct switch true type var",
+  bash: "case do done echo elif else esac exit export fi for function if in local return set shift then until while",
+  json: "false null true",
+};
+
+// Minimal single-pass tokenizer: strings, comments, numbers, keywords. Unknown languages pass
+// through as plain text. Output is spans built with textContent — highlighter input is
+// untrusted transcript content and must never reach innerHTML.
+function highlight(code, lang) {
+  const frag = document.createDocumentFragment();
+  const L = HL_ALIAS[lang] || lang;
+  const kw = HL_KW[L];
+  if (!kw) { frag.appendChild(document.createTextNode(code)); return frag; }
+  const kws = new Set(kw.split(" "));
+  const lineComment = (L === "python" || L === "bash") ? "#" : (L === "json" ? null : "//");
+  const blockComment = (L === "rust" || L === "js" || L === "go") ? ["/*", "*/"] : null;
+  let i = 0, plain = "";
+  const flush = () => { if (plain) { frag.appendChild(document.createTextNode(plain)); plain = ""; } };
+  const span = (cls, text) => {
+    flush();
+    const el = document.createElement("span");
+    el.className = cls;
+    el.textContent = text;
+    frag.appendChild(el);
+  };
+  while (i < code.length) {
+    const c = code[i];
+    if (lineComment && code.startsWith(lineComment, i)) {
+      let j = code.indexOf("\n", i); if (j < 0) j = code.length;
+      span("tok-c", code.slice(i, j)); i = j; continue;
+    }
+    if (blockComment && code.startsWith(blockComment[0], i)) {
+      let j = code.indexOf(blockComment[1], i + 2);
+      j = j < 0 ? code.length : j + 2;
+      span("tok-c", code.slice(i, j)); i = j; continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < code.length && code[j] !== c && code[j] !== "\n") { if (code[j] === "\\") j++; j++; }
+      j = Math.min(j + 1, code.length);
+      span("tok-s", code.slice(i, j)); i = j; continue;
+    }
+    if (/[0-9]/.test(c) && !/[A-Za-z0-9_]/.test(code[i - 1] || "")) {
+      let j = i; while (j < code.length && /[0-9a-fA-FxXoObB._]/.test(code[j])) j++;
+      span("tok-n", code.slice(i, j)); i = j; continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      let j = i; while (j < code.length && /[A-Za-z0-9_]/.test(code[j])) j++;
+      const w = code.slice(i, j);
+      if (kws.has(w)) span("tok-k", w); else plain += w;
+      i = j; continue;
+    }
+    plain += c; i++;
+  }
+  flush();
+  return frag;
 }
 
 // Rebuild `el`'s contents via `fill`, but preserve scroll position across the rebuild — a plain

@@ -458,7 +458,71 @@ pub struct RemoteUrl {
 /// `@path` / config / usage / mesh / workflow) and `copy_text` (the `/copy` payload so the
 /// REMOTE device can copy it); `RemoteInput` gained the keystroke channel (`Key`) and the
 /// overlay verbs (`OverlaySelect`/`OverlayNav`/`OverlayFilter`/`OverlayCancel`).
-pub const PROTOCOL_VERSION: u32 = 4;
+///
+/// v5: reconnect/replay + full scrollback — the WS handshake accepts `?rev=<last seen revision>`
+/// and replays the missed frames from a bounded per-server [`EventLog`] (an unfillable gap
+/// falls back to ONE full snapshot flagged `resync: true`, which `Snapshot` gained); a
+/// token-scoped `GET /<token>/api/history?before=<seq>&limit=<n>` pages the session's persisted
+/// transcript ([`HistoryRow`], newest first) so the page has unlimited scrollback while the
+/// snapshot transcript stays a short live tail.
+pub const PROTOCOL_VERSION: u32 = 5;
+
+/// How many broadcast snapshots the per-server [`EventLog`] retains for reconnect replay. One
+/// entry per *changed* frame covers minutes of activity; a client that was away longer gets a
+/// full-snapshot resync instead (plus `GET /api/history` pagination for the scrollback it wants).
+pub const EVENT_LOG_CAP: usize = 512;
+
+/// A bounded ring of every broadcast snapshot keyed by its [`Snapshot::revision`], so a
+/// reconnecting client (`?rev=<last seen>` on the WS handshake) replays exactly the frames it
+/// missed instead of flickering through a from-scratch rebuild. Revisions are consecutive (one
+/// bump per actually-broadcast frame), so "everything after rev N" is answerable precisely — or
+/// not at all (evicted / unknown / foreign counter), which forces a full-snapshot resync.
+pub struct EventLog {
+    ring: std::collections::VecDeque<(u64, Snapshot)>,
+    cap: usize,
+}
+
+impl EventLog {
+    pub fn new(cap: usize) -> Self {
+        Self {
+            ring: std::collections::VecDeque::new(),
+            cap,
+        }
+    }
+
+    /// Record a broadcast frame, evicting the oldest beyond the cap (memory stays bounded no
+    /// matter how long the session runs).
+    pub fn push(&mut self, rev: u64, snap: Snapshot) {
+        self.ring.push_back((rev, snap));
+        while self.ring.len() > self.cap {
+            self.ring.pop_front();
+        }
+    }
+
+    /// Every retained snapshot with `revision > since`, oldest first — `Some(vec![])` when the
+    /// client is already current. `None` when the gap can't be filled faithfully (the log is
+    /// empty, `since` predates the oldest retained entry, or `since` is from a future/foreign
+    /// counter): the caller must then resync with one full snapshot instead of replaying a hole.
+    pub fn replay_after(&self, since: u64) -> Option<Vec<Snapshot>> {
+        let (front, _) = self.ring.front()?;
+        let (back, _) = self.ring.back()?;
+        if since + 1 < *front || since > *back {
+            return None;
+        }
+        Some(
+            self.ring
+                .iter()
+                .filter(|(rev, _)| *rev > since)
+                .map(|(_, s)| s.clone())
+                .collect(),
+        )
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.ring.len()
+    }
+}
 
 /// Hard cap on a single inbound WebSocket frame (a [`RemoteInput`]). Inputs are short prompts or
 /// answers; anything larger is dropped to bound memory + parse cost from a hostile/buggy client.
@@ -591,6 +655,11 @@ pub struct Snapshot {
     pub notes: Vec<String>,
     /// Monotonic snapshot revision, bumped once per *actually broadcast* (i.e. changed) frame.
     pub revision: u64,
+    /// `true` when this frame is a full-state resynchronization rather than part of the
+    /// contiguous revision stream — the first frame of a connection whose `?rev=` was absent,
+    /// stale (evicted from the event log), or unknown. Tells the page to accept the frame even
+    /// though its revision doesn't follow the last one it saw.
+    pub resync: bool,
     /// `true` once remote control has been turned off (tells the page to stop reconnecting).
     pub closed: bool,
 }
@@ -624,10 +693,30 @@ impl Default for Snapshot {
             prompt_seq: 0,
             notes: Vec::new(),
             revision: 0,
+            resync: false,
             closed: false,
         }
     }
 }
+
+/// One persisted transcript row served by `GET /<token>/api/history` — the full-scrollback
+/// pagination seam (the live [`Snapshot::transcript`] is only a short tail). `role` is the
+/// stored role string (`"user"` / `"assistant"` / `"system"`); `visibility` is `"llm"` for
+/// normal turns and `"ui"` for user-facing notes (which ARE part of the visible conversation).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct HistoryRow {
+    pub seq: i64,
+    pub role: String,
+    pub content: String,
+    pub model: Option<String>,
+    pub created_at: i64,
+    pub visibility: String,
+}
+
+/// The seam through which the server reads persisted transcript pages WITHOUT depending on
+/// `forge-store`: `(session_id, before_seq, limit)` → rows newest first. Built by the caller
+/// (run.rs) over the session's open store handle.
+pub type HistoryProvider = Arc<dyn Fn(&str, Option<i64>, usize) -> Vec<HistoryRow> + Send + Sync>;
 
 /// An input from a remote browser, drained by the render loop and injected like a local
 /// keystroke / command. `Interrupt` maps to Esc-while-busy; `Answer` resolves a permission
@@ -723,7 +812,11 @@ pub fn exposure_label(tunnel: Option<&str>, lan_tls: bool, tls_failed: bool) -> 
 /// queued [`RemoteInput`]s to inject them. Dropping it stops the server.
 pub struct RemoteControl {
     /// Publish the latest visible state; the WS task forwards it to every browser.
+    /// Use [`Self::broadcast`] (never `send` directly) so the frame also lands in the replay log.
     pub snapshot_tx: watch::Sender<Snapshot>,
+    /// Every broadcast frame, retained (bounded) for reconnect replay — shared with the WS
+    /// handler, which answers `?rev=<n>` handshakes from it.
+    events: Arc<std::sync::Mutex<EventLog>>,
     /// Inputs queued by remote browsers; the render loop drains these each iteration.
     pub input_rx: mpsc::Receiver<RemoteInput>,
     /// The connect URL + token (printed once into scrollback).
@@ -750,14 +843,29 @@ impl RemoteControl {
     pub fn tls_failed(&self) -> bool {
         self.tls_failed.load(Ordering::Relaxed)
     }
+
+    /// Publish a frame to every connected browser AND record it in the replay log. The render
+    /// loop must use this (never `snapshot_tx.send` directly): a frame that skipped the log
+    /// would be unreplayable, so a reconnecting client would resync (full rebuild) instead of
+    /// receiving exactly what it missed. `snap.revision` must already be bumped by the caller.
+    pub fn broadcast(&self, snap: Snapshot) {
+        if let Ok(mut log) = self.events.lock() {
+            log.push(snap.revision, snap.clone());
+        }
+        let _ = self.snapshot_tx.send(snap);
+    }
 }
 
 impl Drop for RemoteControl {
     fn drop(&mut self) {
-        // Mark closed so connected browsers stop reconnecting, then tear the server down.
+        // Mark closed so connected browsers stop reconnecting, then tear the server down. The
+        // revision bump matters: the page drops frames at or below the revision it already saw
+        // (reconnect-replay dedup), and `closed` rides on otherwise-unchanged state.
+        let last = self.snapshot_tx.borrow().clone();
         let _ = self.snapshot_tx.send(Snapshot {
             closed: true,
-            ..self.snapshot_tx.borrow().clone()
+            revision: last.revision + 1,
+            ..last
         });
         self._server.abort();
     }
@@ -820,7 +928,14 @@ fn lan_display_host(host_override: Option<&str>, addr: SocketAddr) -> String {
 /// fails this returns `Err`; if the async TLS setup fails later the server is declared
 /// unavailable (see [`RemoteControl::tls_failed`]) — there is deliberately NO cleartext
 /// fallback on the LAN.
-pub fn start(exposure: Exposure, host_override: Option<&str>) -> std::io::Result<RemoteControl> {
+///
+/// `history` is the persisted-transcript seam behind `GET /<token>/api/history` (full
+/// scrollback pagination); `None` serves empty pages (tests / callers without a store).
+pub fn start(
+    exposure: Exposure,
+    host_override: Option<&str>,
+    history: Option<HistoryProvider>,
+) -> std::io::Result<RemoteControl> {
     let token = random_token();
     let bind_ip: std::net::IpAddr = match exposure {
         Exposure::Lan => std::net::Ipv4Addr::UNSPECIFIED.into(),
@@ -838,11 +953,16 @@ pub fn start(exposure: Exposure, host_override: Option<&str>) -> std::io::Result
 
     let (snapshot_tx, snapshot_rx) = watch::channel(Snapshot::default());
     let (input_tx, input_rx) = mpsc::channel::<RemoteInput>(64);
+    // The replay log (v5 reconnect): every broadcast frame lands here (see
+    // `RemoteControl::broadcast`), and the WS handler answers `?rev=` handshakes from it.
+    let events = Arc::new(std::sync::Mutex::new(EventLog::new(EVENT_LOG_CAP)));
 
     let base = format!("/{token}");
     let state = Arc::new(ServerState {
         snapshot_rx: snapshot_rx.clone(),
         input_tx,
+        events: events.clone(),
+        history,
         base: base.clone(),
     });
 
@@ -851,8 +971,12 @@ pub fn start(exposure: Exposure, host_override: Option<&str>) -> std::io::Result
         // `start_url` so the installed app launches inside the service-worker scope.
         .route(&base, get(control_page))
         .route(&format!("{base}/"), get(control_page))
-        // The WebSocket at /<token>/ws — same token gates it.
+        // The WebSocket at /<token>/ws — same token gates it. `?rev=<n>` replays missed frames.
         .route(&format!("{base}/ws"), get(ws_handler))
+        // Paginated persisted-transcript scrollback (newest first, `?before=<seq>&limit=<n>`).
+        // Token-scoped like everything else; this server drives ONE session, so no session
+        // parameter exists yet (the multi-session daemon is Phase 4).
+        .route(&format!("{base}/api/history"), get(history_page))
         // The page's script + stylesheet as separate token-scoped files, so the CSP needs no
         // 'unsafe-inline' anywhere.
         .route(&format!("{base}/app.js"), get(app_js))
@@ -921,6 +1045,7 @@ pub fn start(exposure: Exposure, host_override: Option<&str>) -> std::io::Result
 
         return Ok(RemoteControl {
             snapshot_tx,
+            events,
             input_rx,
             url: RemoteUrl {
                 url,
@@ -949,6 +1074,7 @@ pub fn start(exposure: Exposure, host_override: Option<&str>) -> std::io::Result
 
     Ok(RemoteControl {
         snapshot_tx,
+        events,
         input_rx,
         url: RemoteUrl {
             url,
@@ -969,7 +1095,7 @@ pub fn start(exposure: Exposure, host_override: Option<&str>) -> std::io::Result
 /// port; the returned [`RemoteControl`]'s `url` is the PUBLIC `https://…/<token>`, and it owns
 /// the tunnel child (killed on drop). Errors if no tunnel tool is installed or the tunnel never
 /// publishes a URL — the caller surfaces an install hint.
-pub async fn start_anywhere() -> std::io::Result<RemoteControl> {
+pub async fn start_anywhere(history: Option<HistoryProvider>) -> std::io::Result<RemoteControl> {
     let kind = detect_tunnel().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -978,7 +1104,7 @@ pub async fn start_anywhere() -> std::io::Result<RemoteControl> {
              the public internet in cleartext)",
         )
     })?;
-    let mut rc = start(Exposure::Anywhere, None)?;
+    let mut rc = start(Exposure::Anywhere, None, history)?;
     let port = rc.url.addr.port();
     let (public, child) = spawn_tunnel(kind, port).await?;
     // The control page lives at `/<token>`; the tunnel forwards the whole path, so the public
@@ -993,6 +1119,11 @@ pub async fn start_anywhere() -> std::io::Result<RemoteControl> {
 struct ServerState {
     snapshot_rx: watch::Receiver<Snapshot>,
     input_tx: mpsc::Sender<RemoteInput>,
+    /// The bounded replay log shared with [`RemoteControl::broadcast`] — answers `?rev=` WS
+    /// handshakes with exactly the frames a reconnecting client missed.
+    events: Arc<std::sync::Mutex<EventLog>>,
+    /// The persisted-transcript seam for `GET /api/history`; `None` serves empty pages.
+    history: Option<HistoryProvider>,
     /// The token-gated base path (`/<token>`) — injected into the page + manifest so every URL
     /// (WS, PWA assets, start_url) is correct under a tunnel/LAN host without the page guessing.
     base: String,
@@ -1076,27 +1207,138 @@ async fn fallback() -> Response {
     (axum::http::StatusCode::NOT_FOUND, "Not Found").into_response()
 }
 
-async fn ws_handler(State(state): State<Arc<ServerState>>, ws: WebSocketUpgrade) -> Response {
+/// Default / maximum page size for `GET /api/history` — what a phone can render and SQLite can
+/// serve without a hiccup.
+const HISTORY_PAGE_DEFAULT: usize = 60;
+const HISTORY_PAGE_MAX: usize = 200;
+
+/// Clamp a requested history page size to `1..=`[`HISTORY_PAGE_MAX`].
+fn history_page_limit(requested: Option<usize>) -> usize {
+    requested
+        .unwrap_or(HISTORY_PAGE_DEFAULT)
+        .clamp(1, HISTORY_PAGE_MAX)
+}
+
+/// Query parameters for `GET /<token>/api/history`.
+#[derive(serde::Deserialize)]
+struct HistoryParams {
+    /// Return only rows with `seq <` this (omit for the newest page).
+    before: Option<i64>,
+    /// Page size (clamped — see [`history_page_limit`]).
+    limit: Option<usize>,
+}
+
+/// `GET /<token>/api/history?before=<seq>&limit=<n>` — one JSON page of the session's persisted
+/// transcript, newest first (see [`HistoryRow`]). The session id comes from the latest broadcast
+/// snapshot (this server drives ONE session; the multi-session daemon is Phase 4). Serves `[]`
+/// before the first broadcast or when no store seam was provided. The store read runs on the
+/// blocking pool — rusqlite is synchronous and this is the async accept path.
+async fn history_page(
+    State(state): State<Arc<ServerState>>,
+    axum::extract::Query(params): axum::extract::Query<HistoryParams>,
+) -> Response {
+    let (before, limit) = (params.before, history_page_limit(params.limit));
+    let sid = state.snapshot_rx.borrow().session_id.clone();
+    let rows: Vec<HistoryRow> = match (state.history.clone(), sid.is_empty()) {
+        (Some(provider), false) => {
+            tokio::task::spawn_blocking(move || provider(&sid, before, limit))
+                .await
+                .unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "application/json"),
+            // Live data: a cached page would hide new turns (and the SW skips /api/ too).
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()),
+    )
+        .into_response()
+}
+
+/// Query parameters for the WS handshake: `rev` is the last snapshot revision the page saw
+/// (v5 reconnect/replay). Absent / 0 / malformed → fresh connection (full snapshot flagged
+/// `resync`).
+#[derive(serde::Deserialize)]
+struct WsParams {
+    #[serde(default)]
+    rev: u64,
+}
+
+async fn ws_handler(
+    State(state): State<Arc<ServerState>>,
+    axum::extract::Query(params): axum::extract::Query<WsParams>,
+    ws: WebSocketUpgrade,
+) -> Response {
     // The route is static (the token is baked into the registered path at `start` time and is also
     // held in `state`), so there's no path parameter to extract — taking `Path<String>` here would
     // find zero captures and 500. A wrong-token request never matches the registered route and
     // falls through to the 404 fallback instead.
-    ws.on_upgrade(move |socket| ws_session(socket, state))
+    ws.on_upgrade(move |socket| ws_session(socket, state, params.rev))
 }
 
 /// One connected browser: forward snapshots out, parse inputs in. Runs until the browser
 /// disconnects or the server stops (the watch channel closes → the forward loop exits).
-async fn ws_session(socket: WebSocket, state: Arc<ServerState>) {
+///
+/// `since` is the client's last-seen revision (v5): when the replay log can fill the gap, the
+/// client receives exactly the frames it missed (none when already current) and then follows
+/// live — no gap, no flicker. When it can't (fresh connect, evicted, foreign counter), it gets
+/// ONE full snapshot flagged `resync: true` instead.
+async fn ws_session(socket: WebSocket, state: Arc<ServerState>, since: u64) {
     use futures::stream::StreamExt;
     use futures::SinkExt;
 
     let (mut tx, mut rx) = socket.split();
+    // Clone the receiver BEFORE reading the replay log: a frame broadcast between the two is
+    // then guaranteed to be seen (in the log, in the watch, or both — the page dedupes on
+    // revision), so a reconnect can never observe a gap.
     let mut snap = state.snapshot_rx.clone();
 
-    // Send the current snapshot immediately so the page isn't blank until the next change.
-    let initial = serde_json::to_string(&*snap.borrow()).unwrap_or_else(|_| "{}".into());
-    if tx.send(Message::Text(initial.into())).await.is_err() {
-        return;
+    let replay = if since == 0 {
+        None
+    } else {
+        state
+            .events
+            .lock()
+            .ok()
+            .and_then(|log| log.replay_after(since))
+    };
+    match replay {
+        Some(missed) => {
+            let mut last_sent = since;
+            for s in &missed {
+                let json = serde_json::to_string(s).unwrap_or_else(|_| "{}".into());
+                if tx.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+                last_sent = s.revision;
+            }
+            // A cloned receiver has NOT seen the value currently in the watch, so the forward
+            // loop below would immediately re-deliver it — a duplicate of the replay's last
+            // frame. Mark it seen here, and send it ourselves only when the replay didn't
+            // already cover it (it was broadcast between the ring read and now).
+            let current = snap.borrow_and_update().clone();
+            if current.revision > last_sent {
+                let json = serde_json::to_string(&current).unwrap_or_else(|_| "{}".into());
+                if tx.send(Message::Text(json.into())).await.is_err() {
+                    return;
+                }
+            }
+        }
+        None => {
+            // Send the current snapshot immediately so the page isn't blank until the next
+            // change, flagged as a resync (its revision doesn't extend the client's stream).
+            // `borrow_and_update` (not `borrow`): mark it seen so the forward loop doesn't
+            // deliver the same frame again right away.
+            let mut current = snap.borrow_and_update().clone();
+            current.resync = true;
+            let initial = serde_json::to_string(&current).unwrap_or_else(|_| "{}".into());
+            if tx.send(Message::Text(initial.into())).await.is_err() {
+                return;
+            }
+        }
     }
 
     let mut forward = tokio::spawn(async move {
@@ -1314,7 +1556,112 @@ mod tests {
         assert_eq!(v["prompt_seq"], 7);
         assert_eq!(v["notes"][0], "⚠ /remote can only be toggled from the TUI");
         assert_eq!(v["revision"], 42);
+        // v5: the resync flag rides in every frame (false on the live stream, true on the one
+        // full snapshot a gapped reconnect gets).
+        assert_eq!(v["resync"], false);
         assert_eq!(v["closed"], false);
+
+        let resynced = Snapshot {
+            resync: true,
+            ..Default::default()
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&resynced).unwrap()).unwrap();
+        assert_eq!(v["resync"], true);
+    }
+
+    #[test]
+    fn history_row_serializes_the_wire_shape() {
+        let row = HistoryRow {
+            seq: 12,
+            role: "assistant".into(),
+            content: "```rust\nfn main() {}\n```".into(),
+            model: Some("groq::llama-3.3-70b".into()),
+            created_at: 1_770_000_000,
+            visibility: "llm".into(),
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
+        assert_eq!(v["seq"], 12);
+        assert_eq!(v["role"], "assistant");
+        assert_eq!(v["content"], "```rust\nfn main() {}\n```");
+        assert_eq!(v["model"], "groq::llama-3.3-70b");
+        assert_eq!(v["created_at"], 1_770_000_000_i64);
+        assert_eq!(v["visibility"], "llm");
+    }
+
+    /// A snapshot whose only distinguishing field is its revision, for event-log tests.
+    fn rev_snap(rev: u64) -> Snapshot {
+        Snapshot {
+            revision: rev,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn event_log_replays_exactly_the_frames_after_rev() {
+        let mut log = EventLog::new(EVENT_LOG_CAP);
+        for rev in 1..=10 {
+            log.push(rev, rev_snap(rev));
+        }
+        // Everything after rev 6 — exactly 7, 8, 9, 10, oldest first.
+        let missed = log.replay_after(6).expect("gap is fillable");
+        assert_eq!(
+            missed.iter().map(|s| s.revision).collect::<Vec<_>>(),
+            vec![7, 8, 9, 10]
+        );
+        // Already current → an empty replay (NOT a resync): the client missed nothing.
+        assert_eq!(log.replay_after(10).expect("current is fillable").len(), 0);
+        // The boundary: rev = front-1 still replays the entire retained log.
+        assert_eq!(log.replay_after(0).expect("full log").len(), 10);
+    }
+
+    #[test]
+    fn event_log_eviction_and_unknown_revs_force_resync() {
+        let mut log = EventLog::new(4);
+        for rev in 1..=10 {
+            log.push(rev, rev_snap(rev));
+        }
+        // Ring holds 7..=10 now; a client at rev 2 needs 3..=10 — 3..=6 are gone: resync.
+        assert!(log.replay_after(2).is_none(), "evicted gap must resync");
+        assert!(
+            log.replay_after(5).is_none(),
+            "first needed frame (6) evicted"
+        );
+        // rev 6 needs 7..=10 — all retained.
+        assert_eq!(log.replay_after(6).unwrap().len(), 4);
+        // A future/foreign rev (e.g. from a previous server on the same page) must resync,
+        // never silently pretend the client is current.
+        assert!(log.replay_after(11).is_none(), "future rev must resync");
+        // An empty log can't fill anything.
+        assert!(EventLog::new(4).replay_after(1).is_none());
+    }
+
+    #[test]
+    fn event_log_is_bounded_by_its_cap() {
+        let mut log = EventLog::new(8);
+        for rev in 1..=10_000 {
+            log.push(rev, rev_snap(rev));
+            assert!(log.len() <= 8, "ring must never exceed its cap");
+        }
+        assert_eq!(log.len(), 8);
+        assert_eq!(
+            log.replay_after(9_992).unwrap().len(),
+            8,
+            "the newest cap-many frames are retained"
+        );
+    }
+
+    #[test]
+    fn history_page_limit_is_clamped() {
+        assert_eq!(history_page_limit(None), HISTORY_PAGE_DEFAULT);
+        assert_eq!(history_page_limit(Some(10)), 10);
+        assert_eq!(history_page_limit(Some(0)), 1, "zero would loop forever");
+        assert_eq!(
+            history_page_limit(Some(1_000_000)),
+            HISTORY_PAGE_MAX,
+            "a hostile limit can't dump the whole table"
+        );
     }
 
     #[test]
@@ -1537,7 +1884,7 @@ mod tests {
     }
 
     #[test]
-    fn control_page_speaks_protocol_v4() {
+    fn control_page_speaks_the_current_protocol() {
         // The page's bundled protocol constant must track PROTOCOL_VERSION (mismatch = banner).
         assert!(
             APP_JS.contains(&format!("const PROTO = {PROTOCOL_VERSION};")),
@@ -1551,6 +1898,55 @@ mod tests {
         );
         // The mismatch banner covers BOTH directions (older page vs older server).
         assert!(APP_JS.contains("s.protocol > PROTO"));
+    }
+
+    #[test]
+    fn page_reconnects_with_its_last_seen_revision() {
+        // v5 reconnect/replay: the page must send `?rev=<last seen>` on every (re)connect,
+        // persist the revision across reloads, dedupe the replay/live overlap, and honor
+        // the resync flag.
+        for needle in [
+            r#""/ws?rev=" + lastRev"#, // the handshake carries the last seen revision
+            "sessionStorage.getItem(REV_KEY", // …which survives a page reload
+            "sessionStorage.setItem(REV_KEY",
+            "s.revision <= lastRev", // replay/live overlap dedup
+            "s.resync",              // resync frames always apply
+        ] {
+            assert!(APP_JS.contains(needle), "app.js must contain {needle:?}");
+        }
+    }
+
+    #[test]
+    fn page_paginates_history_and_renders_rich_transcript() {
+        // v5 full scrollback: scroll-up fetches older pages from the token-scoped history API…
+        for needle in [r#"BASE + "/api/history""#, "?before=", "histRow"] {
+            assert!(APP_JS.contains(needle), "app.js must contain {needle:?}");
+        }
+        // …and messages are rendered with the safe markdown renderer + built-in highlighter
+        // (createElement/textContent only, tap-to-copy on fenced blocks — never innerHTML
+        // with transcript content).
+        for needle in [
+            "function mdRender",
+            "function inlineMd",
+            "function highlight",
+            "function codeBlock",
+            "codecopy",
+            "tok-k",
+        ] {
+            assert!(APP_JS.contains(needle), "app.js must contain {needle:?}");
+        }
+        // The transcript panel splits into accumulated history + the rebuilt live tail.
+        for id in ["hist", "tail", "histload"] {
+            assert!(
+                CONTROL_PAGE.contains(&format!("id=\"{id}\"")),
+                "page has #{id}"
+            );
+        }
+        // The service worker must never serve /api/ responses from cache.
+        assert!(
+            SERVICE_WORKER.contains("/api/"),
+            "SW special-cases the live-data API routes"
+        );
     }
 
     #[test]
@@ -1731,7 +2127,7 @@ mod tests {
         // once the assertions pass. Gated behind --ignored so it never runs in CI.
         let _outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             use futures::StreamExt;
-            let rc = start(Exposure::Local, None).expect("start loopback server");
+            let rc = start(Exposure::Local, None, None).expect("start loopback server");
             let port = rc.url.addr.port();
             let token = rc.url.token.clone();
 
@@ -1827,6 +2223,160 @@ mod tests {
         // Unreachable on success (exit above); only reached if the 5s timeout elapsed.
         let _ = _outcome;
         panic!("WS round-trip did not complete within 5s");
+    }
+
+    /// The v5 wire round-trip: connect → take snapshots → drop → reconnect with `?rev=` and
+    /// receive EXACTLY the missed frames (no gap, no duplicates, then live-follow); an unknown
+    /// rev gets one `resync` frame; `/api/history` pages through the provider seam honoring
+    /// `before`/`limit` and stays token-gated. Like its sibling above, it binds a real port and
+    /// force-exits on success, so run it INDIVIDUALLY with --ignored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "binds a real port + opens real sockets; run individually with --ignored (kills itself on success)"]
+    async fn reconnect_replays_missed_frames_and_history_pages() {
+        let _outcome = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            use futures::StreamExt;
+
+            // A canned history provider that echoes its inputs so the handler's passthrough
+            // (session id from the snapshot, before/limit from the query) is observable.
+            let provider: HistoryProvider = Arc::new(|sid, before, limit| {
+                vec![HistoryRow {
+                    seq: before.unwrap_or(-1),
+                    role: "assistant".into(),
+                    content: format!("sid={sid} limit={limit}"),
+                    model: None,
+                    created_at: 1,
+                    visibility: "llm".into(),
+                }]
+            });
+            let rc = start(Exposure::Local, None, Some(provider)).expect("start loopback server");
+            let port = rc.url.addr.port();
+            let token = rc.url.token.clone();
+
+            let broadcast = |rev: u64| {
+                rc.broadcast(Snapshot {
+                    session_id: "sess-e2e".into(),
+                    revision: rev,
+                    notes: vec![format!("frame {rev}")],
+                    ..Default::default()
+                });
+            };
+            // 1. Frames 1..=3 broadcast while nobody is connected.
+            (1..=3).for_each(&broadcast);
+
+            // 2. A fresh connect (rev=0) gets ONE full snapshot flagged resync (the current
+            //    state), not a replay of history it never had.
+            let ws_url = format!("ws://127.0.0.1:{port}/{token}/ws?rev=0");
+            let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
+                .await
+                .expect("WS handshake");
+            let first = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+                .await
+                .expect("first frame arrives")
+                .unwrap()
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&first.into_text().unwrap()).unwrap();
+            assert_eq!(v["revision"], 3, "fresh connect sees the current frame");
+            assert_eq!(v["resync"], true, "fresh connect is a resync");
+            drop(ws); // the phone goes through a tunnel…
+
+            // 3. Frames 4 and 5 happen while disconnected.
+            (4..=5).for_each(&broadcast);
+
+            // 4. Reconnect with the last seen rev: EXACTLY 4 then 5 replay (resync=false),
+            //    and the stream continues live (frame 6) with no duplicates in between.
+            let ws_url = format!("ws://127.0.0.1:{port}/{token}/ws?rev=3");
+            let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
+                .await
+                .expect("WS re-handshake");
+            for want in [4u64, 5] {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+                    .await
+                    .expect("replayed frame arrives")
+                    .unwrap()
+                    .unwrap();
+                let v: serde_json::Value =
+                    serde_json::from_str(&frame.into_text().unwrap()).unwrap();
+                assert_eq!(v["revision"], want, "replay is exact and in order");
+                assert_eq!(v["resync"], false, "replayed frames are stream frames");
+                assert_eq!(v["notes"][0], format!("frame {want}"), "no content gap");
+            }
+            broadcast(6);
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+                .await
+                .expect("live frame follows the replay")
+                .unwrap()
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&frame.into_text().unwrap()).unwrap();
+            assert_eq!(
+                v["revision"], 6,
+                "live-follow after replay, no gap, no dupes"
+            );
+            drop(ws);
+
+            // 5. An unknown/future rev (a page from a previous server run) must resync.
+            let ws_url = format!("ws://127.0.0.1:{port}/{token}/ws?rev=999");
+            let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url)
+                .await
+                .expect("WS handshake with foreign rev");
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+                .await
+                .expect("resync frame arrives")
+                .unwrap()
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&frame.into_text().unwrap()).unwrap();
+            assert_eq!(v["resync"], true, "an unfillable gap resyncs");
+            assert_eq!(v["revision"], 6, "resync carries the current state");
+            drop(ws);
+
+            // 6. History pagination: the session id comes from the snapshot; before/limit pass
+            //    through (limit clamped); the response is JSON with no-store.
+            let http = forge_provider::bundled_http_client();
+            let res = http
+                .get(format!(
+                    "http://127.0.0.1:{port}/{token}/api/history?before=42&limit=5"
+                ))
+                .send()
+                .await
+                .expect("GET history");
+            assert_eq!(res.status(), 200);
+            assert_eq!(
+                res.headers().get("cache-control").unwrap(),
+                "no-store",
+                "live data is never cached"
+            );
+            let rows: serde_json::Value = res.json().await.expect("history is JSON");
+            assert_eq!(rows[0]["seq"], 42, "`before` reached the provider");
+            assert_eq!(rows[0]["content"], "sid=sess-e2e limit=5");
+            // Omitted params → newest page at the default limit.
+            let rows: serde_json::Value = http
+                .get(format!("http://127.0.0.1:{port}/{token}/api/history"))
+                .send()
+                .await
+                .expect("GET history defaults")
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(rows[0]["seq"], -1, "no `before` = newest page");
+            assert_eq!(
+                rows[0]["content"],
+                format!("sid=sess-e2e limit={HISTORY_PAGE_DEFAULT}")
+            );
+
+            // 7. The history route is token-gated like everything else.
+            let wrong = http
+                .get(format!(
+                    "http://127.0.0.1:{port}/deadbeefdeadbeef/api/history"
+                ))
+                .send()
+                .await
+                .expect("GET history with wrong token");
+            assert_eq!(wrong.status(), 404, "wrong token is a 404");
+
+            std::process::exit(0);
+        })
+        .await;
+        let _ = _outcome;
+        panic!("reconnect/replay round-trip did not complete within 8s");
     }
 
     // -----------------------------------------------------------------------
@@ -1963,7 +2513,7 @@ mod tests {
     async fn lan_start_url_is_https_with_fingerprint() {
         // `start(Exposure::Lan)` must return an https:// URL and a populated tls_fingerprint.
         // Requires a Tokio runtime because axum-server's from_tcp_rustls wires into the runtime.
-        let rc = start(Exposure::Lan, None).expect("start LAN server");
+        let rc = start(Exposure::Lan, None, None).expect("start LAN server");
         assert!(
             rc.url.url.starts_with("https://"),
             "LAN URL must be https://: {}",
@@ -1982,7 +2532,7 @@ mod tests {
     async fn local_start_url_is_http_no_fingerprint() {
         // `start(Exposure::Local)` must stay plain HTTP with no fingerprint.
         // Requires a Tokio runtime because axum::serve wires into the runtime.
-        let rc = start(Exposure::Local, None).expect("start loopback server");
+        let rc = start(Exposure::Local, None, None).expect("start loopback server");
         assert!(
             rc.url.url.starts_with("http://"),
             "loopback URL must be http://: {}",
