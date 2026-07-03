@@ -47,20 +47,22 @@ export const Backdrop: React.FC<{ tint?: string }> = ({ tint }) => {
 };
 
 // Floating ember sparks drifting up. Deterministic via random(seed).
-export const Embers: React.FC<{ count?: number; opacity?: number }> = ({
+export const Embers: React.FC<{ count?: number; opacity?: number; width?: number; height?: number }> = ({
   count = 26,
   opacity = 1,
+  width = 1920,
+  height = 1080,
 }) => {
   const frame = useCurrentFrame();
   return (
     <AbsoluteFill style={{ pointerEvents: "none" }}>
       {new Array(count).fill(0).map((_, i) => {
         const seed = i * 3.31;
-        const x = random(`x${seed}`) * 1920;
+        const x = random(`x${seed}`) * width;
         const speed = 0.35 + random(`s${seed}`) * 0.9;
         const size = 1.5 + random(`z${seed}`) * 3.5;
         const phase = random(`p${seed}`) * 1000;
-        const y = (1180 - ((frame * speed + phase) % 1260)) as number;
+        const y = ((height + 100) - ((frame * speed + phase) % (height + 180))) as number;
         const sway = Math.sin((frame + phase) / 26) * 18;
         const flick = 0.3 + 0.7 * Math.abs(Math.sin((frame + phase) / 12));
         return (

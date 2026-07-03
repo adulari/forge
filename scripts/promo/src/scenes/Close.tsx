@@ -4,7 +4,7 @@ import { C, FONT } from "../theme";
 import { Backdrop, Embers, Typewriter } from "../components/common";
 import { Wordmark } from "../components/Wordmark";
 
-export const Close: React.FC<{ dur: number }> = ({ dur }) => {
+export const Close: React.FC<{ dur: number; fadeIn?: number }> = ({ dur, fadeIn = 0 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
 
@@ -15,9 +15,10 @@ export const Close: React.FC<{ dur: number }> = ({ dur }) => {
   const igniteStart = 164;
   const ignite = interpolate(frame, [igniteStart, igniteStart + 36], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp", easing: (t) => 1 - Math.pow(1 - t, 2) });
   const markS = spring({ frame: frame - igniteStart, fps, config: { damping: 14 } });
-  const slugS = spring({ frame: frame - 194, fps, config: { damping: 200 } });
+  const slugS = spring({ frame: frame - 184, fps, config: { damping: 200 } });
 
-  const outFade = interpolate(frame, [dur - 24, dur], [1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const inFade = fadeIn > 0 ? interpolate(frame, [0, fadeIn], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" }) : 1;
+  const outFade = inFade * interpolate(frame, [dur - 24, dur], [1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
   // command card fully clears exactly as the wordmark ignites (no overlap, no gap)
   const cardOut = interpolate(frame, [148, 164], [1, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
 

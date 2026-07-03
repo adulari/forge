@@ -12,23 +12,18 @@ import { Close } from "./scenes/Close";
 
 loadFonts();
 
-// [from, dur]
-const S = {
-  cold: [0, 150],
-  mesh: [150, 450],
-  tui: [600, 360],
-  proof: [960, 240],
-  feat: [1200, 600],
-  remote: [1800, 240],
-  close: [2040, 240],
-} as const;
+import timeline from "./timeline.json";
 
-export const PROMO_DURATION = S.close[0] + S.close[1]; // 2280
+// [from, dur] — single source of truth shared with the audio generator
+// (scripts/promo/audio/make_audio.py) so sound accents land exactly on cuts.
+const S = timeline.promo.scenes;
+
+export const PROMO_DURATION = S.close[0] + S.close[1]; // 2340
 
 // Scenes bordering the FeatureRun montage linger XF frames into the next scene
 // (which fades in on top) so the proof->feat and feat->remote cuts crossfade
 // instead of dipping to a blank backdrop frame.
-const XF = 14;
+const XF = timeline.crossfade;
 
 export const Promo: React.FC = () => {
   return (

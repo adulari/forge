@@ -65,7 +65,7 @@ const Duel: React.FC = () => {
   const left = interpolate(frame, [22, 66], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
   const right = interpolate(frame, [22, 92], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
   return (
-    <Shell tag="/duel" tint={C.ember} caption={<>race two models on one task — <span style={{ color: C.ember }}>keep the winner</span></>}>
+    <Shell tag="/duel" tint={C.ember} caption={<>two models, one task — <span style={{ color: C.ember }}>keep the winner</span></>}>
       <div style={{ display: "flex", gap: 48, alignItems: "flex-start" }}>
         <RacerPanel name="claude sonnet" color={C.ember} prog={left} win={frame >= 66} frame={frame} fps={fps} side="l" />
         <RacerPanel name="gemini pro" color={C.blue} prog={right} win={false} frame={frame} fps={fps} side="r" />
@@ -165,7 +165,7 @@ const Blame: React.FC = () => {
   const arrowS = spring({ frame: frame - 34, fps, config: { damping: 16 } });
   const tagS = spring({ frame: frame - 52, fps, config: { damping: 13 } });
   return (
-    <Shell tag="forge blame" tint={C.teal} caption={<>every line knows <span style={{ color: C.teal }}>which model wrote it — and what it cost</span></>}>
+    <Shell tag="forge blame" tint={C.teal} caption={<>who wrote every line — <span style={{ color: C.teal }}>and what it cost</span></>}>
       <div style={{ display: "flex", alignItems: "center", gap: 40 }}>
         <div style={{ background: C.mantle, border: `1px solid ${C.surface}`, borderRadius: 12, padding: "20px 26px", fontFamily: FONT, fontSize: 22 }}>
           <span style={{ color: C.muted }}>42 </span>

@@ -1,0 +1,61 @@
+{
+  "fps": 30,
+  "crossfade": 14,
+  "promo": {
+    "scenes": {
+      "cold": [0, 150],
+      "mesh": [150, 450],
+      "tui": [600, 360],
+      "proof": [960, 240],
+      "feat": [1200, 600],
+      "remote": [1800, 240],
+      "close": [2040, 300]
+    },
+    "events": {
+      "sparkFlare": 26,
+      "wordmarkIgnite": 30,
+      "meshFlash429": 196,
+      "meshReroute": 246,
+      "meshSuccess": 286,
+      "tuiSubmit": 74,
+      "proofCards": 140,
+      "vignette": 120,
+      "duelWinner": 66,
+      "remoteTap": 128,
+      "closeIgnite": 164
+    }
+  },
+  "teaser": {
+    "scenes": {
+      "cold": [0, 140],
+      "mesh": [140, 400],
+      "duel": [540, 120],
+      "close": [660, 290]
+    },
+    "events": {
+      "meshFlash429": 196,
+      "meshReroute": 246,
+      "meshSuccess": 286,
+      "duelWinner": 66,
+      "closeIgnite": 164
+    }
+  },
+  "vertical": {
+    "scenes": {
+      "hook": [0, 105],
+      "mesh": [105, 240],
+      "duel": [345, 135],
+      "auto": [480, 135],
+      "proof": [615, 165],
+      "close": [780, 180]
+    },
+    "events": {
+      "hookIgnite": 8,
+      "meshFlash429": 96,
+      "meshReroute": 132,
+      "meshSuccess": 162,
+      "duelWinner": 66,
+      "closeIgnite": 24
+    }
+  }
+}

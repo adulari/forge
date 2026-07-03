@@ -82,11 +82,13 @@ export const ColdOpen: React.FC<{ dur: number }> = ({ dur }) => {
             minHeight: 42,
           }}
         >
+          {/* starts as soon as the ignition sweep reaches mid-word so the full
+              tagline holds ~1.5s before the scene fades (readability) */}
           <Typewriter
             text="One binary.  Every model.  Your terminal."
             frame={frame}
-            startFrame={66}
-            cps={30}
+            startFrame={52}
+            cps={32}
           />
         </div>
       </AbsoluteFill>
