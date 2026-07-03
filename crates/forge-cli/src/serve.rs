@@ -154,13 +154,15 @@ struct SessionRow {
 }
 
 /// Fleet ordering: waiting-on-decision first (they need a human NOW), then newest-created.
-/// Created-at (not last-activity) as the tiebreak keeps the list stable while sessions stream.
+/// Created-at (not last-activity) as the tiebreak keeps the list stable while sessions stream;
+/// the id breaks created-at ties (second granularity) so rows created in the same second don't
+/// shuffle between polls with the registry map's iteration order.
 fn sort_session_rows(rows: &mut [SessionRow]) {
-    rows.sort_by_key(|r| {
-        (
-            std::cmp::Reverse(r.waiting),
-            std::cmp::Reverse(r.created_at),
-        )
+    rows.sort_by(|a, b| {
+        b.waiting
+            .cmp(&a.waiting)
+            .then(b.created_at.cmp(&a.created_at))
+            .then_with(|| a.id.cmp(&b.id))
     });
 }
 
@@ -1525,6 +1527,19 @@ mod tests {
             rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             vec!["old-wait", "new-idle", "mid"],
             "waiting-on-decision beats recency; the rest stay newest-first"
+        );
+        // Same-second creations (created_at has second granularity) must order deterministically
+        // — by id — so the dashboard doesn't shuffle rows between polls with map iteration order.
+        let mut ties = vec![
+            mk("bbb", false, 30),
+            mk("aaa", false, 30),
+            mk("ccc", false, 30),
+        ];
+        sort_session_rows(&mut ties);
+        assert_eq!(
+            ties.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["aaa", "bbb", "ccc"],
+            "created-at ties break by id, stably"
         );
         // The wire shape carries the fleet fields the dashboard reads.
         let v: serde_json::Value =
