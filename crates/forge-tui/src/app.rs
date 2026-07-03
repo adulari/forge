@@ -1454,11 +1454,11 @@ impl App {
             self.subagents.clear();
             self.subagent_batch_start = 0;
         }
-        // A workflow run is per-turn: a finished one's view/rows clear so the new turn starts
-        // clean. (`active` should never span turns — kept as a defensive guard.)
-        if !self.workflow.active {
-            self.workflow = Default::default();
-        }
+        // A workflow run is per-turn, so ANY carry-over here is stale — including `active`
+        // (an interrupted run whose WorkflowFinished never arrived). The old `if !active`
+        // guard kept exactly that stale state alive forever: frozen status band, and every
+        // later spawn_agents batch misrouted into the dead run's rows.
+        self.workflow = Default::default();
         self.activity_focused = false;
         self.activity_idx = 0;
         self.pending_shell_fix = None;
@@ -5298,6 +5298,21 @@ mod tests {
             cost_cell("openrouter::anthropic/claude-opus", 0.0),
             "untracked"
         );
+    }
+
+    /// Regression: an interrupted workflow (active=true, WorkflowFinished never arrived) used
+    /// to survive `on_turn_start`'s `if !active` guard forever — every later turn inherited the
+    /// dead run's state, and new spawn_agents batches were misrouted into its row list.
+    #[test]
+    fn turn_start_clears_a_stale_active_workflow() {
+        let mut app = App::default();
+        app.workflow.begin(None);
+        app.workflow
+            .on_agent_start("a".into(), "general".into(), "task".into(), None, None);
+        assert!(app.workflow.active, "simulated stuck state");
+        app.on_turn_start();
+        assert!(!app.workflow.active, "stale active run cleared");
+        assert!(app.workflow.rows.is_empty(), "dead run's rows gone");
     }
 
     #[test]

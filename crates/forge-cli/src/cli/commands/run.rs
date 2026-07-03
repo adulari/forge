@@ -2455,6 +2455,10 @@ pub(crate) async fn run_chat_tui(
                     pending_question = None;
                     app.prompt = None;
                     app.clear_question();
+                    // A live workflow run's WorkflowFinished will never arrive (its emitting
+                    // task just died with the turn) — close it out as interrupted so the status
+                    // band doesn't freeze and later turns don't inherit `active`.
+                    app.workflow.on_interrupt();
                     app.apply(forge_tui::PresenterEvent::AssistantDone); // flush any partial reply
                     app.note("⏹ interrupted — stopped responding");
                     dirty = true;
