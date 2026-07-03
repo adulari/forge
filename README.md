@@ -422,6 +422,7 @@ viewer (main chat + subagents + critics).
 | `/mcp [server]` | Show MCP server status (or one server's tools) |
 | `/assay [--diff\|--branch <b>\|--since <ref>\|<path>] [--only/--skip <lens,…>]` | Run code-quality analysis crew |
 | `/goal <objective>` · `/loop <task>` | Set a persistent goal · run autonomously until complete (≤25 turns) |
+| `/pr [title]` | Branch + commit + open a pull request from this session's work, with a provenance-rich body (session id, models, spend) |
 | `/replay <id> [<id2>]` | Show a session transcript, or diff two sessions |
 | `/lattice <symbol>` · `/image <path>` · `/thinking` | Query code intel · attach image · toggle reasoning blocks |
 | `/remember <text>` · `/memories` | Save a memory · list what Forge knows |
@@ -487,6 +488,16 @@ forge blame src/auth.rs --line 42    # why-card: the prompt + reasoning behind o
 
 Traces lines back through Forge's recorded tool-call history — model, session, originating prompt,
 and the assistant's reasoning, with a `forge replay` pointer for the full turn. No git needed.
+
+### 🧭 `forge tour` — the 2-minute introduction
+
+```bash
+forge tour          # what Forge does + the commands to try, no API keys needed
+forge tour --demo   # ...and watch one real agent turn run offline (mock model)
+```
+
+The demo runs the full loop — mesh routing line, a tool call, the final answer — in a scratch
+directory against an isolated store, so it never touches your projects or session history.
 
 ### ⏰ `forge schedule` — recurring headless runs
 
