@@ -19,6 +19,12 @@ let daemon = false, curSession = sessionStorage.getItem(SESS_KEY) || "";
 function revKeyFor(sid) { return "forge-rev:" + BASE + (sid ? ":" + sid : ""); }
 let REV_KEY = revKeyFor(curSession);
 let lastRev = Number(sessionStorage.getItem(REV_KEY) || 0) || 0;
+// Whether THIS page life has rendered a frame yet. A cold reload restores lastRev from
+// sessionStorage, but the DOM is blank — asking the server for "everything after lastRev"
+// then yields NOTHING when the session is idle (rev already current), leaving a blank page
+// with dead pagination. Until we've painted once, connect with rev=0 to force a full resync;
+// after that, reconnects use lastRev so replay stays gap-free without flicker.
+let painted = false;
 
 function boot() {
   fetch(BASE + "/api/sessions", { cache: "no-store" })
@@ -44,7 +50,7 @@ function connect() {
   if (daemon && !curSession) return; // nothing attached yet — pick from the list
   const scheme = location.protocol === "https:" ? "wss://" : "ws://";
   const sess = daemon && curSession ? "&session=" + encodeURIComponent(curSession) : "";
-  ws = new WebSocket(scheme + location.host + BASE + "/ws?rev=" + lastRev + sess);
+  ws = new WebSocket(scheme + location.host + BASE + "/ws?rev=" + (painted ? lastRev : 0) + sess);
   ws.onopen = () => { retries = 0; $("conn").textContent = "● connected"; flushOfflineQueue(); };
   ws.onmessage = (e) => {
     let s; try { s = JSON.parse(e.data); } catch { return; }
@@ -57,6 +63,7 @@ function connect() {
       try { sessionStorage.setItem(REV_KEY, String(lastRev)); } catch (e2) {}
     }
     render(s);
+    painted = true;
     if (s.closed) {
       if (daemon) {
         // The session was archived (or the driver stopped) — back to the list; the daemon
@@ -99,6 +106,7 @@ function attach(id) {
   try { sessionStorage.setItem(SESS_KEY, id); } catch (e) {}
   REV_KEY = revKeyFor(id);
   lastRev = Number(sessionStorage.getItem(REV_KEY) || 0) || 0;
+  painted = false; // the DOM shows nothing of this session yet — force a full resync
   retries = 0;
   oqDropped = 0;
   renderOfflineQueue();
@@ -267,6 +275,10 @@ function renderTranscript(s) {
   }
   if (nearBottom) panel.scrollTop = panel.scrollHeight;
   tail._sig = body;
+  // When the transcript doesn't overflow (fresh reload of an idle session: the live tail is
+  // a short ring), no scroll event can ever fire — scroll-up pagination would be unreachable.
+  // Eagerly pull history until the panel scrolls (loadHistory self-chains) or it's exhausted.
+  if (histSession && !histDone && panel.scrollHeight <= panel.clientHeight + 4) loadHistory();
 }
 
 // --- v5 full scrollback: paginated persisted history above the live tail -------------------
@@ -285,7 +297,10 @@ function loadHistory() {
   histLoading = true;
   $("histload").hidden = false;
   const q = histOldest === null ? "?limit=" + HIST_PAGE : "?before=" + histOldest + "&limit=" + HIST_PAGE;
-  fetch(BASE + "/api/history" + q, { cache: "no-store" })
+  // Under a daemon the route is shared by every session — address ours explicitly (without
+  // it the server pages an empty id and scrollback never loads).
+  const sess = daemon && curSession ? "&session=" + encodeURIComponent(curSession) : "";
+  fetch(BASE + "/api/history" + q + sess, { cache: "no-store" })
     .then(res => { if (!res.ok) throw new Error("http " + res.status); return res.json(); })
     .then(rows => {
       if (!rows.length) { histDone = true; return; }
@@ -298,6 +313,12 @@ function loadHistory() {
       // Preserve what the reader was looking at across the prepend.
       panel.scrollTop += panel.scrollHeight - beforeH;
       if (rows.length < HIST_PAGE) histDone = true;
+      // Keep pulling while the panel still can't scroll (see renderTranscript) — terminates
+      // when a page makes it overflow or the store runs out (histDone). Success path only,
+      // so a failing fetch can't self-chain into a retry loop (a scroll retries naturally).
+      if (!histDone && !panel.hidden && panel.scrollHeight <= panel.clientHeight + 4) {
+        setTimeout(loadHistory, 0); // after histLoading resets below
+      }
     })
     .catch(() => {})
     .finally(() => { histLoading = false; $("histload").hidden = true; });
