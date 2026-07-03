@@ -143,6 +143,10 @@ Once you're comfortable with the basics:
 | Index your codebase for smarter context | `forge lattice update .` |
 | Set a persistent goal | `/goal <objective>` in chat |
 | Run a quality audit | `/assay` in chat |
+| Orchestrate a big multi-agent task | `/workflow <goal>` or `/effort whitehot` in chat |
+| Race models on a task, keep the winner | `/duel <task>` in chat |
+| See which model wrote a line | `forge blame <file> --line <n>` |
+| Schedule a recurring headless run | `forge schedule add "<task>" --every 30m` |
 | Import your Claude Code skills | `forge import claude` |
 | Connect MCP servers | `forge mcp add ...` or `forge mcp import` |
 | Move Forge to another machine | `forge migrate export ./bundle.tar.gz` |

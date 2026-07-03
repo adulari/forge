@@ -58,6 +58,9 @@ sonnet` fixes **50% more bugs through Forge than through the raw CLI**.
   call-chains, and semantic retrieval, auto-injected before each turn.
 - **Cross-session memory** — durable, typed facts per project, auto-captured at turn end and
   relevance-ranked back into context next session — only the relevant ones, not a dump.
+- **Provenance & the arena** — `forge blame` traces any line back to the model, prompt, and
+  reasoning that wrote it; `/duel` races models on the same task in parallel worktrees, merges the
+  winner, and feeds the outcome back into routing. No other agent has either.
 - **One fast static binary** — Rust, no Node/Python/Bun runtime, no Electron. Installs in one line.
 
 ---
@@ -94,8 +97,10 @@ is spent only where it matters. Inspect any of these decisions live with `/mesh`
   subscription only** — a paid model is never silently used.
 - **Multiple keys per provider** — run `forge auth <provider>` again to stack keys; the mesh
   round-robins across them to multiply a free tier's per-key rate limit.
-- **`/effort`** (low / medium / high / xhigh) steers the *whole* route, benchmark-driven: higher effort
-  biases toward stronger-benchmarked models only when the score gap is real, lower toward cheaper.
+- **`/effort`** (low / medium / high / xhigh / white-hot) steers the *whole* route, benchmark-driven:
+  higher effort biases toward stronger-benchmarked models only when the score gap is real, lower toward
+  cheaper. The top stop, **white-hot**, adds automatic workflow-script orchestration on top of maximum
+  reasoning ([docs](docs/features/whitehot-effort.md)).
 
 ---
 
@@ -243,6 +248,12 @@ You can also stack keys via env: `GROQ_API_KEY="k1,k2"` or numbered `GROQ_API_KE
 - Planning mode (`/plan` read-only → `/execute`); Architect mode (strong planner + cheap editor)
 - Live LSP diagnostics fed back after edits; opt-in autofix loop (lint/test self-heal)
 - Subagent fan-out (`spawn_agents`), mesh-routed children, opt-in git-worktree isolation
+- Workflow scripts (`/workflow`): sandboxed JS orchestration — `agent()` / `parallel()` /
+  `pipeline()` fan-out with phases, saved scripts, and a dedicated animated workflow view
+- `/duel`: race up to 3 distinct-provider models on one task in parallel worktrees, merge the
+  winner — routing learns per-repo from recorded wins
+- `forge blame`: per-line AI provenance — which model, session, prompt, and reasoning wrote any line
+- `forge schedule`: recurring headless runs on native OS timers (systemd / launchd / Task Scheduler)
 - Assay: parallel adversarial critic crew with ranked, refuter-verified findings + CI gate
 - Cross-session auto-memory: typed durable facts, relevance-ranked recall
 - Vision input (`/image` or paste); `@file` context injection
@@ -260,7 +271,7 @@ You can also stack keys via env: `GROQ_API_KEY="k1,k2"` or numbered `GROQ_API_KE
 **🎨 TUI / UX**
 - Full-screen ratatui TUI: scrollable transcript, pinned panels, live progress, cost meter
 - Context-window token gauge, fuzzy command palette, dynamic `/config` settings editor
-- Unified activity viewer (subagents + critics), session/checkpoint pickers
+- Unified activity viewer (subagents + critics), dedicated animated workflow view, session/checkpoint pickers
 - `/usage` + `/mesh` overlays, `/model` picker, `/effort` knob, customizable statusline & keybinds
 - Remote control: drive a session from a phone/desktop browser (`/remote`)
 - `--inline` for native scrollback; `--mock` offline deterministic provider (no key needed)
@@ -400,8 +411,11 @@ viewer (main chat + subagents + critics).
 | `/init` | Scan the repo and write `.forge/AGENTS.md` project memory |
 | `/new` · `/resume [id]` · `/sessions` | Start fresh · resume · browse past sessions |
 | `/undo` · `/checkpoint [label]` · `/checkpoints` | Revert last turn · save · rewind to a checkpoint |
-| `/compact` | Summarize older context to free the window (also auto-triggers at 80% gauge) |
+| `/compact` · `/uncompact` | Summarize older context to free the window (also auto-triggers at 80% gauge) · undo it — restore the full transcript |
+| `/workflow [<task>\|run <name>\|list]` | Author a workflow script for a task · run a saved one · list saved scripts |
+| `/duel <task>` | Race models on the task in parallel worktrees; merge the winner, teach the router |
 | `/mode` · `/model [<id>]` · `/models` | Switch temper · pin a model · browse all discovered models |
+| `/effort [low\|medium\|high\|xhigh\|whitehot]` | Pin the effort knob — white-hot adds auto workflow orchestration |
 | `/usage` · `/mesh [task]` | API spend + token usage · inspect mesh routing |
 | `/mcp [server]` | Show MCP server status (or one server's tools) |
 | `/assay [--diff\|--branch <b>\|--since <ref>\|<path>] [--only/--skip <lens,…>]` | Run code-quality analysis crew |
@@ -461,6 +475,29 @@ forge lattice impact "UserService"   # blast radius — what depends on it
 forge lattice path "main" "persist"  # shortest call chain A → B
 forge lattice why "authenticate"     # git provenance — who last changed it
 ```
+
+### 🔍 `forge blame` — AI provenance per line
+
+```bash
+forge blame src/auth.rs              # which model/session wrote each line of the file
+forge blame src/auth.rs --line 42    # why-card: the prompt + reasoning behind one line
+```
+
+Traces lines back through Forge's recorded tool-call history — model, session, originating prompt,
+and the assistant's reasoning, with a `forge replay` pointer for the full turn. No git needed.
+
+### ⏰ `forge schedule` — recurring headless runs
+
+```bash
+forge schedule add "check the deploy, alert me in the summary" --every 30m
+forge schedule add "morning standup summary" --at 09:00 --mode bypass
+forge schedule add "weekly deps audit" --cron "Mon 08:00"   # systemd OnCalendar (Linux only)
+forge schedule                       # list registered schedules
+forge schedule remove <id-prefix>    # uninstall the OS timer + delete
+```
+
+Each tick fires `forge run` via a native OS timer — systemd `--user` on Linux, launchd on macOS,
+Task Scheduler on Windows. The headless analog to `/loop`/`/goal`.
 
 ### 🧰 Audit, migrate, MCP, skills
 

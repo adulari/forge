@@ -40,6 +40,13 @@ A multi-provider **Rust** CLI with auto mesh routing + failover has no direct eq
 Rust and multi-provider-capable but does no routing or failover; the OSS multi-provider field (Aider,
 Cline, opencode) is Python/TypeScript with manual model selection.
 
+Beyond routing, several Forge capabilities have **no equivalent in any tool below**, precisely
+*because* they need a multi-model mesh underneath: `/duel` (race distinct-provider models on one
+task in parallel worktrees, merge the winner, and feed the outcome back into routing),
+`forge blame` (per-line provenance — which model, session, and prompt wrote a line), sandboxed JS
+workflow scripts with mesh-routed `agent()` fan-out, and `forge schedule` (recurring headless runs
+on native OS timers, no daemon).
+
 ---
 
 ## Per-tool breakdown

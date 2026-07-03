@@ -29,26 +29,22 @@ Ranked by (leverage × certainty) ÷ effort. S/M/L = effort. Each maps to a v1.0
 
 ### Tier 1 — cheap, high-leverage robustness/efficiency (do first, P0.2)
 
-1. **Tool-failure loop guard** (S) — *openclaude `toolFailureLoopGuard.ts`, opencode `doom_loop`.*
-   Track tool failures on a few signatures (per (tool, error-category), per-turn, per-path); trip at
-   a threshold (default 3) into a terminal `ToolFailureLoop` outcome that surfaces "stuck on X — check
-   perms/schema" instead of letting a model burn turns/quota re-failing the same edit. Forge has a
-   shell-error interceptor but no cross-turn failure dedup/abort. **Direct quota + reliability win.**
-   Sketch: a `ToolFailureTracker` on `Session` in forge-core's tool-invoke path; normalize errors to a
-   small `ErrorCategory` enum; reset (tool,cat) on success.
+1. ~~**Tool-failure loop guard**~~ **DONE.** `run_model_loop` trips a two-stage nudge→halt at
+   `FAILURE_LOOP_THRESHOLD` (3) repeated tool failures, backed by `Session::failure_tracker` —
+   "stuck on X" surfaces instead of a model burning turns/quota re-failing the same edit.
 
-2. **Repeated-identical-call (doom-loop) detection** (S) — *opencode.* Subset/cousin of #1: hash
-   `(tool_name, normalized_args)` into a small ring buffer; N identical consecutive calls → Ask or a
-   hard nudge. Catches a model stuck re-issuing the exact same call. Fold into the same tracker as #1.
+2. ~~**Repeated-identical-call (doom-loop) detection**~~ **DONE.** Same place: identical consecutive
+   calls trip `DOOM_LOOP_THRESHOLD` (3) into the same nudge→halt path as #1.
 
-3. **Compaction `prune` pass** (S/M) — *opencode `compaction.prune`/`reserved`.* Before the LLM
-   summarize step, drop/truncate the oldest large tool-result message parts (keep last K), governed by
-   a `reserved` token budget from the token gauge. Reclaiming context by pruning bulky tool output is
-   **free** (no model call) vs Forge's summarize-only compaction. Pairs with the token gauge.
+3. ~~**Compaction `prune` pass**~~ **DONE.** `prune_tool_results()` (forge-core) truncates large old
+   tool results in place before any LLM summarize; `auto_compact_if_needed()` prunes first and only
+   pays for the summarize call if pruning didn't reclaim enough. See
+   `docs/features/context-compaction.md` §3a.
 
-4. **`.env`-denied-by-default + `external_directory` gate** (S) — *opencode permissions.* Deny reads/
-   writes of `*.env` and paths outside the project worktree by default (allowlist to override). Closes
-   a real secret-leak / exfiltration footgun. Routes through Forge's temper gate, not around it.
+4. ~~**`.env`-denied-by-default + `external_directory` gate**~~ **DONE.** `builtin_deny_rules()`
+   (forge-config) denies `.env`/secrets globs as unoverridable `RuleSource::Builtin` rules across
+   read/write/list/search/glob and shell verbs; a separate `confine()` workspace-confinement layer
+   in forge-tools gates paths outside the project worktree.
 
 5. ~~**Provider-aware subagent fan-out cap**~~ **DONE (#238).** `[mesh.subagents] max_per_provider`
    (default 2): each child acquires a per-provider semaphore (keyed by `provider_of(routed_model)`)
@@ -105,9 +101,8 @@ Ranked by (leverage × certainty) ÷ effort. S/M/L = effort. Each maps to a v1.0
     Forge replay is read-only; branching adds A/B exploration + bad-turn recovery. Reuses
     `Store::load_replay` for the read side. Fits the P4 TUI workstream.
 
-14. **Snapshot + `/undo` of file edits** (M) — *opencode `snapshot`.* Per-step file checkpoint (git
-    stash/worktree, dovetails with existing worktree isolation) so an agent's edits can be reverted.
-    Forge has read-only replay, not file-state rollback. Expose `/undo` in the TUI.
+14. ~~**Snapshot + `/undo` of file edits**~~ **DONE.** Shadow file snapshots before every write,
+    `/undo` (and `Ctrl+Z`) with file restore, plus per-turn `/checkpoint` rewind.
 
 15. **Fine-grained per-command permission globs** (M) — *opencode `bash:{"git *":"allow","rm *":
     "deny"}` last-match-wins.* A rule table evaluated *after* the temper mode resolves: parse the bash
@@ -140,8 +135,11 @@ Ranked by (leverage × certainty) ÷ effort. S/M/L = effort. Each maps to a v1.0
 ---
 
 ## Net
-The fastest wins (Tier 1) are robustness/efficiency plumbing that pays off immediately in fewer wasted
-turns and protected quota — **tool-failure loop guard** first. The structural Tier-2 items
-(`LoopOutcome` enum, direct-path goal verification, two-phase context pipeline) make the harness
-auditable and testable offline. The one genuinely transformational gap is the **headless server / RPC
-embed mode** (Tier 3) — staged last, after the cheap robustness wins are banked and benchmarked.
+**Tier 1 is fully banked** (all five items shipped: failure/doom-loop guards, compaction prune,
+`.env`-deny + confinement, fan-out cap). Of Tier 2, goal verification (#7) and hook rewrite/inject
+(#11) are done; the remaining structural items (`LoopOutcome` enum #6, token-budget continuation #8,
+two-phase context pipeline #9) make the harness auditable and testable offline. The one genuinely
+transformational gap left is the **headless server / RPC embed mode** (Tier 3 #16) — staged last.
+(2026-07-03 re-audit: #1/#2/#4 had already shipped organically; the doc had gone stale — struck
+through above. The same wave added `forge schedule` and `/uncompact`, closing the scheduled-runs and
+compaction-undo gaps tracked elsewhere.)
