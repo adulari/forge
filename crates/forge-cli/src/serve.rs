@@ -1027,7 +1027,10 @@ mod tests {
     /// 4. with a client attached, the turn-done transition is debounced: NO push,
     /// 5. with the client gone, the next completed turn pushes `"done"`,
     /// 6. `POST /api/push/unsubscribe` forgets the subscription.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    // 4 workers: this test parks one in `block_in_place` (the turn's pending confirm), runs the
+    // driver loop, the mock push HTTP service, AND reqwest deliveries concurrently — headroom
+    // matters on CI's small, contended runners.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn permission_prompt_pushes_encrypted_notification_and_debounces() {
         let _env = FORGE_DB_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!("forge-serve-push-{}", std::process::id()));
@@ -1172,7 +1175,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let pending = loop {
             let s = handle.snapshot_rx.borrow().clone();
             if s.permission_prompt.is_some() {
@@ -1185,7 +1188,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         };
         let (headers, sealed) =
-            tokio::time::timeout(std::time::Duration::from_secs(10), cap_rx.recv())
+            tokio::time::timeout(std::time::Duration::from_secs(30), cap_rx.recv())
                 .await
                 .expect("a push must arrive at the (mock) push service")
                 .expect("capture channel open");
@@ -1286,13 +1289,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        // Generous deadline: CI runners execute the whole suite in parallel on few cores, so
+        // wall-clock here includes heavy scheduler contention, not just the (instant) mock turn.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             let s = handle.snapshot_rx.borrow().clone();
             if !s.busy && s.permission_prompt.is_none() && !s.transcript.is_empty() {
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "turn never completed");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "turn never completed after the remote allow; last snapshot: busy={} prompt={:?} \
+                 question={:?} seq={} notes={:?} transcript_tail={:?}",
+                s.busy,
+                s.permission_prompt,
+                s.question,
+                s.prompt_seq,
+                s.notes,
+                s.transcript.iter().rev().take(3).collect::<Vec<_>>()
+            );
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         }
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
@@ -1313,7 +1328,7 @@ mod tests {
             .await
             .unwrap();
         let (headers, sealed) =
-            tokio::time::timeout(std::time::Duration::from_secs(20), cap_rx.recv())
+            tokio::time::timeout(std::time::Duration::from_secs(60), cap_rx.recv())
                 .await
                 .expect("a done push must arrive once no client is attached")
                 .unwrap();
