@@ -18,12 +18,26 @@
 <div id="banner"></div>
 <header>
   <h1>⚒ Forge</h1>
+  <button class="iconbtn" id="btnSessions" title="sessions" hidden>☰</button>
   <button class="iconbtn" id="bell" title="notifications">🔕</button>
 </header>
 <div class="meta">
   <span class="badge" id="expo">—</span>
   <span id="cwd">—</span>
   <span>· session <span id="sid">—</span></span>
+  <span id="stitle"></span>
+</div>
+<div class="panel" id="sessions" hidden>
+  <div class="shead"><span>sessions</span><button class="send" id="snew">+ new session</button></div>
+  <div id="slist"><div class="empty">loading…</div></div>
+  <div class="snewform" id="snewform" hidden>
+    <input type="text" id="ncwd" placeholder="working directory (blank = daemon cwd)"
+      autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <input type="text" id="ntitle" placeholder="title (optional)" autocomplete="off">
+    <label class="wtlabel"><input type="checkbox" id="nwt"> isolated git worktree</label>
+    <div class="bar"><button class="send" id="ncreate">Create</button></div>
+    <div class="empty" id="nerr" hidden></div>
+  </div>
 </div>
 <div class="status"><span class="dot" id="dot"></span>
   <span class="tier" id="tier">—</span><span id="model">—</span>

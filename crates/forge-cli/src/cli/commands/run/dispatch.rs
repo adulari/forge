@@ -155,7 +155,7 @@ pub(crate) fn build_mesh_overlay(
 pub(crate) async fn dispatch_command(
     line: &str,
     session: &Arc<tokio::sync::Mutex<Session>>,
-    tui: &mut forge_tui::Tui,
+    mut tui: Option<&mut forge_tui::Tui>,
     app: &mut forge_tui::App,
     catalog: &forge_skills::Catalog,
     armed: &mut std::collections::HashSet<String>,
@@ -192,13 +192,21 @@ pub(crate) async fn dispatch_command(
         CommandAction::Help => app.palette.open_with(""),
         CommandAction::Keys => {
             // Reuse the #362 keybind help overlay (read-only: edit a clone, discard) so `/keys`
-            // doesn't duplicate the F1/ShowHelp surface.
-            let mut tmp = app.keybinds.clone();
-            let _ = tui.run_fullscreen(|| forge_tui::run_keybind_configurator(&mut tmp));
+            // doesn't duplicate the F1/ShowHelp surface. Host-terminal-only by design — a
+            // headless (`forge serve`) session has no terminal to run the configurator on.
+            match tui.as_mut() {
+                Some(tui) => {
+                    let mut tmp = app.keybinds.clone();
+                    let _ = tui.run_fullscreen(|| forge_tui::run_keybind_configurator(&mut tmp));
+                }
+                None => app.note("⌨ /keys is host-only (a fullscreen keybind configurator)"),
+            }
         }
         CommandAction::Quit => return Ok(DispatchOutcome::Quit),
         CommandAction::ClearScreen => {
-            tui.clear_screen();
+            if let Some(tui) = tui.as_mut() {
+                tui.clear_screen();
+            }
             app.clear_transcript();
             app.note("— screen cleared —");
         }
@@ -208,7 +216,9 @@ pub(crate) async fn dispatch_command(
                 let mut s = session.lock().await;
                 s.reset_fresh(&cwd).map_err(|e| anyhow::anyhow!("{e}"))?;
             }
-            tui.clear_screen();
+            if let Some(tui) = tui.as_mut() {
+                tui.clear_screen();
+            }
             app.clear_transcript();
             app.note("● new session");
         }
@@ -485,7 +495,7 @@ pub(crate) async fn dispatch_command(
                             &rows(&v.dependents),
                             why,
                         );
-                        emit_scrollback(tui, app, lines);
+                        emit_scrollback(tui.as_deref_mut(), app, lines);
                     }
                 }
             }

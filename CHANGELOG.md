@@ -7,6 +7,32 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`forge serve` — headless multi-session daemon with session control from the phone
+  (protocol v6)**: one long-lived process hosts any number of concurrent sessions, each driven
+  by a headless SessionDriver task (the same App + dispatch + turn machinery + remote-input
+  handling `forge chat` uses, factored to run with no terminal — commands, pickers, overlays,
+  permission prompts, `/duel`, `/loop`, queued prompts and auto-compact all work identically
+  from the page). Sessions keep running with **zero clients attached** and reconnects replay
+  exactly the missed frames (`?rev=` + per-session event log), beating one-session-per-process
+  remotes and their idle-death timeouts. The daemon listens on a **stable origin** — a fixed
+  port (`[remote] port`, default 7420) plus a daemon token persisted 0600 in the config dir
+  (`forge serve --rotate-token` revokes) — so the installed PWA survives forever; the page
+  gains a session list (busy dot, title, cwd, cost, last activity), a new-session form
+  (cwd + optional title + **isolated git worktree** toggle — the session then runs inside the
+  worktree, tool calls rooted there via the audited subagent rewrite), tap-to-attach switching,
+  and archive (stops the driver, snapshots worktree edits onto its branch, hides the session —
+  history and worktree are kept). New routes under the stable base: `GET|POST /api/sessions`,
+  `POST /api/sessions/{id}/archive`, and `GET /api/history?session=…` (the v5 pagination,
+  session-addressed); `WS /ws?session=<id>&rev=<n>`. Exposures mirror `/remote`
+  (`--lan` self-signed HTTPS default, `--local`, `--anywhere` via cloudflared/ngrok).
+  Snapshots gain `title` + `worktree`; schema v8 adds `session.worktree_path`,
+  `session.archived` (archived sessions leave every list, nothing is deleted) and pre-creates
+  the `push_subscription` table for the upcoming web-push phase. The in-chat `/remote` keeps
+  working unchanged, and the same control page serves both worlds (it probes `/api/sessions`
+  to detect the daemon). Verified live: two mock sessions created over HTTP and driven
+  concurrently over separate WebSockets with zero cross-talk, work completing with no client
+  attached, exact gapless replay on reconnect, archive leaving the survivor drivable, and the
+  token/origin stable across daemon restarts.
 - **Remote control: bulletproof reconnect, full scrollback, rich transcript (protocol v5)**:
   every broadcast frame now lands in a bounded per-server event log, and the WS handshake takes
   `?rev=<last seen revision>` — after any disconnect the page replays exactly the frames it

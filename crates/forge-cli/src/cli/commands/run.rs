@@ -25,6 +25,8 @@ mod pickers;
 pub(crate) use pickers::*;
 mod dispatch;
 pub(crate) use dispatch::*;
+mod driver;
+pub(crate) use driver::*;
 
 /// Keep the command palette in sync with the `/command` token at the cursor (input end): open +
 /// filter when one is present anywhere on the line, close when not (`//` escape yields no token).
@@ -109,6 +111,7 @@ pub(crate) async fn build_session_with(
         pin,
         suppress_mcp_announce,
         true,
+        None,
     )
     .await
 }
@@ -116,6 +119,7 @@ pub(crate) async fn build_session_with(
 /// Build a session, optionally suppressing the self-MCP injection (see the `disable_self_mcp`
 /// doc below). `build_session_with` is the normal entrypoint (self-MCP allowed); `forge mcp
 /// agent` calls this directly with `disable_self_mcp = false` to break the recursion.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_session_with_self_mcp(
     presenter: Box<dyn Presenter>,
     mock: bool,
@@ -124,6 +128,7 @@ pub(crate) async fn build_session_with_self_mcp(
     pin: Option<String>,
     suppress_mcp_announce: bool,
     allow_self_mcp: bool,
+    session_cwd: Option<&str>,
 ) -> Result<Session> {
     // Make any keyring-stored provider keys visible to the provider client.
     forge_config::inject_provider_keys();
@@ -367,7 +372,12 @@ pub(crate) async fn build_session_with_self_mcp(
                 .with_context(|| format!("resuming session {full}"))?
         }
         None => {
-            let cwd = std::env::current_dir()?.display().to_string();
+            // `forge serve` drives sessions in per-session directories (worktrees) — the
+            // process cwd is only the default.
+            let cwd = match session_cwd {
+                Some(c) => c.to_string(),
+                None => std::env::current_dir()?.display().to_string(),
+            };
             Session::start(store, provider, router, tools, presenter, config, &cwd)
                 .context("starting session")?
         }
@@ -791,23 +801,23 @@ impl Drop for DoneGuard {
 /// the terminal's native scrollback; full-screen → the app's transcript log (since there's no
 /// native scrollback in alternate-screen mode).
 pub(crate) fn emit_scrollback(
-    tui: &mut forge_tui::Tui,
+    tui: Option<&mut forge_tui::Tui>,
     app: &mut forge_tui::App,
     lines: Vec<forge_tui::ScrollbackLine<'static>>,
 ) {
-    if tui.is_fullscreen() {
-        app.push_scrollback(lines);
-    } else {
-        tui.insert_lines(lines);
+    match tui {
+        Some(tui) if !tui.is_fullscreen() => tui.insert_lines(lines),
+        // Full-screen (no native scrollback) and headless (`forge serve` — no terminal at all)
+        // both land in the app's transcript log, which the remote snapshot mirrors.
+        _ => app.push_scrollback(lines),
     }
 }
 
 /// Like [`emit_scrollback`] but for plain (unstyled) multi-line text.
-pub(crate) fn emit_text(tui: &mut forge_tui::Tui, app: &mut forge_tui::App, text: &str) {
-    if tui.is_fullscreen() {
-        app.push_scrollback_text(text);
-    } else {
-        tui.print_text(text);
+pub(crate) fn emit_text(tui: Option<&mut forge_tui::Tui>, app: &mut forge_tui::App, text: &str) {
+    match tui {
+        Some(tui) if !tui.is_fullscreen() => tui.print_text(text),
+        _ => app.push_scrollback_text(text),
     }
 }
 
@@ -1742,7 +1752,7 @@ pub(crate) async fn run_chat_tui(
                     match dispatch_command(
                         "/copy",
                         &session,
-                        &mut tui,
+                        Some(&mut tui),
                         &mut app,
                         &catalog,
                         &mut armed_project,
@@ -2027,7 +2037,7 @@ pub(crate) async fn run_chat_tui(
                         match dispatch_command(
                             &line,
                             &session,
-                            &mut tui,
+                            Some(&mut tui),
                             &mut app,
                             &catalog,
                             &mut armed_project,
@@ -2745,7 +2755,7 @@ pub(crate) async fn run_chat_tui(
                 if let DispatchOutcome::Quit = dispatch_command(
                     "/new",
                     &session,
-                    &mut tui,
+                    Some(&mut tui),
                     &mut app,
                     &catalog,
                     &mut armed_project,
@@ -2770,7 +2780,7 @@ pub(crate) async fn run_chat_tui(
                 if let DispatchOutcome::Quit = dispatch_command(
                     "/checkpoint",
                     &session,
-                    &mut tui,
+                    Some(&mut tui),
                     &mut app,
                     &catalog,
                     &mut armed_project,
@@ -2795,7 +2805,7 @@ pub(crate) async fn run_chat_tui(
                 if let DispatchOutcome::Quit = dispatch_command(
                     "/undo",
                     &session,
-                    &mut tui,
+                    Some(&mut tui),
                     &mut app,
                     &catalog,
                     &mut armed_project,
@@ -2820,7 +2830,7 @@ pub(crate) async fn run_chat_tui(
                 match dispatch_command(
                     "/compact",
                     &session,
-                    &mut tui,
+                    Some(&mut tui),
                     &mut app,
                     &catalog,
                     &mut armed_project,
@@ -2933,7 +2943,7 @@ pub(crate) async fn run_chat_tui(
                             match dispatch_command(
                                 &line,
                                 &session,
-                                &mut tui,
+                                Some(&mut tui),
                                 &mut app,
                                 &catalog,
                                 &mut armed_project,
@@ -3255,7 +3265,7 @@ pub(crate) async fn run_chat_tui(
                             match dispatch_command(
                                 &text,
                                 &session,
-                                &mut tui,
+                                Some(&mut tui),
                                 &mut app,
                                 &catalog,
                                 &mut armed_project,
@@ -3797,7 +3807,7 @@ pub(crate) async fn run_chat_tui(
                     app.mesh_overlay.open = false;
                     mesh_load_rx = None;
                     emit_text(
-                        &mut tui,
+                        Some(&mut tui),
                         &mut app,
                         "mesh: auto-discovery routing is off (no model catalog) — nothing to inspect",
                     );
@@ -3851,7 +3861,6 @@ pub(crate) async fn run_chat_tui(
                 dirty = true;
             }
             if dirty || busy {
-                let view = app.remote_snapshot();
                 let exposure = remote
                     .as_ref()
                     .map(|rc| {
@@ -3872,70 +3881,22 @@ pub(crate) async fn run_chat_tui(
                 if let Ok(s) = session.try_lock() {
                     cached_session_id = s.session_id().to_string();
                 }
-                let mut snap = remote::Snapshot {
-                    protocol: remote::PROTOCOL_VERSION,
-                    session_id: cached_session_id.clone(),
-                    cwd: remote_cwd.clone(),
-                    exposure,
-                    busy: view.busy,
-                    done: view.done,
-                    temper: view.temper,
-                    tier: view.tier,
-                    model: view.model,
-                    cost_usd: view.cost_usd,
-                    context_tokens: view.context_tokens,
-                    context_limit: view.context_limit,
-                    streaming: view.streaming,
-                    transcript: view.transcript,
-                    tasks: view
-                        .tasks
-                        .iter()
-                        .map(|t| remote::SnapTask {
-                            title: t.title.clone(),
-                            status: match t.status {
-                                forge_types::TodoStatus::Pending => "pending",
-                                forge_types::TodoStatus::InProgress => "in_progress",
-                                forge_types::TodoStatus::Done => "done",
-                            }
-                            .to_string(),
-                        })
-                        .collect(),
-                    subagents: view
-                        .subagents
-                        .iter()
-                        .map(|s| remote::SnapSubagent {
-                            agent: s.agent.clone(),
-                            task: s.task.clone(),
-                            model: s.model.clone(),
-                            last: s.last.clone(),
-                            done: s.done,
-                            cost: s.cost,
-                        })
-                        .collect(),
-                    queued: view.queued,
-                    permission_prompt: view.permission_prompt,
-                    question: view.question,
-                    question_options: view
-                        .question_options
-                        .iter()
-                        .map(|o| remote::SnapOption {
-                            label: o.label.clone(),
-                            description: o.description.clone(),
-                        })
-                        .collect(),
-                    question_allow_other: view.question_allow_other,
-                    // The generic overlay projection: whatever modal surface owns the TUI
-                    // keyboard (palette / any picker / config / usage / mesh / workflow).
-                    overlay: app.remote_overlay().map(map_overlay_snapshot),
-                    copy_text: remote_copy_text.clone(),
+                let mut snap = build_snapshot_frame(
+                    &app,
+                    SnapshotIdentity {
+                        session_id: &cached_session_id,
+                        title: "",
+                        cwd: &remote_cwd,
+                        worktree: None,
+                        exposure,
+                    },
+                    remote_copy_text.clone(),
                     prompt_seq,
-                    notes: remote_notes.clone(),
+                    remote_notes.clone(),
                     // Candidate carries the LAST revision so the equality compare below sees
                     // only real state changes; bumped just before an actual send.
-                    revision: remote_revision,
-                    resync: false,
-                    closed: false,
-                };
+                    remote_revision,
+                );
                 // Change-only broadcast: while busy this branch runs every 16ms, and
                 // `watch::send` notifies every subscriber unconditionally — without this
                 // compare each client got ~60 identical JSON frames/s for a whole turn.
@@ -4221,6 +4182,99 @@ pub(crate) fn spawn_duel(
             Err(e) => sess.notify_error(&format!("duel failed: {e}")),
         }
     })
+}
+
+/// Who/where a snapshot frame describes — the per-session identity fields of
+/// [`remote::Snapshot`] that the driving loop (TUI render loop or a headless `forge serve`
+/// session driver) knows and `App` doesn't.
+pub(crate) struct SnapshotIdentity<'a> {
+    pub session_id: &'a str,
+    /// Session display title (v6). Empty when unnamed.
+    pub title: &'a str,
+    pub cwd: &'a str,
+    /// The isolated worktree the session runs in (v6), if any.
+    pub worktree: Option<&'a str>,
+    /// "loopback" | "LAN" | "public (provider)" — see [`remote::exposure_label`].
+    pub exposure: String,
+}
+
+/// Build one wire [`remote::Snapshot`] frame from the App's remote projection. The ONE snapshot
+/// producer shared by `run_chat_tui`'s broadcast block and the headless `forge serve` session
+/// driver, so both paths serialize the identical shape. `revision` should carry the LAST
+/// broadcast revision — the caller compares for change and bumps it just before an actual send.
+pub(crate) fn build_snapshot_frame(
+    app: &forge_tui::App,
+    ident: SnapshotIdentity<'_>,
+    copy_text: Option<String>,
+    prompt_seq: u64,
+    notes: Vec<String>,
+    revision: u64,
+) -> remote::Snapshot {
+    let view = app.remote_snapshot();
+    remote::Snapshot {
+        protocol: remote::PROTOCOL_VERSION,
+        session_id: ident.session_id.to_string(),
+        title: ident.title.to_string(),
+        cwd: ident.cwd.to_string(),
+        worktree: ident.worktree.map(str::to_string),
+        exposure: ident.exposure,
+        busy: view.busy,
+        done: view.done,
+        temper: view.temper,
+        tier: view.tier,
+        model: view.model,
+        cost_usd: view.cost_usd,
+        context_tokens: view.context_tokens,
+        context_limit: view.context_limit,
+        streaming: view.streaming,
+        transcript: view.transcript,
+        tasks: view
+            .tasks
+            .iter()
+            .map(|t| remote::SnapTask {
+                title: t.title.clone(),
+                status: match t.status {
+                    forge_types::TodoStatus::Pending => "pending",
+                    forge_types::TodoStatus::InProgress => "in_progress",
+                    forge_types::TodoStatus::Done => "done",
+                }
+                .to_string(),
+            })
+            .collect(),
+        subagents: view
+            .subagents
+            .iter()
+            .map(|s| remote::SnapSubagent {
+                agent: s.agent.clone(),
+                task: s.task.clone(),
+                model: s.model.clone(),
+                last: s.last.clone(),
+                done: s.done,
+                cost: s.cost,
+            })
+            .collect(),
+        queued: view.queued,
+        permission_prompt: view.permission_prompt,
+        question: view.question,
+        question_options: view
+            .question_options
+            .iter()
+            .map(|o| remote::SnapOption {
+                label: o.label.clone(),
+                description: o.description.clone(),
+            })
+            .collect(),
+        question_allow_other: view.question_allow_other,
+        // The generic overlay projection: whatever modal surface owns the keyboard
+        // (palette / any picker / config / usage / mesh / workflow).
+        overlay: app.remote_overlay().map(map_overlay_snapshot),
+        copy_text,
+        prompt_seq,
+        notes,
+        revision,
+        resync: false,
+        closed: false,
+    }
 }
 
 /// Map the TUI-side overlay projection into the remote wire type (kept apart so `forge-tui`

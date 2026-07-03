@@ -259,13 +259,76 @@ auto = "lan"          # session is reachable from a phone the moment chat starts
 host = "192.168.1.5"  # optional: advertise this interface instead of the discovered one
 ```
 
-## 3b. PWA lifetime (interim)
+## 3b. PWA lifetime
 
-Each session gets a fresh port + token, so an installed home-screen app outlives its
-session's origin. When the server is gone the service worker now answers navigations with an
-explicit **"session ended — reopen `/remote` from the TUI"** page (and the live page stops
-claiming "reconnecting…" after ~12s of failures) instead of a stale shell that spins
-forever. A stable origin that makes installs permanent is the Phase-4 daemon's job.
+The in-chat `/remote` server still mints a fresh port + token per session, so an installed
+home-screen app outlives that origin; its service worker answers dead navigations with an
+explicit **"session ended — reopen `/remote` from the TUI"** page. The permanent install is
+the daemon's (§2c): `forge serve`'s origin never changes, so its PWA never dies.
+
+## 2c. The multi-session daemon — `forge serve` (v6)
+
+The end-state of the overhaul: remote control stops being a per-chat bolt-on and becomes a
+**headless daemon hosting N concurrent sessions**, all driveable from the same PWA. This is
+the architecture that beats Claude Code remote control's one-session-per-process, ~10-minute
+death timeout, and per-session URLs.
+
+```
+        forge serve  (headless daemon, stable port + stable token/origin)
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │  SessionRegistry: id → Arc<SessionDriverHandle>                       │
+  │     handle { snapshot_rx: watch<Snapshot>, events: EventLog,          │
+  │              input_tx: mpsc<RemoteInput>,                             │
+  │              meta { cwd, worktree, title, created, last_activity } }  │
+  │   per session ── SessionDriver task (headless run_chat_tui):          │
+  │       App + dispatch_command + spawn_turn* machinery, no terminal,    │
+  │       consumes ChannelPresenter<UiMsg>, drains RemoteInput            │
+  └───────────────┬───────────────────────────────────────────────────────┘
+                  │ axum router (ONE stable base /<daemon-token>/)
+   GET  /<t>/                     control page (session list + live UI)
+   GET  /<t>/manifest|sw|icon|…   PWA assets (stable scope → install survives)
+   WS   /<t>/ws?session=<id>&rev=<n>   per-session stream + replay-from-rev
+   GET  /<t>/api/sessions         list (id, title, cwd, busy, cost, activity)
+   POST /<t>/api/sessions         create {cwd, worktree, title?, model?, resume?}
+   POST /<t>/api/sessions/{id}/archive
+   GET  /<t>/api/history?session=<id>&before&limit
+```
+
+- **The SessionDriver seam.** `run/driver.rs` runs one session as a plain tokio task using
+  the SAME primitives `run_chat_tui` uses — `dispatch_command` (now taking `Option<&mut Tui>`;
+  the daemon passes `None`, the TUI passes `Some`, behavior identical), `picker_accept`,
+  `apply_overlay_input`, the `spawn_turn*`/`spawn_compact`/`spawn_duel` family, and one shared
+  `build_snapshot_frame` producer — so a command dispatched from the phone produces the
+  identical `DispatchOutcome` handling in both worlds. The driver mirrors the TUI's remote
+  drain (prompt queueing while busy, seq-checked Allow/Answer, the named-key channel with the
+  same idle-Esc guard) plus its done-signal pipeline (queued prompts, `/loop` continuation,
+  the `/duel` winner picker, turn-end auto-compact). Host-terminal-only affordances (`/keys`,
+  `$EDITOR` jumps, the host clipboard) degrade to explicit notes. `run_chat_tui` itself is
+  unchanged in behavior — the pty e2e battery is the guard.
+- **Stable origin = permanent PWA.** The port comes from `[remote] port` (default 7420) and
+  the daemon token is minted once into `<config>/serve-token` (0600) and reused forever;
+  `--rotate-token` revokes. The manifest's `scope`/`start_url` therefore never change: install
+  once, use forever. Exposures mirror `/remote` — LAN + self-signed HTTPS by default,
+  `--local` loopback, `--anywhere` via cloudflared/ngrok.
+- **Sessions survive clients — by construction.** The driver broadcasts into a per-session
+  `watch<Snapshot>` + `EventLog` whether or not anyone is connected; the WS route is just
+  `pump_ws` (shared with the single-session server) pointed at a registry entry. Disconnect,
+  come back an hour later, and `?rev=` replays what you missed (or resyncs).
+- **Per-session working directories + worktrees.** New sessions take any `cwd`; with
+  `worktree: true` the daemon creates `.forge/worktrees/<id>` branched from HEAD (the audited
+  `WorktreeGuard` creation, minus its drop-side removal — the worktree must outlive the
+  process) and the session runs inside it. `Session::set_work_root` roots every tool call's
+  relative `path`/`cwd` there via the same rewrite subagent isolation uses, so concurrent
+  sessions can't stomp each other's trees. Archive commits uncommitted worktree edits onto
+  the session branch (never silently lose work) and leaves worktree + branch for manual merge.
+- **Schema v8.** `session.worktree_path` + `session.archived` (archived sessions leave
+  `forge sessions`, the resume picker, and the daemon list; history is kept), plus a
+  pre-created `push_subscription` table so the upcoming actionable-web-push phase needs no
+  migration.
+- **Coexistence.** `forge chat`'s in-process `/remote` is untouched (own ephemeral server);
+  the one control page serves both worlds by probing `/api/sessions`. Registering a live chat
+  session into a running daemon, and a `forge attach <id>` TUI thin client, are follow-ups on
+  the same seam.
 
 ## 4. Surfaces touched
 

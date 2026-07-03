@@ -60,6 +60,7 @@ mod mcp_agent;
 mod mcp_serve;
 mod remote;
 mod replay;
+mod serve;
 mod update;
 mod update_check;
 

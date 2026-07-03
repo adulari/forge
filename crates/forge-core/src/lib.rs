@@ -633,6 +633,11 @@ pub struct Session {
     /// per-turn `tier_override` (a command/skill `tier:` hint) is passed, which still wins. `None`
     /// = normal classification.
     pinned_tier: Option<TaskTier>,
+    /// Per-session working-directory root (`forge serve`): when set, every tool call's relative
+    /// `path`/`cwd` args are rooted here (the same audited rewrite subagent worktree isolation
+    /// uses), so a daemon session whose cwd differs from the process cwd — e.g. an isolated
+    /// worktree — operates on ITS OWN tree, not the daemon's. `None` = process cwd (unchanged).
+    work_root: Option<std::path::PathBuf>,
     /// System hints queued by side-call diagnostics (e.g. shell error interceptor) to be injected
     /// into the transcript immediately after the tool result that triggered them. Cleared each time.
     pending_hints: Vec<String>,
@@ -832,6 +837,7 @@ impl Session {
             pinned_effort: None,
             whitehot_guidance_injected: false,
             pinned_tier: None,
+            work_root: None,
             pending_hints: vec![],
             always_compact_on_switch: false,
             project_prompt_injected,
@@ -863,6 +869,13 @@ impl Session {
     /// message is built; a turn with no images behaves exactly as before.
     pub fn attach_images(&mut self, images: Vec<forge_types::ImageAttachment>) {
         self.pending_images.extend(images);
+    }
+
+    /// Root every tool call's relative `path`/`cwd` args at `root` (see the `work_root` field).
+    /// Set by the `forge serve` driver for sessions whose working directory differs from the
+    /// daemon process's cwd (per-session dirs, isolated worktrees). `None` restores the default.
+    pub fn set_work_root(&mut self, root: Option<std::path::PathBuf>) {
+        self.work_root = root;
     }
 
     /// Whether project-scope (`./.forge/`) commands/skills run without a first-use confirmation.
@@ -4778,6 +4791,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let mut args_json = call_args_json;
         // `effective_args` may be replaced by a PreToolUse hook that rewrites the args.
         let mut effective_args = call.args.clone();
+        // Per-session working-directory rooting (`forge serve`): rewrite relative `path`/`cwd`
+        // args under the session's work root — the same audited primitive subagent worktree
+        // isolation uses — so a daemon session operates on its own tree, not the process cwd.
+        if let Some(root) = &self.work_root {
+            effective_args = subagent::rewrite_args_for_worktree(&effective_args, root);
+            args_json = serde_json::to_string(&effective_args)?;
+        }
 
         let Some(tool) = self.tools.get(&call.name) else {
             // Name the valid tools so the model can recover instead of guessing again.

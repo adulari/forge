@@ -39,6 +39,14 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             )
             .await
         }
+        Command::Serve {
+            local,
+            lan: _,
+            anywhere,
+            port,
+            rotate_token,
+            mock,
+        } => crate::serve::serve_cmd(local, anywhere, port, rotate_token, mock).await,
         Command::Chat {
             mock,
             mode,
