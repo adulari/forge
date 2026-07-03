@@ -416,12 +416,14 @@ pub(crate) async fn open_models_provider(
 }
 
 /// Act on the picker's selected row: resume the chosen session, or rewind to the chosen
-/// checkpoint — then redraw the surviving transcript into scrollback.
+/// checkpoint — then redraw the surviving transcript into scrollback. `tui` is `None` only in
+/// tests (there is no real terminal there); the arms that repaint the screen skip the repaint
+/// then, everything else behaves identically.
 pub(crate) async fn picker_accept(
     kind: forge_tui::PickerKind,
     row: &forge_tui::PickerRow,
     session: &Arc<tokio::sync::Mutex<Session>>,
-    tui: &mut forge_tui::Tui,
+    tui: Option<&mut forge_tui::Tui>,
     app: &mut forge_tui::App,
 ) -> Result<()> {
     match kind {
@@ -432,7 +434,9 @@ pub(crate) async fn picker_accept(
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 (s.replay_items_full(), s.was_compacted(), s.view_snapshot())
             };
-            tui.clear_screen();
+            if let Some(tui) = tui {
+                tui.clear_screen();
+            }
             app.clear_transcript();
             app.note(&format!(
                 "● resumed {}",
@@ -455,7 +459,9 @@ pub(crate) async fn picker_accept(
                 let outcome = s.rewind_to(seq).map_err(|e| anyhow::anyhow!("{e}"))?;
                 (s.replay_items(), outcome)
             };
-            tui.clear_screen();
+            if let Some(tui) = tui {
+                tui.clear_screen();
+            }
             app.clear_transcript();
             app.note("● rewound to that point");
             app.replay_history(&items);
