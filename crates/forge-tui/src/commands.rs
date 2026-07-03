@@ -141,6 +141,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/goal <objective>",
     },
     Command {
+        name: "pr",
+        desc: "turn this session's work into a branch + commit + pull request (provenance-rich body)",
+        usage: "/pr [title]",
+    },
+    Command {
         name: "loop",
         desc: "re-run a task each turn until the model signals it's complete",
         usage: "/loop <task>",
@@ -277,6 +282,9 @@ pub enum CommandAction {
     Lattice(String),
     /// Set a session goal and decompose it into a tracked task plan (`/goal <objective>`).
     Goal(String),
+    /// Turn this session's work into a branch + commit + pull request with a provenance-rich
+    /// body (`/pr [title]`).
+    Pr(String),
     /// Re-run a task each turn until the model signals completion (`/loop <task>`).
     Loop(String),
     /// Show a session transcript inline, or diff two sessions (`/replay <id> [<id2>]`).
@@ -591,6 +599,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "uncompact" => CommandAction::Uncompact,
         "lattice" | "lat" => CommandAction::Lattice(arg),
         "goal" | "objective" => CommandAction::Goal(arg),
+        "pr" | "pullrequest" => CommandAction::Pr(arg),
         "loop" => CommandAction::Loop(arg),
         "duel" => CommandAction::Duel(arg),
         "replay" => {
@@ -1076,6 +1085,11 @@ mod tests {
             CommandAction::Goal("ship the parser".into())
         );
         assert_eq!(parse_command("/goal"), CommandAction::Goal(String::new()));
+        assert_eq!(
+            parse_command("/pr feat: add rate limiter"),
+            CommandAction::Pr("feat: add rate limiter".into())
+        );
+        assert_eq!(parse_command("/pr"), CommandAction::Pr(String::new()));
         assert_eq!(
             parse_command("/loop fix all warnings"),
             CommandAction::Loop("fix all warnings".into())

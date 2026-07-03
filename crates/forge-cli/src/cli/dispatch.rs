@@ -150,5 +150,6 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Schedule { cmd } => schedule_cmd(cmd),
         Command::Queue { cmd } => queue_cmd(cmd),
         Command::Scoreboard => scoreboard_cmd(),
+        Command::Tour { demo } => tour_cmd(demo),
     }
 }

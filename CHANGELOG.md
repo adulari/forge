@@ -7,6 +7,14 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`/pr`** — turn the session's work into a pull request in one command: the agent branches (if
+  on the default branch), stages the session's changes, commits, pushes, and opens the PR — whose
+  body ends with a provenance section (session id + `forge replay` pointer, models used, spend)
+  so a reviewer can trace every change back to the conversation that produced it.
+- **`forge tour`** — a 2-minute printed introduction to Forge's headline features and the exact
+  commands to try, no API keys needed; `forge tour --demo` additionally runs one real agent turn
+  offline (mock model) in a scratch directory with an isolated store, showing routing, a tool
+  call, and the final answer without touching your projects or history.
 - **Two-phase context pipeline + UI-only messages**: `forge_core::context_pipeline` is now the one
   seam between the session transcript and every provider request — `prune_and_inject` (mutating
   phase: old-tool-output reclaim and future context transforms) then `to_llm` (pure phase: strips

@@ -611,6 +611,15 @@ pub(crate) enum Command {
     /// The model scoreboard for this repo: wins/losses and the resulting routing boost per
     /// model, learned from `/duel` arenas and `forge queue run --shadow` passes.
     Scoreboard,
+
+    /// A 2-minute guided tour of Forge — what it does and the commands to try, no API keys
+    /// needed. `--demo` also runs a real offline turn (mock model) in a scratch directory so
+    /// you can watch the loop work.
+    Tour {
+        /// Run a live offline demo turn (mock model) in a scratch directory.
+        #[arg(long)]
+        demo: bool,
+    },
 }
 
 #[derive(Subcommand)]
