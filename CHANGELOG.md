@@ -7,6 +7,14 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Persistent subagents — `send_to_agent`**: follow up with a child agent spawned earlier
+  instead of re-spawning and re-explaining. The child's full transcript is rebuilt from its
+  persisted session (nothing held in memory, so it works across parent turns and across a
+  resumed parent session), the follow-up is appended, and the same child loop runs again —
+  streamed live into the activity panel like any child. Children are named at spawn (session
+  title = agent name); address by name (`"scout"`, most-recent wins on duplicates) or session-id
+  prefix. Available on the direct path and the CLI bridge alike; children themselves never see
+  the tool, so the depth guard stays structural.
 - **`forge queue` — the overnight autopilot**: queue big tasks during the day
   (`forge queue add "<task>" [--budget USD] [--mode m] [--model id]`), drain them headless
   (`forge queue run [--gate high] [--max N]`) — each task runs a full agent turn in its own

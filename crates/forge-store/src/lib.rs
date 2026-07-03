@@ -833,6 +833,40 @@ impl Store {
         Ok(rows.filter_map(std::result::Result::ok).collect())
     }
 
+    /// Name a session — for a subagent child, the resolved agent name (`title` doubles as the
+    /// child's address for `send_to_agent`; top-level sessions title themselves elsewhere).
+    pub fn set_session_title(&self, session_id: &str, title: &str) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE session SET title = ?2 WHERE id = ?1",
+            (session_id, title),
+        )?;
+        Ok(())
+    }
+
+    /// `(id, title)` of `parent_id`'s child sessions, oldest first — the address book
+    /// `send_to_agent` resolves against (title = the agent name recorded at spawn).
+    pub fn named_child_sessions(&self, parent_id: &str) -> Result<Vec<(String, Option<String>)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title FROM session WHERE parent_session_id = ?1 ORDER BY created_at, id",
+        )?;
+        let rows = stmt.query_map([parent_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(StoreError::from)
+    }
+
+    /// The next free message `seq` for a session (0 for an empty one) — lets a follow-up turn
+    /// append to a child session without replaying its whole insert history.
+    pub fn next_message_seq(&self, session_id: &str) -> Result<i64> {
+        Ok(self.lock()?.query_row(
+            "SELECT COALESCE(MAX(seq) + 1, 0) FROM message WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Append a message to a session and return its id.
     pub fn add_message(
         &self,
