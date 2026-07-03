@@ -104,10 +104,12 @@ Ranked by (leverage × certainty) ÷ effort. S/M/L = effort. Each maps to a v1.0
 14. ~~**Snapshot + `/undo` of file edits**~~ **DONE.** Shadow file snapshots before every write,
     `/undo` (and `Ctrl+Z`) with file restore, plus per-turn `/checkpoint` rewind.
 
-15. **Fine-grained per-command permission globs** (M) — *opencode `bash:{"git *":"allow","rm *":
-    "deny"}` last-match-wins.* A rule table evaluated *after* the temper mode resolves: parse the bash
-    command, match ordered `pattern → allow|ask|deny` globs. Temper sets the baseline; globs are the
-    precise override → fewer prompts at equal safety. (Complements #4.)
+15. ~~**Fine-grained per-command permission globs**~~ **DONE.** `[[permissions.rules]]`
+    (tool + allow/ask/deny glob patterns) resolves by specificity in `forge_core::permission`,
+    with shell commands segment-split (`;`/`&&`/`||`/`|`, `bash -c` unwrapping, wrapper
+    stripping) before matching. 2026-07-03: closed the one real hole — an allow glob matching
+    one segment of a compound command no longer auto-allows the rest; every segment must be
+    covered by an allow, while one ask segment is enough to prompt.
 
 16. **Headless server + SSE event bus / RPC embed mode** (L) — *opencode `serve`, pi `--mode rpc`.*
     Extract the run-turn engine behind an axum HTTP+SSE service (or an LF-delimited JSON stdio RPC

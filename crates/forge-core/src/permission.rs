@@ -10,8 +10,10 @@
 //! 1. a `Builtin` deny match → Deny (safety floor — beats every mode incl. `bypass`)
 //! 2. any deny match → Deny
 //! 3. `plan` mode + a side effect → Deny (read-only contract; an allow rule cannot escape it)
-//! 4. the most-specific allow/ask match → that decision
-//! 5. otherwise fall back to the mode ([`decide_mode`]).
+//! 4. shell commands: per-segment allow/ask — ask if any segment matches an ask rule, allow
+//!    only when *every* effective segment matches an allow rule ([`decide_shell_segments`])
+//! 5. other tools: the most-specific allow/ask match → that decision
+//! 6. otherwise fall back to the mode ([`decide_mode`]).
 
 use forge_types::{PermissionDecision, PermissionMode, PermissionRule, RuleSource, SideEffect};
 use serde_json::Value;
@@ -75,7 +77,17 @@ pub fn decide(
     if mode == PermissionMode::Plan && side_effect != SideEffect::ReadOnly {
         return Deny;
     }
-    // 4. Most-specific allow/ask wins.
+    // 4. Shell commands resolve allow/ask per segment: an `allow = "git *"` matching the first
+    //    segment must not smuggle `git status && <anything>` past the prompt — every effective
+    //    segment needs its own allow for the command to auto-approve, while an ask on any one
+    //    segment is enough to prompt (restriction stays cheap, privilege stays earned).
+    if is_shell_tool(tool_name) {
+        if let Some(decision) = decide_shell_segments(tool_name, args, rules) {
+            return decision;
+        }
+        return decide_mode(mode, side_effect);
+    }
+    // 5. Most-specific allow/ask wins.
     if let Some(rule) = matched
         .iter()
         .filter(|r| r.decision != Deny)
@@ -83,8 +95,44 @@ pub fn decide(
     {
         return rule.decision;
     }
-    // 5. No rule applies: fall back to the global mode.
+    // 6. No rule applies: fall back to the global mode.
     decide_mode(mode, side_effect)
+}
+
+/// Allow/ask resolution for a shell command line (denies were already handled in `decide`).
+/// Each effective segment picks its most-specific matching non-deny rule. `Some(Ask)` if any
+/// segment resolved to ask; `Some(Allow)` only when parsing succeeded and *every* segment
+/// resolved to allow; `None` (mode fallback) otherwise.
+fn decide_shell_segments(
+    tool_name: &str,
+    args: &Value,
+    rules: &[PermissionRule],
+) -> Option<PermissionDecision> {
+    use PermissionDecision::*;
+    let cmd = args.get("command").and_then(Value::as_str).unwrap_or("");
+    let (segments, parsed_ok) = effective_commands(cmd);
+    let mut all_allowed = parsed_ok && !segments.is_empty();
+    let mut any_ask = false;
+    for seg in &segments {
+        let best = rules
+            .iter()
+            .filter(|r| r.decision != Deny)
+            .filter(|r| r.tool == "*" || r.tool == tool_name)
+            .filter(|r| r.patterns.is_empty() || r.patterns.iter().any(|p| shell_match(p, seg)))
+            .max_by_key(|r| specificity(r));
+        match best.map(|r| r.decision) {
+            Some(Allow) => {}
+            Some(Ask) => any_ask = true,
+            _ => all_allowed = false,
+        }
+    }
+    if any_ask {
+        return Some(Ask);
+    }
+    if all_allowed {
+        return Some(Allow);
+    }
+    None
 }
 
 /// Does this rule apply to the call? Tool name must match (exact or `*`) and, if the rule
@@ -513,6 +561,57 @@ mod tests {
                 &rules
             ),
             Allow
+        );
+    }
+
+    #[test]
+    fn allow_glob_does_not_cover_a_compound_commands_other_segments() {
+        // The hole this guards: `allow = "git *"` matched the first segment and the whole
+        // chained command rode the allow past the prompt.
+        let rules = [cfg("shell", Allow, &["git *"])];
+        assert_eq!(
+            decide(
+                PermissionMode::Default,
+                SideEffect::Shell,
+                "shell",
+                &shell("git status && cargo publish"),
+                &rules
+            ),
+            Ask
+        );
+    }
+
+    #[test]
+    fn compound_command_allows_when_every_segment_is_covered() {
+        let rules = [
+            cfg("shell", Allow, &["git *"]),
+            cfg("shell", Allow, &["cargo *"]),
+        ];
+        assert_eq!(
+            decide(
+                PermissionMode::Default,
+                SideEffect::Shell,
+                "shell",
+                &shell("git add -A && cargo test"),
+                &rules
+            ),
+            Allow
+        );
+    }
+
+    #[test]
+    fn ask_rule_on_one_segment_prompts_even_in_accept_edits() {
+        // Restriction must not need full coverage: one matching ask segment is enough.
+        let rules = [cfg("shell", Ask, &["rm *"])];
+        assert_eq!(
+            decide(
+                PermissionMode::AcceptEdits,
+                SideEffect::Shell,
+                "shell",
+                &shell("ls -la && rm target/tmp.txt"),
+                &rules
+            ),
+            Ask
         );
     }
 
