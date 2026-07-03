@@ -25,6 +25,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use forge_mesh::pricing;
+
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Fetch per-model context windows AND prices from all reachable provider APIs, persisting
@@ -174,63 +176,71 @@ pub async fn fetch_and_persist(models: &[String]) {
     }
 
     // ── CLI bridge context windows ────────────────────────────────────────────────────────────────
-    // Derived from already-fetched native provider data. CLI bridges use short tier aliases
-    // (opus/sonnet/haiku, gemini-3.5-flash) and publish no machine-readable context window info,
-    // but their underlying models map to known provider families we already fetched above.
-    // codex-cli GPT-5.x models may not appear in OR yet — those fall back to pricing.rs constants.
+    // Derived DYNAMICALLY from the already-fetched provider data for every discovered bridge
+    // model: each alias is matched to its canonical model (claude-cli::fable →
+    // anthropic::claude-fable-5) and takes that model's fetched window. The hardcoded per-bridge
+    // table in forge_mesh::pricing::context_limit is the last-resort fallback only.
     derive_cli_bridge_windows(models, &ctx_registry, &store);
 }
 
 // ── CLI bridge derivation ─────────────────────────────────────────────────────────────────────────
 
-/// claude-cli is the Claude Code subscription — always 200k regardless of what the Anthropic API
-/// reports. Using the API max would inflate the window if Anthropic ever ships a >200k model,
-/// and the subscription gate doesn't follow API limits.
-const CLAUDE_CLI_WINDOW: u32 = 200_000;
-
-/// The discovered `claude-cli::` model ids that get the fixed subscription window. Every alias —
-/// static defaults AND anything `claude --help` newly advertises (fable, …) — is a Claude Code
-/// subscription session, so the same conservative 200k applies.
-fn claude_cli_ids(models: &[String]) -> impl Iterator<Item = &String> {
-    models.iter().filter(|m| {
-        m.strip_prefix("claude-cli::")
-            .is_some_and(|alias| !alias.is_empty())
-    })
+/// Family word a bridge's bare tier aliases must share with a canonical candidate. claude-cli
+/// aliases (`opus`, `fable`) and codex-cli's don't always spell their family, so without this
+/// `opus` could match any model containing that word. agy-cli aliases are full model names
+/// (`gemini-3.5-flash`, `claude-sonnet-4.6`) that already carry their family.
+fn bridge_family_token(prefix: &str) -> Option<&'static str> {
+    match prefix {
+        "claude-cli" => Some("claude"),
+        "codex-cli" => Some("gpt"),
+        _ => None,
+    }
 }
 
-/// Maps agy-cli and codex-cli bridge models to the source namespace prefix and keyword to look up
-/// in ctx_registry. Each alias selects the largest matching window from the given native namespace.
-const CLI_BRIDGE_MAP: &[(&str, &str, &str)] = &[
-    // agy-cli (Antigravity / Google) → match Gemini models by tier keyword
-    ("agy-cli::gemini-3.5-flash", "gemini::", "flash"),
-    ("agy-cli::gemini-3.1-pro", "gemini::", "pro"),
-    // codex-cli → try OR cross-mapped openai:: models; GPT-5.x may not be in OR yet,
-    // in which case no window is written and pricing.rs fallbacks apply.
-    ("codex-cli::gpt-5.5", "openai::", "gpt-5"),
-    ("codex-cli::gpt-5.4", "openai::", "gpt-5"),
-    ("codex-cli::gpt-5.4-mini", "openai::", "gpt-5"),
-    ("codex-cli::gpt-5.3-codex", "openai::", "gpt-5"),
-    ("codex-cli::gpt-5.2", "openai::", "gpt-5"),
-];
+/// The context window for one bridge alias, derived from fetched data: the alias's token set must
+/// be a subset of a canonical model's tokens — the same vocabulary the benchmark mapper uses
+/// (`fable` ⊆ `anthropic::claude-fable-5`) — and among all canonical matches the LARGEST window
+/// wins, because a versionless alias (`opus`, `sonnet`) means the latest/best model of that tier,
+/// exactly like its benchmark mapping. `None` when nothing fetched matches.
+fn bridge_window(prefix: &str, alias: &str, ctx_registry: &HashMap<String, u32>) -> Option<u32> {
+    let want = forge_mesh::bench::tokens(alias);
+    if want.is_empty() {
+        return None;
+    }
+    let family = bridge_family_token(prefix);
+    ctx_registry
+        .iter()
+        .filter(|(id, _)| {
+            let model = id.split_once("::").map(|(_, m)| m).unwrap_or(id);
+            let cand = forge_mesh::bench::tokens(model);
+            family.is_none_or(|f| cand.iter().any(|t| t == f))
+                && want.iter().all(|t| cand.contains(t))
+        })
+        .map(|(_, &w)| w)
+        .max()
+}
 
 fn derive_cli_bridge_windows(
     models: &[String],
     ctx_registry: &HashMap<String, u32>,
     store: &forge_store::Store,
 ) {
-    // claude-cli: subscription is always 200k — do not derive from API data.
-    for id in claude_cli_ids(models) {
-        let _ = store.set_model_context(id, CLAUDE_CLI_WINDOW);
-    }
-    // agy-cli / codex-cli: derive from fetched native provider data.
-    for (bridge_id, ns_prefix, keyword) in CLI_BRIDGE_MAP {
-        let window = ctx_registry
-            .iter()
-            .filter(|(id, _)| id.starts_with(ns_prefix) && id.contains(keyword))
-            .map(|(_, &w)| w)
-            .max();
+    for id in models {
+        let Some((prefix, alias)) = id.split_once("::") else {
+            continue;
+        };
+        if alias.is_empty() || !forge_mesh::catalog::is_subscription(id) {
+            continue;
+        }
+        // Dynamic first. The hardcoded per-bridge table (forge_mesh::pricing::context_limit) is
+        // the LAST-RESORT fallback, for a bridge model absent from every fetched source (e.g. a
+        // codex GPT release before OpenRouter lists it). The result is written to the store
+        // either way so a stale row from an earlier run can't linger and win over the fallback
+        // at read time (the store outranks context_limit in effective_context_window).
+        let window =
+            bridge_window(prefix, alias, ctx_registry).or_else(|| pricing::context_limit(id));
         if let Some(w) = window {
-            let _ = store.set_model_context(bridge_id, w);
+            let _ = store.set_model_context(id, w);
         }
     }
 }
@@ -563,52 +573,106 @@ mod tests {
         assert!(windows.contains(&("groq::gemma2-9b-it".to_string(), 8192)));
     }
 
-    #[test]
-    fn claude_cli_window_is_hardcoded_200k() {
-        // claude-cli subscription is always 200k regardless of what Anthropic API reports, and it
-        // covers EVERY discovered alias (incl. newly-advertised ones like fable) — but never the
-        // bare `claude-cli::` id (empty model name, must not be cataloged or windowed).
-        assert_eq!(CLAUDE_CLI_WINDOW, 200_000);
-        let models = vec![
-            "claude-cli::fable".to_string(),
-            "claude-cli::opus".to_string(),
-            "claude-cli::".to_string(),
-            "anthropic::claude-opus-4-8".to_string(),
-        ];
-        let ids: Vec<&str> = claude_cli_ids(&models).map(String::as_str).collect();
-        assert_eq!(ids, ["claude-cli::fable", "claude-cli::opus"]);
+    /// Registry shaped like real fetched data (OR windows + cross-mapped native namespaces).
+    fn bridge_reg() -> HashMap<String, u32> {
+        HashMap::from([
+            ("anthropic::claude-fable-5".to_string(), 1_000_000),
+            ("anthropic::claude-opus-4.8".to_string(), 1_000_000),
+            ("anthropic::claude-opus-4".to_string(), 200_000),
+            ("anthropic::claude-sonnet-4.6".to_string(), 1_000_000),
+            ("anthropic::claude-sonnet-4".to_string(), 200_000),
+            ("anthropic::claude-haiku-4.5".to_string(), 200_000),
+            ("openai::gpt-5.5".to_string(), 1_050_000),
+            ("openai::gpt-5.4-mini".to_string(), 400_000),
+            ("openai::gpt-oss-120b".to_string(), 131_072),
+            ("gemini::gemini-3.5-flash".to_string(), 1_048_576),
+            ("gemini::gemini-3.1-pro-preview".to_string(), 1_048_576),
+            // A trap: "opus" must not match a non-Claude model that happens to contain the word.
+            ("openrouter::acme/magnum-opus-72b".to_string(), 32_000),
+        ])
     }
 
     #[test]
-    fn derive_cli_bridge_windows_agy_and_codex() {
-        let mut reg: HashMap<String, u32> = HashMap::new();
-        reg.insert("gemini::gemini-2.5-flash".into(), 1_048_576);
-        reg.insert("gemini::gemini-2.5-pro".into(), 1_048_576);
-        reg.insert("openai::gpt-4o".into(), 128_000);
+    fn bridge_windows_derive_from_canonical_fetched_models() {
+        let reg = bridge_reg();
+        // claude-cli: fable is 1M (the #480 regression pinned it to a stale 200k); a versionless
+        // alias takes the LARGEST matching window (opus/sonnet mean the latest tier model, which
+        // GA'd to 1M); haiku stays 200k because no fetched haiku is bigger.
+        assert_eq!(bridge_window("claude-cli", "fable", &reg), Some(1_000_000));
+        assert_eq!(bridge_window("claude-cli", "opus", &reg), Some(1_000_000));
+        assert_eq!(bridge_window("claude-cli", "sonnet", &reg), Some(1_000_000));
+        assert_eq!(bridge_window("claude-cli", "haiku", &reg), Some(200_000));
+        // codex-cli: exact alias→canonical, and the family guard keeps gpt aliases on GPT models.
+        assert_eq!(bridge_window("codex-cli", "gpt-5.5", &reg), Some(1_050_000));
+        assert_eq!(
+            bridge_window("codex-cli", "gpt-5.4-mini", &reg),
+            Some(400_000)
+        );
+        // agy-cli aliases are full model names — including non-Gemini ones the CLI advertises.
+        assert_eq!(
+            bridge_window("agy-cli", "gemini-3.5-flash", &reg),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            bridge_window("agy-cli", "gemini-3.1-pro", &reg),
+            Some(1_048_576)
+        );
+        assert_eq!(
+            bridge_window("agy-cli", "claude-sonnet-4.6", &reg),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            bridge_window("agy-cli", "gpt-oss-120b", &reg),
+            Some(131_072)
+        );
+        // No fetched match → None, so derive falls back to pricing::context_limit.
+        assert_eq!(bridge_window("codex-cli", "gpt-9.9", &reg), None);
+    }
 
-        // agy-cli flash → gemini flash window
-        let flash = reg
-            .iter()
-            .filter(|(id, _)| id.starts_with("gemini::") && id.contains("flash"))
-            .map(|(_, &w)| w)
-            .max();
-        assert_eq!(flash, Some(1_048_576));
+    #[test]
+    fn bridge_window_family_guard_blocks_cross_family_word_matches() {
+        // "opus" appears in acme/magnum-opus-72b (32k) — the claude family guard must keep the
+        // claude-cli alias off it (already covered by the 1M assertions above), and a registry
+        // with ONLY the impostor must yield no match at all rather than a wrong window.
+        let impostor = HashMap::from([("openrouter::acme/magnum-opus-72b".to_string(), 32_000)]);
+        assert_eq!(bridge_window("claude-cli", "opus", &impostor), None);
+    }
 
-        // agy-cli pro → gemini pro window
-        let pro = reg
-            .iter()
-            .filter(|(id, _)| id.starts_with("gemini::") && id.contains("pro"))
-            .map(|(_, &w)| w)
-            .max();
-        assert_eq!(pro, Some(1_048_576));
-
-        // codex-cli gpt-5.x → no match until GPT-5 appears in OR
-        let gpt5 = reg
-            .iter()
-            .filter(|(id, _)| id.starts_with("openai::") && id.contains("gpt-5"))
-            .map(|(_, &w)| w)
-            .max();
-        assert_eq!(gpt5, None);
+    #[test]
+    fn derive_writes_dynamic_windows_with_context_limit_as_last_resort() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = forge_store::Store::open(dir.path().join("t.db")).unwrap();
+        let models = vec![
+            "claude-cli::fable".to_string(),
+            "claude-cli::haiku".to_string(),
+            "codex-cli::gpt-5.5".to_string(),
+            "codex-cli::gpt-9.9".to_string(), // absent from fetched data → fallback
+            "claude-cli::".to_string(),       // bare id → never windowed
+            "anthropic::claude-fable-5".to_string(), // non-bridge → untouched here
+        ];
+        // A stale pre-fix row must be overwritten by the dynamic value.
+        store
+            .set_model_context("claude-cli::fable", 200_000)
+            .unwrap();
+        derive_cli_bridge_windows(&models, &bridge_reg(), &store);
+        assert_eq!(
+            store.model_context("claude-cli::fable").unwrap(),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            store.model_context("claude-cli::haiku").unwrap(),
+            Some(200_000)
+        );
+        assert_eq!(
+            store.model_context("codex-cli::gpt-5.5").unwrap(),
+            Some(1_050_000)
+        );
+        // Last-resort fallback: the documented hardcoded table in pricing::context_limit.
+        assert_eq!(
+            store.model_context("codex-cli::gpt-9.9").unwrap(),
+            pricing::context_limit("codex-cli::gpt-9.9")
+        );
+        assert_eq!(store.model_context("claude-cli::").unwrap(), None);
     }
 
     #[test]
