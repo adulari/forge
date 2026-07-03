@@ -584,6 +584,17 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// One stored Web Push subscription (the browser's `PushSubscription.toJSON()` fields):
+/// `endpoint` is the vendor push URL, `p256dh`/`auth` are the RFC 8291 client keys, both
+/// base64url as handed out by the browser. Deduplicated by endpoint on write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushSubscription {
+    pub id: String,
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+}
+
 impl Store {
     /// Open (creating if needed) a database file and run migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -1918,6 +1929,70 @@ impl Store {
             )
             .optional()?
             .flatten())
+    }
+
+    /// Store (or refresh) a Web Push subscription, deduplicating by `endpoint` — a browser
+    /// re-subscribing after a permission round-trip must update its keys in place, never pile
+    /// up duplicate rows that would each receive (and each decrypt-fail or double-notify) every
+    /// push. Dedupe is application-level: the shipped `push_subscription` table (migration #8)
+    /// has no UNIQUE index on `endpoint`, and shipped migrations are never rewritten.
+    /// Returns the row id (existing or new).
+    pub fn upsert_push_subscription(
+        &self,
+        endpoint: &str,
+        p256dh: &str,
+        auth: &str,
+    ) -> Result<String> {
+        let conn = self.lock()?;
+        if let Some(id) = conn
+            .query_row(
+                "SELECT id FROM push_subscription WHERE endpoint = ?1",
+                [endpoint],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            conn.execute(
+                "UPDATE push_subscription SET p256dh = ?2, auth = ?3 WHERE id = ?1",
+                (&id, p256dh, auth),
+            )?;
+            return Ok(id);
+        }
+        let id = forge_types::new_id();
+        conn.execute(
+            "INSERT INTO push_subscription (id, endpoint, p256dh, auth) VALUES (?1, ?2, ?3, ?4)",
+            (&id, endpoint, p256dh, auth),
+        )?;
+        Ok(id)
+    }
+
+    /// Remove a Web Push subscription by its endpoint (unsubscribe, or a push service answering
+    /// 404/410). `Ok(true)` when a row was actually deleted.
+    pub fn delete_push_subscription(&self, endpoint: &str) -> Result<bool> {
+        let n = self.lock()?.execute(
+            "DELETE FROM push_subscription WHERE endpoint = ?1",
+            [endpoint],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Every stored Web Push subscription, oldest first (delivery order is stable and boring).
+    pub fn list_push_subscriptions(&self) -> Result<Vec<PushSubscription>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, endpoint, p256dh, auth FROM push_subscription ORDER BY created_at, id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(PushSubscription {
+                    id: row.get(0)?,
+                    endpoint: row.get(1)?,
+                    p256dh: row.get(2)?,
+                    auth: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// A session's stored title, if any.
@@ -5032,6 +5107,43 @@ mod tests {
             .unwrap();
         }
         cleanup(&path);
+    }
+
+    #[test]
+    fn push_subscription_crud_dedupes_by_endpoint() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.list_push_subscriptions().unwrap().is_empty());
+
+        let id1 = store
+            .upsert_push_subscription("https://push.example/a", "keyA", "authA")
+            .unwrap();
+        let id2 = store
+            .upsert_push_subscription("https://push.example/b", "keyB", "authB")
+            .unwrap();
+        assert_ne!(id1, id2);
+        assert_eq!(store.list_push_subscriptions().unwrap().len(), 2);
+
+        // Re-subscribing the SAME endpoint refreshes the keys in place — no duplicate row.
+        let id1b = store
+            .upsert_push_subscription("https://push.example/a", "keyA2", "authA2")
+            .unwrap();
+        assert_eq!(id1, id1b, "same endpoint keeps its row id");
+        let subs = store.list_push_subscriptions().unwrap();
+        assert_eq!(subs.len(), 2, "dedupe by endpoint");
+        let a = subs.iter().find(|s| s.id == id1).unwrap();
+        assert_eq!((a.p256dh.as_str(), a.auth.as_str()), ("keyA2", "authA2"));
+        assert_eq!(a.endpoint, "https://push.example/a");
+
+        // Delete by endpoint; deleting again reports nothing removed.
+        assert!(store
+            .delete_push_subscription("https://push.example/a")
+            .unwrap());
+        assert!(!store
+            .delete_push_subscription("https://push.example/a")
+            .unwrap());
+        let left = store.list_push_subscriptions().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].endpoint, "https://push.example/b");
     }
 
     #[test]

@@ -26,6 +26,7 @@ function boot() {
     .then(rows => {
       daemon = true;
       $("btnSessions").hidden = false;
+      initPush();
       renderSessionList(rows);
       if (curSession && rows.some(r => r.id === curSession)) {
         connect();
@@ -44,7 +45,7 @@ function connect() {
   const scheme = location.protocol === "https:" ? "wss://" : "ws://";
   const sess = daemon && curSession ? "&session=" + encodeURIComponent(curSession) : "";
   ws = new WebSocket(scheme + location.host + BASE + "/ws?rev=" + lastRev + sess);
-  ws.onopen = () => { retries = 0; $("conn").textContent = "● connected"; };
+  ws.onopen = () => { retries = 0; $("conn").textContent = "● connected"; flushOfflineQueue(); };
   ws.onmessage = (e) => {
     let s; try { s = JSON.parse(e.data); } catch { return; }
     // Dedupe on revision: a frame can arrive both in the reconnect replay and via the live
@@ -99,6 +100,8 @@ function attach(id) {
   REV_KEY = revKeyFor(id);
   lastRev = Number(sessionStorage.getItem(REV_KEY) || 0) || 0;
   retries = 0;
+  oqDropped = 0;
+  renderOfflineQueue();
   // The transcript belongs to the previous session — renderTranscript resets it when the new
   // session id arrives, but clear eagerly so nothing stale flashes.
   $("hist").innerHTML = ""; $("tail").innerHTML = ""; $("tail")._sig = "";
@@ -623,7 +626,57 @@ function fmt(n) { if (n >= 1e6) return (n/1e6).toFixed(1)+"M"; if (n >= 1e3) ret
 function esc(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 function baseName(p) { if (!p) return ""; const parts = (""+p).replace(/[\\/]+$/, "").split(/[\\/]/); return parts[parts.length-1] || p; }
 
-function submit() { const v = $("prompt").value; if (!v.trim()) return; send({kind:"prompt", text:v}); $("prompt").value=""; }
+function submit() {
+  const v = $("prompt").value;
+  if (!v.trim()) return;
+  if (ws && ws.readyState === 1) {
+    send({ kind: "prompt", text: v });
+  } else {
+    // Offline: queue locally (per server + session, so it can never flush into a different
+    // session) and deliver in order the moment the WS reconnects.
+    queueOffline(v);
+  }
+  $("prompt").value = "";
+}
+
+// --- offline input queue --------------------------------------------------------------------
+// Prompts typed while the WS is down land in localStorage (survives reloads and the PWA being
+// killed), render as "queued (offline)" above the actions area, and flush IN ORDER on
+// reconnect. Bounded: past OQ_CAP entries new input is dropped loudly, never silently.
+const OQ_CAP = 20;
+let oqDropped = 0;
+function oqKey() { return "forge-oq:" + BASE + ":" + curSession; }
+function oqLoad() { try { return JSON.parse(localStorage.getItem(oqKey()) || "[]") || []; } catch (e) { return []; } }
+function oqSave(q) { try { localStorage.setItem(oqKey(), JSON.stringify(q)); } catch (e) {} }
+
+function queueOffline(text) {
+  const q = oqLoad();
+  if (q.length >= OQ_CAP) { oqDropped++; }
+  else q.push(text);
+  oqSave(q);
+  renderOfflineQueue();
+}
+
+function renderOfflineQueue() {
+  const el = $("offq");
+  const q = oqLoad();
+  if (!q.length && !oqDropped) { el.hidden = true; el.innerHTML = ""; return; }
+  el.hidden = false;
+  el.innerHTML = q.map(t => "📴 queued (offline): " + esc(t)).join("<br>") +
+    (oqDropped ? '<br><span class="oqfull">⚠ offline queue full (' + OQ_CAP + ") — " +
+      oqDropped + " prompt" + (oqDropped > 1 ? "s" : "") + " dropped</span>" : "");
+}
+
+function flushOfflineQueue() {
+  const q = oqLoad();
+  if (q.length && ws && ws.readyState === 1) {
+    q.forEach(t => send({ kind: "prompt", text: t }));
+    oqSave([]);
+  }
+  oqDropped = 0;
+  renderOfflineQueue();
+}
+renderOfflineQueue();
 $("send").onclick = submit;
 $("prompt").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
 $("stop").onclick = () => send({kind:"interrupt"});
@@ -727,6 +780,95 @@ function maybeNotify(title, body) {
   } else {
     try { new Notification(title, opts); } catch (e) {}
   }
+}
+
+// --- Web push settings (forge serve only) ---------------------------------------------------
+// Self-hosted VAPID push: notifications fire from YOUR daemon even with the page closed —
+// permission prompts arrive with Allow/Deny actions the service worker answers directly.
+// iOS caveat: Safari only exposes PushManager to an INSTALLED PWA (share → Add to Home Screen)
+// on a trusted (or tunneled) HTTPS origin.
+function b64ToU8(s) {
+  const pad = "=".repeat((4 - (s.length % 4)) % 4);
+  const raw = atob((s + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, c => c.charCodeAt(0));
+}
+
+async function pushSubscription() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return null;
+  const reg = await navigator.serviceWorker.ready;
+  return reg.pushManager.getSubscription();
+}
+
+async function paintPush() {
+  const btn = $("pushbtn"), info = $("pushinfo");
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    btn.hidden = true;
+    info.textContent = "push is unsupported in this browser — on iPhone/iPad, install this " +
+      "page to the home screen first (Share → Add to Home Screen), then enable push from the app.";
+    return;
+  }
+  if (Notification.permission === "denied") {
+    btn.hidden = true;
+    info.textContent = "notification permission is blocked — allow notifications for this site " +
+      "in the browser settings, then reload.";
+    return;
+  }
+  const sub = await pushSubscription().catch(() => null);
+  btn.hidden = false;
+  btn.textContent = sub ? "Disable" : "Enable";
+  info.textContent = sub
+    ? "enabled — permission prompts, questions and finished turns notify this device even with " +
+      "the page closed (answer Allow/Deny right from the notification)."
+    : "off — enable to get notified (and approve prompts) with the page closed.";
+}
+
+async function enablePush() {
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") { paintPush(); return; }
+  const r = await fetch(BASE + "/api/push/key", { cache: "no-store" });
+  if (!r.ok) throw new Error("push key unavailable");
+  const j = await r.json();
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: b64ToU8(j.key),
+  });
+  const sj = sub.toJSON();
+  const res = await fetch(BASE + "/api/push/subscribe", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ endpoint: sub.endpoint, keys: { p256dh: sj.keys.p256dh, auth: sj.keys.auth } }),
+  });
+  if (!res.ok) { try { await sub.unsubscribe(); } catch (e) {} throw new Error("subscribe failed"); }
+}
+
+async function disablePush() {
+  const sub = await pushSubscription();
+  if (!sub) return;
+  const endpoint = sub.endpoint;
+  try { await sub.unsubscribe(); } catch (e) {}
+  await fetch(BASE + "/api/push/unsubscribe", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ endpoint }),
+  }).catch(() => {});
+}
+
+function initPush() {
+  $("pushrow").hidden = false;
+  $("pushbtn").onclick = async () => {
+    $("pushbtn").disabled = true;
+    try {
+      const sub = await pushSubscription();
+      if (sub) await disablePush(); else await enablePush();
+    } catch (e) {
+      $("pushinfo").textContent = "push setup failed: " + (e && e.message || e);
+    } finally {
+      $("pushbtn").disabled = false;
+      paintPush();
+    }
+  };
+  paintPush();
 }
 
 // PWA: register the token-scoped service worker so the page installs to a home screen.

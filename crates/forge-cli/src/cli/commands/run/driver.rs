@@ -37,6 +37,10 @@ pub(crate) struct DriverSpec {
     pub model: Option<String>,
     /// Resume an existing session id instead of starting fresh.
     pub resume: Option<String>,
+    /// The daemon's Web Push sender (`None` = push disabled). The driver fires it on
+    /// notification-worthy snapshot transitions ([`crate::push::detect_trigger`]) — but only
+    /// while zero WS clients are attached ([`crate::push::should_push`]).
+    pub push: Option<std::sync::Arc<crate::push::PushNotifier>>,
 }
 
 /// The daemon-side handle to a running session driver — everything `forge serve`'s HTTP layer
@@ -57,6 +61,9 @@ pub(crate) struct SessionDriverHandle {
     pub input_tx: tokio::sync::mpsc::Sender<remote::RemoteInput>,
     /// Unix seconds of the last broadcast state change — "last activity" in the session list.
     pub last_activity: std::sync::Arc<AtomicI64>,
+    /// How many WebSocket clients are currently attached (the daemon's WS route holds a guard
+    /// per connection). The push debounce: any client connected ⇒ no push.
+    pub ws_clients: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -125,6 +132,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     )));
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let last_activity = std::sync::Arc::new(AtomicI64::new(now_secs()));
+    let ws_clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let task = tokio::spawn(drive_session(
         session,
@@ -138,6 +146,8 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         events.clone(),
         shutdown_rx,
         last_activity.clone(),
+        spec.push,
+        ws_clients.clone(),
     ));
 
     Ok(SessionDriverHandle {
@@ -150,6 +160,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         events,
         input_tx,
         last_activity,
+        ws_clients,
         shutdown_tx,
         task,
     })
@@ -209,6 +220,8 @@ async fn drive_session(
     events: std::sync::Arc<std::sync::Mutex<remote::EventLog>>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     last_activity: std::sync::Arc<AtomicI64>,
+    push: Option<std::sync::Arc<crate::push::PushNotifier>>,
+    ws_clients: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let (done_tx, done_rx) = std::sync::mpsc::channel::<u64>();
     let mut app = App::default();
@@ -292,6 +305,9 @@ async fn drive_session(
     let mut last_snap: Option<remote::Snapshot> = None;
     let mut revision: u64 = 0;
     let mut dirty = true;
+    // The most recent genuine turn failure (PresenterEvent::Error), latched so the busy falling
+    // edge pushes "failed" instead of "done". Cleared when the next turn starts.
+    let mut turn_error: Option<String> = None;
 
     loop {
         if *shutdown_rx.borrow_and_update() {
@@ -301,7 +317,12 @@ async fn drive_session(
         while let Ok(msg) = ui_rx.try_recv() {
             dirty = true;
             match msg {
-                UiMsg::Event(e) => st.app.apply(e),
+                UiMsg::Event(e) => {
+                    if let forge_tui::PresenterEvent::Error(m) = &e {
+                        turn_error = Some(m.clone());
+                    }
+                    st.app.apply(e)
+                }
                 UiMsg::Permission {
                     tool,
                     side_effect,
@@ -371,6 +392,26 @@ async fn drive_session(
             if last_snap.as_ref() != Some(&snap) {
                 revision += 1;
                 snap.revision = revision;
+                // A fresh turn starting clears the previous turn's failure latch.
+                if snap.busy && last_snap.as_ref().is_none_or(|p| !p.busy) {
+                    turn_error = None;
+                }
+                // Actionable Web Push: needs-a-decision / turn-done / turn-failed transitions,
+                // debounced to zero-connected-clients, dispatched fire-and-forget — the
+                // broadcast below never waits on push delivery.
+                if let Some(notifier) = &push {
+                    if crate::push::should_push(
+                        ws_clients.load(std::sync::atomic::Ordering::Relaxed),
+                    ) {
+                        if let Some(msg) = crate::push::detect_trigger(
+                            last_snap.as_ref(),
+                            &snap,
+                            turn_error.as_deref(),
+                        ) {
+                            notifier.dispatch(msg);
+                        }
+                    }
+                }
                 last_snap = Some(snap.clone());
                 if let Ok(mut log) = events.lock() {
                     log.push(revision, snap.clone());
