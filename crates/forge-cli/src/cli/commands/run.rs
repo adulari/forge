@@ -1201,6 +1201,18 @@ pub(crate) async fn run_chat_tui(
     // Prompts typed while a turn is running, queued to run one-per-turn after it finishes
     // (like Claude Code / aider). Drained in the done-handler below; cleared on interrupt.
     let mut queued_prompts: Vec<String> = Vec::new();
+    // Identity of the currently pending permission/question prompt, bumped every time a new one
+    // is installed. Broadcast as `Snapshot::prompt_seq`; remote Allow/Answer must echo it back,
+    // and a mismatch is ignored — a stale tap can never approve a prompt it never saw.
+    let mut prompt_seq: u64 = 0;
+    // Remote-facing notices (`Snapshot::notes`, bounded): feedback for inputs the remote drain
+    // can't fully honor (e.g. `/remote` typed on the phone, stale answers).
+    let mut remote_notes: Vec<String> = Vec::new();
+    // Change-only broadcast: the last snapshot actually sent + its revision. While busy the loop
+    // spins every 16ms; without this compare every iteration pushed an identical frame to every
+    // connected browser (~60 frames/s of JSON for nothing).
+    let mut last_remote_snap: Option<remote::Snapshot> = None;
+    let mut remote_revision: u64 = 0;
     // One long-lived clipboard for mouse-selection copies (see `copy_selection`). Created once so
     // arboard keeps the X11/Wayland selection alive and never logs a "dropped" warning to the TUI.
     let mut clipboard: Option<arboard::Clipboard> = arboard::Clipboard::new().ok();
@@ -1228,7 +1240,18 @@ pub(crate) async fn run_chat_tui(
     // Default-on remote control: when `[remote] auto` is configured, start the server at chat
     // startup so the session is reachable from a phone/browser without typing `/remote` first.
     if let Some(auto) = tui_config.remote.startup_exposure() {
-        toggle_remote(&mut remote, &mut app, &mut tui, auto.into()).await?;
+        toggle_remote(
+            &mut remote,
+            &mut app,
+            &mut tui,
+            auto.into(),
+            tui_config.remote.host.as_deref(),
+        )
+        .await?;
+        // A (re)started server begins from a fresh watch channel — drop the dedup state so the
+        // first frame is always broadcast even if the app state hasn't changed since the last
+        // server's final snapshot.
+        last_remote_snap = None;
     }
 
     while !quit {
@@ -2069,7 +2092,17 @@ pub(crate) async fn run_chat_tui(
                                 usage_load_rx = Some(rx);
                             }
                             DispatchOutcome::ToggleRemote { exposure } => {
-                                toggle_remote(&mut remote, &mut app, &mut tui, exposure).await?;
+                                toggle_remote(
+                                    &mut remote,
+                                    &mut app,
+                                    &mut tui,
+                                    exposure,
+                                    tui_config.remote.host.as_deref(),
+                                )
+                                .await?;
+                                // Fresh server, fresh watch channel — reset the change-only
+                                // broadcast dedup so the first frame always goes out.
+                                last_remote_snap = None;
                             }
                             DispatchOutcome::CopyToClipboard(text) => {
                                 let chars = text.chars().count();
@@ -2955,8 +2988,17 @@ pub(crate) async fn run_chat_tui(
                                     usage_load_rx = Some(rx);
                                 }
                                 DispatchOutcome::ToggleRemote { exposure } => {
-                                    toggle_remote(&mut remote, &mut app, &mut tui, exposure)
-                                        .await?;
+                                    toggle_remote(
+                                        &mut remote,
+                                        &mut app,
+                                        &mut tui,
+                                        exposure,
+                                        tui_config.remote.host.as_deref(),
+                                    )
+                                    .await?;
+                                    // Fresh server, fresh watch channel — reset the change-only
+                                    // broadcast dedup so the first frame always goes out.
+                                    last_remote_snap = None;
                                 }
                                 DispatchOutcome::CopyToClipboard(text) => {
                                     let chars = text.chars().count();
@@ -3064,6 +3106,9 @@ pub(crate) async fn run_chat_tui(
                 } => {
                     app.prompt = Some(format!("allow {tool} ({side_effect:?}) [y/n/a=always]"));
                     pending = Some((tool, reply));
+                    // New prompt, new identity: remote answers rendered against an older prompt
+                    // now carry a stale seq and are ignored instead of approving this one.
+                    prompt_seq += 1;
                 }
                 UiMsg::Question {
                     question,
@@ -3073,6 +3118,7 @@ pub(crate) async fn run_chat_tui(
                 } => {
                     app.set_question(&question, &options, allow_other);
                     pending_question = Some(reply);
+                    prompt_seq += 1;
                 }
             }
         }
@@ -3097,9 +3143,29 @@ pub(crate) async fn run_chat_tui(
                 dirty = true;
                 match input {
                     remote::RemoteInput::Prompt { text } => {
+                        // A fresh prompt starts a fresh interaction — drop the previous notices
+                        // so "stale answer ignored" etc. don't linger on the page forever.
+                        remote_notes.clear();
                         if busy {
-                            // A turn is running — don't queue a second; mirror the local guard.
-                            app.note("⚠ finish or Esc the current turn first (remote)");
+                            // Mid-turn: queue plain prompts to run after this turn, exactly like
+                            // local typing (they used to be refused here, so the phone couldn't
+                            // do what the keyboard could). `/commands` still wait for idle —
+                            // they need the session lock the running turn holds.
+                            let trimmed = text.trim();
+                            if trimmed.is_empty() {
+                                // nothing to queue
+                            } else if trimmed.starts_with('/') && !trimmed.starts_with("//") {
+                                app.note(
+                                    "⏳ commands run when the turn is idle — finish or Esc first",
+                                );
+                            } else {
+                                queued_prompts.push(text.clone());
+                                app.set_queued(&queued_prompts);
+                                app.note(&format!(
+                                    "⏳ queued ({} pending) — runs after this turn",
+                                    queued_prompts.len()
+                                ));
+                            }
                         } else if let Some(rest) = text.strip_prefix("//") {
                             let hooks = session.lock().await.hooks().to_vec();
                             let escaped = format!("/{rest}");
@@ -3216,7 +3282,40 @@ pub(crate) async fn run_chat_tui(
                                         &mut busy_since,
                                     ));
                                 }
-                                _ => {} // handled in-loop (toggle, note, …)
+                                DispatchOutcome::Handled => {}
+                                DispatchOutcome::PendingMesh(rx) => {
+                                    mesh_load_rx = Some(rx);
+                                    push_remote_note(
+                                        &mut remote_notes,
+                                        "📊 /mesh opened on the TUI — overlays aren't remote-viewable yet",
+                                    );
+                                }
+                                DispatchOutcome::PendingUsage(rx) => {
+                                    usage_load_rx = Some(rx);
+                                    push_remote_note(
+                                        &mut remote_notes,
+                                        "📊 /usage opened on the TUI — overlays aren't remote-viewable yet",
+                                    );
+                                }
+                                DispatchOutcome::ToggleRemote { .. } => {
+                                    // Can't be honored here: this drain runs under the
+                                    // `remote.as_mut()` borrow that toggling would destroy.
+                                    // Silence looked like a swallowed command — say so instead.
+                                    push_remote_note(
+                                        &mut remote_notes,
+                                        "⚠ /remote can only be toggled from the TUI",
+                                    );
+                                }
+                                DispatchOutcome::CopyToClipboard(text) => {
+                                    let chars = text.chars().count();
+                                    copy_selection(&mut clipboard, &text);
+                                    push_remote_note(
+                                        &mut remote_notes,
+                                        &format!(
+                                            "✓ copied to the HOST machine's clipboard ({chars} chars) — not this device"
+                                        ),
+                                    );
+                                }
                             }
                         } else {
                             let hooks = session.lock().await.hooks().to_vec();
@@ -3236,8 +3335,17 @@ pub(crate) async fn run_chat_tui(
                             }
                         }
                     }
-                    remote::RemoteInput::Allow { yes } => {
-                        if let Some((tool, reply)) = pending.take() {
+                    remote::RemoteInput::Allow { yes, seq } => {
+                        // The seq must target the prompt pending NOW: a new prompt can be
+                        // installed in the SAME loop iteration (UiMsg drain runs just above),
+                        // so an un-gated Allow could approve a newer, more dangerous prompt
+                        // the operator never saw.
+                        if !remote::prompt_seq_current(prompt_seq, seq) {
+                            push_remote_note(
+                                &mut remote_notes,
+                                "⚠ stale answer ignored — the prompt changed; review the current one",
+                            );
+                        } else if let Some((tool, reply)) = pending.take() {
                             let outcome = if yes {
                                 ConfirmOutcome::Allow
                             } else {
@@ -3252,8 +3360,13 @@ pub(crate) async fn run_chat_tui(
                             }
                         }
                     }
-                    remote::RemoteInput::Answer { text } => {
-                        if app.awaiting_question() {
+                    remote::RemoteInput::Answer { text, seq } => {
+                        if !remote::prompt_seq_current(prompt_seq, seq) {
+                            push_remote_note(
+                                &mut remote_notes,
+                                "⚠ stale answer ignored — the prompt changed; review the current one",
+                            );
+                        } else if app.awaiting_question() {
                             if let Some(ans) = app.resolve_question(&text) {
                                 if let Some(tx) = pending_question.take() {
                                     let _ = tx.send(ans);
@@ -3630,17 +3743,11 @@ pub(crate) async fn run_chat_tui(
                 let exposure = remote
                     .as_ref()
                     .map(|rc| {
-                        if let Some(t) = rc.tunnel {
-                            format!("public ({t})")
-                        } else if rc.url.tls_fingerprint.is_some() {
-                            if rc.tls_degraded() {
-                                "LAN (insecure — TLS failed)".to_string()
-                            } else {
-                                "LAN".to_string()
-                            }
-                        } else {
-                            "loopback".to_string()
-                        }
+                        remote::exposure_label(
+                            rc.tunnel,
+                            rc.url.tls_fingerprint.is_some(),
+                            rc.tls_failed(),
+                        )
                     })
                     .unwrap_or_default();
                 // `try_lock`, NEVER a blocking `.await` here: a busy turn parked in a permission/
@@ -3653,7 +3760,7 @@ pub(crate) async fn run_chat_tui(
                 if let Ok(s) = session.try_lock() {
                     cached_session_id = s.session_id().to_string();
                 }
-                let snap = remote::Snapshot {
+                let mut snap = remote::Snapshot {
                     protocol: remote::PROTOCOL_VERSION,
                     session_id: cached_session_id.clone(),
                     cwd: remote_cwd.clone(),
@@ -3705,10 +3812,23 @@ pub(crate) async fn run_chat_tui(
                         })
                         .collect(),
                     question_allow_other: view.question_allow_other,
+                    prompt_seq,
+                    notes: remote_notes.clone(),
+                    // Candidate carries the LAST revision so the equality compare below sees
+                    // only real state changes; bumped just before an actual send.
+                    revision: remote_revision,
                     closed: false,
                 };
-                if let Some(rc) = remote.as_ref() {
-                    let _ = rc.snapshot_tx.send(snap);
+                // Change-only broadcast: while busy this branch runs every 16ms, and
+                // `watch::send` notifies every subscriber unconditionally — without this
+                // compare each client got ~60 identical JSON frames/s for a whole turn.
+                if last_remote_snap.as_ref() != Some(&snap) {
+                    remote_revision += 1;
+                    snap.revision = remote_revision;
+                    last_remote_snap = Some(snap.clone());
+                    if let Some(rc) = remote.as_ref() {
+                        let _ = rc.snapshot_tx.send(snap);
+                    }
                 }
             }
         } else {
@@ -3984,16 +4104,31 @@ pub(crate) fn spawn_duel(
     })
 }
 
+/// Append a remote-facing notice (`Snapshot::notes`), keeping the ring bounded. These are state,
+/// not events — `watch` coalescing can drop intermediate snapshots, so a note must survive until
+/// the page has had a chance to render it.
+pub(crate) fn push_remote_note(notes: &mut Vec<String>, msg: &str) {
+    const MAX_REMOTE_NOTES: usize = 8;
+    notes.push(msg.to_string());
+    while notes.len() > MAX_REMOTE_NOTES {
+        notes.remove(0);
+    }
+}
+
 /// Start or stop remote control in response to `/remote`. On: bind the server (LAN-reachable by
 /// default, loopback with `--local`, or piped through a public tunnel with `--anywhere`), print
 /// the connect URL + a scan-to-connect QR code into scrollback, and light the statusline
 /// indicator. Off: drop the handle (stops the server + tunnel, frees the port) and clear the
 /// indicator. Idempotent: `/remote` toggles, so running it again turns it off.
+///
+/// `host_override` (`[remote] host`) replaces the auto-discovered LAN IP in the connect
+/// URL/QR/cert; only meaningful for the LAN exposure.
 pub(crate) async fn toggle_remote(
     remote: &mut Option<remote::RemoteControl>,
     app: &mut forge_tui::App,
     _tui: &mut forge_tui::Tui,
     exposure: remote::Exposure,
+    host_override: Option<&str>,
 ) -> Result<()> {
     if let Some(rc) = remote.take() {
         // Turning it off: the handle's Drop aborts the server task + tunnel and sends a `closed`
@@ -4009,7 +4144,7 @@ pub(crate) async fn toggle_remote(
     }
     let started = match exposure {
         remote::Exposure::Anywhere => remote::start_anywhere().await,
-        other => remote::start(other),
+        other => remote::start(other, host_override),
     };
     match started {
         Ok(rc) => {

@@ -334,7 +334,7 @@ pub enum RemoteMode {
     Lan,
     /// Bind `127.0.0.1` only — control from this machine.
     Local,
-    /// Bind loopback and pipe it through a public tunnel (cloudflared/ngrok/bore) so any browser,
+    /// Bind loopback and pipe it through a public tunnel (cloudflared/ngrok) so any browser,
     /// anywhere, can reach it — no manual router port-forwarding. The token gate is then the only
     /// thing standing between the public internet and the session.
     Anywhere,

@@ -36,6 +36,35 @@ All notable changes to Forge are documented here. The format follows
   round-trip — exercises diff-preview, worktree-commit, and queue-drain paths offline.
 
 ### Fixed
+- **Remote: questions are answerable again** — a pending `AskUserQuestion` no longer renders as a
+  dead permission prompt on the phone; the option buttons + free-text answer actually show
+  (remote protocol v3).
+- **Remote: real LAN connect URLs** — the URL/QR/cert now carry the discovered
+  outbound-interface IP instead of the unreachable `0.0.0.0` bind address; `[remote] host`
+  overrides it for multi-homed/VPN machines.
+- **Remote (security): permission answers carry prompt identity** — Allow/Deny and question
+  answers echo a `prompt_seq`; stale or raced taps are ignored instead of approving a newer,
+  possibly more dangerous prompt.
+- **Remote (security): LAN TLS failure now reports "unavailable"** — no more silent cleartext
+  fallback (which couldn't bind anyway) or a healthy-looking "LAN" status over a dead server.
+- **Remote (security): `bore` removed from `--anywhere`** — its tunnel is plain TCP end-to-end,
+  putting the access token + transcript on the public internet in cleartext; only
+  cloudflared/ngrok (HTTPS) are probed now.
+- **Remote: snapshots broadcast only on change** — a busy turn no longer pushes ~60 identical
+  frames/s per client, and the page's Allow/Deny buttons are no longer destroyed/recreated under
+  your finger (taps landed on detached nodes).
+- **Remote: prompts sent while a turn runs are queued** like local typing, instead of refused.
+- **Remote: notifications now fire on Android Chrome** (service-worker `showNotification`, with
+  the constructor as fallback).
+- **Remote: stale transcript panel** — change detection compares content, not string length.
+- **Remote: hardened page headers** — `X-Frame-Options: DENY`, a same-origin CSP, and
+  `Referrer-Policy: no-referrer` so the token-bearing URL can't leak via the Referer header.
+- **Remote: TUI-only commands typed on the phone respond** with a notice (e.g. "/remote can only
+  be toggled from the TUI") instead of being silently swallowed; `/copy` copies on the host and
+  says so.
+- **Remote: protocol-mismatch banner covers both directions** (older page vs. older server).
+- **Remote: dead PWA installs say so** — after the session ends, the installed app shows
+  "session ended — reopen /remote from the TUI" instead of an infinite "reconnecting…" spinner.
 - **Worktree snapshots no longer leak session checkpoints**: the child session running inside an
   isolated worktree writes `.forge/checkpoints/…` per turn, and `commit_worktree` swept those
   into the snapshot — so subagent/duel merge-backs and queue result branches carried another

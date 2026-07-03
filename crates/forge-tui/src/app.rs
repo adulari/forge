@@ -546,7 +546,18 @@ impl App {
                 }))
                 .collect(),
             queued: self.queued.clone(),
-            permission_prompt: self.prompt.clone(),
+            // A pending AskUserQuestion also arms `self.prompt` (the input-line hint text, e.g.
+            // "type a number, or your own answer"), but on the wire `permission_prompt` means
+            // "y/n permission gate" and the control page gives it precedence over `question`.
+            // Projecting both wedged the remote: the page rendered Allow/Deny buttons for a
+            // question that has no pending permission reply, so taps were silent no-ops and the
+            // real options were unreachable. While a question is active, the prompt is its input
+            // hint — never a permission gate — so suppress it here.
+            permission_prompt: if self.question.is_some() {
+                None
+            } else {
+                self.prompt.clone()
+            },
             question: self.question_prompt.clone(),
             question_options,
             question_allow_other,
@@ -5652,6 +5663,43 @@ mod tests {
             app.awaiting_question(),
             "invalid answer keeps the question open"
         );
+    }
+
+    #[test]
+    fn remote_snapshot_suppresses_permission_prompt_while_question_active() {
+        // A plain permission prompt projects as `permission_prompt`.
+        let mut app = App {
+            prompt: Some("allow write_file (FileWrite) [y/n/a=always]".into()),
+            ..Default::default()
+        };
+        let snap = app.remote_snapshot();
+        assert_eq!(
+            snap.permission_prompt.as_deref(),
+            Some("allow write_file (FileWrite) [y/n/a=always]")
+        );
+
+        // A question arms `prompt` with its input hint — the snapshot must NOT project that as a
+        // permission prompt (the page would render dead Allow/Deny buttons over the options).
+        let options = vec![QChoice {
+            label: "Postgres".into(),
+            description: "relational".into(),
+        }];
+        app.set_question("which database?", &options, true);
+        let snap = app.remote_snapshot();
+        assert!(
+            snap.permission_prompt.is_none(),
+            "question suppresses the permission_prompt projection: {:?}",
+            snap.permission_prompt
+        );
+        assert_eq!(snap.question.as_deref(), Some("which database?"));
+        assert_eq!(snap.question_options.len(), 1);
+        assert!(snap.question_allow_other);
+
+        // Resolving the question clears both; nothing lingers on the wire.
+        assert!(app.resolve_question("1").is_some());
+        let snap = app.remote_snapshot();
+        assert!(snap.permission_prompt.is_none());
+        assert!(snap.question.is_none());
     }
 
     #[test]

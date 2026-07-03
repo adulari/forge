@@ -3,8 +3,8 @@
 > **Status (shipped):** `/remote` (alias `/rc`) slash command in the interactive TUI; an
 > in-process `axum` HTTP + WebSocket server (`crates/forge-cli/src/remote.rs`) with three
 > exposures — `--lan` (default, `0.0.0.0`, **self-signed HTTPS**), `--local` (`127.0.0.1`,
-> plain HTTP), and `--anywhere` (a public tunnel via cloudflared/ngrok/bore, no router
-> port-forwarding); a token-gated, **installable** single-page control surface
+> plain HTTP), and `--anywhere` (a public tunnel via cloudflared/ngrok — bore is excluded,
+> see §3 — no router port-forwarding); a token-gated, **installable** single-page control surface
 > (self-contained HTML/CSS/JS, no framework) with **Chat / Tasks / Agents** tabs, tappable
 > permission + question-option buttons, quick-command chips, a session/cwd/exposure header,
 > live notifications, and a **PWA** (token-scoped manifest + service worker + icon) so it
@@ -44,27 +44,36 @@ HTML control page) and `/<token>/ws` (a bidirectional WebSocket). The token is 1
 generated at start time and printed into the TUI scrollback (as a URL **and** a QR code).
 A request that doesn't match either route hits a 404 fallback that doesn't reveal remote
 control is running. `--lan` (default) binds `0.0.0.0` so a phone on the same network can
-connect; `--local` binds loopback only.
+connect; `--local` binds loopback only. The **advertised** LAN host (connect URL, QR code,
+cert SANs) is never the bind address: the outbound-interface IP is discovered via a
+connected UDP socket (`connect("8.8.8.8:80")` + `local_addr()` — route resolution only, no
+packet is sent), overridable with `[remote] host` for multi-homed/VPN machines.
 
 **Live state → browser:** each dirty frame the render loop builds a `Snapshot` (protocol
 version · session id · cwd · exposure · busy · temper · tier · model · cost · context fill ·
 the streaming reply's tail · a bounded ring of recent scrollback lines · the live task list ·
 running subagents · queued prompts · any pending permission prompt or question + its
-tappable options) and publishes it on a `tokio::sync::watch` channel. The WS task forwards
-every change to each connected browser, so the page mirrors the TUI statusline, transcript
-edge, **Tasks** panel, and **Agents** panel in real time. Because `watch` fans out to every
-subscriber and inputs share one `mpsc`, several phones + a desktop can drive one session at
-once with no per-client state — disconnect/reconnect is transparent (the page auto-retries).
+tappable options · `prompt_seq` (the pending prompt's identity) · remote-facing `notes` · a
+monotonic `revision`) and publishes it on a `tokio::sync::watch` channel — **only when it
+differs from the last broadcast frame** (`Snapshot: PartialEq`), so a busy turn doesn't push
+~60 identical JSON frames/s to every client. The WS task forwards each change to each
+connected browser, so the page mirrors the TUI statusline, transcript edge, **Tasks** panel,
+and **Agents** panel in real time. Because `watch` fans out to every subscriber and inputs
+share one `mpsc`, several phones + a desktop can drive one session at once with no
+per-client state — disconnect/reconnect is transparent (the page auto-retries).
 
 **Browser → session:** the page sends `RemoteInput` JSON (`{kind:"prompt",text}`,
-`{kind:"allow",yes}`, `{kind:"answer",text}`, `{kind:"interrupt"}`) over the WS. A prompt
-can be a plain task, a `/command`, or a `//`-escaped hook command — all routed through the
-*same* `dispatch_command` + prompt-hook + `spawn_turn` paths a local keystroke takes, so
+`{kind:"allow",yes,seq}`, `{kind:"answer",text,seq}`, `{kind:"interrupt"}`) over the WS. A
+prompt can be a plain task, a `/command`, or a `//`-escaped hook command — all routed through
+the *same* `dispatch_command` + prompt-hook + `spawn_turn` paths a local keystroke takes, so
 slash commands (`/plan`, `/compact`, `/diff`, `/model`, …), the busy guard, the permission
-gate, temper, and hooks all apply unchanged. `allow` answers a pending permission, `answer`
-resolves an `AskUserQuestion` (a tapped option button sends its 1-based index), and
-`interrupt` aborts the turn task. A remote prompt is indistinguishable from a local one.
-Inbound frames over `MAX_INPUT_BYTES` (256 KiB) are dropped to bound a hostile client.
+gate, temper, and hooks all apply unchanged. Prompts sent while a turn is running are
+**queued** to run after it, exactly like local typing. `allow` answers a pending permission,
+`answer` resolves an `AskUserQuestion` (a tapped option button sends its 1-based index), and
+`interrupt` aborts the turn task. `allow`/`answer` must echo the `prompt_seq` their buttons
+were rendered from — a mismatch (the prompt changed under the tap) is ignored, so a stale
+answer can never resolve a newer prompt. A remote prompt is indistinguishable from a local
+one. Inbound frames over `MAX_INPUT_BYTES` (256 KiB) are dropped to bound a hostile client.
 
 **PWA + notifications:** alongside `/<token>` and `/<token>/ws`, the server serves a
 token-scoped `manifest.webmanifest`, `sw.js` (service worker), and `icon.svg`, so the page
@@ -102,10 +111,30 @@ determined adversary with a sniffer. Defenses:
   `Snapshot` (model name, cost, transcript tail, prompts). API keys never leave the
   process.
 
-- **TLS on the LAN.** `--lan` generates a self-signed certificate at startup and serves
-  HTTPS, so the token never travels in cleartext over the network; the cert's SHA-256
-  fingerprint is printed next to the connect URL for verification. `--local` stays plain
-  HTTP (loopback never leaves the machine); tunnels terminate TLS at the provider.
+- **TLS on the LAN — no cleartext fallback.** `--lan` generates a self-signed certificate at
+  startup and serves HTTPS, so the token never travels in cleartext over the network; the
+  cert's SHA-256 fingerprint is printed next to the connect URL for verification. If TLS
+  setup fails, LAN remote control is declared **unavailable** (`start` errors on cert-gen
+  failure; async setup failures set `tls_failed`, and the status reads "LAN (unavailable —
+  TLS failed)") — it never silently downgrades to plain HTTP, which would both lie about the
+  transport and be unreachable at the already-printed `https://` URL. Use `--local` or
+  `--anywhere` instead. `--local` stays plain HTTP (loopback never leaves the machine);
+  tunnels terminate TLS at the provider.
+- **Prompt identity (`prompt_seq`).** Every pending permission/question carries a
+  monotonically increasing sequence number; remote `allow`/`answer` inputs must echo it, and
+  mismatches are ignored. A stale or raced tap (two phones, or a prompt replaced in the same
+  frame) can never approve a different — possibly more dangerous — prompt than the one
+  rendered. Legacy (v2) seq-less answers fail to parse and are dropped; the page's
+  protocol-mismatch banner tells the operator to refresh.
+- **`bore` is excluded from `--anywhere`.** bore forwards raw TCP with **no TLS**: the token,
+  snapshots (source code, cwd, transcript), and permission approvals would cross the public
+  internet in cleartext — a sniffed token means a stranger can approve shell commands (RCE).
+  Its `http://` origin also breaks the PWA (no secure context → no service worker or
+  notifications). Only cloudflared and ngrok (both HTTPS end-to-end) are probed.
+- **Hardened page headers.** The control page ships `X-Frame-Options: DENY`, a
+  same-origin `Content-Security-Policy` (inline script/style allowed until the asset split),
+  and `Referrer-Policy: no-referrer` so the token-bearing URL never leaks via the Referer
+  header.
 - **Frame-size cap.** Inbound WebSocket frames are capped (`MAX_INPUT_BYTES`) so a hostile
   or buggy client can't exhaust memory with a giant payload.
 - **`--anywhere` is loud.** Opening a public tunnel prints an explicit warning that anyone
@@ -114,19 +143,30 @@ determined adversary with a sniffer. Defenses:
 ## 3a. Configuration
 
 `[remote] auto` controls auto-start at `forge chat` launch: `off` (default; start with
-`/remote`), `local`, `lan`, or `anywhere`. Example:
+`/remote`), `local`, `lan`, or `anywhere`. `[remote] host` overrides the auto-discovered
+LAN IP in the connect URL / QR / cert SANs (multi-homed or VPN'd machines where discovery
+picks the wrong interface). Example:
 
 ```toml
 [remote]
-auto = "lan"   # session is reachable from a phone the moment chat starts
+auto = "lan"          # session is reachable from a phone the moment chat starts
+host = "192.168.1.5"  # optional: advertise this interface instead of the discovered one
 ```
+
+## 3b. PWA lifetime (interim)
+
+Each session gets a fresh port + token, so an installed home-screen app outlives its
+session's origin. When the server is gone the service worker now answers navigations with an
+explicit **"session ended — reopen `/remote` from the TUI"** page (and the live page stops
+claiming "reconnecting…" after ~12s of failures) instead of a stale shell that spins
+forever. A stable origin that makes installs permanent is the Phase-4 daemon's job.
 
 ## 4. Surfaces touched
 
 | Layer | Change |
 |---|---|
 | `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION`, the mobile control page (tabs/panels/option taps/chips), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
-| `forge-config/src/lib.rs` | `[remote]` block: `RemoteConfig` + `RemoteAuto` + `startup_exposure()` |
+| `forge-config/src/lib.rs` | `[remote]` block: `RemoteConfig` (`auto`, `host`) + `RemoteAuto` + `startup_exposure()` |
 | `forge-tui/src/app.rs` | `App.remote_active`, `question_prompt`, `recent_transcript` ring, `drain_flush_remote`, `remote_snapshot` (now incl. tasks/subagents/queued/question options), `print_lines`, statusline `◉ remote` segment |
 | `forge-tui/src/commands.rs` | `CommandAction::Remote { mode }`, `/remote` (alias `/rc`) parse + registry entry |
 | `forge-cli/src/cli/commands/run.rs` | `DispatchOutcome::ToggleRemote`, `toggle_remote`, `[remote] auto` startup, remote input draining + full-state snapshot broadcast in `run_chat_tui` |
