@@ -7,6 +7,14 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Two-phase context pipeline + UI-only messages**: `forge_core::context_pipeline` is now the one
+  seam between the session transcript and every provider request — `prune_and_inject` (mutating
+  phase: old-tool-output reclaim and future context transforms) then `to_llm` (pure phase: strips
+  `UiOnly` messages, then fits the rest to the model's window). Messages carry a persisted
+  `visibility` tag (`llm`/`ui`, migration 0007): UI-only notes — starting with the turn-ending
+  budget-stop and no-usable-model errors — survive resume, forks, and replay for the user's
+  scrollback but never spend prompt tokens, never skew the context gauge, never trip
+  auto-compaction, and are never paid for in compaction summaries.
 - **`forge fork` + `forge tree` — counterfactual session branching**: branch any past session
   BEFORE turn N (every earlier turn held verbatim as fixed context) and re-ask that one prompt,
   optionally pinned to a different model. `--rerun` executes the forked turn immediately and

@@ -396,12 +396,15 @@ pub async fn resume_subagent(
     let mut transcript = Vec::with_capacity(stored.len() + 2);
     transcript.push(Message::system(&agent.system_prompt));
     for m in stored {
-        transcript.push(match m.role {
+        let visibility = m.visibility;
+        let mut msg = match m.role {
             Role::System => Message::system(&m.content),
             Role::User => Message::user(&m.content),
             Role::Assistant => Message::assistant_tool_calls(&m.content, m.tool_calls),
             Role::Tool => Message::tool_result(m.tool_call_id.as_deref().unwrap_or(""), m.content),
-        });
+        };
+        msg.visibility = visibility;
+        transcript.push(msg);
     }
     transcript.push(Message::user(follow_up));
     let seq = ctx.store.next_message_seq(child_id)?;

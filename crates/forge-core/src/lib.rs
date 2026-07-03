@@ -19,6 +19,7 @@ use forge_types::{
 };
 
 pub mod assay;
+pub(crate) mod context_pipeline;
 pub mod duel;
 pub mod hooks;
 pub mod llm_router;
@@ -36,16 +37,6 @@ pub use llm_router::LlmRouter;
 /// rest. Only compact when there are at least `COMPACT_MIN_OLDER` older messages to fold.
 pub(crate) const COMPACT_KEEP_RECENT: usize = 6;
 pub(crate) const COMPACT_MIN_OLDER: usize = 4;
-/// Char length above which an OLD tool result is pruned from the model-facing transcript. Tool
-/// output (file dumps, command logs, search hits) dominates context but its bulk has little value
-/// once the turn has moved on — the model rarely needs the 30th file read verbatim. Pruning trims
-/// the in-memory transcript only; the full text stays in the store for replay.
-const PRUNE_TOOL_RESULT_MAX: usize = 3000;
-/// How much of a pruned tool result's head to keep (enough to see what the tool produced).
-const PRUNE_HEAD_KEEP: usize = 1500;
-/// Marker left in place of the dropped tail; also makes pruning idempotent (a result already ending
-/// with it is skipped).
-const PRUNE_MARKER: &str = "\n…[older tool output pruned to save context; full text in replay]…";
 const COMPACT_SYSTEM: &str = "You are compacting a coding-assistant conversation to save context. \
 Summarize the messages below concisely but preserve: decisions made, key facts, file paths, \
 function/type names, and any open threads or TODOs. Output only the summary.";
@@ -326,12 +317,6 @@ pub struct RewindOutcome {
     pub rewound_prompt: Option<String>,
 }
 
-/// Conservative chars-per-token used ONLY as a fallback when slicing a single oversized message
-/// down to a token budget (real token offsets aren't worth the cost there). Counting elsewhere uses
-/// the real BPE tokenizer ([`tokens`]); this 3 under-estimates so the sliced text stays within
-/// budget rather than overflowing.
-const CHARS_PER_TOKEN: usize = 3;
-
 /// Best-effort single-text embedding via the configured embedder, for semantic memory capture +
 /// recall. `None` when no embedder is available or it errors → callers fall back to keyword recall.
 /// A FREE function taking `&EmbeddingsConfig` (which is `Sync`) — NOT a `&self` method — so the
@@ -567,131 +552,11 @@ fn context_fill_tokens(model: &str, transcript_est: u64, reported_input: u64) ->
     }
 }
 
-/// Real token cost of one message: its content (BPE-counted, cached) + the chat framing overhead +
-/// any tool-call name/arguments it carries (which the model also pays for).
-fn message_tokens(m: &Message) -> usize {
-    let mut n = tokens::count_message(&m.content);
-    for tc in &m.tool_calls {
-        n += tokens::count_text(&tc.name) + tokens::count_text(&tc.args.to_string());
-    }
-    n
-}
-
-/// Trim a transcript to fit within `budget_tokens` (the model's context window minus the reserved
-/// reply), counted with the real BPE tokenizer. System messages are ALWAYS kept (the standing
-/// instructions); the rest are included newest-first until the budget is hit, then re-ordered to
-/// the original sequence. If even the single most-recent message overflows alone, its content is
-/// truncated from the FRONT (keeping the latest text — usually the actual request). Returns the
-/// input unchanged when it already fits. This is what stops a long conversation from overflowing a
-/// model's window and failing the turn as "unavailable" across every model.
-fn fit_messages(messages: &[Message], budget_tokens: usize) -> Vec<Message> {
-    let total: usize = messages.iter().map(message_tokens).sum();
-    if total <= budget_tokens {
-        return messages.to_vec();
-    }
-    // System messages are non-negotiable context; reserve their cost up front.
-    let system_cost: usize = messages
-        .iter()
-        .filter(|m| m.role == Role::System)
-        .map(message_tokens)
-        .sum();
-    let mut remaining = budget_tokens.saturating_sub(system_cost);
-
-    // Walk non-system messages newest→oldest, keeping each that fits.
-    let mut keep_idx = std::collections::HashSet::new();
-    for (i, m) in messages.iter().enumerate().rev() {
-        if m.role == Role::System {
-            continue;
-        }
-        let cost = message_tokens(m);
-        if cost <= remaining {
-            remaining -= cost;
-            keep_idx.insert(i);
-        } else if keep_idx.is_empty() {
-            // Nothing kept yet and even this newest message is too big — truncate it from the
-            // front so the latest words survive, and stop (the budget is spent). Slice by a
-            // conservative char-per-token bound (exact token offsets aren't worth it here).
-            let mut m = m.clone();
-            let keep_chars = remaining.saturating_sub(48).saturating_mul(CHARS_PER_TOKEN);
-            if keep_chars > 0 {
-                let chars: Vec<char> = m.content.chars().collect();
-                let start = chars.len().saturating_sub(keep_chars);
-                m.content = format!(
-                    "[… earlier of this message truncated to fit the model's context …]\n{}",
-                    chars[start..].iter().collect::<String>()
-                );
-            }
-            // A lone tool RESULT with no preceding assistant call is a dangling tool_call_id the
-            // provider rejects — demote it to a plain user message so the request stays valid.
-            if m.role == Role::Tool {
-                m.role = Role::User;
-                m.tool_call_id = None;
-            }
-            // Rebuild in order: systems first (in place) then this lone truncated tail.
-            let mut out: Vec<Message> = messages
-                .iter()
-                .filter(|m| m.role == Role::System)
-                .cloned()
-                .collect();
-            out.push(m);
-            return out;
-        } else {
-            break;
-        }
-    }
-    // The kept non-system messages are a contiguous newest-first tail. If that tail BEGINS with a
-    // tool result, its assistant tool_calls message was trimmed away — a dangling tool_call_id that
-    // makes Anthropic/OpenAI hard-reject the whole request. Drop leading tool results until the
-    // tail starts on a non-tool message. (System messages aren't tool-paired, so they're exempt.)
-    let mut ordered: Vec<usize> = keep_idx.iter().copied().collect();
-    ordered.sort_unstable();
-    for i in ordered {
-        if messages[i].role == Role::Tool {
-            keep_idx.remove(&i);
-        } else {
-            break;
-        }
-    }
-    messages
-        .iter()
-        .enumerate()
-        .filter(|(i, m)| m.role == Role::System || keep_idx.contains(i))
-        .map(|(_, m)| m.clone())
-        .collect()
-}
-
-/// Zero-LLM context reclaim: truncate large OLD tool results in place so a long conversation fits
-/// without paying for an LLM summarize round-trip. Protects the most recent `keep_recent` messages
-/// and only touches `Tool` results longer than [`PRUNE_TOOL_RESULT_MAX`], keeping a
-/// [`PRUNE_HEAD_KEEP`]-char head + a marker. Returns the number of chars reclaimed; idempotent (a
-/// result already ending with [`PRUNE_MARKER`] is skipped). The full text remains in the store for
-/// replay — only the model-facing transcript is trimmed.
-fn prune_tool_results(messages: &mut [Message], keep_recent: usize) -> usize {
-    let len = messages.len();
-    if len <= keep_recent {
-        return 0;
-    }
-    let protect_from = len - keep_recent;
-    let mut reclaimed = 0usize;
-    for m in &mut messages[..protect_from] {
-        if m.role != Role::Tool
-            || m.content.len() <= PRUNE_TOOL_RESULT_MAX
-            || m.content.ends_with(PRUNE_MARKER)
-        {
-            continue;
-        }
-        let before = m.content.len();
-        let mut head = PRUNE_HEAD_KEEP.min(m.content.len());
-        while !m.content.is_char_boundary(head) {
-            head -= 1;
-        }
-        let mut kept = m.content[..head].to_string();
-        kept.push_str(PRUNE_MARKER);
-        reclaimed += before - kept.len();
-        m.content = kept;
-    }
-    reclaimed
-}
+// `message_tokens`, `fit_messages`, and `prune_tool_results` moved to [`context_pipeline`] — the
+// one seam between the transcript and a provider request (imported below for existing call sites).
+#[cfg(test)]
+use context_pipeline::{fit_messages, prune_tool_results, PRUNE_MARKER, PRUNE_TOOL_RESULT_MAX};
+use context_pipeline::{message_tokens, prune_and_inject, to_llm};
 
 /// Output of one execution of the shared model↔tool loop ([`Session::run_model_loop`]).
 /// Carries everything the caller needs; the caller holds `active_model` by value so it is
@@ -887,6 +752,7 @@ impl Session {
                 tool_calls: m.tool_calls,
                 tool_call_id: m.tool_call_id,
                 images: Vec::new(),
+                visibility: m.visibility,
             })
             .collect();
         // Restore the permission mode that was active when the session was last saved.
@@ -1348,6 +1214,7 @@ impl Session {
                         tool_calls: m.tool_calls,
                         tool_call_id: m.tool_call_id,
                         images: Vec::new(),
+                        visibility: m.visibility,
                     })
                     .collect();
                 messages_to_replay_items(&msgs)
@@ -1380,6 +1247,7 @@ impl Session {
                 tool_calls: m.tool_calls,
                 tool_call_id: m.tool_call_id,
                 images: Vec::new(),
+                visibility: m.visibility,
             })
             .collect();
         Ok(())
@@ -1419,6 +1287,7 @@ impl Session {
                 tool_calls: m.tool_calls,
                 tool_call_id: m.tool_call_id,
                 images: Vec::new(),
+                visibility: m.visibility,
             })
             .collect();
         self.id = session_id.to_string();
@@ -1981,7 +1850,7 @@ impl Session {
         // Real-token budget: window minus the reply reservation, with 5% headroom for the small
         // magnitude difference between our o200k counter and the target model's own tokenizer.
         let budget_tokens = window.saturating_sub(reserve) * 95 / 100;
-        fit_messages(&self.transcript, budget_tokens.max(256))
+        to_llm(&self.transcript, budget_tokens.max(256))
     }
 
     /// The base harness preamble prepended (fresh, never persisted) to every main-loop request:
@@ -2021,7 +1890,7 @@ impl Session {
             * 95
             / 100;
         let mut out = preamble;
-        out.extend(fit_messages(&self.transcript, budget_tokens.max(256)));
+        out.extend(to_llm(&self.transcript, budget_tokens.max(256)));
         out
     }
 
@@ -2231,10 +2100,13 @@ Rules:\n\
     }
 
     /// Real BPE token count of the current transcript (content + tool calls + per-message framing),
-    /// via [`tokens`]. Used to decide compaction + drive the gauge; not billed.
+    /// via [`tokens`]. Used to decide compaction + drive the gauge; not billed. UI-only messages
+    /// are excluded — they never reach a provider, so they must not inflate the gauge or trip
+    /// auto-compaction.
     fn estimated_transcript_tokens(&self) -> u64 {
         self.transcript
             .iter()
+            .filter(|m| m.visibility.is_llm())
             .map(|m| message_tokens(m) as u64)
             .sum()
     }
@@ -2294,9 +2166,9 @@ Rules:\n\
     /// compact. Distinct from the failover consent path ([`admit_failover_model`]).
     async fn auto_compact_if_needed(&mut self, model: &str) {
         if !self.transcript_fits(model) {
-            // Cheap first: prune bulky OLD tool results in place (no model call). Often reclaims
-            // enough that the expensive LLM summarize below isn't needed at all.
-            if prune_tool_results(&mut self.transcript, COMPACT_KEEP_RECENT) > 0 {
+            // Cheap first: the pipeline's mutating phase — prune bulky OLD tool results in place
+            // (no model call). Often reclaims enough that the LLM summarize below isn't needed.
+            if prune_and_inject(&mut self.transcript, COMPACT_KEEP_RECENT) > 0 {
                 self.emit_context_gauge(model);
             }
             if !self.transcript_fits(model) {
@@ -2379,6 +2251,8 @@ Rules:\n\
         let older = &self.transcript[..split];
         let rendered = older
             .iter()
+            // UI-only notes never reach a provider — don't pay to summarize them either.
+            .filter(|m| m.visibility.is_llm())
             .map(|m| {
                 // Include the assistant's tool calls — they're the only record of WHAT the turn did
                 // (tool name + args = the files touched / commands run). Without them an editing turn
@@ -3877,10 +3751,11 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             self.store
                 .add_message(&self.id, seq, Role::User, prompt, None)?;
             self.transcript.push(Message::user(prompt));
+            // UI-only: the note ends the turn for the USER; a model resuming this session gains
+            // nothing from stale budget chrome in its prompt.
             let seq = self.next_seq();
-            self.store
-                .add_message(&self.id, seq, Role::System, &msg, None)?;
-            self.transcript.push(Message::system(&msg));
+            self.store.add_ui_note(&self.id, seq, Role::System, &msg)?;
+            self.transcript.push(Message::system(&msg).ui_only());
             self.presenter.emit(PresenterEvent::Done {
                 final_text: msg.clone(),
                 stop_reason: StopReason::BudgetExhausted,
@@ -3941,10 +3816,10 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             self.store
                 .add_message(&self.id, seq, Role::User, prompt, None)?;
             self.transcript.push(Message::user(prompt));
+            // UI-only, same reasoning as the budget-stop note above.
             let seq = self.next_seq();
-            self.store
-                .add_message(&self.id, seq, Role::System, &msg, None)?;
-            self.transcript.push(Message::system(&msg));
+            self.store.add_ui_note(&self.id, seq, Role::System, &msg)?;
+            self.transcript.push(Message::system(&msg).ui_only());
             self.presenter.emit(PresenterEvent::Done {
                 final_text: msg.clone(),
                 stop_reason: StopReason::FinalAnswer,

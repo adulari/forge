@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS message (
     model           TEXT,
     tool_calls_json TEXT,
     tool_call_id    TEXT,
+    visibility      TEXT NOT NULL DEFAULT 'llm',  -- 'ui' = user-facing note, stripped from provider calls (also migration_0007)
     active          INTEGER NOT NULL DEFAULT 1,   -- 0 = soft-deleted by /undo (kept for audit/redo)
     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
