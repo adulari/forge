@@ -2474,6 +2474,23 @@ Rules:\n\
         Ok((before, after))
     }
 
+    /// Undo a `/compact`: reactivate every soft-deleted message in the store and reload the full
+    /// transcript into memory. A no-op (`before == after`) if the session was never compacted —
+    /// mirrors [`compact`](Self::compact)'s "nothing to do" signal shape.
+    pub fn uncompact(&mut self) -> Result<(usize, usize), CoreError> {
+        let before = self.transcript.len();
+        if !self.was_compacted() {
+            return Ok((before, before));
+        }
+        self.store.uncompact_session_store(&self.id)?;
+        self.reload_full_context()?;
+        let after = self.transcript.len();
+        self.presenter.emit(PresenterEvent::Warning(format!(
+            "restored full history: {before} messages → {after} (compaction undone)"
+        )));
+        Ok((before, after))
+    }
+
     const RECAP_SYSTEM: &'static str = "You are a one-line summarizer for a coding assistant. \
 Given the user's request and the assistant's response, write a SINGLE sentence (≤12 words, \
 past tense, no punctuation at end) describing ONLY what the assistant's RESPONSE actually shows it \
@@ -9294,6 +9311,73 @@ mod tests {
             model_users, 10,
             "reload_full_context restores the uncompacted context"
         );
+    }
+
+    #[tokio::test]
+    async fn compact_undo_restores_the_live_transcript() {
+        // Modeled on `full_history_survives_compaction_for_the_user_view`: seed real store rows
+        // (not just in-memory transcript) so `reload_full_context` after undo has something to
+        // rehydrate from.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(SummarizingProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools(),
+            Box::new(HeadlessPresenter::new(false)),
+            Config::default(),
+            ".",
+        )
+        .unwrap();
+        let sid = session.id().to_string();
+        for i in 0..10 {
+            store
+                .add_message(&sid, i, Role::User, &format!("turn {i}"), None)
+                .unwrap();
+        }
+        store
+            .compact_session_store(&sid, "SUMMARY of turns 0..6", 3)
+            .unwrap();
+        session.reset_resumed(&sid).unwrap();
+
+        assert!(session.transcript.len() < 10, "transcript shrank");
+        assert!(session.was_compacted());
+        let compacted_len = session.transcript.len();
+
+        let (undo_before, undo_after) = session.uncompact().unwrap();
+        assert_eq!(
+            undo_before, compacted_len,
+            "uncompact starts from the compacted view"
+        );
+        assert_eq!(undo_after, 10, "full transcript restored");
+        let model_users = session
+            .transcript
+            .iter()
+            .filter(|m| m.role == Role::User)
+            .count();
+        assert_eq!(model_users, 10, "every original turn back in context");
+        assert!(
+            !session.was_compacted(),
+            "the compaction row is gone after undo"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_undo_is_a_noop_without_a_prior_compaction() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(SummarizingProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools(),
+            Box::new(HeadlessPresenter::new(false)),
+            Config::default(),
+            ".",
+        )
+        .unwrap();
+        session.transcript.push(Message::user("just one"));
+        let (before, after) = session.uncompact().unwrap();
+        assert_eq!((before, after), (1, 1), "nothing to undo");
     }
 
     #[tokio::test]

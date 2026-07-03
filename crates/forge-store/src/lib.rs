@@ -1827,6 +1827,32 @@ impl Store {
         Ok(())
     }
 
+    /// Undo a compaction: reactivate every soft-deleted message and drop the stored summary row.
+    /// Returns `false` (no-op) if the session was never compacted (no `session_compaction` row).
+    pub fn uncompact_session_store(&self, session_id: &str) -> Result<bool> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let had_compaction: bool = tx.query_row(
+            "SELECT COUNT(*) FROM session_compaction WHERE session_id = ?1",
+            [session_id],
+            |row| row.get::<_, i64>(0),
+        )? > 0;
+        if !had_compaction {
+            tx.commit()?;
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE message SET active = 1 WHERE session_id = ?1",
+            [session_id],
+        )?;
+        tx.execute(
+            "DELETE FROM session_compaction WHERE session_id = ?1",
+            [session_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Every active message of a session in turn order, each joined to its usage row so a
     /// replay can show the model, token counts, cost, and wall-clock time of each turn
     /// (docs/features/session-replay.md). Unlike [`load_messages`](Self::load_messages) this
@@ -2983,6 +3009,47 @@ mod tests {
             full[0].content, "message 0",
             "the compacted-away first turn survives"
         );
+    }
+
+    #[test]
+    fn uncompact_session_store_reactivates_messages_and_drops_the_summary() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        for i in 0..10 {
+            let role = if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            };
+            store
+                .add_message(&sid, i, role, &format!("message {i}"), None)
+                .unwrap();
+        }
+        store.compact_session_store(&sid, "SUMMARY", 3).unwrap();
+        assert_eq!(
+            store.load_messages(&sid).unwrap().len(),
+            4,
+            "summary + 3 recent"
+        );
+
+        assert!(store.uncompact_session_store(&sid).unwrap());
+        assert!(!store.session_has_compaction(&sid).unwrap());
+        assert_eq!(
+            store.load_messages(&sid).unwrap().len(),
+            10,
+            "every message reactivated, no summary marker"
+        );
+    }
+
+    #[test]
+    fn uncompact_session_store_is_a_no_op_without_a_prior_compaction() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        store
+            .add_message(&sid, 0, Role::User, "hello", None)
+            .unwrap();
+        assert!(!store.uncompact_session_store(&sid).unwrap());
+        assert_eq!(store.load_messages(&sid).unwrap().len(), 1);
     }
 
     #[test]
