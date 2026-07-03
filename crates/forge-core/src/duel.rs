@@ -39,6 +39,7 @@ const DUEL_TOOLS: &[&str] = &[
 ];
 
 /// One model's result in a duel — everything the picker needs to render a comparable row.
+#[derive(Debug, Clone)]
 pub struct DuelCandidate {
     pub model: String,
     pub child_id: String,
@@ -57,6 +58,7 @@ pub struct DuelCandidate {
 }
 
 /// The full result of one `/duel <task>` run, ready for the picker.
+#[derive(Debug, Clone)]
 pub struct DuelReport {
     pub task: String,
     pub candidates: Vec<DuelCandidate>,
@@ -154,8 +156,18 @@ pub async fn run(
             .store
             .create_child_session(".", &mode_label, parent_id)
             .map_err(CoreError::from)?;
-        let guard = worktree::WorktreeGuard::create(&ctx.repo_root, &child_id)
-            .map_err(|e| CoreError::Internal(format!("worktree create failed for {model}: {e}")))?;
+        let guard = {
+            let repo_root = ctx.repo_root.clone();
+            let cid = child_id.clone();
+            tokio::task::spawn_blocking(move || worktree::WorktreeGuard::create(&repo_root, &cid))
+                .await
+                .map_err(|e| {
+                    CoreError::Internal(format!("worktree create task failed for {model}: {e}"))
+                })?
+                .map_err(|e| {
+                    CoreError::Internal(format!("worktree create failed for {model}: {e}"))
+                })?
+        };
         let wt_path = guard.path().to_path_buf();
         let branch = guard.branch().to_string();
         guards.push(guard);
@@ -209,10 +221,28 @@ pub async fn run(
 
             // Snapshot uncommitted edits onto the candidate's branch — both the diffstat below
             // and the eventual winner merge diff HEAD..branch and would see nothing otherwise.
-            if let Err(e) = worktree::commit_worktree(&wt_path) {
-                tracing::warn!("duel worktree snapshot failed for {child_id}: {e}");
+            let commit_res = {
+                let wt_path = wt_path.clone();
+                tokio::task::spawn_blocking(move || worktree::commit_worktree(&wt_path)).await
+            };
+            match commit_res {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => tracing::warn!("duel worktree snapshot failed for {child_id}: {e}"),
+                Err(e) => {
+                    tracing::warn!("duel worktree snapshot task failed for {child_id}: {e}")
+                }
             }
-            let (files_changed, added, removed) = diffstat(&repo_root, &branch);
+            let (files_changed, added, removed) = {
+                let repo_root = repo_root.clone();
+                let branch = branch.clone();
+                match tokio::task::spawn_blocking(move || diffstat(&repo_root, &branch)).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("duel diffstat task failed for {child_id}: {e}");
+                        (0, 0, 0)
+                    }
+                }
+            };
             let tests_passed = run_tests_in(&wt_path).await;
             if tests_passed == Some(false) {
                 ok = false;

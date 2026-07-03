@@ -200,8 +200,6 @@ pub fn month_bounds_local(now: DateTime<Local>) -> (i64, i64) {
 pub enum StoreError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
-    #[error("store lock poisoned")]
-    Lock,
     #[error("connection pool: {0}")]
     Pool(String),
     #[error("portable metadata JSON: {0}")]
@@ -635,7 +633,7 @@ impl Store {
                 conn.pragma_update(None, "journal_mode", "WAL")?;
             }
             // Migrate before schema so old DBs get the composite PK before CREATE TABLE IF NOT EXISTS no-ops.
-            let _ = migrate_subscription_usage(&conn);
+            migrate_subscription_usage(&conn)?;
             conn.execute_batch(schema::SCHEMA)?;
             // Versioned migrations (PRAGMA user_version). Folds the historic ad-hoc ADD COLUMN
             // migrations and the UNIQUE(session_id, seq) index; refuses a DB from a newer build.
@@ -1714,7 +1712,7 @@ impl Store {
                 [session_id],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()?;
         Ok(json
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default())
@@ -2045,7 +2043,7 @@ impl Store {
                 [session_id],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()?;
         let mut stmt = conn.prepare_cached(
             "SELECT role, content, model, tool_calls_json, tool_call_id, visibility
              FROM message WHERE session_id = ?1 AND active = 1 ORDER BY seq",
@@ -2672,7 +2670,7 @@ impl Store {
                 (repo_root, rel_path),
                 |r| r.get::<_, String>(0),
             )
-            .ok();
+            .optional()?;
         Ok(hash)
     }
 

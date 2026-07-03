@@ -698,7 +698,10 @@ async fn run_external_agent(
         .with_context(|| format!("spawning `{bin}` — is it installed and on PATH?"))?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(problem.as_bytes()).await.ok();
+        stdin
+            .write_all(problem.as_bytes())
+            .await
+            .context("feeding problem to benchmark child via stdin")?;
         stdin.shutdown().await.ok();
     }
 

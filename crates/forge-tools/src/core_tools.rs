@@ -1162,91 +1162,100 @@ impl Tool for SearchTool {
             None
         };
 
-        let mut matches: Vec<String> = Vec::new();
-        let mut stack = vec![std::path::PathBuf::from(root)];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    continue; // hidden files + dirs (.git, .venv, …)
-                }
-                let path = entry.path();
-                let Ok(ft) = entry.file_type() else { continue };
-                if ft.is_dir() {
-                    // Skip heavy vendor/build dirs so non-Rust repos (node_modules, venv, …) don't
-                    // bury real results. (`target` is now skipped only as a directory.)
-                    if SEARCH_SKIP_DIRS.contains(&name.as_str()) {
-                        continue;
+        // Offload the recursive walk + per-file reads to a blocking thread so a large-repo search
+        // doesn't stall the async executor (and any concurrent subagents/streams) while it runs.
+        let root = root.to_string();
+        let query = query.to_string();
+        tokio::task::spawn_blocking(move || -> Result<String, ToolError> {
+            let mut matches: Vec<String> = Vec::new();
+            let mut stack = vec![std::path::PathBuf::from(&root)];
+            while let Some(dir) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with('.') {
+                        continue; // hidden files + dirs (.git, .venv, …)
                     }
-                    stack.push(path);
-                } else {
-                    let rel = path.strip_prefix(root).unwrap_or(&path);
-                    if let Some(ref fg) = file_glob {
-                        if !fg.is_match(rel) {
+                    let path = entry.path();
+                    let Ok(ft) = entry.file_type() else { continue };
+                    if ft.is_dir() {
+                        // Skip heavy vendor/build dirs so non-Rust repos (node_modules, venv, …) don't
+                        // bury real results. (`target` is now skipped only as a directory.)
+                        if SEARCH_SKIP_DIRS.contains(&name.as_str()) {
                             continue;
                         }
-                    }
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        let rel_display = rel.display();
-                        let lines: Vec<&str> = content.lines().collect();
-                        let hits: Vec<usize> = lines
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, line)| {
-                                if let Some(ref re) = re {
-                                    re.is_match(line)
-                                } else {
-                                    line.contains(query)
-                                }
-                            })
-                            .map(|(i, _)| i)
-                            .collect();
-                        if hits.is_empty() {
-                            continue;
-                        }
-                        if context == 0 {
-                            for &i in &hits {
-                                matches.push(format!(
-                                    "{rel_display}:{}: {}",
-                                    i + 1,
-                                    lines[i].trim_end()
-                                ));
-                                if matches.len() >= SEARCH_MATCH_CAP {
-                                    matches
-                                        .push(format!("… (capped at {SEARCH_MATCH_CAP} matches)"));
-                                    return Ok(matches.join("\n"));
-                                }
+                        stack.push(path);
+                    } else {
+                        let rel = path.strip_prefix(&root).unwrap_or(&path);
+                        if let Some(ref fg) = file_glob {
+                            if !fg.is_match(rel) {
+                                continue;
                             }
-                        } else {
-                            for hunk in
-                                context_hunks(&rel_display.to_string(), &lines, &hits, context)
-                            {
-                                if !matches.is_empty() {
-                                    matches.push("--".into());
+                        }
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            let rel_display = rel.display();
+                            let lines: Vec<&str> = content.lines().collect();
+                            let hits: Vec<usize> = lines
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, line)| {
+                                    if let Some(ref re) = re {
+                                        re.is_match(line)
+                                    } else {
+                                        line.contains(query.as_str())
+                                    }
+                                })
+                                .map(|(i, _)| i)
+                                .collect();
+                            if hits.is_empty() {
+                                continue;
+                            }
+                            if context == 0 {
+                                for &i in &hits {
+                                    matches.push(format!(
+                                        "{rel_display}:{}: {}",
+                                        i + 1,
+                                        lines[i].trim_end()
+                                    ));
+                                    if matches.len() >= SEARCH_MATCH_CAP {
+                                        matches.push(format!(
+                                            "… (capped at {SEARCH_MATCH_CAP} matches)"
+                                        ));
+                                        return Ok(matches.join("\n"));
+                                    }
                                 }
-                                matches.push(hunk);
-                                if matches.iter().map(String::len).sum::<usize>()
-                                    >= SEARCH_CONTEXT_OUTPUT_MAX_BYTES
+                            } else {
+                                for hunk in
+                                    context_hunks(&rel_display.to_string(), &lines, &hits, context)
                                 {
-                                    matches.push(
-                                        "… (capped — narrow the query or file_pattern)".into(),
-                                    );
-                                    return Ok(matches.join("\n"));
+                                    if !matches.is_empty() {
+                                        matches.push("--".into());
+                                    }
+                                    matches.push(hunk);
+                                    if matches.iter().map(String::len).sum::<usize>()
+                                        >= SEARCH_CONTEXT_OUTPUT_MAX_BYTES
+                                    {
+                                        matches.push(
+                                            "… (capped — narrow the query or file_pattern)".into(),
+                                        );
+                                        return Ok(matches.join("\n"));
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-        }
-        if matches.is_empty() {
-            Ok(format!("no matches for '{query}'"))
-        } else {
-            Ok(matches.join("\n"))
-        }
+            if matches.is_empty() {
+                Ok(format!("no matches for '{query}'"))
+            } else {
+                Ok(matches.join("\n"))
+            }
+        })
+        .await
+        .map_err(|e| ToolError::Failed(format!("search task failed: {e}")))?
     }
 }
 

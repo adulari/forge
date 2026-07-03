@@ -135,6 +135,7 @@ pub fn resolve_child_address(
 }
 
 /// One requested child agent, parsed from the `spawn_agents` arguments.
+#[derive(Debug, Clone)]
 pub struct AgentRequest {
     pub agent: String,
     pub task: String,
@@ -177,7 +178,7 @@ pub fn parse_requests(
 /// A request resolved against the loaded agent types — owned so it can move into a spawned
 /// task. A named agent supplies its system prompt / tool subset / pinned tier; an unknown or
 /// inline (`general`) agent falls back to the default read-only investigator.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ResolvedAgent {
     pub name: String,
     pub task: String,
@@ -299,6 +300,7 @@ pub fn rewrite_args_for_worktree(args: &Value, worktree_root: &Path) -> Value {
 }
 
 /// The result of running one child agent.
+#[derive(Debug, Clone)]
 pub struct SubagentOutcome {
     pub final_text: String,
     pub ok: bool,
@@ -785,20 +787,34 @@ pub async fn orchestrate(
         // Decide whether this child gets an isolated worktree. We create the WorktreeGuard here
         // (on the orchestrator task, before spawning) so any creation error is visible immediately
         // and doesn't kill an already-running child task.
-        let maybe_guard =
-            if isolation_enabled && repo_is_git && is_write_capable(&resolved, &full_registry) {
-                match worktree::WorktreeGuard::create(&ctx.repo_root, &child_id) {
-                    Ok(g) => Some(g),
-                    Err(e) => {
-                        tracing::warn!(
+        let maybe_guard = if isolation_enabled
+            && repo_is_git
+            && is_write_capable(&resolved, &full_registry)
+        {
+            let repo_root = ctx.repo_root.clone();
+            let cid = child_id.clone();
+            match tokio::task::spawn_blocking(move || {
+                worktree::WorktreeGuard::create(&repo_root, &cid)
+            })
+            .await
+            {
+                Ok(Ok(g)) => Some(g),
+                Ok(Err(e)) => {
+                    tracing::warn!(
                         "worktree create failed for {child_id}: {e} — running without isolation"
                     );
-                        None
-                    }
+                    None
                 }
-            } else {
-                None
-            };
+                Err(e) => {
+                    tracing::warn!(
+                            "worktree create task failed for {child_id}: {e} — running without isolation"
+                        );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         // Build the child context, injecting the worktree root when applicable.
         let child_ctx = AgentCtx {
@@ -847,26 +863,51 @@ pub async fn orchestrate(
                 // Snapshot the child's UNCOMMITTED edits onto its branch first —
                 // merge_worktree_back diffs HEAD..branch, and a child never commits on its own,
                 // so without this every edit was silently dropped ("clean" merge, work lost).
-                if let Err(e) = worktree::commit_worktree(guard.path()) {
-                    tracing::warn!("worktree snapshot failed for {child_id}: {e}");
-                    text.push_str(&format!("\n[worktree snapshot failed: {e}]"));
-                    ok = false;
+                let commit_res = {
+                    let path = guard.path().to_path_buf();
+                    tokio::task::spawn_blocking(move || worktree::commit_worktree(&path)).await
+                };
+                match commit_res {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!("worktree snapshot failed for {child_id}: {e}");
+                        text.push_str(&format!("\n[worktree snapshot failed: {e}]"));
+                        ok = false;
+                    }
+                    Err(e) => {
+                        tracing::warn!("worktree snapshot task failed for {child_id}: {e}");
+                        text.push_str(&format!("\n[worktree snapshot task failed: {e}]"));
+                        ok = false;
+                    }
                 }
                 // Hold the merge lock for the duration of the git apply so concurrent finishers
                 // don't race on the index. Drop guard AFTER merge so the branch still exists.
                 let _lock = merge_lock.lock().await;
-                match worktree::merge_worktree_back(&repo_root, &branch) {
-                    Ok(report) if report.conflicted_files.is_empty() => {
+                let merge_res = {
+                    let repo_root = repo_root.clone();
+                    let branch = branch.clone();
+                    tokio::task::spawn_blocking(move || {
+                        worktree::merge_worktree_back(&repo_root, &branch)
+                    })
+                    .await
+                };
+                match merge_res {
+                    Ok(Ok(report)) if report.conflicted_files.is_empty() => {
                         // Clean merge — nothing to add.
                     }
-                    Ok(report) => {
+                    Ok(Ok(report)) => {
                         let conflicts = report.conflicted_files.join(", ");
                         text.push_str(&format!("\n[worktree merge conflicts in: {conflicts}]"));
                         ok = false;
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::warn!("merge_worktree_back failed for {child_id}: {e}");
                         text.push_str(&format!("\n[worktree merge failed: {e}]"));
+                        ok = false;
+                    }
+                    Err(e) => {
+                        tracing::warn!("merge_worktree_back task failed for {child_id}: {e}");
+                        text.push_str(&format!("\n[worktree merge task failed: {e}]"));
                         ok = false;
                     }
                 }

@@ -1205,10 +1205,13 @@ mod tests {
         let store = Arc::new(crate::open_store().unwrap());
         let vapid_public;
         let notifier = {
-            let n = Arc::new(crate::push::PushNotifier::with_key(
-                store.clone(),
-                crate::push::VapidKey::from_scalar(&[9u8; 32]),
-            ));
+            let n = Arc::new(
+                crate::push::PushNotifier::with_key(
+                    store.clone(),
+                    crate::push::VapidKey::from_scalar(&[9u8; 32]),
+                )
+                .unwrap(),
+            );
             vapid_public = n.public_key_b64url();
             n
         };

@@ -278,10 +278,10 @@ fn transfer_permissions(values: &[serde_json::Value], config_dst: &std::path::Pa
         .append(true)
         .open(config_dst)
     {
-        Ok(mut f) => {
-            let _ = write!(f, "{header}{blocks}");
-            count
-        }
+        Ok(mut f) => match write!(f, "{header}{blocks}") {
+            Ok(()) => count,
+            Err(_) => 0,
+        },
         Err(_) => 0,
     }
 }

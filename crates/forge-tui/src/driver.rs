@@ -57,6 +57,7 @@ pub enum MouseKind {
 }
 
 /// An input event from the terminal — either a keystroke or a bracketed paste.
+#[derive(Debug, Clone)]
 pub enum InputEvent {
     Key(KeyKind),
     /// A bracketed paste: the terminal wrapped the content in `\x1b[200~…\x1b[201~` and

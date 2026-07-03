@@ -25,6 +25,7 @@ const ERRRED: Color = Color::Rgb(243, 92, 92);
 const FG: Color = Color::Rgb(208, 213, 224);
 
 /// One selectable row: a primary `label` and a dim `hint` (e.g. transport + source).
+#[derive(Debug, Clone)]
 pub struct SelectItem {
     pub label: String,
     pub hint: String,

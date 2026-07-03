@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes128Gcm, Nonce};
+use anyhow::Context;
 use base64::Engine;
 use hkdf::Hkdf;
 use p256::ecdsa::signature::Signer;
@@ -455,18 +456,21 @@ pub(crate) struct PushNotifier {
 
 impl PushNotifier {
     pub(crate) fn new(store: Arc<forge_store::Store>) -> anyhow::Result<Self> {
-        Ok(Self::with_key(store, VapidKey::load_or_create()?))
+        Self::with_key(store, VapidKey::load_or_create()?)
     }
 
-    pub(crate) fn with_key(store: Arc<forge_store::Store>, vapid: VapidKey) -> Self {
-        Self {
+    pub(crate) fn with_key(
+        store: Arc<forge_store::Store>,
+        vapid: VapidKey,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
             vapid,
             store,
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(8))
                 .build()
-                .expect("reqwest client"),
-        }
+                .context("building reqwest client for push notifier")?,
+        })
     }
 
     pub(crate) fn public_key_b64url(&self) -> String {

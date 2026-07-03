@@ -62,7 +62,7 @@ impl HostFunction {
 /// otherwise hang the session unrecoverably (tokio task-abort can only fire at an await point,
 /// and a synchronous QuickJS interpretation never reaches one), and unbounded string/array
 /// growth would OOM the whole process rather than fail the one script.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub struct Limits {
     /// QuickJS heap ceiling; an allocation past it fails and surfaces as a script error.
     pub memory_bytes: usize,

@@ -117,7 +117,9 @@ fn build_watcher(
         .name("forge-lattice-reindex".into())
         .spawn(move || {
             run_reindex_worker(rx, coalesce, |path| {
-                let _ = lattice.reindex_path(path);
+                if let Err(e) = lattice.reindex_path(path) {
+                    tracing::warn!("lattice reindex of {path:?} failed: {e}");
+                }
             });
         })
         .map_err(|e| e.to_string())?;
