@@ -149,5 +149,6 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::SelfMcp { action } => self_mcp_cmd(action),
         Command::Schedule { cmd } => schedule_cmd(cmd),
         Command::Queue { cmd } => queue_cmd(cmd),
+        Command::Scoreboard => scoreboard_cmd(),
     }
 }

@@ -1574,6 +1574,36 @@ impl Store {
             .collect())
     }
 
+    /// The per-model win/loss ledger behind [`Store::duel_boosts`], for the scoreboard view:
+    /// `(model, wins, losses, boost)`, most-boosted first. Same source (`duel_outcome`) and the
+    /// same boost math, so what the scoreboard shows is exactly what routing applies.
+    pub fn model_scoreboard(&self, repo_key: &str) -> Result<Vec<(String, i64, i64, f64)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT model, SUM(won), COUNT(*) FROM duel_outcome
+             WHERE repo_key = ?1 GROUP BY model",
+        )?;
+        let rows = stmt
+            .query_map([repo_key], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut out: Vec<(String, i64, i64, f64)> = rows
+            .into_iter()
+            .map(|(model, wins, total)| {
+                let losses = total - wins;
+                let boost = ((wins - losses) as f64 * 0.5).clamp(-2.0, 2.0);
+                (model, wins, losses, boost)
+            })
+            .collect();
+        out.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(out)
+    }
+
     /// Snapshot of models still benched as of `now` (epoch secs) — cooldown not yet elapsed.
     pub fn benched_models(&self, now: i64) -> Result<forge_types::ModelHealth> {
         let conn = self.lock()?;
@@ -4335,6 +4365,34 @@ mod tests {
 
         assert!(store.remove_queue_task(&id).unwrap());
         assert_eq!(store.list_queue_tasks(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn scoreboard_mirrors_duel_boost_math_and_sorts_by_boost() {
+        let store = Store::open_in_memory().unwrap();
+        let repo = "/repo/x";
+        assert!(store.model_scoreboard(repo).unwrap().is_empty());
+        for _ in 0..3 {
+            store
+                .record_duel_outcome(repo, "free::fast", true, "t")
+                .unwrap();
+        }
+        store
+            .record_duel_outcome(repo, "free::fast", false, "t")
+            .unwrap();
+        store
+            .record_duel_outcome(repo, "paid::big", false, "t")
+            .unwrap();
+
+        let rows = store.model_scoreboard(repo).unwrap();
+        assert_eq!(rows.len(), 2);
+        // (3 wins - 1 loss) * 0.5 = +1.0, sorted first; (0 - 1) * 0.5 = -0.5 second.
+        assert_eq!(rows[0], ("free::fast".into(), 3, 1, 1.0));
+        assert_eq!(rows[1], ("paid::big".into(), 0, 1, -0.5));
+        // The scoreboard's boost equals what routing actually receives.
+        let boosts = store.duel_boosts(repo).unwrap();
+        assert_eq!(boosts.get("free::fast"), Some(&1.0));
+        assert_eq!(boosts.get("paid::big"), Some(&-0.5));
     }
 
     #[test]

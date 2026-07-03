@@ -42,6 +42,12 @@ All notable changes to Forge are documented here. The format follows
   runs. Migration 0005 (`queue_task`, machine-local like `schedule`).
 - **Mock provider**: a `mock:write` / "create a file" trigger that does one `write_file`
   round-trip — exercises diff-preview, worktree-commit, and queue-drain paths offline.
+- **Shadow routing + `forge scoreboard`**: `forge queue run --shadow` re-runs each task that
+  finished `done` on a free/subscription model (`FORGE_MESH__CREDIT_MODE=strict` overlay — a
+  shadow never spends paid credit) in a throwaway worktree, and records whether it kept up into
+  the same per-repo `duel_outcome` boosts `/duel` feeds — ambient routing learning from real
+  work instead of manual arenas. `forge scoreboard` shows the ledger: wins, losses, and the
+  exact boost routing applies in this repo.
 
 ### Fixed
 - **Worktree snapshots no longer leak session checkpoints**: the child session running inside an

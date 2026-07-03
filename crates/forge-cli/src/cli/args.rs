@@ -608,6 +608,9 @@ pub(crate) enum Command {
         #[command(subcommand)]
         cmd: Option<QueueCmd>,
     },
+    /// The model scoreboard for this repo: wins/losses and the resulting routing boost per
+    /// model, learned from `/duel` arenas and `forge queue run --shadow` passes.
+    Scoreboard,
 }
 
 #[derive(Subcommand)]
@@ -982,6 +985,12 @@ pub(crate) enum QueueCmd {
         /// Forward --mock to each run (offline deterministic provider; for tests/demos).
         #[arg(long)]
         mock: bool,
+        /// After each task that finishes `done`, re-run it on a free/subscription model
+        /// (credit-mode strict — a shadow never spends paid credit) in a throwaway worktree,
+        /// and record whether it kept up into the per-repo routing boosts `/duel` feeds.
+        /// See `forge scoreboard`.
+        #[arg(long)]
+        shadow: bool,
     },
     /// The morning digest: outcomes, branches, costs, and replay pointers, most recent first.
     Report,
