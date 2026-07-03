@@ -436,13 +436,15 @@ pub async fn run_subagent(
         }
     }
 
-    // The loop ended without the model producing a final answer (it kept calling tools until the
-    // step cap). Don't report that as an empty SUCCESS — the parent model would assemble a blank
+    // The model produced no usable final answer — either it kept calling tools until the step
+    // cap, or it answered with a blank/whitespace-only string (`is_empty()` alone missed "\n").
+    // Don't report that as an empty SUCCESS — the parent model would assemble a blank
     // `[agent N]` block and proceed as if the child finished its task.
-    if final_text.is_empty() {
+    if final_text.trim().is_empty() {
         ok = false;
         final_text = format!(
-            "error: subagent hit the {max_steps}-step limit without producing a final answer"
+            "error: subagent produced no usable final answer (blank output, or it hit the \
+             {max_steps}-step limit without answering)"
         );
     }
 
@@ -554,6 +556,23 @@ pub async fn orchestrate(
     let mut ids: Vec<String> = vec![String::new(); n];
     let mut all_ok = true;
 
+    // Tokio does NOT cascade-cancel tasks spawned inside an aborted task. Without this guard, a
+    // user interrupt (Esc) aborts the turn — dropping this function's future — while every
+    // already-spawned child keeps running to completion in the background: still calling models
+    // (spend), still executing write/shell tools, still merging worktree branches back into the
+    // shared tree, all AFTER the user believed the operation was cancelled. Holding the handles
+    // in a drop-guard aborts the children the moment this future is dropped; on normal
+    // completion the tasks are already finished and `abort()` is a no-op.
+    struct AbortChildrenOnDrop(Vec<tokio::task::JoinHandle<()>>);
+    impl Drop for AbortChildrenOnDrop {
+        fn drop(&mut self) {
+            for handle in &self.0 {
+                handle.abort();
+            }
+        }
+    }
+    let mut child_tasks = AbortChildrenOnDrop(Vec::with_capacity(n));
+
     // Serialize merge-back across concurrently-finishing children so `git apply` doesn't race on
     // the index. One merge at a time is fine: the patch itself is generated from the branch diff,
     // not the index, so ordering is deterministic.
@@ -655,7 +674,7 @@ pub async fn orchestrate(
         let sem = Arc::clone(&sem);
         let merge_lock = Arc::clone(&merge_lock);
         let repo_root = ctx.repo_root.clone();
-        tokio::spawn(async move {
+        child_tasks.0.push(tokio::spawn(async move {
             // Acquire the provider sub-cap FIRST (block here without holding a global permit, so a
             // saturated provider can't head-of-line-block children bound for OTHER providers), then
             // the global concurrency permit. Both are held for the child's lifetime.
@@ -720,7 +739,7 @@ pub async fn orchestrate(
                 ok,
                 cost,
             }));
-        });
+        }));
     }
     drop(tx); // close the channel once every task holds its own clone
 
@@ -749,7 +768,19 @@ pub async fn orchestrate(
 
     let mut combined = String::new();
     for (i, slot) in slots.into_iter().enumerate() {
-        let (agent, text) = slot.unwrap_or_else(|| ("?".into(), "error: no result".into()));
+        let (agent, text) = match slot {
+            Some(pair) => pair,
+            // The child's task ended without ever sending Done — it panicked (or was aborted).
+            // That MUST count as a failure: `all_ok` feeds the parent's tool-call status, and a
+            // batch with a crashed child is not "ok" just because its siblings succeeded.
+            None => {
+                all_ok = false;
+                (
+                    "?".into(),
+                    "error: no result (the agent crashed before reporting)".into(),
+                )
+            }
+        };
         combined.push_str(&format!("[agent {}: {}]\n{}\n\n", i + 1, agent, text));
     }
     Ok((combined.trim_end().to_string(), all_ok))
@@ -1273,6 +1304,184 @@ mod tests {
             peak.load(SeqCst),
             1,
             "max_per_provider=1 must serialize children sharing a provider (peak in-flight)"
+        );
+    }
+
+    /// Answers instantly with a whitespace-only string — `is_empty()` alone let this through as
+    /// a SUCCESSFUL child ("\n" is not empty), handing the parent a blank agent block marked ok.
+    struct WhitespaceProvider;
+    #[async_trait::async_trait]
+    impl Provider for WhitespaceProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[forge_types::Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            Ok(forge_provider::ModelResponse {
+                content: "\n  \n".into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_whitespace_only_answer_is_a_failure_not_a_blank_success() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let child = store
+            .create_child_session(".", "default", "parent")
+            .unwrap();
+        let router = Arc::new(FixedRouter {
+            model: "openai::gpt-test".into(),
+            fallbacks: vec![],
+        });
+        let ctx = ctx_with(Arc::new(WhitespaceProvider), router, store);
+        let resolved = resolve(
+            &AgentRequest {
+                agent: "general".into(),
+                task: "t".into(),
+            },
+            &ctx.agents,
+        );
+        let decision = route_child(&ctx, &resolved, BudgetState::default()).await;
+        let mut on_delta = |_: StreamEvent| {};
+        let out = run_subagent(
+            &ctx,
+            &child,
+            &resolved,
+            decision,
+            BudgetState::default(),
+            &mut on_delta,
+        )
+        .await
+        .unwrap();
+        assert!(!out.ok, "blank output must not be a successful child");
+        assert!(
+            out.final_text.contains("no usable final answer"),
+            "explains itself: {}",
+            out.final_text
+        );
+    }
+
+    /// A provider that panics mid-turn — the child's spawned task dies without ever sending
+    /// `Done`, which must surface as a failed batch, not a silent "ok".
+    struct PanickingProvider;
+    #[async_trait::async_trait]
+    impl Provider for PanickingProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[forge_types::Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            panic!("simulated provider crash");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicked_child_fails_the_batch_not_silent_ok() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let router = Arc::new(FixedRouter {
+            model: "openai::gpt-test".into(),
+            fallbacks: vec![],
+        });
+        let ctx = ctx_with(Arc::new(PanickingProvider), router, store);
+        let requests = vec![AgentRequest {
+            agent: "general".into(),
+            task: "t".into(),
+        }];
+        let mut sink = |_: Lifecycle| {};
+        let (out, ok) = orchestrate(
+            &ctx,
+            "parent",
+            requests,
+            BudgetState::default(),
+            8,
+            &mut sink,
+        )
+        .await
+        .unwrap();
+        assert!(!ok, "a crashed child must not report a successful batch");
+        assert!(
+            out.contains("error: no result"),
+            "placeholder present: {out}"
+        );
+    }
+
+    /// A provider whose completions count — used to prove that dropping `orchestrate`'s future
+    /// (what a turn abort does) actually cancels in-flight children instead of leaking them to
+    /// run (and spend, and write) in the background.
+    struct SlowCountingProvider {
+        completed: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl Provider for SlowCountingProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[forge_types::Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            self.completed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(forge_provider::ModelResponse {
+                content: "child done".into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_orchestrate_cancels_inflight_children() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let completed = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(SlowCountingProvider {
+            completed: Arc::clone(&completed),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "openai::gpt-test".into(),
+            fallbacks: vec![],
+        });
+        let ctx = ctx_with(provider, router, store);
+        let requests: Vec<_> = (0..3)
+            .map(|i| AgentRequest {
+                agent: "general".into(),
+                task: format!("t{i}"),
+            })
+            .collect();
+
+        // Poll orchestrate long enough for the children to spawn and start their slow model
+        // calls, then DROP it — exactly what `JoinHandle::abort()` on the turn task does.
+        {
+            let mut sink = |_: Lifecycle| {};
+            let fut = orchestrate(
+                &ctx,
+                "parent",
+                requests,
+                BudgetState::default(),
+                8,
+                &mut sink,
+            );
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(100), fut).await;
+            // timeout dropped the future here
+        }
+
+        // Give any leaked child ample time to finish its 300ms sleep and increment the counter.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(
+            completed.load(SeqCst),
+            0,
+            "children must be aborted when the orchestrating turn is dropped, not keep \
+             running (and spending / writing) in the background"
         );
     }
 

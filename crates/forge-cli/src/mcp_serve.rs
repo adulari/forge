@@ -70,7 +70,6 @@ struct SubagentSupport {
     parent_id: String,
     max_agents: usize,
     max_concurrency: usize,
-    depth: usize,
 }
 
 struct ForgeMcp {
@@ -466,9 +465,6 @@ impl ForgeMcp {
             min_context_tokens: None,
         };
 
-        // Mark anything we spawn as a deeper subagent level so recursion is bounded (Phase 3c).
-        std::env::set_var(crate::FORGE_SUBAGENT_DEPTH_ENV, (s.depth + 1).to_string());
-
         // Report subagent lifecycle to the out-of-band sink (if the bridge gave us one) so the
         // parent Forge TUI shows these children natively (RFC subagent-orchestration Phase 3c).
         let mut sink = std::env::var(forge_provider::SUBAGENT_SINK_ENV)
@@ -558,6 +554,14 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
+    // Publish depth+1 for any bridge subprocess our own children spawn (they inherit OUR env via
+    // `bridge_mcp_env`'s fallback read). Depth is a per-PROCESS constant, so write it exactly
+    // once HERE — during single-threaded init, before the server starts handling anything —
+    // never per-request: `handle_spawn_agents` used to `set_var` on every call, and a process-
+    // global env write racing a concurrent `getenv` on another thread is undefined behavior
+    // (the same hazard class the explicit `CheckpointContext` threading removed for
+    // FORGE_CHECKPOINT_*).
+    std::env::set_var(crate::FORGE_SUBAGENT_DEPTH_ENV, (depth + 1).to_string());
     let subagents = if config.mesh.subagents.enabled && depth < config.mesh.subagents.max_depth {
         // Same global store the parent uses — NOT a relative `.forge/forge.db`, which is a DIFFERENT
         // file (the parent's store lives in the per-user data dir). The divergence created spurious
@@ -589,7 +593,6 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
             parent_id,
             max_agents: config.mesh.subagents.max_agents,
             max_concurrency: config.mesh.subagents.max_concurrency,
-            depth,
         })
     } else {
         None
