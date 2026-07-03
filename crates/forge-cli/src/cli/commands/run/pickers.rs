@@ -120,6 +120,37 @@ pub(crate) fn checkpoint_rows(cps: &[forge_store::CheckpointRow]) -> Vec<forge_t
         .collect()
 }
 
+/// Build picker rows for a finished `/duel` report (docs/features/duel.md): one row per
+/// candidate, `id` = its worktree branch (what the Duel picker's Enter handling merges back),
+/// title = ok/fail badge + model, subtitle = diffstat / test badge / duration / cost / summary.
+pub(crate) fn duel_picker_rows(report: &forge_core::duel::DuelReport) -> Vec<forge_tui::PickerRow> {
+    report
+        .candidates
+        .iter()
+        .map(|c| {
+            let badge = if c.ok { "✓" } else { "✗" };
+            let tests = match c.tests_passed {
+                Some(true) => "tests ✓",
+                Some(false) => "tests ✗",
+                None => "tests –",
+            };
+            forge_tui::PickerRow {
+                id: c.branch.clone(),
+                title: format!("{badge} {}", c.model),
+                subtitle: format!(
+                    "{} files +{} -{} · {tests} · {:.1}s · ${:.4} · {}",
+                    c.files_changed,
+                    c.added,
+                    c.removed,
+                    c.duration_ms as f64 / 1000.0,
+                    c.cost_usd,
+                    c.summary,
+                ),
+            }
+        })
+        .collect()
+}
+
 /// Build the top-level provider list for the `/models` browser, with a stats heading.
 pub(crate) fn models_provider_view(
     cat: &forge_mesh::ModelCatalog,
@@ -463,6 +494,9 @@ pub(crate) async fn picker_accept(
                 app.note(&format!("⊕ model pinned: {model_id} (clear with /model)"));
             }
         }
+        // /duel resolves in the render loop (it needs to merge a worktree branch + drop guards
+        // that live only there), never here.
+        forge_tui::PickerKind::Duel => {}
         forge_tui::PickerKind::ResumeMode => {
             if row.id == "full" {
                 let n = {

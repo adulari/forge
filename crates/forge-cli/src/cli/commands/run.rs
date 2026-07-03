@@ -8,6 +8,15 @@ use forge_tui::{HeadlessPresenter, Presenter, TuiPresenter};
 
 use crate::*;
 
+/// A finished `/duel` result: the comparable report plus the still-alive worktree guards for
+/// every candidate (the picker owns picking a winner — merging it back and dropping every guard).
+/// Named so the background task ([`spawn_duel`]) and the done-signal drain that consumes it don't
+/// need to spell out the nested `Arc<Mutex<Option<(...)>>>` type.
+pub(crate) type PendingDuel = Option<(
+    forge_core::duel::DuelReport,
+    Vec<forge_core::worktree::WorktreeGuard>,
+)>;
+
 mod atfiles;
 pub(crate) use atfiles::*;
 mod copy;
@@ -281,8 +290,23 @@ pub(crate) async fn build_session_with_self_mcp(
         .ok()
         .and_then(|s| s.all_model_contexts().ok())
         .unwrap_or_default();
-    let (provider, router) =
-        build_provider_and_router(&config, mock, pin, catalog.clone(), ctx_windows);
+    // Per-repo routing-learning boosts from past `/duel` outcomes (docs/features/duel.md) — same
+    // repo-key convention as `Session::run_duel`'s recording side (the cwd's display string).
+    let repo_key = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let repo_boosts = crate::open_store()
+        .ok()
+        .and_then(|s| s.duel_boosts(&repo_key).ok())
+        .unwrap_or_default();
+    let (provider, router) = build_provider_and_router(
+        &config,
+        mock,
+        pin,
+        catalog.clone(),
+        ctx_windows,
+        repo_boosts,
+    );
 
     // Build the code-intelligence index up front so it can be shared between the model-facing
     // `lattice` tool and the turn's auto-injection (code-intelligence.md). Cheap to construct; it
@@ -1112,6 +1136,12 @@ pub(crate) async fn run_chat_tui(
     let mut loop_state: Option<LoopState> = None;
     let mut pending: Option<(String, std::sync::mpsc::Sender<ConfirmOutcome>)> = None;
     let mut pending_question: Option<std::sync::mpsc::Sender<String>> = None;
+    // `/duel`: the background task writes its finished report + still-alive worktree guards here
+    // (it can't return a value through `turn_handle`, a `JoinHandle<()>`); the done-signal drain
+    // below takes it and opens the picker. `duel_state` then holds it across picker frames until
+    // the user picks a winner (merge) or cancels (Esc discards every candidate).
+    let pending_duel: Arc<std::sync::Mutex<PendingDuel>> = Arc::new(std::sync::Mutex::new(None));
+    let mut duel_state: PendingDuel = None;
     // Lens filter set by `/assay --only`/`--skip`; consumed when the AssayChoice picker resolves.
     let mut assay_lenses: Vec<forge_types::FindingCategory> = Vec::new();
     // Scope set by `/assay --diff/--branch/--since/<path>`; consumed when picker resolves.
@@ -2000,6 +2030,19 @@ pub(crate) async fn run_chat_tui(
                                     args,
                                 ));
                             }
+                            DispatchOutcome::RunDuel { task } => {
+                                turn_gen += 1;
+                                turn_handle = Some(spawn_duel(
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                    task,
+                                    Arc::clone(&pending_duel),
+                                ));
+                            }
                             DispatchOutcome::StartLoop { prompt } => {
                                 turn_gen += 1;
                                 loop_state = Some(LoopState {
@@ -2167,6 +2210,12 @@ pub(crate) async fn run_chat_tui(
                         } else {
                             app.models_drilled = None;
                             app.models_pin_mode = false;
+                            if app.picker.kind == Some(forge_tui::PickerKind::Duel) {
+                                // Dropping `duel_state` drops every candidate's `WorktreeGuard`,
+                                // removing its worktree dir + branch — no merge, no routing record.
+                                duel_state = None;
+                                app.note("⚔ duel discarded — no candidate was merged");
+                            }
                             app.picker.close();
                         }
                     }
@@ -2246,6 +2295,51 @@ pub(crate) async fn run_chat_tui(
                                     app.note(&format!("✓ copied to clipboard ({chars} chars)"));
                                 }
                                 app.copy_candidates.clear();
+                            } else if kind == forge_tui::PickerKind::Duel {
+                                // Merge the picked branch back, record every candidate's outcome
+                                // (won only for the winner) so future routing in this repo softly
+                                // favors it, then drop every guard (removes every worktree+branch —
+                                // the winner's diff is already applied, so its branch isn't needed).
+                                if let Some((report, guards)) = duel_state.take() {
+                                    let repo_root = std::env::current_dir()
+                                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                    let repo_key = repo_root.display().to_string();
+                                    let winner_branch = row.id.clone();
+                                    let merge_note = match forge_core::duel::merge_winner(
+                                        &repo_root,
+                                        &winner_branch,
+                                    ) {
+                                        Ok(m) if m.conflicted_files.is_empty() => {
+                                            "merged cleanly".to_string()
+                                        }
+                                        Ok(m) => format!(
+                                            "merged with conflicts in: {}",
+                                            m.conflicted_files.join(", ")
+                                        ),
+                                        Err(e) => format!("merge failed: {e}"),
+                                    };
+                                    if let Ok(store) = crate::open_store() {
+                                        for c in &report.candidates {
+                                            let won = c.branch == winner_branch;
+                                            let _ = store.record_duel_outcome(
+                                                &repo_key,
+                                                &c.model,
+                                                won,
+                                                &report.task,
+                                            );
+                                        }
+                                    }
+                                    let winner_model = report
+                                        .candidates
+                                        .iter()
+                                        .find(|c| c.branch == winner_branch)
+                                        .map(|c| c.model.clone())
+                                        .unwrap_or_else(|| "?".to_string());
+                                    app.note(&format!(
+                                        "⚔ duel winner: {winner_model} — {merge_note}"
+                                    ));
+                                    drop(guards);
+                                }
                             } else if kind == forge_tui::PickerKind::Sessions
                                 && row.id.starts_with("observe:")
                             {
@@ -2822,6 +2916,19 @@ pub(crate) async fn run_chat_tui(
                                         args,
                                     ));
                                 }
+                                DispatchOutcome::RunDuel { task } => {
+                                    turn_gen += 1;
+                                    turn_handle = Some(spawn_duel(
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                        task,
+                                        Arc::clone(&pending_duel),
+                                    ));
+                                }
                                 DispatchOutcome::StartLoop { prompt } => {
                                     turn_gen += 1;
                                     loop_state = Some(LoopState {
@@ -3077,6 +3184,19 @@ pub(crate) async fn run_chat_tui(
                                         args,
                                     ));
                                 }
+                                DispatchOutcome::RunDuel { task } => {
+                                    turn_gen += 1;
+                                    turn_handle = Some(spawn_duel(
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                        task,
+                                        Arc::clone(&pending_duel),
+                                    ));
+                                }
                                 DispatchOutcome::StartLoop { prompt } => {
                                     turn_gen += 1;
                                     loop_state = Some(LoopState {
@@ -3177,6 +3297,22 @@ pub(crate) async fn run_chat_tui(
                 // turn so a later resume restores it exactly. Skipped when there's nothing to save.
                 if let Some(json) = app.view_snapshot_json() {
                     session.lock().await.save_view_snapshot(&json);
+                }
+                // `/duel`: a finished report is waiting in `pending_duel` — open the picker over
+                // its candidates (diffstat / test badge / duration / cost) and hold the report +
+                // worktree guards in `duel_state` until the user picks a winner or cancels.
+                if let Some((report, guards)) = pending_duel.lock().unwrap().take() {
+                    if report.candidates.is_empty() {
+                        app.note("⚔ duel produced no usable candidates");
+                    } else {
+                        let rows = duel_picker_rows(&report);
+                        app.picker.open_with(
+                            forge_tui::PickerKind::Duel,
+                            &format!("⚔ duel — pick the winner ({} candidates)", rows.len()),
+                            rows,
+                        );
+                        duel_state = Some((report, guards));
+                    }
                 }
                 // `/loop`: if this was a loop turn, decide whether to run another iteration.
                 if let Some(ls) = loop_state.take() {
@@ -3812,6 +3948,38 @@ pub(crate) fn spawn_saved_workflow(
         let mut sess = s.lock().await;
         if let Err(e) = sess.run_saved_workflow(&name, args).await {
             sess.notify_error(&format!("workflow '{name}' failed: {e}"));
+        }
+    })
+}
+
+/// Spawn `/duel <task>` as a background task (docs/features/duel.md): same busy/spinner/interrupt
+/// semantics as a normal turn. Unlike `run_saved_workflow`, the result isn't just a presenter
+/// event trail — the finished report + still-alive worktree guards must reach the render loop so
+/// it can open a picker over the candidates, so they're written into `pending_duel` for the
+/// done-signal drain to pick up.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_duel(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    done_tx: &std::sync::mpsc::Sender<u64>,
+    gen: u64,
+    app: &mut forge_tui::App,
+    busy: &mut bool,
+    busy_since: &mut std::time::Instant,
+    task: String,
+    pending_duel: Arc<std::sync::Mutex<PendingDuel>>,
+) -> tokio::task::JoinHandle<()> {
+    app.done = false;
+    app.tick = 0;
+    *busy = true;
+    *busy_since = std::time::Instant::now();
+    let s = session.clone();
+    let dt = done_tx.clone();
+    tokio::spawn(async move {
+        let _done = DoneGuard(dt, gen);
+        let mut sess = s.lock().await;
+        match sess.run_duel(&task).await {
+            Ok(result) => *pending_duel.lock().unwrap() = Some(result),
+            Err(e) => sess.notify_error(&format!("duel failed: {e}")),
         }
     })
 }

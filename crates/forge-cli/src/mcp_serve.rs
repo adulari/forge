@@ -568,8 +568,18 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         // empty sessions and broke the bridge task round-trip (the parent reloaded tasks from the
         // global db but mcp-serve wrote them to the project-local one).
         let store = Arc::new(crate::open_store()?);
-        let (provider, router) =
-            crate::build_provider_and_router(&config, false, None, None, Default::default());
+        let repo_key = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let repo_boosts = store.duel_boosts(&repo_key).unwrap_or_default();
+        let (provider, router) = crate::build_provider_and_router(
+            &config,
+            false,
+            None,
+            None,
+            Default::default(),
+            repo_boosts,
+        );
         let parent_id = store.create_session(".", &format!("{:?}", config.permission_mode))?;
         let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
             &config.mesh.subagents.agents_dir,

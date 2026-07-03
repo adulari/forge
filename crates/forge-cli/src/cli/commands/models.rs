@@ -51,6 +51,9 @@ pub(crate) fn build_provider_and_router(
     pin: Option<String>,
     catalog: Option<forge_mesh::ModelCatalog>,
     context_windows: std::collections::HashMap<String, u32>,
+    // Per-repo routing boosts learned from past `/duel` outcomes (docs/features/duel.md). Callers
+    // with no store (e.g. `mcp_serve`) pass an empty map — this is a pure no-op then.
+    repo_boosts: std::collections::HashMap<String, f64>,
 ) -> (Arc<dyn Provider>, Arc<dyn Router>) {
     let provider: Arc<dyn Provider> = if mock {
         Arc::new(MockProvider)
@@ -65,7 +68,8 @@ pub(crate) fn build_provider_and_router(
     };
     let mut heuristic = HeuristicRouter::new(config.clone())
         .with_pin(pin)
-        .with_context_windows(context_windows);
+        .with_context_windows(context_windows)
+        .with_repo_boosts(repo_boosts);
     if let Some(cat) = catalog {
         heuristic = heuristic.with_catalog(cat);
     }

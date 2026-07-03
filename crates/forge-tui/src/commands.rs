@@ -195,6 +195,11 @@ pub const COMMANDS: &[Command] = &[
         desc: "author and run a mesh-routed multi-agent workflow script for a goal, run a saved one, or list saved scripts",
         usage: "/workflow <goal> | /workflow run <name> [args] | /workflow list",
     },
+    Command {
+        name: "duel",
+        desc: "race 2-3 mesh models on the same task, each in its own worktree, then pick the winner",
+        usage: "/duel <task>",
+    },
 ];
 
 /// Subcommand for `/statusline`.
@@ -308,6 +313,9 @@ pub enum CommandAction {
     Statusline(StatuslineAction),
     /// Mesh-routed multi-agent workflow scripts (`/workflow`, docs/rfcs/forge-workflow.md).
     Workflow(WorkflowAction),
+    /// Model arena (`/duel <task>`, docs/features/duel.md): race 2-3 mesh models on the same task
+    /// concurrently, each in its own worktree, then let the user pick a winner.
+    Duel(String),
     /// Not a known command — the binary shows `unknown command: X`.
     Unknown(String),
 }
@@ -576,6 +584,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "lattice" | "lat" => CommandAction::Lattice(arg),
         "goal" | "objective" => CommandAction::Goal(arg),
         "loop" => CommandAction::Loop(arg),
+        "duel" => CommandAction::Duel(arg),
         "replay" => {
             // `/replay <id>` or `/replay <a> <b>`
             let mut ids = arg.splitn(2, char::is_whitespace);
@@ -866,6 +875,10 @@ pub enum PickerKind {
     /// sorted by tier (subscription → frontier → paid → free). Enter pins the selected model;
     /// selecting "mesh" clears the pin. Esc closes without changing anything.
     ModelPin,
+    /// Pick the winning candidate from a finished `/duel` run (docs/features/duel.md). Each row's
+    /// `id` is the candidate's worktree branch. Enter merges the winner back and discards the
+    /// rest; Esc discards every candidate (no merge, no routing-learning record).
+    Duel,
 }
 
 /// One row in an interactive picker: an opaque `id` the loop acts on, plus two display strings.
@@ -1057,6 +1070,11 @@ mod tests {
             parse_command("/loop fix all warnings"),
             CommandAction::Loop("fix all warnings".into())
         );
+        assert_eq!(
+            parse_command("/duel add pagination to the /users endpoint"),
+            CommandAction::Duel("add pagination to the /users endpoint".into())
+        );
+        assert_eq!(parse_command("/duel"), CommandAction::Duel(String::new()));
         assert_eq!(parse_command("/init"), CommandAction::Init);
         assert_eq!(
             parse_command("/plan add a cache layer"),

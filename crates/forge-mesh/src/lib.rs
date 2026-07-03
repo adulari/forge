@@ -137,6 +137,29 @@ pub trait Router: Send + Sync {
         self.route(prompt, budget, health, quota, effort, project)
             .await
     }
+
+    /// Route to the top-`n` DISTINCT-PROVIDER candidates for the same task (model arena / `/duel`):
+    /// each entry is a full [`RoutingDecision`] as if that model were the primary pick, so the
+    /// caller can run the same task concurrently across several models. The default just wraps a
+    /// single [`Router::route`] call (a one-candidate arena) so implementations that don't have a
+    /// natural notion of "next-best" (e.g. `FixedRouter` in tests) still satisfy the trait;
+    /// [`HeuristicRouter`] overrides this to actually rank alternatives.
+    #[allow(clippy::too_many_arguments)]
+    async fn route_candidates(
+        &self,
+        prompt: &str,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        project: &ProjectContext,
+        _n: usize,
+    ) -> Vec<RoutingDecision> {
+        vec![
+            self.route(prompt, budget, health, quota, effort, project)
+                .await,
+        ]
+    }
 }
 
 // --- Classification signals (weighted scoring; see `classify`). Capability over length. ---
@@ -307,6 +330,10 @@ pub struct HeuristicRouter {
     /// Known context-window sizes (model id → token count). Used to filter out models that
     /// cannot fit the current transcript during routing.
     context_windows: std::collections::HashMap<String, u32>,
+    /// Per-repo routing boost learned from past `/duel` outcomes (model id → boost). Applied as a
+    /// stable reorder over the ranked candidate list — a model that has won duels in THIS repo
+    /// floats above an otherwise-equally-ranked peer; empty = no-op (today's behaviour).
+    repo_boosts: std::collections::HashMap<String, f64>,
 }
 
 fn default_model_available(model: &str) -> bool {
@@ -556,6 +583,7 @@ impl HeuristicRouter {
             pricing,
             catalog: None,
             context_windows: std::collections::HashMap::new(),
+            repo_boosts: std::collections::HashMap::new(),
         }
     }
 
@@ -575,6 +603,12 @@ impl HeuristicRouter {
     /// current transcript.
     pub fn with_context_windows(mut self, windows: std::collections::HashMap<String, u32>) -> Self {
         self.context_windows = windows;
+        self
+    }
+
+    /// Attach per-repo routing boosts learned from past `/duel` outcomes (empty = no-op).
+    pub fn with_repo_boosts(mut self, boosts: std::collections::HashMap<String, f64>) -> Self {
+        self.repo_boosts = boosts;
         self
     }
 
@@ -602,7 +636,7 @@ impl HeuristicRouter {
         quota: &SubscriptionQuota,
         effort: Option<EffortLevel>,
     ) -> Vec<String> {
-        if self.auto_active() {
+        let candidates = if self.auto_active() {
             // Rank EVERY routable discovered model (not a top-N): the result feeds the failover
             // chain, and the mesh must keep trying down the full list rather than give up after a
             // handful when tens of usable free models remain. The primary pick is still the
@@ -619,11 +653,30 @@ impl HeuristicRouter {
                 quota,
                 effort,
             );
-            if !ranked.is_empty() {
-                return ranked;
+            if ranked.is_empty() {
+                self.config.candidates_for(tier)
+            } else {
+                ranked
             }
+        } else {
+            self.config.candidates_for(tier)
+        };
+        self.apply_repo_boosts(candidates)
+    }
+
+    /// Stable-reorder `candidates` by repo-learned boost, highest first. A model with no recorded
+    /// boost sorts as `0.0`, so ties among unboosted models keep their original (ranked) order —
+    /// `sort_by` is a stable sort. No-op when no boosts are attached.
+    fn apply_repo_boosts(&self, mut candidates: Vec<String>) -> Vec<String> {
+        if self.repo_boosts.is_empty() {
+            return candidates;
         }
-        self.config.candidates_for(tier)
+        candidates.sort_by(|a, b| {
+            let ba = self.repo_boosts.get(a).copied().unwrap_or(0.0);
+            let bb = self.repo_boosts.get(b).copied().unwrap_or(0.0);
+            bb.total_cmp(&ba)
+        });
+        candidates
     }
 
     /// Inject a deterministic provider-availability predicate (tests only).
@@ -983,6 +1036,54 @@ impl Router for HeuristicRouter {
                     .await
             }
         }
+    }
+
+    async fn route_candidates(
+        &self,
+        prompt: &str,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+        project: &ProjectContext,
+        n: usize,
+    ) -> Vec<RoutingDecision> {
+        let (tier, reason) = Self::classify(prompt, project);
+        let hints = RouteHints::from_prompt(prompt);
+        let ranked = self.ordered_usable_for_tier(
+            tier,
+            health,
+            hints,
+            quota,
+            effort,
+            budget.min_context_tokens,
+        );
+
+        // Distinct-provider top-n: a duel across three models of the SAME provider isn't a useful
+        // arena (correlated failure modes, same weights family in some setups) — one pick per
+        // provider, in the mesh's own rank order.
+        let mut seen = std::collections::HashSet::new();
+        let mut picks: Vec<String> = Vec::new();
+        for m in ranked {
+            let provider = forge_config::provider_of(&m).to_string();
+            if seen.insert(provider) {
+                picks.push(m);
+                if picks.len() >= n {
+                    break;
+                }
+            }
+        }
+
+        picks
+            .into_iter()
+            .enumerate()
+            .map(|(i, model)| RoutingDecision {
+                tier,
+                model,
+                rationale: format!("duel candidate #{} — {reason}", i + 1),
+                fallbacks: Vec::new(),
+            })
+            .collect()
     }
 }
 
@@ -2654,5 +2755,118 @@ mod tests {
                 "expected Trivial for {p:?}"
             );
         }
+    }
+
+    // --- /duel: route_candidates + repo_boosts (feature: model arena with routing learning) ---
+
+    #[tokio::test]
+    async fn route_candidates_returns_distinct_providers_up_to_n() {
+        let r = mixed_router();
+        let cands = r
+            .route_candidates(
+                "implement pagination for the /users endpoint",
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+                3,
+            )
+            .await;
+        assert!(
+            cands.len() >= 2 && cands.len() <= 3,
+            "expected 2-3 candidates, got {}: {:?}",
+            cands.len(),
+            cands.iter().map(|d| &d.model).collect::<Vec<_>>()
+        );
+        let providers: std::collections::HashSet<&str> = cands
+            .iter()
+            .map(|d| forge_config::provider_of(&d.model))
+            .collect();
+        assert_eq!(
+            providers.len(),
+            cands.len(),
+            "every candidate must be a different provider: {:?}",
+            cands.iter().map(|d| &d.model).collect::<Vec<_>>()
+        );
+        for d in &cands {
+            assert!(d.rationale.contains("duel candidate"));
+        }
+    }
+
+    #[tokio::test]
+    async fn route_candidates_default_impl_falls_back_to_a_single_route() {
+        // A `Router` with no override (the trait default) must still satisfy `/duel`'s "at least
+        // one candidate" contract — proves the default doesn't panic / return empty.
+        struct Trivial;
+        #[async_trait]
+        impl Router for Trivial {
+            async fn route(
+                &self,
+                _prompt: &str,
+                _budget: BudgetState,
+                _health: &ModelHealth,
+                _quota: &SubscriptionQuota,
+                _effort: Option<EffortLevel>,
+                _project: &ProjectContext,
+            ) -> RoutingDecision {
+                RoutingDecision {
+                    tier: TaskTier::Standard,
+                    model: "fixed::model".into(),
+                    rationale: "fixed".into(),
+                    fallbacks: vec![],
+                }
+            }
+        }
+        let cands = Trivial
+            .route_candidates(
+                "anything",
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+                3,
+            )
+            .await;
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].model, "fixed::model");
+    }
+
+    #[tokio::test]
+    async fn repo_boosts_float_a_winning_model_above_equally_ranked_peers() {
+        let mut c = Config::default();
+        c.mesh.models.insert(
+            TaskTier::Standard.as_str().into(),
+            forge_config::OneOrMany::Many(vec![
+                "provA::one".to_string(),
+                "provB::two".to_string(),
+                "provC::three".to_string(),
+            ]),
+        );
+        let prompt = "add a retry-with-backoff wrapper around the http client";
+
+        // Baseline: no boosts → configured order (cheapest-first with equal cost = config order).
+        let plain = HeuristicRouter::new(c.clone()).with_availability(|_| true);
+        let baseline = route_model(&plain, prompt).await;
+        assert_eq!(baseline, "provA::one", "baseline should keep config order");
+
+        // Boost the third model above the other two → it must now win.
+        let mut boosts = std::collections::HashMap::new();
+        boosts.insert("provC::three".to_string(), 2.0);
+        let boosted = HeuristicRouter::new(c.clone())
+            .with_availability(|_| true)
+            .with_repo_boosts(boosts);
+        let winner = route_model(&boosted, prompt).await;
+        assert_eq!(
+            winner, "provC::three",
+            "boosted model must float to the top"
+        );
+
+        // An unboosted router must be unaffected by an EMPTY boost map (no-op).
+        let empty_boosted = HeuristicRouter::new(c)
+            .with_availability(|_| true)
+            .with_repo_boosts(std::collections::HashMap::new());
+        assert_eq!(route_model(&empty_boosted, prompt).await, baseline);
     }
 }

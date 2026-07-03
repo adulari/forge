@@ -133,6 +133,10 @@ pub struct ResolvedAgent {
     pub system_prompt: String,
     pub tools: Vec<String>,
     pub tier: Option<TaskTier>,
+    /// A specific model pinned for this child, bypassing the mesh entirely (used by `/duel`, where
+    /// each candidate MUST run the exact model the arena picked, not whatever the mesh would
+    /// independently route the task to). `None` = route normally (the `tier` pin still applies).
+    pub pinned_model: Option<String>,
 }
 
 /// Resolve a parsed request against the loaded agent-type map (RFC subagent-orchestration Ph2).
@@ -148,6 +152,7 @@ pub fn resolve(req: &AgentRequest, agents: &HashMap<String, AgentDef>) -> Resolv
             },
             tools: def.tools.clone(),
             tier: def.tier,
+            pinned_model: None,
         },
         None => ResolvedAgent {
             name: req.agent.clone(),
@@ -155,6 +160,7 @@ pub fn resolve(req: &AgentRequest, agents: &HashMap<String, AgentDef>) -> Resolv
             system_prompt: SUBAGENT_SYSTEM.to_string(),
             tools: Vec::new(),
             tier: None,
+            pinned_model: None,
         },
     }
 }
@@ -259,6 +265,17 @@ pub async fn route_child(
     agent: &ResolvedAgent,
     budget: BudgetState,
 ) -> RoutingDecision {
+    if let Some(model) = agent.pinned_model.as_deref() {
+        // A hard model pin (e.g. one /duel candidate) bypasses the mesh entirely — the caller
+        // decided exactly which model this child must run, unlike an agent-type tier pin (which
+        // still resolves a MODEL via `config.model_for`).
+        return RoutingDecision {
+            tier: agent.tier.unwrap_or(TaskTier::Standard),
+            model: model.to_string(),
+            rationale: "duel: pinned".to_string(),
+            fallbacks: Vec::new(),
+        };
+    }
     match agent
         .tier
         .and_then(|t| ctx.config.model_for(t).map(|m| (t, m)))
@@ -708,6 +725,14 @@ pub async fn orchestrate(
             // Merge the child's worktree changes back into the main tree (serialized).
             if let Some(guard) = maybe_guard {
                 let branch = guard.branch().to_string();
+                // Snapshot the child's UNCOMMITTED edits onto its branch first —
+                // merge_worktree_back diffs HEAD..branch, and a child never commits on its own,
+                // so without this every edit was silently dropped ("clean" merge, work lost).
+                if let Err(e) = worktree::commit_worktree(guard.path()) {
+                    tracing::warn!("worktree snapshot failed for {child_id}: {e}");
+                    text.push_str(&format!("\n[worktree snapshot failed: {e}]"));
+                    ok = false;
+                }
                 // Hold the merge lock for the duration of the git apply so concurrent finishers
                 // don't race on the index. Drop guard AFTER merge so the branch still exists.
                 let _lock = merge_lock.lock().await;
@@ -787,7 +812,7 @@ pub async fn orchestrate(
 }
 
 /// First non-empty line of a result, truncated — a one-line summary for lifecycle events.
-fn summary(text: &str) -> String {
+pub(crate) fn summary(text: &str) -> String {
     let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     line.chars().take(120).collect()
 }
@@ -924,6 +949,33 @@ mod tests {
         assert_eq!(unknown.system_prompt, SUBAGENT_SYSTEM);
     }
 
+    #[tokio::test]
+    async fn pinned_model_bypasses_the_router_entirely() {
+        // A /duel candidate must run the EXACT model the arena picked, not whatever the mesh
+        // would independently route the task to (FixedRouter here would pick "mesh::pick").
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let provider: Arc<dyn Provider> = Arc::new(FlakyProvider {
+            bad: std::collections::HashSet::new(),
+        });
+        let router: Arc<dyn Router> = Arc::new(FixedRouter {
+            model: "mesh::pick".into(),
+            fallbacks: vec![],
+        });
+        let ctx = ctx_with(provider, router, store);
+        let agent = ResolvedAgent {
+            name: "duel:provx".into(),
+            task: "implement the thing".into(),
+            system_prompt: "s".into(),
+            tools: Vec::new(),
+            tier: None,
+            pinned_model: Some("provx::model".into()),
+        };
+        let decision = route_child(&ctx, &agent, BudgetState::default()).await;
+        assert_eq!(decision.model, "provx::model");
+        assert!(decision.rationale.contains("duel"));
+        assert!(decision.fallbacks.is_empty());
+    }
+
     #[test]
     fn subagents_never_get_the_spawn_tool_depth_guard() {
         // Structural depth-1 guard: a child's toolset excludes spawn_agents, so it cannot recurse.
@@ -1030,6 +1082,7 @@ mod tests {
             system_prompt: "you are a subagent".into(),
             tools: Vec::new(),
             tier: None,
+            pinned_model: None,
         };
         let mut sink = |_: StreamEvent| {};
         let decision = route_child(&ctx, &agent, BudgetState::default()).await;
@@ -1117,6 +1170,7 @@ mod tests {
             system_prompt: "you are a subagent".into(),
             tools: Vec::new(),
             tier: None,
+            pinned_model: None,
         };
         let mut sink = |_: StreamEvent| {};
         let decision = route_child(&ctx, &agent, BudgetState::default()).await;
@@ -1148,6 +1202,7 @@ mod tests {
             system_prompt: "s".into(),
             tools: vec!["write_file".into()],
             tier: None,
+            pinned_model: None,
         };
         assert!(is_write_capable(&write_agent, &registry));
 
@@ -1158,6 +1213,7 @@ mod tests {
             system_prompt: "s".into(),
             tools: vec!["read_file".into()],
             tier: None,
+            pinned_model: None,
         };
         assert!(!is_write_capable(&read_agent, &registry));
 
@@ -1168,6 +1224,7 @@ mod tests {
             system_prompt: "s".into(),
             tools: vec!["shell".into()],
             tier: None,
+            pinned_model: None,
         };
         assert!(is_write_capable(&shell_agent, &registry));
 
@@ -1178,6 +1235,7 @@ mod tests {
             system_prompt: "s".into(),
             tools: Vec::new(),
             tier: None,
+            pinned_model: None,
         };
         assert!(!is_write_capable(&default_agent, &registry));
     }

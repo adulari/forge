@@ -16,7 +16,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -446,9 +446,27 @@ fn migration_0002(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Migration #3: `/duel` outcome history (docs/features/duel.md): one row per candidate in
+/// every duel run, per repo. `duel_boosts` aggregates wins-minus-losses per model, per repo,
+/// into the soft routing boost `HeuristicRouter::with_repo_boosts` consumes.
+fn migration_0003(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS duel_outcome (
+            id TEXT PRIMARY KEY,
+            repo_key TEXT NOT NULL,
+            model TEXT NOT NULL,
+            won INTEGER NOT NULL,
+            task TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         );
+         CREATE INDEX IF NOT EXISTS idx_duel_outcome_repo ON duel_outcome(repo_key)",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
-const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[migration_0001, migration_0002];
+const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] =
+    &[migration_0001, migration_0002, migration_0003];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
 /// crash mid-run resumes cleanly. Refuses (with [`StoreError::SchemaTooNew`]) to open a DB written
@@ -1355,6 +1373,53 @@ impl Store {
     /// benched rows removed so the caller can report it.
     pub fn clear_all_model_health(&self) -> Result<usize> {
         Ok(self.lock()?.execute("DELETE FROM model_health", [])?)
+    }
+
+    // --- /duel: model arena outcomes + routing-learning boosts (feature: duel) ---
+
+    /// Record one `/duel` candidate's outcome (won or lost) for `repo_key` (the canonicalized repo
+    /// root). Called once per candidate every time a duel resolves, so a model's full win/loss
+    /// history in this repo can be reconstructed and aggregated by [`Store::duel_boosts`].
+    pub fn record_duel_outcome(
+        &self,
+        repo_key: &str,
+        model: &str,
+        won: bool,
+        task: &str,
+    ) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO duel_outcome (id, repo_key, model, won, task) VALUES (?1, ?2, ?3, ?4, ?5)",
+            (forge_types::new_id(), repo_key, model, won as i64, task),
+        )?;
+        Ok(())
+    }
+
+    /// Per-model routing boost for `repo_key`, learned from past `/duel` outcomes: `(wins - losses)
+    /// as f64 * 0.5`, clamped to `[-2.0, 2.0]` so a long streak can't permanently dominate routing.
+    /// Feeds `HeuristicRouter::with_repo_boosts`. Empty when the repo has no duel history.
+    pub fn duel_boosts(&self, repo_key: &str) -> Result<std::collections::HashMap<String, f64>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT model, SUM(won), COUNT(*) FROM duel_outcome
+             WHERE repo_key = ?1 GROUP BY model",
+        )?;
+        let rows = stmt
+            .query_map([repo_key], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .map(|(model, wins, total)| {
+                let losses = total - wins;
+                let boost = ((wins - losses) as f64 * 0.5).clamp(-2.0, 2.0);
+                (model, boost)
+            })
+            .collect())
     }
 
     /// Snapshot of models still benched as of `now` (epoch secs) — cooldown not yet elapsed.
@@ -3541,6 +3606,59 @@ mod tests {
         let sessions = store.list_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, sid);
+    }
+
+    #[test]
+    fn duel_outcome_roundtrips_and_boost_math_is_correct() {
+        let store = Store::open_in_memory().unwrap();
+        let repo = "/home/user/proj";
+
+        // No history yet → empty boosts.
+        assert!(store.duel_boosts(repo).unwrap().is_empty());
+
+        // model A: 2 wins, 0 losses -> boost = min(2*0.5, 2.0) = 1.0
+        store
+            .record_duel_outcome(repo, "provA::one", true, "task 1")
+            .unwrap();
+        store
+            .record_duel_outcome(repo, "provA::one", true, "task 2")
+            .unwrap();
+        // model B: 1 win, 1 loss -> boost = 0*0.5 = 0.0
+        store
+            .record_duel_outcome(repo, "provB::two", true, "task 1")
+            .unwrap();
+        store
+            .record_duel_outcome(repo, "provB::two", false, "task 2")
+            .unwrap();
+        // model C: 0 wins, 1 loss -> boost = -1*0.5 = -0.5
+        store
+            .record_duel_outcome(repo, "provC::three", false, "task 1")
+            .unwrap();
+
+        let boosts = store.duel_boosts(repo).unwrap();
+        assert_eq!(boosts.get("provA::one").copied(), Some(1.0));
+        assert_eq!(boosts.get("provB::two").copied(), Some(0.0));
+        assert_eq!(boosts.get("provC::three").copied(), Some(-0.5));
+
+        // Boosts are scoped per-repo: a different repo sees nothing.
+        assert!(store.duel_boosts("/some/other/repo").unwrap().is_empty());
+    }
+
+    #[test]
+    fn duel_boost_clamps_at_the_bound_for_a_long_streak() {
+        let store = Store::open_in_memory().unwrap();
+        let repo = "/home/user/proj";
+        for i in 0..20 {
+            store
+                .record_duel_outcome(repo, "provA::one", true, &format!("task {i}"))
+                .unwrap();
+        }
+        let boosts = store.duel_boosts(repo).unwrap();
+        assert_eq!(
+            boosts.get("provA::one").copied(),
+            Some(2.0),
+            "a long win streak must clamp at +2.0, not grow unbounded"
+        );
     }
 
     #[test]
