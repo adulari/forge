@@ -13,7 +13,7 @@ mod genai_provider;
 mod mock;
 mod tool_recovery;
 
-pub use cli_provider::{available_bridge_models, CliKind, CliProvider, SUBAGENT_SINK_ENV};
+pub use cli_provider::{CliKind, CliProvider, SUBAGENT_SINK_ENV};
 pub use embedder::{select_embedder, GenaiEmbedder};
 pub use genai_provider::{
     bundled_http_client, is_discoverable, list_custom_models, list_models, GenAiProvider,

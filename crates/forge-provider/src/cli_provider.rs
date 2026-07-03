@@ -86,16 +86,18 @@ impl CliKind {
         format!("{}::", self.prefix())
     }
 
-    /// The model aliases this bridge exposes by default, so auto-discovery surfaces more than just
-    /// the CLI's single default — letting the mesh size each turn (haiku/mini for trivial, opus for
-    /// complex). The official CLIs publish no machine-readable model list, so these are the
-    /// documented `--model` aliases; users can override the set via `[mesh.bridge_models]`, and any
-    /// alias that's stale or unavailable just benches itself via failover (never a hard error).
+    /// FALLBACK model aliases, used only when [`Self::detect_models`] yields nothing (CLI can't be
+    /// probed, or offers no enumeration). These are the documented `--model` aliases at the time
+    /// of writing; the live CLI's own advertised list ([`Self::bridge_models`]) is the primary
+    /// source, so this table going stale only affects offline/unprobeable installs. Any alias
+    /// that's stale or unavailable just benches itself via failover (never a hard error).
     pub fn default_models(self) -> &'static [&'static str] {
         match self {
-            // `claude --model` accepts these aliases (claude 2.x); they span the capability tiers.
-            CliKind::ClaudeCode => &["opus", "sonnet", "haiku"],
+            // `claude --model` aliases (claude 2.1 --help names fable/opus/sonnet; haiku is the
+            // documented fast tier); they span the capability tiers.
+            CliKind::ClaudeCode => &["fable", "opus", "sonnet", "haiku"],
             // `codex --model` (codex 0.13x model picker). gpt-5.4-mini is the fast/cheap tier.
+            // codex is ALWAYS on this table: it exposes no model enumeration (see detect_models).
             CliKind::Codex => &[
                 "gpt-5.5",
                 "gpt-5.3-codex",
@@ -107,6 +109,56 @@ impl CliKind {
             // (trivial/standard), pro = the capable tier (complex). Verified accepted live.
             CliKind::Antigravity => &["gemini-3.5-flash", "gemini-3.1-pro"],
         }
+    }
+
+    /// Model aliases the installed CLI itself advertises — the primary, non-hardcoded source, so
+    /// a model Anthropic/Google ships to subscribers appears in the mesh without a Forge release.
+    /// Best-effort and cheap: one non-interactive spawn (`claude --help` / `agy models`, never a
+    /// prompt), short-timed, empty on any failure. codex 0.141 exposes no model enumeration
+    /// (`--model` is free-form, no `models` subcommand — verified against its full command list),
+    /// so it always falls back to the static table; extend it via `[mesh.bridge_models]`.
+    pub async fn detect_models(self) -> Vec<String> {
+        let args: &[&str] = match self {
+            CliKind::ClaudeCode => &["--help"],
+            CliKind::Antigravity => &["models"],
+            CliKind::Codex => return Vec::new(),
+        };
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let mut cmd = bridge_command(self.default_binary(), &args);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let out = match tokio::time::timeout(Duration::from_secs(5), cmd.output()).await {
+            Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            _ => return Vec::new(),
+        };
+        match self {
+            CliKind::ClaudeCode => parse_claude_model_aliases(&out),
+            CliKind::Antigravity => parse_agy_models(&out),
+            CliKind::Codex => Vec::new(),
+        }
+    }
+
+    /// The model-alias list for this bridge: whatever the installed CLI itself advertises
+    /// ([`Self::detect_models`]), falling back to the static [`Self::default_models`] table only
+    /// when detection yields nothing. Detection-first keeps the list tracking the live CLI —
+    /// no hardcoded model list to go stale — at the cost that an alias the CLI stops advertising
+    /// drops out with it (by design).
+    pub async fn bridge_models(self) -> Vec<String> {
+        let detected: Vec<String> = self
+            .detect_models()
+            .await
+            .into_iter()
+            .filter(|m| !m.is_empty())
+            .collect();
+        if detected.is_empty() {
+            return self
+                .default_models()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        }
+        detected
     }
 
     /// How to tell the user to make this CLI usable.
@@ -215,24 +267,64 @@ fn windows_cmd_line(program: &std::path::Path, args: &[String]) -> String {
     format!("\"{inner}\"")
 }
 
-/// Forge model ids for every CLI bridge whose CLI is installed — the always-available
-/// subscription models the mesh should fall back to (and prefer, being $0). Empty if none.
-///
-/// Each installed bridge contributes its bare default id (`claude-cli::`, the CLI's own configured
-/// default) plus one id per [`CliKind::default_models`] alias (`claude-cli::opus`, …) so the mesh
-/// has a model per tier rather than a single mid one. Callers that want a custom set per bridge
-/// should build ids from [`CliKind::default_models`] / a config override instead.
-pub fn available_bridge_models() -> Vec<String> {
+/// The model aliases `claude --help` documents for `--model`: its help names them in single
+/// quotes ("Provide an alias for the latest model (e.g. 'fable', 'opus', or 'sonnet')"). Only
+/// purely-alphabetic quoted tokens count — full ids like 'claude-fable-5' are also quoted but
+/// duplicate an alias, and stray apostrophe pairings ("model's full name…") never survive the
+/// alphabetic filter. Best-effort: a reworded help yields fewer aliases, never wrong ones.
+fn parse_claude_model_aliases(help: &str) -> Vec<String> {
+    let Some(start) = help.find("--model ") else {
+        return Vec::new();
+    };
+    let block: String = help[start..]
+        .lines()
+        .take(1)
+        .chain(
+            help[start..]
+                .lines()
+                .skip(1)
+                .take_while(|l| !l.trim_start().starts_with('-')),
+        )
+        .collect::<Vec<_>>()
+        .join(" ");
     let mut out = Vec::new();
-    for k in CliKind::all().into_iter().filter(|k| k.available()) {
-        out.push(k.default_model_id());
-        out.extend(
-            k.default_models()
-                .iter()
-                .map(|m| format!("{}::{m}", k.prefix())),
-        );
+    for (i, chunk) in block.split('\'').enumerate() {
+        if i % 2 == 1
+            && !chunk.is_empty()
+            && chunk.chars().all(|c| c.is_ascii_lowercase())
+            && !out.contains(&chunk.to_string())
+        {
+            out.push(chunk.to_string());
+        }
     }
     out
+}
+
+/// Model slugs from `agy models` output. It prints one display name per line, each with an
+/// effort parenthetical ("Gemini 3.5 Flash (Medium)"); the accepted `--model` slug is the
+/// lowercased name with the parenthetical dropped and separators hyphenated
+/// ("gemini-3.5-flash" — the same slugs verified accepted live for the static defaults).
+fn parse_agy_models(out: &str) -> Vec<String> {
+    let mut slugs = Vec::new();
+    for line in out.lines() {
+        let name = line.split('(').next().unwrap_or("").trim();
+        if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+            continue;
+        }
+        let mut slug = String::new();
+        for c in name.to_lowercase().chars() {
+            if c.is_ascii_alphanumeric() || c == '.' {
+                slug.push(c);
+            } else if !slug.ends_with('-') && !slug.is_empty() {
+                slug.push('-');
+            }
+        }
+        let slug = slug.trim_end_matches('-').to_string();
+        if !slug.is_empty() && !slugs.contains(&slug) {
+            slugs.push(slug);
+        }
+    }
+    slugs
 }
 
 /// IDLE window (seconds) for a bridged CLI: kill only after this long with NO output. Not a total
@@ -2425,7 +2517,7 @@ mod tests {
         // Each bridge exposes more than one model so the mesh can size a turn (haiku/mini ↔ opus).
         let claude = CliKind::ClaudeCode.default_models();
         assert!(
-            claude.contains(&"opus") && claude.contains(&"haiku"),
+            claude.contains(&"fable") && claude.contains(&"opus") && claude.contains(&"haiku"),
             "{claude:?}"
         );
         let codex = CliKind::Codex.default_models();
@@ -2436,8 +2528,68 @@ mod tests {
         // A model alias namespaces into a full Forge id under the bridge prefix.
         assert_eq!(
             format!("{}::{}", CliKind::ClaudeCode.prefix(), claude[0]),
-            "claude-cli::opus"
+            "claude-cli::fable"
         );
+    }
+
+    #[test]
+    fn bridge_model_aliases_are_never_empty() {
+        // `claude-cli::` (empty model name) is a routing pin for the CLI's own default, NOT a
+        // discoverable model — no alias source may emit an empty name (it renders as a garbage
+        // empty row and can never match a benchmark or context window). Fallback tables:
+        for k in CliKind::all() {
+            assert!(!k.default_models().iter().any(|m| m.is_empty()));
+        }
+        // Detection parsers can't produce empty aliases either, even from degenerate input.
+        assert!(!parse_claude_model_aliases("--model x (e.g. '', 'a')")
+            .iter()
+            .any(String::is_empty));
+        assert!(!parse_agy_models("(\n)\n ( ) \nA (x)")
+            .iter()
+            .any(String::is_empty));
+    }
+
+    #[test]
+    fn claude_help_model_aliases_parse_from_real_help_text() {
+        // Captured from `claude --help` (2.1.200). Aliases are the single-quoted alphabetic
+        // tokens in the --model help; the full id ('claude-fable-5') and the stray apostrophe in
+        // "model's" must not produce tokens.
+        let help = r#"
+  --fallback-model <model>              Enable automatic fallback to specified
+                                        model(s) when the default model is
+                                        overloaded or not available.
+  --model <model>                       Model for the current session. Provide
+                                        an alias for the latest model (e.g.
+                                        'fable', 'opus', or 'sonnet') or a
+                                        model's full name (e.g.
+                                        'claude-fable-5').
+  -n, --name <name>                     Set a display name for this session
+"#;
+        assert_eq!(
+            parse_claude_model_aliases(help),
+            ["fable", "opus", "sonnet"]
+        );
+        assert!(parse_claude_model_aliases("no model flag here").is_empty());
+    }
+
+    #[test]
+    fn agy_models_output_slugifies_to_accepted_model_ids() {
+        // Captured from `agy models` (1.0.16): display names with an effort parenthetical. The
+        // slugs for the gemini tiers match the ones verified accepted live by `--model`.
+        let out = "Gemini 3.5 Flash (Medium)\nGemini 3.5 Flash (High)\nGemini 3.5 Flash (Low)\n\
+                   Gemini 3.1 Pro (Low)\nGemini 3.1 Pro (High)\nClaude Sonnet 4.6 (Thinking)\n\
+                   GPT-OSS 120B (Medium)\n";
+        assert_eq!(
+            parse_agy_models(out),
+            [
+                "gemini-3.5-flash",
+                "gemini-3.1-pro",
+                "claude-sonnet-4.6",
+                "gpt-oss-120b"
+            ]
+        );
+        assert!(parse_agy_models("").is_empty());
+        assert!(parse_agy_models("  (weird)\n---\n").is_empty());
     }
 
     #[test]

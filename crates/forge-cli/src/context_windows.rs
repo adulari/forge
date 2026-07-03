@@ -178,7 +178,7 @@ pub async fn fetch_and_persist(models: &[String]) {
     // (opus/sonnet/haiku, gemini-3.5-flash) and publish no machine-readable context window info,
     // but their underlying models map to known provider families we already fetched above.
     // codex-cli GPT-5.x models may not appear in OR yet — those fall back to pricing.rs constants.
-    derive_cli_bridge_windows(&ctx_registry, &store);
+    derive_cli_bridge_windows(models, &ctx_registry, &store);
 }
 
 // ── CLI bridge derivation ─────────────────────────────────────────────────────────────────────────
@@ -187,7 +187,16 @@ pub async fn fetch_and_persist(models: &[String]) {
 /// reports. Using the API max would inflate the window if Anthropic ever ships a >200k model,
 /// and the subscription gate doesn't follow API limits.
 const CLAUDE_CLI_WINDOW: u32 = 200_000;
-const CLAUDE_CLI_ALIASES: &[&str] = &["opus", "sonnet", "haiku"];
+
+/// The discovered `claude-cli::` model ids that get the fixed subscription window. Every alias —
+/// static defaults AND anything `claude --help` newly advertises (fable, …) — is a Claude Code
+/// subscription session, so the same conservative 200k applies.
+fn claude_cli_ids(models: &[String]) -> impl Iterator<Item = &String> {
+    models.iter().filter(|m| {
+        m.strip_prefix("claude-cli::")
+            .is_some_and(|alias| !alias.is_empty())
+    })
+}
 
 /// Maps agy-cli and codex-cli bridge models to the source namespace prefix and keyword to look up
 /// in ctx_registry. Each alias selects the largest matching window from the given native namespace.
@@ -204,10 +213,14 @@ const CLI_BRIDGE_MAP: &[(&str, &str, &str)] = &[
     ("codex-cli::gpt-5.2", "openai::", "gpt-5"),
 ];
 
-fn derive_cli_bridge_windows(ctx_registry: &HashMap<String, u32>, store: &forge_store::Store) {
+fn derive_cli_bridge_windows(
+    models: &[String],
+    ctx_registry: &HashMap<String, u32>,
+    store: &forge_store::Store,
+) {
     // claude-cli: subscription is always 200k — do not derive from API data.
-    for alias in CLAUDE_CLI_ALIASES {
-        let _ = store.set_model_context(&format!("claude-cli::{alias}"), CLAUDE_CLI_WINDOW);
+    for id in claude_cli_ids(models) {
+        let _ = store.set_model_context(id, CLAUDE_CLI_WINDOW);
     }
     // agy-cli / codex-cli: derive from fetched native provider data.
     for (bridge_id, ns_prefix, keyword) in CLI_BRIDGE_MAP {
@@ -552,11 +565,18 @@ mod tests {
 
     #[test]
     fn claude_cli_window_is_hardcoded_200k() {
-        // claude-cli subscription is always 200k regardless of what Anthropic API reports.
+        // claude-cli subscription is always 200k regardless of what Anthropic API reports, and it
+        // covers EVERY discovered alias (incl. newly-advertised ones like fable) — but never the
+        // bare `claude-cli::` id (empty model name, must not be cataloged or windowed).
         assert_eq!(CLAUDE_CLI_WINDOW, 200_000);
-        assert!(CLAUDE_CLI_ALIASES.contains(&"sonnet"));
-        assert!(CLAUDE_CLI_ALIASES.contains(&"opus"));
-        assert!(CLAUDE_CLI_ALIASES.contains(&"haiku"));
+        let models = vec![
+            "claude-cli::fable".to_string(),
+            "claude-cli::opus".to_string(),
+            "claude-cli::".to_string(),
+            "anthropic::claude-opus-4-8".to_string(),
+        ];
+        let ids: Vec<&str> = claude_cli_ids(&models).map(String::as_str).collect();
+        assert_eq!(ids, ["claude-cli::fable", "claude-cli::opus"]);
     }
 
     #[test]

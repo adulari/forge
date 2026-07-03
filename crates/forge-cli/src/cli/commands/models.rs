@@ -224,21 +224,33 @@ pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mes
     // They don't rate-limit like the free API tiers, so the mesh can rely on them — and being
     // $0 subscriptions they rank first (prefer_subscription), so routing reaches a working model
     // instead of erroring out when metered providers are throttled. Each installed bridge
-    // contributes its bare default id PLUS one id per model alias (config override, else the
-    // bridge's built-in defaults) so the mesh can size each turn (haiku/mini ↔ opus) instead of
-    // seeing a single model. A stale alias just benches itself via failover — never a hard error.
-    for k in forge_provider::CliKind::all()
-        .into_iter()
-        .filter(|k| k.available())
-    {
-        let prefix = k.prefix();
-        models.push(k.default_model_id());
-        match config.mesh.bridge_models.get(prefix) {
-            Some(custom) if !custom.is_empty() => {
-                models.extend(custom.iter().map(|m| format!("{prefix}::{m}")));
-            }
-            _ => models.extend(k.default_models().iter().map(|m| format!("{prefix}::{m}"))),
-        }
+    // contributes one id per model alias — config override, else whatever the CLI itself
+    // advertises (`claude --help` / `agy models`, probed concurrently), else the built-in
+    // fallback table — so the mesh can size each turn (haiku/mini ↔ opus) and a model newly
+    // shipped to subscribers appears without a Forge release. The bare default id
+    // (`claude-cli::`) is NOT cataloged: it's a valid manual pin for the CLI's own default, but
+    // as a catalog row it's empty-named and can never match a benchmark. A stale alias just
+    // benches itself via failover — never a hard error.
+    let bridge_lists = futures::future::join_all(
+        forge_provider::CliKind::all()
+            .into_iter()
+            .filter(|k| k.available())
+            .map(|k| async move {
+                let prefix = k.prefix();
+                let aliases = match config.mesh.bridge_models.get(prefix) {
+                    Some(custom) if !custom.is_empty() => custom.clone(),
+                    _ => k.bridge_models().await,
+                };
+                aliases
+                    .into_iter()
+                    .filter(|m| !m.is_empty())
+                    .map(|m| format!("{prefix}::{m}"))
+                    .collect::<Vec<_>>()
+            }),
+    )
+    .await;
+    for list in bridge_lists {
+        models.extend(list);
     }
     // Dedup while preserving discovery order (a provider could list the same id twice).
     let mut seen = std::collections::HashSet::new();

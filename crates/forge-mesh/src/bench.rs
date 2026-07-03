@@ -320,6 +320,11 @@ mod tests {
         );
         let fable = b.score_for("anthropic::claude-fable-5").unwrap();
         assert_eq!(fable.intelligence, 59.9);
+        // The versionless bridge alias maps to the same Fable row (family words claude+fable,
+        // no version conflict) — so `claude-cli::fable` ranks on real scores, not the heuristic.
+        let bridged = b.score_for("claude-cli::fable").unwrap();
+        assert_eq!(bridged.intelligence, 59.9);
+        assert_eq!(bridged.coding, 76.5);
     }
 
     #[test]
