@@ -21,10 +21,32 @@ use crate::{EventSink, ModelResponse, Provider, ProviderError, StreamEvent, Tool
 #[derive(Debug, Default)]
 pub struct MockProvider;
 
-/// Emit `text` to the sink word by word, simulating streaming.
-fn stream_words(text: &str, on_event: &mut EventSink<'_>) {
+/// Per-word streaming delay, read once from `FORGE_MOCK_STREAM_DELAY_MS`. Unset/0 (the default,
+/// and what every test uses) keeps the mock instant; setting it makes `--mock` turns pace like a
+/// real model — used by `scripts/demo/` recordings so streaming and the workflow view animate.
+fn stream_delay() -> Option<std::time::Duration> {
+    static DELAY: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *DELAY.get_or_init(|| {
+        std::env::var("FORGE_MOCK_STREAM_DELAY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(std::time::Duration::from_millis)
+    })
+}
+
+/// Emit `text` to the sink word by word, simulating streaming (with a short "thinking" pause
+/// first when `FORGE_MOCK_STREAM_DELAY_MS` is set).
+async fn stream_words(text: &str, on_event: &mut EventSink<'_>) {
+    let delay = stream_delay();
+    if let Some(d) = delay {
+        tokio::time::sleep(6 * d).await;
+    }
     for word in text.split_inclusive(' ') {
         on_event(StreamEvent::Text(word.to_string()));
+        if let Some(d) = delay {
+            tokio::time::sleep(d).await;
+        }
     }
 }
 
@@ -100,11 +122,11 @@ impl Provider for MockProvider {
         if wants_plan {
             if plan_proposed {
                 let content = "The plan is on screen for your review.";
-                stream_words(content, on_event);
+                stream_words(content, on_event).await;
                 return Ok(resp(content, vec![], 42, 18));
             }
             let content = "Here's a plan for the refactor.";
-            stream_words(content, on_event);
+            stream_words(content, on_event).await;
             return Ok(resp(
                 content,
                 vec![ToolCall {
@@ -130,11 +152,11 @@ impl Provider for MockProvider {
         if wants_tasks {
             if tasks_set {
                 let content = "Tasks are tracked in the panel above.";
-                stream_words(content, on_event);
+                stream_words(content, on_event).await;
                 return Ok(resp(content, vec![], 42, 18));
             }
             let content = "Setting up the task list.";
-            stream_words(content, on_event);
+            stream_words(content, on_event).await;
             return Ok(resp(
                 content,
                 vec![ToolCall {
@@ -157,11 +179,11 @@ impl Provider for MockProvider {
         if wants_write {
             if used_write {
                 let content = "Done — the file is written.";
-                stream_words(content, on_event);
+                stream_words(content, on_event).await;
                 return Ok(resp(content, vec![], 42, 18));
             }
             let content = "Writing the file now.";
-            stream_words(content, on_event);
+            stream_words(content, on_event).await;
             return Ok(resp(
                 content,
                 vec![ToolCall {
@@ -181,7 +203,7 @@ impl Provider for MockProvider {
         if wants_code {
             let content =
                 "Here's a snippet:\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\nThat's it.";
-            stream_words(content, on_event);
+            stream_words(content, on_event).await;
             return Ok(resp(content, vec![], 42, 18));
         }
 
@@ -189,11 +211,11 @@ impl Provider for MockProvider {
         // — cost/budget tests in forge-core depend on this exact usage (30/12 then 42/18).
         if used_read {
             let content = "Done — I read the project manifest and the workspace looks healthy.";
-            stream_words(content, on_event);
+            stream_words(content, on_event).await;
             Ok(resp(content, vec![], 42, 18))
         } else {
             let content = "Let me inspect the project manifest.";
-            stream_words(content, on_event);
+            stream_words(content, on_event).await;
             Ok(resp(
                 content,
                 vec![ToolCall {

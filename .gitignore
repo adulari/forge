@@ -34,3 +34,6 @@ scripts/.e2e-out/
 
 # Container-built E2E binary target dir (scripts/e2e-docker.sh)
 target-e2e/
+
+# Demo recording stage (scripts/demo/setup.sh)
+scripts/demo/.stage/
