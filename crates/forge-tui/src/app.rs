@@ -565,6 +565,399 @@ impl App {
     }
 }
 
+/// The stable wire tag for a [`PickerKind`](crate::commands::PickerKind), used as
+/// [`OverlaySnapshot::kind`]. Exhaustive on purpose: adding a picker variant without a wire tag
+/// is a compile error, so every future picker is remote-drivable by adding exactly one arm here.
+pub fn picker_kind_wire(kind: crate::commands::PickerKind) -> &'static str {
+    use crate::commands::PickerKind as P;
+    match kind {
+        P::Sessions => "picker:sessions",
+        P::Checkpoints => "picker:checkpoints",
+        P::Tempers => "picker:tempers",
+        P::AssayChoice => "picker:assay",
+        P::Models => "picker:models",
+        P::ResumeMode => "picker:resume_mode",
+        P::CopyBlocks => "picker:copy_blocks",
+        P::ModelPin => "picker:model_pin",
+        P::Duel => "picker:duel",
+    }
+}
+
+/// One row of a remotely-projected overlay ([`OverlaySnapshot::rows`]): an opaque `id` the remote
+/// client echoes back (`OverlaySelect`), two display strings, the cursor flag, and an optional
+/// group header (e.g. a workflow phase title).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlayRowSnapshot {
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    pub selected: bool,
+    pub group: Option<String>,
+}
+
+/// A plain-data projection of whichever modal overlay currently owns the keyboard — the command
+/// palette, any [`Picker`](crate::commands::Picker) kind, the `@path` picker, the `/config`
+/// wizard, or an informational overlay (`/usage`, `/mesh`, the workflow view). Produced by
+/// [`App::remote_overlay`] and mapped into the remote-control wire type by the render loop, so a
+/// browser can render + drive the exact surface the TUI shows. `None` when nothing modal is open.
+///
+/// `filter` is `Some` when the overlay has a type-to-filter query the client may replace
+/// (`OverlayFilter`); `free_text` is true while the overlay is collecting a free-form value
+/// (e.g. a `/config` field being edited); `body` carries pre-rendered text for overlays that are
+/// informational rather than selectable.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverlaySnapshot {
+    /// A stable discriminator: `"palette"`, `"picker:<kind>"`, `"picker:at_path"`, `"config"`,
+    /// `"overlay:usage"`, `"overlay:mesh"`, `"overlay:workflow"`.
+    pub kind: String,
+    pub title: String,
+    pub rows: Vec<OverlayRowSnapshot>,
+    /// Cursor index into `rows` (server-authoritative).
+    pub selected: usize,
+    pub filter: Option<String>,
+    pub free_text: bool,
+    pub body: Option<String>,
+}
+
+impl App {
+    /// Project the top-most open modal overlay for the remote-control wire (see
+    /// [`OverlaySnapshot`]). Precedence mirrors the render loop's key routing, so the projection
+    /// is always the surface a keystroke would actually reach: workflow view → `/config` editor →
+    /// palette → `/usage` → `/mesh` → `@path` picker → picker. The `/keys` configurator is
+    /// exempt by design: it runs a blocking fullscreen loop on the host terminal (never App
+    /// state), so there is nothing here to project — the remote drain notes it as host-only.
+    pub fn remote_overlay(&self) -> Option<OverlaySnapshot> {
+        if self.workflow.open {
+            return Some(self.workflow_overlay());
+        }
+        if self.config_editor.open {
+            return Some(self.config_overlay());
+        }
+        if self.palette.open {
+            return Some(self.palette_overlay());
+        }
+        if self.usage_overlay.open {
+            return Some(self.usage_overlay_snapshot());
+        }
+        if self.mesh_overlay.open {
+            return Some(self.mesh_overlay_snapshot());
+        }
+        if self.at_picker.open {
+            return Some(self.at_picker_overlay());
+        }
+        if self.picker.open {
+            return Some(self.picker_overlay());
+        }
+        None
+    }
+
+    fn picker_overlay(&self) -> OverlaySnapshot {
+        let kind = self
+            .picker
+            .kind
+            .map(picker_kind_wire)
+            .unwrap_or("picker:unknown");
+        let rows = self
+            .picker
+            .matches()
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| OverlayRowSnapshot {
+                id: r.id.clone(),
+                label: r.title.clone(),
+                detail: r.subtitle.clone(),
+                selected: i == self.picker.selected,
+                group: None,
+            })
+            .collect();
+        OverlaySnapshot {
+            kind: kind.to_string(),
+            title: self.picker.heading.clone(),
+            rows,
+            selected: self.picker.selected,
+            filter: Some(self.picker.query.clone()),
+            free_text: false,
+            body: None,
+        }
+    }
+
+    fn palette_overlay(&self) -> OverlaySnapshot {
+        let rows = self
+            .palette
+            .matches()
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| OverlayRowSnapshot {
+                id: e.name.clone(),
+                label: format!("/{}", e.name),
+                detail: if e.usage.is_empty() {
+                    e.desc.clone()
+                } else {
+                    format!("{} · {}", e.desc, e.usage)
+                },
+                selected: i == self.palette.selected,
+                group: None,
+            })
+            .collect();
+        OverlaySnapshot {
+            kind: "palette".to_string(),
+            title: "commands".to_string(),
+            rows,
+            selected: self.palette.selected,
+            filter: Some(self.palette.query.clone()),
+            free_text: false,
+            body: None,
+        }
+    }
+
+    fn at_picker_overlay(&self) -> OverlaySnapshot {
+        let rows = self
+            .at_picker
+            .matches()
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| OverlayRowSnapshot {
+                id: p.clone(),
+                label: format!("@{p}"),
+                detail: String::new(),
+                selected: i == self.at_picker.selected,
+                group: None,
+            })
+            .collect();
+        OverlaySnapshot {
+            kind: "picker:at_path".to_string(),
+            title: "mention a file".to_string(),
+            rows,
+            selected: self.at_picker.selected,
+            filter: Some(self.at_picker.query.clone()),
+            free_text: false,
+            body: None,
+        }
+    }
+
+    fn config_overlay(&self) -> OverlaySnapshot {
+        let editing = self.config_editor.editing.as_ref();
+        let matches = self.config_editor.matches();
+        let rows = matches
+            .iter()
+            .enumerate()
+            .map(|(i, &ri)| {
+                let r = &self.config_editor.rows[ri];
+                OverlayRowSnapshot {
+                    id: r.path.clone(),
+                    label: r.label.clone(),
+                    detail: format!("{} = {} ({})", r.path, r.value, r.source),
+                    selected: i == self.config_editor.selected,
+                    group: Some(r.group.clone()),
+                }
+            })
+            .collect();
+        let scope = if self.config_editor.project_scope {
+            "project"
+        } else {
+            "user"
+        };
+        let mut body = self.config_editor.status.clone();
+        if let Some(buf) = editing {
+            let path = self
+                .config_editor
+                .selected_row()
+                .map(|r| r.path.clone())
+                .unwrap_or_default();
+            body = Some(format!("editing {path}: {buf}"));
+        }
+        OverlaySnapshot {
+            kind: "config".to_string(),
+            title: format!("settings — {scope} scope"),
+            rows,
+            selected: self.config_editor.selected,
+            filter: Some(self.config_editor.filter.clone()),
+            free_text: editing.is_some(),
+            body,
+        }
+    }
+
+    fn usage_overlay_snapshot(&self) -> OverlaySnapshot {
+        let u = &self.usage_overlay;
+        let mut body = String::new();
+        if u.loading {
+            body.push_str("loading subscription stats…\n\n");
+        }
+        body.push_str(&format!(
+            "session: ${:.4} · {} in / {} out tokens\nmonth:   ${:.2}\n",
+            u.session_usd, u.session_in, u.session_out, u.month_usd
+        ));
+        for (label, rows) in [
+            ("last 5 hours", &u.by_model_5h),
+            ("today", &u.by_model),
+            ("this week", &u.by_model_week),
+        ] {
+            if rows.is_empty() {
+                continue;
+            }
+            body.push_str(&format!("\n{label}:\n"));
+            for (model, usd, tin, tout) in rows {
+                body.push_str(&format!("  {model}  ${usd:.4}  {tin} in / {tout} out\n"));
+            }
+        }
+        let caps: Vec<String> = [
+            ("daily", u.daily_cap),
+            ("weekly", u.weekly_cap),
+            ("monthly", u.monthly_cap),
+        ]
+        .iter()
+        .filter_map(|(l, c)| c.map(|v| format!("{l} ${v:.2}")))
+        .collect();
+        if !caps.is_empty() {
+            body.push_str(&format!("\ncaps: {}\n", caps.join(" · ")));
+        }
+        for (label, pct) in [
+            ("claude 5h", u.claude_5h_pct),
+            ("claude weekly", u.claude_weekly_pct),
+            ("codex 5h", u.codex_5h_pct),
+            ("codex weekly", u.codex_weekly_pct),
+        ] {
+            if let Some(p) = pct {
+                body.push_str(&format!("{label}: {p:.0}% used\n"));
+            }
+        }
+        OverlaySnapshot {
+            kind: "overlay:usage".to_string(),
+            title: "usage".to_string(),
+            rows: Vec::new(),
+            selected: 0,
+            filter: None,
+            free_text: false,
+            body: Some(body),
+        }
+    }
+
+    fn mesh_overlay_snapshot(&self) -> OverlaySnapshot {
+        let m = &self.mesh_overlay;
+        let rows = m
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let mut badges = vec![c.cost_tag.clone()];
+                if c.frontier {
+                    badges.push("frontier".to_string());
+                }
+                if !c.usable {
+                    badges.push("unusable".to_string());
+                }
+                if c.selected {
+                    badges.push("← routed pick".to_string());
+                }
+                OverlayRowSnapshot {
+                    id: c.model.clone(),
+                    label: format!("#{} {}", c.rank, c.model),
+                    detail: format!("score {:.2} · {}", c.score, badges.join(" · ")),
+                    selected: i == m.cursor,
+                    group: None,
+                }
+            })
+            .collect();
+        let mut body = String::new();
+        if m.loading {
+            body.push_str("computing routing explanation…\n");
+        } else {
+            if !m.prompt.is_empty() {
+                body.push_str(&format!("prompt: {}\n", m.prompt));
+            }
+            body.push_str(&format!(
+                "classified: {} ({}) → routed: {}{}\nreasons: {}\nconserve: {}\npick: {}\n",
+                m.classified,
+                m.classifier,
+                m.routed,
+                if m.code_heavy { " · code-heavy" } else { "" },
+                m.reasons,
+                m.conserve_line,
+                m.pick,
+            ));
+            if !m.fallbacks.is_empty() {
+                body.push_str(&format!("fallbacks: {}\n", m.fallbacks.join(" → ")));
+            }
+            if !m.rationale.is_empty() {
+                body.push_str(&format!("rationale: {}\n", m.rationale));
+            }
+            for q in &m.quota {
+                body.push_str(&format!(
+                    "quota {}: {:.0}% used ({} · {})\n",
+                    q.provider,
+                    q.fraction * 100.0,
+                    q.plan,
+                    q.status,
+                ));
+            }
+        }
+        OverlaySnapshot {
+            kind: "overlay:mesh".to_string(),
+            title: "mesh — routing inspector".to_string(),
+            rows,
+            selected: m.cursor,
+            filter: None,
+            free_text: false,
+            body: Some(body),
+        }
+    }
+
+    fn workflow_overlay(&self) -> OverlaySnapshot {
+        let w = &self.workflow;
+        let rows = w
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let status = if !r.done {
+                    "◐"
+                } else if r.ok {
+                    "✓"
+                } else {
+                    "✗"
+                };
+                OverlayRowSnapshot {
+                    id: r.id.clone(),
+                    label: format!("{status} {}", r.agent),
+                    detail: format!("{} — {}", r.task, r.last),
+                    selected: i == w.selected,
+                    group: r.phase_idx.map(|p| w.phases[p].title.clone()),
+                }
+            })
+            .collect();
+        let title = match (&w.name, &w.finished) {
+            (Some(n), None) => format!("workflow: {n} — running"),
+            (Some(n), Some((ok, _))) => {
+                format!(
+                    "workflow: {n} — {}",
+                    if *ok { "finished" } else { "failed" }
+                )
+            }
+            (None, None) => "workflow — running".to_string(),
+            (None, Some((ok, _))) => {
+                format!("workflow — {}", if *ok { "finished" } else { "failed" })
+            }
+        };
+        let mut body = String::new();
+        if let Some((_, summary)) = &w.finished {
+            body.push_str(summary);
+            body.push('\n');
+        }
+        if !w.logs.is_empty() {
+            body.push_str(&w.logs.join("\n"));
+        }
+        OverlaySnapshot {
+            kind: "overlay:workflow".to_string(),
+            title,
+            rows,
+            selected: w.selected,
+            filter: None,
+            free_text: false,
+            body: (!body.is_empty()).then_some(body),
+        }
+    }
+}
+
 /// A plain-data view of the live state, produced by [`App::remote_snapshot`] and mapped into the
 /// `remote::Snapshot` JSON by the render loop. Defined here (in forge-tui) so the pure render
 /// crate owns the projection without depending on the server module.
@@ -5700,6 +6093,240 @@ mod tests {
         let snap = app.remote_snapshot();
         assert!(snap.permission_prompt.is_none());
         assert!(snap.question.is_none());
+    }
+
+    fn overlay_picker_rows() -> Vec<crate::commands::PickerRow> {
+        vec![
+            crate::commands::PickerRow {
+                id: "row-a".into(),
+                title: "Alpha".into(),
+                subtitle: "first".into(),
+            },
+            crate::commands::PickerRow {
+                id: "row-b".into(),
+                title: "Beta".into(),
+                subtitle: "second".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn remote_overlay_is_none_when_nothing_modal_is_open() {
+        assert_eq!(App::default().remote_overlay(), None);
+    }
+
+    #[test]
+    fn remote_overlay_projects_every_picker_kind() {
+        use crate::commands::PickerKind as P;
+        // One projection arm covers EVERY picker kind — each maps to a stable wire tag, so any
+        // future variant fails to compile in `picker_kind_wire` until it gets a tag too.
+        for (kind, wire) in [
+            (P::Sessions, "picker:sessions"),
+            (P::Checkpoints, "picker:checkpoints"),
+            (P::Tempers, "picker:tempers"),
+            (P::AssayChoice, "picker:assay"),
+            (P::Models, "picker:models"),
+            (P::ResumeMode, "picker:resume_mode"),
+            (P::CopyBlocks, "picker:copy_blocks"),
+            (P::ModelPin, "picker:model_pin"),
+            (P::Duel, "picker:duel"),
+        ] {
+            let mut app = App::default();
+            app.picker
+                .open_with(kind, "pick one", overlay_picker_rows());
+            app.picker.move_down();
+            let o = app.remote_overlay().expect("open picker projects");
+            assert_eq!(o.kind, wire, "{kind:?} wire tag");
+            assert_eq!(o.title, "pick one");
+            assert_eq!(o.rows.len(), 2);
+            assert_eq!(o.rows[0].id, "row-a");
+            assert_eq!(o.rows[0].label, "Alpha");
+            assert_eq!(o.rows[0].detail, "first");
+            assert!(!o.rows[0].selected);
+            assert!(o.rows[1].selected, "cursor row is flagged");
+            assert_eq!(o.selected, 1);
+            assert_eq!(o.filter.as_deref(), Some(""), "pickers are filterable");
+            assert!(!o.free_text);
+            assert!(o.body.is_none());
+        }
+    }
+
+    #[test]
+    fn remote_overlay_picker_filter_narrows_rows() {
+        let mut app = App::default();
+        app.picker.open_with(
+            crate::commands::PickerKind::Sessions,
+            "resume a session",
+            overlay_picker_rows(),
+        );
+        app.picker.query = "beta".into();
+        app.picker.clamp();
+        let o = app.remote_overlay().unwrap();
+        assert_eq!(o.filter.as_deref(), Some("beta"));
+        assert_eq!(o.rows.len(), 1, "rows are the FILTERED matches");
+        assert_eq!(o.rows[0].id, "row-b");
+    }
+
+    #[test]
+    fn remote_overlay_projects_the_palette() {
+        let mut app = App::default();
+        app.palette.open_with("mod");
+        let o = app.remote_overlay().expect("open palette projects");
+        assert_eq!(o.kind, "palette");
+        assert_eq!(o.filter.as_deref(), Some("mod"));
+        assert!(
+            o.rows.iter().any(|r| r.id == "model"),
+            "filtered commands present: {:?}",
+            o.rows.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        let model = o.rows.iter().find(|r| r.id == "model").unwrap();
+        assert_eq!(model.label, "/model");
+        assert!(!model.detail.is_empty(), "desc/usage hint rides along");
+    }
+
+    #[test]
+    fn remote_overlay_projects_the_at_path_picker() {
+        let mut app = App::default();
+        app.at_picker
+            .open_with("ma", vec!["src/main.rs".into(), "Cargo.toml".into()]);
+        let o = app.remote_overlay().expect("open @path picker projects");
+        assert_eq!(o.kind, "picker:at_path");
+        assert_eq!(o.filter.as_deref(), Some("ma"));
+        assert_eq!(o.rows.len(), 1, "matches() filtering applies");
+        assert_eq!(o.rows[0].id, "src/main.rs");
+        assert_eq!(o.rows[0].label, "@src/main.rs");
+    }
+
+    #[test]
+    fn remote_overlay_projects_the_config_editor() {
+        let mut app = App::default();
+        app.config_editor.open_with(vec![crate::SettingRow {
+            path: "tui.fullscreen".into(),
+            group: "tui".into(),
+            label: "Full-screen mode".into(),
+            value: "true".into(),
+            source: "user".into(),
+            ..Default::default()
+        }]);
+        let o = app.remote_overlay().expect("open config editor projects");
+        assert_eq!(o.kind, "config");
+        assert_eq!(o.title, "settings — user scope");
+        assert_eq!(o.rows[0].id, "tui.fullscreen");
+        assert_eq!(o.rows[0].group.as_deref(), Some("tui"));
+        assert!(o.rows[0].detail.contains("true"));
+        assert!(!o.free_text, "not editing yet");
+
+        // While a value is being typed, free_text turns on and the buffer shows in the body.
+        app.config_editor.editing = Some("fal".into());
+        let o = app.remote_overlay().unwrap();
+        assert!(o.free_text, "editing → free-text box");
+        assert!(
+            o.body.as_deref().unwrap_or("").contains("fal"),
+            "buffer echoed: {:?}",
+            o.body
+        );
+    }
+
+    #[test]
+    fn remote_overlay_projects_usage_as_a_text_body() {
+        let mut app = App::default();
+        app.usage_overlay.open = true;
+        app.usage_overlay.session_usd = 1.25;
+        app.usage_overlay.by_model = vec![("groq::llama-3.3-70b".into(), 0.5, 1000, 2000)];
+        app.usage_overlay.claude_5h_pct = Some(42.0);
+        let o = app.remote_overlay().expect("open usage overlay projects");
+        assert_eq!(o.kind, "overlay:usage");
+        assert!(o.rows.is_empty(), "informational — no selectable rows");
+        let body = o.body.expect("pre-rendered text body");
+        assert!(body.contains("$1.2500"), "session spend: {body}");
+        assert!(body.contains("groq::llama-3.3-70b"));
+        assert!(body.contains("claude 5h: 42% used"));
+    }
+
+    #[test]
+    fn remote_overlay_projects_mesh_candidates_and_verdict() {
+        let mut app = App::default();
+        app.mesh_overlay.open = true;
+        app.mesh_overlay.classified = "complex".into();
+        app.mesh_overlay.routed = "complex".into();
+        app.mesh_overlay.pick = "claude-cli::opus".into();
+        app.mesh_overlay.conserve_line = "off".into();
+        app.mesh_overlay.candidates = vec![
+            MeshCandRow {
+                rank: 1,
+                model: "claude-cli::opus".into(),
+                score: 0.9,
+                cost_tag: "subscription".into(),
+                frontier: true,
+                usable: true,
+                selected: true,
+                penalty: 0.0,
+            },
+            MeshCandRow {
+                rank: 2,
+                model: "groq::llama".into(),
+                score: 0.7,
+                cost_tag: "free".into(),
+                usable: true,
+                ..Default::default()
+            },
+        ];
+        app.mesh_overlay.cursor = 1;
+        let o = app.remote_overlay().expect("open mesh overlay projects");
+        assert_eq!(o.kind, "overlay:mesh");
+        assert_eq!(o.rows.len(), 2);
+        assert_eq!(o.rows[0].id, "claude-cli::opus");
+        assert!(o.rows[0].detail.contains("routed pick"));
+        assert!(o.rows[1].selected, "browsing cursor row flagged");
+        assert_eq!(o.selected, 1);
+        let body = o.body.expect("routing verdict body");
+        assert!(body.contains("classified: complex"));
+        assert!(body.contains("pick: claude-cli::opus"));
+    }
+
+    #[test]
+    fn remote_overlay_projects_the_workflow_view_with_phase_groups() {
+        let mut app = App::default();
+        app.workflow.begin(Some("release".into()));
+        app.workflow.phases = vec![crate::WfPhase {
+            title: "build".into(),
+        }];
+        app.workflow.rows = vec![crate::WfRow {
+            id: "wf-1".into(),
+            agent: "builder".into(),
+            task: "compile it".into(),
+            model: None,
+            phase_idx: Some(0),
+            last: "running tests".into(),
+            log: Vec::new(),
+            done: false,
+            ok: true,
+            cost: 0.0,
+        }];
+        app.workflow.logs = vec!["phase build started".into()];
+        let o = app.remote_overlay().expect("open workflow view projects");
+        assert_eq!(o.kind, "overlay:workflow");
+        assert!(o.title.contains("release"), "title: {}", o.title);
+        assert_eq!(o.rows[0].id, "wf-1");
+        assert_eq!(o.rows[0].group.as_deref(), Some("build"));
+        assert!(o.rows[0].detail.contains("compile it"));
+        assert!(o.body.unwrap().contains("phase build started"));
+    }
+
+    #[test]
+    fn remote_overlay_precedence_mirrors_key_routing() {
+        // Both a picker and the palette open → the palette (which owns the keys) projects.
+        let mut app = App::default();
+        app.picker.open_with(
+            crate::commands::PickerKind::Sessions,
+            "resume",
+            overlay_picker_rows(),
+        );
+        app.palette.open_with("");
+        assert_eq!(app.remote_overlay().unwrap().kind, "palette");
+        // The workflow view outranks everything (it's checked first by the key loop).
+        app.workflow.open = true;
+        assert_eq!(app.remote_overlay().unwrap().kind, "overlay:workflow");
     }
 
     #[test]
