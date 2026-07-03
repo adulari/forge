@@ -226,6 +226,41 @@ You can also stack keys via env: `GROQ_API_KEY="k1,k2"` or numbered `GROQ_API_KE
 
 ---
 
+<a id="see-it-in-action"></a>
+
+## 🎬 See it in action
+
+All recordings run fully offline against the deterministic `--mock` provider on a scratch project —
+no API keys, same output every time. Re-record them with `scripts/demo/record.sh` (vhs tapes in
+`scripts/demo/tapes/`).
+
+<details>
+<summary><b>Full-screen TUI</b> — streaming turns, tool calls, diff preview, the autofix lint pass, ⇧⇥ temper switching</summary>
+<p align="center"><img src="docs/assets/demo-tui.gif" alt="Forge TUI chat" width="800"></p>
+</details>
+
+<details>
+<summary><b>Workflow view</b> — a saved <code>/workflow</code> script fans out mesh-routed agents in a dedicated animated dashboard</summary>
+<p align="center"><img src="docs/assets/demo-workflow.gif" alt="Forge workflow view" width="800"></p>
+</details>
+
+<details>
+<summary><b>Mesh routing</b> — <code>forge mesh</code>: per-tier picks, quota pressure, and exactly why one prompt routes where it does</summary>
+<p align="center"><img src="docs/assets/demo-mesh.gif" alt="Forge mesh routing explanation" width="800"></p>
+</details>
+
+<details>
+<summary><b>Provenance</b> — <code>forge blame</code> a line back to its model/session/prompt, <code>replay</code> the session, <code>fork</code> the counterfactual</summary>
+<p align="center"><img src="docs/assets/demo-provenance.gif" alt="Forge blame, replay and fork" width="800"></p>
+</details>
+
+<details>
+<summary><b>Queue autopilot</b> — queue tasks, drain them headless into isolated worktrees, wake up to review-ready branches</summary>
+<p align="center"><img src="docs/assets/demo-queue.gif" alt="Forge queue autopilot" width="800"></p>
+</details>
+
+---
+
 <a id="feature-overview"></a>
 
 ## ✨ Feature highlights

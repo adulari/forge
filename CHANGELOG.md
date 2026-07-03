@@ -70,6 +70,15 @@ All notable changes to Forge are documented here. The format follows
   work instead of manual arenas. `forge scoreboard` shows the ledger: wins, losses, and the
   exact boost routing applies in this repo.
 
+### Changed
+- **README demo GIFs re-recorded**: a new hero GIF (chat → tools → the animated workflow view →
+  mesh routing → the autopilot digest) plus five per-feature GIFs (TUI, workflow view, mesh,
+  provenance, queue) under a "See it in action" README section. Recordings are reproducible —
+  `scripts/demo/record.sh` stages an isolated offline `--mock` environment (vhs tapes in
+  `scripts/demo/tapes/`), and the mock provider gained an env-gated pacing knob
+  (`FORGE_MOCK_STREAM_DELAY_MS`, default off) so streaming and the workflow view animate like a
+  real model on camera.
+
 ### Fixed
 - **Remote: questions are answerable again** — a pending `AskUserQuestion` no longer renders as a
   dead permission prompt on the phone; the option buttons + free-text answer actually show
