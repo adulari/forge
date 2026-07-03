@@ -25,6 +25,9 @@ use crate::pricing::Pricing;
 /// Discovered `provider::model` ids the user can actually use right now.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelCatalog {
+    /// Deserialization applies the same bare-id guard as [`ModelCatalog::new`], so a catalog
+    /// cache written before the guard existed can't re-introduce empty-named bridge rows.
+    #[serde(deserialize_with = "de_named_models")]
     models: Vec<String>,
     /// Measured performance scores (ADR-0011), attached at discovery. When present the router ranks
     /// on real benchmark data; when absent it falls back to the family-name heuristic.
@@ -34,6 +37,12 @@ pub struct ModelCatalog {
 /// The provider prefix of a `provider::model` id (`"groq"` from `"groq::llama-3.1-8b"`).
 pub fn provider_of(id: &str) -> &str {
     id.split("::").next().unwrap_or(id)
+}
+
+fn de_named_models<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let mut models = Vec::<String>::deserialize(d)?;
+    models.retain(|m| !m.ends_with("::"));
+    Ok(models)
 }
 
 /// A $0-marginal subscription bridge (the locally-installed claude/codex CLI), as opposed to a
@@ -511,7 +520,12 @@ impl ProviderGroup {
 }
 
 impl ModelCatalog {
-    pub fn new(models: Vec<String>) -> Self {
+    pub fn new(mut models: Vec<String>) -> Self {
+        // A bare bridge id (`claude-cli::`) is a valid manual *pin* for the CLI's own default
+        // model, but as a catalog entry it's an empty-named row that can never match a benchmark
+        // or context window — every catalog entry must name a model. Discovery no longer emits
+        // them; this also keeps ids cached before that fix (or hand-written) out.
+        models.retain(|m| !m.ends_with("::"));
         Self {
             models,
             bench: None,
@@ -1002,7 +1016,7 @@ mod tests {
             "groq::llama-3.1-8b-instant".into(),            // small, free (unpriced free-tier)
             "groq::llama-3.3-70b-versatile".into(),         // frontier, free
             "ollama::llama3.2".into(),                      // free, local
-            "claude-cli::".into(),                          // subscription bridge
+            "claude-cli::sonnet".into(),                    // subscription bridge
             "openrouter::anthropic/claude-opus-4".into(), // frontier, PAID gateway (no price, no :free)
             "openrouter::deepseek/deepseek-r1:free".into(), // frontier, free (:free variant)
             "opencode_go::glm-5.2".into(),                // PAID gateway model billing key balance
@@ -1124,10 +1138,25 @@ mod tests {
             bridge.subscription && !bridge.free,
             "subscription bridge is not counted as free"
         );
-        assert_eq!(
-            bridge.name, "",
-            "bare bridge id → default model (empty name)"
-        );
+        assert_eq!(bridge.name, "sonnet");
+    }
+
+    #[test]
+    fn bare_bridge_ids_never_enter_the_catalog() {
+        // `claude-cli::` (empty model name) is a routing pin, not a catalog row — it rendered as
+        // a garbage empty id in `forge models` and could never match a benchmark or window.
+        let cat = ModelCatalog::new(vec![
+            "claude-cli::".into(),
+            "codex-cli::".into(),
+            "agy-cli::".into(),
+            "claude-cli::fable".into(),
+        ]);
+        assert_eq!(cat.models(), ["claude-cli::fable".to_string()]);
+        // The serde path (catalog cache written before the guard) is filtered too.
+        let cached: ModelCatalog =
+            serde_json::from_str(r#"{"models":["claude-cli::","claude-cli::fable"],"bench":null}"#)
+                .unwrap();
+        assert_eq!(cached.models(), ["claude-cli::fable".to_string()]);
     }
 
     #[test]
@@ -1135,7 +1164,7 @@ mod tests {
         let s = overview_catalog().stats(&Pricing::default());
         assert_eq!(s.total, 9);
         assert_eq!(s.providers, 7); // anthropic, openai, groq, ollama, claude-cli, openrouter, opencode_go
-        assert_eq!(s.frontier, 4); // anthropic-opus, groq-70b, or-opus, or-deepseek-r1
+        assert_eq!(s.frontier, 5); // anthropic-opus, groq-70b, claude-cli-sonnet, or-opus, or-deepseek-r1
         assert_eq!(s.subscription, 1); // claude-cli
         assert_eq!(s.free, 4); // groq-8b, groq-70b, ollama, or-deepseek-r1:free
         assert_eq!(s.paid, 4); // anthropic-opus, gpt-4o-mini, or-opus, opencode-glm

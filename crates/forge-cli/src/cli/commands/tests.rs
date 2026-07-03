@@ -279,7 +279,7 @@ fn models_catalog() -> forge_mesh::ModelCatalog {
         "anthropic::claude-opus-4-8".into(),
         "groq::llama-3.1-8b-instant".into(),
         "groq::llama-3.3-70b-versatile".into(),
-        "claude-cli::".into(), // bare default (hidden in browser, still counted in stats)
+        "claude-cli::".into(), // bare default — must be dropped by the catalog, never a row
         "claude-cli::opus".into(), // named alias (shown in browser)
     ])
 }
@@ -289,8 +289,8 @@ fn models_provider_view_heading_has_counts_and_rows_per_provider() {
     let cat = models_catalog();
     let pricing = forge_mesh::pricing::Pricing::default();
     let (heading, rows) = models_provider_view(&cat, &pricing, &Default::default());
-    assert!(heading.contains("5 total"), "heading counts: {heading}");
-    assert!(heading.contains("3 frontier") && heading.contains("2 subscription"));
+    assert!(heading.contains("4 total"), "heading counts: {heading}");
+    assert!(heading.contains("3 frontier") && heading.contains("1 subscription"));
     // groq has 2 models → it's the first (richest) provider row.
     assert_eq!(rows[0].id, "groq");
     assert!(rows[0].subtitle.contains("2 models"));
