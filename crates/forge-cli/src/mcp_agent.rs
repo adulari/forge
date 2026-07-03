@@ -83,9 +83,13 @@ impl forge_tui::Presenter for AgentPresenter {
                     forge_tui::ConfirmOutcome::Deny
                 }
             }
-            // Default / Plan: only read-only is auto-allowed; writes need explicit permission.
-            // In an agent context with no TTY, treat "ask" as allow so turns don't hang.
-            PermissionMode::Default | PermissionMode::Plan => forge_tui::ConfirmOutcome::Allow,
+            // Default / Plan advertise "ask before any write" — and there is no TTY here to
+            // ask, so the honest resolution is DENY, not a silent allow. The old arm returned
+            // Allow for EVERYTHING that reached it (writes, shell, and External MCP calls),
+            // making `default` strictly MORE permissive than `accept_edits` — an inverted
+            // safety ordering. The denial surfaces to the orchestrating agent, which can
+            // escalate deliberately via forge_set_mode("accept_edits"/"bypass").
+            PermissionMode::Default | PermissionMode::Plan => forge_tui::ConfirmOutcome::Deny,
         }
     }
 
@@ -603,4 +607,60 @@ pub async fn run(session_id: Option<String>, cwd: Option<std::path::PathBuf>) ->
     let service = server.serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use forge_tui::{ConfirmOutcome, Presenter};
+
+    fn presenter(mode: PermissionMode) -> AgentPresenter {
+        AgentPresenter {
+            event_tx: Arc::new(Mutex::new(None)),
+            mode: Arc::new(Mutex::new(mode)),
+        }
+    }
+
+    /// The safety ordering must hold: default ≤ accept_edits ≤ bypass. `default` used to
+    /// auto-allow EVERYTHING that reached confirm() — writes, shell, and External MCP calls —
+    /// making the advertised "ask before any write" mode the most permissive of the three.
+    #[test]
+    fn default_mode_denies_what_it_cannot_ask_about() {
+        let mut p = presenter(PermissionMode::Default);
+        assert_eq!(
+            p.confirm("write_file", SideEffect::Write),
+            ConfirmOutcome::Deny
+        );
+        assert_eq!(p.confirm("shell", SideEffect::Shell), ConfirmOutcome::Deny);
+        assert_eq!(
+            p.confirm("mcp_tool", SideEffect::External),
+            ConfirmOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn accept_edits_allows_writes_but_denies_external() {
+        let mut p = presenter(PermissionMode::AcceptEdits);
+        assert_eq!(
+            p.confirm("write_file", SideEffect::Write),
+            ConfirmOutcome::Allow
+        );
+        assert_eq!(
+            p.confirm("mcp_tool", SideEffect::External),
+            ConfirmOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn bypass_allows_everything() {
+        let mut p = presenter(PermissionMode::Bypass);
+        assert_eq!(
+            p.confirm("write_file", SideEffect::Write),
+            ConfirmOutcome::Allow
+        );
+        assert_eq!(
+            p.confirm("mcp_tool", SideEffect::External),
+            ConfirmOutcome::Allow
+        );
+    }
 }
