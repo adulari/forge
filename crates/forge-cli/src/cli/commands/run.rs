@@ -1164,6 +1164,28 @@ pub(crate) async fn run_chat_tui(
     // a busy turn parked in a permission/question prompt holds `session`'s lock for the ENTIRE
     // turn, and this id practically never changes mid-turn anyway, so a stale reuse costs nothing).
     let mut cached_session_id = session.lock().await.session_id().to_string();
+    // The store seam behind the remote server's `GET /api/history` scrollback pagination
+    // (docs/features/remote-control.md §2b): reads persisted transcript pages for whatever
+    // session id the latest snapshot carries (it follows `/new`/resume automatically). A
+    // closure so `remote.rs` needn't depend on forge-store.
+    let remote_history: remote::HistoryProvider = {
+        let store = session.lock().await.store.clone();
+        std::sync::Arc::new(move |sid: &str, before: Option<i64>, limit: usize| {
+            store
+                .load_history_page(sid, before, limit)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| remote::HistoryRow {
+                    seq: r.seq,
+                    role: r.role.as_str().to_string(),
+                    content: r.content,
+                    model: r.model,
+                    created_at: r.created_at,
+                    visibility: r.visibility.as_str().to_string(),
+                })
+                .collect()
+        })
+    };
     // Mirrors `Session::pinned_tier` so tier_up/tier_down can read + update it WITHOUT the session
     // lock — `spawn_turn_with`'s task holds that lock for the entire turn (every provider
     // round-trip, every tool call), not just during a permission/question prompt, so `try_lock`
@@ -1255,6 +1277,7 @@ pub(crate) async fn run_chat_tui(
             &mut tui,
             auto.into(),
             tui_config.remote.host.as_deref(),
+            remote_history.clone(),
         )
         .await?;
         // A (re)started server begins from a fresh watch channel — drop the dedup state so the
@@ -2113,6 +2136,7 @@ pub(crate) async fn run_chat_tui(
                                     &mut tui,
                                     exposure,
                                     tui_config.remote.host.as_deref(),
+                                    remote_history.clone(),
                                 )
                                 .await?;
                                 // Fresh server, fresh watch channel — reset the change-only
@@ -3018,6 +3042,7 @@ pub(crate) async fn run_chat_tui(
                                         &mut tui,
                                         exposure,
                                         tui_config.remote.host.as_deref(),
+                                        remote_history.clone(),
                                     )
                                     .await?;
                                     // Fresh server, fresh watch channel — reset the change-only
@@ -3908,6 +3933,7 @@ pub(crate) async fn run_chat_tui(
                     // Candidate carries the LAST revision so the equality compare below sees
                     // only real state changes; bumped just before an actual send.
                     revision: remote_revision,
+                    resync: false,
                     closed: false,
                 };
                 // Change-only broadcast: while busy this branch runs every 16ms, and
@@ -3918,7 +3944,9 @@ pub(crate) async fn run_chat_tui(
                     snap.revision = remote_revision;
                     last_remote_snap = Some(snap.clone());
                     if let Some(rc) = remote.as_ref() {
-                        let _ = rc.snapshot_tx.send(snap);
+                        // `broadcast` (not a bare `send`): the frame must also land in the
+                        // replay log so a reconnecting page gets exactly what it missed.
+                        rc.broadcast(snap);
                     }
                 }
             }
@@ -4397,6 +4425,7 @@ pub(crate) async fn toggle_remote(
     _tui: &mut forge_tui::Tui,
     exposure: remote::Exposure,
     host_override: Option<&str>,
+    history: remote::HistoryProvider,
 ) -> Result<()> {
     if let Some(rc) = remote.take() {
         // Turning it off: the handle's Drop aborts the server task + tunnel and sends a `closed`
@@ -4411,8 +4440,8 @@ pub(crate) async fn toggle_remote(
         app.note("◉ remote control — opening a public tunnel (this can take a few seconds)…");
     }
     let started = match exposure {
-        remote::Exposure::Anywhere => remote::start_anywhere().await,
-        other => remote::start(other, host_override),
+        remote::Exposure::Anywhere => remote::start_anywhere(Some(history)).await,
+        other => remote::start(other, host_override, Some(history)),
     };
     match started {
         Ok(rc) => {

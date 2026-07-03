@@ -1960,6 +1960,49 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// One page of a session's user-facing transcript, NEWEST first — the remote-control
+    /// scrollback pagination seam (docs/features/remote-control.md). Returns user + assistant
+    /// turns plus `visibility='ui'` notes (they are part of the visible conversation); tool
+    /// results, tool-call carrier rows (empty content), and system prompts are harness plumbing
+    /// and excluded. Soft-deleted (`active=0`) rows are INCLUDED, like
+    /// [`load_all_messages`](Self::load_all_messages) — this is the user's history, not the
+    /// model's context. `before_seq` restricts to rows with `seq < before_seq` (pass `None` for
+    /// the newest page); `limit` caps the page size.
+    pub fn load_history_page(
+        &self,
+        session_id: &str,
+        before_seq: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<HistoryRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT seq, role, content, model, created_at, visibility
+             FROM message
+             WHERE session_id = ?1
+               AND (?2 IS NULL OR seq < ?2)
+               AND (role IN ('user', 'assistant') OR visibility = 'ui')
+               AND content != ''
+             ORDER BY seq DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![session_id, before_seq, limit as i64],
+            |row| {
+                let role: String = row.get(1)?;
+                let visibility: String = row.get(5)?;
+                Ok(HistoryRow {
+                    seq: row.get(0)?,
+                    role: Role::parse(&role).unwrap_or(Role::User),
+                    content: row.get(2)?,
+                    model: row.get(3)?,
+                    created_at: row.get(4)?,
+                    visibility: Visibility::parse(&visibility),
+                })
+            },
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     /// Whether this session has a stored compaction summary (was compacted at least once) — the
     /// signal for offering "compact first vs continue uncompacted" when resuming it.
     pub fn session_has_compaction(&self, session_id: &str) -> Result<bool> {
@@ -2305,6 +2348,19 @@ pub struct StoredMessage {
     pub tool_calls: Vec<ToolCall>,
     pub tool_call_id: Option<String>,
     /// `UiOnly` rows are user-facing notes; the context pipeline strips them from provider calls.
+    pub visibility: Visibility,
+}
+
+/// One row of a user-facing transcript page (see [`Store::load_history_page`]) — the
+/// remote-control full-scrollback seam.
+#[derive(Debug, Clone)]
+pub struct HistoryRow {
+    pub seq: i64,
+    pub role: Role,
+    pub content: String,
+    pub model: Option<String>,
+    pub created_at: i64,
+    /// `UiOnly` rows are user-facing notes; they belong in the visible conversation.
     pub visibility: Visibility,
 }
 
@@ -3491,6 +3547,92 @@ mod tests {
         assert_eq!(sessions[0].message_count, 2);
         assert_eq!(sessions[1].id, a);
         assert_eq!(sessions[1].message_count, 1);
+    }
+
+    #[test]
+    fn history_page_is_newest_first_windowed_and_user_facing() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        // seq 0..=9: user/assistant alternating, plus a tool row, an empty assistant
+        // (tool-call carrier), a system row, and a ui note — only the user-facing rows page.
+        store.add_message(&sid, 0, Role::User, "q0", None).unwrap();
+        store
+            .add_message(&sid, 1, Role::Assistant, "a1", Some("m1"))
+            .unwrap();
+        store
+            .add_message(&sid, 2, Role::Tool, "tool output — plumbing", None)
+            .unwrap();
+        store
+            .add_message(&sid, 3, Role::Assistant, "", None)
+            .unwrap();
+        store
+            .add_message(&sid, 4, Role::System, "system prompt — plumbing", None)
+            .unwrap();
+        store
+            .add_ui_note(&sid, 5, Role::System, "⚠ budget note")
+            .unwrap();
+        store.add_message(&sid, 6, Role::User, "q6", None).unwrap();
+        store
+            .add_message(&sid, 7, Role::Assistant, "a7", None)
+            .unwrap();
+
+        // Newest page: newest first, plumbing rows (tool / empty / system) excluded, ui included.
+        let page = store.load_history_page(&sid, None, 10).unwrap();
+        let seqs: Vec<i64> = page.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, vec![7, 6, 5, 1, 0], "newest-first, user-facing only");
+        assert_eq!(
+            page[2].visibility,
+            Visibility::UiOnly,
+            "ui notes ride along"
+        );
+        assert_eq!(page[3].model.as_deref(), Some("m1"));
+        assert!(
+            page.iter().all(|r| r.created_at > 0),
+            "created_at populated"
+        );
+
+        // `limit` caps the page; `before` opens the next window strictly below it.
+        let first = store.load_history_page(&sid, None, 2).unwrap();
+        assert_eq!(first.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![7, 6]);
+        let next = store
+            .load_history_page(&sid, Some(first.last().unwrap().seq), 2)
+            .unwrap();
+        assert_eq!(next.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![5, 1]);
+        let last = store.load_history_page(&sid, Some(1), 10).unwrap();
+        assert_eq!(last.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![0]);
+        assert!(store
+            .load_history_page(&sid, Some(0), 10)
+            .unwrap()
+            .is_empty());
+
+        // Session scoping: another session's rows never leak into the page.
+        let other = store.create_session("/y", "default").unwrap();
+        store
+            .add_message(&other, 0, Role::User, "other q", None)
+            .unwrap();
+        let page = store.load_history_page(&sid, None, 10).unwrap();
+        assert_eq!(page.len(), 5, "other session's rows excluded");
+    }
+
+    #[test]
+    fn history_page_keeps_compacted_away_rows_for_the_user() {
+        // Compaction soft-deletes old rows from the MODEL's view; the user's scrollback (and so
+        // the remote history page) still shows them.
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        for i in 0..6 {
+            let role = if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            };
+            store
+                .add_message(&sid, i, role, &format!("m{i}"), None)
+                .unwrap();
+        }
+        store.compact_session_store(&sid, "SUMMARY", 2).unwrap();
+        let page = store.load_history_page(&sid, None, 10).unwrap();
+        assert_eq!(page.len(), 6, "soft-deleted rows still page for the user");
     }
 
     #[test]

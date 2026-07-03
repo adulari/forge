@@ -10,7 +10,7 @@
 > live notifications, and a **PWA** (token-scoped manifest + service worker + icon) so it
 > adds to a phone home screen and runs standalone; a `◉ remote` statusline segment; a QR
 > code printed into the TUI scrollback. The wire is a versioned `Snapshot`/`RemoteInput`
-> protocol (`PROTOCOL_VERSION`, currently **4**); the page shows a "refresh to update" banner
+> protocol (`PROTOCOL_VERSION`, currently **5**); the page shows a "refresh to update" banner
 > on a mismatch. Auto-start is configurable (`[remote] auto`). The server reuses the running
 > session's presenter channel — no second process, no IPC, no keys to configure.
 >
@@ -26,6 +26,15 @@
 > split into separate token-scoped files (`remote_assets/`), which let the CSP drop
 > `'unsafe-inline'` entirely. `/keys` is host-only by design (a blocking fullscreen
 > configurator on the host terminal) — the remote gets an explanatory note.
+>
+> **v5 — bulletproof reconnect + full scrollback + rich transcript:** every broadcast frame
+> lands in a bounded per-server event log, and the WS handshake takes `?rev=<last seen
+> revision>` — a reconnecting page replays exactly the frames it missed (no gap, no flicker),
+> falling back to one full snapshot flagged `resync` when the gap is unfillable (§2b). A
+> token-scoped `GET /<token>/api/history?before=<seq>&limit=<n>` pages the session's persisted
+> transcript from the store, and the page fetches older pages on scroll-up — unlimited
+> scrollback (the live snapshot transcript stays a short tail). The page renders markdown with
+> a self-contained, CSP-safe syntax highlighter and tap-to-copy fenced blocks.
 >
 > **Deferred:** image/file attachments from the phone, true push notifications while the app
 > is fully closed (live notifications fire while the page/PWA is open in the background), and
@@ -128,6 +137,44 @@ browse (provider drill-in included), `/mode` tempers, `/sessions`/`/resume`, `/c
 host, AND the text ships in `Snapshot.copy_text` so the page can offer a "Copy here" button
 for the phone's own clipboard.
 
+## 2b. Reconnect/replay + full scrollback (v5)
+
+Reliability is the #1 complaint about every remote-coding rival — a dropped connection that
+loses state (or kills the session outright) makes the whole surface untrustworthy. v5 makes
+disconnects a non-event:
+
+- **Event log + `?rev=` replay.** `RemoteControl::broadcast` records every published frame in
+  a bounded ring (`EventLog`, 512 entries) keyed by the snapshot's monotonic `revision`. The
+  WS handshake takes `?rev=<last seen revision>`: when the ring can fill the gap, the client
+  receives **exactly the frames it missed** (none when already current), then follows live —
+  the page shows what happened while it was away with no gap and no flicker. When it can't
+  (fresh connect, evicted, or a rev from a previous server), it gets ONE full snapshot flagged
+  `resync: true`. The page persists its last seen revision in `sessionStorage` (keyed by the
+  token base so it can never target a different server) and dedupes the replay/live overlap by
+  revision, so a frame that raced the handshake is never rendered twice. The session itself
+  never depended on a connected client — the server just kept broadcasting into the watch
+  channel — so this closes the last gap: *the page* now survives the disconnect too.
+- **Full scrollback via `GET /<token>/api/history?before=<seq>&limit=<n>`.** The live
+  `Snapshot.transcript` stays a short tail (12 lines — a phone screen); real scrollback pages
+  through the session's **persisted** messages. `Store::load_history_page` returns user +
+  assistant turns plus `visibility='ui'` notes (user-facing, part of the conversation),
+  newest first, excluding tool results / tool-call carriers / system prompts (harness
+  plumbing) but including compacted-away rows (the user's history, not the model's context).
+  Scroll to the top of the transcript and the page fetches the next-older page and prepends it,
+  preserving the scroll position; `before` walks the window, `limit` is clamped server-side
+  (max 200). The seam is a `HistoryProvider` closure built in `run.rs` over the session's
+  store handle, so `remote.rs` never depends on `forge-store` — and the session id comes from
+  the latest snapshot, so history follows `/new`/resume automatically. The service worker
+  never caches `/api/` responses.
+- **Rich transcript.** History messages and the live streaming edge render through a minimal
+  markdown renderer written into the page (headings, lists, paragraphs, inline `code` /
+  **bold** / *italic*, links as plain text — never live anchors) plus a self-contained
+  syntax highlighter (strings / comments / numbers / keywords for rust, js/ts, python, go,
+  bash, json; aliases like `py`/`rs`/`sh` fold in). Fenced blocks get a tap-to-copy button
+  (device clipboard, like the `/copy` bar). Everything is built with
+  `createElement`/`textContent` only — transcript content never reaches `innerHTML`, so it
+  cannot inject markup even before the no-inline CSP is considered.
+
 **PWA + notifications:** alongside `/<token>` and `/<token>/ws`, the server serves a
 token-scoped `manifest.webmanifest`, `sw.js` (service worker), and `icon.svg`, so the page
 installs to a home screen and launches standalone into *this* session's control surface.
@@ -224,14 +271,15 @@ forever. A stable origin that makes installs permanent is the Phase-4 daemon's j
 
 | Layer | Change |
 |---|---|
-| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (4), `SnapOverlay`/`SnapRow` + `named_key`, PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
-| `forge-cli/src/remote_assets/` | The control page split into `page.html` / `app.js` / `styles.css` / `sw.js` (served via `include_str!` as token-scoped routes; enables the no-`unsafe-inline` CSP); the page's generic overlay renderer + copy-here button |
+| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (5), `SnapOverlay`/`SnapRow` + `named_key`, v5 `EventLog` + `?rev=` replay + `Snapshot.resync`, `GET /api/history` (`HistoryRow`/`HistoryProvider` seam), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
+| `forge-cli/src/remote_assets/` | The control page split into `page.html` / `app.js` / `styles.css` / `sw.js` (served via `include_str!` as token-scoped routes; enables the no-`unsafe-inline` CSP); the page's generic overlay renderer + copy-here button; v5: `?rev=` reconnect + sessionStorage revision + replay dedup, scroll-up history pagination (`#hist` above the live `#tail`), markdown renderer + syntax highlighter + fenced-block copy buttons |
 | `forge-config/src/lib.rs` | `[remote]` block: `RemoteConfig` (`auto`, `host`) + `RemoteAuto` + `startup_exposure()` |
+| `forge-store/src/lib.rs` | v5: `Store::load_history_page` + `HistoryRow` (user-facing transcript pages, newest first, `before`/`limit` windowed) |
 | `forge-tui/src/app.rs` | `App.remote_active`, `question_prompt`, `recent_transcript` ring, `drain_flush_remote`, `remote_snapshot` (tasks/subagents/queued/question options), `remote_overlay()` + `OverlaySnapshot`/`OverlayRowSnapshot` + `picker_kind_wire`, `print_lines`, statusline `◉ remote` segment |
 | `forge-tui/src/commands.rs` | `CommandAction::Remote { mode }`, `/remote` (alias `/rc`) parse + registry entry |
-| `forge-cli/src/cli/commands/run.rs` | `DispatchOutcome::ToggleRemote`, `toggle_remote`, `[remote] auto` startup, remote input draining + full-state snapshot broadcast in `run_chat_tui`; v4: `next_input_event` (remote keys join the local key loop), `apply_overlay_input` + `RemoteOverlayOp`, `/keys` host-only note, `remote_copy_text` |
+| `forge-cli/src/cli/commands/run.rs` | `DispatchOutcome::ToggleRemote`, `toggle_remote`, `[remote] auto` startup, remote input draining + full-state snapshot broadcast in `run_chat_tui`; v4: `next_input_event` (remote keys join the local key loop), `apply_overlay_input` + `RemoteOverlayOp`, `/keys` host-only note, `remote_copy_text`; v5: `RemoteControl::broadcast` (frame → event log + watch), the `HistoryProvider` closure over the session's store |
 | `Cargo.toml` | `axum` (ws), `axum-server` (rustls), `rcgen`, `tokio-tungstenite`, `qrcode`; `tokio` `net` feature |
-| tests | snapshot wire-shape (v4 incl. overlay/copy_text), named-key table, overlay-verb units, per-`PickerKind` projection units, an e2e-style remote drive of the `/model` pin picker asserting the pin changed, manifest/base/SW/exposure-mapping units + the `--ignored` real-socket page + WS + PWA + asset round-trip |
+| tests | snapshot wire-shape (v5 incl. overlay/copy_text/resync + `HistoryRow`), named-key table, overlay-verb units, per-`PickerKind` projection units, an e2e-style remote drive of the `/model` pin picker asserting the pin changed, `EventLog` replay/eviction/bounded units, history-page store units (windowing/ordering/ui-rows/session-scoping), manifest/base/SW/exposure-mapping units + two `--ignored` real-socket round-trips (page + WS + PWA assets; connect → drop → `?rev=` reconnect asserting exact gap-free replay + history pagination + token-gated 404) |
 
 The stdin-prompt fix (`ef8a365`, feed CLI-bridge prompts via stdin to avoid `ARG_MAX`) is
 included on this branch — it's the prior commit this feature builds on.

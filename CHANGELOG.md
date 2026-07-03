@@ -7,6 +7,18 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Remote control: bulletproof reconnect, full scrollback, rich transcript (protocol v5)**:
+  every broadcast frame now lands in a bounded per-server event log, and the WS handshake takes
+  `?rev=<last seen revision>` — after any disconnect the page replays exactly the frames it
+  missed (no gap, no flicker, verified live over a real drop/reconnect), falling back to ONE
+  full snapshot flagged `resync` when the gap is unfillable; a token-scoped
+  `GET /<token>/api/history?before=<seq>&limit=<n>` pages the session's persisted transcript
+  from the store (newest first, user + assistant turns plus user-facing `ui` notes), and the
+  page fetches older pages as you scroll up — unlimited scrollback instead of the 12-line live
+  tail; the page renders markdown (headings, lists, inline + fenced code, links as plain text)
+  with a self-contained syntax highlighter (rust/js/ts/python/go/bash/json — no CDN, CSP-safe)
+  and a tap-to-copy button on every fenced block. All rendering builds DOM via
+  `createElement`/`textContent` only, so transcript content can never inject markup.
 - **Remote control: full command + picker parity (protocol v4)**: every slash command, picker,
   palette, and overlay is now usable from the phone/browser through one generic mechanism —
   `Snapshot.overlay` projects whichever modal surface owns the TUI keyboard (the command palette,

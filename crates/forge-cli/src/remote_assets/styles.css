@@ -96,3 +96,27 @@ footer { font-size: 11px; color: #4a4a54; text-align: center; padding: 4px 0 2px
 .copybar { display: flex; gap: 8px; align-items: center; background: var(--panel);
   border: 1px solid #33333c; border-radius: 8px; padding: 8px 10px; margin: 6px 0; }
 .copybar .cinfo { flex: 1 1 auto; color: var(--dim); font-size: 12px; }
+
+/* v5 rich transcript: paginated history messages + markdown / highlighted code rendering. */
+#histload { color: var(--dim); font-size: 12px; text-align: center; padding: 4px 0; }
+#hist .msg { border-bottom: 1px solid #1d1d25; padding: 4px 0 6px; margin: 0 0 4px; }
+.mrole { color: var(--dim); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+.msg.user .mrole { color: var(--acc); }
+.msg.note .mbody { color: #ffd9a8; }
+.mbody { font-size: 14px; }
+.mbody p { margin: 4px 0; }
+.mbody h3, .mbody h4, .mbody h5, .mbody h6, .stream h3, .stream h4, .stream h5, .stream h6 {
+  margin: 8px 0 4px; color: var(--acc); font-size: 14px; }
+.mbody ul, .mbody ol, .stream ul, .stream ol { margin: 4px 0; padding-left: 20px; }
+.mbody code, .stream code { background: #23232b; border-radius: 4px; padding: 0 4px;
+  font: 12px/1.5 ui-monospace, Menlo, monospace; }
+.codeblock { position: relative; background: #0b0b10; border: 1px solid #23232b; border-radius: 8px; margin: 6px 0; }
+.codeblock pre { margin: 0; padding: 8px 10px; overflow-x: auto;
+  font: 12px/1.5 ui-monospace, Menlo, monospace; }
+.codeblock pre code { background: none; padding: 0; }
+.codecopy { position: absolute; top: 4px; right: 4px; background: #23232b; color: var(--dim);
+  border: 1px solid #33333c; border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer; }
+.tok-k { color: #ff913c; }
+.tok-s { color: #78d28c; }
+.tok-c { color: #6e6e78; font-style: italic; }
+.tok-n { color: #7db8f0; }
