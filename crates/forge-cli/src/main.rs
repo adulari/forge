@@ -33,8 +33,8 @@ pub(crate) use cli::commands::models::{
 pub(crate) use cli::commands::provider::provider_cmd;
 pub(crate) use cli::commands::queue::queue_cmd;
 pub(crate) use cli::commands::replay::{
-    open_store, replay_cmd, replay_rerun_cmd, resolve_resume_mode, resolve_session, sessions,
-    ResumeMode,
+    fork_cmd, open_store, replay_cmd, replay_rerun_cmd, resolve_resume_mode, resolve_session,
+    sessions, tree_cmd, ResumeMode,
 };
 pub(crate) use cli::commands::run::{
     build_session, chat, fmt_age, nl_cmd, run, session_title, DoneGuard,

@@ -7,6 +7,15 @@ All notable changes to Forge are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **`forge fork` + `forge tree` — counterfactual session branching**: branch any past session
+  BEFORE turn N (every earlier turn held verbatim as fixed context) and re-ask that one prompt,
+  optionally pinned to a different model. `--rerun` executes the forked turn immediately and
+  prints the counterfactual card — the original-vs-fork replay diff, where the shared prefix is
+  identical by construction so the diff IS the effect of the change. `forge tree` shows fork
+  lineage; forks are ordinary sessions (resumable, replayable, diffable). Complements
+  `forge replay --rerun` (whole-history re-execution): a fork changes exactly one variable.
+  Migration 0006 (`session.forked_from`/`forked_at_seq`). Conversation-state only — files are
+  not rewound.
 - **Persistent subagents — `send_to_agent`**: follow up with a child agent spawned earlier
   instead of re-spawning and re-explaining. The child's full transcript is rebuilt from its
   persisted session (nothing held in memory, so it works across parent turns and across a
