@@ -19,6 +19,15 @@ is down, and is *measurably* more reliable than the raw vendor CLIs.**
 
 </div>
 
+<!-- Promo video (silent, ~75s). GitHub renders committed mp4s as an inline player. -->
+<div align="center">
+
+https://github.com/Adulari/forge/raw/main/docs/assets/forge-promo.mp4
+
+<em>▶ 75-second tour — <a href="docs/assets/forge-promo.mp4">main promo</a> · <a href="docs/assets/forge-promo-teaser.mp4">30-second teaser</a></em>
+
+</div>
+
 <p align="center"><img src="docs/assets/forge-demo.gif" alt="Forge in action" width="800"></p>
 
 ---
