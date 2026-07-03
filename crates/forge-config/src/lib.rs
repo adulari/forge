@@ -126,9 +126,14 @@ pub struct Config {
 pub struct RemoteConfig {
     /// Auto-start exposure when `forge chat` launches. `off` (default) leaves remote control off
     /// until you type `/remote`; `local` binds loopback (this machine only); `lan` binds the LAN
-    /// with self-signed HTTPS; `anywhere` opens a public tunnel (cloudflared/ngrok/bore).
+    /// with self-signed HTTPS; `anywhere` opens a public tunnel (cloudflared/ngrok).
     #[serde(default)]
     pub auto: RemoteAuto,
+    /// Override the host used in the LAN connect URL / QR code / TLS cert SANs. By default the
+    /// outbound-interface IP is auto-discovered; set this on multi-homed or VPN'd machines where
+    /// the discovered interface isn't the one the phone reaches (e.g. `host = "192.168.1.5"`).
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 impl RemoteConfig {
@@ -152,7 +157,7 @@ pub enum RemoteAuto {
     Local,
     /// LAN-reachable over self-signed HTTPS.
     Lan,
-    /// Public tunnel (cloudflared / ngrok / bore) — reachable from any network.
+    /// Public tunnel (cloudflared / ngrok) — reachable from any network.
     Anywhere,
 }
 
@@ -3733,6 +3738,13 @@ mod tests {
         let c = RemoteConfig::default();
         assert_eq!(c.auto, RemoteAuto::Off);
         assert!(c.startup_exposure().is_none(), "off => no auto-start");
+        assert!(c.host.is_none(), "no host override by default");
+    }
+
+    #[test]
+    fn remote_config_parses_host_override() {
+        let c: RemoteConfig = toml::from_str(r#"host = "192.168.1.5""#).unwrap();
+        assert_eq!(c.host.as_deref(), Some("192.168.1.5"));
     }
 
     #[test]

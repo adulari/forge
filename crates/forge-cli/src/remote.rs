@@ -7,9 +7,11 @@
 //! recent transcript edge) to the browser and [`RemoteInput`] (prompt / answer / interrupt) back.
 //!
 //! `--local` binds loopback only (control from this machine); `--anywhere` binds loopback and
-//! pipes it through a public tunnel (cloudflared / ngrok / bore, whichever is installed) so the
+//! pipes it through a public tunnel (cloudflared / ngrok, whichever is installed) so the
 //! page is reachable from any network with NO manual router port-forwarding — the connect URL is
-//! then a public `https://…/<token>`. See [`Exposure`] + [`start_anywhere`].
+//! then a public `https://…/<token>`. See [`Exposure`] + [`start_anywhere`]. `bore` is
+//! deliberately NOT probed: its tunnel is plain TCP end-to-end, so the token, transcript, and
+//! permission approvals would travel the public internet in cleartext.
 //!
 //! The design goals are: *easy* (one slash command, no install, works from any browser), and
 //! *accessible on mobile + desktop* (a responsive, low-friction control page that needs no app).
@@ -25,8 +27,13 @@
 //! printed alongside the connect URL so the user can verify it in the browser's cert dialog.
 //! Loopback (`--local`) stays plain HTTP — the connection never leaves the machine. Tunnel modes
 //! are unchanged — the provider (cloudflared / ngrok) already terminates TLS. If TLS setup fails
-//! for any reason the server falls back to plain HTTP with a loud warning rather than refusing to
-//! start.
+//! the LAN server is declared unavailable rather than silently downgrading to cleartext HTTP:
+//! the `https://` connect URL was already handed out, so a plain-HTTP fallback both lies about
+//! the transport AND can't be reached at that URL anyway. Use `--local` or `--anywhere` instead.
+//!
+//! The connect URL / QR / cert SANs use the real outbound-interface IP (discovered via a
+//! connected UDP socket — no packets are sent), overridable with `[remote] host` for
+//! multi-homed/VPN machines, never the meaningless `0.0.0.0` bind address.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,7 +41,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use tokio::sync::{mpsc, watch};
@@ -194,7 +201,7 @@ pub enum Exposure {
     /// Bind `127.0.0.1` only — control from this machine.
     Local,
     /// Bind loopback and pipe it through a public tunnel so any browser, anywhere, can reach it.
-    /// No manual router port-forwarding: the tunnel (cloudflared/ngrok/bore) punches through NAT.
+    /// No manual router port-forwarding: the tunnel (cloudflared/ngrok) punches through NAT.
     Anywhere,
 }
 
@@ -212,9 +219,15 @@ impl From<forge_config::RemoteAuto> for Exposure {
 }
 
 /// A public-tunnel provider Forge can drive if it's installed. Probed in priority order: the
-/// first one found on `PATH` is used. Each is free to run for a session; cloudflared/ngrok give
-/// HTTPS (the page's JS auto-picks `wss://`), bore gives plain TCP (`ws://`). All three proxy the
-/// HTTP WebSocket upgrade transparently, so the existing control page + token gate work unchanged.
+/// first one found on `PATH` is used. Each is free to run for a session and gives HTTPS (the
+/// page's JS auto-picks `wss://`); both proxy the HTTP WebSocket upgrade transparently, so the
+/// existing control page + token gate work unchanged.
+///
+/// `bore` was deliberately removed from the probe list: its tunnel is raw TCP with no TLS, so
+/// the path token, snapshots (source code, cwd, transcript), and permission approvals would all
+/// travel the public internet in cleartext — a sniffed token lets a stranger drive the session
+/// and approve shell commands (RCE). Its `http://` origin also breaks the PWA (no secure
+/// context → no service worker, no notifications).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TunnelKind {
     /// `cloudflared tunnel --url http://localhost:PORT` → `https://<rand>.trycloudflare.com`.
@@ -222,20 +235,17 @@ enum TunnelKind {
     Cloudflared,
     /// `ngrok http PORT` → `https://<id>.ngrok-free.app` (needs a one-time `ngrok config add-authtoken`).
     Ngrok,
-    /// `bore local PORT --to bore.pub` → `bore.pub:<port>` (plain TCP, no TLS, no account).
-    Bore,
 }
 
 impl TunnelKind {
     /// All providers in probe priority order.
-    const ALL: [Self; 3] = [Self::Cloudflared, Self::Ngrok, Self::Bore];
+    const ALL: [Self; 2] = [Self::Cloudflared, Self::Ngrok];
 
     /// The binary name to look for on `PATH`.
     fn binary(self) -> &'static str {
         match self {
             Self::Cloudflared => "cloudflared",
             Self::Ngrok => "ngrok",
-            Self::Bore => "bore",
         }
     }
 
@@ -244,7 +254,6 @@ impl TunnelKind {
         match self {
             Self::Cloudflared => "cloudflared (trycloudflare.com)",
             Self::Ngrok => "ngrok",
-            Self::Bore => "bore.pub",
         }
     }
 
@@ -257,13 +266,6 @@ impl TunnelKind {
                 format!("http://localhost:{local_port}"),
             ],
             Self::Ngrok => vec!["http".into(), local_port.to_string()],
-            // bore: `local <port> --to bore.pub` — the public instance. No account, no secret.
-            Self::Bore => vec![
-                "local".into(),
-                local_port.to_string(),
-                "--to".into(),
-                "bore.pub".into(),
-            ],
         }
     }
 
@@ -271,7 +273,6 @@ impl TunnelKind {
     /// differently; these patterns are matched against the *verified* output formats:
     /// - cloudflared logs the `https://…trycloudflare.com` URL in a log line on stderr.
     /// - ngrok prints `Forwarding  https://<id>.ngrok-free.app -> http://localhost:PORT`.
-    /// - bore logs `listening at bore.pub:<port>` (plain TCP → an http:// URL).
     fn parse_url(self, line: &str) -> Option<String> {
         match self {
             Self::Cloudflared => {
@@ -301,21 +302,6 @@ impl TunnelKind {
                                 || tok.contains("ngrok.app"))
                     })
                     .map(|t| t.trim_end_matches(',').to_string())
-            }
-            Self::Bore => {
-                // `listening at bore.pub:40123` → http URL (plain TCP, no TLS).
-                if let Some(idx) = line.find("bore.pub:") {
-                    let rest = &line[idx..];
-                    let port: String = rest
-                        .chars()
-                        .skip("bore.pub:".len())
-                        .take_while(|c| c.is_ascii_digit())
-                        .collect();
-                    if port.chars().all(|c| c.is_ascii_digit()) && !port.is_empty() {
-                        return Some(format!("http://bore.pub:{port}"));
-                    }
-                }
-                None
             }
         }
     }
@@ -371,7 +357,7 @@ async fn spawn_tunnel(
     let mut child = cmd.spawn()?;
 
     // Merge stdout + stderr so the URL (whichever stream it lands on) is seen. cloudflared prints
-    // the URL on stderr; ngrok on stdout; bore on stderr (via tracing). Read both concurrently.
+    // the URL on stderr; ngrok on stdout. Read both concurrently.
     // The readers drain to EOF (the child's exit) regardless of whether anyone is still receiving:
     // once we have the URL we stop reading `rx`, but a chatty tunnel keeps logging — if we stopped
     // draining its pipe, a full pipe buffer would block the tunnel process and stall forwarding.
@@ -463,14 +449,18 @@ pub struct RemoteUrl {
 /// Wire-protocol version for the remote control page ⇄ server contract. Bumped whenever the
 /// [`Snapshot`] / [`RemoteInput`] shape changes in a way the page must know about; the page
 /// shows a "refresh to update" hint when its bundled version and the server's disagree.
-pub const PROTOCOL_VERSION: u32 = 2;
+///
+/// v3: `Snapshot` gained `prompt_seq`/`notes`/`revision`; `Allow`/`Answer` REQUIRE a `seq`
+/// echoing the snapshot's `prompt_seq` (a v2 page's seq-less answers are rejected by design —
+/// they can't prove which prompt they target).
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Hard cap on a single inbound WebSocket frame (a [`RemoteInput`]). Inputs are short prompts or
 /// answers; anything larger is dropped to bound memory + parse cost from a hostile/buggy client.
 const MAX_INPUT_BYTES: usize = 256 * 1024;
 
 /// One tracked task in the live task list, projected for the wire (status as a stable word).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SnapTask {
     pub title: String,
     /// "pending" | "in_progress" | "done".
@@ -478,7 +468,7 @@ pub struct SnapTask {
 }
 
 /// One live subagent row, projected for the wire.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SnapSubagent {
     pub agent: String,
     pub task: String,
@@ -491,7 +481,7 @@ pub struct SnapSubagent {
 
 /// One selectable option of a pending AskUserQuestion, so the page can render tappable buttons
 /// instead of forcing the user to type a number on a phone keyboard.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SnapOption {
     pub label: String,
     pub description: String,
@@ -500,7 +490,12 @@ pub struct SnapOption {
 /// One frame of visible state broadcast to every connected browser, so the control page mirrors
 /// the TUI statusline + the tail of the conversation. Cheap to build (plain strings) and JSON, so
 /// a phone renders it without any client-side framework.
-#[derive(Debug, Clone, serde::Serialize)]
+///
+/// `PartialEq` is load-bearing: the render loop compares each candidate against the last
+/// broadcast snapshot and only `watch::send`s on a real change — without that, the ~60 Hz busy
+/// loop pushed an identical JSON frame every 16 ms to every client (battery/bandwidth burn, and
+/// the page's action buttons were destroyed/recreated under the user's finger).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Snapshot {
     /// Wire-protocol version (see [`PROTOCOL_VERSION`]); the page warns on a mismatch.
     pub protocol: u32,
@@ -540,6 +535,16 @@ pub struct Snapshot {
     pub question_options: Vec<SnapOption>,
     /// Whether the pending question accepts a free-text answer in addition to its options.
     pub question_allow_other: bool,
+    /// Identity of the currently pending permission prompt / question. Incremented every time a
+    /// new prompt is installed; [`RemoteInput::Allow`]/[`RemoteInput::Answer`] must echo it back,
+    /// and a mismatch is ignored — so a stale tap can never approve a NEWER (possibly more
+    /// dangerous) prompt that replaced the one the page rendered.
+    pub prompt_seq: u64,
+    /// Recent remote-facing notices (bounded, newest last) — e.g. "that command ran in the TUI",
+    /// "stale answer ignored". State (not events) so `watch` coalescing can't drop them.
+    pub notes: Vec<String>,
+    /// Monotonic snapshot revision, bumped once per *actually broadcast* (i.e. changed) frame.
+    pub revision: u64,
     /// `true` once remote control has been turned off (tells the page to stop reconnecting).
     pub closed: bool,
 }
@@ -568,6 +573,9 @@ impl Default for Snapshot {
             question: None,
             question_options: Vec::new(),
             question_allow_other: false,
+            prompt_seq: 0,
+            notes: Vec::new(),
+            revision: 0,
             closed: false,
         }
     }
@@ -581,12 +589,40 @@ impl Default for Snapshot {
 pub enum RemoteInput {
     /// Submit a prompt (or a `/command`) — exactly as if typed + Enter in the TUI.
     Prompt { text: String },
-    /// Answer a pending permission prompt: `true` = allow (y), `false` = deny (n).
-    Allow { yes: bool },
-    /// Answer a pending AskUserQuestion with a free-text line (a number picks an option).
-    Answer { text: String },
+    /// Answer a pending permission prompt: `true` = allow (y), `false` = deny (n). `seq` echoes
+    /// the [`Snapshot::prompt_seq`] the page rendered its buttons from; the drain ignores a
+    /// mismatch (the prompt changed under the tap). REQUIRED — a seq-less legacy (v2) answer
+    /// fails to parse and is dropped, by design: it can't prove which prompt it approves.
+    Allow { yes: bool, seq: u64 },
+    /// Answer a pending AskUserQuestion with a free-text line (a number picks an option). `seq`
+    /// as on [`RemoteInput::Allow`].
+    Answer { text: String, seq: u64 },
     /// Esc-while-busy: stop the current turn (ignored when idle).
     Interrupt,
+}
+
+/// True when a remote Allow/Answer's echoed `seq` targets the prompt that is pending NOW (see
+/// [`Snapshot::prompt_seq`]). A mismatch means the prompt changed after the page rendered its
+/// buttons — the answer is stale and must be ignored rather than resolving the wrong prompt.
+pub fn prompt_seq_current(current: u64, sent: u64) -> bool {
+    current == sent
+}
+
+/// The human exposure label shown in the page header ("loopback" | "LAN" | "public (provider)").
+/// `tls_failed` (LAN only) turns the label into an explicit *unavailable* — the server is NOT
+/// listening after a TLS setup failure, and pretending otherwise ("LAN") lies to the operator.
+pub fn exposure_label(tunnel: Option<&str>, lan_tls: bool, tls_failed: bool) -> String {
+    if let Some(t) = tunnel {
+        format!("public ({t})")
+    } else if lan_tls {
+        if tls_failed {
+            "LAN (unavailable — TLS failed)".to_string()
+        } else {
+            "LAN".to_string()
+        }
+    } else {
+        "loopback".to_string()
+    }
 }
 
 /// The handle the render loop holds: publish a new [`Snapshot`] every dirty frame, and drain
@@ -605,19 +641,20 @@ pub struct RemoteControl {
     _tunnel: Option<tokio::process::Child>,
     /// The tunnel provider's human label (`--anywhere` only), for the scrollback note.
     pub tunnel: Option<&'static str>,
-    /// Set from the spawned server task if a `Lan` bind's TLS setup fails *after* [`start`] already
-    /// returned an `https://` URL (see [`Self::tls_degraded`]) — the connect URL and cert
+    /// Set from the spawned server task if a `Lan` bind's TLS setup fails *after* [`start`]
+    /// already returned an `https://` URL (see [`Self::tls_failed`]) — the connect URL and cert
     /// fingerprint were fixed at return time and can't be corrected in place, so this is checked
     /// separately wherever the exposure is reported (e.g. the remote-page header).
-    tls_degraded: Arc<AtomicBool>,
+    tls_failed: Arc<AtomicBool>,
 }
 
 impl RemoteControl {
-    /// True once a `Lan`-exposure bind's TLS config build has failed and the server fell back to
-    /// plain HTTP — meaning the token is travelling in cleartext despite the `https://` connect
-    /// URL handed out at start time. Always `false` for `Local`/`Anywhere` (no TLS is attempted).
-    pub fn tls_degraded(&self) -> bool {
-        self.tls_degraded.load(Ordering::Relaxed)
+    /// True once a `Lan`-exposure bind's TLS setup has failed asynchronously — the server is NOT
+    /// listening (there is no cleartext fallback: it would lie about the transport and be
+    /// unreachable at the already-printed `https://` URL anyway), so remote control is
+    /// unavailable. Always `false` for `Local`/`Anywhere` (no TLS is attempted).
+    pub fn tls_failed(&self) -> bool {
+        self.tls_failed.load(Ordering::Relaxed)
     }
 }
 
@@ -650,6 +687,29 @@ fn lan_host(addr: SocketAddr) -> String {
     addr.ip().to_string()
 }
 
+/// Discover the IP of the interface that carries this machine's outbound traffic — the address a
+/// phone on the same network can actually reach. Binding `0.0.0.0` and printing the *bind*
+/// address gave phones a dead `https://0.0.0.0:PORT/…` URL/QR; the OS knows the real interface,
+/// and `connect` on a UDP socket resolves the route + local address WITHOUT sending any packet
+/// (8.8.8.8 is never contacted). `None` when routing fails (offline, no default route) or the
+/// resolved address is unusable (unspecified/loopback) — callers fall back to the bind address.
+fn discover_lan_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    sock.connect(("8.8.8.8", 80)).ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_unspecified() && !ip.is_loopback()).then_some(ip)
+}
+
+/// The host to advertise for a `Lan` bind (URL, QR, cert SANs): the `[remote] host` config
+/// override wins (multi-homed/VPN machines where discovery picks the wrong interface), then the
+/// discovered outbound-interface IP, then the raw bind address as a last resort.
+fn lan_display_host(host_override: Option<&str>, addr: SocketAddr) -> String {
+    host_override
+        .map(str::to_string)
+        .or_else(|| discover_lan_ip().map(|ip| ip.to_string()))
+        .unwrap_or_else(|| lan_host(addr))
+}
+
 /// Start the remote-control server. The returned [`RemoteControl`] is moved into the render loop;
 /// dropping it stops the server and frees the port. [`Exposure`] selects the bind address:
 /// `Lan` → `0.0.0.0` (LAN-reachable, HTTPS with self-signed cert), `Local`/`Anywhere` →
@@ -657,12 +717,16 @@ fn lan_host(addr: SocketAddr) -> String {
 /// ([`start_anywhere`]) provides the public exposure; this fn does NOT spawn the tunnel (it's
 /// sync) — use [`start_anywhere`] for that.
 ///
+/// `host_override` (`[remote] host`) replaces the auto-discovered LAN IP in the connect URL,
+/// QR code, and certificate SANs; ignored for `Local`/`Anywhere`.
+///
 /// **TLS**: For the `Lan` exposure the server generates a self-signed certificate and serves
 /// HTTPS so the access token never travels in cleartext over the LAN. The cert fingerprint is
-/// included in the returned [`RemoteUrl`] so it can be shown to the user. If TLS setup fails
-/// (cert generation error or RustlsConfig build error) the server falls back to plain HTTP with a
-/// `tracing::warn!` rather than failing to start.
-pub fn start(exposure: Exposure) -> std::io::Result<RemoteControl> {
+/// included in the returned [`RemoteUrl`] so it can be shown to the user. If cert generation
+/// fails this returns `Err`; if the async TLS setup fails later the server is declared
+/// unavailable (see [`RemoteControl::tls_failed`]) — there is deliberately NO cleartext
+/// fallback on the LAN.
+pub fn start(exposure: Exposure, host_override: Option<&str>) -> std::io::Result<RemoteControl> {
     let token = random_token();
     let bind_ip: std::net::IpAddr = match exposure {
         Exposure::Lan => std::net::Ipv4Addr::UNSPECIFIED.into(),
@@ -671,7 +735,12 @@ pub fn start(exposure: Exposure) -> std::io::Result<RemoteControl> {
     // Port 0 → the OS picks a free ephemeral port (no clashes, no config).
     let listener = std::net::TcpListener::bind((bind_ip, 0))?;
     let addr = listener.local_addr()?;
-    let host = lan_host(addr);
+    // The advertised host: for LAN binds the bind address (0.0.0.0) is meaningless to a phone,
+    // so advertise the config override or the discovered outbound-interface IP instead.
+    let host = match exposure {
+        Exposure::Lan => lan_display_host(host_override, addr),
+        Exposure::Local | Exposure::Anywhere => lan_host(addr),
+    };
 
     let (snapshot_tx, snapshot_rx) = watch::channel(Snapshot::default());
     let (input_tx, input_rx) = mpsc::channel::<RemoteInput>(64);
@@ -698,96 +767,78 @@ pub fn start(exposure: Exposure) -> std::io::Result<RemoteControl> {
         .fallback(fallback)
         .with_state(state);
 
-    // For the LAN exposure, attempt TLS with a self-signed certificate so the access token
-    // doesn't travel in cleartext. Fall back to plain HTTP on any error.
+    // For the LAN exposure, serve TLS with a self-signed certificate so the access token doesn't
+    // travel in cleartext. Any TLS failure means LAN remote control is UNAVAILABLE — never a
+    // silent downgrade to plain HTTP: the `https://` URL was already committed (browsers can't
+    // reach an `http://` server through it), and a cleartext LAN server would put the token on
+    // the wire while the status still said "LAN".
     if exposure == Exposure::Lan {
-        // SANs: the numeric LAN IP + localhost (so a browser connecting by hostname also works).
+        // SANs: the advertised LAN IP + localhost (so a browser connecting by hostname also works).
         let sans = vec![host.clone(), "localhost".to_string()];
-        match generate_self_signed(sans) {
-            Ok(tls) => {
-                let fingerprint = tls.fingerprint.clone();
-                let cert_pem = tls.cert_pem;
-                let key_pem = tls.key_pem;
-                let url = format!("https://{host}:{}/{}", addr.port(), token);
-                // axum-server calls tokio::net::TcpListener::from_std internally, which
-                // requires the listener to already be in nonblocking mode.
-                listener.set_nonblocking(true)?;
+        let tls = generate_self_signed(sans).map_err(|e| {
+            std::io::Error::other(format!(
+                "self-signed cert generation failed ({e}) — LAN remote control needs TLS; \
+                 try `/remote --local` or `/remote --anywhere`"
+            ))
+        })?;
+        let fingerprint = tls.fingerprint.clone();
+        let cert_pem = tls.cert_pem;
+        let key_pem = tls.key_pem;
+        let url = format!("https://{host}:{}/{}", addr.port(), token);
+        // axum-server calls tokio::net::TcpListener::from_std internally, which
+        // requires the listener to already be in nonblocking mode.
+        listener.set_nonblocking(true)?;
 
-                // axum-server::from_tcp_rustls takes a std::net::TcpListener (non-async).
-                // We build the RustlsConfig inside the spawned async task because
-                // RustlsConfig::from_pem is async (it spawns blocking work internally).
-                // `start()` already committed to an `https://` URL above (before this task even
-                // runs), so a fallback here can't change the connect URL — `tls_degraded` is how
-                // the render loop finds out the token is actually travelling in cleartext.
-                let tls_degraded = Arc::new(AtomicBool::new(false));
-                let tls_degraded_task = tls_degraded.clone();
-                let server = tokio::spawn(async move {
-                    match axum_server::tls_rustls::RustlsConfig::from_pem(cert_pem, key_pem).await {
-                        Ok(tls_config) => {
-                            match axum_server::from_tcp_rustls(listener, tls_config) {
-                                Ok(server) => {
-                                    server.serve(app.into_make_service()).await.ok();
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "remote: TLS server setup failed ({e}), \
-                                         LAN remote control is unavailable"
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "remote: TLS config build failed ({e}); \
-                                 falling back to plain HTTP — token will travel in cleartext"
-                            );
-                            tls_degraded_task.store(true, Ordering::Relaxed);
-                            // Fall back: rebuild listener (the original was moved). We can't
-                            // easily un-move it, so we open a new one on the same addr.
-                            // In the unlikely event that fails, just log and exit the task.
-                            match std::net::TcpListener::bind(addr) {
-                                Ok(fb_listener) => {
-                                    if let Ok(tl) = tokio::net::TcpListener::from_std(fb_listener) {
-                                        axum::serve(tl, app).await.ok();
-                                    }
-                                }
-                                Err(bind_err) => {
-                                    tracing::warn!(
-                                        "remote: fallback HTTP bind also failed ({bind_err}); \
-                                         remote control unavailable"
-                                    );
-                                }
-                            }
-                        }
+        // axum-server::from_tcp_rustls takes a std::net::TcpListener (non-async).
+        // We build the RustlsConfig inside the spawned async task because
+        // RustlsConfig::from_pem is async (it spawns blocking work internally).
+        // `start()` already committed to an `https://` URL above (before this task even
+        // runs), so a failure here can't be corrected in place — `tls_failed` is how the
+        // render loop finds out the server never came up.
+        let tls_failed = Arc::new(AtomicBool::new(false));
+        let tls_failed_task = tls_failed.clone();
+        let server = tokio::spawn(async move {
+            match axum_server::tls_rustls::RustlsConfig::from_pem(cert_pem, key_pem).await {
+                Ok(tls_config) => match axum_server::from_tcp_rustls(listener, tls_config) {
+                    Ok(server) => {
+                        server.serve(app.into_make_service()).await.ok();
                     }
-                });
+                    Err(e) => {
+                        tracing::warn!(
+                            "remote: TLS server setup failed ({e}) — \
+                             LAN remote control is unavailable (no cleartext fallback)"
+                        );
+                        tls_failed_task.store(true, Ordering::Relaxed);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        "remote: TLS config build failed ({e}) — \
+                         LAN remote control is unavailable (no cleartext fallback)"
+                    );
+                    tls_failed_task.store(true, Ordering::Relaxed);
+                }
+            }
+        });
 
-                return Ok(RemoteControl {
-                    snapshot_tx,
-                    input_rx,
-                    url: RemoteUrl {
-                        url,
-                        addr,
-                        token,
-                        tls_fingerprint: Some(fingerprint),
-                    },
-                    _server: server,
-                    _tunnel: None,
-                    tls_degraded,
-                    tunnel: None,
-                });
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "remote: self-signed cert generation failed ({e}); \
-                     falling back to plain HTTP on the LAN — token will be sent in cleartext"
-                );
-                // Fall through to the plain HTTP path below.
-            }
-        }
+        return Ok(RemoteControl {
+            snapshot_tx,
+            input_rx,
+            url: RemoteUrl {
+                url,
+                addr,
+                token,
+                tls_fingerprint: Some(fingerprint),
+            },
+            _server: server,
+            _tunnel: None,
+            tls_failed,
+            tunnel: None,
+        });
     }
 
-    // Plain HTTP path: loopback (--local / --anywhere) and LAN fallback.
+    // Plain HTTP path: loopback only (--local / --anywhere) — the connection never leaves the
+    // machine (tunnels terminate TLS at the provider).
     // axum wants a tokio TcpListener; convert the blocking std listener we used to read the
     // bound port (so the connect URL is correct before the async task even starts).
     listener.set_nonblocking(true)?;
@@ -810,24 +861,26 @@ pub fn start(exposure: Exposure) -> std::io::Result<RemoteControl> {
         _server: server,
         _tunnel: None,
         tunnel: None,
-        tls_degraded: Arc::new(AtomicBool::new(false)),
+        tls_failed: Arc::new(AtomicBool::new(false)),
     })
 }
 
 /// Start the server on loopback and pipe it through a public tunnel so any browser, anywhere, can
 /// reach it — no manual router port-forwarding. Probes for an installed tunnel CLI
-/// (cloudflared → ngrok → bore) and points it at the bound port; the returned [`RemoteControl`]'s
-/// `url` is the PUBLIC `https://…/<token>` (or `http://bore.pub:port/<token>`), and it owns the
-/// tunnel child (killed on drop). Errors if no tunnel tool is installed or the tunnel never
+/// (cloudflared → ngrok; bore is excluded — cleartext end-to-end) and points it at the bound
+/// port; the returned [`RemoteControl`]'s `url` is the PUBLIC `https://…/<token>`, and it owns
+/// the tunnel child (killed on drop). Errors if no tunnel tool is installed or the tunnel never
 /// publishes a URL — the caller surfaces an install hint.
 pub async fn start_anywhere() -> std::io::Result<RemoteControl> {
     let kind = detect_tunnel().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "no tunnel tool found on PATH — install one of: cloudflared, ngrok, or bore",
+            "no tunnel tool found on PATH — install cloudflared or ngrok \
+             (bore is unsupported: its tunnel has no TLS, so the access token would travel \
+             the public internet in cleartext)",
         )
     })?;
-    let mut rc = start(Exposure::Anywhere)?;
+    let mut rc = start(Exposure::Anywhere, None)?;
     let port = rc.url.addr.port();
     let (public, child) = spawn_tunnel(kind, port).await?;
     // The control page lives at `/<token>`; the tunnel forwards the whole path, so the public
@@ -847,12 +900,32 @@ struct ServerState {
     base: String,
 }
 
+/// The `Content-Security-Policy` for the control page. Everything is same-origin; the inline
+/// `<script>`/`<style>` blocks need `'unsafe-inline'` until the Phase-2 asset split moves them to
+/// separate token-scoped files. `connect-src` must name the ws:/wss: schemes explicitly — some
+/// browsers don't fold WebSockets into `'self'`.
+const PAGE_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+     style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; \
+     frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
 /// The single control page: a responsive, dependency-free HTML/CSS/JS shell that mirrors the
 /// statusline, shows the streaming reply + recent transcript, and sends inputs over the WS. It's
 /// intentionally one self-contained string so there's no static-asset serving to wire up. Takes
-/// the shared state (ignored) so axum's `Handler` bound is satisfied on a stateful router.
-async fn control_page(State(state): State<Arc<ServerState>>) -> Html<String> {
-    Html(CONTROL_PAGE.replace("__BASE__", &state.base))
+/// the shared state so the token base path can be injected. Hardening headers ride along: the
+/// page drives a live coding session, so it must never render inside a hostile frame
+/// (X-Frame-Options/frame-ancestors) and its token-bearing URL must never leak via the Referer
+/// header (Referrer-Policy).
+async fn control_page(State(state): State<Arc<ServerState>>) -> Response {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (axum::http::header::X_FRAME_OPTIONS, "DENY"),
+            (axum::http::header::CONTENT_SECURITY_POLICY, PAGE_CSP),
+            (axum::http::header::REFERRER_POLICY, "no-referrer"),
+        ],
+        CONTROL_PAGE.replace("__BASE__", &state.base),
+    )
+        .into_response()
 }
 
 /// The token-scoped PWA manifest (`start_url`/`scope` baked to this session's path).
@@ -1124,22 +1197,31 @@ const CONTROL_PAGE: &str = r##"<!doctype html>
 
 <script>
 const BASE = "__BASE__";
-const PROTO = 2;
+const PROTO = 3;
 const $ = (id) => document.getElementById(id);
-let ws = null, dead = false, sent = 0, notif = false;
+let ws = null, dead = false, notif = false, curSeq = 0, retries = 0;
 let prev = { busy:false, prompt:false, question:false };
 
 function connect() {
   if (dead) return;
   const scheme = location.protocol === "https:" ? "wss://" : "ws://";
   ws = new WebSocket(scheme + location.host + BASE + "/ws");
-  ws.onopen = () => { $("conn").textContent = "● connected"; };
+  ws.onopen = () => { retries = 0; $("conn").textContent = "● connected"; };
   ws.onmessage = (e) => {
     let s; try { s = JSON.parse(e.data); } catch { return; }
     render(s);
     if (s.closed) { dead = true; $("conn").textContent = "remote control turned off — reconnect to the TUI"; ws.close(); }
   };
-  ws.onclose = () => { if (dead) return; $("conn").textContent = "reconnecting…"; setTimeout(connect, 1500); };
+  ws.onclose = () => {
+    if (dead) return;
+    retries++;
+    // After ~12s of failures the session is almost certainly gone (the server dies with the
+    // TUI) — say so instead of an infinite "reconnecting…", and back off to a slow retry.
+    $("conn").textContent = retries > 8
+      ? "session unreachable — reopen /remote from the TUI for a fresh link"
+      : "reconnecting…";
+    setTimeout(connect, retries > 8 ? 10000 : 1500);
+  };
   ws.onerror = () => ws.close();
 }
 function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
@@ -1147,8 +1229,11 @@ function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj))
 function render(s) {
   if (s.protocol && s.protocol !== PROTO) {
     $("banner").style.display = "block";
-    $("banner").textContent = "A newer Forge is running — refresh this page to update the remote UI.";
+    $("banner").textContent = s.protocol > PROTO
+      ? "A newer Forge is running — refresh this page to update the remote UI."
+      : "This page is newer than the running Forge — restart Forge in the terminal, then reload.";
   }
+  curSeq = s.prompt_seq || 0;
   $("dot").className = "dot" + (s.busy ? " busy" : "");
   $("tier").textContent = s.tier ? "[" + s.tier + "]" : "—";
   $("model").textContent = s.model || "—";
@@ -1172,14 +1257,16 @@ function render(s) {
 
 function renderTranscript(s) {
   const t = $("transcript");
+  // Exact content signature — a length-based check missed equal-length ring
+  // rotations/replacements and left stale lines on screen.
   const body = (s.transcript || []).join("\n") + (s.streaming ? "\n" + s.streaming : "");
-  if (t._n === sent + body.length) return; // unchanged
+  if (t._sig === body) return; // unchanged
   const nearBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 80;
   t.innerHTML = "";
   (s.transcript || []).forEach(line => { const d = document.createElement("div"); d.textContent = line; t.appendChild(d); });
   if (s.streaming) { const d = document.createElement("div"); d.className = "stream"; d.textContent = s.streaming; t.appendChild(d); }
   if (nearBottom) t.scrollTop = t.scrollHeight;
-  t._n = sent + body.length;
+  t._sig = body;
 }
 
 // Rebuild `el`'s contents via `fill`, but preserve scroll position across the rebuild — a plain
@@ -1232,9 +1319,20 @@ function renderAgents(s) {
 function renderActions(s) {
   const a = $("actions");
   const queued = s.queued || [];
+  const notes = s.notes || [];
+  // Rebuild ONLY when the actionable state changed. This area holds live buttons + a free-text
+  // input; rebuilding it on every snapshot (streaming updates arrive continuously while busy)
+  // destroyed the nodes mid-tap ("tapped Allow, nothing happened") and wiped typed answers.
+  const sig = JSON.stringify([queued, notes, s.permission_prompt, s.question,
+    s.question_options, s.question_allow_other, s.prompt_seq]);
+  if (a._sig === sig) return;
+  a._sig = sig;
   let h = queued.length
     ? '<div class="queued">' + queued.map(q => "⏳ queued: " + esc(q)).join("<br>") + '</div>'
     : "";
+  if (notes.length) {
+    h += '<div class="queued">' + notes.map(esc).join("<br>") + '</div>';
+  }
   if (s.permission_prompt) {
     h += '<div class="prompt"><span class="q">⚠ ' + esc(s.permission_prompt) +
       '</span></div><div class="bar"><button class="y" onclick="answer(true)">Allow</button>' +
@@ -1271,14 +1369,16 @@ function fmt(n) { if (n >= 1e6) return (n/1e6).toFixed(1)+"M"; if (n >= 1e3) ret
 function esc(s) { return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 function baseName(p) { if (!p) return ""; const parts = (""+p).replace(/[\\/]+$/, "").split(/[\\/]/); return parts[parts.length-1] || p; }
 
-function submit() { const v = $("prompt").value; if (!v.trim()) return; send({kind:"prompt", text:v}); $("prompt").value=""; sent++; }
+function submit() { const v = $("prompt").value; if (!v.trim()) return; send({kind:"prompt", text:v}); $("prompt").value=""; }
 function chip(cmd) { send({kind:"prompt", text:cmd}); }
 $("send").onclick = submit;
 $("prompt").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); submit(); } });
 $("stop").onclick = () => send({kind:"interrupt"});
-window.answer = (yes) => send({kind:"allow", yes:!!yes});
-window.pick = (n) => send({kind:"answer", text:""+n});
-window.sendAnswer = () => { const v = $("ans").value; if (v.trim()) { send({kind:"answer", text:v}); sent++; } };
+// Answers echo the prompt_seq their buttons were rendered from, so a stale tap can never
+// resolve a newer prompt that replaced this one.
+window.answer = (yes) => send({kind:"allow", yes:!!yes, seq:curSeq});
+window.pick = (n) => send({kind:"answer", text:""+n, seq:curSeq});
+window.sendAnswer = () => { const v = $("ans").value; if (v.trim()) send({kind:"answer", text:v, seq:curSeq}); };
 window.chip = chip;
 
 // Tabs
@@ -1299,8 +1399,16 @@ $("bell").onclick = () => {
   Notification.requestPermission().then(p => { notif = (p === "granted"); paintBell(); });
 };
 function maybeNotify(title, body) {
-  if (notif && document.hidden && "Notification" in window && Notification.permission === "granted") {
-    try { new Notification(title, { body: (body||"").slice(0, 120), icon: BASE + "/icon.svg", tag: "forge-remote" }); } catch (e) {}
+  if (!(notif && document.hidden && "Notification" in window && Notification.permission === "granted")) return;
+  const opts = { body: (body||"").slice(0, 120), icon: BASE + "/icon.svg", tag: "forge-remote" };
+  // Android Chrome throws on the page-context Notification constructor — notifications must go
+  // through the service worker registration there. Fall back to the constructor elsewhere.
+  if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+    navigator.serviceWorker.ready
+      .then(r => r.showNotification(title, opts))
+      .catch(() => { try { new Notification(title, opts); } catch (e) {} });
+  } else {
+    try { new Notification(title, opts); } catch (e) {}
   }
 }
 
@@ -1316,14 +1424,33 @@ connect();
 </html>"##;
 
 /// The token-scoped PWA service worker. Its presence + a `fetch` handler is what makes the control
-/// page installable to a phone home screen; it caches the shell (network-first) so a reconnect is
-/// instant. Live state flows over the WebSocket, never `fetch`, so there's nothing else to cache.
-const SERVICE_WORKER: &str = r#"const CACHE = "forge-remote-v2";
+/// page installable to a phone home screen; it caches non-navigation assets (network-first) so a
+/// reconnect is instant. Live state flows over the WebSocket, never `fetch`.
+///
+/// Navigations are special-cased: when the server is gone (each session gets a fresh port +
+/// token, so an installed home-screen app outlives its session), serving the *cached* shell
+/// showed a live-looking page stuck on "reconnecting…" forever. Instead the SW answers a failed
+/// navigation with an explicit "session ended — reopen /remote from the TUI" page. A stable
+/// origin that makes the install permanent is the Phase-4 daemon's job.
+const SERVICE_WORKER: &str = r#"const CACHE = "forge-remote-v3";
+const ENDED = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Forge remote - session ended</title>
+<style>body{background:#16161c;color:#d8d8e0;font:16px/1.6 -apple-system,system-ui,sans-serif;
+display:flex;align-items:center;justify-content:center;height:100vh;margin:0;text-align:center;
+padding:24px}b{color:#ff913c}</style></head><body><div><b>⚒ Forge</b><br><br>
+This remote session has ended.<br>Each session gets a fresh link: reopen <b>/remote</b> in the
+Forge TUI and scan the new QR code (or open the new URL).</div></body></html>`;
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
 self.addEventListener("fetch", (e) => {
   const req = e.request;
   if (req.method !== "GET") return;
+  if (req.mode === "navigate") {
+    e.respondWith(fetch(req).catch(() =>
+      new Response(ENDED, { headers: { "Content-Type": "text/html; charset=utf-8" } })));
+    return;
+  }
   e.respondWith(
     fetch(req).then((res) => {
       const copy = res.clone();
@@ -1386,6 +1513,9 @@ mod tests {
                 description: "do it".into(),
             }],
             question_allow_other: true,
+            prompt_seq: 7,
+            notes: vec!["⚠ /remote can only be toggled from the TUI".into()],
+            revision: 42,
             ..Default::default()
         };
         // Snapshot is server→client (serialize only); confirm the wire shape carries every field
@@ -1412,6 +1542,9 @@ mod tests {
         assert_eq!(v["question"], serde_json::Value::Null);
         assert_eq!(v["question_options"][0]["label"], "Yes");
         assert_eq!(v["question_allow_other"], true);
+        assert_eq!(v["prompt_seq"], 7);
+        assert_eq!(v["notes"][0], "⚠ /remote can only be toggled from the TUI");
+        assert_eq!(v["revision"], 42);
         assert_eq!(v["closed"], false);
     }
 
@@ -1424,17 +1557,120 @@ mod tests {
             }
         );
         assert_eq!(
-            serde_json::from_str::<RemoteInput>(r#"{"kind":"allow","yes":true}"#).unwrap(),
-            RemoteInput::Allow { yes: true }
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"allow","yes":true,"seq":3}"#).unwrap(),
+            RemoteInput::Allow { yes: true, seq: 3 }
         );
         assert_eq!(
-            serde_json::from_str::<RemoteInput>(r#"{"kind":"answer","text":"2"}"#).unwrap(),
-            RemoteInput::Answer { text: "2".into() }
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"answer","text":"2","seq":9}"#).unwrap(),
+            RemoteInput::Answer {
+                text: "2".into(),
+                seq: 9
+            }
         );
         assert_eq!(
             serde_json::from_str::<RemoteInput>(r#"{"kind":"interrupt"}"#).unwrap(),
             RemoteInput::Interrupt
         );
+    }
+
+    #[test]
+    fn legacy_answers_without_seq_are_rejected() {
+        // A v2 page's Allow/Answer carries no `seq`, so it can't prove which prompt it targets —
+        // parsing must fail (the ws layer then drops the frame) rather than defaulting to some
+        // seq that could approve a newer, more dangerous prompt. The page shows the protocol-
+        // mismatch banner, so the operator knows to refresh.
+        assert!(serde_json::from_str::<RemoteInput>(r#"{"kind":"allow","yes":true}"#).is_err());
+        assert!(serde_json::from_str::<RemoteInput>(r#"{"kind":"answer","text":"2"}"#).is_err());
+        // Prompt/Interrupt are seq-free (they don't resolve a pending prompt) and still parse.
+        assert!(serde_json::from_str::<RemoteInput>(r#"{"kind":"interrupt"}"#).is_ok());
+    }
+
+    #[test]
+    fn stale_prompt_seq_is_not_current() {
+        // The render loop only resolves a pending prompt when the answer echoes the CURRENT seq.
+        assert!(prompt_seq_current(5, 5));
+        assert!(
+            !prompt_seq_current(6, 5),
+            "answer for a replaced prompt is stale"
+        );
+        assert!(
+            !prompt_seq_current(5, 6),
+            "an answer can't target a future prompt"
+        );
+    }
+
+    #[test]
+    fn snapshot_partial_eq_backs_change_only_broadcast() {
+        // The dedup in the render loop (`last != candidate → send`) hinges on PartialEq seeing
+        // real state changes and nothing else.
+        let a = Snapshot::default();
+        let b = Snapshot::default();
+        assert_eq!(
+            a, b,
+            "identical snapshots compare equal (no spurious sends)"
+        );
+        let c = Snapshot {
+            busy: true,
+            ..Default::default()
+        };
+        assert_ne!(a, c, "a real change compares unequal");
+        let d = Snapshot {
+            prompt_seq: 1,
+            ..Default::default()
+        };
+        assert_ne!(a, d, "a new prompt identity is a change");
+    }
+
+    #[test]
+    fn exposure_label_reports_tls_failure_as_unavailable() {
+        assert_eq!(
+            exposure_label(Some("ngrok"), false, false),
+            "public (ngrok)"
+        );
+        assert_eq!(exposure_label(None, true, false), "LAN");
+        assert_eq!(
+            exposure_label(None, true, true),
+            "LAN (unavailable — TLS failed)",
+            "a TLS failure must never masquerade as a healthy LAN server"
+        );
+        assert_eq!(exposure_label(None, false, false), "loopback");
+    }
+
+    #[test]
+    fn discovered_lan_ip_is_never_unspecified_or_loopback() {
+        // Discovery is environment-dependent (offline machines have no route), but the contract
+        // is: whatever it returns is an address a peer could actually dial — never 0.0.0.0/::
+        // and never 127.0.0.1 (those are exactly the useless values it exists to replace).
+        if let Some(ip) = discover_lan_ip() {
+            assert!(
+                !ip.is_unspecified(),
+                "discovered IP must not be unspecified: {ip}"
+            );
+            assert!(
+                !ip.is_loopback(),
+                "discovered IP must not be loopback: {ip}"
+            );
+        }
+    }
+
+    #[test]
+    fn lan_display_host_prefers_the_config_override() {
+        let addr: SocketAddr = "0.0.0.0:4123".parse().unwrap();
+        assert_eq!(
+            lan_display_host(Some("192.168.1.5"), addr),
+            "192.168.1.5",
+            "[remote] host wins over discovery"
+        );
+        // Without an override the result is discovery-or-bind-address; either way it's the
+        // literal bind IP only when discovery found nothing.
+        let h = lan_display_host(None, addr);
+        assert!(!h.is_empty());
+        if discover_lan_ip().is_some() {
+            assert_ne!(
+                h, "0.0.0.0",
+                "with a discoverable interface the URL never says 0.0.0.0"
+            );
+        }
     }
 
     #[test]
@@ -1466,9 +1702,41 @@ mod tests {
     }
 
     #[test]
+    fn control_page_speaks_protocol_v3() {
+        // The page's bundled protocol constant must track PROTOCOL_VERSION (mismatch = banner).
+        assert!(
+            CONTROL_PAGE.contains(&format!("const PROTO = {PROTOCOL_VERSION};")),
+            "page PROTO must equal PROTOCOL_VERSION"
+        );
+        // Answers must echo the prompt identity (seq) the buttons were rendered from.
+        assert!(
+            CONTROL_PAGE.contains("seq:curSeq"),
+            "allow/answer carry seq"
+        );
+        assert!(
+            CONTROL_PAGE.contains("s.prompt_seq"),
+            "page tracks the snapshot's prompt_seq"
+        );
+        // The mismatch banner covers BOTH directions (older page vs older server).
+        assert!(CONTROL_PAGE.contains("s.protocol > PROTO"));
+    }
+
+    #[test]
     fn service_worker_has_fetch_handler() {
         // PWA installability requires a fetch handler; guard against accidentally dropping it.
         assert!(SERVICE_WORKER.contains(r#"addEventListener("fetch""#));
+    }
+
+    #[test]
+    fn service_worker_serves_session_ended_page_when_server_is_gone() {
+        // A dead server (session over — port + token are per-session) must yield an explicit
+        // "session ended" navigation response, not the cached live shell stuck on
+        // "reconnecting…" forever.
+        assert!(SERVICE_WORKER.contains("session has ended"));
+        assert!(
+            SERVICE_WORKER.contains(r#"req.mode === "navigate""#),
+            "navigations are special-cased away from the stale-shell cache"
+        );
     }
 
     #[test]
@@ -1523,27 +1791,19 @@ mod tests {
     }
 
     #[test]
-    fn bore_url_parses_to_an_http_address() {
-        // bore logs `listening at bore.pub:<port>`; it's plain TCP, so the connect URL is http://.
-        let line = "2026-06-18 INFO bore_cli::client: listening at bore.pub:40123";
-        assert_eq!(
-            TunnelKind::Bore.parse_url(line).as_deref(),
-            Some("http://bore.pub:40123")
-        );
-        assert_eq!(TunnelKind::Bore.parse_url("connecting…"), None);
-    }
-
-    #[test]
     fn tunnel_argv_points_at_the_local_port() {
         assert_eq!(
             TunnelKind::Cloudflared.argv(8080),
             vec!["tunnel", "--url", "http://localhost:8080"]
         );
         assert_eq!(TunnelKind::Ngrok.argv(8080), vec!["http", "8080"]);
-        assert_eq!(
-            TunnelKind::Bore.argv(8080),
-            vec!["local", "8080", "--to", "bore.pub"]
-        );
+    }
+
+    #[test]
+    fn bore_is_not_probed_as_a_tunnel_provider() {
+        // bore forwards raw TCP (no TLS): the token + transcript + approvals would cross the
+        // public internet in cleartext. It must never be in the auto-detect list.
+        assert!(!TunnelKind::ALL.iter().any(|k| k.binary() == "bore"));
     }
 
     #[test]
@@ -1576,7 +1836,7 @@ mod tests {
         // once the assertions pass. Gated behind --ignored so it never runs in CI.
         let _outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             use futures::StreamExt;
-            let rc = start(Exposure::Local).expect("start loopback server");
+            let rc = start(Exposure::Local, None).expect("start loopback server");
             let port = rc.url.addr.port();
             let token = rc.url.token.clone();
 
@@ -1788,7 +2048,7 @@ mod tests {
     async fn lan_start_url_is_https_with_fingerprint() {
         // `start(Exposure::Lan)` must return an https:// URL and a populated tls_fingerprint.
         // Requires a Tokio runtime because axum-server's from_tcp_rustls wires into the runtime.
-        let rc = start(Exposure::Lan).expect("start LAN server");
+        let rc = start(Exposure::Lan, None).expect("start LAN server");
         assert!(
             rc.url.url.starts_with("https://"),
             "LAN URL must be https://: {}",
@@ -1807,7 +2067,7 @@ mod tests {
     async fn local_start_url_is_http_no_fingerprint() {
         // `start(Exposure::Local)` must stay plain HTTP with no fingerprint.
         // Requires a Tokio runtime because axum::serve wires into the runtime.
-        let rc = start(Exposure::Local).expect("start loopback server");
+        let rc = start(Exposure::Local, None).expect("start loopback server");
         assert!(
             rc.url.url.starts_with("http://"),
             "loopback URL must be http://: {}",
