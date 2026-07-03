@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-07-03
+
 ### Added
 - **Remote control endgame — fleet dashboard, diff + plan review cards, file/image upload,
   voice input (protocol v7)**: the daemon's session list is now a real **fleet dashboard** —
