@@ -898,8 +898,19 @@ mod tests {
             !store.load_messages(&b.session_id).unwrap().is_empty(),
             "archive hides, never deletes"
         );
-        // The archived driver's last frame tells clients to stop reconnecting.
-        assert!(b.snapshot_rx.borrow().closed, "final frame is closed");
+        // The archived driver's last frame tells clients to stop reconnecting. The driver winds
+        // down asynchronously (it notices shutdown on its next loop tick, then runs SessionEnd
+        // hooks before the final broadcast) — and the `Arc::try_unwrap` join above is skipped
+        // whenever the test still holds its own handle clone — so poll instead of racing it
+        // (observed flaky on contended CI runners).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !b.snapshot_rx.borrow().closed {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "final closed frame never arrived"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
 
         std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1046,6 +1057,10 @@ mod tests {
         let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
         std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
         std::env::set_var("FORGE_PERMISSION_MODE", "default");
+        // The test binary's cwd is inside the Forge workspace, so autofix's project-structure
+        // auto-detection would run `cargo check --all-targets` against the WHOLE WORKSPACE after
+        // the allowed write — minutes on a cold CI cache (the diagnosed "turn never completed").
+        std::env::set_var("FORGE_AUTOFIX__AUTO_DETECT", "false");
 
         // The stand-in for the browser vendor's push service: captures every POST it receives.
         let (cap_tx, mut cap_rx) =
@@ -1310,6 +1325,15 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(30)).await;
         }
+        assert!(
+            !handle
+                .snapshot_rx
+                .borrow()
+                .transcript
+                .iter()
+                .any(|l| l.contains("autofix")),
+            "FORGE_AUTOFIX__AUTO_DETECT=false must keep the workspace-wide check out of the turn"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         assert!(
             cap_rx.try_recv().is_err(),
@@ -1354,6 +1378,7 @@ mod tests {
         assert!(store.list_push_subscriptions().unwrap().is_empty());
 
         handle.shutdown();
+        std::env::remove_var("FORGE_AUTOFIX__AUTO_DETECT");
         std::env::remove_var("FORGE_PERMISSION_MODE");
         match old_xdg {
             Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
