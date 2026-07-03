@@ -38,6 +38,36 @@ impl Role {
     }
 }
 
+/// Who a transcript message is for. `Llm` (the default) messages are sent to the model;
+/// `UiOnly` messages exist for the user's benefit — turn-ending error notes, cards, gauges —
+/// and are stripped by the context pipeline before every provider call, so they never spend
+/// prompt tokens or leak harness chrome into the model's view (including after a resume).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    #[default]
+    Llm,
+    UiOnly,
+}
+
+impl Visibility {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Visibility::Llm => "llm",
+            Visibility::UiOnly => "ui",
+        }
+    }
+    pub fn parse(s: &str) -> Visibility {
+        match s {
+            "ui" => Visibility::UiOnly,
+            _ => Visibility::Llm,
+        }
+    }
+    pub fn is_llm(&self) -> bool {
+        matches!(self, Visibility::Llm)
+    }
+}
+
 /// An image attached to a user message (vision input). `data_base64` is the raw image bytes,
 /// base64-encoded; `media_type` is the MIME type (e.g. "image/png"). Carried on the user `Message`
 /// and mapped to the provider's multimodal content parts at request time.
@@ -63,6 +93,9 @@ pub struct Message {
     /// text-only turns.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageAttachment>,
+    /// Who this message is for. `UiOnly` messages are stripped before every provider call.
+    #[serde(default, skip_serializing_if = "Visibility::is_llm")]
+    pub visibility: Visibility,
 }
 
 impl Message {
@@ -73,6 +106,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: None,
             images: Vec::new(),
+            visibility: Visibility::Llm,
         }
     }
     pub fn user(content: impl Into<String>) -> Self {
@@ -86,6 +120,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: None,
             images,
+            visibility: Visibility::Llm,
         }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
@@ -102,6 +137,7 @@ impl Message {
             tool_calls,
             tool_call_id: None,
             images: Vec::new(),
+            visibility: Visibility::Llm,
         }
     }
     /// A tool result answering a specific call.
@@ -112,7 +148,13 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
             images: Vec::new(),
+            visibility: Visibility::Llm,
         }
+    }
+    /// Mark this message as UI-only: shown to the user (and persisted), never sent to a model.
+    pub fn ui_only(mut self) -> Self {
+        self.visibility = Visibility::UiOnly;
+        self
     }
 }
 

@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, TimeZone};
-use forge_types::{Role, TaskTier, ToolCall, Usage};
+use forge_types::{Role, TaskTier, ToolCall, Usage, Visibility};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 mod memory;
@@ -16,7 +16,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -518,6 +518,17 @@ fn migration_0006(conn: &Connection) -> rusqlite::Result<()> {
     add_column_if_missing(conn, "ALTER TABLE session ADD COLUMN forked_at_seq INTEGER")
 }
 
+/// Migration #7: two-phase context pipeline — a message carries who it's for. `'llm'` (default)
+/// rows are sent to the model; `'ui'` rows are user-facing notes the context pipeline strips
+/// before every provider call (and after a resume).
+fn migration_0007(conn: &Connection) -> rusqlite::Result<()> {
+    // Idempotent: on a fresh DB the base schema already carries this column.
+    add_column_if_missing(
+        conn,
+        "ALTER TABLE message ADD COLUMN visibility TEXT NOT NULL DEFAULT 'llm'",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -527,6 +538,7 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0004,
     migration_0005,
     migration_0006,
+    migration_0007,
 ];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
@@ -889,6 +901,27 @@ impl Store {
         self.add_message_full(session_id, seq, role, content, model, &[], None)
     }
 
+    /// Append a UI-only note: persisted (so it survives resume and shows in replay/scrollback)
+    /// but tagged `visibility='ui'` so the context pipeline never sends it to a model.
+    pub fn add_ui_note(
+        &self,
+        session_id: &str,
+        seq: i64,
+        role: Role,
+        content: &str,
+    ) -> Result<String> {
+        self.insert_message(
+            session_id,
+            seq,
+            role,
+            content,
+            None,
+            &[],
+            None,
+            Visibility::UiOnly,
+        )
+    }
+
     /// Append a message, including any tool-call linkage (assistant tool calls / tool
     /// result ids), so the transcript round-trips faithfully on resume.
     #[allow(clippy::too_many_arguments)]
@@ -901,6 +934,30 @@ impl Store {
         model: Option<&str>,
         tool_calls: &[ToolCall],
         tool_call_id: Option<&str>,
+    ) -> Result<String> {
+        self.insert_message(
+            session_id,
+            seq,
+            role,
+            content,
+            model,
+            tool_calls,
+            tool_call_id,
+            Visibility::Llm,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_message(
+        &self,
+        session_id: &str,
+        seq: i64,
+        role: Role,
+        content: &str,
+        model: Option<&str>,
+        tool_calls: &[ToolCall],
+        tool_call_id: Option<&str>,
+        visibility: Visibility,
     ) -> Result<String> {
         let id = forge_types::new_id();
         let tool_calls_json = if tool_calls.is_empty() {
@@ -918,9 +975,9 @@ impl Store {
             let mut s = seq;
             loop {
                 let r = tx.execute(
-                    "INSERT INTO message (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    (&id, session_id, s, role.as_str(), content, model, &tool_calls_json, tool_call_id),
+                    "INSERT INTO message (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id, visibility)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    (&id, session_id, s, role.as_str(), content, model, &tool_calls_json, tool_call_id, visibility.as_str()),
                 );
                 match r {
                     Ok(_) => break,
@@ -1802,7 +1859,7 @@ impl Store {
             )
             .ok();
         let mut stmt = conn.prepare_cached(
-            "SELECT role, content, model, tool_calls_json, tool_call_id
+            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility
              FROM message WHERE session_id = ?1 AND active = 1 ORDER BY seq",
         )?;
         let rows = stmt.query_map([session_id], |row| {
@@ -1811,12 +1868,14 @@ impl Store {
             let tool_calls = tool_calls_json
                 .and_then(|j| serde_json::from_str(&j).ok())
                 .unwrap_or_default();
+            let visibility: String = row.get(5)?;
             Ok(StoredMessage {
                 role: Role::parse(&role).unwrap_or(Role::User),
                 content: row.get(1)?,
                 model: row.get(2)?,
                 tool_calls,
                 tool_call_id: row.get(4)?,
+                visibility: Visibility::parse(&visibility),
             })
         })?;
         let mut msgs = rows
@@ -1834,6 +1893,7 @@ impl Store {
                     model: None,
                     tool_calls: vec![],
                     tool_call_id: None,
+                    visibility: Visibility::Llm,
                 },
             );
         }
@@ -1847,7 +1907,7 @@ impl Store {
     pub fn load_all_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT role, content, model, tool_calls_json, tool_call_id
+            "SELECT role, content, model, tool_calls_json, tool_call_id, visibility
              FROM message WHERE session_id = ?1 ORDER BY seq",
         )?;
         let rows = stmt.query_map([session_id], |row| {
@@ -1856,12 +1916,14 @@ impl Store {
             let tool_calls = tool_calls_json
                 .and_then(|j| serde_json::from_str(&j).ok())
                 .unwrap_or_default();
+            let visibility: String = row.get(5)?;
             Ok(StoredMessage {
                 role: Role::parse(&role).unwrap_or(Role::User),
                 content: row.get(1)?,
                 model: row.get(2)?,
                 tool_calls,
                 tool_call_id: row.get(4)?,
+                visibility: Visibility::parse(&visibility),
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -2212,6 +2274,8 @@ pub struct StoredMessage {
     pub model: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub tool_call_id: Option<String>,
+    /// `UiOnly` rows are user-facing notes; the context pipeline strips them from provider calls.
+    pub visibility: Visibility,
 }
 
 /// One `forge tree` row: `(session id, forked_from, forked_at_seq, created_at)`.
@@ -3035,12 +3099,12 @@ impl Store {
         )?;
         {
             let mut read = tx.prepare(
-                "SELECT seq, role, content, model, tool_calls_json, tool_call_id \
+                "SELECT seq, role, content, model, tool_calls_json, tool_call_id, visibility \
                  FROM message WHERE session_id = ?1 AND active = 1 AND seq < ?2 ORDER BY seq",
             )?;
             let mut write = tx.prepare(
-                "INSERT INTO message (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO message (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id, visibility) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             let rows = read.query_map((src, at_seq), |r| {
                 Ok((
@@ -3050,10 +3114,11 @@ impl Store {
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, Option<String>>(4)?,
                     r.get::<_, Option<String>>(5)?,
+                    r.get::<_, String>(6)?,
                 ))
             })?;
             for row in rows {
-                let (seq, role, content, model, tcj, tcid) = row?;
+                let (seq, role, content, model, tcj, tcid, vis) = row?;
                 write.execute((
                     forge_types::new_id(),
                     &new_id,
@@ -3063,6 +3128,7 @@ impl Store {
                     model,
                     tcj,
                     tcid,
+                    vis,
                 ))?;
             }
         }
@@ -3344,6 +3410,30 @@ mod tests {
         assert_eq!(roles, vec![Role::User, Role::Assistant, Role::Tool]);
         assert_eq!(msgs[0].content, "do the thing");
         assert_eq!(msgs[1].model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn ui_notes_round_trip_their_visibility() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/tmp", "default").unwrap();
+        store
+            .add_message(&sid, 0, Role::User, "do the thing", None)
+            .unwrap();
+        store
+            .add_ui_note(&sid, 1, Role::System, "⚠ budget cap reached")
+            .unwrap();
+
+        let msgs = store.load_messages(&sid).unwrap();
+        assert_eq!(msgs[0].visibility, Visibility::Llm);
+        assert_eq!(msgs[1].visibility, Visibility::UiOnly);
+        // The full-history read keeps the tag too (scrollback still shows the note).
+        let all = store.load_all_messages(&sid).unwrap();
+        assert_eq!(all[1].visibility, Visibility::UiOnly);
+
+        // Forks copy the tag: a UI note in the prefix must not become model context in the fork.
+        let fork = store.fork_session(&sid, 2).unwrap();
+        let forked = store.load_messages(&fork).unwrap();
+        assert_eq!(forked[1].visibility, Visibility::UiOnly);
     }
 
     #[test]

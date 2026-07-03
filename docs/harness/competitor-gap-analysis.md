@@ -70,11 +70,14 @@ Ranked by (leverage × certainty) ÷ effort. S/M/L = effort. Each maps to a v1.0
    continue; stop when `continuation_count ≥ 3 && Δtokens < 500`. Catches premature "I'm done" *and*
    stalls. Pairs with #7 and compaction (compact first, then nudge).
 
-9. **Two-phase context pipeline + UI-only message class** (M) — *pi `transformContext`/`convertToLlm`.*
-   A `ContextTransform` seam run before every provider call: `prune_and_inject(&mut Vec<Message>)` then
-   `to_llm(&[Message])`, with a `visibility: {Llm, UiOnly}` tag so token-gauge notes, plan cards, and
-   tool-detail blocks stop polluting the prompt. Turns Forge's growing pile of injected context
-   (lattice, MCP, gauge) into a disciplined, testable injection point.
+9. ~~**Two-phase context pipeline + UI-only message class**~~ **DONE.** `forge_core::context_pipeline`
+   is the one seam between the transcript and a provider request: `prune_and_inject(&mut [Message])`
+   (mutating phase — tool-result reclaim + future injections) then `to_llm(&[Message], budget)`
+   (pure phase — strips `visibility: UiOnly` messages, then window-fits). `Message.visibility`
+   `{Llm, UiOnly}` is persisted (`message.visibility`, migration 0007) so UI notes survive resume,
+   forks, and replay WITHOUT ever re-entering a prompt; the gauge, auto-compaction threshold, and
+   compaction summarizer all skip UI-only rows. Turn-ending error notes (budget stop, no-usable-model)
+   are the first UiOnly citizens.
 
 10. ~~**Parallel tool execution**~~ **ALREADY SHIPPED.** `run_model_loop` detects a batch of ≥2
     independent `SideEffect::ReadOnly` calls (and no hooks configured) and runs them via
@@ -98,10 +101,12 @@ Ranked by (leverage × certainty) ÷ effort. S/M/L = effort. Each maps to a v1.0
     addresses resolve by name (most-recent wins) or id prefix. Advertised on both the direct path
     and the CLI bridge; the depth-1 guard stays structural (children never see the tool).
 
-13. **Session branching / fork-and-continue (`/tree`)** (M) — *pi.* Add a `parent_id` to the message
-    table; a `forge tree` / TUI overlay to pick any past node, continue from there, switch branches.
-    Forge replay is read-only; branching adds A/B exploration + bad-turn recovery. Reuses
-    `Store::load_replay` for the read side. Fits the P4 TUI workstream.
+13. ~~**Session branching / fork-and-continue (`/tree`)**~~ **DONE.** `forge fork <session> [--turn N]
+    [--model id] [--rerun]` branches a session BEFORE turn N (prefix copied verbatim via
+    `Store::fork_session`, migration 0006 `session.forked_from`/`forked_at_seq`) and re-asks that
+    one prompt — optionally on a different model — with `--rerun` printing the counterfactual
+    replay diff. `forge tree` renders fork lineage. Forks are ordinary sessions: resumable,
+    replayable, diffable.
 
 14. ~~**Snapshot + `/undo` of file edits**~~ **DONE.** Shadow file snapshots before every write,
     `/undo` (and `Ctrl+Z`) with file restore, plus per-turn `/checkpoint` rewind.
