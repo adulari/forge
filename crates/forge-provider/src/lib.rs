@@ -293,6 +293,16 @@ pub enum StreamEvent {
     /// the out-of-band sink so the parent renders the plan card and runs the approval flow at turn
     /// end, exactly like the in-process path (CLI bridge only).
     Plan(forge_types::PlanProposal),
+    /// Forge's own MCP tool server (`forge mcp-serve`, spawned by the bridged CLI to expose
+    /// `mcp__forge__*` write tools) FAILED TO START this turn — the child logged an MCP-startup /
+    /// `resources/list` failure, so the model ran with the filesystem effectively read-only and
+    /// could not edit anything. Distinct from "the model chose not to edit": the tools were not
+    /// available at all. The harness uses it to classify + retry a toolless bridge turn instead of
+    /// scoring a silent empty completion as a clean run. `reason` carries the child's stderr signature
+    /// (CLI bridge only). Evidence: a codex-cli::gpt-5.5 SWE-bench sweep hit this on ~7/15 instances,
+    /// each of which then submitted an empty patch. Root cause of the ENOENT (sandbox vs load) is
+    /// intermittent and unconfirmed; the respawn on retry usually clears it.
+    ToolsUnavailable { reason: String },
 }
 
 /// A sink for [`StreamEvent`]s as they arrive (text, reasoning, tool activity).
