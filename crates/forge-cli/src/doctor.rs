@@ -328,10 +328,10 @@ fn environment_checks() -> Vec<Check> {
             "interactive (Windows console, raw-mode OK)".to_string(),
             None,
         )
-    } else if term_usable {
+    } else if let Some(term) = term.as_deref().filter(|_| term_usable) {
         (
             Status::Ok,
-            format!("interactive ({}, raw-mode OK)", term.unwrap()),
+            format!("interactive ({term}, raw-mode OK)"),
             None,
         )
     } else {

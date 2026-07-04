@@ -117,7 +117,8 @@ fn load_or_create_key() -> Result<Key, ConfigError> {
     let path = keyfile_path().ok_or_else(|| ConfigError::Keyring("no config dir".into()))?;
     if let Ok(bytes) = std::fs::read(&path) {
         if bytes.len() == 32 {
-            return Ok(Key::try_from(bytes.as_slice()).unwrap());
+            return Key::try_from(bytes.as_slice())
+                .map_err(|e| ConfigError::Keyring(e.to_string()));
         }
     }
     if let Some(parent) = path.parent() {
@@ -125,7 +126,7 @@ fn load_or_create_key() -> Result<Key, ConfigError> {
     }
     let raw: [u8; 32] = rand::random();
     write_private(&path, &raw)?;
-    Ok(Key::try_from(raw.as_slice()).unwrap())
+    Key::try_from(raw.as_slice()).map_err(|e| ConfigError::Keyring(e.to_string()))
 }
 
 /// Write a file readable/writable only by the owner (`0600` on Unix).
@@ -169,7 +170,8 @@ fn write_map(map: &BTreeMap<String, String>) -> Result<(), ConfigError> {
 fn file_set(key: &str, value: &str) -> Result<(), ConfigError> {
     let cipher = cipher()?;
     let nonce_bytes: [u8; 12] = rand::random();
-    let nonce = Nonce::try_from(nonce_bytes.as_slice()).unwrap();
+    let nonce =
+        Nonce::try_from(nonce_bytes.as_slice()).map_err(|e| ConfigError::Keyring(e.to_string()))?;
     let ct = cipher
         .encrypt(&nonce, value.as_bytes())
         .map_err(|e| ConfigError::Keyring(e.to_string()))?;
@@ -190,10 +192,8 @@ fn file_get(key: &str) -> Option<String> {
         return None;
     }
     let (nonce_bytes, ct) = blob.split_at(12);
-    let pt = cipher()
-        .ok()?
-        .decrypt(&Nonce::try_from(nonce_bytes).unwrap(), ct)
-        .ok()?;
+    let nonce = Nonce::try_from(nonce_bytes).ok()?;
+    let pt = cipher().ok()?.decrypt(&nonce, ct).ok()?;
     String::from_utf8(pt).ok()
 }
 

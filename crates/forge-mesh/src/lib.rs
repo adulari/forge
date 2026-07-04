@@ -643,7 +643,9 @@ impl HeuristicRouter {
             // first usable entry, so a longer tail never changes selection — it only deepens
             // failover. (The bug: a top-5 cap meant ~6 unique models across tiers, so a few dead
             // providers exhausted the chain while most of the catalog went untried.)
-            let catalog = self.catalog.as_ref().unwrap();
+            let Some(catalog) = self.catalog.as_ref() else {
+                return self.apply_repo_boosts(self.config.candidates_for(tier));
+            };
             let ranked = catalog.ranked_seeded(
                 tier,
                 &self.pricing,

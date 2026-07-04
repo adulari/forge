@@ -238,8 +238,12 @@ async fn run_command_inner(
         Err(e) => return (format!("shell: failed to start (cwd {cwd}): {e}"), None),
     };
     let pgid = child.id().map(|id| id as i32);
-    let stdout = child.stdout.take().expect("piped stdout");
-    let stderr = child.stderr.take().expect("piped stderr");
+    let Some(stdout) = child.stdout.take() else {
+        return ("shell: failed to capture stdout pipe".to_string(), None);
+    };
+    let Some(stderr) = child.stderr.take() else {
+        return ("shell: failed to capture stderr pipe".to_string(), None);
+    };
     let out_task = tokio::spawn(read_capped(stdout));
     let err_task = tokio::spawn(read_capped(stderr));
 

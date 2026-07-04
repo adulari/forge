@@ -29,7 +29,7 @@
 //! ```
 //! Then call `mcp__forge__forge_chat("fix the bug in auth.rs")` from any MCP-aware agent.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Result;
 use forge_types::{PermissionMode, SideEffect, TaskTier};
@@ -54,6 +54,12 @@ use crate::cli::commands::run::build_session_with_self_mcp;
 type EventSender = mpsc::UnboundedSender<forge_tui::PresenterEvent>;
 type SharedEventSender = Arc<Mutex<Option<EventSender>>>;
 
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // ---------------------------------------------------------------------------
 // AgentPresenter: headless presenter that streams events to the MCP handler
 // ---------------------------------------------------------------------------
@@ -66,13 +72,13 @@ struct AgentPresenter {
 
 impl forge_tui::Presenter for AgentPresenter {
     fn emit(&mut self, event: forge_tui::PresenterEvent) {
-        if let Some(tx) = self.event_tx.lock().unwrap().as_ref() {
+        if let Some(tx) = lock_or_recover(&self.event_tx).as_ref() {
             let _ = tx.send(event);
         }
     }
 
     fn confirm(&mut self, _tool: &str, side_effect: SideEffect) -> forge_tui::ConfirmOutcome {
-        match *self.mode.lock().unwrap() {
+        match *lock_or_recover(&self.mode) {
             // Full auto: allow everything unconditionally.
             PermissionMode::Bypass => forge_tui::ConfirmOutcome::Allow,
             // Accept edits: allow all file mutations; defer shell to SideEffect check.
@@ -317,7 +323,7 @@ impl ServerHandler for ForgeAgentServer {
 
                 let mut session = self.session.lock().await;
                 let (tx, mut rx) = mpsc::unbounded_channel();
-                *self.event_tx.lock().unwrap() = Some(tx);
+                *lock_or_recover(&self.event_tx) = Some(tx);
 
                 let peer = ctx.peer.clone();
                 let store = Arc::clone(&self.store);
@@ -350,7 +356,7 @@ impl ServerHandler for ForgeAgentServer {
                     r = session.run_turn_with(&message, &[], None) => Some(r),
                     _ = interrupt.notified() => None,
                 };
-                *self.event_tx.lock().unwrap() = None;
+                *lock_or_recover(&self.event_tx) = None;
                 let tool_calls = notify_task.await.unwrap_or_default();
                 match outcome {
                     Some(Ok(response)) => {
@@ -410,7 +416,7 @@ impl ServerHandler for ForgeAgentServer {
                 };
                 // Update both the session's internal mode and the presenter's mode so
                 // permission checks on the next turn use the new value.
-                *self.mode.lock().unwrap() = mode;
+                *lock_or_recover(&self.mode) = mode;
                 let mut session = self.session.lock().await;
                 session.set_mode(mode);
                 Ok(CallToolResult::success(vec![ContentBlock::text(format!(
@@ -484,7 +490,7 @@ impl ServerHandler for ForgeAgentServer {
                 };
 
                 let (tx, mut rx) = mpsc::unbounded_channel();
-                *self.event_tx.lock().unwrap() = Some(tx);
+                *lock_or_recover(&self.event_tx) = Some(tx);
 
                 let peer = ctx.peer.clone();
                 let store = Arc::clone(&self.store);
@@ -512,7 +518,7 @@ impl ServerHandler for ForgeAgentServer {
                         _ = interrupt.notified() => None,
                     }
                 };
-                *self.event_tx.lock().unwrap() = None;
+                *lock_or_recover(&self.event_tx) = None;
                 let _ = notify_task.await;
 
                 match outcome {

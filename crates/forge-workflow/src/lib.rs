@@ -267,13 +267,16 @@ fn js_to_json_at<'js>(value: &Value<'js>, depth: usize) -> Result<serde_json::Va
             let s = value
                 .clone()
                 .into_string()
-                .expect("checked String type")
+                .ok_or_else(|| "expected String value".to_string())?
                 .to_string()
                 .map_err(err)?;
             serde_json::Value::String(s)
         }
         Type::Array => {
-            let arr = value.clone().into_array().expect("checked Array type");
+            let arr = value
+                .clone()
+                .into_array()
+                .ok_or_else(|| "expected Array value".to_string())?;
             let mut out = Vec::with_capacity(arr.len());
             for item in arr.iter::<Value>() {
                 out.push(js_to_json_at(&item.map_err(err)?, depth + 1)?);
@@ -283,7 +286,10 @@ fn js_to_json_at<'js>(value: &Value<'js>, depth: usize) -> Result<serde_json::Va
         // Function/Symbol/etc. have no meaningful JSON representation — same as
         // `JSON.stringify` treating an unrepresentable value as `undefined`.
         Type::Object => {
-            let obj = value.clone().into_object().expect("checked Object type");
+            let obj = value
+                .clone()
+                .into_object()
+                .ok_or_else(|| "expected Object value".to_string())?;
             let mut map = serde_json::Map::new();
             for key in obj.keys::<String>() {
                 let key = key.map_err(err)?;
