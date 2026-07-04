@@ -673,6 +673,24 @@ fn working_tree_unchanged(root: Option<&std::path::Path>) -> bool {
     }
 }
 
+/// Classify a completed bridge turn as TOOLS-UNAVAILABLE (harness wave 7): the model ran with no
+/// working write tools because Forge's `mcp-serve` server failed to start, so a silent empty
+/// completion is a broken attempt, NOT "the model chose not to edit". True only when ALL hold:
+/// the session expected a code change; the model is a CLI bridge; the child emitted an
+/// MCP-startup/tool-unavailable signal (`mcp_startup_failed`); zero forge tools ran this turn; and
+/// the working tree is still unchanged. Kept DISTINCT from the wave-2 empty-diff nudge, which fires
+/// on a normal empty completion (no startup-failure signal) and re-drives in-process — this signal
+/// instead drives a fresh-process retry at the harness level. Pure so the gate is unit-testable.
+fn classify_tools_unavailable(
+    expect_code_change: bool,
+    is_bridge: bool,
+    mcp_startup_failed: bool,
+    forge_tools_ran: u64,
+    tree_unchanged: bool,
+) -> bool {
+    expect_code_change && is_bridge && mcp_startup_failed && forge_tools_ran == 0 && tree_unchanged
+}
+
 /// Render a sequence of messages into TUI [`ReplayItem`](forge_tui::ReplayItem)s — user prompts,
 /// assistant text, tool calls (with args), tool results (matched to their call's name via
 /// `tool_call_id`), and the compaction marker. Shared by the model-facing replay
@@ -897,6 +915,11 @@ struct ModelLoopOutcome {
     /// from the sink). The empty-diff completion nudge keys on it: "the model worked (tools ran)
     /// but changed nothing" is the description-instead-of-implementation failure mode.
     tools_ran: u64,
+    /// A CLI-bridge completion this loop reported that Forge's `mcp-serve` tool server failed to
+    /// start (`StreamEvent::ToolsUnavailable`), so the model's write tools were never exposed
+    /// (wave 7). Combined with a zero-tool, empty-tree turn this is the toolless-bridge signal the
+    /// harness retries on — distinct from a normal empty completion (the wave-2 nudge's job).
+    mcp_tools_unavailable: bool,
 }
 
 /// One interactive session. Construct with [`Session::start`], then drive [`Session::run_turn`].
@@ -987,6 +1010,13 @@ pub struct Session {
     /// With `mesh.nudge_empty_diff`, a turn that ran tools but edited nothing and left the git
     /// tree clean gets ONE "implement it, don't describe it" push-back. Never set interactively.
     expect_code_change: bool,
+    /// Set by the last [`Session::run_turn`] on an `expect_code_change` bridge turn that was
+    /// classified TOOLS-UNAVAILABLE (wave 7): Forge's `mcp-serve` tool server failed to start, so
+    /// the model ran with no write tools and produced an empty tree. Read by the harness
+    /// ([`Session::tools_unavailable`]) to retry the instance on a fresh bridge process instead of
+    /// scoring a silent toolless run as a clean empty completion. Recomputed each turn; only ever
+    /// true when `mesh.bridge_require_tools` is on and the session expects a code change.
+    tools_unavailable_run: bool,
     /// Soft turn deadline (quality guards wave 4): set by a caller that enforces a HARD timeout
     /// the session cannot see (`bench swe`'s tokio timeout), minus a reserve. Once past it the
     /// model loop stops launching new completions except ONE reconciliation turn ("revert
@@ -1187,6 +1217,7 @@ impl Session {
             pending_images: Vec::new(),
             edits_this_turn: 0,
             expect_code_change: false,
+            tools_unavailable_run: false,
             turn_deadline: None,
             deadline_reconciled: false,
             env_fight: EnvFightTracker::default(),
@@ -1250,6 +1281,15 @@ impl Session {
     /// demand an implementation, arming the empty-diff completion nudge (`mesh.nudge_empty_diff`).
     pub fn set_expect_code_change(&mut self, v: bool) {
         self.expect_code_change = v;
+    }
+
+    /// Whether the last [`Session::run_turn`] was classified TOOLS-UNAVAILABLE (wave 7): an
+    /// `expect_code_change` CLI-bridge turn whose `mcp-serve` tool server failed to start, so it
+    /// ran with no write tools and left an empty tree. The harness (`bench swe` / headless) reads
+    /// this to retry the instance on a fresh bridge process rather than record a silent toolless
+    /// run as a clean empty completion. Always false on interactive / direct-API sessions.
+    pub fn tools_unavailable(&self) -> bool {
+        self.tools_unavailable_run
     }
 
     /// Set the soft turn deadline (see the `turn_deadline` field): the caller enforces a hard
@@ -3268,6 +3308,10 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         // Counts INSPECTION tools (anything except `update_tasks`/`present_plan`) — the verification
         // gate requires the bridge to actually CHECK real state, not just re-assert "done".
         let inspect_ran = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // Latched when a CLI-bridge completion reports `StreamEvent::ToolsUnavailable` — Forge's
+        // `mcp-serve` tool server failed to start, so the model's write tools were never exposed
+        // (wave 7). Read into the loop outcome so `run_turn` can classify + the harness can retry.
+        let mcp_tools_unavailable = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         // This turn's snapshot context, handed explicitly to each bridge completion so its
         // `forge mcp-serve` child snapshots edits into THIS turn's dir under the live temper — no
         // process-global env mutation. Computed once before the per-step borrows (the temper is
@@ -3337,6 +3381,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                     let tools = std::sync::Arc::clone(&tools_ran);
                     let inspects = std::sync::Arc::clone(&inspect_ran);
                     let build_fight = std::sync::Arc::clone(&bridge_build_fight);
+                    let tools_unavailable = std::sync::Arc::clone(&mcp_tools_unavailable);
                     let mut sink = |ev: StreamEvent| {
                         act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         match ev {
@@ -3405,6 +3450,14 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                                     presenter.emit(PresenterEvent::PlanProposed(plan.clone()));
                                     proposed_plan = Some(plan);
                                 }
+                            }
+                            // The bridge's `mcp-serve` tool server failed to start this turn (wave 7):
+                            // the model's write tools were never exposed. Latch it for the toolless-
+                            // bridge classification in `run_turn`. Deliberately does NOT emit a
+                            // presenter event — interactive turns stay behaviourally unchanged; only
+                            // headless `expect_code_change` runs act on it (classify + retry).
+                            StreamEvent::ToolsUnavailable { reason: _ } => {
+                                tools_unavailable.store(true, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                     };
@@ -4282,6 +4335,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             active_model,
             plan: proposed_plan,
             tools_ran: tools_ran.load(std::sync::atomic::Ordering::Relaxed),
+            mcp_tools_unavailable: mcp_tools_unavailable.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -4668,6 +4722,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let mut context_tokens = outcome.context_tokens;
         let mut active_model = outcome.active_model;
         let mut hit_step_cap = outcome.hit_step_cap;
+        // Wave 7: did ANY bridge completion this turn (primary or a guard re-drive) report that
+        // `mcp-serve` failed to start? OR-ed across the re-drives below, then combined with the
+        // final tree/tool state to classify a toolless-bridge turn (see below the guards).
+        let mut saw_mcp_unavailable = outcome.mcp_tools_unavailable;
 
         // A CLI-bridge model proposed a plan (the sink already rendered the card). Seed tasks,
         // persist it, and stash it for the approval flow below — the in-process path did this in
@@ -4751,6 +4809,9 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             context_tokens = nudge_outcome.context_tokens;
             active_model = nudge_outcome.active_model;
             hit_step_cap = nudge_outcome.hit_step_cap;
+            // The nudge re-drive spawns a FRESH bridge process (a new `mcp-serve`); if it too failed
+            // to start, this stays a toolless turn — carry the signal into the classification below.
+            saw_mcp_unavailable |= nudge_outcome.mcp_tools_unavailable;
         }
 
         // ── Existing-tests-are-spec guard (quality guards wave 4, fix 1) ──────────────────────
@@ -4800,6 +4861,35 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 active_model = guard_outcome.active_model;
                 hit_step_cap = guard_outcome.hit_step_cap;
             }
+        }
+
+        // ── Toolless-bridge classification (bridge MCP-tool health guard, wave 7) ─────────────
+        // Forge serves the bridged CLI its write tools via `forge mcp-serve`. That server can FAIL
+        // TO START under the sandbox — codex logs `resources/list failed: MCP startup failed: No
+        // such file or directory` — leaving the model with the filesystem read-only. The turn then
+        // "completes" with prose + an empty patch and NO error, so a benchmark scores a silent
+        // toolless run as a clean completion (a codex-cli::gpt-5.5 SWE-bench sweep hit this on ~7/15
+        // instances). Classify it here (recomputed every turn, so it self-resets): the child showed
+        // the MCP-startup signal AND no forge tool ran AND the tree is still empty. The harness
+        // (`bench swe` / headless) reads `tools_unavailable()` to RETRY on a fresh process rather
+        // than record an empty patch. Gated on `mesh.bridge_require_tools`; kept DISTINCT from the
+        // empty-diff nudge above (which handles a NORMAL empty completion, no startup-failure signal).
+        // The ENOENT root cause (sandbox vs load) is intermittent and unconfirmed — a respawn on the
+        // harness retry usually clears it.
+        self.tools_unavailable_run = self.config.mesh.bridge_require_tools
+            && classify_tools_unavailable(
+                self.expect_code_change,
+                forge_provider::is_cli_bridge(&active_model),
+                saw_mcp_unavailable,
+                turn_tools_ran,
+                working_tree_unchanged(self.work_root.as_deref()),
+            );
+        if self.tools_unavailable_run {
+            self.presenter.emit(PresenterEvent::Warning(
+                "bridge turn ran with NO working tools — Forge's mcp-serve tool server failed to \
+                 start (empty tree, zero tool calls); the harness will retry on a fresh process"
+                    .to_string(),
+            ));
         }
 
         // ── Self-review pass (mesh.self_review) ───────────────────────────────────────────────
@@ -11907,6 +11997,140 @@ mod tests {
             "a direct turn that ran no tools must not be nudged (unchanged behavior)"
         );
         assert_eq!(answer, "explored the repo — here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Toolless-bridge classification (bridge MCP-tool health guard, wave 7) ---
+
+    #[test]
+    fn classify_tools_unavailable_requires_all_signals() {
+        // The positive case: an expect_code_change bridge turn that saw the mcp-startup failure,
+        // ran zero forge tools, and left the tree unchanged → TOOLS-UNAVAILABLE.
+        assert!(classify_tools_unavailable(true, true, true, 0, true));
+        // A NORMAL empty completion (no startup-failure signal) is NOT tools-unavailable — that's
+        // the wave-2 empty-diff nudge's job, kept distinct.
+        assert!(!classify_tools_unavailable(true, true, false, 0, true));
+        // Tools actually ran → mcp-serve came up; not toolless.
+        assert!(!classify_tools_unavailable(true, true, true, 3, true));
+        // The tree changed → the model DID edit; not a toolless empty run.
+        assert!(!classify_tools_unavailable(true, true, true, 0, false));
+        // Not a bridge (direct model) → never classified.
+        assert!(!classify_tools_unavailable(true, false, true, 0, true));
+        // Not a code-change run (interactive) → never classified.
+        assert!(!classify_tools_unavailable(false, true, true, 0, true));
+    }
+
+    /// Scripted CLI-bridge that emits `StreamEvent::ToolsUnavailable` on its FIRST completion —
+    /// modelling a bridge whose `forge mcp-serve` tool server failed to start (wave 7): it ran no
+    /// tools, edited nothing, and reported prose. Every completion yields prose with an empty tree.
+    struct BridgeToollessProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for BridgeToollessProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                on_event(StreamEvent::ToolsUnavailable {
+                    reason: "resources/list failed: MCP startup failed: No such file or directory \
+                             (os error 2)"
+                        .into(),
+                });
+            }
+            let text = "I can't edit — no writable tool is exposed here.";
+            on_event(StreamEvent::Text(text.into()));
+            Ok(forge_provider::ModelResponse {
+                content: text.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn toolless_bridge_turn_is_classified_tools_unavailable() {
+        // Wave 7: a bridge turn whose mcp-serve failed to start (ToolsUnavailable event), ran no
+        // tools, and left an empty tree must be classified TOOLS-UNAVAILABLE so the harness retries
+        // — NOT scored as a clean empty completion.
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeToollessProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        session.run_turn("fix the bug").await.unwrap();
+        assert!(
+            session.tools_unavailable(),
+            "a toolless bridge turn (mcp-serve startup failure) must be classified TOOLS-UNAVAILABLE"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn normal_empty_completion_is_not_tools_unavailable() {
+        // Distinctness from the wave-2 nudge: a bridge that yields an empty diff WITHOUT any
+        // mcp-startup-failure signal (it simply described the fix) is nudged, but is NOT classified
+        // TOOLS-UNAVAILABLE — the harness must not retry it as a broken-tools turn.
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: false,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        session.run_turn("fix the bug").await.unwrap();
+        assert!(
+            !session.tools_unavailable(),
+            "a normal empty completion (no startup-failure signal) is NOT tools-unavailable"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn tools_unavailable_respects_the_config_gate() {
+        // `mesh.bridge_require_tools = false` disables the classification even for a bench run that
+        // saw the mcp-startup failure.
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeToollessProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        session.config.mesh.bridge_require_tools = false;
+        session.run_turn("fix the bug").await.unwrap();
+        assert!(
+            !session.tools_unavailable(),
+            "the config gate must suppress the classification"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

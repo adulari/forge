@@ -1334,6 +1334,17 @@ pub struct MeshConfig {
     /// that provisioning was never going to win. Default true; latched once per turn.
     #[serde(default = "default_env_fight_nudge")]
     pub env_fight_nudge: bool,
+    /// Bridge MCP-tool health guard (wave 7): on a headless code-change run (`bench swe` marks the
+    /// session), require that the bridged CLI actually had Forge's write tools. Forge serves them
+    /// via `forge mcp-serve`, which intermittently FAILS TO START under the sandbox (codex logs
+    /// `resources/list failed: MCP startup failed`) — the turn then completes with an empty patch
+    /// and NO error, so a benchmark silently scores a toolless run as a clean completion (observed
+    /// on ~7/15 instances of a codex-cli::gpt-5.5 SWE-bench sweep). When true, such a turn is
+    /// classified TOOLS-UNAVAILABLE and the harness retries it ONCE on a fresh process, then records
+    /// an ERROR rather than a fair empty attempt. Default true; only `expect_code_change` runs are
+    /// affected, so interactive use never sees it. Set false to disable even for bench.
+    #[serde(default = "default_bridge_require_tools")]
+    pub bridge_require_tools: bool,
     /// Per-turn cumulative input-token ceiling for a CLI bridge turn (wave 5). A bridge runs its
     /// own tool loop inside a subprocess, so the direct-path cost guards (which only see
     /// `resp.tool_calls`) never fire on it — an unbounded bridge turn is the dominant tail-cost
@@ -1473,6 +1484,10 @@ fn default_deadline_reconcile() -> bool {
 }
 
 fn default_env_fight_nudge() -> bool {
+    true
+}
+
+fn default_bridge_require_tools() -> bool {
     true
 }
 
@@ -1888,6 +1903,7 @@ impl Default for Config {
                 guard_test_edits: default_guard_test_edits(),
                 deadline_reconcile: default_deadline_reconcile(),
                 env_fight_nudge: default_env_fight_nudge(),
+                bridge_require_tools: default_bridge_require_tools(),
                 bridge_turn_token_cap: default_bridge_turn_token_cap(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
