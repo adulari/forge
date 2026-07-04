@@ -424,6 +424,96 @@ fn failover_policy(pinned: bool, pin_failover: bool, rate_limited: bool) -> Fail
 const EMPTY_DIFF_NUDGE: &str =
     "You have not modified any files. Implement the fix now — do not just describe it.";
 
+/// The existing-tests-are-spec guard turn (quality guards wave 4, fix 1): sent as a synthetic
+/// user message after the working diff was found to MODIFY existing test files and those edits
+/// were stashed. Hidden evaluation restores pristine tests, so a fix that only passes rewritten
+/// expectations is a guaranteed fail (the xarray-3364 forensic: a correct 6-line fix, then a
+/// refactor that broke 2 tests, then the tests' expectations rewritten to match).
+const TEST_EDIT_GUARD: &str = "Your change edits existing test expectations. Hidden evaluation \
+uses the ORIGINAL tests. Re-verify your core change against the pristine tests (they have been \
+restored); if they fail, shrink your fix rather than editing tests. Your test edits are stashed \
+(`git stash pop` re-applies them); re-apply only if genuinely justified by the issue text.";
+
+/// Whether `path` looks like a test file — the small, extensible pattern list the
+/// existing-tests-are-spec guard keys on. Matches by basename (`test_*.py`, `*_test.py`,
+/// `*_tests.rs`, `*_test.rs`, `*.test.js/ts`, `*.spec.js/ts`, `test_*.rs`) or by living under a
+/// `tests/` / `test/` / `testing/` directory component. Paths use `/` (git porcelain output).
+fn is_test_path(path: &str) -> bool {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    let by_name = (base.starts_with("test_") && (base.ends_with(".py") || base.ends_with(".rs")))
+        || base.ends_with("_test.py")
+        || base.ends_with("_test.rs")
+        || base.ends_with("_tests.rs")
+        || base.ends_with("_test.go")
+        || [
+            ".test.js",
+            ".test.ts",
+            ".test.jsx",
+            ".test.tsx",
+            ".spec.js",
+            ".spec.ts",
+        ]
+        .iter()
+        .any(|s| base.ends_with(s));
+    let by_dir = path
+        .split('/')
+        .rev()
+        .skip(1) // the basename is not a directory component
+        .any(|c| c == "tests" || c == "test" || c == "testing");
+    by_name || by_dir
+}
+
+/// Parse `git status --porcelain` output into the list of MODIFIED (or deleted) existing test
+/// files. The status columns distinguish the red flag from allowed practice: `M`/`D` in either
+/// column means an existing tracked test was rewritten/removed (the guard's target), while `A`
+/// (added) and `??` (untracked) are NEW tests — writing a fresh reproduction test is normal and
+/// never trips the guard. Rename lines (`R  old -> new`) are skipped: rare here, and stashing by
+/// pathspec doesn't round-trip them cleanly. Pure so it is unit-testable.
+fn modified_test_paths(porcelain: &str) -> Vec<String> {
+    porcelain
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 || line.contains(" -> ") {
+                return None;
+            }
+            let (status, path) = line.split_at(2);
+            let modified = status.contains('M') || status.contains('D');
+            let path = path.trim_start();
+            (modified && is_test_path(path)).then(|| path.trim_matches('"').to_string())
+        })
+        .collect()
+}
+
+/// The working diff's modified-existing-test files at `root` (`None` = process cwd). Any git
+/// failure yields an empty list so the guard can never fire outside a real repository.
+fn modified_test_files_in_tree(root: Option<&std::path::Path>) -> Vec<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["status", "--porcelain"]);
+    if let Some(r) = root {
+        cmd.current_dir(r);
+    }
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            modified_test_paths(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Stash the given pathspecs at `root` (`git stash push -- <paths>`), restoring those files to
+/// their committed (pristine) state while keeping the edits recoverable via `git stash pop`.
+/// Returns whether the stash actually succeeded — the guard only fires on success (a failed
+/// stash leaves the tree untouched, and claiming "tests restored" would then be a lie).
+fn stash_paths(root: Option<&std::path::Path>, paths: &[String]) -> bool {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["stash", "push", "--quiet", "--"]);
+    cmd.args(paths);
+    if let Some(r) = root {
+        cmd.current_dir(r);
+    }
+    matches!(cmd.output(), Ok(out) if out.status.success())
+}
+
 /// Whether the working tree at `root` (`None` = process cwd) shows NO changes at all:
 /// `git status --porcelain` output empty — no staged or unstaged modifications AND no untracked
 /// files (a solution that only ADDS a file is still a change; `git diff` alone would miss it,
@@ -4360,6 +4450,50 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             context_tokens = nudge_outcome.context_tokens;
             active_model = nudge_outcome.active_model;
             hit_step_cap = nudge_outcome.hit_step_cap;
+        }
+
+        // ── Existing-tests-are-spec guard (quality guards wave 4, fix 1) ──────────────────────
+        // A headless code-change turn whose working diff MODIFIES existing test files is the
+        // xarray-3364 failure shape: the model rewrites test expectations to match its own
+        // behavior, the evaluator restores the pristine tests, and the run fails. Before the turn
+        // completes: stash exactly the test-file modifications (restoring the pristine tests) and
+        // push back ONCE — re-verify against the originals, shrink the fix rather than editing
+        // tests, `git stash pop` only if the issue text genuinely demands a test change. NEW test
+        // files (git status `A`/`??`) never trip it — writing a reproduction test is normal.
+        // One-shot by construction (straight-line code, like the empty-diff nudge above); runs
+        // BEFORE self-review/autofix so whatever state the model settles on is still checked.
+        if self.config.mesh.guard_test_edits && self.expect_code_change {
+            let test_edits = modified_test_files_in_tree(self.work_root.as_deref());
+            if !test_edits.is_empty() && stash_paths(self.work_root.as_deref(), &test_edits) {
+                self.presenter.emit(PresenterEvent::Warning(format!(
+                    "code-change turn modified {} existing test file(s) — stashed the test edits \
+                     and pushing back once: hidden evaluation runs the ORIGINAL tests",
+                    test_edits.len()
+                )));
+                let guard = format!(
+                    "{TEST_EDIT_GUARD}\n\nStashed test-file edits:\n- {}",
+                    test_edits.join("\n- ")
+                );
+                let gseq = self.next_seq();
+                self.store
+                    .add_message(&self.id, gseq, Role::User, &guard, None)?;
+                self.transcript.push(Message::user(&guard));
+                let guard_specs = self.tool_specs();
+                let guard_outcome = self
+                    .run_model_loop(
+                        active_model.clone(),
+                        &guard_specs,
+                        primary_decision,
+                        max_steps,
+                        stream_idle,
+                    )
+                    .await?;
+                // Leave whatever state the model chose; only the answer bookkeeping updates.
+                final_text = guard_outcome.final_text;
+                context_tokens = guard_outcome.context_tokens;
+                active_model = guard_outcome.active_model;
+                hit_step_cap = guard_outcome.hit_step_cap;
+            }
         }
 
         // ── Self-review pass (mesh.self_review) ───────────────────────────────────────────────
@@ -11272,6 +11406,179 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(answer, "here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Existing-tests-are-spec guard (quality guards wave 4, fix 1) ---
+
+    #[test]
+    fn test_path_classifier_matches_the_pattern_list() {
+        for p in [
+            "tests/test_dataset.py",
+            "xarray/tests/test_concat.py",
+            "pkg/foo_test.py",
+            "src/parser_test.rs",
+            "src/parser_tests.rs",
+            "test_units.rs",
+            "web/app.test.ts",
+            "web/app.spec.js",
+            "tests/helpers.py", // under a tests/ dir counts even without a test_ name
+        ] {
+            assert!(is_test_path(p), "{p} must classify as a test path");
+        }
+        for p in [
+            "src/lib.rs",
+            "xarray/core/concat.py",
+            "docs/testing.md",
+            "attest.py",
+        ] {
+            assert!(!is_test_path(p), "{p} must NOT classify as a test path");
+        }
+    }
+
+    #[test]
+    fn modified_test_paths_flags_m_and_d_but_never_new_files() {
+        // The red flag is a MODIFIED (or deleted) existing test; a NEW test file (`A` staged or
+        // `??` untracked) is normal practice and must never trip the guard.
+        let porcelain = " M xarray/tests/test_concat.py\n\
+                         M  tests/test_merge.py\n\
+                         D  tests/test_old.py\n\
+                         A  tests/test_new.py\n\
+                         ?? tests/test_scratch.py\n\
+                         M  xarray/core/concat.py\n\
+                         R  tests/test_a.py -> tests/test_b.py\n";
+        assert_eq!(
+            modified_test_paths(porcelain),
+            vec![
+                "xarray/tests/test_concat.py".to_string(),
+                "tests/test_merge.py".to_string(),
+                "tests/test_old.py".to_string(),
+            ]
+        );
+    }
+
+    /// A throwaway git repo with a committed test file (plus a source file) whose test is then
+    /// MODIFIED in the working tree — the xarray-3364 shape the guard exists for.
+    fn repo_with_modified_test() -> std::path::PathBuf {
+        let dir = clean_git_repo();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("tests/test_foo.py"), "assert fix() == 1\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "add test"]);
+        // The turn "rewrites the test's expectations".
+        std::fs::write(dir.join("tests/test_foo.py"), "assert fix() == 2\n").unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn modified_existing_tests_are_stashed_and_the_model_pushed_back_once() {
+        let dir = repo_with_modified_test();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "explore + describe (2 completions), then exactly ONE guard re-drive"
+        );
+        assert_eq!(answer, "still only describing");
+        // The pristine test was restored (the stash took the rewritten expectations with it)…
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+            "assert fix() == 1\n",
+            "the test file must be back at its committed content"
+        );
+        // …and the edits are recoverable, not destroyed.
+        let stashes = std::process::Command::new("git")
+            .args(["stash", "list"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            !stashes.stdout.is_empty(),
+            "the test edits must be stashed, not discarded"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn new_test_files_never_trip_the_guard() {
+        // Adding a fresh reproduction test is normal practice — only MODIFIED existing tests are
+        // the red flag.
+        let dir = clean_git_repo();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("tests/test_new.py"), "assert repro()\n").unwrap();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "an untracked new test file must not fire the guard"
+        );
+        assert_eq!(answer, "here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_edit_guard_respects_the_config_gate() {
+        let dir = repo_with_modified_test();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        session.config.mesh.guard_test_edits = false;
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(answer, "here is how you would fix it");
+        // The rewritten test is left exactly as the model wrote it.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+            "assert fix() == 2\n"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

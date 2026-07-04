@@ -1309,6 +1309,15 @@ pub struct MeshConfig {
     /// runs are affected, so interactive use never sees it. Set false to disable even for bench.
     #[serde(default = "default_nudge_empty_diff")]
     pub nudge_empty_diff: bool,
+    /// Existing-tests-are-spec guard (quality guards wave 4): when a headless code-change run
+    /// (`bench swe` marks the session as expecting a code change) is about to complete with the
+    /// working diff MODIFYING existing test files, stash those test edits and push back ONCE —
+    /// hidden evaluation runs the ORIGINAL tests, so rewriting their expectations converts a
+    /// near-solve into a guaranteed fail (the xarray-3364 forensic). New test files are fine
+    /// (common practice); only modifications to tracked tests trip the guard. Default true;
+    /// only code-change runs are affected, so interactive use never sees it.
+    #[serde(default = "default_guard_test_edits")]
+    pub guard_test_edits: bool,
     /// Which subscription plan backs each CLI bridge (`claude-cli` → "max-20x", `codex-cli` →
     /// "plus"), captured by `forge init`. Records the usage headroom the user has: the
     /// subscription-conservation layer reads it so a larger plan (more headroom) is spent more
@@ -1427,6 +1436,10 @@ fn default_verify_completeness() -> bool {
 }
 
 fn default_nudge_empty_diff() -> bool {
+    true
+}
+
+fn default_guard_test_edits() -> bool {
     true
 }
 
@@ -1835,6 +1848,7 @@ impl Default for Config {
                 benchmark_ranking: default_benchmark_ranking(),
                 verify_completeness: default_verify_completeness(),
                 nudge_empty_diff: default_nudge_empty_diff(),
+                guard_test_edits: default_guard_test_edits(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
                 disabled: Vec::new(),
