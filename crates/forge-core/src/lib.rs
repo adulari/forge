@@ -536,11 +536,19 @@ impl EnvFightTracker {
 /// Minimal-diff bias (quality guards wave 4, fix 3): appended to the system context of every
 /// `expect_code_change` turn. The seaborn-2848 forensic: the model chose a plausible-but-wrong
 /// fix SHAPE (rewiring semantics instead of a value-level fallback) and self-verified against its
-/// own new test. Kept deliberately short — a size test pins it ≤400 bytes so it can't grow into
+/// own new test. Kept deliberately short — a size test pins it ≤520 bytes so it can't grow into
 /// another token-tripling preamble.
+///
+/// Wave 5 adds one clause: "minimal" governs the FINAL COMMITTED diff, not throwaway verification
+/// work. astropy-12907's cheap path was spent on C-extension build archaeology partly because the
+/// bias read as "don't touch anything" — so it never stubbed the unrelated failing `.so` it needed
+/// to verify against. Permitting out-of-tree scaffolding keeps the fix-shape discipline (the
+/// seaborn quality win) while unblocking verification.
 const MINIMAL_DIFF_BIAS: &str = "Prefer the most local fix at the failure site. Do not change \
 data-flow or filtering semantics when a value-level fallback suffices. Do not edit changelogs. \
-Hidden tests assert on unchanged surrounding behavior — keep the diff minimal.";
+Hidden tests assert on unchanged surrounding behavior — keep the diff minimal. Throwaway build or \
+verification scaffolding in /tmp, and stubbing an unrelated failing C-extension to unblock \
+verification, are fine as long as the FINAL committed diff stays minimal.";
 
 /// The deadline-reconciliation instruction (quality guards wave 4, fix 2): injected once when a
 /// turn crosses its soft deadline. The model gets ONE more completion to revert speculative work,
@@ -11991,11 +11999,27 @@ mod tests {
     #[test]
     fn minimal_diff_bias_stays_small() {
         // One short paragraph, not another token-tripling preamble: the always-on completeness
-        // clause tripled tokens; this bias must stay a few sentences.
+        // clause tripled tokens; this bias must stay a few sentences. Wave 5 added one out-of-tree
+        // verification clause, moving the ceiling 400 → 520 bytes; it must not grow past that.
         assert!(
-            MINIMAL_DIFF_BIAS.len() <= 400,
-            "MINIMAL_DIFF_BIAS must stay ≤400 bytes, is {}",
+            MINIMAL_DIFF_BIAS.len() <= 520,
+            "MINIMAL_DIFF_BIAS must stay ≤520 bytes, is {}",
             MINIMAL_DIFF_BIAS.len()
+        );
+    }
+
+    #[test]
+    fn minimal_diff_bias_permits_out_of_tree_verification() {
+        // The wave 5 clause must keep the minimal-final-diff discipline while explicitly allowing
+        // throwaway scaffolding, so the astropy build-archaeology regression isn't re-locked in.
+        assert!(
+            MINIMAL_DIFF_BIAS.contains("keep the diff minimal"),
+            "must retain the minimal-diff discipline"
+        );
+        assert!(
+            MINIMAL_DIFF_BIAS.contains("/tmp")
+                && MINIMAL_DIFF_BIAS.contains("FINAL committed diff"),
+            "must permit /tmp scaffolding gated on a minimal FINAL diff"
         );
     }
 
