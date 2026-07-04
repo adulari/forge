@@ -6,6 +6,46 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-07-04
+
+### Added
+- **`forge api` — an OpenAI-compatible embed endpoint (run Forge as your app's AI backend)**:
+  an opt-in local HTTP server exposing `/v1/chat/completions` (plus `/v1/models` and `/health`)
+  backed by Forge's model mesh. Any app that speaks the OpenAI API can swap one `base_url` and
+  gain tier-based routing, cross-provider failover, subscription quota-spread, and per-response
+  cost visibility instead of a single hard-wired model. `model:"auto"` routes via the mesh; a
+  concrete id pins it but still fails over. Streaming uses OpenAI SSE `chat.completion.chunk`
+  frames (non-streaming returns JSON); advertised `tools` pass through and `tool_calls` surface
+  with the right `finish_reason`. Optional bearer auth (`--api-key` / `FORGE_API_KEY`), loopback
+  bind by default. Reuses the same `DispatchProvider` + `HeuristicRouter` wiring as `forge run`,
+  so routing behavior matches an interactive session. `/v1/models` advertises only usable ids
+  (bare provider-prefix candidates like `claude-cli::` are filtered out) plus `auto`.
+  Docs: `docs/features/embed-ai-backend.md`.
+
+### Changed
+- **CLI-bridge harness robustness — seven waves of quality and cost improvements** for headless
+  runs that route to a CLI bridge (claude/codex):
+  - **Wave 1 — token diet**: capped `read_file`/shell result sizes, a leaner exposed tool
+    surface (names-only skill listing), right-sized batched-update ritual for `update_tasks`,
+    a lattice-injection gate that skips the code-index preamble on bridge turns, and honest
+    surfacing of in-band bridge errors.
+  - **Wave 2 — robustness**: rate-limit backoff now retries a *pinned* model instead of failing
+    over off it; strict pin semantics (an explicit pin never silently fails over to another
+    model); `search` accepts a file path and searches that file; and an empty-diff completion
+    nudge for headless code-change runs.
+  - **Wave 3 — per-CLI slim preamble** and a resume reminder tuned per bridge.
+  - **Wave 4 — quality guards**: a pristine/existing-tests-are-spec guard for headless
+    code-change runs, a deadline reconciliation window before the hard bench kill, a minimal-diff
+    bias in the `expect_code_change` system context, and an env-fight spend cap that nudges after
+    repeated failed provisioning attempts.
+  - **Wave 5 — bridge cost caps**: a per-turn bridge input-token ceiling, bridge-aware
+    env/build-fight tracking, and a loosened minimal-diff bias for out-of-tree verification.
+  - **Wave 6 — empty-diff nudge on the bridge path** (with tests proving both quality guards
+    fire on the CLI bridge).
+  - **Wave 7 — mcp-serve health retry**: a toolless CLI-bridge turn (e.g. a codex MCP-startup
+    failure) is now classified as TOOLS-UNAVAILABLE and retried once before being recorded,
+    with the underlying MCP-startup failure parsed into a typed error.
+
 ## [2.4.0] - 2026-07-03
 
 ### Added
@@ -2230,7 +2270,9 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.3.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.0...HEAD
+[2.5.0]: https://github.com/Adulari/forge/compare/v2.4.0...v2.5.0
+[2.4.0]: https://github.com/Adulari/forge/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/Adulari/forge/compare/v2.2.0...v2.3.0
 [2.2.0]: https://github.com/Adulari/forge/compare/v2.1.0...v2.2.0
 [2.1.0]: https://github.com/Adulari/forge/compare/v2.0.0...v2.1.0
