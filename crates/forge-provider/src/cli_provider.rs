@@ -1495,7 +1495,7 @@ impl CliProvider {
             let p = std::env::temp_dir()
                 .join(format!("forge-subagents-{}-{n}.jsonl", std::process::id()));
             // Create it empty so the tailer can open it immediately.
-            std::fs::File::create(&p).ok().map(|_| p)
+            tokio::fs::File::create(&p).await.ok().map(|_| p)
         };
 
         // The env `forge mcp-serve` needs to round-trip a bridge turn's activity (sink) and snapshot
@@ -2120,7 +2120,7 @@ impl CliProvider {
                 "forge-subagents-{}-live{n}.jsonl",
                 std::process::id()
             ));
-            std::fs::File::create(&p).ok().map(|_| p)
+            tokio::fs::File::create(&p).await.ok().map(|_| p)
         };
         let mcp_env = bridge_mcp_env(sink_path.as_deref(), checkpoint);
         // Pin this live process to the spawning turn's seq so a later turn forces a respawn (keeps

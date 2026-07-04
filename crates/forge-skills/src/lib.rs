@@ -247,6 +247,7 @@ impl Catalog {
         // reachable via `/skill orchestrate` (and visible in the listing). `/orchestrate` is
         // intentionally a lightweight dynamic command, not a heavy built-in skill whose full
         // methodology is injected every turn.
+        cat.insert_builtin_skills();
         cat.insert_builtin_commands();
         cat
     }
@@ -375,10 +376,24 @@ impl Catalog {
         // Only a user/project command of the same name suppresses the built-in (same-kind scope
         // precedence). A same-named skill must not — the built-in command keeps the bare
         // `/orchestrate` invocation; the skill remains reachable via `/skill orchestrate`.
-        if self.commands.contains_key("orchestrate") {
-            return;
+        if !self.commands.contains_key("orchestrate") {
+            self.insert_command(builtin_orchestrate_command());
         }
-        self.insert_command(builtin_orchestrate_command());
+        // `/rust` is a thin wrapper that loads the built-in `rust-best-practices` skill (its
+        // `**rust-best-practices**` reference is resolved by `referenced_skill_guidance`). A
+        // user/project command named `rust` overrides it.
+        if !self.commands.contains_key("rust") {
+            self.insert_command(builtin_rust_command());
+        }
+    }
+
+    /// Register the skills compiled into the binary (methodology bundled inline, no `dir` to read).
+    /// Inserted after on-disk discovery so a user/project skill of the same name wins (its higher
+    /// scope shadows the builtin in [`Catalog::insert_skill`]).
+    fn insert_builtin_skills(&mut self) {
+        for meta in builtin_skills() {
+            self.insert_skill(meta);
+        }
     }
 
     pub fn warnings(&self) -> &[String] {
@@ -741,6 +756,59 @@ fn parse_skill_meta(raw: &str, stem: &str, scope: Scope, dir: &Path) -> Result<S
         scope,
         body: None,
     })
+}
+
+/// The skills compiled into the binary. Each carries its methodology inline (`body: Some`) so it
+/// loads with no filesystem access — available even on a fresh install with empty user/project
+/// scopes. The SKILL.md is the single source of truth for name/description/tier; a malformed one
+/// is skipped rather than panicking at startup.
+fn builtin_skills() -> Vec<SkillMeta> {
+    const RUST_BEST_PRACTICES: &str = include_str!("../builtin/rust-best-practices/SKILL.md");
+    [("rust-best-practices", RUST_BEST_PRACTICES)]
+        .into_iter()
+        .filter_map(|(name, raw)| parse_builtin_skill(name, raw))
+        .collect()
+}
+
+/// Parse a compiled-in SKILL.md into a [`SkillMeta`] whose body is held inline. Unlike
+/// [`parse_skill_meta`], the body travels with the metadata (there is no `dir` to re-read at use
+/// time). Returns `None` for a SKILL.md with unparsable frontmatter or no description.
+fn parse_builtin_skill(name: &str, raw: &str) -> Option<SkillMeta> {
+    let (fm_text, body) = frontmatter::split(raw);
+    let fm = frontmatter::parse(fm_text.unwrap_or("")).ok()?;
+    let description = fm.scalar("description")?;
+    Some(SkillMeta {
+        name: fm.scalar("name").unwrap_or_else(|| name.to_string()),
+        description,
+        tier: fm.scalar("tier").and_then(|t| parse_tier(&t)),
+        resources: Vec::new(),
+        dir: PathBuf::from(format!("<builtin>/skills/{name}")),
+        scope: Scope::Builtin,
+        body: Some(body.trim().to_string()),
+    })
+}
+
+/// Build the built-in `/rust` command: a thin wrapper that loads the `rust-best-practices` skill.
+/// The `**rust-best-practices**` reference in the body is resolved to the skill's full methodology
+/// by [`Catalog::referenced_skill_guidance`] at invoke time. A user/project command named `rust`
+/// overrides it.
+fn builtin_rust_command() -> Command {
+    Command {
+        name: "rust".to_string(),
+        description: "Apply Rust best practices — idiomatic error handling, ownership, API design, clippy/fmt, and size limits — to the Rust you write or review.".to_string(),
+        args: Vec::new(),
+        tier: Some(TaskTier::Standard),
+        model: None,
+        body: concat!(
+            "Apply the **rust-best-practices** skill to this task. Follow its methodology for any\n",
+            "Rust code you write, review, or refactor, and run the verification gate (fmt, clippy,\n",
+            "test) before reporting done.\n\n",
+            "Task: $ARGUMENTS"
+        )
+        .to_string(),
+        scope: Scope::Builtin,
+        path: PathBuf::from("<builtin>/commands/rust.md"),
+    }
 }
 
 /// Build the built-in `/orchestrate` command. User/project commands or skills named `orchestrate`

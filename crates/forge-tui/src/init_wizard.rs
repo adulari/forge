@@ -28,6 +28,7 @@ const WARNYEL: Color = Color::Rgb(238, 188, 82);
 const TOOLCYAN: Color = Color::Rgb(75, 212, 218);
 
 /// A key-based provider offered in the wizard.
+#[derive(Debug, Clone)]
 pub struct ProviderItem {
     pub id: String,
     pub label: String,
@@ -35,6 +36,7 @@ pub struct ProviderItem {
 }
 
 /// An installed CLI bridge offered a plan choice: `plans` is `(human label, stored slug)`.
+#[derive(Debug, Clone)]
 pub struct BridgeItem {
     pub prefix: String,
     pub plans: Vec<(String, String)>,

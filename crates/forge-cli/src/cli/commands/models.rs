@@ -814,12 +814,16 @@ pub(crate) async fn probe_models(
             // A PERMANENT incapability (no tool support / unaffordable) → exclude for a long window
             // so discovery stops resurrecting it every run.
             Ok(Err(e)) if e.is_permanent() => {
-                store.exclude_model(m, e.reason()).ok();
+                if let Err(err) = store.exclude_model(m, e.reason()) {
+                    eprintln!("  ⚠ {m}: exclusion not persisted: {err}");
+                }
                 println!("  ⊘ {m} — {} (excluded)", e.reason());
             }
             Ok(Err(e)) if e.is_retryable() => {
                 let cooldown = e.cooldown(default_cooldown);
-                store.bench_for(m, cooldown, e.reason()).ok();
+                if let Err(err) = store.bench_for(m, cooldown, e.reason()) {
+                    eprintln!("  ⚠ {m}: benching not persisted: {err}");
+                }
                 println!("  ✗ {m} — {} (benched {}s)", e.reason(), cooldown.as_secs());
             }
             Ok(Err(e)) => {
@@ -827,7 +831,9 @@ pub(crate) async fn probe_models(
                 println!("  ? {m} — {} (not benched)", e.reason());
             }
             Err(_) => {
-                store.bench_for(m, default_cooldown, "probe timeout").ok();
+                if let Err(err) = store.bench_for(m, default_cooldown, "probe timeout") {
+                    eprintln!("  ⚠ {m}: benching not persisted: {err}");
+                }
                 println!(
                     "  ✗ {m} — timeout (benched {}s)",
                     default_cooldown.as_secs()

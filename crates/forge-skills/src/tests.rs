@@ -725,3 +725,76 @@ fn a_user_orchestrate_command_overrides_the_builtin() {
         other => panic!("expected user command, got {other:?}"),
     }
 }
+
+#[test]
+fn rust_best_practices_is_a_builtin_skill_loadable_with_no_import() {
+    // Empty user/project scopes: the compiled-in skill must be present and its full methodology
+    // loadable via /skill and use_skill (no filesystem access).
+    let t = Tmp::new();
+    let cat = t.load();
+    let meta = cat
+        .skill("rust-best-practices")
+        .expect("builtin rust skill present");
+    assert_eq!(meta.scope, Scope::Builtin);
+    assert!(meta.body.is_some(), "methodology bundled inline");
+    assert!(cat
+        .skill_listing()
+        .iter()
+        .any(|(n, _)| n == "rust-best-practices"));
+    let guidance = cat
+        .skill_guidance("rust-best-practices")
+        .expect("guidance loads from the inline body");
+    assert!(
+        guidance.contains("cargo clippy"),
+        "real methodology: {guidance:.80}"
+    );
+    // Reachable explicitly via /skill.
+    match cat.resolve("/skill rust-best-practices review this") {
+        Resolved::Skill { meta, prompt } => {
+            assert_eq!(meta.name, "rust-best-practices");
+            assert_eq!(prompt, "review this");
+        }
+        other => panic!("expected builtin skill via /skill, got {other:?}"),
+    }
+}
+
+#[test]
+fn rust_builtin_command_injects_the_skill_methodology() {
+    // Bare /rust is a thin wrapper whose body references the skill; resolving it must inject the
+    // skill's full methodology as guidance and carry the task through $ARGUMENTS.
+    let t = Tmp::new();
+    let cat = t.load();
+    match cat.resolve("/rust write a config parser") {
+        Resolved::Command {
+            cmd,
+            prompt,
+            guidance,
+        } => {
+            assert_eq!(cmd.scope, Scope::Builtin);
+            assert!(prompt.contains("write a config parser"));
+            assert_eq!(guidance.len(), 1, "skill methodology injected once");
+            assert!(
+                guidance[0].contains("Error handling"),
+                "full skill body: {}",
+                guidance[0]
+            );
+        }
+        other => panic!("expected builtin /rust command, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_user_rust_skill_overrides_the_builtin() {
+    // A user skill of the same name takes precedence over the compiled-in one.
+    let t = Tmp::new();
+    t.skill(
+        "user",
+        "rust-best-practices",
+        "---\nname: rust-best-practices\ndescription: my rust rules\n---\nMY CUSTOM RUST BODY.",
+    );
+    let cat = t.load();
+    let meta = cat.skill("rust-best-practices").unwrap();
+    assert_eq!(meta.scope, Scope::User, "user skill wins the name");
+    let g = cat.skill_guidance("rust-best-practices").unwrap();
+    assert!(g.contains("MY CUSTOM RUST BODY"), "user body loaded: {g}");
+}
