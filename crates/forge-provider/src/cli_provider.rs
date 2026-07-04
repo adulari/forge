@@ -1777,6 +1777,27 @@ impl CliProvider {
         let status = child.wait().await.ok();
         let stderr_text = err_task.await.unwrap_or_default();
 
+        // Toolless-bridge detection (wave 7): in harness mode Forge serves its write tools to the
+        // sandboxed child via `forge mcp-serve`. That server intermittently FAILS TO START (codex
+        // logs `resources/list failed: MCP startup failed: No such file or directory` — observed on
+        // ~7/15 instances of a codex-cli::gpt-5.5 SWE-bench sweep), leaving the model with the
+        // filesystem effectively read-only. The turn still "completes" with prose + an empty patch
+        // and NO error — a silent toolless run scored as a clean completion. Surface it as a typed
+        // event the run-loop can act on (classify + retry) instead of swallowing it. Only when the
+        // child both showed the failure signature AND ran no native forge tool this turn
+        // (`tool_names` empty) — if a tool actually ran, mcp-serve did come up and the turn was real.
+        if self.harness && tool_names.is_empty() && mcp_startup_failed(&stderr_text) {
+            // Keep the reason to the last stderr line (the signature) so it's a compact log detail.
+            let reason = stderr_text
+                .lines()
+                .rev()
+                .find(|l| mcp_startup_failed(l))
+                .unwrap_or_else(|| stderr_text.trim())
+                .trim()
+                .to_string();
+            on_event(StreamEvent::ToolsUnavailable { reason });
+        }
+
         // Codex doesn't stream its quota (unlike Claude's `rate_limit_event`); read the snapshot
         // from the session rollout file it just wrote, keyed by the thread id (L3, ToS-safe).
         // The recursive directory walk is synchronous I/O — offload to the blocking pool.
@@ -1885,6 +1906,23 @@ impl CliProvider {
             quotas,
         })
     }
+}
+
+/// Whether a bridged CLI's stderr shows that Forge's own MCP tool server (`forge mcp-serve`) failed
+/// to start this turn — the signature the sandboxed child logs when the `mcp_servers.forge` command
+/// can't be launched, e.g. codex's
+/// `list_mcp_resources: resources/list failed: MCP startup failed: No such file or directory
+/// (os error 2)`. When it fires, the `mcp__forge__*` write tools were NEVER exposed, so the model
+/// ran with the filesystem effectively read-only and its turn is toolless regardless of what it
+/// printed. Matched case-insensitively on the stable phrases (`MCP startup failed` /
+/// `resources/list failed` / `list_mcp_resources`) so CLI wording drift degrades gracefully. Pure so
+/// it is unit-testable. Observed on ~7/15 instances of a codex-cli::gpt-5.5 SWE-bench sweep; the
+/// ENOENT root cause (sandbox vs load) is intermittent and unconfirmed.
+fn mcp_startup_failed(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("mcp startup failed")
+        || lower.contains("resources/list failed")
+        || lower.contains("list_mcp_resources")
 }
 
 /// Classify a CLI's in-band (streamed) error string into a [`ProviderError`] so the mesh can fail
@@ -2705,6 +2743,22 @@ mod tests {
         assert_eq!(bare_model("claude-cli::sonnet"), "sonnet");
         assert_eq!(bare_model("codex-cli::gpt-5-codex"), "gpt-5-codex");
         assert_eq!(bare_model("claude-cli"), "");
+    }
+
+    #[test]
+    fn mcp_startup_failure_signature_is_detected() {
+        // The exact codex signature observed when `forge mcp-serve` fails to start (wave 7).
+        assert!(mcp_startup_failed(
+            "list_mcp_resources: resources/list failed: MCP startup failed: No such file or \
+             directory (os error 2)"
+        ));
+        // Case-insensitive + either phrase alone is enough (CLI wording drift).
+        assert!(mcp_startup_failed("ERROR: mcp startup failed"));
+        assert!(mcp_startup_failed("resources/list failed for server forge"));
+        // Ordinary stderr (a normal turn, a rate-limit note) must NOT trip it.
+        assert!(!mcp_startup_failed(""));
+        assert!(!mcp_startup_failed("thinking...\ntool call ok\ndone"));
+        assert!(!mcp_startup_failed("rate limit reached, retry in 20s"));
     }
 
     #[test]

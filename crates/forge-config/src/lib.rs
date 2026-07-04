@@ -1309,6 +1309,51 @@ pub struct MeshConfig {
     /// runs are affected, so interactive use never sees it. Set false to disable even for bench.
     #[serde(default = "default_nudge_empty_diff")]
     pub nudge_empty_diff: bool,
+    /// Existing-tests-are-spec guard (quality guards wave 4): when a headless code-change run
+    /// (`bench swe` marks the session as expecting a code change) is about to complete with the
+    /// working diff MODIFYING existing test files, stash those test edits and push back ONCE —
+    /// hidden evaluation runs the ORIGINAL tests, so rewriting their expectations converts a
+    /// near-solve into a guaranteed fail (the xarray-3364 forensic). New test files are fine
+    /// (common practice); only modifications to tracked tests trip the guard. Default true;
+    /// only code-change runs are affected, so interactive use never sees it.
+    #[serde(default = "default_guard_test_edits")]
+    pub guard_test_edits: bool,
+    /// Timeout reconciliation window (quality guards wave 4): when the caller has set a turn
+    /// deadline (`bench swe` reserves ~120s before its hard tokio timeout), a turn past the
+    /// deadline stops launching new model calls and gets ONE final instruction — revert
+    /// unverified speculative changes, keep the minimal verified fix, stop. Without it the hard
+    /// kill ships whatever mid-refactor state the tree happens to be in (the xarray-3364 timeout:
+    /// "submit partial work" shipped the riskiest state). Default true; inert unless a deadline
+    /// is set, so interactive use never sees it.
+    #[serde(default = "default_deadline_reconcile")]
+    pub deadline_reconcile: bool,
+    /// Env-fight spend cap (quality guards wave 4): when environment-provisioning shell commands
+    /// (pip install / venv / virtualenv / ensurepip / apt / uv …) fail 4 times in a row within a
+    /// turn, inject ONE nudge — stop provisioning, verify the change at the logic level instead.
+    /// SWE-bench turns burned minutes fighting host-python/repo-era mismatches (venv archaeology)
+    /// that provisioning was never going to win. Default true; latched once per turn.
+    #[serde(default = "default_env_fight_nudge")]
+    pub env_fight_nudge: bool,
+    /// Bridge MCP-tool health guard (wave 7): on a headless code-change run (`bench swe` marks the
+    /// session), require that the bridged CLI actually had Forge's write tools. Forge serves them
+    /// via `forge mcp-serve`, which intermittently FAILS TO START under the sandbox (codex logs
+    /// `resources/list failed: MCP startup failed`) — the turn then completes with an empty patch
+    /// and NO error, so a benchmark silently scores a toolless run as a clean completion (observed
+    /// on ~7/15 instances of a codex-cli::gpt-5.5 SWE-bench sweep). When true, such a turn is
+    /// classified TOOLS-UNAVAILABLE and the harness retries it ONCE on a fresh process, then records
+    /// an ERROR rather than a fair empty attempt. Default true; only `expect_code_change` runs are
+    /// affected, so interactive use never sees it. Set false to disable even for bench.
+    #[serde(default = "default_bridge_require_tools")]
+    pub bridge_require_tools: bool,
+    /// Per-turn cumulative input-token ceiling for a CLI bridge turn (wave 5). A bridge runs its
+    /// own tool loop inside a subprocess, so the direct-path cost guards (which only see
+    /// `resp.tool_calls`) never fire on it — an unbounded bridge turn is the dominant tail-cost
+    /// risk because bridge input scales ~quadratically with round-trips (each re-drive re-sends the
+    /// transcript). When the accumulated input across a turn's bridge completions crosses this cap,
+    /// Forge stops re-driving and ends the turn cleanly, submitting whatever verified diff exists.
+    /// A backstop, not a target: 0 disables it. Default 2_500_000.
+    #[serde(default = "default_bridge_turn_token_cap")]
+    pub bridge_turn_token_cap: u64,
     /// Which subscription plan backs each CLI bridge (`claude-cli` → "max-20x", `codex-cli` →
     /// "plus"), captured by `forge init`. Records the usage headroom the user has: the
     /// subscription-conservation layer reads it so a larger plan (more headroom) is spent more
@@ -1428,6 +1473,26 @@ fn default_verify_completeness() -> bool {
 
 fn default_nudge_empty_diff() -> bool {
     true
+}
+
+fn default_guard_test_edits() -> bool {
+    true
+}
+
+fn default_deadline_reconcile() -> bool {
+    true
+}
+
+fn default_env_fight_nudge() -> bool {
+    true
+}
+
+fn default_bridge_require_tools() -> bool {
+    true
+}
+
+fn default_bridge_turn_token_cap() -> u64 {
+    2_500_000
 }
 
 /// The Artificial Analysis Data API key (ADR-0011), for benchmark-driven ranking. Read from
@@ -1835,6 +1900,11 @@ impl Default for Config {
                 benchmark_ranking: default_benchmark_ranking(),
                 verify_completeness: default_verify_completeness(),
                 nudge_empty_diff: default_nudge_empty_diff(),
+                guard_test_edits: default_guard_test_edits(),
+                deadline_reconcile: default_deadline_reconcile(),
+                env_fight_nudge: default_env_fight_nudge(),
+                bridge_require_tools: default_bridge_require_tools(),
+                bridge_turn_token_cap: default_bridge_turn_token_cap(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
                 disabled: Vec::new(),

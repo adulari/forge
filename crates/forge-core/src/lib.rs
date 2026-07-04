@@ -424,6 +424,237 @@ fn failover_policy(pinned: bool, pin_failover: bool, rate_limited: bool) -> Fail
 const EMPTY_DIFF_NUDGE: &str =
     "You have not modified any files. Implement the fix now — do not just describe it.";
 
+/// The env-fight nudge (quality guards wave 4, fix 4): injected once per turn after
+/// [`ENV_FIGHT_THRESHOLD`] consecutive failed environment-provisioning shell commands.
+const ENV_FIGHT_NUDGE: &str = "Environment setup keeps failing. Stop provisioning; verify your \
+change at the logic level (a targeted script or careful reasoning against the code) and finish.";
+
+/// Consecutive env-setup failures before the nudge fires.
+const ENV_FIGHT_THRESHOLD: usize = 4;
+
+/// Repeated build/provision tool invocations within ONE bridge turn before the ceiling folds it
+/// into an early terminate (wave 5, fix 2). A CLI bridge runs its tools in a subprocess, so the
+/// sink surfaces each tool START but not per-command success/failure — we can't build the
+/// consecutive-failure streak the direct-path [`EnvFightTracker`] keys on. This approximates it:
+/// a bridge turn that keeps re-issuing build/provision commands this many times is stuck in the
+/// same venv/C-extension archaeology the env-fight guard targets, so it's folded into the
+/// token-ceiling early-terminate. Higher than the direct threshold because it counts invocations,
+/// not failures (some of these commands legitimately succeed).
+const BRIDGE_BUILD_FIGHT_THRESHOLD: u64 = 8;
+
+/// Whether a single bridge turn's accumulated input tokens have crossed its ceiling (wave 5,
+/// fix 1). Pure so the trip logic is unit-testable. A tail-cost backstop, not a target: `cap == 0`
+/// disables it, and the check is `>=` so the turn stops at the first observation boundary at or
+/// past the cap.
+const fn bridge_turn_over_budget(accumulated_input: u64, cap: u64) -> bool {
+    cap != 0 && accumulated_input >= cap
+}
+
+/// Best-effort extraction of a shell command from a bridge tool's serialized args (wave 5, fix 2).
+/// Bridge tools surface args as a String that is either the raw command (codex `command_execution`)
+/// or a JSON blob carrying a `command`/`cmd` field (claude `Bash`, Forge's `shell` over MCP). Falls
+/// back to the raw string so the env/build heuristic still sees phrase patterns embedded in JSON.
+fn bridge_tool_command(args: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
+        for key in ["command", "cmd"] {
+            if let Some(c) = v.get(key).and_then(|x| x.as_str()) {
+                return c.to_string();
+            }
+        }
+    }
+    args.to_string()
+}
+
+/// Whether a shell command looks like environment provisioning or a native build — the heuristic
+/// the env-fight cap keys on (pip/venv/virtualenv/ensurepip/apt/uv/conda…), extended in wave 5 with
+/// build archaeology (C-extension builds + native toolchains: `setup.py build_ext`, `make`, `gcc`,
+/// `cmake`, `pyenv`, `./configure`…) that were the bulk of astropy-12907's failing commands and
+/// matched nothing before. Phrase patterns use a substring match on the whitespace-normalized,
+/// lowercased command (so wrappers like `cd x && pip install …` still match); single-token compiler
+/// invocations are matched as WHOLE tokens so `make` doesn't fire on `cmake`/`makemigrations`.
+fn is_env_setup_command(cmd: &str) -> bool {
+    let c = cmd
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    const PHRASES: &[&str] = &[
+        "pip install",
+        "pip3 install",
+        "-m pip",
+        "-m ensurepip",
+        "-m venv",
+        "virtualenv",
+        "uv venv",
+        "uv pip",
+        "apt-get install",
+        "apt install",
+        "conda install",
+        "conda create",
+        "yum install",
+        "apk add",
+        "setup.py build",
+        "python setup.py",
+        "./configure",
+        "cmake",
+        "pyenv",
+    ];
+    if PHRASES.iter().any(|p| c.contains(p)) {
+        return true;
+    }
+    // Single-token compiler/build invocations — matched as WHOLE tokens, not substrings, so
+    // `make` doesn't fire on `cmake`/`makemigrations` and `cc` doesn't fire on `gcc`/`accept`.
+    const TOOLS: &[&str] = &["make", "gcc", "g++", "cc", "clang", "meson", "ninja"];
+    c.split(' ').any(|tok| TOOLS.contains(&tok))
+}
+
+/// Consecutive-failure tracker + once-per-turn latch for the env-fight nudge. Pure state machine
+/// (unit-testable): only env-setup commands feed it — a failure extends the streak, a success
+/// resets it, and `observe` returns `true` exactly once, when the threshold-th consecutive
+/// failure lands.
+#[derive(Default)]
+struct EnvFightTracker {
+    streak: usize,
+    nudged: bool,
+}
+
+impl EnvFightTracker {
+    fn observe(&mut self, failed: bool) -> bool {
+        if !failed {
+            self.streak = 0;
+            return false;
+        }
+        self.streak += 1;
+        if self.streak >= ENV_FIGHT_THRESHOLD && !self.nudged {
+            self.nudged = true;
+            return true;
+        }
+        false
+    }
+}
+
+/// Minimal-diff bias (quality guards wave 4, fix 3): appended to the system context of every
+/// `expect_code_change` turn. The seaborn-2848 forensic: the model chose a plausible-but-wrong
+/// fix SHAPE (rewiring semantics instead of a value-level fallback) and self-verified against its
+/// own new test. Kept deliberately short — a size test pins it ≤520 bytes so it can't grow into
+/// another token-tripling preamble.
+///
+/// Wave 5 adds one clause: "minimal" governs the FINAL COMMITTED diff, not throwaway verification
+/// work. astropy-12907's cheap path was spent on C-extension build archaeology partly because the
+/// bias read as "don't touch anything" — so it never stubbed the unrelated failing `.so` it needed
+/// to verify against. Permitting out-of-tree scaffolding keeps the fix-shape discipline (the
+/// seaborn quality win) while unblocking verification.
+const MINIMAL_DIFF_BIAS: &str = "Prefer the most local fix at the failure site. Do not change \
+data-flow or filtering semantics when a value-level fallback suffices. Do not edit changelogs. \
+Hidden tests assert on unchanged surrounding behavior — keep the diff minimal. Throwaway build or \
+verification scaffolding in /tmp, and stubbing an unrelated failing C-extension to unblock \
+verification, are fine as long as the FINAL committed diff stays minimal.";
+
+/// The deadline-reconciliation instruction (quality guards wave 4, fix 2): injected once when a
+/// turn crosses its soft deadline. The model gets ONE more completion to revert speculative work,
+/// then the loop ends — the caller's hard timeout still kills the turn at the full limit.
+const DEADLINE_RECONCILE_NUDGE: &str = "Time budget exhausted. Revert any UNVERIFIED speculative \
+changes now (git checkout those hunks), keeping only the minimal verified fix, then stop.";
+
+/// The soft-deadline budget for a turn bounded by a hard `timeout_secs` kill: reserve
+/// `reserve_secs` for the reconciliation window (one revert turn + slack), or `None` when the
+/// timeout is too small to leave a usable working budget. Pure so the gating math is
+/// unit-testable; `bench swe` calls it with its per-instance timeout and a 120s reserve.
+pub fn reconcile_deadline_budget_secs(timeout_secs: u64, reserve_secs: u64) -> Option<u64> {
+    let budget = timeout_secs.saturating_sub(reserve_secs);
+    (budget > 0).then_some(budget)
+}
+
+/// The existing-tests-are-spec guard turn (quality guards wave 4, fix 1): sent as a synthetic
+/// user message after the working diff was found to MODIFY existing test files and those edits
+/// were stashed. Hidden evaluation restores pristine tests, so a fix that only passes rewritten
+/// expectations is a guaranteed fail (the xarray-3364 forensic: a correct 6-line fix, then a
+/// refactor that broke 2 tests, then the tests' expectations rewritten to match).
+const TEST_EDIT_GUARD: &str = "Your change edits existing test expectations. Hidden evaluation \
+uses the ORIGINAL tests. Re-verify your core change against the pristine tests (they have been \
+restored); if they fail, shrink your fix rather than editing tests. Your test edits are stashed \
+(`git stash pop` re-applies them); re-apply only if genuinely justified by the issue text.";
+
+/// Whether `path` looks like a test file — the small, extensible pattern list the
+/// existing-tests-are-spec guard keys on. Matches by basename (`test_*.py`, `*_test.py`,
+/// `*_tests.rs`, `*_test.rs`, `*.test.js/ts`, `*.spec.js/ts`, `test_*.rs`) or by living under a
+/// `tests/` / `test/` / `testing/` directory component. Paths use `/` (git porcelain output).
+fn is_test_path(path: &str) -> bool {
+    let base = path.rsplit('/').next().unwrap_or(path);
+    let by_name = (base.starts_with("test_") && (base.ends_with(".py") || base.ends_with(".rs")))
+        || base.ends_with("_test.py")
+        || base.ends_with("_test.rs")
+        || base.ends_with("_tests.rs")
+        || base.ends_with("_test.go")
+        || [
+            ".test.js",
+            ".test.ts",
+            ".test.jsx",
+            ".test.tsx",
+            ".spec.js",
+            ".spec.ts",
+        ]
+        .iter()
+        .any(|s| base.ends_with(s));
+    let by_dir = path
+        .split('/')
+        .rev()
+        .skip(1) // the basename is not a directory component
+        .any(|c| c == "tests" || c == "test" || c == "testing");
+    by_name || by_dir
+}
+
+/// Parse `git status --porcelain` output into the list of MODIFIED (or deleted) existing test
+/// files. The status columns distinguish the red flag from allowed practice: `M`/`D` in either
+/// column means an existing tracked test was rewritten/removed (the guard's target), while `A`
+/// (added) and `??` (untracked) are NEW tests — writing a fresh reproduction test is normal and
+/// never trips the guard. Rename lines (`R  old -> new`) are skipped: rare here, and stashing by
+/// pathspec doesn't round-trip them cleanly. Pure so it is unit-testable.
+fn modified_test_paths(porcelain: &str) -> Vec<String> {
+    porcelain
+        .lines()
+        .filter_map(|line| {
+            if line.len() < 4 || line.contains(" -> ") {
+                return None;
+            }
+            let (status, path) = line.split_at(2);
+            let modified = status.contains('M') || status.contains('D');
+            let path = path.trim_start();
+            (modified && is_test_path(path)).then(|| path.trim_matches('"').to_string())
+        })
+        .collect()
+}
+
+/// The working diff's modified-existing-test files at `root` (`None` = process cwd). Any git
+/// failure yields an empty list so the guard can never fire outside a real repository.
+fn modified_test_files_in_tree(root: Option<&std::path::Path>) -> Vec<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["status", "--porcelain"]);
+    if let Some(r) = root {
+        cmd.current_dir(r);
+    }
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            modified_test_paths(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Stash the given pathspecs at `root` (`git stash push -- <paths>`), restoring those files to
+/// their committed (pristine) state while keeping the edits recoverable via `git stash pop`.
+/// Returns whether the stash actually succeeded — the guard only fires on success (a failed
+/// stash leaves the tree untouched, and claiming "tests restored" would then be a lie).
+fn stash_paths(root: Option<&std::path::Path>, paths: &[String]) -> bool {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["stash", "push", "--quiet", "--"]);
+    cmd.args(paths);
+    if let Some(r) = root {
+        cmd.current_dir(r);
+    }
+    matches!(cmd.output(), Ok(out) if out.status.success())
+}
+
 /// Whether the working tree at `root` (`None` = process cwd) shows NO changes at all:
 /// `git status --porcelain` output empty — no staged or unstaged modifications AND no untracked
 /// files (a solution that only ADDS a file is still a change; `git diff` alone would miss it,
@@ -440,6 +671,24 @@ fn working_tree_unchanged(root: Option<&std::path::Path>) -> bool {
         Ok(out) if out.status.success() => out.stdout.iter().all(u8::is_ascii_whitespace),
         _ => false,
     }
+}
+
+/// Classify a completed bridge turn as TOOLS-UNAVAILABLE (harness wave 7): the model ran with no
+/// working write tools because Forge's `mcp-serve` server failed to start, so a silent empty
+/// completion is a broken attempt, NOT "the model chose not to edit". True only when ALL hold:
+/// the session expected a code change; the model is a CLI bridge; the child emitted an
+/// MCP-startup/tool-unavailable signal (`mcp_startup_failed`); zero forge tools ran this turn; and
+/// the working tree is still unchanged. Kept DISTINCT from the wave-2 empty-diff nudge, which fires
+/// on a normal empty completion (no startup-failure signal) and re-drives in-process — this signal
+/// instead drives a fresh-process retry at the harness level. Pure so the gate is unit-testable.
+fn classify_tools_unavailable(
+    expect_code_change: bool,
+    is_bridge: bool,
+    mcp_startup_failed: bool,
+    forge_tools_ran: u64,
+    tree_unchanged: bool,
+) -> bool {
+    expect_code_change && is_bridge && mcp_startup_failed && forge_tools_ran == 0 && tree_unchanged
 }
 
 /// Render a sequence of messages into TUI [`ReplayItem`](forge_tui::ReplayItem)s — user prompts,
@@ -666,6 +915,11 @@ struct ModelLoopOutcome {
     /// from the sink). The empty-diff completion nudge keys on it: "the model worked (tools ran)
     /// but changed nothing" is the description-instead-of-implementation failure mode.
     tools_ran: u64,
+    /// A CLI-bridge completion this loop reported that Forge's `mcp-serve` tool server failed to
+    /// start (`StreamEvent::ToolsUnavailable`), so the model's write tools were never exposed
+    /// (wave 7). Combined with a zero-tool, empty-tree turn this is the toolless-bridge signal the
+    /// harness retries on — distinct from a normal empty completion (the wave-2 nudge's job).
+    mcp_tools_unavailable: bool,
 }
 
 /// One interactive session. Construct with [`Session::start`], then drive [`Session::run_turn`].
@@ -756,6 +1010,24 @@ pub struct Session {
     /// With `mesh.nudge_empty_diff`, a turn that ran tools but edited nothing and left the git
     /// tree clean gets ONE "implement it, don't describe it" push-back. Never set interactively.
     expect_code_change: bool,
+    /// Set by the last [`Session::run_turn`] on an `expect_code_change` bridge turn that was
+    /// classified TOOLS-UNAVAILABLE (wave 7): Forge's `mcp-serve` tool server failed to start, so
+    /// the model ran with no write tools and produced an empty tree. Read by the harness
+    /// ([`Session::tools_unavailable`]) to retry the instance on a fresh bridge process instead of
+    /// scoring a silent toolless run as a clean empty completion. Recomputed each turn; only ever
+    /// true when `mesh.bridge_require_tools` is on and the session expects a code change.
+    tools_unavailable_run: bool,
+    /// Soft turn deadline (quality guards wave 4): set by a caller that enforces a HARD timeout
+    /// the session cannot see (`bench swe`'s tokio timeout), minus a reserve. Once past it the
+    /// model loop stops launching new completions except ONE reconciliation turn ("revert
+    /// unverified speculative changes, then stop"). `None` = no deadline (interactive default).
+    turn_deadline: Option<std::time::Instant>,
+    /// One-shot latch for the deadline-reconciliation instruction; re-armed by
+    /// [`Session::set_turn_deadline`].
+    deadline_reconciled: bool,
+    /// Env-fight spend cap (quality guards wave 4): consecutive failed env-provisioning shell
+    /// commands this turn + the once-per-turn nudge latch. Reset at each turn start.
+    env_fight: EnvFightTracker,
     /// Per-turn guard against repeated failing tools and identical-call doom loops.
     failure_tracker: ToolFailureTracker,
     /// The current git branch (`.git/HEAD` → `refs/heads/<branch>`), cached so the hot per-request
@@ -945,6 +1217,10 @@ impl Session {
             pending_images: Vec::new(),
             edits_this_turn: 0,
             expect_code_change: false,
+            tools_unavailable_run: false,
+            turn_deadline: None,
+            deadline_reconciled: false,
+            env_fight: EnvFightTracker::default(),
             failure_tracker: ToolFailureTracker::new(),
             cached_git_branch: current_git_branch(),
             // Read AGENTS.md eagerly (sync, off the async path) only when it will actually be
@@ -1005,6 +1281,31 @@ impl Session {
     /// demand an implementation, arming the empty-diff completion nudge (`mesh.nudge_empty_diff`).
     pub fn set_expect_code_change(&mut self, v: bool) {
         self.expect_code_change = v;
+    }
+
+    /// Whether the last [`Session::run_turn`] was classified TOOLS-UNAVAILABLE (wave 7): an
+    /// `expect_code_change` CLI-bridge turn whose `mcp-serve` tool server failed to start, so it
+    /// ran with no write tools and left an empty tree. The harness (`bench swe` / headless) reads
+    /// this to retry the instance on a fresh bridge process rather than record a silent toolless
+    /// run as a clean empty completion. Always false on interactive / direct-API sessions.
+    pub fn tools_unavailable(&self) -> bool {
+        self.tools_unavailable_run
+    }
+
+    /// Set the soft turn deadline (see the `turn_deadline` field): the caller enforces a hard
+    /// timeout the session cannot see, so this is set to `hard limit − reserve` (the reserve
+    /// leaves room for the one reconciliation turn). Re-arms the one-shot latch.
+    pub fn set_turn_deadline(&mut self, deadline: std::time::Instant) {
+        self.turn_deadline = Some(deadline);
+        self.deadline_reconciled = false;
+    }
+
+    /// Whether the soft turn deadline is set, active (`mesh.deadline_reconcile`), and past.
+    fn past_turn_deadline(&self) -> bool {
+        self.config.mesh.deadline_reconcile
+            && self
+                .turn_deadline
+                .is_some_and(|d| std::time::Instant::now() >= d)
     }
 
     /// Set (or clear) the in-session reasoning-effort pin. `None` returns to the provider default.
@@ -1994,7 +2295,13 @@ impl Session {
             env.push_str(&format!("git_branch: {b}\n"));
         }
         env.push_str("</env>");
-        vec![Message::system(FORGE_SYSTEM), Message::system(env)]
+        let mut msgs = vec![Message::system(FORGE_SYSTEM), Message::system(env)];
+        // Headless code-change turns (bench swe) get the minimal-diff bias — per-request system
+        // context, so it reaches direct AND bridge providers without touching the bridge preamble.
+        if self.expect_code_change {
+            msgs.push(Message::system(MINIMAL_DIFF_BIAS));
+        }
+        msgs
     }
 
     /// The request body for a main-loop call: the base harness preamble (system prompt + env)
@@ -2910,6 +3217,13 @@ Output ONLY that sentence — no preamble, no quotation marks.";
 
         let mut final_text = String::new();
         let mut context_tokens: u64 = 0;
+        // Per-turn cumulative bridge input tokens (wave 5, fix 1). A CLI bridge runs its own tool
+        // loop in a subprocess, so the direct-path cost guards never see it; this sums the input
+        // reported by each bridge completion this turn so the token ceiling can end an unbounded
+        // bridge turn at an observation boundary. Summing across re-drives may over-count if a
+        // persistent bridge reports cumulative usage, but this is a backstop — tripping early is
+        // safe. Only bridge completions feed it (direct turns leave it 0).
+        let mut bridge_input_accum: u64 = 0;
         let mut hit_step_cap = true;
         // A plan a bridge model proposes via the out-of-band sink (StreamEvent::Plan). Captured by
         // the per-step stream closure and returned in the outcome for the turn's approval flow.
@@ -2986,9 +3300,18 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         // signal: a re-run that completes no task AND runs no tool made no progress, so it's halted
         // rather than re-driven again (the anti-spiral guard the old bridge-nudge lacked).
         let tools_ran = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // Counts build/provision tool STARTS a bridge surfaces via the sink across the whole turn
+        // (wave 5, fix 2). Per-command success/failure isn't available from the sink, so this
+        // approximates the direct-path env-fight streak with an invocation count; past
+        // BRIDGE_BUILD_FIGHT_THRESHOLD it folds into the token-ceiling early-terminate.
+        let bridge_build_fight = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         // Counts INSPECTION tools (anything except `update_tasks`/`present_plan`) — the verification
         // gate requires the bridge to actually CHECK real state, not just re-assert "done".
         let inspect_ran = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // Latched when a CLI-bridge completion reports `StreamEvent::ToolsUnavailable` — Forge's
+        // `mcp-serve` tool server failed to start, so the model's write tools were never exposed
+        // (wave 7). Read into the loop outcome so `run_turn` can classify + the harness can retry.
+        let mcp_tools_unavailable = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         // This turn's snapshot context, handed explicitly to each bridge completion so its
         // `forge mcp-serve` child snapshots edits into THIS turn's dir under the live temper — no
         // process-global env mutation. Computed once before the per-step borrows (the temper is
@@ -2996,6 +3319,35 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         let checkpoint_ctx = self.checkpoint_context();
 
         for step in 0..max_steps {
+            // ── Timeout reconciliation window (quality guards wave 4, fix 2) ──────────────────
+            // The caller's hard timeout (`bench swe`'s tokio kill) is invisible from inside the
+            // turn, so without this the kill lands mid-verification and "submit partial work"
+            // ships whatever risky state the tree is in. Past the soft deadline: stop launching
+            // new completions, inject ONE revert instruction, allow one model turn to act on it
+            // (its tool calls run in the same step), then end the loop normally. The latch is a
+            // Session field so later loop re-entries this turn (nudges/guards) end immediately
+            // instead of re-firing.
+            if self.past_turn_deadline() {
+                if self.deadline_reconciled {
+                    hit_step_cap = false;
+                    break;
+                }
+                self.deadline_reconciled = true;
+                self.presenter.emit(PresenterEvent::Warning(
+                    "turn deadline reached — asking the model to revert unverified changes and stop"
+                        .to_string(),
+                ));
+                let dseq = self.next_seq();
+                let _ = self.store.add_message(
+                    &self.id,
+                    dseq,
+                    Role::System,
+                    DEADLINE_RECONCILE_NUDGE,
+                    None,
+                );
+                self.transcript
+                    .push(Message::system(DEADLINE_RECONCILE_NUDGE));
+            }
             let tools_before = tools_ran.load(std::sync::atomic::Ordering::Relaxed);
             let inspect_before = inspect_ran.load(std::sync::atomic::Ordering::Relaxed);
             // Stream the reply, with transparent failover for this step's completion.
@@ -3028,6 +3380,8 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                     let act = std::sync::Arc::clone(&activity);
                     let tools = std::sync::Arc::clone(&tools_ran);
                     let inspects = std::sync::Arc::clone(&inspect_ran);
+                    let build_fight = std::sync::Arc::clone(&bridge_build_fight);
+                    let tools_unavailable = std::sync::Arc::clone(&mcp_tools_unavailable);
                     let mut sink = |ev: StreamEvent| {
                         act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         match ev {
@@ -3045,6 +3399,12 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                                     && !name.ends_with("present_plan")
                                 {
                                     inspects.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                // Bridge-aware env/build-fight tracking (wave 5, fix 2): a bridge's
+                                // shell tools surface here, not in `resp.tool_calls`, so this is the
+                                // only place the build/provision-command pattern is observable.
+                                if is_env_setup_command(&bridge_tool_command(&args)) {
+                                    build_fight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
                                 presenter.emit(PresenterEvent::ToolStart { name, args })
                             }
@@ -3090,6 +3450,14 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                                     presenter.emit(PresenterEvent::PlanProposed(plan.clone()));
                                     proposed_plan = Some(plan);
                                 }
+                            }
+                            // The bridge's `mcp-serve` tool server failed to start this turn (wave 7):
+                            // the model's write tools were never exposed. Latch it for the toolless-
+                            // bridge classification in `run_turn`. Deliberately does NOT emit a
+                            // presenter event — interactive turns stay behaviourally unchanged; only
+                            // headless `expect_code_change` runs act on it (classify + retry).
+                            StreamEvent::ToolsUnavailable { reason: _ } => {
+                                tools_unavailable.store(true, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                     };
@@ -3393,6 +3761,10 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 }
             }
             self.store.record_usage(&self.id, &msg_id, &resp.usage)?;
+            // Accumulate this bridge completion's input toward the per-turn ceiling (wave 5, fix 1).
+            if forge_provider::is_cli_bridge(&active_model) {
+                bridge_input_accum = bridge_input_accum.saturating_add(resp.usage.input_tokens);
+            }
 
             if !resp.wants_tools() {
                 // A response with neither text nor a tool call is a silent dead-end (model glitch,
@@ -3456,6 +3828,43 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             .to_string(),
                     ));
                 } else if forge_provider::is_cli_bridge(&active_model) {
+                    // Bridge cost ceiling (wave 5, fixes 1 + 2). This is the observation boundary a
+                    // bridge turn actually has: its tools ran inside the subprocess and it has now
+                    // yielded, so the direct-path cost guards (which key on `resp.tool_calls`) never
+                    // saw any of it. Two backstops decide whether to keep re-driving:
+                    //   * the accumulated input crossed the per-turn ceiling (fix 1), or
+                    //   * the bridge kept re-issuing build/provision commands (fix 2 — the env/build
+                    //     fight pattern the sink can see but can't attach pass/fail to).
+                    // Either one ends the turn cleanly here — no further re-drive — submitting
+                    // whatever verified diff exists. A tail-cost backstop, NOT a target; the common
+                    // bridge turn finishes well under the cap and never trips this.
+                    let over_budget = bridge_turn_over_budget(
+                        bridge_input_accum,
+                        self.config.mesh.bridge_turn_token_cap,
+                    );
+                    let build_fighting = bridge_build_fight
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        >= BRIDGE_BUILD_FIGHT_THRESHOLD;
+                    if over_budget || build_fighting {
+                        let why = if over_budget {
+                            format!(
+                                "bridge turn hit the {}M input-token ceiling",
+                                self.config.mesh.bridge_turn_token_cap / 1_000_000
+                            )
+                        } else {
+                            format!(
+                                "bridge kept re-running build/provision commands \
+                                 ({BRIDGE_BUILD_FIGHT_THRESHOLD}×)"
+                            )
+                        };
+                        self.presenter.emit(PresenterEvent::Warning(format!(
+                            "{why} — stopping the turn and submitting the current diff to cap \
+                             tail cost"
+                        )));
+                        final_text = resp.content;
+                        hit_step_cap = false;
+                        break;
+                    }
                     // Loop-gated completeness (opt-in `mesh.verify_completeness`): the bridge yielded.
                     // Before accepting "done", fire ONE bounded final-diff review — the model worked
                     // the turn normally (no completeness pressure throughout, which is what tripled
@@ -3830,6 +4239,26 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         // earlier rough patch doesn't later trip the guard after the model recovered.
                         None => failure_counts.retain(|(nm, _), _| nm != &call.name),
                     }
+                    // Env-fight spend cap (quality guards wave 4, fix 4): shell commands that look
+                    // like environment provisioning and keep failing are venv archaeology — the
+                    // SWE-bench turns that burned minutes on host-python/repo-era mismatches. After
+                    // ENV_FIGHT_THRESHOLD consecutive failures, tell the model once (per turn) to
+                    // stop provisioning and verify at the logic level. Delivered via pending_hints
+                    // so it lands right after this failing result.
+                    if self.config.mesh.env_fight_nudge && call.name == "shell" {
+                        if let Some(cmd) = call.args.get("command").and_then(|v| v.as_str()) {
+                            if is_env_setup_command(cmd)
+                                && self.env_fight.observe(shell_command_failed(&result))
+                            {
+                                self.presenter.emit(PresenterEvent::Warning(format!(
+                                    "environment setup failed {ENV_FIGHT_THRESHOLD}× in a row — \
+                                     nudging the model to stop provisioning and verify at the \
+                                     logic level"
+                                )));
+                                self.pending_hints.push(ENV_FIGHT_NUDGE.to_string());
+                            }
+                        }
+                    }
                     let seq = self.next_seq();
                     self.store.add_message_full(
                         &self.id,
@@ -3906,6 +4335,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             active_model,
             plan: proposed_plan,
             tools_ran: tools_ran.load(std::sync::atomic::Ordering::Relaxed),
+            mcp_tools_unavailable: mcp_tools_unavailable.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -4139,6 +4569,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // something (not a carry-over from a prior turn).
         self.edits_this_turn = 0;
         self.failure_tracker.reset_turn();
+        self.env_fight = EnvFightTracker::default();
 
         // 2. Persist + record the user message. Its seq keys this turn's code-snapshot dir
         // (PR3): files written during the turn are restorable by rewinding to this boundary.
@@ -4291,6 +4722,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let mut context_tokens = outcome.context_tokens;
         let mut active_model = outcome.active_model;
         let mut hit_step_cap = outcome.hit_step_cap;
+        // Wave 7: did ANY bridge completion this turn (primary or a guard re-drive) report that
+        // `mcp-serve` failed to start? OR-ed across the re-drives below, then combined with the
+        // final tree/tool state to classify a toolless-bridge turn (see below the guards).
+        let mut saw_mcp_unavailable = outcome.mcp_tools_unavailable;
 
         // A CLI-bridge model proposed a plan (the sink already rendered the card). Seed tasks,
         // persist it, and stash it for the approval flow below — the in-process path did this in
@@ -4333,10 +4768,24 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // model loop. One-shot by construction (straight-line code, the same latch idea as
         // `completeness_checked`); runs BEFORE self-review/autofix so any edits it produces are
         // still lint/test-checked. `mesh.nudge_empty_diff = false` disables it wholesale.
+        //
+        // Bridge-path robustness (wave 6): `turn_tools_ran` counts a CLI bridge's tools too — they
+        // surface through the stream sink as `StreamEvent::ToolStarted` (see run_model_loop) — so the
+        // nudge already fires for the common bridge turn that explored then described. But that count
+        // then hinges on the bridge's tool-event JSON parsing: if a bridge yields an empty diff having
+        // surfaced NO parseable tool event (a refusal, a prose-only reply, or codex/claude CLI output
+        // drift), the `> 0` gate would silently drop the pushback on the exact path every bench uses.
+        // A `codex-cli::gpt-5.5` SWE-bench Lite sweep resolved 3/15 vs raw codex 9/15, with 8/15
+        // submitting an empty patch — so an empty completion on a known code-change turn ALWAYS
+        // warrants one pushback on the bridge, whether or not a tool event was surfaced. Direct-path
+        // semantics are unchanged (`> 0`); only the bridge relaxes the tool-activity requirement.
         if self.config.mesh.nudge_empty_diff
             && self.expect_code_change
-            && turn_tools_ran > 0
+            && (turn_tools_ran > 0 || forge_provider::is_cli_bridge(&active_model))
             && self.edits_this_turn == 0
+            // Past the soft deadline there is no budget for a re-drive (and the re-entered loop
+            // would end immediately, clobbering the final answer with an empty one).
+            && !self.past_turn_deadline()
             && working_tree_unchanged(self.work_root.as_deref())
         {
             self.presenter.emit(PresenterEvent::Warning(
@@ -4360,6 +4809,87 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             context_tokens = nudge_outcome.context_tokens;
             active_model = nudge_outcome.active_model;
             hit_step_cap = nudge_outcome.hit_step_cap;
+            // The nudge re-drive spawns a FRESH bridge process (a new `mcp-serve`); if it too failed
+            // to start, this stays a toolless turn — carry the signal into the classification below.
+            saw_mcp_unavailable |= nudge_outcome.mcp_tools_unavailable;
+        }
+
+        // ── Existing-tests-are-spec guard (quality guards wave 4, fix 1) ──────────────────────
+        // A headless code-change turn whose working diff MODIFIES existing test files is the
+        // xarray-3364 failure shape: the model rewrites test expectations to match its own
+        // behavior, the evaluator restores the pristine tests, and the run fails. Before the turn
+        // completes: stash exactly the test-file modifications (restoring the pristine tests) and
+        // push back ONCE — re-verify against the originals, shrink the fix rather than editing
+        // tests, `git stash pop` only if the issue text genuinely demands a test change. NEW test
+        // files (git status `A`/`??`) never trip it — writing a reproduction test is normal.
+        // One-shot by construction (straight-line code, like the empty-diff nudge above); runs
+        // BEFORE self-review/autofix so whatever state the model settles on is still checked.
+        // Skipped past the soft deadline: no budget for a guard turn (same rationale as the
+        // empty-diff nudge gate above).
+        if self.config.mesh.guard_test_edits
+            && self.expect_code_change
+            && !self.past_turn_deadline()
+        {
+            let test_edits = modified_test_files_in_tree(self.work_root.as_deref());
+            if !test_edits.is_empty() && stash_paths(self.work_root.as_deref(), &test_edits) {
+                self.presenter.emit(PresenterEvent::Warning(format!(
+                    "code-change turn modified {} existing test file(s) — stashed the test edits \
+                     and pushing back once: hidden evaluation runs the ORIGINAL tests",
+                    test_edits.len()
+                )));
+                let guard = format!(
+                    "{TEST_EDIT_GUARD}\n\nStashed test-file edits:\n- {}",
+                    test_edits.join("\n- ")
+                );
+                let gseq = self.next_seq();
+                self.store
+                    .add_message(&self.id, gseq, Role::User, &guard, None)?;
+                self.transcript.push(Message::user(&guard));
+                let guard_specs = self.tool_specs();
+                let guard_outcome = self
+                    .run_model_loop(
+                        active_model.clone(),
+                        &guard_specs,
+                        primary_decision,
+                        max_steps,
+                        stream_idle,
+                    )
+                    .await?;
+                // Leave whatever state the model chose; only the answer bookkeeping updates.
+                final_text = guard_outcome.final_text;
+                context_tokens = guard_outcome.context_tokens;
+                active_model = guard_outcome.active_model;
+                hit_step_cap = guard_outcome.hit_step_cap;
+            }
+        }
+
+        // ── Toolless-bridge classification (bridge MCP-tool health guard, wave 7) ─────────────
+        // Forge serves the bridged CLI its write tools via `forge mcp-serve`. That server can FAIL
+        // TO START under the sandbox — codex logs `resources/list failed: MCP startup failed: No
+        // such file or directory` — leaving the model with the filesystem read-only. The turn then
+        // "completes" with prose + an empty patch and NO error, so a benchmark scores a silent
+        // toolless run as a clean completion (a codex-cli::gpt-5.5 SWE-bench sweep hit this on ~7/15
+        // instances). Classify it here (recomputed every turn, so it self-resets): the child showed
+        // the MCP-startup signal AND no forge tool ran AND the tree is still empty. The harness
+        // (`bench swe` / headless) reads `tools_unavailable()` to RETRY on a fresh process rather
+        // than record an empty patch. Gated on `mesh.bridge_require_tools`; kept DISTINCT from the
+        // empty-diff nudge above (which handles a NORMAL empty completion, no startup-failure signal).
+        // The ENOENT root cause (sandbox vs load) is intermittent and unconfirmed — a respawn on the
+        // harness retry usually clears it.
+        self.tools_unavailable_run = self.config.mesh.bridge_require_tools
+            && classify_tools_unavailable(
+                self.expect_code_change,
+                forge_provider::is_cli_bridge(&active_model),
+                saw_mcp_unavailable,
+                turn_tools_ran,
+                working_tree_unchanged(self.work_root.as_deref()),
+            );
+        if self.tools_unavailable_run {
+            self.presenter.emit(PresenterEvent::Warning(
+                "bridge turn ran with NO working tools — Forge's mcp-serve tool server failed to \
+                 start (empty tree, zero tool calls); the harness will retry on a fresh process"
+                    .to_string(),
+            ));
         }
 
         // ── Self-review pass (mesh.self_review) ───────────────────────────────────────────────
@@ -11186,6 +11716,14 @@ mod tests {
             assert!(out.status.success(), "git {args:?} failed");
         };
         git(&["init", "-q"]);
+        // Pin line-ending handling so the repo is byte-deterministic regardless of the host's
+        // global git config. Windows CI images default to `core.autocrlf=true`, which rewrites
+        // LF→CRLF on checkout — so a `git stash push` restore of a file this test wrote with LF
+        // would come back with CRLF and fail the byte-equality asserts. Disabling autocrlf keeps
+        // the on-disk bytes exactly what the test committed on every platform.
+        git(&["config", "core.autocrlf", "false"]);
+        git(&["config", "core.safecrlf", "false"]);
+        git(&["config", "core.eol", "lf"]);
         std::fs::write(dir.join("f.txt"), "seed").unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-qm", "seed"]);
@@ -11273,6 +11811,917 @@ mod tests {
         assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(answer, "here is how you would fix it");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Scripted CLI-BRIDGE model (wave 6). A claude-cli/codex-cli bridge runs its WHOLE tool loop
+    /// inside one `complete()` in a subprocess and surfaces each tool as a `StreamEvent::ToolStarted`
+    /// through the sink — never in `resp.tool_calls`. So the empty-diff nudge's `turn_tools_ran > 0`
+    /// gate must count sink tool starts, not just direct `resp.tool_calls`, or it stays blind to the
+    /// exact path every bridge benchmark uses. `edit_file`, when set, makes the first completion
+    /// write a real file (a non-empty diff) so the "edited → must NOT nudge" case is exercised too.
+    struct BridgeDescribeProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        edit_file: Option<std::path::PathBuf>,
+        /// Whether the first completion surfaces a tool via the sink. `false` models a bridge that
+        /// yields with an empty diff having surfaced NO parseable tool event (refusal / prose-only /
+        /// CLI output drift) — the case the wave-6 bridge-path relaxation covers.
+        emit_tool: bool,
+    }
+    #[async_trait::async_trait]
+    impl Provider for BridgeDescribeProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                // The bridge subprocess ran a tool: it surfaces via the sink, NOT resp.tool_calls.
+                if self.emit_tool {
+                    on_event(StreamEvent::ToolStarted {
+                        name: "shell".into(),
+                        args: "ls".into(),
+                    });
+                    on_event(StreamEvent::ToolFinished {
+                        name: "shell".into(),
+                        ok: true,
+                        summary: String::new(),
+                    });
+                }
+                if let Some(p) = &self.edit_file {
+                    std::fs::write(p, "patched").unwrap();
+                }
+                let text = "explored the repo — here is how you would fix it";
+                on_event(StreamEvent::Text(text.into()));
+                return Ok(forge_provider::ModelResponse {
+                    content: text.into(),
+                    tool_calls: vec![],
+                    usage: forge_types::Usage::default(),
+                    quotas: Vec::new(),
+                });
+            }
+            let text = "still only describing after the nudge";
+            on_event(StreamEvent::Text(text.into()));
+            Ok(forge_provider::ModelResponse {
+                content: text.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_empty_diff_run_is_nudged_exactly_once() {
+        // Wave 6: the empty-diff nudge must fire on the CLI-BRIDGE path. Hard evidence: a 15-instance
+        // SWE-bench Lite sweep on the codex-cli::gpt-5.5 bridge resolved 3/15 vs raw codex 9/15;
+        // 8/15 bridge instances submitted an EMPTY patch and the nudge fired 0×. The bridge ran its
+        // tools inside its subprocess (surfaced via the sink's ToolStarted), so the gate must see
+        // that activity. Here the bridge explores (one sink tool) then only describes → exactly ONE
+        // nudge re-drive, then the turn ends (the model keeps describing; the latch prevents a loop).
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: true,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "bridge yields its whole loop in ONE completion, then exactly ONE nudge re-drive"
+        );
+        assert_eq!(answer, "still only describing after the nudge");
+        // The synthetic nudge must actually have been injected (not just an extra completion).
+        assert!(
+            session
+                .transcript
+                .iter()
+                .any(|m| m.content == EMPTY_DIFF_NUDGE),
+            "the empty-diff nudge message was injected on the bridge path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn bridge_that_edited_files_is_not_nudged() {
+        // The counterpart guard: a bridge turn that DID change the tree (non-empty diff) must NOT be
+        // nudged — `working_tree_unchanged` is false — so a real fix is never second-guessed.
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: Some(dir.join("patch.txt")),
+            emit_tool: true,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a bridge turn that edited the tree must not be nudged"
+        );
+        assert_eq!(answer, "explored the repo — here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn bridge_empty_diff_with_no_surfaced_tool_still_nudges() {
+        // Wave-6 bridge-path robustness: a bridge that yields an empty diff having surfaced NO
+        // parseable tool event (refusal / prose-only / CLI output drift → `tools_ran == 0`) still
+        // gets exactly ONE pushback. The direct-path `tools_ran > 0` gate would have dropped it on
+        // the very path every bench uses; the bridge relaxes that requirement.
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: false,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "bridge empty diff with no surfaced tool must still be nudged exactly once"
+        );
+        assert_eq!(answer, "still only describing after the nudge");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn direct_empty_diff_with_no_tools_is_not_nudged() {
+        // The regression that keeps the wave-6 relaxation bridge-ONLY: a DIRECT-path turn that ran
+        // no tools (`tools_ran == 0`) and is NOT a CLI bridge must NOT be nudged — direct-path
+        // semantics are unchanged (the nudge still means "you worked but changed nothing").
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: false,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a direct turn that ran no tools must not be nudged (unchanged behavior)"
+        );
+        assert_eq!(answer, "explored the repo — here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Toolless-bridge classification (bridge MCP-tool health guard, wave 7) ---
+
+    #[test]
+    fn classify_tools_unavailable_requires_all_signals() {
+        // The positive case: an expect_code_change bridge turn that saw the mcp-startup failure,
+        // ran zero forge tools, and left the tree unchanged → TOOLS-UNAVAILABLE.
+        assert!(classify_tools_unavailable(true, true, true, 0, true));
+        // A NORMAL empty completion (no startup-failure signal) is NOT tools-unavailable — that's
+        // the wave-2 empty-diff nudge's job, kept distinct.
+        assert!(!classify_tools_unavailable(true, true, false, 0, true));
+        // Tools actually ran → mcp-serve came up; not toolless.
+        assert!(!classify_tools_unavailable(true, true, true, 3, true));
+        // The tree changed → the model DID edit; not a toolless empty run.
+        assert!(!classify_tools_unavailable(true, true, true, 0, false));
+        // Not a bridge (direct model) → never classified.
+        assert!(!classify_tools_unavailable(true, false, true, 0, true));
+        // Not a code-change run (interactive) → never classified.
+        assert!(!classify_tools_unavailable(false, true, true, 0, true));
+    }
+
+    /// Scripted CLI-bridge that emits `StreamEvent::ToolsUnavailable` on its FIRST completion —
+    /// modelling a bridge whose `forge mcp-serve` tool server failed to start (wave 7): it ran no
+    /// tools, edited nothing, and reported prose. Every completion yields prose with an empty tree.
+    struct BridgeToollessProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for BridgeToollessProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                on_event(StreamEvent::ToolsUnavailable {
+                    reason: "resources/list failed: MCP startup failed: No such file or directory \
+                             (os error 2)"
+                        .into(),
+                });
+            }
+            let text = "I can't edit — no writable tool is exposed here.";
+            on_event(StreamEvent::Text(text.into()));
+            Ok(forge_provider::ModelResponse {
+                content: text.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn toolless_bridge_turn_is_classified_tools_unavailable() {
+        // Wave 7: a bridge turn whose mcp-serve failed to start (ToolsUnavailable event), ran no
+        // tools, and left an empty tree must be classified TOOLS-UNAVAILABLE so the harness retries
+        // — NOT scored as a clean empty completion.
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeToollessProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        session.run_turn("fix the bug").await.unwrap();
+        assert!(
+            session.tools_unavailable(),
+            "a toolless bridge turn (mcp-serve startup failure) must be classified TOOLS-UNAVAILABLE"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn normal_empty_completion_is_not_tools_unavailable() {
+        // Distinctness from the wave-2 nudge: a bridge that yields an empty diff WITHOUT any
+        // mcp-startup-failure signal (it simply described the fix) is nudged, but is NOT classified
+        // TOOLS-UNAVAILABLE — the harness must not retry it as a broken-tools turn.
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: false,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        session.run_turn("fix the bug").await.unwrap();
+        assert!(
+            !session.tools_unavailable(),
+            "a normal empty completion (no startup-failure signal) is NOT tools-unavailable"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn tools_unavailable_respects_the_config_gate() {
+        // `mesh.bridge_require_tools = false` disables the classification even for a bench run that
+        // saw the mcp-startup failure.
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeToollessProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        session.config.mesh.bridge_require_tools = false;
+        session.run_turn("fix the bug").await.unwrap();
+        assert!(
+            !session.tools_unavailable(),
+            "the config gate must suppress the classification"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Existing-tests-are-spec guard (quality guards wave 4, fix 1) ---
+
+    #[test]
+    fn test_path_classifier_matches_the_pattern_list() {
+        for p in [
+            "tests/test_dataset.py",
+            "xarray/tests/test_concat.py",
+            "pkg/foo_test.py",
+            "src/parser_test.rs",
+            "src/parser_tests.rs",
+            "test_units.rs",
+            "web/app.test.ts",
+            "web/app.spec.js",
+            "tests/helpers.py", // under a tests/ dir counts even without a test_ name
+        ] {
+            assert!(is_test_path(p), "{p} must classify as a test path");
+        }
+        for p in [
+            "src/lib.rs",
+            "xarray/core/concat.py",
+            "docs/testing.md",
+            "attest.py",
+        ] {
+            assert!(!is_test_path(p), "{p} must NOT classify as a test path");
+        }
+    }
+
+    #[test]
+    fn modified_test_paths_flags_m_and_d_but_never_new_files() {
+        // The red flag is a MODIFIED (or deleted) existing test; a NEW test file (`A` staged or
+        // `??` untracked) is normal practice and must never trip the guard.
+        let porcelain = " M xarray/tests/test_concat.py\n\
+                         M  tests/test_merge.py\n\
+                         D  tests/test_old.py\n\
+                         A  tests/test_new.py\n\
+                         ?? tests/test_scratch.py\n\
+                         M  xarray/core/concat.py\n\
+                         R  tests/test_a.py -> tests/test_b.py\n";
+        assert_eq!(
+            modified_test_paths(porcelain),
+            vec![
+                "xarray/tests/test_concat.py".to_string(),
+                "tests/test_merge.py".to_string(),
+                "tests/test_old.py".to_string(),
+            ]
+        );
+    }
+
+    /// A throwaway git repo with a committed test file (plus a source file) whose test is then
+    /// MODIFIED in the working tree — the xarray-3364 shape the guard exists for.
+    fn repo_with_modified_test() -> std::path::PathBuf {
+        let dir = clean_git_repo();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("tests/test_foo.py"), "assert fix() == 1\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "add test"]);
+        // The turn "rewrites the test's expectations".
+        std::fs::write(dir.join("tests/test_foo.py"), "assert fix() == 2\n").unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn modified_existing_tests_are_stashed_and_the_model_pushed_back_once() {
+        let dir = repo_with_modified_test();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "explore + describe (2 completions), then exactly ONE guard re-drive"
+        );
+        assert_eq!(answer, "still only describing");
+        // The pristine test was restored (the stash took the rewritten expectations with it)…
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+            "assert fix() == 1\n",
+            "the test file must be back at its committed content"
+        );
+        // …and the edits are recoverable, not destroyed.
+        let stashes = std::process::Command::new("git")
+            .args(["stash", "list"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            !stashes.stdout.is_empty(),
+            "the test edits must be stashed, not discarded"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn bridge_modified_tests_are_stashed_and_pushed_back_once() {
+        // Wave 6: the pristine-test guard is git-tree-based (it inspects the working tree, not
+        // `resp.tool_calls`), so it already covers a CLI-BRIDGE turn — whose file edits happen in
+        // the `forge mcp-serve` subprocess and only ever show up as a tree change. Proven here: a
+        // bridge turn (tools surfaced via the sink) that left a modified existing test gets exactly
+        // ONE guard re-drive, and the pristine test is restored.
+        let dir = repo_with_modified_test();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: true,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "bridge yields in ONE completion, then exactly ONE guard re-drive"
+        );
+        assert_eq!(answer, "still only describing after the nudge");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+            "assert fix() == 1\n",
+            "the test file must be back at its committed content"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn new_test_files_never_trip_the_guard() {
+        // Adding a fresh reproduction test is normal practice — only MODIFIED existing tests are
+        // the red flag.
+        let dir = clean_git_repo();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("tests/test_new.py"), "assert repro()\n").unwrap();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "an untracked new test file must not fire the guard"
+        );
+        assert_eq!(answer, "here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_edit_guard_respects_the_config_gate() {
+        let dir = repo_with_modified_test();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        session.config.mesh.guard_test_edits = false;
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(answer, "here is how you would fix it");
+        // The rewritten test is left exactly as the model wrote it.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+            "assert fix() == 2\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Timeout reconciliation window (quality guards wave 4, fix 2) ---
+
+    #[test]
+    fn reconcile_deadline_budget_math() {
+        // bench swe's shape: a 900s hard timeout leaves a 780s soft budget (120s reserve).
+        assert_eq!(reconcile_deadline_budget_secs(900, 120), Some(780));
+        assert_eq!(reconcile_deadline_budget_secs(300, 120), Some(180));
+        // A timeout at or under the reserve leaves no usable budget → no deadline is set (the
+        // hard kill is then the only bound, exactly the pre-wave-4 behaviour).
+        assert_eq!(reconcile_deadline_budget_secs(120, 120), None);
+        assert_eq!(reconcile_deadline_budget_secs(60, 120), None);
+        assert_eq!(reconcile_deadline_budget_secs(0, 120), None);
+    }
+
+    /// Scripted runaway model: ALWAYS returns a read-only tool call, never finishing on its own —
+    /// only an external bound (step cap or the deadline) can end the loop. Counts completions.
+    struct CountingToolLoopProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for CountingToolLoopProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(forge_provider::ModelResponse {
+                content: String::new(),
+                tool_calls: vec![forge_types::ToolCall {
+                    id: forge_types::new_id(),
+                    name: "list_dir".into(),
+                    args: serde_json::json!({ "path": "." }),
+                }],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn past_deadline_allows_exactly_one_reconcile_completion() {
+        // With the deadline already past, the loop must inject the revert instruction, allow ONE
+        // model completion to act on it, then end — not run to the 100-step cap.
+        let provider = Arc::new(CountingToolLoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.set_turn_deadline(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one reconciliation completion, then the loop must end"
+        );
+        // The revert instruction was actually delivered to the transcript.
+        let msgs = store.load_messages(session.id()).unwrap();
+        assert!(
+            msgs.iter().any(|m| m.content == DEADLINE_RECONCILE_NUDGE),
+            "the reconcile instruction must be in the transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn deadline_reconcile_respects_the_config_gate() {
+        // `mesh.deadline_reconcile = false` restores the old behaviour: the deadline is ignored
+        // and only the step cap bounds the loop.
+        let provider = Arc::new(CountingToolLoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.config.mesh.deadline_reconcile = false;
+        session.config.mesh.max_steps = 3;
+        session.set_turn_deadline(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "gate off → the step cap, not the deadline, bounds the loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_deadline_means_no_reconcile_behaviour() {
+        // An interactive session (no deadline set) is byte-for-byte unaffected.
+        let provider = Arc::new(CountingToolLoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.config.mesh.max_steps = 3;
+        session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    // --- Minimal-diff bias (quality guards wave 4, fix 3) ---
+
+    #[test]
+    fn minimal_diff_bias_stays_small() {
+        // One short paragraph, not another token-tripling preamble: the always-on completeness
+        // clause tripled tokens; this bias must stay a few sentences. Wave 5 added one out-of-tree
+        // verification clause, moving the ceiling 400 → 520 bytes; it must not grow past that.
+        assert!(
+            MINIMAL_DIFF_BIAS.len() <= 520,
+            "MINIMAL_DIFF_BIAS must stay ≤520 bytes, is {}",
+            MINIMAL_DIFF_BIAS.len()
+        );
+    }
+
+    #[test]
+    fn minimal_diff_bias_permits_out_of_tree_verification() {
+        // The wave 5 clause must keep the minimal-final-diff discipline while explicitly allowing
+        // throwaway scaffolding, so the astropy build-archaeology regression isn't re-locked in.
+        assert!(
+            MINIMAL_DIFF_BIAS.contains("keep the diff minimal"),
+            "must retain the minimal-diff discipline"
+        );
+        assert!(
+            MINIMAL_DIFF_BIAS.contains("/tmp")
+                && MINIMAL_DIFF_BIAS.contains("FINAL committed diff"),
+            "must permit /tmp scaffolding gated on a minimal FINAL diff"
+        );
+    }
+
+    #[test]
+    fn minimal_diff_bias_rides_only_code_change_turns() {
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(Arc::new(PanicProvider), router);
+        let plain = session.system_preamble();
+        assert!(
+            plain.iter().all(|m| m.content != MINIMAL_DIFF_BIAS),
+            "interactive turns must NOT carry the bias"
+        );
+        session.set_expect_code_change(true);
+        let bench = session.system_preamble();
+        assert!(
+            bench.iter().any(|m| m.content == MINIMAL_DIFF_BIAS),
+            "code-change turns must carry the bias as system context"
+        );
+    }
+
+    // --- Env-fight spend cap (quality guards wave 4, fix 4) ---
+
+    #[test]
+    fn env_setup_command_heuristic() {
+        for c in [
+            "pip install numpy==1.16",
+            "pip3 install -e .",
+            "python -m pip install -r requirements.txt",
+            "python3 -m ensurepip --upgrade",
+            "python -m venv .venv",
+            "cd /repo && virtualenv env27",
+            "uv venv --python 3.7",
+            "uv pip install pytest",
+            "sudo apt-get install -y python3-dev",
+            "apt install python2",
+            "conda create -n old python=2.7",
+            // Build archaeology (wave 5, fix 2) — the astropy-12907 C-extension churn.
+            "python setup.py build_ext --inplace",
+            "cd astropy && python setup.py build_ext -i",
+            "make -j4",
+            "cd build && make",
+            "gcc -c _np_utils.c -o _np_utils.o",
+            "g++ -shared foo.o -o foo.so",
+            "cc -fPIC -c wcslib.c",
+            "cmake -DCMAKE_BUILD_TYPE=Release ..",
+            "pyenv install 3.7.9",
+            "./configure --prefix=/usr/local",
+            "ninja -C build",
+        ] {
+            assert!(is_env_setup_command(c), "{c} must count as env setup");
+        }
+        for c in [
+            "pytest tests/test_concat.py",
+            "python -m pytest -x",
+            "git status",
+            "cargo build",
+            "cat requirements.txt",
+            // Whole-token matching must NOT let these false-positive off `make`/`cc`.
+            "python manage.py makemigrations",
+            "cat accumulator.py",
+            "grep -rn cc_email .",
+        ] {
+            assert!(!is_env_setup_command(c), "{c} must NOT count as env setup");
+        }
+    }
+
+    #[test]
+    fn bridge_tool_command_extracts_from_json_or_raw() {
+        // claude Bash / Forge shell over MCP: JSON with a command field.
+        assert_eq!(
+            bridge_tool_command(r#"{"command":"python setup.py build_ext","timeout":60}"#),
+            "python setup.py build_ext"
+        );
+        // codex command_execution: the raw command string.
+        assert_eq!(bridge_tool_command("make -j4"), "make -j4");
+        // The extracted command feeds the same build-fight heuristic.
+        assert!(is_env_setup_command(&bridge_tool_command(
+            r#"{"command":"cd astropy && python setup.py build_ext -i"}"#
+        )));
+    }
+
+    // --- Bridge token ceiling (wave 5, fix 1) ---
+
+    #[test]
+    fn bridge_turn_ceiling_trips_at_or_past_the_cap() {
+        let cap = 2_500_000u64;
+        assert!(!bridge_turn_over_budget(0, cap));
+        assert!(!bridge_turn_over_budget(cap - 1, cap));
+        assert!(
+            bridge_turn_over_budget(cap, cap),
+            "exactly at the cap trips"
+        );
+        assert!(bridge_turn_over_budget(cap + 1, cap));
+        // The astropy tail (6.46M input) trips comfortably; n=1 and stochastic, a backstop only.
+        assert!(bridge_turn_over_budget(6_460_000, cap));
+    }
+
+    #[test]
+    fn bridge_turn_ceiling_disabled_by_zero_cap() {
+        assert!(
+            !bridge_turn_over_budget(u64::MAX, 0),
+            "0 disables the ceiling"
+        );
+    }
+
+    #[test]
+    fn env_fight_tracker_fires_once_at_the_threshold() {
+        let mut t = EnvFightTracker::default();
+        assert!(!t.observe(true));
+        assert!(!t.observe(true));
+        assert!(!t.observe(true));
+        assert!(
+            t.observe(true),
+            "the 4th consecutive failure fires the nudge"
+        );
+        assert!(!t.observe(true), "latched — never re-fires this turn");
+        assert!(!t.observe(true));
+    }
+
+    #[test]
+    fn env_fight_tracker_resets_on_success() {
+        let mut t = EnvFightTracker::default();
+        assert!(!t.observe(true));
+        assert!(!t.observe(true));
+        assert!(!t.observe(true));
+        assert!(!t.observe(false), "a success resets the streak");
+        assert!(!t.observe(true));
+        assert!(!t.observe(true));
+        assert!(!t.observe(true));
+        assert!(t.observe(true), "a fresh run of 4 failures fires");
+    }
+
+    /// Scripted env-fighter: four DISTINCT failing env-setup shell commands (distinct args so the
+    /// identical-call doom-loop guard stays out of the way), then a final text sign-off.
+    struct EnvFighterProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for EnvFighterProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < 4 {
+                // A `-m venv` command (recognized by `is_env_setup_command`) invoking a binary that
+                // does not exist, so it fails to start with a non-zero exit on EVERY platform
+                // (`cmd /C` → "not recognized", `sh -c` → 127). The earlier form
+                // `python3 -m venv /dev/null/venvN` only failed on Unix, where `/dev/null` is a
+                // device file; on Windows `/dev/null/venvN` is an ordinary path that `venv` happily
+                // creates → exit 0 → the failure streak never reached the threshold. Distinct target
+                // per `n` keeps the identical-call doom-loop guard out of the way.
+                return Ok(forge_provider::ModelResponse {
+                    content: String::new(),
+                    tool_calls: vec![forge_types::ToolCall {
+                        id: forge_types::new_id(),
+                        name: "shell".into(),
+                        args: serde_json::json!({
+                            "command": format!("forge-no-such-python -m venv target-venv{n}")
+                        }),
+                    }],
+                    usage: forge_types::Usage::default(),
+                    quotas: Vec::new(),
+                });
+            }
+            on_event(StreamEvent::Text("stopping the provisioning fight".into()));
+            Ok(forge_provider::ModelResponse {
+                content: "stopping the provisioning fight".into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn four_env_setup_failures_inject_the_nudge_once() {
+        let provider = Arc::new(EnvFighterProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        // Keep the count deterministic: no side-call diagnosis completions on shell failures.
+        session.config.shell.explain_errors = false;
+        session.mode = PermissionMode::Bypass;
+        session.run_turn("fix the bug").await.unwrap();
+        let msgs = store.load_messages(session.id()).unwrap();
+        assert_eq!(
+            msgs.iter().filter(|m| m.content == ENV_FIGHT_NUDGE).count(),
+            1,
+            "exactly one env-fight nudge after 4 consecutive provisioning failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn env_fight_nudge_respects_the_config_gate() {
+        let provider = Arc::new(EnvFighterProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.config.shell.explain_errors = false;
+        session.config.mesh.env_fight_nudge = false;
+        session.mode = PermissionMode::Bypass;
+        session.run_turn("fix the bug").await.unwrap();
+        let msgs = store.load_messages(session.id()).unwrap();
+        assert!(
+            msgs.iter().all(|m| m.content != ENV_FIGHT_NUDGE),
+            "gate off → no nudge"
+        );
     }
 
     #[tokio::test]
