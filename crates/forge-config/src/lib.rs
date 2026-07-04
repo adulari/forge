@@ -1334,6 +1334,15 @@ pub struct MeshConfig {
     /// that provisioning was never going to win. Default true; latched once per turn.
     #[serde(default = "default_env_fight_nudge")]
     pub env_fight_nudge: bool,
+    /// Per-turn cumulative input-token ceiling for a CLI bridge turn (wave 5). A bridge runs its
+    /// own tool loop inside a subprocess, so the direct-path cost guards (which only see
+    /// `resp.tool_calls`) never fire on it — an unbounded bridge turn is the dominant tail-cost
+    /// risk because bridge input scales ~quadratically with round-trips (each re-drive re-sends the
+    /// transcript). When the accumulated input across a turn's bridge completions crosses this cap,
+    /// Forge stops re-driving and ends the turn cleanly, submitting whatever verified diff exists.
+    /// A backstop, not a target: 0 disables it. Default 2_500_000.
+    #[serde(default = "default_bridge_turn_token_cap")]
+    pub bridge_turn_token_cap: u64,
     /// Which subscription plan backs each CLI bridge (`claude-cli` → "max-20x", `codex-cli` →
     /// "plus"), captured by `forge init`. Records the usage headroom the user has: the
     /// subscription-conservation layer reads it so a larger plan (more headroom) is spent more
@@ -1465,6 +1474,10 @@ fn default_deadline_reconcile() -> bool {
 
 fn default_env_fight_nudge() -> bool {
     true
+}
+
+fn default_bridge_turn_token_cap() -> u64 {
+    2_500_000
 }
 
 /// The Artificial Analysis Data API key (ADR-0011), for benchmark-driven ranking. Read from
@@ -1875,6 +1888,7 @@ impl Default for Config {
                 guard_test_edits: default_guard_test_edits(),
                 deadline_reconcile: default_deadline_reconcile(),
                 env_fight_nudge: default_env_fight_nudge(),
+                bridge_turn_token_cap: default_bridge_turn_token_cap(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
                 disabled: Vec::new(),

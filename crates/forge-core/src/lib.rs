@@ -432,6 +432,14 @@ change at the logic level (a targeted script or careful reasoning against the co
 /// Consecutive env-setup failures before the nudge fires.
 const ENV_FIGHT_THRESHOLD: usize = 4;
 
+/// Whether a single bridge turn's accumulated input tokens have crossed its ceiling (wave 5,
+/// fix 1). Pure so the trip logic is unit-testable. A tail-cost backstop, not a target: `cap == 0`
+/// disables it, and the check is `>=` so the turn stops at the first observation boundary at or
+/// past the cap.
+const fn bridge_turn_over_budget(accumulated_input: u64, cap: u64) -> bool {
+    cap != 0 && accumulated_input >= cap
+}
+
 /// Whether a shell command looks like environment provisioning — the small heuristic list the
 /// env-fight cap keys on (pip/venv/virtualenv/ensurepip/apt/uv/conda…). Substring match on the
 /// whitespace-normalized, lowercased command, so wrappers (`cd x && pip install …`) still match.
@@ -3122,6 +3130,13 @@ Output ONLY that sentence — no preamble, no quotation marks.";
 
         let mut final_text = String::new();
         let mut context_tokens: u64 = 0;
+        // Per-turn cumulative bridge input tokens (wave 5, fix 1). A CLI bridge runs its own tool
+        // loop in a subprocess, so the direct-path cost guards never see it; this sums the input
+        // reported by each bridge completion this turn so the token ceiling can end an unbounded
+        // bridge turn at an observation boundary. Summing across re-drives may over-count if a
+        // persistent bridge reports cumulative usage, but this is a backstop — tripping early is
+        // safe. Only bridge completions feed it (direct turns leave it 0).
+        let mut bridge_input_accum: u64 = 0;
         let mut hit_step_cap = true;
         // A plan a bridge model proposes via the out-of-band sink (StreamEvent::Plan). Captured by
         // the per-step stream closure and returned in the outcome for the turn's approval flow.
@@ -3634,6 +3649,10 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 }
             }
             self.store.record_usage(&self.id, &msg_id, &resp.usage)?;
+            // Accumulate this bridge completion's input toward the per-turn ceiling (wave 5, fix 1).
+            if forge_provider::is_cli_bridge(&active_model) {
+                bridge_input_accum = bridge_input_accum.saturating_add(resp.usage.input_tokens);
+            }
 
             if !resp.wants_tools() {
                 // A response with neither text nor a tool call is a silent dead-end (model glitch,
@@ -3697,6 +3716,26 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             .to_string(),
                     ));
                 } else if forge_provider::is_cli_bridge(&active_model) {
+                    // Bridge token ceiling (wave 5, fix 1). This is the observation boundary a
+                    // bridge turn actually has: its tools ran inside the subprocess and it has now
+                    // yielded, so the direct-path cost guards (which key on `resp.tool_calls`) never
+                    // saw any of it. If the accumulated input crossed the per-turn ceiling, end the
+                    // turn cleanly here — no further re-drive — submitting whatever verified diff
+                    // exists. A tail-cost backstop, NOT a target; the common bridge turn finishes
+                    // well under the cap and never trips this.
+                    if bridge_turn_over_budget(
+                        bridge_input_accum,
+                        self.config.mesh.bridge_turn_token_cap,
+                    ) {
+                        self.presenter.emit(PresenterEvent::Warning(format!(
+                            "bridge turn hit the {}M input-token ceiling — stopping and submitting \
+                             the current diff to cap tail cost",
+                            self.config.mesh.bridge_turn_token_cap / 1_000_000
+                        )));
+                        final_text = resp.content;
+                        hit_step_cap = false;
+                        break;
+                    }
                     // Loop-gated completeness (opt-in `mesh.verify_completeness`): the bridge yielded.
                     // Before accepting "done", fire ONE bounded final-diff review — the model worked
                     // the turn normally (no completeness pressure throughout, which is what tripled
@@ -11940,6 +11979,30 @@ mod tests {
         ] {
             assert!(!is_env_setup_command(c), "{c} must NOT count as env setup");
         }
+    }
+
+    // --- Bridge token ceiling (wave 5, fix 1) ---
+
+    #[test]
+    fn bridge_turn_ceiling_trips_at_or_past_the_cap() {
+        let cap = 2_500_000u64;
+        assert!(!bridge_turn_over_budget(0, cap));
+        assert!(!bridge_turn_over_budget(cap - 1, cap));
+        assert!(
+            bridge_turn_over_budget(cap, cap),
+            "exactly at the cap trips"
+        );
+        assert!(bridge_turn_over_budget(cap + 1, cap));
+        // The astropy tail (6.46M input) trips comfortably; n=1 and stochastic, a backstop only.
+        assert!(bridge_turn_over_budget(6_460_000, cap));
+    }
+
+    #[test]
+    fn bridge_turn_ceiling_disabled_by_zero_cap() {
+        assert!(
+            !bridge_turn_over_budget(u64::MAX, 0),
+            "0 disables the ceiling"
+        );
     }
 
     #[test]
