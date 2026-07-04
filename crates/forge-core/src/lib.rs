@@ -424,6 +424,68 @@ fn failover_policy(pinned: bool, pin_failover: bool, rate_limited: bool) -> Fail
 const EMPTY_DIFF_NUDGE: &str =
     "You have not modified any files. Implement the fix now — do not just describe it.";
 
+/// The env-fight nudge (quality guards wave 4, fix 4): injected once per turn after
+/// [`ENV_FIGHT_THRESHOLD`] consecutive failed environment-provisioning shell commands.
+const ENV_FIGHT_NUDGE: &str = "Environment setup keeps failing. Stop provisioning; verify your \
+change at the logic level (a targeted script or careful reasoning against the code) and finish.";
+
+/// Consecutive env-setup failures before the nudge fires.
+const ENV_FIGHT_THRESHOLD: usize = 4;
+
+/// Whether a shell command looks like environment provisioning — the small heuristic list the
+/// env-fight cap keys on (pip/venv/virtualenv/ensurepip/apt/uv/conda…). Substring match on the
+/// whitespace-normalized, lowercased command, so wrappers (`cd x && pip install …`) still match.
+fn is_env_setup_command(cmd: &str) -> bool {
+    let c = cmd
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    [
+        "pip install",
+        "pip3 install",
+        "-m pip",
+        "-m ensurepip",
+        "-m venv",
+        "virtualenv",
+        "uv venv",
+        "uv pip",
+        "apt-get install",
+        "apt install",
+        "conda install",
+        "conda create",
+        "yum install",
+        "apk add",
+    ]
+    .iter()
+    .any(|p| c.contains(p))
+}
+
+/// Consecutive-failure tracker + once-per-turn latch for the env-fight nudge. Pure state machine
+/// (unit-testable): only env-setup commands feed it — a failure extends the streak, a success
+/// resets it, and `observe` returns `true` exactly once, when the threshold-th consecutive
+/// failure lands.
+#[derive(Default)]
+struct EnvFightTracker {
+    streak: usize,
+    nudged: bool,
+}
+
+impl EnvFightTracker {
+    fn observe(&mut self, failed: bool) -> bool {
+        if !failed {
+            self.streak = 0;
+            return false;
+        }
+        self.streak += 1;
+        if self.streak >= ENV_FIGHT_THRESHOLD && !self.nudged {
+            self.nudged = true;
+            return true;
+        }
+        false
+    }
+}
+
 /// Minimal-diff bias (quality guards wave 4, fix 3): appended to the system context of every
 /// `expect_code_change` turn. The seaborn-2848 forensic: the model chose a plausible-but-wrong
 /// fix SHAPE (rewiring semantics instead of a value-level fallback) and self-verified against its
@@ -878,6 +940,9 @@ pub struct Session {
     /// One-shot latch for the deadline-reconciliation instruction; re-armed by
     /// [`Session::set_turn_deadline`].
     deadline_reconciled: bool,
+    /// Env-fight spend cap (quality guards wave 4): consecutive failed env-provisioning shell
+    /// commands this turn + the once-per-turn nudge latch. Reset at each turn start.
+    env_fight: EnvFightTracker,
     /// Per-turn guard against repeated failing tools and identical-call doom loops.
     failure_tracker: ToolFailureTracker,
     /// The current git branch (`.git/HEAD` → `refs/heads/<branch>`), cached so the hot per-request
@@ -1069,6 +1134,7 @@ impl Session {
             expect_code_change: false,
             turn_deadline: None,
             deadline_reconciled: false,
+            env_fight: EnvFightTracker::default(),
             failure_tracker: ToolFailureTracker::new(),
             cached_git_branch: current_git_branch(),
             // Read AGENTS.md eagerly (sync, off the async path) only when it will actually be
@@ -4005,6 +4071,26 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         // earlier rough patch doesn't later trip the guard after the model recovered.
                         None => failure_counts.retain(|(nm, _), _| nm != &call.name),
                     }
+                    // Env-fight spend cap (quality guards wave 4, fix 4): shell commands that look
+                    // like environment provisioning and keep failing are venv archaeology — the
+                    // SWE-bench turns that burned minutes on host-python/repo-era mismatches. After
+                    // ENV_FIGHT_THRESHOLD consecutive failures, tell the model once (per turn) to
+                    // stop provisioning and verify at the logic level. Delivered via pending_hints
+                    // so it lands right after this failing result.
+                    if self.config.mesh.env_fight_nudge && call.name == "shell" {
+                        if let Some(cmd) = call.args.get("command").and_then(|v| v.as_str()) {
+                            if is_env_setup_command(cmd)
+                                && self.env_fight.observe(shell_command_failed(&result))
+                            {
+                                self.presenter.emit(PresenterEvent::Warning(format!(
+                                    "environment setup failed {ENV_FIGHT_THRESHOLD}× in a row — \
+                                     nudging the model to stop provisioning and verify at the \
+                                     logic level"
+                                )));
+                                self.pending_hints.push(ENV_FIGHT_NUDGE.to_string());
+                            }
+                        }
+                    }
                     let seq = self.next_seq();
                     self.store.add_message_full(
                         &self.id,
@@ -4314,6 +4400,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // something (not a carry-over from a prior turn).
         self.edits_this_turn = 0;
         self.failure_tracker.reset_turn();
+        self.env_fight = EnvFightTracker::default();
 
         // 2. Persist + record the user message. Its seq keys this turn's code-snapshot dir
         // (PR3): files written during the turn are restorable by rewinding to this boundary.
@@ -11822,6 +11909,151 @@ mod tests {
         assert!(
             bench.iter().any(|m| m.content == MINIMAL_DIFF_BIAS),
             "code-change turns must carry the bias as system context"
+        );
+    }
+
+    // --- Env-fight spend cap (quality guards wave 4, fix 4) ---
+
+    #[test]
+    fn env_setup_command_heuristic() {
+        for c in [
+            "pip install numpy==1.16",
+            "pip3 install -e .",
+            "python -m pip install -r requirements.txt",
+            "python3 -m ensurepip --upgrade",
+            "python -m venv .venv",
+            "cd /repo && virtualenv env27",
+            "uv venv --python 3.7",
+            "uv pip install pytest",
+            "sudo apt-get install -y python3-dev",
+            "apt install python2",
+            "conda create -n old python=2.7",
+        ] {
+            assert!(is_env_setup_command(c), "{c} must count as env setup");
+        }
+        for c in [
+            "pytest tests/test_concat.py",
+            "python -m pytest -x",
+            "git status",
+            "cargo build",
+            "cat requirements.txt",
+        ] {
+            assert!(!is_env_setup_command(c), "{c} must NOT count as env setup");
+        }
+    }
+
+    #[test]
+    fn env_fight_tracker_fires_once_at_the_threshold() {
+        let mut t = EnvFightTracker::default();
+        assert!(!t.observe(true));
+        assert!(!t.observe(true));
+        assert!(!t.observe(true));
+        assert!(
+            t.observe(true),
+            "the 4th consecutive failure fires the nudge"
+        );
+        assert!(!t.observe(true), "latched — never re-fires this turn");
+        assert!(!t.observe(true));
+    }
+
+    #[test]
+    fn env_fight_tracker_resets_on_success() {
+        let mut t = EnvFightTracker::default();
+        assert!(!t.observe(true));
+        assert!(!t.observe(true));
+        assert!(!t.observe(true));
+        assert!(!t.observe(false), "a success resets the streak");
+        assert!(!t.observe(true));
+        assert!(!t.observe(true));
+        assert!(!t.observe(true));
+        assert!(t.observe(true), "a fresh run of 4 failures fires");
+    }
+
+    /// Scripted env-fighter: four DISTINCT failing env-setup shell commands (distinct args so the
+    /// identical-call doom-loop guard stays out of the way), then a final text sign-off.
+    struct EnvFighterProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for EnvFighterProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < 4 {
+                // Fails on every platform: the venv target's parent is not a directory (Unix) or
+                // python3/the path is invalid (Windows) — deterministic non-zero exit either way.
+                return Ok(forge_provider::ModelResponse {
+                    content: String::new(),
+                    tool_calls: vec![forge_types::ToolCall {
+                        id: forge_types::new_id(),
+                        name: "shell".into(),
+                        args: serde_json::json!({
+                            "command": format!("python3 -m venv /dev/null/venv{n}")
+                        }),
+                    }],
+                    usage: forge_types::Usage::default(),
+                    quotas: Vec::new(),
+                });
+            }
+            on_event(StreamEvent::Text("stopping the provisioning fight".into()));
+            Ok(forge_provider::ModelResponse {
+                content: "stopping the provisioning fight".into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn four_env_setup_failures_inject_the_nudge_once() {
+        let provider = Arc::new(EnvFighterProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        // Keep the count deterministic: no side-call diagnosis completions on shell failures.
+        session.config.shell.explain_errors = false;
+        session.mode = PermissionMode::Bypass;
+        session.run_turn("fix the bug").await.unwrap();
+        let msgs = store.load_messages(session.id()).unwrap();
+        assert_eq!(
+            msgs.iter().filter(|m| m.content == ENV_FIGHT_NUDGE).count(),
+            1,
+            "exactly one env-fight nudge after 4 consecutive provisioning failures"
+        );
+    }
+
+    #[tokio::test]
+    async fn env_fight_nudge_respects_the_config_gate() {
+        let provider = Arc::new(EnvFighterProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.config.shell.explain_errors = false;
+        session.config.mesh.env_fight_nudge = false;
+        session.mode = PermissionMode::Bypass;
+        session.run_turn("fix the bug").await.unwrap();
+        let msgs = store.load_messages(session.id()).unwrap();
+        assert!(
+            msgs.iter().all(|m| m.content != ENV_FIGHT_NUDGE),
+            "gate off → no nudge"
         );
     }
 

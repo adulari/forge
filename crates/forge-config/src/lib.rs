@@ -1327,6 +1327,13 @@ pub struct MeshConfig {
     /// is set, so interactive use never sees it.
     #[serde(default = "default_deadline_reconcile")]
     pub deadline_reconcile: bool,
+    /// Env-fight spend cap (quality guards wave 4): when environment-provisioning shell commands
+    /// (pip install / venv / virtualenv / ensurepip / apt / uv …) fail 4 times in a row within a
+    /// turn, inject ONE nudge — stop provisioning, verify the change at the logic level instead.
+    /// SWE-bench turns burned minutes fighting host-python/repo-era mismatches (venv archaeology)
+    /// that provisioning was never going to win. Default true; latched once per turn.
+    #[serde(default = "default_env_fight_nudge")]
+    pub env_fight_nudge: bool,
     /// Which subscription plan backs each CLI bridge (`claude-cli` → "max-20x", `codex-cli` →
     /// "plus"), captured by `forge init`. Records the usage headroom the user has: the
     /// subscription-conservation layer reads it so a larger plan (more headroom) is spent more
@@ -1453,6 +1460,10 @@ fn default_guard_test_edits() -> bool {
 }
 
 fn default_deadline_reconcile() -> bool {
+    true
+}
+
+fn default_env_fight_nudge() -> bool {
     true
 }
 
@@ -1863,6 +1874,7 @@ impl Default for Config {
                 nudge_empty_diff: default_nudge_empty_diff(),
                 guard_test_edits: default_guard_test_edits(),
                 deadline_reconcile: default_deadline_reconcile(),
+                env_fight_nudge: default_env_fight_nudge(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
                 disabled: Vec::new(),
