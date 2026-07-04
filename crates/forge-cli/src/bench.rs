@@ -91,6 +91,13 @@ pub struct InstanceMetric {
     /// truncated run can't be read as a normal-cost solve. Defaults false for older sidecars.
     #[serde(default)]
     pub timed_out: bool,
+    /// True when the CLI-bridge turn ran with NO working Forge tools because `forge mcp-serve`
+    /// failed to start (wave 7) — the model had a read-only filesystem and submitted an empty patch.
+    /// Even after ONE fresh-process retry the tools stayed unavailable, so this is an ERROR, NOT a
+    /// fair empty attempt: exclude it from resolve-rate denominators rather than count a silent
+    /// toolless run as a clean miss. Defaults false for older sidecars.
+    #[serde(default)]
+    pub tools_unavailable: bool,
 }
 
 /// Outcome of running one instance: the patch plus the resources it took.
@@ -102,6 +109,26 @@ struct RunOutcome {
     wall_secs: f64,
     metrics_complete: bool,
     timed_out: bool,
+    /// The bridge turn ran with no working Forge tools (`mcp-serve` failed to start, wave 7). Drives
+    /// the once-only fresh-process retry in [`run_one_sweep`]; only the Forge/bridge path sets it.
+    tools_unavailable: bool,
+}
+
+impl RunOutcome {
+    /// An instance that could not be run (prepare/clone error): no patch, no resources, not a
+    /// toolless-bridge case (that only applies to a turn that actually ran).
+    fn empty() -> Self {
+        RunOutcome {
+            patch: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
+            wall_secs: 0.0,
+            metrics_complete: false,
+            timed_out: false,
+            tools_unavailable: false,
+        }
+    }
 }
 
 /// Serialize per-instance metrics as JSONL (one object per line) for the `<out>.metrics.jsonl`
@@ -304,37 +331,31 @@ async fn run_one_sweep(
     let total = instances.len();
     for (i, inst) in instances.iter().enumerate() {
         eprintln!("[{}/{}] {} ({})", i + 1, total, inst.instance_id, inst.repo);
-        let outcome = match prepare_and_run(inst, workdir, model.clone(), agent, timeout_secs).await
-        {
-            Ok(o) => {
+        let mut outcome = run_one_instance(inst, workdir, model.clone(), agent, timeout_secs).await;
+        // ── Toolless-bridge retry (bridge MCP-tool health guard, wave 7) ──────────────────────
+        // The turn ran with NO working Forge tools because `forge mcp-serve` failed to start under
+        // the sandbox (codex logs `resources/list failed: MCP startup failed`) — the model had a
+        // read-only filesystem and submitted an empty patch, with no error surfaced. That is NOT a
+        // fair attempt. Retry the instance ONCE on a completely fresh process (a new session +
+        // reset repo → a fresh `mcp-serve` spawn, which usually clears the intermittent ENOENT).
+        // This is DISTINCT from the wave-2 empty-diff nudge (a normal "described-but-didn't-edit"
+        // completion re-driven in-process); here the tools were genuinely absent. If it recurs, the
+        // metric's `tools_unavailable` flag marks the instance an ERROR so it can be excluded from
+        // resolve-rate denominators rather than counted as a clean miss.
+        if outcome.tools_unavailable {
+            eprintln!(
+                "  ⚠ bridge turn had NO working tools (mcp-serve failed to start) — retrying once \
+                 on a fresh process"
+            );
+            let _ = std::env::set_current_dir(&orig_cwd);
+            let retry = run_one_instance(inst, workdir, model.clone(), agent, timeout_secs).await;
+            if retry.tools_unavailable {
                 eprintln!(
-                    "  ✓ patch: {} lines · {} tok ({} in / {} out) · {:.1}s{}",
-                    o.patch.lines().count(),
-                    o.input_tokens + o.output_tokens,
-                    o.input_tokens,
-                    o.output_tokens,
-                    o.wall_secs,
-                    if o.metrics_complete {
-                        ""
-                    } else {
-                        " · tokens n/a"
-                    },
+                    "  ✗ still toolless after retry — recording an ERROR (not a fair empty attempt)"
                 );
-                o
             }
-            Err(e) => {
-                eprintln!("  ✗ skipped: {e:#}");
-                RunOutcome {
-                    patch: String::new(),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    cost_usd: 0.0,
-                    wall_secs: 0.0,
-                    metrics_complete: false,
-                    timed_out: false,
-                }
-            }
-        };
+            outcome = retry;
+        }
         // Always restore CWD so the next instance (and the final write) resolve correctly.
         let _ = std::env::set_current_dir(&orig_cwd);
         let patched = !outcome.patch.is_empty();
@@ -349,6 +370,7 @@ async fn run_one_sweep(
             patched,
             metrics_complete: outcome.metrics_complete,
             timed_out: outcome.timed_out,
+            tools_unavailable: outcome.tools_unavailable,
         });
         preds.push(Prediction {
             instance_id: inst.instance_id.clone(),
@@ -370,8 +392,51 @@ async fn run_one_sweep(
         out.display(),
         metrics_out.display(),
     );
+    // Wave 7: call out toolless-bridge ERRORS separately so a sweep degraded by mcp-serve startup
+    // failures isn't silently read as a low resolve rate (the ~7/15 hole this guard closes).
+    let toolless = metrics.iter().filter(|m| m.tools_unavailable).count();
+    if toolless > 0 {
+        eprintln!(
+            "⚠ {toolless} instance(s) recorded TOOLS-UNAVAILABLE (mcp-serve failed to start, even \
+             after one retry) — these are ERRORS, exclude them from resolve-rate denominators"
+        );
+    }
     eprintln!("score with the official evaluator — see docs/benchmarks/swe-bench.md");
     Ok(())
+}
+
+/// Run one instance to a [`RunOutcome`], mapping a prepare/run error to an empty outcome (logged,
+/// never aborting the whole sweep). Pulled out so [`run_one_sweep`] can call it twice — the wave-7
+/// toolless-bridge retry re-runs the SAME instance on a fresh process (a new `mcp-serve` spawn).
+async fn run_one_instance(
+    inst: &SweInstance,
+    workdir: &Path,
+    model: Option<String>,
+    agent: Agent,
+    timeout_secs: u64,
+) -> RunOutcome {
+    match prepare_and_run(inst, workdir, model, agent, timeout_secs).await {
+        Ok(o) => {
+            eprintln!(
+                "  ✓ patch: {} lines · {} tok ({} in / {} out) · {:.1}s{}",
+                o.patch.lines().count(),
+                o.input_tokens + o.output_tokens,
+                o.input_tokens,
+                o.output_tokens,
+                o.wall_secs,
+                if o.metrics_complete {
+                    ""
+                } else {
+                    " · tokens n/a"
+                },
+            );
+            o
+        }
+        Err(e) => {
+            eprintln!("  ✗ skipped: {e:#}");
+            RunOutcome::empty()
+        }
+    }
 }
 
 /// Aggregate pass@k from several swebench evaluation reports (the `*.json` written by
@@ -600,64 +665,69 @@ async fn prepare_and_run(
     let dir = prepare_repo(inst, workdir)?;
     std::env::set_current_dir(&dir).context("entering instance repo")?;
     let started = std::time::Instant::now();
-    let (input_tokens, output_tokens, cost_usd, metrics_complete, timed_out) = match agent {
-        Agent::Forge => {
-            // Bypass mode: a benchmark turn runs unattended, so no permission prompts. The agent
-            // edits the freshly-reset working tree; we read the diff back out afterwards.
-            let mut session = crate::build_session(false, Some(Mode::Bypass), false, None, model)
-                .await
-                .context("building session")?;
-            // Every SWE-bench prompt demands a code change: arm the empty-diff completion nudge
-            // (mesh.nudge_empty_diff) so a turn that explored but edited nothing gets one
-            // "implement it, don't describe it" push-back instead of scoring an empty patch.
-            session.set_expect_code_change(true);
-            // Soft deadline 120s before the hard tokio timeout below: past it the session stops
-            // launching model calls and spends ONE turn reverting unverified speculative changes,
-            // so the hard kill no longer ships the riskiest mid-refactor state as the patch.
-            if let Some(budget) = forge_core::reconcile_deadline_budget_secs(timeout_secs, 120) {
-                session.set_turn_deadline(
-                    std::time::Instant::now() + std::time::Duration::from_secs(budget),
-                );
-            }
-            // Bound the in-process Forge turn the SAME way the external CLIs are bounded. Without
-            // this the Forge path was unbounded: a non-converging run on a hard instance was observed
-            // making 500+ tool calls over 22 minutes while claude-cli's own internal limits kept it
-            // to ~1 minute. On timeout we keep whatever edits + usage the turn produced and submit
-            // the partial patch (a non-empty attempt still scores; an unsolved one was unsolved
-            // anyway).
-            let turn = session.run_turn(&inst.problem_statement);
-            let timed_out = match tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_secs),
-                turn,
-            )
-            .await
-            {
-                Ok(res) => {
-                    res.context("running the agent turn")?;
-                    false
+    let (input_tokens, output_tokens, cost_usd, metrics_complete, timed_out, tools_unavailable) =
+        match agent {
+            Agent::Forge => {
+                // Bypass mode: a benchmark turn runs unattended, so no permission prompts. The agent
+                // edits the freshly-reset working tree; we read the diff back out afterwards.
+                let mut session =
+                    crate::build_session(false, Some(Mode::Bypass), false, None, model)
+                        .await
+                        .context("building session")?;
+                // Every SWE-bench prompt demands a code change: arm the empty-diff completion nudge
+                // (mesh.nudge_empty_diff) so a turn that explored but edited nothing gets one
+                // "implement it, don't describe it" push-back instead of scoring an empty patch.
+                session.set_expect_code_change(true);
+                // Soft deadline 120s before the hard tokio timeout below: past it the session stops
+                // launching model calls and spends ONE turn reverting unverified speculative changes,
+                // so the hard kill no longer ships the riskiest mid-refactor state as the patch.
+                if let Some(budget) = forge_core::reconcile_deadline_budget_secs(timeout_secs, 120)
+                {
+                    session.set_turn_deadline(
+                        std::time::Instant::now() + std::time::Duration::from_secs(budget),
+                    );
                 }
-                Err(_) => {
-                    eprintln!(
+                // Bound the in-process Forge turn the SAME way the external CLIs are bounded. Without
+                // this the Forge path was unbounded: a non-converging run on a hard instance was observed
+                // making 500+ tool calls over 22 minutes while claude-cli's own internal limits kept it
+                // to ~1 minute. On timeout we keep whatever edits + usage the turn produced and submit
+                // the partial patch (a non-empty attempt still scores; an unsolved one was unsolved
+                // anyway).
+                let turn = session.run_turn(&inst.problem_statement);
+                let timed_out =
+                    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), turn)
+                        .await
+                    {
+                        Ok(res) => {
+                            res.context("running the agent turn")?;
+                            false
+                        }
+                        Err(_) => {
+                            eprintln!(
                         "  forge turn hit the {timeout_secs}s timeout — submitting partial work"
                     );
-                    true
-                }
-            };
-            // Reliable even for bridge providers — read from Forge's own usage DB for THIS session.
-            let (inp, out, cost) = session.session_usage_db();
-            (inp, out, cost, true, timed_out)
-        }
-        Agent::ClaudeCode | Agent::Codex => {
-            run_external_agent(
-                agent,
-                &inst.problem_statement,
-                &dir,
-                model.as_deref(),
-                timeout_secs,
-            )
-            .await?
-        }
-    };
+                            true
+                        }
+                    };
+                // Reliable even for bridge providers — read from Forge's own usage DB for THIS session.
+                let (inp, out, cost) = session.session_usage_db();
+                // Wave 7: did this turn run toolless because `mcp-serve` failed to start? Only the
+                // bridge/headless path can report it; the harness retries the instance once on it.
+                (inp, out, cost, true, timed_out, session.tools_unavailable())
+            }
+            Agent::ClaudeCode | Agent::Codex => {
+                let (inp, out, cost, complete, timed_out) = run_external_agent(
+                    agent,
+                    &inst.problem_statement,
+                    &dir,
+                    model.as_deref(),
+                    timeout_secs,
+                )
+                .await?;
+                // An external CLI runs its OWN tools (not Forge's mcp-serve), so this never applies.
+                (inp, out, cost, complete, timed_out, false)
+            }
+        };
     let wall_secs = started.elapsed().as_secs_f64();
     let patch = extract_patch(&dir)?;
     Ok(RunOutcome {
@@ -668,6 +738,7 @@ async fn prepare_and_run(
         wall_secs,
         metrics_complete,
         timed_out,
+        tools_unavailable,
     })
 }
 
@@ -906,6 +977,7 @@ mod tests {
                 patched: true,
                 metrics_complete: true,
                 timed_out: false,
+                tools_unavailable: false,
             },
             InstanceMetric {
                 instance_id: "a-2".into(),
@@ -918,6 +990,7 @@ mod tests {
                 patched: false,
                 metrics_complete: false,
                 timed_out: true,
+                tools_unavailable: true,
             },
         ];
         let jsonl = metrics_to_jsonl(&m);
@@ -942,6 +1015,10 @@ mod tests {
         .unwrap();
         let loaded = load_metrics(&p).unwrap();
         assert!(!loaded[0].timed_out, "older sidecars default to false");
+        assert!(
+            !loaded[0].tools_unavailable,
+            "a sidecar without the wave-7 field defaults tools_unavailable to false"
+        );
     }
 
     fn mk(id: &str, patched: bool, complete: bool, tokens: u64) -> InstanceMetric {
@@ -956,6 +1033,7 @@ mod tests {
             patched,
             metrics_complete: complete,
             timed_out: false,
+            tools_unavailable: false,
         }
     }
 
