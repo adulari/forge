@@ -1222,6 +1222,12 @@ pub struct MeshConfig {
     /// gate; `text` runs the CLI as its own agent with its own tools.
     #[serde(default)]
     pub bridge_mode: BridgeMode,
+    /// Lean bridge tool surface: `forge mcp-serve` drops the rarely-used tools (web_fetch,
+    /// web_search, spawn_agents, send_to_agent, remember, present_plan) from the list advertised
+    /// to a bridged CLI, which re-ingests every schema on every turn of its own loop. Also
+    /// enabled by `FORGE_BRIDGE_LEAN=1`. Default false.
+    #[serde(default)]
+    pub bridge_lean: bool,
     /// Enforcement behavior once a cap is reached.
     #[serde(default)]
     pub budget: BudgetBehavior,
@@ -1790,6 +1796,7 @@ impl Default for Config {
                 classifier: ClassifierKind::default(),
                 classifier_model: None,
                 bridge_mode: BridgeMode::default(),
+                bridge_lean: false,
                 daily_budget_usd: None,
                 monthly_cap_usd: None,
                 weekly_budget_usd: None,
