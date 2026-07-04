@@ -11715,6 +11715,201 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Scripted CLI-BRIDGE model (wave 6). A claude-cli/codex-cli bridge runs its WHOLE tool loop
+    /// inside one `complete()` in a subprocess and surfaces each tool as a `StreamEvent::ToolStarted`
+    /// through the sink — never in `resp.tool_calls`. So the empty-diff nudge's `turn_tools_ran > 0`
+    /// gate must count sink tool starts, not just direct `resp.tool_calls`, or it stays blind to the
+    /// exact path every bridge benchmark uses. `edit_file`, when set, makes the first completion
+    /// write a real file (a non-empty diff) so the "edited → must NOT nudge" case is exercised too.
+    struct BridgeDescribeProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        edit_file: Option<std::path::PathBuf>,
+        /// Whether the first completion surfaces a tool via the sink. `false` models a bridge that
+        /// yields with an empty diff having surfaced NO parseable tool event (refusal / prose-only /
+        /// CLI output drift) — the case the wave-6 bridge-path relaxation covers.
+        emit_tool: bool,
+    }
+    #[async_trait::async_trait]
+    impl Provider for BridgeDescribeProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                // The bridge subprocess ran a tool: it surfaces via the sink, NOT resp.tool_calls.
+                if self.emit_tool {
+                    on_event(StreamEvent::ToolStarted {
+                        name: "shell".into(),
+                        args: "ls".into(),
+                    });
+                    on_event(StreamEvent::ToolFinished {
+                        name: "shell".into(),
+                        ok: true,
+                        summary: String::new(),
+                    });
+                }
+                if let Some(p) = &self.edit_file {
+                    std::fs::write(p, "patched").unwrap();
+                }
+                let text = "explored the repo — here is how you would fix it";
+                on_event(StreamEvent::Text(text.into()));
+                return Ok(forge_provider::ModelResponse {
+                    content: text.into(),
+                    tool_calls: vec![],
+                    usage: forge_types::Usage::default(),
+                    quotas: Vec::new(),
+                });
+            }
+            let text = "still only describing after the nudge";
+            on_event(StreamEvent::Text(text.into()));
+            Ok(forge_provider::ModelResponse {
+                content: text.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_empty_diff_run_is_nudged_exactly_once() {
+        // Wave 6: the empty-diff nudge must fire on the CLI-BRIDGE path. Hard evidence: a 15-instance
+        // SWE-bench Lite sweep on the codex-cli::gpt-5.5 bridge resolved 3/15 vs raw codex 9/15;
+        // 8/15 bridge instances submitted an EMPTY patch and the nudge fired 0×. The bridge ran its
+        // tools inside its subprocess (surfaced via the sink's ToolStarted), so the gate must see
+        // that activity. Here the bridge explores (one sink tool) then only describes → exactly ONE
+        // nudge re-drive, then the turn ends (the model keeps describing; the latch prevents a loop).
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: true,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "bridge yields its whole loop in ONE completion, then exactly ONE nudge re-drive"
+        );
+        assert_eq!(answer, "still only describing after the nudge");
+        // The synthetic nudge must actually have been injected (not just an extra completion).
+        assert!(
+            session
+                .transcript
+                .iter()
+                .any(|m| m.content == EMPTY_DIFF_NUDGE),
+            "the empty-diff nudge message was injected on the bridge path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn bridge_that_edited_files_is_not_nudged() {
+        // The counterpart guard: a bridge turn that DID change the tree (non-empty diff) must NOT be
+        // nudged — `working_tree_unchanged` is false — so a real fix is never second-guessed.
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: Some(dir.join("patch.txt")),
+            emit_tool: true,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a bridge turn that edited the tree must not be nudged"
+        );
+        assert_eq!(answer, "explored the repo — here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn bridge_empty_diff_with_no_surfaced_tool_still_nudges() {
+        // Wave-6 bridge-path robustness: a bridge that yields an empty diff having surfaced NO
+        // parseable tool event (refusal / prose-only / CLI output drift → `tools_ran == 0`) still
+        // gets exactly ONE pushback. The direct-path `tools_ran > 0` gate would have dropped it on
+        // the very path every bench uses; the bridge relaxes that requirement.
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: false,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "bridge empty diff with no surfaced tool must still be nudged exactly once"
+        );
+        assert_eq!(answer, "still only describing after the nudge");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn direct_empty_diff_with_no_tools_is_not_nudged() {
+        // The regression that keeps the wave-6 relaxation bridge-ONLY: a DIRECT-path turn that ran
+        // no tools (`tools_ran == 0`) and is NOT a CLI bridge must NOT be nudged — direct-path
+        // semantics are unchanged (the nudge still means "you worked but changed nothing").
+        let dir = clean_git_repo();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: false,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a direct turn that ran no tools must not be nudged (unchanged behavior)"
+        );
+        assert_eq!(answer, "explored the repo — here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // --- Existing-tests-are-spec guard (quality guards wave 4, fix 1) ---
 
     #[test]
@@ -11826,6 +12021,44 @@ mod tests {
         assert!(
             !stashes.stdout.is_empty(),
             "the test edits must be stashed, not discarded"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn bridge_modified_tests_are_stashed_and_pushed_back_once() {
+        // Wave 6: the pristine-test guard is git-tree-based (it inspects the working tree, not
+        // `resp.tool_calls`), so it already covers a CLI-BRIDGE turn — whose file edits happen in
+        // the `forge mcp-serve` subprocess and only ever show up as a tree change. Proven here: a
+        // bridge turn (tools surfaced via the sink) that left a modified existing test gets exactly
+        // ONE guard re-drive, and the pristine test is restored.
+        let dir = repo_with_modified_test();
+        let provider = Arc::new(BridgeDescribeProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            edit_file: None,
+            emit_tool: true,
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "codex-cli::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "bridge yields in ONE completion, then exactly ONE guard re-drive"
+        );
+        assert_eq!(answer, "still only describing after the nudge");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
+            "assert fix() == 1\n",
+            "the test file must be back at its committed content"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
