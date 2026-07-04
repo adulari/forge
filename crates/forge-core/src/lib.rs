@@ -350,6 +350,47 @@ const MAX_TRANSIENT_RETRIES: u32 = 2;
 /// `mesh.rate_limit_wait_secs` (0 disables waiting).
 const MAX_RATE_LIMIT_WAITS: u32 = 2;
 
+// --- Pinned rate-limit backoff (harness-robustness wave 2, fix 1) ------------------------------
+// When the model was EXPLICITLY pinned (`--model` / `/model`), a rate limit must not fail the turn
+// and must not switch models (a pin must pin — the SWE-bench baseline lost 4 instances to
+// "skipped: rate limited" with zero retry). Instead the SAME model is retried on this schedule.
+// Provider-level multi-key rotation runs FIRST: on a 429 the genai provider already retries once
+// with the next configured key before the error ever reaches this loop (genai_provider.rs), so
+// waiting only starts once every key is limited.
+
+/// Max same-model retry attempts for a rate-limited pinned model before failing the turn.
+const PINNED_RL_MAX_ATTEMPTS: u32 = 6;
+/// First backoff delay (seconds); grows ×[`PINNED_RL_GROWTH`] per attempt: 5s, 15s, 45s, then
+/// capped — 5·3ᵏ⁻¹ up to [`PINNED_RL_DELAY_CAP_SECS`].
+const PINNED_RL_BASE_SECS: u64 = 5;
+/// Exponential growth factor between attempts.
+const PINNED_RL_GROWTH: u64 = 3;
+/// Per-attempt delay cap (seconds): attempts 4-6 wait at most this long.
+const PINNED_RL_DELAY_CAP_SECS: u64 = 60;
+/// Total in-turn wait budget (seconds) across all pinned-backoff attempts (~3 min). A schedule
+/// or `Retry-After` that would exceed the remaining budget fails the turn with the real error
+/// instead of blocking indefinitely.
+const PINNED_RL_TOTAL_WAIT_SECS: u64 = 180;
+
+/// One pinned-backoff delay. `attempt` is 1-based. A server `Retry-After` (when the provider
+/// error carried one) is respected verbatim — the server knows its own reset better than our
+/// blind schedule. Otherwise: exponential base delay with ±20% jitter (`jitter` ∈ [0,1] maps to
+/// a 0.8-1.2 factor) so many pinned turns limited at once don't retry in lockstep.
+fn pinned_backoff_delay(
+    attempt: u32,
+    retry_after: Option<std::time::Duration>,
+    jitter: f64,
+) -> std::time::Duration {
+    if let Some(ra) = retry_after {
+        return ra;
+    }
+    let base = PINNED_RL_BASE_SECS
+        .saturating_mul(PINNED_RL_GROWTH.saturating_pow(attempt.saturating_sub(1)))
+        .min(PINNED_RL_DELAY_CAP_SECS);
+    let factor = 0.8 + 0.4 * jitter.clamp(0.0, 1.0);
+    std::time::Duration::from_secs_f64(base as f64 * factor)
+}
+
 /// Render a sequence of messages into TUI [`ReplayItem`](forge_tui::ReplayItem)s — user prompts,
 /// assistant text, tool calls (with args), tool results (matched to their call's name via
 /// `tool_call_id`), and the compaction marker. Shared by the model-facing replay
@@ -2792,6 +2833,13 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         // Bounds in-turn waits for a rate-limited model to RESET (per-minute free tiers). Per turn,
         // not per model: a few short waits total, so the turn can't block indefinitely.
         let mut rate_limit_waits = 0u32;
+        // Pinned rate-limit backoff (harness-robustness wave 2, fix 1): whether this turn runs an
+        // EXPLICITLY pinned model — the session `/model` pin, or a routing decision flagged as a
+        // `--model` pin. A rate limit on a pinned model is waited out with exponential backoff on
+        // the SAME model (see `pinned_backoff_delay`) instead of failing the turn.
+        let pinned_turn = self.pinned_model.is_some() || decision.is_some_and(|d| d.pinned);
+        let mut pinned_rl_attempts = 0u32;
+        let mut pinned_rl_waited = std::time::Duration::ZERO;
 
         let mut final_text = String::new();
         let mut context_tokens: u64 = 0;
@@ -3033,6 +3081,48 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             });
                             tokio::time::sleep(backoff).await;
                             continue;
+                        }
+                        // Pinned rate-limit backoff (harness-robustness wave 2, fix 1): a pin must
+                        // pin. Retry the SAME model on the documented schedule (5s/15s/45s, then
+                        // 60s-capped, ±20% jitter, ≤6 attempts, ≤180s total — the PINNED_RL_*
+                        // constants), honoring a server `Retry-After` verbatim when the error
+                        // carried one. Multi-key rotation already ran inside the provider (one
+                        // next-key retry per 429, genai_provider.rs), so by the time the error
+                        // reaches this loop every configured key is limited and waiting is the
+                        // only same-model option left.
+                        if pinned_turn && e.is_rate_limited() {
+                            let retry_after = match &e {
+                                forge_provider::ProviderError::RateLimited {
+                                    retry_after, ..
+                                } => *retry_after,
+                                _ => None,
+                            };
+                            let attempt = pinned_rl_attempts + 1;
+                            // Cheap jitter without a rand dependency: sub-second wall-clock nanos.
+                            let jitter = f64::from(
+                                std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.subsec_nanos())
+                                    .unwrap_or(0),
+                            ) / 1e9;
+                            let delay = pinned_backoff_delay(attempt, retry_after, jitter);
+                            let budget = std::time::Duration::from_secs(PINNED_RL_TOTAL_WAIT_SECS);
+                            if attempt <= PINNED_RL_MAX_ATTEMPTS
+                                && pinned_rl_waited + delay <= budget
+                            {
+                                pinned_rl_attempts = attempt;
+                                pinned_rl_waited += delay;
+                                self.presenter.emit(PresenterEvent::Warning(format!(
+                                    "{active_model}: rate limited — retrying pinned model in {}s \
+                                     (attempt {attempt}/{PINNED_RL_MAX_ATTEMPTS})",
+                                    delay.as_secs().max(1)
+                                )));
+                                self.presenter.emit(PresenterEvent::ModelSearch {
+                                    model: active_model.clone(),
+                                });
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
                         }
                         // Rate-limit on the current (best-ranked) model with a SHORT reset: WAIT for
                         // it to reset and retry the SAME model instead of degrading to a lower-ranked
@@ -10402,6 +10492,35 @@ mod tests {
                 model: self.model.clone(),
                 rationale: "test".into(),
                 fallbacks: self.fallbacks.clone(),
+                pinned: false,
+            }
+        }
+    }
+
+    /// Like [`FixedRouter`], but the decision is an EXPLICIT pin (`--model`), so the strict-pin
+    /// failover rules + the pinned rate-limit backoff apply. `fallbacks` are deliberately allowed,
+    /// mirroring a legacy decision, so tests can prove they are NOT used for a pinned model.
+    struct PinnedRouter {
+        model: String,
+        fallbacks: Vec<String>,
+    }
+    #[async_trait::async_trait]
+    impl Router for PinnedRouter {
+        async fn route(
+            &self,
+            _prompt: &str,
+            _budget: BudgetState,
+            _health: &forge_types::ModelHealth,
+            _quota: &forge_types::SubscriptionQuota,
+            _effort: Option<forge_types::EffortLevel>,
+            _project: &forge_types::ProjectContext,
+        ) -> forge_mesh::RoutingDecision {
+            forge_mesh::RoutingDecision {
+                tier: forge_types::TaskTier::Trivial,
+                model: self.model.clone(),
+                rationale: "pinned via --model".into(),
+                fallbacks: self.fallbacks.clone(),
+                pinned: true,
             }
         }
     }
@@ -10710,6 +10829,91 @@ mod tests {
         assert!(
             store.current_benched().unwrap().is_empty(),
             "a model we waited out and recovered must not be benched"
+        );
+    }
+
+    #[test]
+    fn pinned_backoff_schedule_grows_caps_and_respects_retry_after() {
+        use std::time::Duration;
+        let secs = |a: u32, j: f64| pinned_backoff_delay(a, None, j).as_secs_f64();
+        // jitter 0.5 → factor 1.0: the documented 5s/15s/45s schedule, capped at 60s from #4.
+        for (attempt, want) in [
+            (1, 5.0),
+            (2, 15.0),
+            (3, 45.0),
+            (4, 60.0),
+            (5, 60.0),
+            (6, 60.0),
+        ] {
+            assert!(
+                (secs(attempt, 0.5) - want).abs() < 1e-9,
+                "attempt {attempt}: want {want}s"
+            );
+        }
+        // Jitter bounds: ±20% of the base delay.
+        assert!((secs(1, 0.0) - 4.0).abs() < 1e-9, "low jitter = 0.8×base");
+        assert!((secs(1, 1.0) - 6.0).abs() < 1e-9, "high jitter = 1.2×base");
+        // A server Retry-After is respected verbatim — it beats the blind schedule either way.
+        assert_eq!(
+            pinned_backoff_delay(1, Some(Duration::from_millis(10)), 0.5),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            pinned_backoff_delay(1, Some(Duration::from_secs(90)), 0.5),
+            Duration::from_secs(90)
+        );
+        // The full jittered schedule can exceed the wait budget, so the budget is the real cap.
+        let worst: f64 = (1..=PINNED_RL_MAX_ATTEMPTS).map(|a| secs(a, 1.0)).sum();
+        assert!(
+            worst > PINNED_RL_TOTAL_WAIT_SECS as f64,
+            "total budget must bind before the attempt cap at max jitter"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limited_pinned_model_backs_off_and_retries_the_same_model() {
+        // Baseline defect (harness-robustness wave 2): pinned SWE-bench turns aborted
+        // "skipped: rate limited" with ZERO retry. Two consecutive 429s (retry_after 10ms)
+        // must be waited out on the SAME pinned model — the fallback stays unused and the
+        // recovered model is never benched.
+        let provider = Arc::new(RateLimitThenOkProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_first: 2,
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            answer, "pin::model",
+            "pinned model must be retried with backoff, not failed or switched"
+        );
+        assert!(
+            store.current_benched().unwrap().is_empty(),
+            "a pinned model that recovered after backoff must not be benched"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_model_pin_engages_the_pinned_backoff_too() {
+        // The `/model` (session) pin flows through `self.pinned_model`, not the routing
+        // decision — it must get the same backoff treatment as a `--model` pin.
+        let provider = Arc::new(RateLimitThenOkProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_first: 1,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "routed::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.pin_model(Some("pin::model".into()));
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            answer, "pin::model",
+            "session pin retried on the same model"
         );
     }
 

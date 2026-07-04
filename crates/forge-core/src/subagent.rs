@@ -327,6 +327,9 @@ pub async fn route_child(
             model: model.to_string(),
             rationale: "duel: pinned".to_string(),
             fallbacks: Vec::new(),
+            // A duel candidate is a hard, explicit pin: switching models mid-duel would
+            // invalidate the comparison, so the pinned rate-limit backoff applies here too.
+            pinned: true,
         };
     }
     match agent
@@ -338,6 +341,8 @@ pub async fn route_child(
             model: model.to_string(),
             rationale: format!("pinned by agent type '{}'", agent.name),
             fallbacks: Vec::new(),
+            // An agent-type tier default, not an explicit user pin — normal failover rules.
+            pinned: false,
         },
         // Route around benched models too (model-health-failover): a child still avoids a
         // model the parent just rate-limited.
@@ -1195,6 +1200,7 @@ mod tests {
                 model: self.model.clone(),
                 rationale: "test".into(),
                 fallbacks: self.fallbacks.clone(),
+                pinned: false,
             }
         }
     }
