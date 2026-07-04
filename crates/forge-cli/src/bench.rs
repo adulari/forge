@@ -607,6 +607,10 @@ async fn prepare_and_run(
             let mut session = crate::build_session(false, Some(Mode::Bypass), false, None, model)
                 .await
                 .context("building session")?;
+            // Every SWE-bench prompt demands a code change: arm the empty-diff completion nudge
+            // (mesh.nudge_empty_diff) so a turn that explored but edited nothing gets one
+            // "implement it, don't describe it" push-back instead of scoring an empty patch.
+            session.set_expect_code_change(true);
             // Bound the in-process Forge turn the SAME way the external CLIs are bounded. Without
             // this the Forge path was unbounded: a non-converging run on a hard instance was observed
             // making 500+ tool calls over 22 minutes while claude-cli's own internal limits kept it

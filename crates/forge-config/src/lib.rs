@@ -1302,6 +1302,13 @@ pub struct MeshConfig {
     /// default and turned on only when solve rate matters more than cost.
     #[serde(default = "default_verify_completeness")]
     pub verify_completeness: bool,
+    /// Empty-diff completion nudge (harness-robustness wave 2): when a headless code-change run
+    /// (`bench swe` marks the session as expecting a code change) ends with tools having run but
+    /// NO file edits and a clean git tree, push back ONCE — "implement it, don't describe it" —
+    /// before accepting the turn. Default true; only sessions explicitly marked as code-change
+    /// runs are affected, so interactive use never sees it. Set false to disable even for bench.
+    #[serde(default = "default_nudge_empty_diff")]
+    pub nudge_empty_diff: bool,
     /// Which subscription plan backs each CLI bridge (`claude-cli` → "max-20x", `codex-cli` →
     /// "plus"), captured by `forge init`. Records the usage headroom the user has: the
     /// subscription-conservation layer reads it so a larger plan (more headroom) is spent more
@@ -1417,6 +1424,10 @@ fn default_benchmark_ranking() -> bool {
 
 fn default_verify_completeness() -> bool {
     false
+}
+
+fn default_nudge_empty_diff() -> bool {
+    true
 }
 
 /// The Artificial Analysis Data API key (ADR-0011), for benchmark-driven ranking. Read from
@@ -1823,6 +1834,7 @@ impl Default for Config {
                 subscription_conserve: default_subscription_conserve(),
                 benchmark_ranking: default_benchmark_ranking(),
                 verify_completeness: default_verify_completeness(),
+                nudge_empty_diff: default_nudge_empty_diff(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
                 disabled: Vec::new(),

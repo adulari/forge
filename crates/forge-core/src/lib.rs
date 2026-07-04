@@ -419,6 +419,29 @@ fn failover_policy(pinned: bool, pin_failover: bool, rate_limited: bool) -> Fail
     }
 }
 
+/// The one-shot empty-diff completion nudge (harness-robustness wave 2, fix 4): sent as a
+/// synthetic user message when a headless code-change turn ends having changed nothing.
+const EMPTY_DIFF_NUDGE: &str =
+    "You have not modified any files. Implement the fix now — do not just describe it.";
+
+/// Whether the working tree at `root` (`None` = process cwd) shows NO changes at all:
+/// `git status --porcelain` output empty — no staged or unstaged modifications AND no untracked
+/// files (a solution that only ADDS a file is still a change; `git diff` alone would miss it,
+/// the same hole `bench swe`'s patch extraction plugs with `git add -A`). Any git failure (not
+/// a repo, git missing) counts as "changed" so the empty-diff nudge can never fire outside a
+/// real repository.
+fn working_tree_unchanged(root: Option<&std::path::Path>) -> bool {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["status", "--porcelain"]);
+    if let Some(r) = root {
+        cmd.current_dir(r);
+    }
+    match cmd.output() {
+        Ok(out) if out.status.success() => out.stdout.iter().all(u8::is_ascii_whitespace),
+        _ => false,
+    }
+}
+
 /// Render a sequence of messages into TUI [`ReplayItem`](forge_tui::ReplayItem)s — user prompts,
 /// assistant text, tool calls (with args), tool results (matched to their call's name via
 /// `tool_call_id`), and the compaction marker. Shared by the model-facing replay
@@ -639,6 +662,10 @@ struct ModelLoopOutcome {
     /// A plan a CLI-bridge model proposed this loop (tailed from the sink as [`StreamEvent::Plan`]).
     /// `None` on the in-process path, where the `present_plan` handler sets `pending_plan` directly.
     plan: Option<forge_types::PlanProposal>,
+    /// How many tools STARTED executing across this loop (direct-path calls + bridge tools tailed
+    /// from the sink). The empty-diff completion nudge keys on it: "the model worked (tools ran)
+    /// but changed nothing" is the description-instead-of-implementation failure mode.
+    tools_ran: u64,
 }
 
 /// One interactive session. Construct with [`Session::start`], then drive [`Session::run_turn`].
@@ -724,6 +751,11 @@ pub struct Session {
     /// Count of successful writes made by `invoke_tool` in the current turn. Reset at the start
     /// of each turn; used to gate the autofix stage (skip it when nothing was edited).
     edits_this_turn: u32,
+    /// Headless code-change mode (harness-robustness wave 2): the caller KNOWS each prompt
+    /// demands a code change (`bench swe` sets it — an explicit option, not prompt sniffing).
+    /// With `mesh.nudge_empty_diff`, a turn that ran tools but edited nothing and left the git
+    /// tree clean gets ONE "implement it, don't describe it" push-back. Never set interactively.
+    expect_code_change: bool,
     /// Per-turn guard against repeated failing tools and identical-call doom loops.
     failure_tracker: ToolFailureTracker,
     /// The current git branch (`.git/HEAD` → `refs/heads/<branch>`), cached so the hot per-request
@@ -912,6 +944,7 @@ impl Session {
             project_prompt_injected,
             pending_images: Vec::new(),
             edits_this_turn: 0,
+            expect_code_change: false,
             failure_tracker: ToolFailureTracker::new(),
             cached_git_branch: current_git_branch(),
             // Read AGENTS.md eagerly (sync, off the async path) only when it will actually be
@@ -966,6 +999,12 @@ impl Session {
     /// The currently-pinned model, if any (`/model <id>` was called this session).
     pub fn pinned_model(&self) -> Option<&str> {
         self.pinned_model.as_deref()
+    }
+
+    /// Mark this session as a headless code-change run (`bench swe`): every prompt is known to
+    /// demand an implementation, arming the empty-diff completion nudge (`mesh.nudge_empty_diff`).
+    pub fn set_expect_code_change(&mut self, v: bool) {
+        self.expect_code_change = v;
     }
 
     /// Set (or clear) the in-session reasoning-effort pin. `None` returns to the provider default.
@@ -3866,6 +3905,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             hit_step_cap,
             active_model,
             plan: proposed_plan,
+            tools_ran: tools_ran.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -4246,6 +4286,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let outcome = self
             .run_model_loop(edit_model, &specs, primary_decision, max_steps, stream_idle)
             .await?;
+        let turn_tools_ran = outcome.tools_ran;
         let mut final_text = outcome.final_text;
         let mut context_tokens = outcome.context_tokens;
         let mut active_model = outcome.active_model;
@@ -4281,6 +4322,44 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 self.presenter
                     .emit(PresenterEvent::Tasks(self.tasks.clone()));
             }
+        }
+
+        // ── Empty-diff completion nudge (harness-robustness wave 2, fix 4) ────────────────────
+        // Headless code-change runs (`bench swe` marks the session via `set_expect_code_change`;
+        // interactive sessions never set it) sometimes end with the model having WORKED (tools
+        // ran) but changed NOTHING — the SWE-bench baseline "completed" 2 instances with an empty
+        // diff and no pushback: the model described the fix instead of making it. Push back
+        // exactly once: a synthetic user message demanding the implementation, then one more
+        // model loop. One-shot by construction (straight-line code, the same latch idea as
+        // `completeness_checked`); runs BEFORE self-review/autofix so any edits it produces are
+        // still lint/test-checked. `mesh.nudge_empty_diff = false` disables it wholesale.
+        if self.config.mesh.nudge_empty_diff
+            && self.expect_code_change
+            && turn_tools_ran > 0
+            && self.edits_this_turn == 0
+            && working_tree_unchanged(self.work_root.as_deref())
+        {
+            self.presenter.emit(PresenterEvent::Warning(
+                "code-change task ended with an empty diff — pushing back once".to_string(),
+            ));
+            let seq = self.next_seq();
+            self.store
+                .add_message(&self.id, seq, Role::User, EMPTY_DIFF_NUDGE, None)?;
+            self.transcript.push(Message::user(EMPTY_DIFF_NUDGE));
+            let nudge_specs = self.tool_specs();
+            let nudge_outcome = self
+                .run_model_loop(
+                    active_model.clone(),
+                    &nudge_specs,
+                    primary_decision,
+                    max_steps,
+                    stream_idle,
+                )
+                .await?;
+            final_text = nudge_outcome.final_text;
+            context_tokens = nudge_outcome.context_tokens;
+            active_model = nudge_outcome.active_model;
+            hit_step_cap = nudge_outcome.hit_step_cap;
         }
 
         // ── Self-review pass (mesh.self_review) ───────────────────────────────────────────────
@@ -11041,6 +11120,159 @@ mod tests {
         session.config.mesh.pin_failover = true;
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(answer, "worse::model", "escape hatch allows the old switch");
+    }
+
+    // --- Empty-diff completion nudge (harness-robustness wave 2, fix 4) ---
+
+    /// Scripted "describe instead of implement" model: completion 1 explores (one read-only tool
+    /// call), later completions only narrate — no tool calls, no edits. Counts completions so a
+    /// test can prove the nudge fired exactly once.
+    struct DescribeOnlyProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for DescribeOnlyProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                return Ok(forge_provider::ModelResponse {
+                    content: String::new(),
+                    tool_calls: vec![forge_types::ToolCall {
+                        id: forge_types::new_id(),
+                        name: "list_dir".into(),
+                        args: serde_json::json!({ "path": "." }),
+                    }],
+                    usage: forge_types::Usage::default(),
+                    quotas: Vec::new(),
+                });
+            }
+            let text = if n == 1 {
+                "here is how you would fix it"
+            } else {
+                "still only describing"
+            };
+            on_event(StreamEvent::Text(text.into()));
+            Ok(forge_provider::ModelResponse {
+                content: text.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    /// A throwaway git repo with one committed file and a CLEAN tree, so
+    /// `working_tree_unchanged` is deterministically true regardless of the checkout state of
+    /// the repo the tests happen to run in.
+    fn clean_git_repo() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("forge-nudge-{}", forge_types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("f.txt"), "seed").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "seed"]);
+        dir
+    }
+
+    #[tokio::test]
+    async fn empty_diff_code_change_run_is_nudged_exactly_once() {
+        // Baseline defect: 2 SWE-bench instances "completed" with an empty diff and no pushback.
+        // A code-change run (bench sets `expect_code_change`) whose turn ran tools but edited
+        // nothing must get ONE "implement it" nudge — and only one (latch): the model here keeps
+        // describing, so the turn ends after the single re-drive rather than looping.
+        let dir = clean_git_repo();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        // The recap + auto-memory summarizers also call the provider at turn end — disable them
+        // so the call count below measures ONLY the main loop's completions.
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "explore + describe (2 completions), then exactly ONE nudge re-drive"
+        );
+        assert_eq!(answer, "still only describing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn empty_diff_nudge_never_fires_for_interactive_sessions() {
+        // `expect_code_change` is only ever set by bench — a plain session with the identical
+        // "explored but changed nothing" turn ends normally, no nudge.
+        let dir = clean_git_repo();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "no nudge without the code-change flag"
+        );
+        assert_eq!(answer, "here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn empty_diff_nudge_respects_the_config_gate() {
+        // `mesh.nudge_empty_diff = false` disables the push-back even for bench runs.
+        let dir = clean_git_repo();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        session.config.mesh.nudge_empty_diff = false;
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(answer, "here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
