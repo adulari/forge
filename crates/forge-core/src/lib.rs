@@ -11626,6 +11626,14 @@ mod tests {
             assert!(out.status.success(), "git {args:?} failed");
         };
         git(&["init", "-q"]);
+        // Pin line-ending handling so the repo is byte-deterministic regardless of the host's
+        // global git config. Windows CI images default to `core.autocrlf=true`, which rewrites
+        // LF→CRLF on checkout — so a `git stash push` restore of a file this test wrote with LF
+        // would come back with CRLF and fail the byte-equality asserts. Disabling autocrlf keeps
+        // the on-disk bytes exactly what the test committed on every platform.
+        git(&["config", "core.autocrlf", "false"]);
+        git(&["config", "core.safecrlf", "false"]);
+        git(&["config", "core.eol", "lf"]);
         std::fs::write(dir.join("f.txt"), "seed").unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-qm", "seed"]);
@@ -12415,15 +12423,20 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < 4 {
-                // Fails on every platform: the venv target's parent is not a directory (Unix) or
-                // python3/the path is invalid (Windows) — deterministic non-zero exit either way.
+                // A `-m venv` command (recognized by `is_env_setup_command`) invoking a binary that
+                // does not exist, so it fails to start with a non-zero exit on EVERY platform
+                // (`cmd /C` → "not recognized", `sh -c` → 127). The earlier form
+                // `python3 -m venv /dev/null/venvN` only failed on Unix, where `/dev/null` is a
+                // device file; on Windows `/dev/null/venvN` is an ordinary path that `venv` happily
+                // creates → exit 0 → the failure streak never reached the threshold. Distinct target
+                // per `n` keeps the identical-call doom-loop guard out of the way.
                 return Ok(forge_provider::ModelResponse {
                     content: String::new(),
                     tool_calls: vec![forge_types::ToolCall {
                         id: forge_types::new_id(),
                         name: "shell".into(),
                         args: serde_json::json!({
-                            "command": format!("python3 -m venv /dev/null/venv{n}")
+                            "command": format!("forge-no-such-python -m venv target-venv{n}")
                         }),
                     }],
                     usage: forge_types::Usage::default(),
