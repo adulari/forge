@@ -424,6 +424,15 @@ fn failover_policy(pinned: bool, pin_failover: bool, rate_limited: bool) -> Fail
 const EMPTY_DIFF_NUDGE: &str =
     "You have not modified any files. Implement the fix now — do not just describe it.";
 
+/// Minimal-diff bias (quality guards wave 4, fix 3): appended to the system context of every
+/// `expect_code_change` turn. The seaborn-2848 forensic: the model chose a plausible-but-wrong
+/// fix SHAPE (rewiring semantics instead of a value-level fallback) and self-verified against its
+/// own new test. Kept deliberately short — a size test pins it ≤400 bytes so it can't grow into
+/// another token-tripling preamble.
+const MINIMAL_DIFF_BIAS: &str = "Prefer the most local fix at the failure site. Do not change \
+data-flow or filtering semantics when a value-level fallback suffices. Do not edit changelogs. \
+Hidden tests assert on unchanged surrounding behavior — keep the diff minimal.";
+
 /// The deadline-reconciliation instruction (quality guards wave 4, fix 2): injected once when a
 /// turn crosses its soft deadline. The model gets ONE more completion to revert speculative work,
 /// then the loop ends — the caller's hard timeout still kills the turn at the full limit.
@@ -2125,7 +2134,13 @@ impl Session {
             env.push_str(&format!("git_branch: {b}\n"));
         }
         env.push_str("</env>");
-        vec![Message::system(FORGE_SYSTEM), Message::system(env)]
+        let mut msgs = vec![Message::system(FORGE_SYSTEM), Message::system(env)];
+        // Headless code-change turns (bench swe) get the minimal-diff bias — per-request system
+        // context, so it reaches direct AND bridge providers without touching the bridge preamble.
+        if self.expect_code_change {
+            msgs.push(Message::system(MINIMAL_DIFF_BIAS));
+        }
+        msgs
     }
 
     /// The request body for a main-loop call: the base harness preamble (system prompt + env)
@@ -11775,6 +11790,39 @@ mod tests {
         session.config.mesh.max_steps = 3;
         session.run_turn("fix the bug").await.unwrap();
         assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    // --- Minimal-diff bias (quality guards wave 4, fix 3) ---
+
+    #[test]
+    fn minimal_diff_bias_stays_small() {
+        // One short paragraph, not another token-tripling preamble: the always-on completeness
+        // clause tripled tokens; this bias must stay a few sentences.
+        assert!(
+            MINIMAL_DIFF_BIAS.len() <= 400,
+            "MINIMAL_DIFF_BIAS must stay ≤400 bytes, is {}",
+            MINIMAL_DIFF_BIAS.len()
+        );
+    }
+
+    #[test]
+    fn minimal_diff_bias_rides_only_code_change_turns() {
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(Arc::new(PanicProvider), router);
+        let plain = session.system_preamble();
+        assert!(
+            plain.iter().all(|m| m.content != MINIMAL_DIFF_BIAS),
+            "interactive turns must NOT carry the bias"
+        );
+        session.set_expect_code_change(true);
+        let bench = session.system_preamble();
+        assert!(
+            bench.iter().any(|m| m.content == MINIMAL_DIFF_BIAS),
+            "code-change turns must carry the bias as system context"
+        );
     }
 
     #[tokio::test]
