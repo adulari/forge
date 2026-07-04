@@ -45,6 +45,71 @@ use serde_json::Value;
 /// trusted parent↔child pipe); HTTP is network-reachable, so it must be behind auth.
 const MCP_SERVE_TOKEN_ENV: &str = "FORGE_MCP_SERVE_TOKEN";
 
+/// Bridge-side byte cap on a `read_file` result. Mirrors the native caps claude/codex apply to
+/// their own read tools (they page files in ~small chunks); forge-tools' direct-path cap is
+/// 256 KiB, which a bridged CLI re-ingests on every subsequent turn of ITS loop — a large read
+/// through the bridge costs 2-4x the tokens of the same read in the native CLI. mcp-serve path
+/// only; the direct-API path is untouched.
+const BRIDGE_READ_CAP_BYTES: usize = 32 * 1024;
+
+/// Bridge-side byte cap on a `shell` result. Mirrors the ~10-16 KiB head+tail clamp claude/codex
+/// apply to their own shell tools. mcp-serve path only.
+const BRIDGE_SHELL_CAP_BYTES: usize = 16 * 1024;
+
+/// The cap + re-request advice for a tool's result on the bridge path, or `None` for uncapped
+/// tools.
+fn bridge_cap_for(tool: &str) -> Option<(usize, &'static str)> {
+    match tool {
+        "read_file" => Some((
+            BRIDGE_READ_CAP_BYTES,
+            "re-request just the lines you need with start_line/end_line",
+        )),
+        "shell" => Some((
+            BRIDGE_SHELL_CAP_BYTES,
+            "re-run with a narrower command or filters (grep/head/tail)",
+        )),
+        _ => None,
+    }
+}
+
+/// Clamp an oversized bridge tool result to its cap, keeping the head (headers/signatures) and
+/// tail (totals/trailing errors) around an explicit marker so the model knows the middle is
+/// missing and how to get it back.
+fn cap_bridge_result(tool: &str, text: String) -> String {
+    let Some((cap, advice)) = bridge_cap_for(tool) else {
+        return text;
+    };
+    if text.len() <= cap {
+        return text;
+    }
+    let head_end = floor_char_boundary(&text, cap * 3 / 4);
+    let tail_start = ceil_char_boundary(&text, text.len() - cap / 4);
+    format!(
+        "{}\n[… {} of {} bytes omitted by the Forge bridge ({} KiB cap) — {advice} …]\n{}",
+        &text[..head_end],
+        tail_start - head_end,
+        text.len(),
+        cap / 1024,
+        &text[tail_start..]
+    )
+}
+
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
+    i = i.min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 /// Append one JSON record to the out-of-band subagent sink the CLI bridge tails (if it gave us
 /// one via `FORGE_SUBAGENT_SINK`). Used to surface bridge-turn activity (subagents, task-list
 /// updates) in the parent Forge TUI live. Best-effort: no sink / write error is silently ignored.
@@ -416,7 +481,7 @@ impl ServerHandler for ForgeMcp {
                 if let Some(path) = &write_path {
                     let _ = forge_core::snapshot::record_from_env_after_write(path);
                 }
-                (out, true)
+                (cap_bridge_result(&name, out), true)
             }
             Err(e) => (format!("error: {e}"), false),
         };
@@ -829,6 +894,48 @@ fn bearer_ok(header: Option<&str>, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cap_bridge_result_passes_small_and_uncapped_tools_through() {
+        let small = "x".repeat(1000);
+        assert_eq!(cap_bridge_result("read_file", small.clone()), small);
+        let big = "y".repeat(BRIDGE_READ_CAP_BYTES + 1000);
+        assert_eq!(
+            cap_bridge_result("write_file", big.clone()),
+            big,
+            "only read_file/shell are capped"
+        );
+    }
+
+    #[test]
+    fn cap_bridge_result_clamps_read_with_head_tail_and_marker() {
+        let text = format!("HEAD{}TAIL", "m".repeat(BRIDGE_READ_CAP_BYTES * 2));
+        let capped = cap_bridge_result("read_file", text.clone());
+        assert!(capped.len() < text.len());
+        assert!(
+            capped.len() <= BRIDGE_READ_CAP_BYTES + 256,
+            "cap + marker only"
+        );
+        assert!(capped.starts_with("HEAD"));
+        assert!(capped.ends_with("TAIL"));
+        assert!(capped.contains("omitted by the Forge bridge"));
+        assert!(capped.contains("start_line/end_line"));
+    }
+
+    #[test]
+    fn cap_bridge_result_clamps_shell_with_shell_advice() {
+        let text = "z".repeat(BRIDGE_SHELL_CAP_BYTES * 3);
+        let capped = cap_bridge_result("shell", text);
+        assert!(capped.len() <= BRIDGE_SHELL_CAP_BYTES + 256);
+        assert!(capped.contains("narrower command"));
+    }
+
+    #[test]
+    fn cap_bridge_result_is_multibyte_safe() {
+        let text = "é".repeat(BRIDGE_READ_CAP_BYTES); // 2 bytes each → over cap, odd boundaries
+        let capped = cap_bridge_result("read_file", text);
+        assert!(capped.contains("omitted by the Forge bridge"));
+    }
 
     #[test]
     fn bearer_ok_accepts_exact_token_either_case_prefix() {
