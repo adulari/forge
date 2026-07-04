@@ -155,6 +155,9 @@ fn advertised_models(
             models.extend(config.candidates_for(tier));
         }
     }
+    // Drop bare provider prefixes (e.g. a configured `claude-cli::` with no model) — they're not
+    // routable ids on their own and only clutter the list.
+    models.retain(|m| !m.trim_end().ends_with("::") && !m.is_empty());
     models.sort();
     models.dedup();
     models.insert(0, "auto".to_string());
