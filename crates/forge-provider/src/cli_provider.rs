@@ -704,69 +704,104 @@ fn build_args(
     args
 }
 
-/// Prepended to harness-mode prompts so the bridged CLI prefers Forge's gated MCP tools over
-/// any built-in/native web search or browsing (which Forge can't see/cost-track/route).
-const HARNESS_TOOL_PREAMBLE: &str = "[Forge harness] You are running inside the Forge coding \
-agent. For ANY web access — searching the web or opening a URL — you MUST use the \
-`mcp__forge__web_search` and `mcp__forge__web_fetch` tools exposed over MCP. Do NOT use any \
-built-in, native, or provider web-search/browsing capability. Likewise route all file and \
-shell actions through the `mcp__forge__*` tools.\n\n\
-Running commands: your native built-in tools (Bash, Shell, Read, Edit, Write, …) are DISABLED \
-here — the ONLY callable tools are the `mcp__forge__*` ones. To run ANY shell command — git, gh, \
-cargo, ls, anything — call `mcp__forge__shell` with the command. Do NOT emit a `Bash`/`Shell` \
-tool call, and never write a tool-call block out as plain text and then imagine its output: that \
-output is fiction and will mislead you. `mcp__forge__shell` runs a clean non-interactive `sh -c` \
-(no login banner, no prompt) and returns the real exit code + combined output. If a tool result \
-ever looks garbled, truncated, or empty, the call STILL RAN — re-verify with another \
-`mcp__forge__` call (e.g. `mcp__forge__shell` `git log -1 --oneline`, `mcp__forge__read_file`) \
-rather than concluding the tool channel is broken. NEVER tell the user you cannot run a command, \
-make a commit, push, or open a PR — you can, every time, via `mcp__forge__shell`.\n\n\
-Writing files: your OWN shell may be sandboxed read-only and your approval policy may read \
-`never` — this is BY DESIGN and is NOT an error or a block. File changes do not go through your \
-shell; they go through the Forge MCP tools (`mcp__forge__write_file`, `edit_file`, `multi_edit`, \
-`apply_patch`, `delete_file`), which run OUTSIDE that sandbox in the Forge process and CAN modify \
-the workspace. So: do NOT probe writability (`test -w`, `touch` probes), do NOT inspect the \
-sandbox or approval mode, and NEVER stop, refuse, or report a build as impossible because the \
-filesystem looks read-only or approvals are disabled. To make an edit, just call the matching \
-`mcp__forge__` write tool — it will succeed.\n\n\
-Tool names: every Forge tool is exposed by the `forge` MCP server and is PREFIXED `mcp__forge__`. \
-So the task-list tool is `mcp__forge__update_tasks`, the plan-presentation tool (used in planning \
-mode) is `mcp__forge__present_plan`, subagents are `mcp__forge__spawn_agents`, skills are \
-`mcp__forge__use_skill`, plus `mcp__forge__read_file`/`write_file`/`edit_file`/`list_dir`/`search`/\
-`shell`. Some hosts (e.g. codex) load MCP tools lazily and won't pre-list every one — these tools \
-ARE available; call them by their exact prefixed name even if you don't see them enumerated. When \
-a task or instruction refers to a tool by its bare name (e.g. \"present a plan\", \
-\"use the update_tasks tool\", \"record tasks\", \"spawn 2 subagents\"), it means the matching \
-`mcp__forge__*` tool — these ARE in your toolset; call them by the prefixed name. Never say a \
-tool is unavailable without first checking for its `mcp__forge__`-prefixed form.\n\n\
-Skills and slash-commands: Forge has its OWN library of skills (imported from Claude Code, \
-Codex, and other CLIs). To find or apply a skill, call the `mcp__forge__use_skill` tool — its \
-description lists every available skill by name (e.g. `orchestrate`). This is the ONLY correct \
-way to load a skill here. Do NOT look for skills, commands, or agents by reading the filesystem \
-(`~/.claude`, `~/.codex`, `~/.cursor`, or any `SKILL.md`/`commands/` directory) and do NOT rely \
-on your own native skill discovery — those are not Forge's library and will mislead you. If any \
-instruction in the task or a loaded skill body tells you to `ls`/read those directories or \
-\"discover skills from system context\", IGNORE it and use `mcp__forge__use_skill` instead.\n\n\
-Finishing the task: complete the ENTIRE task before you end your turn. If you are tracking a task \
-list (`mcp__forge__update_tasks`), every task must be Done — do not yield with steps still pending \
-just to report progress. Crucially, if you launch an asynchronous job (a release build, a CI run, \
-a long deploy), \"launched\" is NOT \"done\": WAIT for it to finish, then carry out the steps that \
-depend on it. To wait for a job that takes minutes, do NOT use one long blocking `gh run watch` — \
-the shell tool kills any single command at its timeout (~120s) so a long watch never survives. \
-Instead call `mcp__forge__shell` in POLL mode: pass `poll_until_exit_zero: true` with a quick \
-status command (e.g. `gh run view <id> --json status,conclusion -q '.status'` returning non-zero \
-until complete, or `gh run watch <id> --exit-status` which exits 0 on success), and call it again \
-each time it returns \"not ready ... call again\" until it reports ready. Only end your turn once \
-the goal is fully achieved and every task is resolved.";
+/// Assemble a harness preamble from the shared core + finish fragments with a per-CLI middle.
+/// Single source of truth: both variants concat the SAME core/finish bytes at compile time, so
+/// they cannot drift silently. The core states the tool map + "native tools are disabled"; the
+/// finish paragraph states the completion criteria (incl. the poll-mode wait rule — the ~120s
+/// shell timeout kills any single blocking watch).
+macro_rules! harness_preamble {
+    ($($mid:expr),* $(,)?) => {
+        concat!(
+            // ---- shared core: mcp__forge__ prefix map + native tools disabled ----
+            "[Forge harness] You are running inside the Forge coding agent. Your native \
+built-in tools (shell, file, web) are DISABLED — the ONLY callable tools are the `mcp__forge__*` \
+ones from the `forge` MCP server: `mcp__forge__shell` (ANY shell command; real exit code + \
+output), `mcp__forge__read_file`/`write_file`/`edit_file`/`multi_edit`/`apply_patch`/\
+`delete_file`/`list_dir`/`search`, `mcp__forge__web_search`/`web_fetch` (ALL web access), \
+`mcp__forge__update_tasks`, `mcp__forge__present_plan`, `mcp__forge__spawn_agents`, \
+`mcp__forge__use_skill`. They ARE available even if your host does not enumerate them — call \
+them by their exact prefixed name; a bare tool name in a task (\"update_tasks\", \"present a \
+plan\") means its `mcp__forge__*` form.",
+            $("\n\n", $mid,)*
+            // ---- shared finish criteria ----
+            "\n\nFinishing the task: complete the ENTIRE task before ending your turn — every \
+`mcp__forge__update_tasks` task must be Done; do not yield with steps still pending. A launched \
+async job (build, CI, deploy) is NOT done: wait for it via `mcp__forge__shell` in poll mode \
+(`poll_until_exit_zero: true` + a quick status command, called again on each \"not ready\") — \
+a single blocking watch dies at the shell's ~120s timeout. End your turn only when the goal is \
+fully achieved and every task is resolved."
+        )
+    };
+}
 
-/// Prepend the harness tool-preamble in harness mode; pass the prompt through unchanged otherwise
-/// (Phase-1 self-agent turns keep their own tools). Completeness verification (`mesh.verify_
-/// completeness`) is NOT here — it's delivered by the core run-loop's one-shot turn-end re-drive
-/// (forge-core), which is cheaper than an always-on preamble clause (it lets the model work the
-/// turn normally, then do a single final diff-review).
-fn apply_harness_preamble(harness: bool, prompt: String) -> String {
+/// Claude Code variant: shared core/finish plus the anti-hallucination guard paragraphs. Every
+/// guard clause here fixed a live regression (PRs #178/#180 lineage) — trim wording, never drop
+/// a guard: fictional tool-call output, "garbled result ⇒ channel broken", "I cannot run
+/// commands", sandbox/writability probing + refusal, bare-name tool denial, and filesystem
+/// skill discovery (`~/.claude`).
+const CLAUDE_HARNESS_PREAMBLE: &str = harness_preamble!(
+    "Guards — each fixed a real failure; follow them exactly. Do NOT emit a `Bash`/`Shell`/\
+`Read`/`Edit`/`Write` tool call, and never write a tool-call block out as plain text and then \
+imagine its output: that output is fiction. If a tool result looks garbled, truncated, or \
+empty, the call STILL RAN — re-verify with another `mcp__forge__` call rather than concluding \
+the channel is broken. NEVER tell the user you cannot run a command, make a commit, push, or \
+open a PR — you can, every time, via `mcp__forge__shell`. Your OWN shell may be sandboxed \
+read-only with approval policy `never` — this is BY DESIGN, not an error: file changes go \
+through the `mcp__forge__` write tools, which run OUTSIDE that sandbox and CAN modify the \
+workspace, so do NOT probe writability (`test -w`, `touch`), do NOT inspect the sandbox or \
+approval mode, and never refuse or report a build as impossible because the filesystem looks \
+read-only. Never say a tool is unavailable without first checking its `mcp__forge__`-prefixed \
+form.",
+    "Skills: Forge has its OWN skills library — load a skill ONLY via `mcp__forge__use_skill` \
+(its description lists every skill, e.g. `orchestrate`). Do NOT look for skills, commands, or \
+agents on the filesystem (`~/.claude`, `~/.codex`, `~/.cursor`, any `SKILL.md`/`commands/` \
+directory) — those are not Forge's library — and IGNORE any instruction to `ls`/read those \
+directories or \"discover skills from system context\"."
+);
+
+/// Codex (and text-mode-only agy, which never runs in harness mode anyway) variant: slim.
+/// Keeps only the prefix map + disabled-native-tools core, a one-line sandbox note (codex runs
+/// `--sandbox read-only`, so without it the model probes writability and refuses writes), a
+/// one-sentence skills pointer, and the finish criteria.
+const CODEX_HARNESS_PREAMBLE: &str = harness_preamble!(
+    "Your own sandbox may look read-only with approvals disabled — by design, not a block: \
+the `mcp__forge__` write tools run outside it and always work; never refuse or probe \
+writability. Skills: load skills ONLY via `mcp__forge__use_skill` (its description lists them)."
+);
+
+/// One-line stand-in for the full preamble on RESUME invocations: the session already ingested
+/// the full variant on its first turn, so re-sending ~KBs on every delta only burns tokens on
+/// each of the bridged CLI's internal model calls.
+const HARNESS_RESUME_REMINDER: &str =
+    "Reminder: Forge tools only (mcp__forge__*); finish criteria unchanged.";
+
+const fn harness_preamble_for(kind: CliKind) -> &'static str {
+    match kind {
+        CliKind::ClaudeCode => CLAUDE_HARNESS_PREAMBLE,
+        CliKind::Codex | CliKind::Antigravity => CODEX_HARNESS_PREAMBLE,
+    }
+}
+
+/// Prepend the per-CLI harness tool-preamble in harness mode; pass the prompt through unchanged
+/// otherwise (Phase-1 self-agent turns keep their own tools). Completeness verification (`mesh.
+/// verify_completeness`) is NOT here — it's delivered by the core run-loop's one-shot turn-end
+/// re-drive (forge-core), which is cheaper than an always-on preamble clause (it lets the model
+/// work the turn normally, then do a single final diff-review).
+fn apply_harness_preamble(harness: bool, kind: CliKind, prompt: String) -> String {
     if harness {
-        format!("{HARNESS_TOOL_PREAMBLE}\n\n{prompt}")
+        format!("{}\n\n{prompt}", harness_preamble_for(kind))
+    } else {
+        prompt
+    }
+}
+
+/// Resume/delta invocations get a one-line reminder instead of the full preamble: the session
+/// saw the full variant on its FIRST invocation, and the bridged CLI re-ingests the whole prompt
+/// on every internal model call (30-80 per instance) — a full re-prepend cost ~30-90k tokens per
+/// instance measured.
+fn apply_resume_reminder(harness: bool, prompt: String) -> String {
+    if harness {
+        format!("{HARNESS_RESUME_REMINDER}\n\n{prompt}")
     } else {
         prompt
     }
@@ -1467,22 +1502,23 @@ impl CliProvider {
                 if delta.trim().is_empty() {
                     // Nothing new to act on (shouldn't normally happen) — fall back to a fresh render.
                     (
-                        apply_harness_preamble(self.harness, render_prompt(messages)),
+                        apply_harness_preamble(self.harness, self.kind, render_prompt(messages)),
                         None,
                     )
                 } else {
                     // Resume: claude already holds the prior CONTEXT in its own session, so we skip
-                    // the (potentially huge) transcript — the headline efficiency win. We DO re-apply
-                    // the harness preamble: it's small, and re-stating "use the mcp__forge__ tools"
-                    // each turn keeps a resumed claude from drifting onto native tools.
+                    // the (potentially huge) transcript — the headline efficiency win. The full
+                    // preamble went in on the FIRST invocation and lives in the resumed session;
+                    // re-prepending it here would be re-ingested by every internal model call, so
+                    // a one-line reminder keeps the model on the mcp__forge__ tools instead.
                     (
-                        apply_harness_preamble(self.harness, delta),
+                        apply_resume_reminder(self.harness, delta),
                         st.session_id.clone(),
                     )
                 }
             } else {
                 (
-                    apply_harness_preamble(self.harness, render_prompt(messages)),
+                    apply_harness_preamble(self.harness, self.kind, render_prompt(messages)),
                     None,
                 )
             }
@@ -2246,13 +2282,14 @@ impl CliProvider {
         // First turn on this process gets the full transcript; later turns (re-drives) get only the
         // new messages — the live process already holds the prior context. This is the token win.
         let payload = if sess.sent == 0 {
-            apply_harness_preamble(self.harness, render_prompt(messages))
+            apply_harness_preamble(self.harness, self.kind, render_prompt(messages))
         } else {
             let delta = render_resume_delta(&messages[sess.sent..]);
             if delta.trim().is_empty() {
-                apply_harness_preamble(self.harness, render_prompt(messages))
+                apply_harness_preamble(self.harness, self.kind, render_prompt(messages))
             } else {
-                apply_harness_preamble(self.harness, delta)
+                // Live process already ingested the full preamble on its first turn.
+                apply_resume_reminder(self.harness, delta)
             }
         };
 
@@ -3066,9 +3103,9 @@ mod tests {
 
     #[test]
     fn harness_preamble_nudges_to_forge_tools_only_in_harness_mode() {
-        let out = apply_harness_preamble(true, "User: search the web".into());
+        let out = apply_harness_preamble(true, CliKind::ClaudeCode, "User: search the web".into());
         assert!(out.contains("mcp__forge__web_search"));
-        assert!(out.contains("Do NOT use any") || out.contains("MUST use"));
+        assert!(out.contains("DISABLED"));
         // Skills steering: point the bridged model at Forge's use_skill, not the filesystem.
         assert!(out.contains("mcp__forge__use_skill"));
         assert!(out.contains("~/.claude"));
@@ -3077,7 +3114,107 @@ mod tests {
         assert!(out.contains("mcp__forge__spawn_agents"));
         assert!(out.ends_with("User: search the web"));
         // Phase-1 self-agent turns are untouched.
-        assert_eq!(apply_harness_preamble(false, "User: hi".into()), "User: hi");
+        assert_eq!(
+            apply_harness_preamble(false, CliKind::ClaudeCode, "User: hi".into()),
+            "User: hi"
+        );
+    }
+
+    #[test]
+    fn codex_harness_preamble_is_slim() {
+        // Hard budget: the bridged CLI re-ingests the preamble on every internal model call, so
+        // the codex variant must stay small. 1536 bytes = the wave-3 diet target.
+        assert!(
+            CODEX_HARNESS_PREAMBLE.len() <= 1536,
+            "codex preamble is {} bytes (> 1536)",
+            CODEX_HARNESS_PREAMBLE.len()
+        );
+        // …but still carries the essentials: prefix map, disabled-native-tools, finish criteria,
+        // one-sentence skills pointer, and the read-only-sandbox note (codex runs --sandbox
+        // read-only; without it the model probes writability and refuses writes).
+        for must in [
+            "mcp__forge__shell",
+            "DISABLED",
+            "mcp__forge__use_skill",
+            "Finishing the task",
+            "read-only",
+        ] {
+            assert!(CODEX_HARNESS_PREAMBLE.contains(must), "codex lost: {must}");
+        }
+        // The claude-only pathology guards must NOT be paid for on codex.
+        assert!(!CODEX_HARNESS_PREAMBLE.contains("~/.claude"));
+        assert!(!CODEX_HARNESS_PREAMBLE.contains("STILL RAN"));
+        assert_eq!(harness_preamble_for(CliKind::Codex), CODEX_HARNESS_PREAMBLE);
+        assert_eq!(
+            harness_preamble_for(CliKind::Antigravity),
+            CODEX_HARNESS_PREAMBLE
+        );
+    }
+
+    #[test]
+    fn claude_harness_preamble_keeps_every_guard_clause() {
+        // Each phrase below anchors a guard that fixed a LIVE regression (PRs #178/#180 lineage).
+        // Trimming wording is fine; dropping one of these is not.
+        for guard in [
+            // fictional tool output: never narrate a tool call as text and imagine its result
+            "never write a tool-call block out as plain text",
+            // garbled/empty tool result does not mean the channel is broken
+            "the call STILL RAN",
+            // no "I can't run commands/commit/push" refusals
+            "NEVER tell the user you cannot run a command",
+            // read-only sandbox + approvals=never are by design, not a block
+            "BY DESIGN",
+            "do NOT probe writability",
+            // never declare a tool missing without checking its prefixed form
+            "Never say a tool is unavailable",
+            // skills come from Forge's library, not the filesystem
+            "~/.claude",
+            "mcp__forge__use_skill",
+        ] {
+            assert!(
+                CLAUDE_HARNESS_PREAMBLE.contains(guard),
+                "claude preamble lost guard: {guard}"
+            );
+        }
+        assert!(
+            CLAUDE_HARNESS_PREAMBLE.len() <= 3072,
+            "claude preamble is {} bytes (> 3072)",
+            CLAUDE_HARNESS_PREAMBLE.len()
+        );
+        assert_eq!(
+            harness_preamble_for(CliKind::ClaudeCode),
+            CLAUDE_HARNESS_PREAMBLE
+        );
+    }
+
+    #[test]
+    fn preamble_variants_share_core_and_finish_fragments() {
+        // Single source of truth: both variants are concat'd from the same core + finish
+        // literals, so they must share the exact prefix and suffix byte-for-byte.
+        let shared_prefix = "[Forge harness] You are running inside the Forge coding agent.";
+        assert!(CLAUDE_HARNESS_PREAMBLE.starts_with(shared_prefix));
+        assert!(CODEX_HARNESS_PREAMBLE.starts_with(shared_prefix));
+        let finish_start = CODEX_HARNESS_PREAMBLE
+            .find("Finishing the task:")
+            .expect("codex finish fragment");
+        let finish = &CODEX_HARNESS_PREAMBLE[finish_start..];
+        assert!(CLAUDE_HARNESS_PREAMBLE.ends_with(finish));
+    }
+
+    #[test]
+    fn resume_invocations_get_a_one_line_reminder_not_the_full_preamble() {
+        let out = apply_resume_reminder(true, "User: continue".into());
+        assert_eq!(out, format!("{HARNESS_RESUME_REMINDER}\n\nUser: continue"));
+        // One line, and a fraction of even the slim variant.
+        assert!(!HARNESS_RESUME_REMINDER.contains('\n'));
+        assert!(HARNESS_RESUME_REMINDER.len() < 128);
+        // The full-preamble marker never rides along on a resume delta.
+        assert!(!out.contains("[Forge harness] You are running inside"));
+        // Non-harness (text-mode) deltas stay untouched.
+        assert_eq!(
+            apply_resume_reminder(false, "User: continue".into()),
+            "User: continue"
+        );
     }
 
     #[test]
