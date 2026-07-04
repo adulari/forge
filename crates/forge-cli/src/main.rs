@@ -44,6 +44,7 @@ pub(crate) use cli::commands::self_mcp::self_mcp_cmd;
 pub(crate) use cli::commands::skill::{commands_cmd, skill_cmd};
 pub(crate) use cli::commands::tour::tour_cmd;
 
+mod api_serve;
 mod assay_output;
 mod balance;
 mod bench;
