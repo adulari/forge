@@ -690,6 +690,7 @@ mod tests {
                 model: self.model.clone(),
                 rationale: "test".into(),
                 fallbacks: Vec::new(),
+                pinned: false,
             }
         }
     }

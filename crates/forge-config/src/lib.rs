@@ -1222,6 +1222,12 @@ pub struct MeshConfig {
     /// gate; `text` runs the CLI as its own agent with its own tools.
     #[serde(default)]
     pub bridge_mode: BridgeMode,
+    /// Lean bridge tool surface: `forge mcp-serve` drops the rarely-used tools (web_fetch,
+    /// web_search, spawn_agents, send_to_agent, remember, present_plan) from the list advertised
+    /// to a bridged CLI, which re-ingests every schema on every turn of its own loop. Also
+    /// enabled by `FORGE_BRIDGE_LEAN=1`. Default false.
+    #[serde(default)]
+    pub bridge_lean: bool,
     /// Enforcement behavior once a cap is reached.
     #[serde(default)]
     pub budget: BudgetBehavior,
@@ -1247,6 +1253,14 @@ pub struct MeshConfig {
     /// turn transparently retries on the next-best healthy model. Set false for single-shot.
     #[serde(default = "default_failover")]
     pub failover: bool,
+    /// Escape hatch for strict pin semantics (harness-robustness wave 2): when FALSE (default), an
+    /// EXPLICITLY pinned model (`--model` / `/model`) never fails over to a different model — a
+    /// rate limit is waited out on the same model (pinned backoff) and a permanent error fails the
+    /// turn with the real cause, so a pinned run can't be silently contaminated by another model's
+    /// output (the SWE-bench pin-violation defect). Set true to restore the old switch-away
+    /// behaviour for pinned turns.
+    #[serde(default)]
+    pub pin_failover: bool,
     /// Default bench duration (seconds) when a transient failure (rate-limit / 5xx) gives no
     /// server `Retry-After`. Kept short because free-tier rate limits typically reset per MINUTE
     /// (NVIDIA NIM, Groq, Gemini RPM) — a long bench would strand the best free models and push
@@ -1288,6 +1302,13 @@ pub struct MeshConfig {
     /// default and turned on only when solve rate matters more than cost.
     #[serde(default = "default_verify_completeness")]
     pub verify_completeness: bool,
+    /// Empty-diff completion nudge (harness-robustness wave 2): when a headless code-change run
+    /// (`bench swe` marks the session as expecting a code change) ends with tools having run but
+    /// NO file edits and a clean git tree, push back ONCE — "implement it, don't describe it" —
+    /// before accepting the turn. Default true; only sessions explicitly marked as code-change
+    /// runs are affected, so interactive use never sees it. Set false to disable even for bench.
+    #[serde(default = "default_nudge_empty_diff")]
+    pub nudge_empty_diff: bool,
     /// Which subscription plan backs each CLI bridge (`claude-cli` → "max-20x", `codex-cli` →
     /// "plus"), captured by `forge init`. Records the usage headroom the user has: the
     /// subscription-conservation layer reads it so a larger plan (more headroom) is spent more
@@ -1403,6 +1424,10 @@ fn default_benchmark_ranking() -> bool {
 
 fn default_verify_completeness() -> bool {
     false
+}
+
+fn default_nudge_empty_diff() -> bool {
+    true
 }
 
 /// The Artificial Analysis Data API key (ADR-0011), for benchmark-driven ranking. Read from
@@ -1790,6 +1815,7 @@ impl Default for Config {
                 classifier: ClassifierKind::default(),
                 classifier_model: None,
                 bridge_mode: BridgeMode::default(),
+                bridge_lean: false,
                 daily_budget_usd: None,
                 monthly_cap_usd: None,
                 weekly_budget_usd: None,
@@ -1800,6 +1826,7 @@ impl Default for Config {
                 workflows: WorkflowsConfig::default(),
                 auto_discover: default_auto_discover(),
                 failover: default_failover(),
+                pin_failover: false,
                 failover_cooldown_secs: default_failover_cooldown_secs(),
                 rate_limit_wait_secs: default_rate_limit_wait_secs(),
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
@@ -1807,6 +1834,7 @@ impl Default for Config {
                 subscription_conserve: default_subscription_conserve(),
                 benchmark_ranking: default_benchmark_ranking(),
                 verify_completeness: default_verify_completeness(),
+                nudge_empty_diff: default_nudge_empty_diff(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
                 disabled: Vec::new(),

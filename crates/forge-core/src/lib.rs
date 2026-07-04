@@ -350,6 +350,98 @@ const MAX_TRANSIENT_RETRIES: u32 = 2;
 /// `mesh.rate_limit_wait_secs` (0 disables waiting).
 const MAX_RATE_LIMIT_WAITS: u32 = 2;
 
+// --- Pinned rate-limit backoff (harness-robustness wave 2, fix 1) ------------------------------
+// When the model was EXPLICITLY pinned (`--model` / `/model`), a rate limit must not fail the turn
+// and must not switch models (a pin must pin — the SWE-bench baseline lost 4 instances to
+// "skipped: rate limited" with zero retry). Instead the SAME model is retried on this schedule.
+// Provider-level multi-key rotation runs FIRST: on a 429 the genai provider already retries once
+// with the next configured key before the error ever reaches this loop (genai_provider.rs), so
+// waiting only starts once every key is limited.
+
+/// Max same-model retry attempts for a rate-limited pinned model before failing the turn.
+const PINNED_RL_MAX_ATTEMPTS: u32 = 6;
+/// First backoff delay (seconds); grows ×[`PINNED_RL_GROWTH`] per attempt: 5s, 15s, 45s, then
+/// capped — 5·3ᵏ⁻¹ up to [`PINNED_RL_DELAY_CAP_SECS`].
+const PINNED_RL_BASE_SECS: u64 = 5;
+/// Exponential growth factor between attempts.
+const PINNED_RL_GROWTH: u64 = 3;
+/// Per-attempt delay cap (seconds): attempts 4-6 wait at most this long.
+const PINNED_RL_DELAY_CAP_SECS: u64 = 60;
+/// Total in-turn wait budget (seconds) across all pinned-backoff attempts (~3 min). A schedule
+/// or `Retry-After` that would exceed the remaining budget fails the turn with the real error
+/// instead of blocking indefinitely.
+const PINNED_RL_TOTAL_WAIT_SECS: u64 = 180;
+
+/// One pinned-backoff delay. `attempt` is 1-based. A server `Retry-After` (when the provider
+/// error carried one) is respected verbatim — the server knows its own reset better than our
+/// blind schedule. Otherwise: exponential base delay with ±20% jitter (`jitter` ∈ [0,1] maps to
+/// a 0.8-1.2 factor) so many pinned turns limited at once don't retry in lockstep.
+fn pinned_backoff_delay(
+    attempt: u32,
+    retry_after: Option<std::time::Duration>,
+    jitter: f64,
+) -> std::time::Duration {
+    if let Some(ra) = retry_after {
+        return ra;
+    }
+    let base = PINNED_RL_BASE_SECS
+        .saturating_mul(PINNED_RL_GROWTH.saturating_pow(attempt.saturating_sub(1)))
+        .min(PINNED_RL_DELAY_CAP_SECS);
+    let factor = 0.8 + 0.4 * jitter.clamp(0.0, 1.0);
+    std::time::Duration::from_secs_f64(base as f64 * factor)
+}
+
+/// What the failover machinery may do with a retryable provider error, given pin state
+/// (harness-robustness wave 2, fix 2 — strict pin semantics). Pure so the policy is
+/// table-testable; [`failover_policy`] is the single chooser `run_model_loop` obeys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailoverPolicy {
+    /// Not pinned (or the `mesh.pin_failover` escape hatch is on): normal cross-model
+    /// failover down the routed chain.
+    SwitchModels,
+    /// Pinned + rate-limited: wait out the limit and retry the SAME model (fix 1's backoff).
+    BackoffSameModel,
+    /// Pinned + any other retryable failure (permanent capability/auth error, or an outage that
+    /// survived the same-model transient retries): fail the turn with the REAL error — an
+    /// explicitly pinned model is never silently switched.
+    FailTurn,
+}
+
+/// The strict-pin failover chooser: an explicit pin forbids cross-model switching unless
+/// `mesh.pin_failover = true` restores the old behaviour.
+fn failover_policy(pinned: bool, pin_failover: bool, rate_limited: bool) -> FailoverPolicy {
+    if !pinned || pin_failover {
+        FailoverPolicy::SwitchModels
+    } else if rate_limited {
+        FailoverPolicy::BackoffSameModel
+    } else {
+        FailoverPolicy::FailTurn
+    }
+}
+
+/// The one-shot empty-diff completion nudge (harness-robustness wave 2, fix 4): sent as a
+/// synthetic user message when a headless code-change turn ends having changed nothing.
+const EMPTY_DIFF_NUDGE: &str =
+    "You have not modified any files. Implement the fix now — do not just describe it.";
+
+/// Whether the working tree at `root` (`None` = process cwd) shows NO changes at all:
+/// `git status --porcelain` output empty — no staged or unstaged modifications AND no untracked
+/// files (a solution that only ADDS a file is still a change; `git diff` alone would miss it,
+/// the same hole `bench swe`'s patch extraction plugs with `git add -A`). Any git failure (not
+/// a repo, git missing) counts as "changed" so the empty-diff nudge can never fire outside a
+/// real repository.
+fn working_tree_unchanged(root: Option<&std::path::Path>) -> bool {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["status", "--porcelain"]);
+    if let Some(r) = root {
+        cmd.current_dir(r);
+    }
+    match cmd.output() {
+        Ok(out) if out.status.success() => out.stdout.iter().all(u8::is_ascii_whitespace),
+        _ => false,
+    }
+}
+
 /// Render a sequence of messages into TUI [`ReplayItem`](forge_tui::ReplayItem)s — user prompts,
 /// assistant text, tool calls (with args), tool results (matched to their call's name via
 /// `tool_call_id`), and the compaction marker. Shared by the model-facing replay
@@ -570,6 +662,10 @@ struct ModelLoopOutcome {
     /// A plan a CLI-bridge model proposed this loop (tailed from the sink as [`StreamEvent::Plan`]).
     /// `None` on the in-process path, where the `present_plan` handler sets `pending_plan` directly.
     plan: Option<forge_types::PlanProposal>,
+    /// How many tools STARTED executing across this loop (direct-path calls + bridge tools tailed
+    /// from the sink). The empty-diff completion nudge keys on it: "the model worked (tools ran)
+    /// but changed nothing" is the description-instead-of-implementation failure mode.
+    tools_ran: u64,
 }
 
 /// One interactive session. Construct with [`Session::start`], then drive [`Session::run_turn`].
@@ -655,6 +751,11 @@ pub struct Session {
     /// Count of successful writes made by `invoke_tool` in the current turn. Reset at the start
     /// of each turn; used to gate the autofix stage (skip it when nothing was edited).
     edits_this_turn: u32,
+    /// Headless code-change mode (harness-robustness wave 2): the caller KNOWS each prompt
+    /// demands a code change (`bench swe` sets it — an explicit option, not prompt sniffing).
+    /// With `mesh.nudge_empty_diff`, a turn that ran tools but edited nothing and left the git
+    /// tree clean gets ONE "implement it, don't describe it" push-back. Never set interactively.
+    expect_code_change: bool,
     /// Per-turn guard against repeated failing tools and identical-call doom loops.
     failure_tracker: ToolFailureTracker,
     /// The current git branch (`.git/HEAD` → `refs/heads/<branch>`), cached so the hot per-request
@@ -843,6 +944,7 @@ impl Session {
             project_prompt_injected,
             pending_images: Vec::new(),
             edits_this_turn: 0,
+            expect_code_change: false,
             failure_tracker: ToolFailureTracker::new(),
             cached_git_branch: current_git_branch(),
             // Read AGENTS.md eagerly (sync, off the async path) only when it will actually be
@@ -897,6 +999,12 @@ impl Session {
     /// The currently-pinned model, if any (`/model <id>` was called this session).
     pub fn pinned_model(&self) -> Option<&str> {
         self.pinned_model.as_deref()
+    }
+
+    /// Mark this session as a headless code-change run (`bench swe`): every prompt is known to
+    /// demand an implementation, arming the empty-diff completion nudge (`mesh.nudge_empty_diff`).
+    pub fn set_expect_code_change(&mut self, v: bool) {
+        self.expect_code_change = v;
     }
 
     /// Set (or clear) the in-session reasoning-effort pin. `None` returns to the provider default.
@@ -2792,6 +2900,13 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         // Bounds in-turn waits for a rate-limited model to RESET (per-minute free tiers). Per turn,
         // not per model: a few short waits total, so the turn can't block indefinitely.
         let mut rate_limit_waits = 0u32;
+        // Pinned rate-limit backoff (harness-robustness wave 2, fix 1): whether this turn runs an
+        // EXPLICITLY pinned model — the session `/model` pin, or a routing decision flagged as a
+        // `--model` pin. A rate limit on a pinned model is waited out with exponential backoff on
+        // the SAME model (see `pinned_backoff_delay`) instead of failing the turn.
+        let pinned_turn = self.pinned_model.is_some() || decision.is_some_and(|d| d.pinned);
+        let mut pinned_rl_attempts = 0u32;
+        let mut pinned_rl_waited = std::time::Duration::ZERO;
 
         let mut final_text = String::new();
         let mut context_tokens: u64 = 0;
@@ -3033,6 +3148,76 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             });
                             tokio::time::sleep(backoff).await;
                             continue;
+                        }
+                        // Strict pin semantics (harness-robustness wave 2, fix 2): the single
+                        // chooser for what this error may do given pin state. An explicit pin
+                        // forbids cross-model failover — `mesh.pin_failover = true` is the escape
+                        // hatch that restores the old switch-away behaviour end to end.
+                        match failover_policy(
+                            pinned_turn,
+                            self.config.mesh.pin_failover,
+                            e.is_rate_limited(),
+                        ) {
+                            FailoverPolicy::SwitchModels => {} // fall through to wait/bench/chain
+                            // Pinned rate-limit backoff (fix 1): a pin must pin. Retry the SAME
+                            // model on the documented schedule (5s/15s/45s, then 60s-capped, ±20%
+                            // jitter, ≤6 attempts, ≤180s total — the PINNED_RL_* constants),
+                            // honoring a server `Retry-After` verbatim when the error carried one.
+                            // Multi-key rotation already ran inside the provider (one next-key
+                            // retry per 429, genai_provider.rs), so by the time the error reaches
+                            // this loop every configured key is limited and waiting is the only
+                            // same-model option left.
+                            FailoverPolicy::BackoffSameModel => {
+                                let retry_after = match &e {
+                                    forge_provider::ProviderError::RateLimited {
+                                        retry_after,
+                                        ..
+                                    } => *retry_after,
+                                    _ => None,
+                                };
+                                let attempt = pinned_rl_attempts + 1;
+                                // Cheap jitter without a rand dependency: sub-second wall-clock
+                                // nanos.
+                                let jitter = f64::from(
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.subsec_nanos())
+                                        .unwrap_or(0),
+                                ) / 1e9;
+                                let delay = pinned_backoff_delay(attempt, retry_after, jitter);
+                                let budget =
+                                    std::time::Duration::from_secs(PINNED_RL_TOTAL_WAIT_SECS);
+                                if attempt <= PINNED_RL_MAX_ATTEMPTS
+                                    && pinned_rl_waited + delay <= budget
+                                {
+                                    pinned_rl_attempts = attempt;
+                                    pinned_rl_waited += delay;
+                                    self.presenter.emit(PresenterEvent::Warning(format!(
+                                        "{active_model}: rate limited — retrying pinned model in \
+                                         {}s (attempt {attempt}/{PINNED_RL_MAX_ATTEMPTS})",
+                                        delay.as_secs().max(1)
+                                    )));
+                                    self.presenter.emit(PresenterEvent::ModelSearch {
+                                        model: active_model.clone(),
+                                    });
+                                    tokio::time::sleep(delay).await;
+                                    continue;
+                                }
+                                // Backoff budget exhausted: fail the turn with the REAL error
+                                // rather than silently running a different model than the pin.
+                                self.presenter.emit(PresenterEvent::Warning(format!(
+                                    "{active_model}: still rate limited after \
+                                     {pinned_rl_attempts} backoff retries — failing the turn \
+                                     (pinned model; cross-model failover disabled)"
+                                )));
+                                return Err(e.into());
+                            }
+                            FailoverPolicy::FailTurn => {
+                                // A pinned model with a permanent incapability (or an outage that
+                                // survived the same-model transient retries) can't serve this
+                                // turn, and switching models is forbidden: surface the real error.
+                                return Err(e.into());
+                            }
                         }
                         // Rate-limit on the current (best-ranked) model with a SHORT reset: WAIT for
                         // it to reset and retry the SAME model instead of degrading to a lower-ranked
@@ -3720,6 +3905,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             hit_step_cap,
             active_model,
             plan: proposed_plan,
+            tools_ran: tools_ran.load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 
@@ -3996,8 +4182,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // first so the `&self.lattice` borrow is released before we mutate the transcript. The
         // budget shrinks with budget pressure — context spend follows the same discipline as model
         // spend. Empty index / disabled / any error → nothing injected, turn runs as before.
+        // Skipped when the routed model is a CLI bridge: claude/codex explore with their OWN
+        // agent loop, so the injected snippets are duplicated context they re-ingest every turn
+        // of that loop on top of their own reads.
         let injected = {
-            if let Some(lat) = self.lattice.as_ref().filter(|_| self.config.lattice.inject) {
+            if let Some(lat) = self.lattice.as_ref().filter(|_| {
+                self.config.lattice.inject && !forge_provider::is_cli_bridge(&routed_model)
+            }) {
                 let budget = inject_budget(self.config.lattice.inject_token_budget, status);
                 let emb = &self.config.lattice.embeddings;
                 // Body injection (the big token-saving lever): inject the top hits' full source so
@@ -4095,6 +4286,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let outcome = self
             .run_model_loop(edit_model, &specs, primary_decision, max_steps, stream_idle)
             .await?;
+        let turn_tools_ran = outcome.tools_ran;
         let mut final_text = outcome.final_text;
         let mut context_tokens = outcome.context_tokens;
         let mut active_model = outcome.active_model;
@@ -4130,6 +4322,44 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 self.presenter
                     .emit(PresenterEvent::Tasks(self.tasks.clone()));
             }
+        }
+
+        // ── Empty-diff completion nudge (harness-robustness wave 2, fix 4) ────────────────────
+        // Headless code-change runs (`bench swe` marks the session via `set_expect_code_change`;
+        // interactive sessions never set it) sometimes end with the model having WORKED (tools
+        // ran) but changed NOTHING — the SWE-bench baseline "completed" 2 instances with an empty
+        // diff and no pushback: the model described the fix instead of making it. Push back
+        // exactly once: a synthetic user message demanding the implementation, then one more
+        // model loop. One-shot by construction (straight-line code, the same latch idea as
+        // `completeness_checked`); runs BEFORE self-review/autofix so any edits it produces are
+        // still lint/test-checked. `mesh.nudge_empty_diff = false` disables it wholesale.
+        if self.config.mesh.nudge_empty_diff
+            && self.expect_code_change
+            && turn_tools_ran > 0
+            && self.edits_this_turn == 0
+            && working_tree_unchanged(self.work_root.as_deref())
+        {
+            self.presenter.emit(PresenterEvent::Warning(
+                "code-change task ended with an empty diff — pushing back once".to_string(),
+            ));
+            let seq = self.next_seq();
+            self.store
+                .add_message(&self.id, seq, Role::User, EMPTY_DIFF_NUDGE, None)?;
+            self.transcript.push(Message::user(EMPTY_DIFF_NUDGE));
+            let nudge_specs = self.tool_specs();
+            let nudge_outcome = self
+                .run_model_loop(
+                    active_model.clone(),
+                    &nudge_specs,
+                    primary_decision,
+                    max_steps,
+                    stream_idle,
+                )
+                .await?;
+            final_text = nudge_outcome.final_text;
+            context_tokens = nudge_outcome.context_tokens;
+            active_model = nudge_outcome.active_model;
+            hit_step_cap = nudge_outcome.hit_step_cap;
         }
 
         // ── Self-review pass (mesh.self_review) ───────────────────────────────────────────────
@@ -8817,6 +9047,9 @@ mod tests {
 
         let mut session = probe_session(Arc::clone(&store), Config::default());
         session.set_lattice(Some(Arc::new(lat)));
+        // Pin a non-bridge model: injection is intentionally skipped for CLI bridges, and the
+        // default mesh routes this prompt's tier to claude-cli::.
+        session.pin_model(Some("ollama::probe".into()));
         let answer = session
             .run_turn("explain lattice_probe_symbol please")
             .await
@@ -8825,6 +9058,34 @@ mod tests {
             answer, "SAW_INJECTION",
             "the symbol was retrieved + injected"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bridged CLIs run their own exploration loop, so lattice injection is duplicated context
+    /// there — the gate must skip it for `*-cli::` models while direct models keep it.
+    #[tokio::test]
+    async fn lattice_injection_is_skipped_for_cli_bridge_models() {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-inj-bridge-{}-{}",
+            std::process::id(),
+            forge_types::new_id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("probe.rs"), "pub fn lattice_probe_symbol() {}\n").unwrap();
+
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let lat = forge_index::Lattice::new(Arc::clone(&store), &dir);
+        lat.update().unwrap();
+
+        let mut session = probe_session(Arc::clone(&store), Config::default());
+        session.set_lattice(Some(Arc::new(lat)));
+        session.pin_model(Some("claude-cli::sonnet".into()));
+        let answer = session
+            .run_turn("explain lattice_probe_symbol please")
+            .await
+            .unwrap();
+        assert_eq!(answer, "NO_INJECTION", "bridge models get no injection");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -10366,6 +10627,35 @@ mod tests {
                 model: self.model.clone(),
                 rationale: "test".into(),
                 fallbacks: self.fallbacks.clone(),
+                pinned: false,
+            }
+        }
+    }
+
+    /// Like [`FixedRouter`], but the decision is an EXPLICIT pin (`--model`), so the strict-pin
+    /// failover rules + the pinned rate-limit backoff apply. `fallbacks` are deliberately allowed,
+    /// mirroring a legacy decision, so tests can prove they are NOT used for a pinned model.
+    struct PinnedRouter {
+        model: String,
+        fallbacks: Vec<String>,
+    }
+    #[async_trait::async_trait]
+    impl Router for PinnedRouter {
+        async fn route(
+            &self,
+            _prompt: &str,
+            _budget: BudgetState,
+            _health: &forge_types::ModelHealth,
+            _quota: &forge_types::SubscriptionQuota,
+            _effort: Option<forge_types::EffortLevel>,
+            _project: &forge_types::ProjectContext,
+        ) -> forge_mesh::RoutingDecision {
+            forge_mesh::RoutingDecision {
+                tier: forge_types::TaskTier::Trivial,
+                model: self.model.clone(),
+                rationale: "pinned via --model".into(),
+                fallbacks: self.fallbacks.clone(),
+                pinned: true,
             }
         }
     }
@@ -10675,6 +10965,314 @@ mod tests {
             store.current_benched().unwrap().is_empty(),
             "a model we waited out and recovered must not be benched"
         );
+    }
+
+    #[test]
+    fn pinned_backoff_schedule_grows_caps_and_respects_retry_after() {
+        use std::time::Duration;
+        let secs = |a: u32, j: f64| pinned_backoff_delay(a, None, j).as_secs_f64();
+        // jitter 0.5 → factor 1.0: the documented 5s/15s/45s schedule, capped at 60s from #4.
+        for (attempt, want) in [
+            (1, 5.0),
+            (2, 15.0),
+            (3, 45.0),
+            (4, 60.0),
+            (5, 60.0),
+            (6, 60.0),
+        ] {
+            assert!(
+                (secs(attempt, 0.5) - want).abs() < 1e-9,
+                "attempt {attempt}: want {want}s"
+            );
+        }
+        // Jitter bounds: ±20% of the base delay.
+        assert!((secs(1, 0.0) - 4.0).abs() < 1e-9, "low jitter = 0.8×base");
+        assert!((secs(1, 1.0) - 6.0).abs() < 1e-9, "high jitter = 1.2×base");
+        // A server Retry-After is respected verbatim — it beats the blind schedule either way.
+        assert_eq!(
+            pinned_backoff_delay(1, Some(Duration::from_millis(10)), 0.5),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            pinned_backoff_delay(1, Some(Duration::from_secs(90)), 0.5),
+            Duration::from_secs(90)
+        );
+        // The full jittered schedule can exceed the wait budget, so the budget is the real cap.
+        let worst: f64 = (1..=PINNED_RL_MAX_ATTEMPTS).map(|a| secs(a, 1.0)).sum();
+        assert!(
+            worst > PINNED_RL_TOTAL_WAIT_SECS as f64,
+            "total budget must bind before the attempt cap at max jitter"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limited_pinned_model_backs_off_and_retries_the_same_model() {
+        // Baseline defect (harness-robustness wave 2): pinned SWE-bench turns aborted
+        // "skipped: rate limited" with ZERO retry. Two consecutive 429s (retry_after 10ms)
+        // must be waited out on the SAME pinned model — the fallback stays unused and the
+        // recovered model is never benched.
+        let provider = Arc::new(RateLimitThenOkProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_first: 2,
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            answer, "pin::model",
+            "pinned model must be retried with backoff, not failed or switched"
+        );
+        assert!(
+            store.current_benched().unwrap().is_empty(),
+            "a pinned model that recovered after backoff must not be benched"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_model_pin_engages_the_pinned_backoff_too() {
+        // The `/model` (session) pin flows through `self.pinned_model`, not the routing
+        // decision — it must get the same backoff treatment as a `--model` pin.
+        let provider = Arc::new(RateLimitThenOkProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_first: 1,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "routed::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.pin_model(Some("pin::model".into()));
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            answer, "pin::model",
+            "session pin retried on the same model"
+        );
+    }
+
+    #[test]
+    fn failover_chooser_forbids_cross_model_switching_for_pins() {
+        // Table test on the single failover chooser (strict pin semantics, fix 2):
+        // (pinned, pin_failover escape hatch, rate_limited) → what the loop may do.
+        use FailoverPolicy::*;
+        let table = [
+            // Unpinned turns: normal failover regardless of error kind or escape hatch.
+            (false, false, true, SwitchModels),
+            (false, false, false, SwitchModels),
+            (false, true, true, SwitchModels),
+            (false, true, false, SwitchModels),
+            // Pinned + strict (default): rate limit → same-model backoff; anything else →
+            // fail the turn with the real error. Never a silent switch.
+            (true, false, true, BackoffSameModel),
+            (true, false, false, FailTurn),
+            // Pinned + escape hatch: the old switch-away behaviour, end to end.
+            (true, true, true, SwitchModels),
+            (true, true, false, SwitchModels),
+        ];
+        for (pinned, hatch, rl, want) in table {
+            assert_eq!(
+                failover_policy(pinned, hatch, rl),
+                want,
+                "pinned={pinned} pin_failover={hatch} rate_limited={rl}"
+            );
+        }
+    }
+
+    fn capability(_m: &str) -> forge_provider::ProviderError {
+        forge_provider::ProviderError::Capability("no tool support".into())
+    }
+
+    #[tokio::test]
+    async fn pinned_model_with_a_permanent_error_fails_the_turn_with_the_real_cause() {
+        // Strict pins: a pinned model that permanently can't serve the turn must FAIL the turn
+        // with the real error — not silently run the fallback (benchmark contamination).
+        let provider = Arc::new(EchoProvider {
+            bad: ["pin::model".to_string()].into_iter().collect(),
+            err: capability,
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        let err = session.run_turn("fix the bug").await.unwrap_err();
+        assert!(
+            err.to_string().contains("no tool support"),
+            "the REAL provider error must surface, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_failover_escape_hatch_restores_cross_model_switching() {
+        // `mesh.pin_failover = true` deliberately restores the old behaviour: a failing pinned
+        // model may switch to the decision's fallbacks.
+        let provider = Arc::new(EchoProvider {
+            bad: ["pin::model".to_string()].into_iter().collect(),
+            err: unavailable,
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.mesh.pin_failover = true;
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(answer, "worse::model", "escape hatch allows the old switch");
+    }
+
+    // --- Empty-diff completion nudge (harness-robustness wave 2, fix 4) ---
+
+    /// Scripted "describe instead of implement" model: completion 1 explores (one read-only tool
+    /// call), later completions only narrate — no tool calls, no edits. Counts completions so a
+    /// test can prove the nudge fired exactly once.
+    struct DescribeOnlyProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for DescribeOnlyProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                return Ok(forge_provider::ModelResponse {
+                    content: String::new(),
+                    tool_calls: vec![forge_types::ToolCall {
+                        id: forge_types::new_id(),
+                        name: "list_dir".into(),
+                        args: serde_json::json!({ "path": "." }),
+                    }],
+                    usage: forge_types::Usage::default(),
+                    quotas: Vec::new(),
+                });
+            }
+            let text = if n == 1 {
+                "here is how you would fix it"
+            } else {
+                "still only describing"
+            };
+            on_event(StreamEvent::Text(text.into()));
+            Ok(forge_provider::ModelResponse {
+                content: text.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    /// A throwaway git repo with one committed file and a CLEAN tree, so
+    /// `working_tree_unchanged` is deterministically true regardless of the checkout state of
+    /// the repo the tests happen to run in.
+    fn clean_git_repo() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("forge-nudge-{}", forge_types::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("f.txt"), "seed").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "seed"]);
+        dir
+    }
+
+    #[tokio::test]
+    async fn empty_diff_code_change_run_is_nudged_exactly_once() {
+        // Baseline defect: 2 SWE-bench instances "completed" with an empty diff and no pushback.
+        // A code-change run (bench sets `expect_code_change`) whose turn ran tools but edited
+        // nothing must get ONE "implement it" nudge — and only one (latch): the model here keeps
+        // describing, so the turn ends after the single re-drive rather than looping.
+        let dir = clean_git_repo();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        // The recap + auto-memory summarizers also call the provider at turn end — disable them
+        // so the call count below measures ONLY the main loop's completions.
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "explore + describe (2 completions), then exactly ONE nudge re-drive"
+        );
+        assert_eq!(answer, "still only describing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn empty_diff_nudge_never_fires_for_interactive_sessions() {
+        // `expect_code_change` is only ever set by bench — a plain session with the identical
+        // "explored but changed nothing" turn ends normally, no nudge.
+        let dir = clean_git_repo();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "no nudge without the code-change flag"
+        );
+        assert_eq!(answer, "here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn empty_diff_nudge_respects_the_config_gate() {
+        // `mesh.nudge_empty_diff = false` disables the push-back even for bench runs.
+        let dir = clean_git_repo();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.work_root = Some(dir.clone());
+        session.set_expect_code_change(true);
+        session.config.mesh.nudge_empty_diff = false;
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(answer, "here is how you would fix it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

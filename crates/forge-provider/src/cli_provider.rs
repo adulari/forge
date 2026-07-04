@@ -1135,7 +1135,7 @@ fn parse_claude_line(line: &str) -> Vec<Parsed> {
                         .and_then(Value::as_str)
                         .map(str::to_string)
                         .or(result_text)
-                        .unwrap_or_else(|| "claude reported an error".into()),
+                        .unwrap_or_else(|| truncated_event_json(&v)),
                 ));
             }
         }
@@ -1194,6 +1194,20 @@ fn tool_result_summary(content: Option<&Value>) -> String {
     };
     let one_line = text.split('\n').next().unwrap_or("").trim();
     one_line.chars().take(120).collect()
+}
+
+/// Fallback detail for a CLI error event that carries no recognizable `message` field: the whole
+/// event JSON, truncated. A generic "codex reported an error" hid the actual cause (quota, plan
+/// restrictions, bad flags) — the raw event is the only diagnostic there is.
+fn truncated_event_json(v: &Value) -> String {
+    const MAX_CHARS: usize = 500;
+    let raw = v.to_string();
+    if raw.chars().count() <= MAX_CHARS {
+        raw
+    } else {
+        let head: String = raw.chars().take(MAX_CHARS).collect();
+        format!("{head}…")
+    }
 }
 
 fn codex_item_id(item: Option<&Value>) -> String {
@@ -1325,8 +1339,13 @@ fn parse_codex_line(line: &str) -> Vec<Parsed> {
         Some(t) if t.contains("error") || t.contains("failed") => vec![Parsed::Error(
             v.get("message")
                 .and_then(Value::as_str)
-                .unwrap_or("codex reported an error")
-                .to_string(),
+                .or_else(|| {
+                    v.get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_string)
+                .unwrap_or_else(|| truncated_event_json(&v)),
         )],
         _ => Vec::new(),
     }
@@ -1739,7 +1758,12 @@ impl CliProvider {
         }
 
         if let Some(e) = in_band_error {
-            return Err(classify_in_band_error(&self.binary, &e));
+            // Append stderr like the stall path above — when the in-band event is terse, the
+            // CLI's stderr often carries the actionable cause.
+            return Err(classify_in_band_error(
+                &self.binary,
+                &format!("{e}{}", stderr_suffix(&stderr_text)),
+            ));
         }
 
         let text = if content.is_empty() {
@@ -3484,6 +3508,54 @@ mod tests {
         assert_eq!(v["message"]["role"], "user");
         assert_eq!(v["message"]["content"], "hello \"world\"\nline2");
         assert!(!line.contains('\n'), "the envelope itself is a single line");
+    }
+
+    #[test]
+    fn codex_error_event_prefers_message_fields() {
+        let top = r#"{"type":"error","message":"quota exhausted"}"#;
+        assert_eq!(
+            parse_codex_line(top),
+            vec![Parsed::Error("quota exhausted".into())]
+        );
+        let nested = r#"{"type":"turn.failed","error":{"message":"team plan required"}}"#;
+        assert_eq!(
+            parse_codex_line(nested),
+            vec![Parsed::Error("team plan required".into())]
+        );
+    }
+
+    #[test]
+    fn codex_error_event_without_message_surfaces_the_whole_event() {
+        let line = r#"{"type":"stream_error","code":42,"detail":"usage limit hit for this plan"}"#;
+        let parsed = parse_codex_line(line);
+        assert_eq!(parsed.len(), 1);
+        let Parsed::Error(e) = &parsed[0] else {
+            panic!("expected an error, got {parsed:?}");
+        };
+        assert!(e.contains("usage limit hit for this plan"), "got: {e}");
+        assert!(e.contains("stream_error"), "got: {e}");
+        assert!(
+            !e.contains("codex reported an error"),
+            "generic string is gone"
+        );
+    }
+
+    #[test]
+    fn error_event_json_is_truncated_to_500_chars() {
+        let big = serde_json::json!({"type": "error", "blob": "x".repeat(2000)});
+        let detail = truncated_event_json(&big);
+        assert_eq!(detail.chars().count(), 501, "500 chars + ellipsis");
+        assert!(detail.ends_with('…'));
+    }
+
+    #[test]
+    fn claude_error_result_without_status_or_text_surfaces_the_event() {
+        let line = r#"{"type":"result","is_error":true,"subtype":"error_during_execution"}"#;
+        let parsed = parse_claude_line(line);
+        let Some(Parsed::Error(e)) = parsed.last() else {
+            panic!("expected an error, got {parsed:?}");
+        };
+        assert!(e.contains("error_during_execution"), "got: {e}");
     }
 
     #[test]

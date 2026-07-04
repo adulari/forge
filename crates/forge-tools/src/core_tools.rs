@@ -1069,8 +1069,10 @@ impl Tool for ListDirTool {
     }
 }
 
-/// Recursively search text files for a pattern, returning `path:lineno: line` matches.
-/// Supports substring (default) or full regex matching, and an optional file-path glob filter.
+/// Search text files for a pattern, returning `path:lineno: line` matches. `path` may be a
+/// directory (recursive walk) or a single file (models routinely pass a file path — the old
+/// "is not a directory" error just burned a round-trip). Supports substring (default) or full
+/// regex matching, and an optional file-path glob filter.
 pub struct SearchTool;
 
 const SEARCH_MATCH_CAP: usize = 200;
@@ -1094,7 +1096,8 @@ impl Tool for SearchTool {
         "search"
     }
     fn description(&self) -> &str {
-        "Recursively search text files under `path` for lines matching `query`. \
+        "Search text files for lines matching `query`. `path` may be a directory (searched \
+         recursively) or a single file (searched by itself). \
          Set `regex: true` for regex matching (default: substring). \
          Use `file_pattern` (glob) to restrict which files are searched, e.g. \"**/*.rs\". \
          Set `context` to N to print N lines around each match (like grep -C) — often enough to \
@@ -1137,8 +1140,11 @@ impl Tool for SearchTool {
                 "path '{root}' does not exist or can't be read: {e}"
             ))
         })?;
-        if !root_meta.is_dir() {
-            return Err(ToolError::Failed(format!("{root} is not a directory")));
+        let root_is_file = root_meta.is_file();
+        if !root_is_file && !root_meta.is_dir() {
+            return Err(ToolError::Failed(format!(
+                "{root} is neither a file nor a directory"
+            )));
         }
         let use_regex = args.get("regex").and_then(Value::as_bool).unwrap_or(false);
         let file_pattern = args.get("file_pattern").and_then(Value::as_str);
@@ -1173,80 +1179,52 @@ impl Tool for SearchTool {
         let query = query.to_string();
         tokio::task::spawn_blocking(move || -> Result<String, ToolError> {
             let mut matches: Vec<String> = Vec::new();
-            let mut stack = vec![std::path::PathBuf::from(&root)];
-            while let Some(dir) = stack.pop() {
-                let Ok(entries) = std::fs::read_dir(&dir) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if name.starts_with('.') {
-                        continue; // hidden files + dirs (.git, .venv, …)
-                    }
-                    let path = entry.path();
-                    let Ok(ft) = entry.file_type() else { continue };
-                    if ft.is_dir() {
-                        // Skip heavy vendor/build dirs so non-Rust repos (node_modules, venv, …) don't
-                        // bury real results. (`target` is now skipped only as a directory.)
-                        if SEARCH_SKIP_DIRS.contains(&name.as_str()) {
-                            continue;
+            if root_is_file {
+                // A file path searches that single file — same matching semantics + output
+                // format, the path column is the file as given. `file_pattern` is ignored:
+                // the caller already named the exact file. A read failure is a real error
+                // here (unlike the walk, where unreadable files are skipped silently).
+                let content = std::fs::read_to_string(&root)
+                    .map_err(|e| ToolError::Failed(format!("can't read {root}: {e}")))?;
+                append_search_matches(&root, &content, re.as_ref(), &query, context, &mut matches);
+            } else {
+                let mut stack = vec![std::path::PathBuf::from(&root)];
+                'walk: while let Some(dir) = stack.pop() {
+                    let Ok(entries) = std::fs::read_dir(&dir) else {
+                        continue;
+                    };
+                    for entry in entries.flatten() {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        if name.starts_with('.') {
+                            continue; // hidden files + dirs (.git, .venv, …)
                         }
-                        stack.push(path);
-                    } else {
-                        let rel = path.strip_prefix(&root).unwrap_or(&path);
-                        if let Some(ref fg) = file_glob {
-                            if !fg.is_match(rel) {
+                        let path = entry.path();
+                        let Ok(ft) = entry.file_type() else { continue };
+                        if ft.is_dir() {
+                            // Skip heavy vendor/build dirs so non-Rust repos (node_modules, venv,
+                            // …) don't bury real results. (`target` is skipped only as a dir.)
+                            if SEARCH_SKIP_DIRS.contains(&name.as_str()) {
                                 continue;
                             }
-                        }
-                        if let Ok(content) = std::fs::read_to_string(&path) {
-                            let rel_display = rel.display();
-                            let lines: Vec<&str> = content.lines().collect();
-                            let hits: Vec<usize> = lines
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, line)| {
-                                    if let Some(ref re) = re {
-                                        re.is_match(line)
-                                    } else {
-                                        line.contains(query.as_str())
-                                    }
-                                })
-                                .map(|(i, _)| i)
-                                .collect();
-                            if hits.is_empty() {
-                                continue;
-                            }
-                            if context == 0 {
-                                for &i in &hits {
-                                    matches.push(format!(
-                                        "{rel_display}:{}: {}",
-                                        i + 1,
-                                        lines[i].trim_end()
-                                    ));
-                                    if matches.len() >= SEARCH_MATCH_CAP {
-                                        matches.push(format!(
-                                            "… (capped at {SEARCH_MATCH_CAP} matches)"
-                                        ));
-                                        return Ok(matches.join("\n"));
-                                    }
+                            stack.push(path);
+                        } else {
+                            let rel = path.strip_prefix(&root).unwrap_or(&path);
+                            if let Some(ref fg) = file_glob {
+                                if !fg.is_match(rel) {
+                                    continue;
                                 }
-                            } else {
-                                for hunk in
-                                    context_hunks(&rel_display.to_string(), &lines, &hits, context)
-                                {
-                                    if !matches.is_empty() {
-                                        matches.push("--".into());
-                                    }
-                                    matches.push(hunk);
-                                    if matches.iter().map(String::len).sum::<usize>()
-                                        >= SEARCH_CONTEXT_OUTPUT_MAX_BYTES
-                                    {
-                                        matches.push(
-                                            "… (capped — narrow the query or file_pattern)".into(),
-                                        );
-                                        return Ok(matches.join("\n"));
-                                    }
+                            }
+                            if let Ok(content) = std::fs::read_to_string(&path) {
+                                let label = rel.display().to_string();
+                                if !append_search_matches(
+                                    &label,
+                                    &content,
+                                    re.as_ref(),
+                                    &query,
+                                    context,
+                                    &mut matches,
+                                ) {
+                                    break 'walk; // an output cap was hit — stop searching
                                 }
                             }
                         }
@@ -1262,6 +1240,57 @@ impl Tool for SearchTool {
         .await
         .map_err(|e| ToolError::Failed(format!("search task failed: {e}")))?
     }
+}
+
+/// Scan one file's `content` for `query` matches and append rendered output lines to `matches` —
+/// the shared match/render core of [`SearchTool`] for both the directory walk and the single-file
+/// path. `label` is the path column. Returns `false` when an output cap was hit (the caller must
+/// stop searching; the cap note has already been appended).
+fn append_search_matches(
+    label: &str,
+    content: &str,
+    re: Option<&regex::Regex>,
+    query: &str,
+    context: usize,
+    matches: &mut Vec<String>,
+) -> bool {
+    let lines: Vec<&str> = content.lines().collect();
+    let hits: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            if let Some(re) = re {
+                re.is_match(line)
+            } else {
+                line.contains(query)
+            }
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if hits.is_empty() {
+        return true;
+    }
+    if context == 0 {
+        for &i in &hits {
+            matches.push(format!("{label}:{}: {}", i + 1, lines[i].trim_end()));
+            if matches.len() >= SEARCH_MATCH_CAP {
+                matches.push(format!("… (capped at {SEARCH_MATCH_CAP} matches)"));
+                return false;
+            }
+        }
+    } else {
+        for hunk in context_hunks(label, &lines, &hits, context) {
+            if !matches.is_empty() {
+                matches.push("--".into());
+            }
+            matches.push(hunk);
+            if matches.iter().map(String::len).sum::<usize>() >= SEARCH_CONTEXT_OUTPUT_MAX_BYTES {
+                matches.push("… (capped — narrow the query or file_pattern)".into());
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Total byte budget for a context-mode `search` result, so `context: N` over many hits can't flood
@@ -1810,6 +1839,46 @@ mod tests {
 
         assert!(out.contains("a.rs"), "got:\n{out}");
         assert!(!out.contains("b.txt"), "must skip non-rs:\n{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn search_accepts_a_file_path_and_searches_that_file() {
+        // Baseline defect (harness-robustness wave 2): models routinely pass a FILE path and got
+        // "X is not a directory" — a wasted round-trip. A file path must search that single file,
+        // same output format, path column = the file as given.
+        let dir = temp_dir("search-file-path");
+        std::fs::write(dir.join("a.txt"), "hello\nfind ME here\nbye").unwrap();
+        std::fs::write(dir.join("b.txt"), "find ME too").unwrap();
+        let file = dir.join("a.txt");
+        let file = file.to_str().unwrap();
+
+        let out = SearchTool
+            .run(&json!({ "query": "find ME", "path": file }))
+            .await
+            .unwrap();
+
+        assert_eq!(out, format!("{file}:2: find ME here"), "got:\n{out}");
+        assert!(!out.contains("b.txt"), "only the named file is searched");
+
+        // Same regex + context semantics as the directory walk.
+        let out = SearchTool
+            .run(&json!({ "query": r"find \w+", "path": file, "regex": true, "context": 1 }))
+            .await
+            .unwrap();
+        assert!(
+            out.contains(&format!("{file}:2: find ME here")),
+            "got:\n{out}"
+        );
+        assert!(out.contains(&format!("{file}:1- hello")), "got:\n{out}");
+        assert!(out.contains(&format!("{file}:3- bye")), "got:\n{out}");
+
+        // No hits in the file reads exactly like an empty directory search.
+        let out = SearchTool
+            .run(&json!({ "query": "absent", "path": file }))
+            .await
+            .unwrap();
+        assert_eq!(out, "no matches for 'absent'");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
