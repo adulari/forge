@@ -540,10 +540,19 @@ impl ForgeMcp {
                 Arc::new(follow_schema),
             ));
         }
-        // Always advertise task tracking so a bridge model can maintain a visible todo list.
+        // Always advertise task tracking so a bridge model can maintain a visible todo list. The
+        // description is bridge-specific: the direct path's spec encourages an update per status
+        // change, which through a bridged CLI means a whole extra model round-trip per task — so
+        // here it asks for batched updates instead.
         let ts = forge_core::update_tasks_spec();
         let ts_schema: JsonObject = ts.schema.as_object().cloned().unwrap_or_default();
-        tools.push(Tool::new(ts.name, ts.description, Arc::new(ts_schema)));
+        tools.push(Tool::new(
+            ts.name,
+            "Create the task list once up front. Batch status changes — update in one call when \
+             several steps changed. One final call marking remaining tasks Done before finishing."
+                .to_string(),
+            Arc::new(ts_schema),
+        ));
         // Always advertise the on-demand memory tool so a bridge model can persist facts mid-turn.
         let rs = forge_core::remember_spec();
         let rs_schema: JsonObject = rs.schema.as_object().cloned().unwrap_or_default();
