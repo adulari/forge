@@ -1318,6 +1318,15 @@ pub struct MeshConfig {
     /// only code-change runs are affected, so interactive use never sees it.
     #[serde(default = "default_guard_test_edits")]
     pub guard_test_edits: bool,
+    /// Timeout reconciliation window (quality guards wave 4): when the caller has set a turn
+    /// deadline (`bench swe` reserves ~120s before its hard tokio timeout), a turn past the
+    /// deadline stops launching new model calls and gets ONE final instruction — revert
+    /// unverified speculative changes, keep the minimal verified fix, stop. Without it the hard
+    /// kill ships whatever mid-refactor state the tree happens to be in (the xarray-3364 timeout:
+    /// "submit partial work" shipped the riskiest state). Default true; inert unless a deadline
+    /// is set, so interactive use never sees it.
+    #[serde(default = "default_deadline_reconcile")]
+    pub deadline_reconcile: bool,
     /// Which subscription plan backs each CLI bridge (`claude-cli` → "max-20x", `codex-cli` →
     /// "plus"), captured by `forge init`. Records the usage headroom the user has: the
     /// subscription-conservation layer reads it so a larger plan (more headroom) is spent more
@@ -1440,6 +1449,10 @@ fn default_nudge_empty_diff() -> bool {
 }
 
 fn default_guard_test_edits() -> bool {
+    true
+}
+
+fn default_deadline_reconcile() -> bool {
     true
 }
 
@@ -1849,6 +1862,7 @@ impl Default for Config {
                 verify_completeness: default_verify_completeness(),
                 nudge_empty_diff: default_nudge_empty_diff(),
                 guard_test_edits: default_guard_test_edits(),
+                deadline_reconcile: default_deadline_reconcile(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),
                 disabled: Vec::new(),

@@ -611,6 +611,14 @@ async fn prepare_and_run(
             // (mesh.nudge_empty_diff) so a turn that explored but edited nothing gets one
             // "implement it, don't describe it" push-back instead of scoring an empty patch.
             session.set_expect_code_change(true);
+            // Soft deadline 120s before the hard tokio timeout below: past it the session stops
+            // launching model calls and spends ONE turn reverting unverified speculative changes,
+            // so the hard kill no longer ships the riskiest mid-refactor state as the patch.
+            if let Some(budget) = forge_core::reconcile_deadline_budget_secs(timeout_secs, 120) {
+                session.set_turn_deadline(
+                    std::time::Instant::now() + std::time::Duration::from_secs(budget),
+                );
+            }
             // Bound the in-process Forge turn the SAME way the external CLIs are bounded. Without
             // this the Forge path was unbounded: a non-converging run on a hard instance was observed
             // making 500+ tool calls over 22 minutes while claude-cli's own internal limits kept it

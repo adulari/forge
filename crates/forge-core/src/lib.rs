@@ -424,6 +424,21 @@ fn failover_policy(pinned: bool, pin_failover: bool, rate_limited: bool) -> Fail
 const EMPTY_DIFF_NUDGE: &str =
     "You have not modified any files. Implement the fix now — do not just describe it.";
 
+/// The deadline-reconciliation instruction (quality guards wave 4, fix 2): injected once when a
+/// turn crosses its soft deadline. The model gets ONE more completion to revert speculative work,
+/// then the loop ends — the caller's hard timeout still kills the turn at the full limit.
+const DEADLINE_RECONCILE_NUDGE: &str = "Time budget exhausted. Revert any UNVERIFIED speculative \
+changes now (git checkout those hunks), keeping only the minimal verified fix, then stop.";
+
+/// The soft-deadline budget for a turn bounded by a hard `timeout_secs` kill: reserve
+/// `reserve_secs` for the reconciliation window (one revert turn + slack), or `None` when the
+/// timeout is too small to leave a usable working budget. Pure so the gating math is
+/// unit-testable; `bench swe` calls it with its per-instance timeout and a 120s reserve.
+pub fn reconcile_deadline_budget_secs(timeout_secs: u64, reserve_secs: u64) -> Option<u64> {
+    let budget = timeout_secs.saturating_sub(reserve_secs);
+    (budget > 0).then_some(budget)
+}
+
 /// The existing-tests-are-spec guard turn (quality guards wave 4, fix 1): sent as a synthetic
 /// user message after the working diff was found to MODIFY existing test files and those edits
 /// were stashed. Hidden evaluation restores pristine tests, so a fix that only passes rewritten
@@ -846,6 +861,14 @@ pub struct Session {
     /// With `mesh.nudge_empty_diff`, a turn that ran tools but edited nothing and left the git
     /// tree clean gets ONE "implement it, don't describe it" push-back. Never set interactively.
     expect_code_change: bool,
+    /// Soft turn deadline (quality guards wave 4): set by a caller that enforces a HARD timeout
+    /// the session cannot see (`bench swe`'s tokio timeout), minus a reserve. Once past it the
+    /// model loop stops launching new completions except ONE reconciliation turn ("revert
+    /// unverified speculative changes, then stop"). `None` = no deadline (interactive default).
+    turn_deadline: Option<std::time::Instant>,
+    /// One-shot latch for the deadline-reconciliation instruction; re-armed by
+    /// [`Session::set_turn_deadline`].
+    deadline_reconciled: bool,
     /// Per-turn guard against repeated failing tools and identical-call doom loops.
     failure_tracker: ToolFailureTracker,
     /// The current git branch (`.git/HEAD` → `refs/heads/<branch>`), cached so the hot per-request
@@ -1035,6 +1058,8 @@ impl Session {
             pending_images: Vec::new(),
             edits_this_turn: 0,
             expect_code_change: false,
+            turn_deadline: None,
+            deadline_reconciled: false,
             failure_tracker: ToolFailureTracker::new(),
             cached_git_branch: current_git_branch(),
             // Read AGENTS.md eagerly (sync, off the async path) only when it will actually be
@@ -1095,6 +1120,22 @@ impl Session {
     /// demand an implementation, arming the empty-diff completion nudge (`mesh.nudge_empty_diff`).
     pub fn set_expect_code_change(&mut self, v: bool) {
         self.expect_code_change = v;
+    }
+
+    /// Set the soft turn deadline (see the `turn_deadline` field): the caller enforces a hard
+    /// timeout the session cannot see, so this is set to `hard limit − reserve` (the reserve
+    /// leaves room for the one reconciliation turn). Re-arms the one-shot latch.
+    pub fn set_turn_deadline(&mut self, deadline: std::time::Instant) {
+        self.turn_deadline = Some(deadline);
+        self.deadline_reconciled = false;
+    }
+
+    /// Whether the soft turn deadline is set, active (`mesh.deadline_reconcile`), and past.
+    fn past_turn_deadline(&self) -> bool {
+        self.config.mesh.deadline_reconcile
+            && self
+                .turn_deadline
+                .is_some_and(|d| std::time::Instant::now() >= d)
     }
 
     /// Set (or clear) the in-session reasoning-effort pin. `None` returns to the provider default.
@@ -3086,6 +3127,35 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         let checkpoint_ctx = self.checkpoint_context();
 
         for step in 0..max_steps {
+            // ── Timeout reconciliation window (quality guards wave 4, fix 2) ──────────────────
+            // The caller's hard timeout (`bench swe`'s tokio kill) is invisible from inside the
+            // turn, so without this the kill lands mid-verification and "submit partial work"
+            // ships whatever risky state the tree is in. Past the soft deadline: stop launching
+            // new completions, inject ONE revert instruction, allow one model turn to act on it
+            // (its tool calls run in the same step), then end the loop normally. The latch is a
+            // Session field so later loop re-entries this turn (nudges/guards) end immediately
+            // instead of re-firing.
+            if self.past_turn_deadline() {
+                if self.deadline_reconciled {
+                    hit_step_cap = false;
+                    break;
+                }
+                self.deadline_reconciled = true;
+                self.presenter.emit(PresenterEvent::Warning(
+                    "turn deadline reached — asking the model to revert unverified changes and stop"
+                        .to_string(),
+                ));
+                let dseq = self.next_seq();
+                let _ = self.store.add_message(
+                    &self.id,
+                    dseq,
+                    Role::System,
+                    DEADLINE_RECONCILE_NUDGE,
+                    None,
+                );
+                self.transcript
+                    .push(Message::system(DEADLINE_RECONCILE_NUDGE));
+            }
             let tools_before = tools_ran.load(std::sync::atomic::Ordering::Relaxed);
             let inspect_before = inspect_ran.load(std::sync::atomic::Ordering::Relaxed);
             // Stream the reply, with transparent failover for this step's completion.
@@ -4427,6 +4497,9 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             && self.expect_code_change
             && turn_tools_ran > 0
             && self.edits_this_turn == 0
+            // Past the soft deadline there is no budget for a re-drive (and the re-entered loop
+            // would end immediately, clobbering the final answer with an empty one).
+            && !self.past_turn_deadline()
             && working_tree_unchanged(self.work_root.as_deref())
         {
             self.presenter.emit(PresenterEvent::Warning(
@@ -4462,7 +4535,12 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // files (git status `A`/`??`) never trip it — writing a reproduction test is normal.
         // One-shot by construction (straight-line code, like the empty-diff nudge above); runs
         // BEFORE self-review/autofix so whatever state the model settles on is still checked.
-        if self.config.mesh.guard_test_edits && self.expect_code_change {
+        // Skipped past the soft deadline: no budget for a guard turn (same rationale as the
+        // empty-diff nudge gate above).
+        if self.config.mesh.guard_test_edits
+            && self.expect_code_change
+            && !self.past_turn_deadline()
+        {
             let test_edits = modified_test_files_in_tree(self.work_root.as_deref());
             if !test_edits.is_empty() && stash_paths(self.work_root.as_deref(), &test_edits) {
                 self.presenter.emit(PresenterEvent::Warning(format!(
@@ -11580,6 +11658,123 @@ mod tests {
             "assert fix() == 2\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Timeout reconciliation window (quality guards wave 4, fix 2) ---
+
+    #[test]
+    fn reconcile_deadline_budget_math() {
+        // bench swe's shape: a 900s hard timeout leaves a 780s soft budget (120s reserve).
+        assert_eq!(reconcile_deadline_budget_secs(900, 120), Some(780));
+        assert_eq!(reconcile_deadline_budget_secs(300, 120), Some(180));
+        // A timeout at or under the reserve leaves no usable budget → no deadline is set (the
+        // hard kill is then the only bound, exactly the pre-wave-4 behaviour).
+        assert_eq!(reconcile_deadline_budget_secs(120, 120), None);
+        assert_eq!(reconcile_deadline_budget_secs(60, 120), None);
+        assert_eq!(reconcile_deadline_budget_secs(0, 120), None);
+    }
+
+    /// Scripted runaway model: ALWAYS returns a read-only tool call, never finishing on its own —
+    /// only an external bound (step cap or the deadline) can end the loop. Counts completions.
+    struct CountingToolLoopProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for CountingToolLoopProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(forge_provider::ModelResponse {
+                content: String::new(),
+                tool_calls: vec![forge_types::ToolCall {
+                    id: forge_types::new_id(),
+                    name: "list_dir".into(),
+                    args: serde_json::json!({ "path": "." }),
+                }],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn past_deadline_allows_exactly_one_reconcile_completion() {
+        // With the deadline already past, the loop must inject the revert instruction, allow ONE
+        // model completion to act on it, then end — not run to the 100-step cap.
+        let provider = Arc::new(CountingToolLoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.set_turn_deadline(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one reconciliation completion, then the loop must end"
+        );
+        // The revert instruction was actually delivered to the transcript.
+        let msgs = store.load_messages(session.id()).unwrap();
+        assert!(
+            msgs.iter().any(|m| m.content == DEADLINE_RECONCILE_NUDGE),
+            "the reconcile instruction must be in the transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn deadline_reconcile_respects_the_config_gate() {
+        // `mesh.deadline_reconcile = false` restores the old behaviour: the deadline is ignored
+        // and only the step cap bounds the loop.
+        let provider = Arc::new(CountingToolLoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.config.mesh.deadline_reconcile = false;
+        session.config.mesh.max_steps = 3;
+        session.set_turn_deadline(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "gate off → the step cap, not the deadline, bounds the loop"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_deadline_means_no_reconcile_behaviour() {
+        // An interactive session (no deadline set) is byte-for-byte unaffected.
+        let provider = Arc::new(CountingToolLoopProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.config.mesh.max_steps = 3;
+        session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
     #[tokio::test]
