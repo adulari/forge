@@ -4710,9 +4710,20 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // model loop. One-shot by construction (straight-line code, the same latch idea as
         // `completeness_checked`); runs BEFORE self-review/autofix so any edits it produces are
         // still lint/test-checked. `mesh.nudge_empty_diff = false` disables it wholesale.
+        //
+        // Bridge-path robustness (wave 6): `turn_tools_ran` counts a CLI bridge's tools too — they
+        // surface through the stream sink as `StreamEvent::ToolStarted` (see run_model_loop) — so the
+        // nudge already fires for the common bridge turn that explored then described. But that count
+        // then hinges on the bridge's tool-event JSON parsing: if a bridge yields an empty diff having
+        // surfaced NO parseable tool event (a refusal, a prose-only reply, or codex/claude CLI output
+        // drift), the `> 0` gate would silently drop the pushback on the exact path every bench uses.
+        // A `codex-cli::gpt-5.5` SWE-bench Lite sweep resolved 3/15 vs raw codex 9/15, with 8/15
+        // submitting an empty patch — so an empty completion on a known code-change turn ALWAYS
+        // warrants one pushback on the bridge, whether or not a tool event was surfaced. Direct-path
+        // semantics are unchanged (`> 0`); only the bridge relaxes the tool-activity requirement.
         if self.config.mesh.nudge_empty_diff
             && self.expect_code_change
-            && turn_tools_ran > 0
+            && (turn_tools_ran > 0 || forge_provider::is_cli_bridge(&active_model))
             && self.edits_this_turn == 0
             // Past the soft deadline there is no budget for a re-drive (and the re-entered loop
             // would end immediately, clobbering the final answer with an empty one).
