@@ -380,6 +380,26 @@ pub(crate) enum Command {
         #[arg(long)]
         mock: bool,
     },
+    /// Run an OpenAI-compatible HTTP endpoint backed by Forge's model mesh — embed Forge as your
+    /// app's AI backend. Point any OpenAI-compatible client's `base_url` at `http://<host>:<port>/v1`
+    /// and every chat completion is routed through the mesh (tier-based model choice, cross-provider
+    /// failover, quota-spread, cost tracking). See docs/features/embed-ai-backend.md.
+    Api {
+        /// Bind address (default 127.0.0.1 — loopback only). Use 0.0.0.0 to accept LAN/container
+        /// traffic (put a reverse proxy in front for TLS + public exposure).
+        #[arg(long)]
+        host: Option<String>,
+        /// Listen port (default 8787).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Require this bearer token on requests (`Authorization: Bearer <KEY>`). Falls back to the
+        /// FORGE_API_KEY env var; open to all callers when neither is set.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Serve the offline deterministic mock provider instead of real models (testing).
+        #[arg(long)]
+        mock: bool,
+    },
     /// List past sessions (newest first).
     Sessions,
     /// Replay a past session from the record: one id prints its turn-by-turn transcript
