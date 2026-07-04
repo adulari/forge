@@ -1253,6 +1253,14 @@ pub struct MeshConfig {
     /// turn transparently retries on the next-best healthy model. Set false for single-shot.
     #[serde(default = "default_failover")]
     pub failover: bool,
+    /// Escape hatch for strict pin semantics (harness-robustness wave 2): when FALSE (default), an
+    /// EXPLICITLY pinned model (`--model` / `/model`) never fails over to a different model — a
+    /// rate limit is waited out on the same model (pinned backoff) and a permanent error fails the
+    /// turn with the real cause, so a pinned run can't be silently contaminated by another model's
+    /// output (the SWE-bench pin-violation defect). Set true to restore the old switch-away
+    /// behaviour for pinned turns.
+    #[serde(default)]
+    pub pin_failover: bool,
     /// Default bench duration (seconds) when a transient failure (rate-limit / 5xx) gives no
     /// server `Retry-After`. Kept short because free-tier rate limits typically reset per MINUTE
     /// (NVIDIA NIM, Groq, Gemini RPM) — a long bench would strand the best free models and push
@@ -1807,6 +1815,7 @@ impl Default for Config {
                 workflows: WorkflowsConfig::default(),
                 auto_discover: default_auto_discover(),
                 failover: default_failover(),
+                pin_failover: false,
                 failover_cooldown_secs: default_failover_cooldown_secs(),
                 rate_limit_wait_secs: default_rate_limit_wait_secs(),
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),

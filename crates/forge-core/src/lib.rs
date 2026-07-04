@@ -391,6 +391,34 @@ fn pinned_backoff_delay(
     std::time::Duration::from_secs_f64(base as f64 * factor)
 }
 
+/// What the failover machinery may do with a retryable provider error, given pin state
+/// (harness-robustness wave 2, fix 2 — strict pin semantics). Pure so the policy is
+/// table-testable; [`failover_policy`] is the single chooser `run_model_loop` obeys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailoverPolicy {
+    /// Not pinned (or the `mesh.pin_failover` escape hatch is on): normal cross-model
+    /// failover down the routed chain.
+    SwitchModels,
+    /// Pinned + rate-limited: wait out the limit and retry the SAME model (fix 1's backoff).
+    BackoffSameModel,
+    /// Pinned + any other retryable failure (permanent capability/auth error, or an outage that
+    /// survived the same-model transient retries): fail the turn with the REAL error — an
+    /// explicitly pinned model is never silently switched.
+    FailTurn,
+}
+
+/// The strict-pin failover chooser: an explicit pin forbids cross-model switching unless
+/// `mesh.pin_failover = true` restores the old behaviour.
+fn failover_policy(pinned: bool, pin_failover: bool, rate_limited: bool) -> FailoverPolicy {
+    if !pinned || pin_failover {
+        FailoverPolicy::SwitchModels
+    } else if rate_limited {
+        FailoverPolicy::BackoffSameModel
+    } else {
+        FailoverPolicy::FailTurn
+    }
+}
+
 /// Render a sequence of messages into TUI [`ReplayItem`](forge_tui::ReplayItem)s — user prompts,
 /// assistant text, tool calls (with args), tool results (matched to their call's name via
 /// `tool_call_id`), and the compaction marker. Shared by the model-facing replay
@@ -3082,46 +3110,74 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             tokio::time::sleep(backoff).await;
                             continue;
                         }
-                        // Pinned rate-limit backoff (harness-robustness wave 2, fix 1): a pin must
-                        // pin. Retry the SAME model on the documented schedule (5s/15s/45s, then
-                        // 60s-capped, ±20% jitter, ≤6 attempts, ≤180s total — the PINNED_RL_*
-                        // constants), honoring a server `Retry-After` verbatim when the error
-                        // carried one. Multi-key rotation already ran inside the provider (one
-                        // next-key retry per 429, genai_provider.rs), so by the time the error
-                        // reaches this loop every configured key is limited and waiting is the
-                        // only same-model option left.
-                        if pinned_turn && e.is_rate_limited() {
-                            let retry_after = match &e {
-                                forge_provider::ProviderError::RateLimited {
-                                    retry_after, ..
-                                } => *retry_after,
-                                _ => None,
-                            };
-                            let attempt = pinned_rl_attempts + 1;
-                            // Cheap jitter without a rand dependency: sub-second wall-clock nanos.
-                            let jitter = f64::from(
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.subsec_nanos())
-                                    .unwrap_or(0),
-                            ) / 1e9;
-                            let delay = pinned_backoff_delay(attempt, retry_after, jitter);
-                            let budget = std::time::Duration::from_secs(PINNED_RL_TOTAL_WAIT_SECS);
-                            if attempt <= PINNED_RL_MAX_ATTEMPTS
-                                && pinned_rl_waited + delay <= budget
-                            {
-                                pinned_rl_attempts = attempt;
-                                pinned_rl_waited += delay;
+                        // Strict pin semantics (harness-robustness wave 2, fix 2): the single
+                        // chooser for what this error may do given pin state. An explicit pin
+                        // forbids cross-model failover — `mesh.pin_failover = true` is the escape
+                        // hatch that restores the old switch-away behaviour end to end.
+                        match failover_policy(
+                            pinned_turn,
+                            self.config.mesh.pin_failover,
+                            e.is_rate_limited(),
+                        ) {
+                            FailoverPolicy::SwitchModels => {} // fall through to wait/bench/chain
+                            // Pinned rate-limit backoff (fix 1): a pin must pin. Retry the SAME
+                            // model on the documented schedule (5s/15s/45s, then 60s-capped, ±20%
+                            // jitter, ≤6 attempts, ≤180s total — the PINNED_RL_* constants),
+                            // honoring a server `Retry-After` verbatim when the error carried one.
+                            // Multi-key rotation already ran inside the provider (one next-key
+                            // retry per 429, genai_provider.rs), so by the time the error reaches
+                            // this loop every configured key is limited and waiting is the only
+                            // same-model option left.
+                            FailoverPolicy::BackoffSameModel => {
+                                let retry_after = match &e {
+                                    forge_provider::ProviderError::RateLimited {
+                                        retry_after,
+                                        ..
+                                    } => *retry_after,
+                                    _ => None,
+                                };
+                                let attempt = pinned_rl_attempts + 1;
+                                // Cheap jitter without a rand dependency: sub-second wall-clock
+                                // nanos.
+                                let jitter = f64::from(
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.subsec_nanos())
+                                        .unwrap_or(0),
+                                ) / 1e9;
+                                let delay = pinned_backoff_delay(attempt, retry_after, jitter);
+                                let budget =
+                                    std::time::Duration::from_secs(PINNED_RL_TOTAL_WAIT_SECS);
+                                if attempt <= PINNED_RL_MAX_ATTEMPTS
+                                    && pinned_rl_waited + delay <= budget
+                                {
+                                    pinned_rl_attempts = attempt;
+                                    pinned_rl_waited += delay;
+                                    self.presenter.emit(PresenterEvent::Warning(format!(
+                                        "{active_model}: rate limited — retrying pinned model in \
+                                         {}s (attempt {attempt}/{PINNED_RL_MAX_ATTEMPTS})",
+                                        delay.as_secs().max(1)
+                                    )));
+                                    self.presenter.emit(PresenterEvent::ModelSearch {
+                                        model: active_model.clone(),
+                                    });
+                                    tokio::time::sleep(delay).await;
+                                    continue;
+                                }
+                                // Backoff budget exhausted: fail the turn with the REAL error
+                                // rather than silently running a different model than the pin.
                                 self.presenter.emit(PresenterEvent::Warning(format!(
-                                    "{active_model}: rate limited — retrying pinned model in {}s \
-                                     (attempt {attempt}/{PINNED_RL_MAX_ATTEMPTS})",
-                                    delay.as_secs().max(1)
+                                    "{active_model}: still rate limited after \
+                                     {pinned_rl_attempts} backoff retries — failing the turn \
+                                     (pinned model; cross-model failover disabled)"
                                 )));
-                                self.presenter.emit(PresenterEvent::ModelSearch {
-                                    model: active_model.clone(),
-                                });
-                                tokio::time::sleep(delay).await;
-                                continue;
+                                return Err(e.into());
+                            }
+                            FailoverPolicy::FailTurn => {
+                                // A pinned model with a permanent incapability (or an outage that
+                                // survived the same-model transient retries) can't serve this
+                                // turn, and switching models is forbidden: surface the real error.
+                                return Err(e.into());
                             }
                         }
                         // Rate-limit on the current (best-ranked) model with a SHORT reset: WAIT for
@@ -10915,6 +10971,76 @@ mod tests {
             answer, "pin::model",
             "session pin retried on the same model"
         );
+    }
+
+    #[test]
+    fn failover_chooser_forbids_cross_model_switching_for_pins() {
+        // Table test on the single failover chooser (strict pin semantics, fix 2):
+        // (pinned, pin_failover escape hatch, rate_limited) → what the loop may do.
+        use FailoverPolicy::*;
+        let table = [
+            // Unpinned turns: normal failover regardless of error kind or escape hatch.
+            (false, false, true, SwitchModels),
+            (false, false, false, SwitchModels),
+            (false, true, true, SwitchModels),
+            (false, true, false, SwitchModels),
+            // Pinned + strict (default): rate limit → same-model backoff; anything else →
+            // fail the turn with the real error. Never a silent switch.
+            (true, false, true, BackoffSameModel),
+            (true, false, false, FailTurn),
+            // Pinned + escape hatch: the old switch-away behaviour, end to end.
+            (true, true, true, SwitchModels),
+            (true, true, false, SwitchModels),
+        ];
+        for (pinned, hatch, rl, want) in table {
+            assert_eq!(
+                failover_policy(pinned, hatch, rl),
+                want,
+                "pinned={pinned} pin_failover={hatch} rate_limited={rl}"
+            );
+        }
+    }
+
+    fn capability(_m: &str) -> forge_provider::ProviderError {
+        forge_provider::ProviderError::Capability("no tool support".into())
+    }
+
+    #[tokio::test]
+    async fn pinned_model_with_a_permanent_error_fails_the_turn_with_the_real_cause() {
+        // Strict pins: a pinned model that permanently can't serve the turn must FAIL the turn
+        // with the real error — not silently run the fallback (benchmark contamination).
+        let provider = Arc::new(EchoProvider {
+            bad: ["pin::model".to_string()].into_iter().collect(),
+            err: capability,
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        let err = session.run_turn("fix the bug").await.unwrap_err();
+        assert!(
+            err.to_string().contains("no tool support"),
+            "the REAL provider error must surface, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_failover_escape_hatch_restores_cross_model_switching() {
+        // `mesh.pin_failover = true` deliberately restores the old behaviour: a failing pinned
+        // model may switch to the decision's fallbacks.
+        let provider = Arc::new(EchoProvider {
+            bad: ["pin::model".to_string()].into_iter().collect(),
+            err: unavailable,
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.mesh.pin_failover = true;
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(answer, "worse::model", "escape hatch allows the old switch");
     }
 
     #[tokio::test]

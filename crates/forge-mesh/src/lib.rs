@@ -890,6 +890,15 @@ impl HeuristicRouter {
             // `pinned` only when the pin itself is the routed model — a pin that was unusable
             // (no key) already fell back to a mesh pick above, which is NOT an explicit pin.
             let pinned = model == *pin;
+            // Strict pin semantics (harness-robustness wave 2, fix 2): an explicit pin gets NO
+            // cross-model fallback chain — mid-turn failover off a pinned model silently
+            // contaminated runs that depended on the exact model (the SWE-bench baseline switched
+            // 2 pinned instances to a different model). A rate limit is waited out on the SAME
+            // model (the pinned backoff in forge-core); a permanent error fails the turn with the
+            // real cause. `mesh.pin_failover = true` restores the old switch-away behaviour.
+            if pinned && !self.config.mesh.pin_failover {
+                chain.clear();
+            }
             return RoutingDecision {
                 tier: classified_tier,
                 model,
@@ -2169,6 +2178,38 @@ mod tests {
         assert!(
             d.pinned,
             "an explicit --model pin must be flagged as pinned"
+        );
+        assert!(
+            d.fallbacks.is_empty(),
+            "strict pins (default): no cross-model fallback chain for a pinned model, got {:?}",
+            d.fallbacks
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_failover_escape_hatch_keeps_the_fallback_chain() {
+        // `mesh.pin_failover = true` restores the pre-wave-2 behaviour: a pinned decision keeps
+        // the mesh fallback chain so a failing pin may still switch away mid-turn.
+        let mut config = Config::default();
+        config.mesh.pin_failover = true;
+        let r = HeuristicRouter::new(config)
+            .with_availability(|_| true)
+            .with_pin(Some("openai::gpt-4o".into()));
+        let d = r
+            .route(
+                "fix typo",
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(d.model, "openai::gpt-4o");
+        assert!(d.pinned);
+        assert!(
+            !d.fallbacks.is_empty(),
+            "escape hatch keeps the old pin fallback chain"
         );
     }
 
