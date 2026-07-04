@@ -87,6 +87,10 @@ pub struct InstanceMetric {
     pub patched: bool,
     /// False when token/cost numbers could not be captured (external CLI without machine output).
     pub metrics_complete: bool,
+    /// True when the instance hit the per-instance timeout and submitted partial work — so a
+    /// truncated run can't be read as a normal-cost solve. Defaults false for older sidecars.
+    #[serde(default)]
+    pub timed_out: bool,
 }
 
 /// Outcome of running one instance: the patch plus the resources it took.
@@ -97,6 +101,7 @@ struct RunOutcome {
     cost_usd: f64,
     wall_secs: f64,
     metrics_complete: bool,
+    timed_out: bool,
 }
 
 /// Serialize per-instance metrics as JSONL (one object per line) for the `<out>.metrics.jsonl`
@@ -326,6 +331,7 @@ async fn run_one_sweep(
                     cost_usd: 0.0,
                     wall_secs: 0.0,
                     metrics_complete: false,
+                    timed_out: false,
                 }
             }
         };
@@ -342,6 +348,7 @@ async fn run_one_sweep(
             wall_secs: outcome.wall_secs,
             patched,
             metrics_complete: outcome.metrics_complete,
+            timed_out: outcome.timed_out,
         });
         preds.push(Prediction {
             instance_id: inst.instance_id.clone(),
@@ -593,7 +600,7 @@ async fn prepare_and_run(
     let dir = prepare_repo(inst, workdir)?;
     std::env::set_current_dir(&dir).context("entering instance repo")?;
     let started = std::time::Instant::now();
-    let (input_tokens, output_tokens, cost_usd, metrics_complete) = match agent {
+    let (input_tokens, output_tokens, cost_usd, metrics_complete, timed_out) = match agent {
         Agent::Forge => {
             // Bypass mode: a benchmark turn runs unattended, so no permission prompts. The agent
             // edits the freshly-reset working tree; we read the diff back out afterwards.
@@ -607,28 +614,36 @@ async fn prepare_and_run(
             // the partial patch (a non-empty attempt still scores; an unsolved one was unsolved
             // anyway).
             let turn = session.run_turn(&inst.problem_statement);
-            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), turn).await {
+            let timed_out = match tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_secs),
+                turn,
+            )
+            .await
+            {
                 Ok(res) => {
                     res.context("running the agent turn")?;
+                    false
                 }
-                Err(_) => eprintln!(
-                    "  forge turn hit the {timeout_secs}s timeout — submitting partial work"
-                ),
-            }
+                Err(_) => {
+                    eprintln!(
+                        "  forge turn hit the {timeout_secs}s timeout — submitting partial work"
+                    );
+                    true
+                }
+            };
             // Reliable even for bridge providers — read from Forge's own usage DB for THIS session.
             let (inp, out, cost) = session.session_usage_db();
-            (inp, out, cost, true)
+            (inp, out, cost, true, timed_out)
         }
         Agent::ClaudeCode | Agent::Codex => {
-            let usage = run_external_agent(
+            run_external_agent(
                 agent,
                 &inst.problem_statement,
                 &dir,
                 model.as_deref(),
                 timeout_secs,
             )
-            .await?;
-            (usage.0, usage.1, usage.2, usage.3)
+            .await?
         }
     };
     let wall_secs = started.elapsed().as_secs_f64();
@@ -640,22 +655,26 @@ async fn prepare_and_run(
         cost_usd,
         wall_secs,
         metrics_complete,
+        timed_out,
     })
 }
 
 /// Run an external agent CLI (Claude Code / Codex) as its OWN autonomous agent in `dir`, feeding the
 /// task on stdin. Both must run fully unattended (edit files + run commands without prompts) so they
 /// can actually solve the instance — the clone is disposable, so the broad autonomy is contained.
-/// Returns `(input_tokens, output_tokens, cost_usd, metrics_complete)` parsed from the CLI's machine
-/// output where available (claude `--output-format json`); `metrics_complete = false` when the CLI
-/// gave no parseable usage, so the report won't make token claims it can't back up.
+/// Returns `(input_tokens, output_tokens, cost_usd, metrics_complete, timed_out)` parsed from the
+/// CLI's machine output where available (claude `--output-format json`); `metrics_complete = false`
+/// when the CLI gave no parseable usage, so the report won't make token claims it can't back up.
+/// On timeout the child is killed and the run still returns Ok — the caller extracts whatever
+/// partial diff the agent left in the working tree (parity with the Forge arm's timeout handling,
+/// which was already submitting partial work while this path failed the whole instance).
 async fn run_external_agent(
     agent: Agent,
     problem: &str,
     dir: &Path,
     model: Option<&str>,
     timeout_secs: u64,
-) -> Result<(u64, u64, f64, bool)> {
+) -> Result<(u64, u64, f64, bool, bool)> {
     use tokio::io::AsyncWriteExt;
 
     let (bin, mut args): (&str, Vec<String>) = match agent {
@@ -729,16 +748,24 @@ async fn run_external_agent(
             }
             let buf = reader.await.unwrap_or_default();
             let stdout = String::from_utf8_lossy(&buf);
-            Ok(parse_external_usage(agent, &stdout))
+            let (inp, out, cost, complete) = parse_external_usage(agent, &stdout);
+            Ok((inp, out, cost, complete, false))
         }
         Ok(Err(e)) => {
             reader.abort();
             Err(anyhow::anyhow!("waiting on {bin}: {e}"))
         }
         Err(_) => {
+            eprintln!("  {bin} hit the {timeout_secs}s timeout — submitting partial work");
             let _ = child.start_kill();
-            reader.abort();
-            anyhow::bail!("{bin} timed out after {timeout_secs}s")
+            let _ = child.wait().await;
+            // The kill closed stdout, so the reader finishes with whatever streamed before the
+            // timeout — codex's JSONL usage often parses from a partial stream; claude's single
+            // final JSON object won't (metrics_complete stays honest either way).
+            let buf = reader.await.unwrap_or_default();
+            let stdout = String::from_utf8_lossy(&buf);
+            let (inp, out, cost, complete) = parse_external_usage(agent, &stdout);
+            Ok((inp, out, cost, complete, true))
         }
     }
 }
@@ -866,6 +893,7 @@ mod tests {
                 wall_secs: 4.5,
                 patched: true,
                 metrics_complete: true,
+                timed_out: false,
             },
             InstanceMetric {
                 instance_id: "a-2".into(),
@@ -877,6 +905,7 @@ mod tests {
                 wall_secs: 0.0,
                 patched: false,
                 metrics_complete: false,
+                timed_out: true,
             },
         ];
         let jsonl = metrics_to_jsonl(&m);
@@ -887,6 +916,20 @@ mod tests {
         let p = dir.join("preds.metrics.jsonl");
         std::fs::write(&p, &jsonl).unwrap();
         assert_eq!(load_metrics(&p).unwrap(), m);
+    }
+
+    #[test]
+    fn metrics_without_timed_out_field_still_load() {
+        let dir = std::env::temp_dir().join(format!("forge-bench-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("old.metrics.jsonl");
+        std::fs::write(
+            &p,
+            "{\"instance_id\":\"a-1\",\"agent\":\"forge\",\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2,\"cost_usd\":0.0,\"wall_secs\":1.0,\"patched\":true,\"metrics_complete\":true}\n",
+        )
+        .unwrap();
+        let loaded = load_metrics(&p).unwrap();
+        assert!(!loaded[0].timed_out, "older sidecars default to false");
     }
 
     fn mk(id: &str, patched: bool, complete: bool, tokens: u64) -> InstanceMetric {
@@ -900,6 +943,7 @@ mod tests {
             wall_secs: 2.0,
             patched,
             metrics_complete: complete,
+            timed_out: false,
         }
     }
 
