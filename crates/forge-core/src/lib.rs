@@ -432,6 +432,16 @@ change at the logic level (a targeted script or careful reasoning against the co
 /// Consecutive env-setup failures before the nudge fires.
 const ENV_FIGHT_THRESHOLD: usize = 4;
 
+/// Repeated build/provision tool invocations within ONE bridge turn before the ceiling folds it
+/// into an early terminate (wave 5, fix 2). A CLI bridge runs its tools in a subprocess, so the
+/// sink surfaces each tool START but not per-command success/failure — we can't build the
+/// consecutive-failure streak the direct-path [`EnvFightTracker`] keys on. This approximates it:
+/// a bridge turn that keeps re-issuing build/provision commands this many times is stuck in the
+/// same venv/C-extension archaeology the env-fight guard targets, so it's folded into the
+/// token-ceiling early-terminate. Higher than the direct threshold because it counts invocations,
+/// not failures (some of these commands legitimately succeed).
+const BRIDGE_BUILD_FIGHT_THRESHOLD: u64 = 8;
+
 /// Whether a single bridge turn's accumulated input tokens have crossed its ceiling (wave 5,
 /// fix 1). Pure so the trip logic is unit-testable. A tail-cost backstop, not a target: `cap == 0`
 /// disables it, and the check is `>=` so the turn stops at the first observation boundary at or
@@ -440,16 +450,35 @@ const fn bridge_turn_over_budget(accumulated_input: u64, cap: u64) -> bool {
     cap != 0 && accumulated_input >= cap
 }
 
-/// Whether a shell command looks like environment provisioning — the small heuristic list the
-/// env-fight cap keys on (pip/venv/virtualenv/ensurepip/apt/uv/conda…). Substring match on the
-/// whitespace-normalized, lowercased command, so wrappers (`cd x && pip install …`) still match.
+/// Best-effort extraction of a shell command from a bridge tool's serialized args (wave 5, fix 2).
+/// Bridge tools surface args as a String that is either the raw command (codex `command_execution`)
+/// or a JSON blob carrying a `command`/`cmd` field (claude `Bash`, Forge's `shell` over MCP). Falls
+/// back to the raw string so the env/build heuristic still sees phrase patterns embedded in JSON.
+fn bridge_tool_command(args: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
+        for key in ["command", "cmd"] {
+            if let Some(c) = v.get(key).and_then(|x| x.as_str()) {
+                return c.to_string();
+            }
+        }
+    }
+    args.to_string()
+}
+
+/// Whether a shell command looks like environment provisioning or a native build — the heuristic
+/// the env-fight cap keys on (pip/venv/virtualenv/ensurepip/apt/uv/conda…), extended in wave 5 with
+/// build archaeology (C-extension builds + native toolchains: `setup.py build_ext`, `make`, `gcc`,
+/// `cmake`, `pyenv`, `./configure`…) that were the bulk of astropy-12907's failing commands and
+/// matched nothing before. Phrase patterns use a substring match on the whitespace-normalized,
+/// lowercased command (so wrappers like `cd x && pip install …` still match); single-token compiler
+/// invocations are matched as WHOLE tokens so `make` doesn't fire on `cmake`/`makemigrations`.
 fn is_env_setup_command(cmd: &str) -> bool {
     let c = cmd
         .to_ascii_lowercase()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    [
+    const PHRASES: &[&str] = &[
         "pip install",
         "pip3 install",
         "-m pip",
@@ -464,9 +493,19 @@ fn is_env_setup_command(cmd: &str) -> bool {
         "conda create",
         "yum install",
         "apk add",
-    ]
-    .iter()
-    .any(|p| c.contains(p))
+        "setup.py build",
+        "python setup.py",
+        "./configure",
+        "cmake",
+        "pyenv",
+    ];
+    if PHRASES.iter().any(|p| c.contains(p)) {
+        return true;
+    }
+    // Single-token compiler/build invocations — matched as WHOLE tokens, not substrings, so
+    // `make` doesn't fire on `cmake`/`makemigrations` and `cc` doesn't fire on `gcc`/`accept`.
+    const TOOLS: &[&str] = &["make", "gcc", "g++", "cc", "clang", "meson", "ninja"];
+    c.split(' ').any(|tok| TOOLS.contains(&tok))
 }
 
 /// Consecutive-failure tracker + once-per-turn latch for the env-fight nudge. Pure state machine
@@ -3213,6 +3252,11 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         // signal: a re-run that completes no task AND runs no tool made no progress, so it's halted
         // rather than re-driven again (the anti-spiral guard the old bridge-nudge lacked).
         let tools_ran = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // Counts build/provision tool STARTS a bridge surfaces via the sink across the whole turn
+        // (wave 5, fix 2). Per-command success/failure isn't available from the sink, so this
+        // approximates the direct-path env-fight streak with an invocation count; past
+        // BRIDGE_BUILD_FIGHT_THRESHOLD it folds into the token-ceiling early-terminate.
+        let bridge_build_fight = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         // Counts INSPECTION tools (anything except `update_tasks`/`present_plan`) — the verification
         // gate requires the bridge to actually CHECK real state, not just re-assert "done".
         let inspect_ran = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -3284,6 +3328,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                     let act = std::sync::Arc::clone(&activity);
                     let tools = std::sync::Arc::clone(&tools_ran);
                     let inspects = std::sync::Arc::clone(&inspect_ran);
+                    let build_fight = std::sync::Arc::clone(&bridge_build_fight);
                     let mut sink = |ev: StreamEvent| {
                         act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         match ev {
@@ -3301,6 +3346,12 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                                     && !name.ends_with("present_plan")
                                 {
                                     inspects.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                // Bridge-aware env/build-fight tracking (wave 5, fix 2): a bridge's
+                                // shell tools surface here, not in `resp.tool_calls`, so this is the
+                                // only place the build/provision-command pattern is observable.
+                                if is_env_setup_command(&bridge_tool_command(&args)) {
+                                    build_fight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
                                 presenter.emit(PresenterEvent::ToolStart { name, args })
                             }
@@ -3716,21 +3767,38 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             .to_string(),
                     ));
                 } else if forge_provider::is_cli_bridge(&active_model) {
-                    // Bridge token ceiling (wave 5, fix 1). This is the observation boundary a
+                    // Bridge cost ceiling (wave 5, fixes 1 + 2). This is the observation boundary a
                     // bridge turn actually has: its tools ran inside the subprocess and it has now
                     // yielded, so the direct-path cost guards (which key on `resp.tool_calls`) never
-                    // saw any of it. If the accumulated input crossed the per-turn ceiling, end the
-                    // turn cleanly here — no further re-drive — submitting whatever verified diff
-                    // exists. A tail-cost backstop, NOT a target; the common bridge turn finishes
-                    // well under the cap and never trips this.
-                    if bridge_turn_over_budget(
+                    // saw any of it. Two backstops decide whether to keep re-driving:
+                    //   * the accumulated input crossed the per-turn ceiling (fix 1), or
+                    //   * the bridge kept re-issuing build/provision commands (fix 2 — the env/build
+                    //     fight pattern the sink can see but can't attach pass/fail to).
+                    // Either one ends the turn cleanly here — no further re-drive — submitting
+                    // whatever verified diff exists. A tail-cost backstop, NOT a target; the common
+                    // bridge turn finishes well under the cap and never trips this.
+                    let over_budget = bridge_turn_over_budget(
                         bridge_input_accum,
                         self.config.mesh.bridge_turn_token_cap,
-                    ) {
+                    );
+                    let build_fighting = bridge_build_fight
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        >= BRIDGE_BUILD_FIGHT_THRESHOLD;
+                    if over_budget || build_fighting {
+                        let why = if over_budget {
+                            format!(
+                                "bridge turn hit the {}M input-token ceiling",
+                                self.config.mesh.bridge_turn_token_cap / 1_000_000
+                            )
+                        } else {
+                            format!(
+                                "bridge kept re-running build/provision commands \
+                                 ({BRIDGE_BUILD_FIGHT_THRESHOLD}×)"
+                            )
+                        };
                         self.presenter.emit(PresenterEvent::Warning(format!(
-                            "bridge turn hit the {}M input-token ceiling — stopping and submitting \
-                             the current diff to cap tail cost",
-                            self.config.mesh.bridge_turn_token_cap / 1_000_000
+                            "{why} — stopping the turn and submitting the current diff to cap \
+                             tail cost"
                         )));
                         final_text = resp.content;
                         hit_step_cap = false;
@@ -11967,6 +12035,18 @@ mod tests {
             "sudo apt-get install -y python3-dev",
             "apt install python2",
             "conda create -n old python=2.7",
+            // Build archaeology (wave 5, fix 2) — the astropy-12907 C-extension churn.
+            "python setup.py build_ext --inplace",
+            "cd astropy && python setup.py build_ext -i",
+            "make -j4",
+            "cd build && make",
+            "gcc -c _np_utils.c -o _np_utils.o",
+            "g++ -shared foo.o -o foo.so",
+            "cc -fPIC -c wcslib.c",
+            "cmake -DCMAKE_BUILD_TYPE=Release ..",
+            "pyenv install 3.7.9",
+            "./configure --prefix=/usr/local",
+            "ninja -C build",
         ] {
             assert!(is_env_setup_command(c), "{c} must count as env setup");
         }
@@ -11976,9 +12056,28 @@ mod tests {
             "git status",
             "cargo build",
             "cat requirements.txt",
+            // Whole-token matching must NOT let these false-positive off `make`/`cc`.
+            "python manage.py makemigrations",
+            "cat accumulator.py",
+            "grep -rn cc_email .",
         ] {
             assert!(!is_env_setup_command(c), "{c} must NOT count as env setup");
         }
+    }
+
+    #[test]
+    fn bridge_tool_command_extracts_from_json_or_raw() {
+        // claude Bash / Forge shell over MCP: JSON with a command field.
+        assert_eq!(
+            bridge_tool_command(r#"{"command":"python setup.py build_ext","timeout":60}"#),
+            "python setup.py build_ext"
+        );
+        // codex command_execution: the raw command string.
+        assert_eq!(bridge_tool_command("make -j4"), "make -j4");
+        // The extracted command feeds the same build-fight heuristic.
+        assert!(is_env_setup_command(&bridge_tool_command(
+            r#"{"command":"cd astropy && python setup.py build_ext -i"}"#
+        )));
     }
 
     // --- Bridge token ceiling (wave 5, fix 1) ---
