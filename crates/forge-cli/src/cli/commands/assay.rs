@@ -60,7 +60,11 @@ pub(crate) async fn assay_cmd(sub: AssayCmd) -> Result<()> {
                     .collect();
                 match matches.len() {
                     0 => anyhow::bail!("no assay run matches '{prefix}' — see `forge assay list`"),
-                    1 => Ok(matches.into_iter().next().unwrap().0),
+                    1 => matches
+                        .into_iter()
+                        .next()
+                        .map(|(id, ..)| id)
+                        .ok_or_else(|| anyhow::anyhow!("no assay run matches '{prefix}'")),
                     n => anyhow::bail!("'{prefix}' is ambiguous ({n} runs) — use more characters"),
                 }
             };

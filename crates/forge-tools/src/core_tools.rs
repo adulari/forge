@@ -1045,22 +1045,27 @@ impl Tool for ListDirTool {
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
         let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
         confine(path)?;
-        let meta = std::fs::metadata(path)?;
-        if !meta.is_dir() {
-            return Err(ToolError::Failed(format!("{path} is not a directory")));
-        }
-        let mut entries: Vec<String> = Vec::new();
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if entry.file_type()?.is_dir() {
-                entries.push(format!("{name}/"));
-            } else {
-                entries.push(name);
+        let path = path.to_string();
+        tokio::task::spawn_blocking(move || -> Result<String, ToolError> {
+            let meta = std::fs::metadata(&path)?;
+            if !meta.is_dir() {
+                return Err(ToolError::Failed(format!("{path} is not a directory")));
             }
-        }
-        entries.sort();
-        Ok(entries.join("\n"))
+            let mut entries: Vec<String> = Vec::new();
+            for entry in std::fs::read_dir(&path)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if entry.file_type()?.is_dir() {
+                    entries.push(format!("{name}/"));
+                } else {
+                    entries.push(name);
+                }
+            }
+            entries.sort();
+            Ok(entries.join("\n"))
+        })
+        .await
+        .map_err(|e| ToolError::Failed(format!("list_dir task failed: {e}")))?
     }
 }
 
@@ -1341,41 +1346,47 @@ impl Tool for GlobTool {
             .map_err(|e| ToolError::Failed(format!("invalid glob: {e}")))?
             .compile_matcher();
 
-        let mut matches: Vec<String> = Vec::new();
-        let mut stack = vec![std::path::PathBuf::from(root)];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    continue; // hidden files + dirs (.git, .venv, …)
-                }
-                let path = entry.path();
-                let Ok(ft) = entry.file_type() else { continue };
-                if ft.is_dir() {
-                    // Skip heavy vendor/build dirs so non-Rust repos (node_modules, venv, …) don't
-                    // bury real results. (`target` is now skipped only as a directory.)
-                    if SEARCH_SKIP_DIRS.contains(&name.as_str()) {
-                        continue;
+        let root = root.to_string();
+        let pattern = pattern.to_string();
+        tokio::task::spawn_blocking(move || -> Result<String, ToolError> {
+            let mut matches: Vec<String> = Vec::new();
+            let mut stack = vec![std::path::PathBuf::from(&root)];
+            while let Some(dir) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.starts_with('.') {
+                        continue; // hidden files + dirs (.git, .venv, …)
                     }
-                    stack.push(path);
-                } else {
-                    let rel = path.strip_prefix(root).unwrap_or(&path);
-                    if matcher.is_match(rel) {
-                        matches.push(rel.display().to_string());
+                    let path = entry.path();
+                    let Ok(ft) = entry.file_type() else { continue };
+                    if ft.is_dir() {
+                        // Skip heavy vendor/build dirs so non-Rust repos (node_modules, venv, …)
+                        // don't bury real results. (`target` is skipped only as a directory.)
+                        if SEARCH_SKIP_DIRS.contains(&name.as_str()) {
+                            continue;
+                        }
+                        stack.push(path);
+                    } else {
+                        let rel = path.strip_prefix(&root).unwrap_or(&path);
+                        if matcher.is_match(rel) {
+                            matches.push(rel.display().to_string());
+                        }
                     }
                 }
             }
-        }
 
-        if matches.is_empty() {
-            Ok(format!("no files match '{pattern}'"))
-        } else {
-            matches.sort();
-            Ok(matches.join("\n"))
-        }
+            if matches.is_empty() {
+                Ok(format!("no files match '{pattern}'"))
+            } else {
+                matches.sort();
+                Ok(matches.join("\n"))
+            }
+        })
+        .await
+        .map_err(|e| ToolError::Failed(format!("glob task failed: {e}")))?
     }
 }
 

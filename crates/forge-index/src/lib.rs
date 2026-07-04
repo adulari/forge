@@ -491,7 +491,7 @@ impl Lattice {
         bodies: Option<retrieve::BodyOpts>,
         embedder: &dyn Embedder,
     ) -> Result<InjectedContext, LatticeError> {
-        let ctx = retrieve::retrieve(self, prompt, token_budget, bodies)?;
+        let ctx = self.retrieve_async(prompt, token_budget, bodies).await?;
         if self.store.lattice_embedding_count()? == 0 {
             return Ok(ctx);
         }
@@ -718,6 +718,24 @@ impl Lattice {
         bodies: Option<retrieve::BodyOpts>,
     ) -> Result<InjectedContext, LatticeError> {
         retrieve::retrieve(self, prompt, token_budget, bodies)
+    }
+
+    /// Async-safe retrieval for turn injection. Body retrieval may read source files, so this keeps
+    /// the filesystem work off the Tokio worker thread while preserving the synchronous API above.
+    pub async fn retrieve_async(
+        &self,
+        prompt: &str,
+        token_budget: usize,
+        bodies: Option<retrieve::BodyOpts>,
+    ) -> Result<InjectedContext, LatticeError> {
+        let lat = Lattice {
+            store: Arc::clone(&self.store),
+            repo_root: self.repo_root.clone(),
+        };
+        let prompt = prompt.to_string();
+        tokio::task::spawn_blocking(move || lat.retrieve(&prompt, token_budget, bodies))
+            .await
+            .map_err(|e| LatticeError::Io(format!("lattice retrieval task failed: {e}")))?
     }
 
     pub fn status(&self) -> Result<IndexStatus, LatticeError> {

@@ -92,7 +92,10 @@ impl LspRegistry {
                 }
             }
         }
-        let server = slot.as_mut().unwrap();
+        let Some(server) = slot.as_mut() else {
+            warn!("lsp: server unavailable for {lang} after spawn");
+            return vec![];
+        };
 
         if let Err(e) = server.did_open(&uri, lang, &text).await {
             warn!("lsp: did_open failed: {e}");

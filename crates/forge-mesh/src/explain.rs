@@ -89,14 +89,18 @@ impl HeuristicRouter {
         let routed_tier = decision.tier;
 
         let (conserve, rows) = if self.auto_active() {
-            self.catalog.as_ref().unwrap().ranked_rows(
-                routed_tier,
-                &self.pricing,
-                hints.code_heavy,
-                hints.seed,
-                quota,
-                effort,
-            )
+            if let Some(catalog) = self.catalog.as_ref() {
+                catalog.ranked_rows(
+                    routed_tier,
+                    &self.pricing,
+                    hints.code_heavy,
+                    hints.seed,
+                    quota,
+                    effort,
+                )
+            } else {
+                (ConserveDecision::default(), Vec::new())
+            }
         } else {
             (ConserveDecision::default(), Vec::new())
         };

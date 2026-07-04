@@ -33,10 +33,9 @@ pub fn matches(combo: &KeyCombo, ev: &KeyEvent) -> bool {
         "f10" => ev.code == KeyCode::F(10),
         "f11" => ev.code == KeyCode::F(11),
         "f12" => ev.code == KeyCode::F(12),
-        s if s.chars().count() == 1 => {
-            let c = s.chars().next().unwrap();
+        s if s.chars().count() == 1 => s.chars().next().is_some_and(|c| {
             ev.code == KeyCode::Char(c) || ev.code == KeyCode::Char(c.to_ascii_uppercase())
-        }
+        }),
         _ => false,
     };
     if !code_matches {

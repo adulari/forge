@@ -4018,7 +4018,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         .retrieve_hybrid(prompt, budget, bodies, embedder.as_ref())
                         .await
                         .ok(),
-                    None => lat.retrieve(prompt, budget, bodies).ok(),
+                    None => lat.retrieve_async(prompt, budget, bodies).await.ok(),
                 }
             } else {
                 None
