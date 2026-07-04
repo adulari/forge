@@ -3996,8 +3996,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // first so the `&self.lattice` borrow is released before we mutate the transcript. The
         // budget shrinks with budget pressure — context spend follows the same discipline as model
         // spend. Empty index / disabled / any error → nothing injected, turn runs as before.
+        // Skipped when the routed model is a CLI bridge: claude/codex explore with their OWN
+        // agent loop, so the injected snippets are duplicated context they re-ingest every turn
+        // of that loop on top of their own reads.
         let injected = {
-            if let Some(lat) = self.lattice.as_ref().filter(|_| self.config.lattice.inject) {
+            if let Some(lat) = self.lattice.as_ref().filter(|_| {
+                self.config.lattice.inject && !forge_provider::is_cli_bridge(&routed_model)
+            }) {
                 let budget = inject_budget(self.config.lattice.inject_token_budget, status);
                 let emb = &self.config.lattice.embeddings;
                 // Body injection (the big token-saving lever): inject the top hits' full source so
@@ -8817,6 +8822,9 @@ mod tests {
 
         let mut session = probe_session(Arc::clone(&store), Config::default());
         session.set_lattice(Some(Arc::new(lat)));
+        // Pin a non-bridge model: injection is intentionally skipped for CLI bridges, and the
+        // default mesh routes this prompt's tier to claude-cli::.
+        session.pin_model(Some("ollama::probe".into()));
         let answer = session
             .run_turn("explain lattice_probe_symbol please")
             .await
@@ -8825,6 +8833,34 @@ mod tests {
             answer, "SAW_INJECTION",
             "the symbol was retrieved + injected"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bridged CLIs run their own exploration loop, so lattice injection is duplicated context
+    /// there — the gate must skip it for `*-cli::` models while direct models keep it.
+    #[tokio::test]
+    async fn lattice_injection_is_skipped_for_cli_bridge_models() {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-inj-bridge-{}-{}",
+            std::process::id(),
+            forge_types::new_id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("probe.rs"), "pub fn lattice_probe_symbol() {}\n").unwrap();
+
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let lat = forge_index::Lattice::new(Arc::clone(&store), &dir);
+        lat.update().unwrap();
+
+        let mut session = probe_session(Arc::clone(&store), Config::default());
+        session.set_lattice(Some(Arc::new(lat)));
+        session.pin_model(Some("claude-cli::sonnet".into()));
+        let answer = session
+            .run_turn("explain lattice_probe_symbol please")
+            .await
+            .unwrap();
+        assert_eq!(answer, "NO_INJECTION", "bridge models get no injection");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
