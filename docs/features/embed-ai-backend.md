@@ -51,13 +51,18 @@ self-healing one.
      -d '{"model":"auto","messages":[{"role":"user","content":"hello"}]}'
    ```
 
-3. **Pick models via the mesh.** `GET /v1/models` lists everything the mesh can route to plus the
-   `auto` sentinel:
+3. **Pick models via the mesh.** `GET /v1/models` lists every routable model the mesh can reach
+   plus the `auto` sentinel (task-specific endpoints — embeddings, rerankers, translation-only,
+   TTS/image/audio models — are filtered out; they can't serve a chat turn):
 
    - `"model": "auto"` (or `"mesh"`, or omit it) → the mesh classifies the request and routes it,
      with automatic failover down its ranked chain.
-   - `"model": "anthropic::claude-opus-4-8"` (any concrete Forge id) → pins that model, but the
-     mesh **still fails over** to alternatives if the pinned model is rate-limited or down.
+   - `"model": "anthropic::claude-opus-4-8"` (any concrete Forge id **from `/v1/models`**) → pins
+     that exact model, **bypassing the mesh classifier**. Failover stays **within the pinned
+     model's own provider** (so a pin never silently degrades to an unrelated model); if every
+     same-provider option fails, the request returns the real error rather than a surprise model.
+   - Pinning a model that isn't in `/v1/models` returns a **`404 model_not_found`** — the request is
+     never silently rerouted to some other model.
 
 ## Endpoints
 
@@ -73,11 +78,17 @@ All under the server's origin; the OpenAI base URL is `http://<host>:<port>/v1`.
 
 - `messages` (**required**) — `system` / `user` / `assistant` / `tool` roles. `content` may be a
   string or an array of content parts (only text parts are used today).
-- `model` — `auto`/`mesh`/omitted for mesh routing, or a concrete Forge id to pin (see above).
+- `model` — `auto`/`mesh`/omitted for mesh routing, or a concrete Forge id (from `/v1/models`) to
+  pin (see above). An unknown id is a `404`.
 - `stream` — `true` to receive `text/event-stream` `chat.completion.chunk` frames ending in
   `data: [DONE]`.
 - `temperature` — forwarded to the model.
 - `reasoning_effort` — `low` / `medium` / `high` (also accepts Forge's `xhigh` / `whitehot`).
+- `response_format` — `{"type":"json_object"}` for free-form JSON, or
+  `{"type":"json_schema","json_schema":{"name","schema"}}` for schema-constrained JSON. Forwarded to
+  the provider's native JSON mode where supported; for the (non-streaming) reply Forge also strips a
+  stray Markdown code fence so `content` is always directly parseable JSON, honoring the OpenAI
+  `json_object` contract across providers that would otherwise fence their output.
 - `tools` — OpenAI function specs. Advertised to the model; any `tool_calls` it makes are returned
   with `finish_reason:"tool_calls"`, so your app runs its own tool loop exactly as with the OpenAI
   API.
@@ -129,8 +140,16 @@ Standard OpenAI `chat.completion` (or `chat.completion.chunk` when streaming), p
 
 - `crates/forge-cli/src/api_serve.rs` — the axum router, the OpenAI request/response mapping, the
   routing + failover loop, and SSE streaming. Tests cover the completion shape, `tool_calls`
-  surfacing, SSE framing, `/v1/models`, the 400/401 error shapes, and content-part flattening.
+  surfacing, SSE framing, `/v1/models`, the 400/401 error shapes, content-part flattening, pin
+  honoring, `404` on an unknown pin, in-provider-only pin failover, `response_format` parsing +
+  fence-stripping, and task-specific-model exclusion from `/v1/models`.
+- On startup it calls `forge_config::inject_provider_keys()` (as `forge run` does) so keyring-stored
+  keys for single-key native-adapter providers (gemini/openai/anthropic) resolve — without it a pin
+  to one would fail with a provider resolver error.
 - Routing reuses the production wiring: `build_provider_and_router` (the same
-  `DispatchProvider` + `HeuristicRouter` `forge run` builds) and `HeuristicRouter::route`, so the
-  endpoint's routing behavior is identical to an interactive session's.
+  `DispatchProvider` + `HeuristicRouter` `forge run` builds). Unpinned (`auto`) requests go through
+  `HeuristicRouter::route`; a pin bypasses the classifier and is served directly with an
+  in-provider failover chain, so behavior matches an interactive `--model` pin.
+- Task-specific-model exclusion lives in `forge_mesh::catalog::is_routable` (translation, rerank,
+  embedding, TTS/image/audio, guard, …), shared by mesh routing and `/v1/models`.
 - CLI: `forge api [--host] [--port] [--api-key] [--mock]`.

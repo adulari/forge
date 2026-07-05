@@ -328,6 +328,20 @@ pub struct CheckpointContext {
     pub mode: String,
 }
 
+/// A provider-neutral structured-output request (OpenAI `response_format`). Backends that support
+/// it (currently the genai/API path) map it to their JSON-mode / JSON-schema knob; backends that
+/// don't (the CLI bridges) ignore it.
+#[derive(Debug, Clone)]
+pub enum ResponseFormat {
+    /// Free-form JSON object (`{"type":"json_object"}`).
+    JsonObject,
+    /// Schema-constrained JSON (`{"type":"json_schema", ...}`).
+    JsonSchema {
+        name: String,
+        schema: serde_json::Value,
+    },
+}
+
 /// Per-completion options that extend the base [`Provider::complete`] signature without breaking
 /// existing call sites. Passed via [`Provider::complete_with`]; the base `complete` ignores it.
 #[derive(Debug, Clone, Default)]
@@ -340,6 +354,8 @@ pub struct CompletionOptions {
     /// Checkpoint context handed explicitly to a CLI-bridge child. `None` for non-bridge calls and
     /// the base `complete` path, which fall back to inherited process env for legacy compatibility.
     pub checkpoint: Option<CheckpointContext>,
+    /// Structured-output request (OpenAI `response_format`). `None` = provider default (free text).
+    pub response_format: Option<ResponseFormat>,
 }
 
 /// A model backend. Implement this trait (and nothing in the core) to add a provider.

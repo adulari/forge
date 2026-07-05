@@ -31,7 +31,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use forge_mesh::{BudgetState, Router as MeshRouter};
-use forge_provider::{CompletionOptions, Provider, StreamEvent, ToolSpec};
+use forge_provider::{CompletionOptions, Provider, ResponseFormat, StreamEvent, ToolSpec};
 use forge_types::{EffortLevel, Message, ModelHealth, ProjectContext, Role, SubscriptionQuota};
 use serde::Deserialize;
 
@@ -58,6 +58,12 @@ pub(crate) async fn api_serve_cmd(
     mock: bool,
 ) -> Result<()> {
     let config = forge_config::load().unwrap_or_default();
+    // Hydrate keyring-stored provider keys into this process's env, exactly as `forge run`/`models`/
+    // `mcp` do. Without this, single-key NATIVE-adapter providers (gemini/openai/anthropic) — whose
+    // genai auth is `FromEnv(<VAR>)` — fail every request with a resolver error, so a pin to one of
+    // them looked "broken" even though the key was configured (only custom-endpoint providers, which
+    // read the keyring directly, worked).
+    forge_config::inject_provider_keys();
     let port = port.unwrap_or(DEFAULT_PORT);
     let host = host.unwrap_or_else(|| "127.0.0.1".to_string());
     let api_key = api_key
@@ -158,6 +164,10 @@ fn advertised_models(
     // Drop bare provider prefixes (e.g. a configured `claude-cli::` with no model) — they're not
     // routable ids on their own and only clutter the list.
     models.retain(|m| !m.trim_end().ends_with("::") && !m.is_empty());
+    // Drop task-specific endpoints (embeddings, rerankers, translation-only, TTS, image, …): the
+    // mesh can't route a general chat turn to them, so advertising them as `/v1/chat/completions`
+    // targets only invites a pin that produces garbage.
+    models.retain(|m| forge_mesh::catalog::is_routable(m));
     models.sort();
     models.dedup();
     models.insert(0, "auto".to_string());
@@ -209,6 +219,10 @@ struct ChatCompletionRequest {
     /// come back in the response (the client runs its own tool loop, as with the OpenAI API).
     #[serde(default)]
     tools: Vec<serde_json::Value>,
+    /// OpenAI structured-output request (`{"type":"json_object"}` or `{"type":"json_schema",…}`).
+    /// Forwarded to the provider's JSON mode so a caller asking for JSON actually gets JSON.
+    #[serde(default)]
+    response_format: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -328,6 +342,91 @@ fn model_pin(model: &Option<String>) -> Option<String> {
     }
 }
 
+/// Resolve the request's `model` into an optional hard pin, validated against what this server can
+/// actually route to. Returns:
+/// - `Ok(None)` for the mesh sentinels (`auto`/`mesh`/…) — let the mesh route.
+/// - `Ok(Some(id))` when `id` is an advertised, routable model — pin it.
+/// - `Err(msg)` when `id` is unknown/unadvertised — the caller returns a 404 instead of silently
+///   mesh-routing the request to some unrelated model (the original bug: a pin to an unreachable
+///   id fell through to a translation model).
+fn resolve_pin(models: &[String], model: &Option<String>) -> Result<Option<String>, String> {
+    let Some(pin) = model_pin(model) else {
+        return Ok(None);
+    };
+    if models.iter().any(|m| m == &pin) {
+        Ok(Some(pin))
+    } else {
+        Err(format!(
+            "model '{pin}' is not available on this server — GET /v1/models for the routable ids, \
+             or use \"auto\" to let the mesh pick"
+        ))
+    }
+}
+
+/// The failover chain for a pinned model: the pin first, then any OTHER advertised models from the
+/// SAME provider (in-provider failover only). Crucially it never crosses to a different provider's
+/// model, so a pin to (say) an OpenRouter id can't silently degrade to an unrelated NVIDIA
+/// translation endpoint — if every same-provider option fails, the request errors with the real
+/// cause instead.
+fn pinned_chain(models: &[String], pin: &str) -> Vec<String> {
+    let provider = forge_config::provider_of(pin);
+    let mut chain = vec![pin.to_string()];
+    chain.extend(
+        models
+            .iter()
+            .filter(|m| {
+                m.as_str() != "auto"
+                    && m.as_str() != pin
+                    && forge_config::provider_of(m) == provider
+            })
+            .cloned(),
+    );
+    chain
+}
+
+/// Strip a surrounding Markdown code fence (```` ```json … ``` ````) from `s`, returning the inner
+/// text. Providers vary: OpenAI honors JSON mode natively, but others (e.g. Gemini via a plain
+/// `json_object` request, several OpenRouter models) ignore it and wrap the JSON in a fence. The
+/// OpenAI `json_object` contract promises the `content` IS parseable JSON, so when the caller asked
+/// for JSON we unwrap the fence to honor it. A no-op when there's no fence.
+fn unfence_json(s: &str) -> String {
+    let t = s.trim();
+    let Some(rest) = t.strip_prefix("```") else {
+        return s.to_string();
+    };
+    // Drop an optional language tag on the opening fence (```json / ```JSON / ```).
+    let rest = rest
+        .strip_prefix("json")
+        .or_else(|| rest.strip_prefix("JSON"))
+        .unwrap_or(rest);
+    let inner = rest.trim_start_matches('\n');
+    match inner.rfind("```") {
+        Some(end) => inner[..end].trim().to_string(),
+        None => s.to_string(),
+    }
+}
+
+/// Parse an OpenAI `response_format` object into a provider-neutral [`ResponseFormat`]. Unknown or
+/// `{"type":"text"}` shapes map to `None` (plain text, the default).
+fn parse_response_format(v: &Option<serde_json::Value>) -> Option<ResponseFormat> {
+    let obj = v.as_ref()?;
+    match obj.get("type").and_then(|t| t.as_str()) {
+        Some("json_object") => Some(ResponseFormat::JsonObject),
+        Some("json_schema") => {
+            // OpenAI nests the schema under `json_schema: {name, schema}`.
+            let spec = obj.get("json_schema")?;
+            let name = spec
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("response")
+                .to_string();
+            let schema = spec.get("schema").cloned().unwrap_or(serde_json::json!({}));
+            Some(ResponseFormat::JsonSchema { name, schema })
+        }
+        _ => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -391,49 +490,58 @@ async fn chat_completions(
 
     let messages = to_forge_messages(&req.messages);
     let tools = to_tool_specs(&req.tools);
-    let pin = model_pin(&req.model);
+    // Resolve the pin BEFORE any routing: an explicit `model` that this server can't route to is a
+    // hard 404, never a silent mesh fallback.
+    let pin = match resolve_pin(&state.models, &req.model) {
+        Ok(p) => p,
+        Err(msg) => return openai_error(StatusCode::NOT_FOUND, "model_not_found", &msg),
+    };
     let effort = req.reasoning_effort.as_deref().and_then(EffortLevel::parse);
     let opts = CompletionOptions {
         effort,
         temperature: req.temperature,
         checkpoint: None,
+        response_format: parse_response_format(&req.response_format),
     };
 
-    // Ask the mesh which model to use (and its ordered failover chain).
-    let decision = {
-        let prompt = routing_prompt(&messages);
-        let router = state
-            .router
-            .route(
-                &prompt,
-                BudgetState::default(),
-                &state.health,
-                &SubscriptionQuota::default(),
-                effort,
-                &ProjectContext::default(),
-            )
-            .await;
-        // A per-request pin overrides the mesh's primary pick but keeps the failover chain.
-        match pin {
-            Some(p) => {
-                let mut chain: Vec<String> = std::iter::once(router.model.clone())
-                    .chain(router.fallbacks.clone())
-                    .filter(|m| m != &p)
-                    .collect();
-                chain.insert(0, p);
-                chain
-            }
-            None => std::iter::once(router.model.clone())
+    // Decide the ordered model chain to try.
+    let decision = match &pin {
+        // Pinned: bypass the mesh classifier entirely and honor the caller's exact model, failing
+        // over only within its own provider (never across to an unrelated model).
+        Some(p) => pinned_chain(&state.models, p),
+        // Unpinned ("auto"): ask the mesh which model to use and its ordered failover chain.
+        None => {
+            let prompt = routing_prompt(&messages);
+            let router = state
+                .router
+                .route(
+                    &prompt,
+                    BudgetState::default(),
+                    &state.health,
+                    &SubscriptionQuota::default(),
+                    effort,
+                    &ProjectContext::default(),
+                )
+                .await;
+            std::iter::once(router.model.clone())
                 .chain(router.fallbacks.clone())
-                .collect(),
+                .collect()
         }
     };
 
+    let wants_json = opts.response_format.is_some();
     if req.stream {
         stream_completion(state, messages, tools, opts, decision)
     } else {
         match run_completion(&state, &messages, &tools, &opts, &decision).await {
-            Ok(done) => non_stream_response(&state, done).into_response(),
+            Ok(mut done) => {
+                // Honor the OpenAI `json_object` contract (content IS parseable JSON) even for
+                // providers that ignore JSON mode and fence their output.
+                if wants_json && !done.response.wants_tools() {
+                    done.response.content = unfence_json(&done.response.content);
+                }
+                non_stream_response(&state, done).into_response()
+            }
             Err(msg) => openai_error(StatusCode::BAD_GATEWAY, "api_error", &msg),
         }
     }
@@ -941,5 +1049,131 @@ mod tests {
             model_pin(&Some("groq::llama-3.3-70b".into())),
             Some("groq::llama-3.3-70b".into())
         );
+    }
+
+    /// The first concrete (non-`auto`) advertised model, for pin tests.
+    fn a_concrete_model(state: &ApiState) -> String {
+        state
+            .models
+            .iter()
+            .find(|m| m.as_str() != "auto")
+            .expect("mock config advertises at least one concrete model")
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn a_pinned_model_is_routed_to_verbatim() {
+        let state = mock_state();
+        let pinned = a_concrete_model(&state);
+        let router = api_router(state);
+        let resp = router
+            .oneshot(post_chat(serde_json::json!({
+                "model": pinned,
+                "messages": [{"role": "user", "content": "mock:code please"}],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        // The pin is honored exactly — no silent mesh reroute to a different model.
+        assert_eq!(v["model"], pinned);
+        assert_eq!(v["x_forge"]["routed_model"], pinned);
+    }
+
+    #[tokio::test]
+    async fn pinning_an_unknown_model_is_a_404_not_a_silent_reroute() {
+        let router = api_router(mock_state());
+        let resp = router
+            .oneshot(post_chat(serde_json::json!({
+                "model": "openrouter::definitely-not-a-real-model-xyz",
+                "messages": [{"role": "user", "content": "mock:code"}],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(v["error"]["type"], "model_not_found");
+    }
+
+    #[test]
+    fn resolve_pin_validates_against_advertised_models() {
+        let models = vec![
+            "auto".to_string(),
+            "groq::llama-3.3-70b".to_string(),
+            "openai::gpt-4o-mini".to_string(),
+        ];
+        assert_eq!(resolve_pin(&models, &Some("auto".into())), Ok(None));
+        assert_eq!(resolve_pin(&models, &None), Ok(None));
+        assert_eq!(
+            resolve_pin(&models, &Some("groq::llama-3.3-70b".into())),
+            Ok(Some("groq::llama-3.3-70b".into()))
+        );
+        assert!(resolve_pin(&models, &Some("groq::nope".into())).is_err());
+    }
+
+    #[test]
+    fn pinned_chain_fails_over_only_within_the_same_provider() {
+        let models = vec![
+            "auto".to_string(),
+            "openai::gpt-4o-mini".to_string(),
+            "openai::gpt-4o".to_string(),
+            "nvidia::riva-translate".to_string(),
+            "groq::llama-3.3-70b".to_string(),
+        ];
+        let chain = pinned_chain(&models, "openai::gpt-4o-mini");
+        assert_eq!(chain.first().unwrap(), "openai::gpt-4o-mini");
+        assert!(chain.iter().all(|m| m.starts_with("openai::")));
+        // Never crosses to another provider (the silent-degrade-to-translation bug).
+        assert!(!chain.iter().any(|m| m.contains("riva")));
+        assert!(!chain.iter().any(|m| m.starts_with("groq::")));
+    }
+
+    #[test]
+    fn response_format_parses_openai_shapes() {
+        assert!(parse_response_format(&None).is_none());
+        assert!(matches!(
+            parse_response_format(&Some(serde_json::json!({"type": "json_object"}))),
+            Some(ResponseFormat::JsonObject)
+        ));
+        assert!(parse_response_format(&Some(serde_json::json!({"type": "text"}))).is_none());
+        let schema = parse_response_format(&Some(serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {"name": "cat", "schema": {"type": "object"}},
+        })));
+        match schema {
+            Some(ResponseFormat::JsonSchema { name, schema }) => {
+                assert_eq!(name, "cat");
+                assert_eq!(schema, serde_json::json!({"type": "object"}));
+            }
+            other => panic!("expected JsonSchema, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unfence_json_unwraps_code_fences() {
+        assert_eq!(unfence_json("```json\n{\"a\":1}\n```"), "{\"a\":1}");
+        assert_eq!(unfence_json("```\n{\"a\":1}\n```"), "{\"a\":1}");
+        assert_eq!(unfence_json("  ```JSON\n{\"a\":1}```  "), "{\"a\":1}");
+        // No fence → unchanged.
+        assert_eq!(unfence_json("{\"a\":1}"), "{\"a\":1}");
+        assert_eq!(unfence_json("plain text"), "plain text");
+    }
+
+    #[test]
+    fn advertised_models_exclude_task_specific_endpoints() {
+        let mut config = forge_config::Config::default();
+        // Inject a translation-only + embedding endpoint the way discovery would.
+        config.mesh.models.insert(
+            "trivial".to_string(),
+            forge_config::OneOrMany::Many(vec![
+                "nvidia::nvidia/riva-translate-4b-instruct-v1.1".to_string(),
+                "nvidia::nvidia/nv-embedqa-e5-v5".to_string(),
+                "groq::llama-3.1-8b-instant".to_string(),
+            ]),
+        );
+        let models = advertised_models(&config, None);
+        assert!(!models.iter().any(|m| m.contains("riva-translate")));
+        assert!(!models.iter().any(|m| m.contains("embedqa")));
+        assert!(models.iter().any(|m| m.contains("llama-3.1-8b-instant")));
     }
 }

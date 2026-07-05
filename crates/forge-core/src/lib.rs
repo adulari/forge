@@ -2445,6 +2445,7 @@ Rules:\n\
             temperature: Some(CODING_TEMPERATURE),
             // The planner runs with no tools (it can't edit files), so it needs no checkpoint context.
             checkpoint: None,
+            response_format: None,
         };
 
         let mut chain = fallbacks.into_iter();
@@ -3465,6 +3466,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         effort: self.pinned_effort,
                         temperature: Some(CODING_TEMPERATURE),
                         checkpoint: Some(checkpoint_ctx.clone()),
+                        response_format: None,
                     };
                     let fut = provider.complete_with(
                         &active_model,
