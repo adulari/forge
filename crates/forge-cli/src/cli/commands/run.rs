@@ -321,19 +321,30 @@ pub(crate) async fn build_session_with_self_mcp(
         Arc::new(forge_index::Lattice::new(store_for_lattice, &root))
     });
     let mut tools = ToolRegistry::with_core_tools();
-    // Opt-in OS sandbox: replace the default shell tool with one that confines filesystem writes
-    // to the workspace via Landlock (Linux; no-op elsewhere / on unsupported kernels).
-    if config.shell.sandbox {
+    // Opt-in OS sandbox and/or scoped build-target dir: replace the default shell tool with one
+    // that confines filesystem writes to the workspace via Landlock (Linux; no-op elsewhere) and/or
+    // relocates cargo's CARGO_TARGET_DIR outside the (possibly read-only) workspace so a
+    // bypass-mode agent can compile-check its own edits under confinement.
+    if config.shell.sandbox || config.shell.scoped_cargo_target {
         let writable = config
             .shell
             .sandbox_writable
             .iter()
             .map(std::path::PathBuf::from)
             .collect();
+        let cargo_target_base = config.shell.scoped_cargo_target.then(|| {
+            config
+                .shell
+                .scoped_cargo_target_dir
+                .clone()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::env::temp_dir().join("forge-cargo-target"))
+        });
         tools.register(Box::new(forge_tools::ShellTool {
             policy: forge_tools::SandboxPolicy {
-                enabled: true,
+                enabled: config.shell.sandbox,
                 writable,
+                cargo_target_base,
             },
         }));
     }

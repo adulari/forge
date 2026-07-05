@@ -22,7 +22,7 @@
 //! TUI (`ToolOutputDelta`/`ToolEnd`), background jobs (`shell_poll`/`shell_kill`),
 //! session-remembered allows, and the rich command-context permission prompt.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
@@ -229,8 +229,24 @@ async fn run_command_inner(
         .kill_on_drop(true);
     put_in_own_process_group(&mut cmd);
 
-    // Sandbox wiring: probe in the parent, install pre_exec only when supported.
-    maybe_install_sandbox(&mut cmd, policy, cwd);
+    // Scoped build-target carve-out: for cargo/rust build commands, relocate CARGO_TARGET_DIR to a
+    // per-project dir outside the (possibly read-only) workspace so the build can write its target
+    // tree even under confinement. `None` when disabled, not a build command, or the caller already
+    // set CARGO_TARGET_DIR (their explicit choice wins).
+    let scoped_target = scoped_cargo_target(
+        command,
+        cwd,
+        policy.cargo_target_base.as_deref(),
+        std::env::var_os("CARGO_TARGET_DIR").is_some(),
+    );
+    if let Some(dir) = scoped_target.as_deref() {
+        let _ = std::fs::create_dir_all(dir);
+        cmd.env("CARGO_TARGET_DIR", dir);
+    }
+
+    // Sandbox wiring: probe in the parent, install pre_exec only when supported. The scoped target
+    // dir is passed as an extra writable path so the confined build can write there.
+    maybe_install_sandbox(&mut cmd, policy, cwd, scoped_target.as_deref());
 
     let start = Instant::now();
     let mut child = match cmd.spawn() {
@@ -535,6 +551,67 @@ async fn read_capped<R: AsyncRead + Unpin>(mut r: R) -> (Vec<u8>, bool) {
     (buf, capped)
 }
 
+/// Compute the scoped, writable `CARGO_TARGET_DIR` to inject for `command`, or `None` to leave the
+/// environment untouched. Injection happens only when: (a) `base` is configured, (b) the caller has
+/// not already set `CARGO_TARGET_DIR` (`caller_set == false` — an explicit choice always wins), and
+/// (c) `command` is a cargo/rust build invocation. The result is a per-project subdir of `base`
+/// keyed by the canonicalized cwd, so distinct projects keep separate incremental caches and
+/// repeated builds of the same project stay incremental.
+fn scoped_cargo_target(
+    command: &str,
+    cwd: &str,
+    base: Option<&Path>,
+    caller_set: bool,
+) -> Option<PathBuf> {
+    let base = base?;
+    if caller_set || !is_cargo_command(command) {
+        return None;
+    }
+    let cwd_path = Path::new(cwd);
+    let resolved = if cwd_path.is_absolute() {
+        cwd_path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(cwd_path)
+    };
+    let canon = resolved.canonicalize().unwrap_or(resolved);
+    Some(base.join(project_slug(&canon)))
+}
+
+/// True when `command` runs `cargo` as a command token. Conservative by design: a stray `cargo`
+/// argument to some other program would also match, but the only effect is relocating an otherwise
+/// unused `CARGO_TARGET_DIR`, which is harmless.
+fn is_cargo_command(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .any(|tok| tok == "cargo" || tok.ends_with("/cargo"))
+}
+
+/// A stable, filesystem-safe directory name for a project path: its sanitized basename plus an
+/// FNV-1a hash of the full canonical path (deterministic across runs and process restarts, unlike
+/// `DefaultHasher`), so two projects with the same basename never collide.
+fn project_slug(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in path.as_os_str().as_encoded_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{safe}-{hash:016x}")
+}
+
 /// Probe Landlock support once per process and emit the "unconfined" warning at most once.
 /// Returns `true` if a sandbox pre_exec should be installed.
 fn sandbox_supported_once(policy: &SandboxPolicy) -> bool {
@@ -556,14 +633,24 @@ fn sandbox_supported_once(policy: &SandboxPolicy) -> bool {
 
 /// Attach a `pre_exec` hook to `cmd` that applies the Landlock sandbox in the child process.
 /// On non-Unix platforms and when the sandbox is disabled or unsupported this is a no-op.
-fn maybe_install_sandbox(cmd: &mut Command, policy: &SandboxPolicy, cwd: &str) {
+/// `extra_writable` is an additional path (e.g. the scoped CARGO_TARGET_DIR) folded into the
+/// writable set so the confined command can write there.
+fn maybe_install_sandbox(
+    cmd: &mut Command,
+    policy: &SandboxPolicy,
+    cwd: &str,
+    extra_writable: Option<&Path>,
+) {
     if !sandbox_supported_once(policy) {
         return;
     }
 
     // Build the writable set in the parent (before fork) — PathBuf is Send + Clone.
     let cwd_path = PathBuf::from(cwd);
-    let extra: Vec<PathBuf> = policy.writable.iter().map(PathBuf::from).collect();
+    let mut extra: Vec<PathBuf> = policy.writable.iter().map(PathBuf::from).collect();
+    if let Some(p) = extra_writable {
+        extra.push(p.to_path_buf());
+    }
     let writable = sandbox::effective_writable(&cwd_path, &extra);
 
     // Install the pre_exec closure. It runs after fork, before exec — in the child only.
@@ -938,10 +1025,63 @@ mod tests {
             let policy = SandboxPolicy {
                 enabled: false,
                 writable: vec![],
+                cargo_target_base: None,
             };
             let out = run_command("echo sandbox_off", ".", 10, &policy).await;
             assert!(out.contains("sandbox_off"), "output: {out}");
             assert!(out.contains("exit 0"), "exit: {out}");
+        }
+
+        #[test]
+        fn is_cargo_command_detects_cargo_token() {
+            assert!(is_cargo_command("cargo check"));
+            assert!(is_cargo_command("cargo build --release -p forge-agent"));
+            assert!(is_cargo_command("RUSTFLAGS=-Dwarnings cargo test"));
+            assert!(is_cargo_command("make deps && cargo clippy"));
+            assert!(is_cargo_command("/home/u/.cargo/bin/cargo run"));
+            assert!(!is_cargo_command("echo cargoisnothere"));
+            assert!(!is_cargo_command("ls -la target"));
+            assert!(!is_cargo_command("rustc --version"));
+        }
+
+        #[test]
+        fn scoped_cargo_target_only_for_build_commands_under_base() {
+            let base = std::path::PathBuf::from("/scratch/forge-cargo-target");
+
+            // Disabled when no base is configured.
+            assert_eq!(scoped_cargo_target("cargo check", ".", None, false), None);
+            // Disabled for non-cargo commands.
+            assert_eq!(
+                scoped_cargo_target("echo hi", ".", Some(&base), false),
+                None
+            );
+            // Respect an explicit caller-set CARGO_TARGET_DIR.
+            assert_eq!(
+                scoped_cargo_target("cargo build", ".", Some(&base), true),
+                None
+            );
+
+            // Enabled: a per-project subdir of the base.
+            let got = scoped_cargo_target("cargo check", "/abs/proj", Some(&base), false)
+                .expect("should inject for cargo under a base");
+            assert!(got.starts_with(&base), "under the base: {got:?}");
+            assert!(
+                got.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("proj-"),
+                "slug keyed by basename: {got:?}"
+            );
+        }
+
+        #[test]
+        fn project_slug_is_stable_and_distinct_per_path() {
+            let a = project_slug(std::path::Path::new("/home/u/repo"));
+            let b = project_slug(std::path::Path::new("/home/u/repo"));
+            let c = project_slug(std::path::Path::new("/tmp/repo"));
+            assert_eq!(a, b, "same path -> stable slug");
+            assert_ne!(a, c, "same basename, different path -> distinct slug");
+            assert!(a.starts_with("repo-"));
         }
     }
 
@@ -957,6 +1097,7 @@ mod tests {
                 policy: crate::SandboxPolicy {
                     enabled: true,
                     writable: vec![],
+                    cargo_target_base: None,
                 },
             };
             let out = tool

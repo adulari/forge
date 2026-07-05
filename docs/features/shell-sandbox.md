@@ -38,3 +38,24 @@ sandbox_writable = ["/home/me/.cargo"]   # extra writable dirs beyond cwd + temp
 
 Verified on Linux 6.x/7.x (`CONFIG_SECURITY_LANDLOCK=y`): a write inside cwd succeeds, a write to
 `/etc/...` is denied with `Permission denied`.
+
+## Scoped cargo target dir (`shell.scoped_cargo_target`)
+
+An autonomous/bypass-mode agent that dogfoods Forge on a Rust workspace needs to run
+`cargo check`/`build` to verify its own edits. Under confinement — Forge's own Landlock sandbox
+or an outer container that mounts the checkout read-only — cargo cannot create `<workspace>/target`
+and fails with `Read-only file system (os error 30)` on the build lock.
+
+Enabling `shell.scoped_cargo_target = true` makes the `shell` tool inject a writable
+`CARGO_TARGET_DIR` for recognized cargo commands, pointing at a per-project subdir of
+`shell.scoped_cargo_target_dir` (default `<system-temp>/forge-cargo-target`). The build's target
+tree lands there instead of the read-only workspace, so the compile-check succeeds. The scoped dir
+is also folded into the Landlock writable set, so it works when `shell.sandbox` is on too.
+
+- **Opt-in, default off** — normal runs are byte-for-byte unchanged.
+- **Only recognized cargo commands** get the env var; other commands are untouched.
+- **An explicit `CARGO_TARGET_DIR` in the environment always wins** (the caller's choice is
+  respected).
+- Independent of `shell.sandbox`: it also helps under an outer container that confines writes
+  without Forge's Landlock.
+- Confinement is **not** weakened for arbitrary writes — only the build-target dir is carved out.

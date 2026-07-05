@@ -150,6 +150,15 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Extra writable paths when sandbox = true. Absolute, or resolved against cwd."
+        },
+        "scoped_cargo_target": {
+          "type": "boolean",
+          "default": false,
+          "description": "Inject a scoped, writable CARGO_TARGET_DIR (outside the workspace) for cargo/rust build commands so a bypass-mode agent can compile-check its own edits even when the workspace tree is read-only under confinement. An explicit CARGO_TARGET_DIR in the env always wins. Works with or without sandbox."
+        },
+        "scoped_cargo_target_dir": {
+          "type": "string",
+          "description": "Base directory for the scoped CARGO_TARGET_DIR (see scoped_cargo_target). Each project gets a stable subdir. Defaults to <system-temp>/forge-cargo-target when unset."
         }
       }
     },
