@@ -9,28 +9,28 @@
 class Forge < Formula
   desc "Multi-provider mesh AI coding CLI"
   homepage "https://github.com/florisvoskamp/forge"
-  version "2.5.2" # auto-updated by release.yml (scripts/update-brew-formula.sh) per release
+  version "2.5.3" # auto-updated by release.yml (scripts/update-brew-formula.sh) per release
   license "AGPL-3.0-only"
 
   on_macos do
     on_arm do
       url "https://github.com/florisvoskamp/forge/releases/download/v#{version}/forge-aarch64-apple-darwin.tar.gz"
-      sha256 "4ef4c4031bd45603e07b63a3a2d3f72e53f817cc073e3bf1c015effb075b6f5e"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
     on_intel do
       url "https://github.com/florisvoskamp/forge/releases/download/v#{version}/forge-x86_64-apple-darwin.tar.gz"
-      sha256 "28013bf9e7bc29febfa96f63ad141fb748422b7b82de6898d4c5cba8f27be268"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/florisvoskamp/forge/releases/download/v#{version}/forge-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "a432b2b2e232f95d522fda1ca3de80ec1f1aac04c82fa95bddc662e123571c41"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
     on_arm do
       url "https://github.com/florisvoskamp/forge/releases/download/v#{version}/forge-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "de3710fa566f2ff409f23dce9c8c500008e13bddaa36925f51c0dbaec96ae5f8"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 
