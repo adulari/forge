@@ -161,8 +161,93 @@ function renderSessionList(rows) {
         .catch(() => {});
     };
     d.appendChild(main); d.appendChild(arch);
+    // Worktree sessions can be merged back into their base branch or discarded outright.
+    if (r.worktree) {
+      d.appendChild(worktreeBtn(r, "merge", "smerge", false));
+      d.appendChild(worktreeBtn(r, "discard", "sdiscard", true));
+    }
     el.appendChild(d);
   });
+}
+
+// A one-tap worktree action button (merge / discard) for a running session row. `confirmFirst`
+// gates the destructive discard behind a confirm(); merge reports conflicts inline instead of
+// silently applying, so it needs no up-front prompt.
+function worktreeBtn(r, action, cls, confirmFirst) {
+  const b = document.createElement("button");
+  b.className = "sarch " + cls;
+  b.textContent = action;
+  b.onclick = () => {
+    if (confirmFirst && !confirm("Discard this worktree AND its branch? Unmerged work is lost.")) return;
+    b.disabled = true;
+    fetch(BASE + "/api/sessions/" + encodeURIComponent(r.id) + "/" + action, { method: "POST" })
+      .then(res => res.json().then(j => ({ ok: res.ok, j })))
+      .then(({ ok, j }) => {
+        if (!ok) {
+          const detail = (j.conflicts && j.conflicts.length) ? "\n\nConflicts:\n" + j.conflicts.join("\n")
+            : (j.dirty_files && j.dirty_files.length) ? "\n\nUncommitted:\n" + j.dirty_files.join("\n") : "";
+          alert((j.error || (action + " failed")) + detail);
+          return;
+        }
+        if (r.id === curSession) detach();
+        pollSessions();
+      })
+      .catch(e => alert(action + " failed: " + e))
+      .finally(() => { b.disabled = false; });
+  };
+  return b;
+}
+
+// --- Past-session resurrection browser -------------------------------------------------------
+let pastBefore = null; // last_activity cursor for "load more"
+function loadPast(more) {
+  if (!daemon) return;
+  if (!more) { pastBefore = null; $("pastlist").innerHTML = '<div class="empty">loading…</div>'; }
+  let url = BASE + "/api/sessions/past?limit=25";
+  if (more && pastBefore) url += "&before=" + pastBefore;
+  fetch(url, { cache: "no-store" })
+    .then(r => r.json())
+    .then(rows => renderPast(rows, more))
+    .catch(() => { if (!more) $("pastlist").innerHTML = '<div class="empty">could not load</div>'; });
+}
+function renderPast(rows, append) {
+  const el = $("pastlist");
+  if (!append) el.innerHTML = "";
+  if (!append && !rows.length) { el.innerHTML = '<div class="empty">no past sessions to resume</div>'; }
+  rows.forEach(r => {
+    const d = document.createElement("div");
+    d.className = "sessrow";
+    const main = document.createElement("button");
+    main.className = "sessmain";
+    main.innerHTML = '<span class="sdot idle"></span><b>' +
+      esc(r.title || (r.preview ? r.preview.slice(0, 40) : r.id.slice(0, 8))) + '</b>' +
+      '<span class="sinfo">' + esc(baseName(r.cwd)) +
+      (r.worktree ? " · ⎇ worktree" : "") +
+      (r.message_count ? " · " + r.message_count + " msg" : "") +
+      " · $" + (r.cost_usd || 0).toFixed(4) +
+      " · " + age(r.last_activity) + '</span>';
+    main.title = "resume this session";
+    main.onclick = () => resumePast(r, main);
+    d.appendChild(main);
+    el.appendChild(d);
+    if (r.last_activity) pastBefore = r.last_activity;
+  });
+  $("pastmore").hidden = rows.length < 25;
+}
+function resumePast(r, btn) {
+  btn.disabled = true;
+  fetch(BASE + "/api/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ resume: r.id }),
+  })
+    .then(res => res.json().then(j => ({ ok: res.ok, j })))
+    .then(({ ok, j }) => {
+      if (!ok) { alert(j.error || "resume failed"); return; }
+      attach(j.id);
+    })
+    .catch(e => alert("resume failed: " + e))
+    .finally(() => { btn.disabled = false; });
 }
 
 function age(t) {
@@ -179,10 +264,12 @@ function showSessions(v) {
   $("transcript").hidden = v;
   $("tasks").hidden = true;
   $("agents").hidden = true;
-  if (v) pollSessions();
+  if (v) { pollSessions(); loadPast(false); }
 }
 
 $("btnSessions").onclick = () => showSessions($("sessions").hidden);
+$("pastrefresh").onclick = () => loadPast(false);
+$("pastmore").onclick = () => loadPast(true);
 $("snew").onclick = () => { $("snewform").hidden = !$("snewform").hidden; };
 $("ncreate").onclick = () => {
   $("nerr").hidden = true;

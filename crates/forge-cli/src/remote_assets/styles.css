@@ -156,6 +156,15 @@ footer { font-size: 11px; color: #4a4a54; text-align: center; padding: 4px 0 2px
 #offq { padding: 4px 2px; }
 .oqfull { color: var(--no); }
 
+/* serve completion — worktree merge/discard + past-session browser */
+.smerge:active { color: var(--ok); border-color: var(--ok); }
+.sdiscard:active { color: var(--no); border-color: var(--no); }
+.sarch:disabled { opacity: .5; cursor: default; }
+.sdot.idle { background: var(--dim); }
+#pastwrap { margin-top: 10px; border-top: 1px solid #2a2a32; padding-top: 8px; }
+.pasthead { padding-bottom: 6px; }
+.pastmore { width: 100%; }
+
 /* v7 — fleet dashboard */
 .sdot.wait { background: var(--no); animation: pulse .7s infinite; }
 .sneeds { color: var(--no); font-size: 11px; font-weight: 700; text-transform: uppercase;
