@@ -11,14 +11,16 @@ use forge_types::{EffortLevel, Message, Role, ToolCall, Usage};
 use futures::StreamExt;
 use genai::adapter::AdapterKind;
 use genai::chat::{
-    Binary, CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent,
-    ContentPart, MessageContent, ReasoningEffort, Tool, ToolCall as GenAiToolCall, ToolResponse,
+    Binary, CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatResponseFormat, ChatRole,
+    ChatStreamEvent, ContentPart, JsonSpec, MessageContent, ReasoningEffort, Tool,
+    ToolCall as GenAiToolCall, ToolResponse,
 };
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, Headers, ModelIden, ServiceTarget};
 
 use crate::{
-    CompletionOptions, EventSink, ModelResponse, Provider, ProviderError, StreamEvent, ToolSpec,
+    CompletionOptions, EventSink, ModelResponse, Provider, ProviderError, ResponseFormat,
+    StreamEvent, ToolSpec,
 };
 
 pub struct GenAiProvider {
@@ -1002,6 +1004,19 @@ impl Provider for GenAiProvider {
                 // engaged: thinking models reject (or ignore) a custom temperature, so effort wins.
                 options = options.with_temperature(temp as f64);
             }
+        }
+
+        // Structured-output request (OpenAI `response_format`): map to the provider's JSON-mode /
+        // JSON-schema knob so a caller asking for JSON actually gets JSON. Providers that don't
+        // support it ignore the field (genai's documented behaviour).
+        if let Some(rf) = &opts.response_format {
+            let genai_rf = match rf {
+                ResponseFormat::JsonObject => ChatResponseFormat::JsonMode,
+                ResponseFormat::JsonSchema { name, schema } => {
+                    ChatResponseFormat::JsonSpec(JsonSpec::new(name.clone(), schema.clone()))
+                }
+            };
+            options = options.with_response_format(genai_rf);
         }
 
         // Stall guards: a hung connection or a stream that goes silent must not freeze the

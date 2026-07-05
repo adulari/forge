@@ -92,12 +92,15 @@ pub fn is_free(id: &str, cost: f64, subscription: bool) -> bool {
     }
 }
 
-/// Whether a model id is a chat/text-generation model the mesh can route a turn to. Provider
-/// model lists mix in non-conversational endpoints — image (`imagen`, `veo`, `lyria`, `*-image`,
-/// `nano-banana`), audio/TTS (`*-tts`, `whisper`, `*-audio`), embeddings, async deep-research,
-/// `computer-use`/`robotics`, and moderation/guard models. Routing to one breaks the turn (or, for
-/// `deep-research`, silently picks a slow research endpoint for a trivial edit — the bug). They
-/// stay visible in `forge models` but are excluded from the routing ranking.
+/// Whether a model id is a general chat/text-generation model the mesh can route an arbitrary turn
+/// to. Provider model lists mix in *task-specific* endpoints that either break a general turn or
+/// silently mangle it — image (`imagen`, `veo`, `lyria`, `*-image`, `nano-banana`), audio/TTS
+/// (`*-tts`, `whisper`, `*-audio`), embeddings/rerankers, translation-only models (e.g.
+/// `riva-translate`, which just translates/echoes any non-translation prompt), async deep-research,
+/// `computer-use`/`robotics`, and moderation/guard models. Routing a general "reply with JSON …"
+/// prompt to one of these produces garbage (the translation-model bug), so they are excluded from
+/// the general routing ranking. They stay visible in `forge models`; a caller that specifically
+/// wants one still pins it explicitly (which bypasses this general-pool filter).
 pub fn is_routable(id: &str) -> bool {
     let m = id.to_lowercase();
     const BLOCK: &[&str] = &[
@@ -110,6 +113,10 @@ pub fn is_routable(id: &str) -> bool {
         "tts-",
         "whisper",
         "embedding",
+        "-embed", // embed variants not caught by "embedding" (e.g. `nv-embedqa`, `text-embed`)
+        "embed-", // ditto (e.g. Cohere `embed-english-v3.0`)
+        "rerank", // reranker endpoints score pairs; they don't do chat completion
+        "translate", // translation-only models (e.g. `riva-translate`) can't follow general prompts
         "deep-research",
         "computer-use",
         "robotics",
@@ -1000,6 +1007,35 @@ mod tests {
         assert!(!r
             .iter()
             .any(|m| m.contains("deep-research") || m.contains("imagen")));
+    }
+
+    #[test]
+    fn task_specific_models_are_excluded_from_general_routing() {
+        // Translation-only, reranker, and embedding-variant endpoints appear in provider model
+        // lists (esp. NVIDIA NIM) but can't answer a general chat/JSON turn — routing to
+        // `riva-translate` just echoes/translates the prompt (the reported bug). They must be
+        // filtered out of the general routing pool.
+        assert!(!is_routable(
+            "nvidia::nvidia/riva-translate-4b-instruct-v1.1"
+        ));
+        assert!(!is_routable("nvidia::nvidia/llama-3.2-nv-rerankqa-1b-v2"));
+        assert!(!is_routable("nvidia::nvidia/nv-embedqa-e5-v5"));
+        assert!(!is_routable("cohere::embed-english-v3.0"));
+        // A real instruct model whose id merely contains "instruct" stays routable.
+        assert!(is_routable("nvidia::meta/llama-3.3-70b-instruct"));
+
+        // With a translation model in the catalog alongside a real instruct model, ranking picks
+        // the instruct model — never the translator.
+        let cat = ModelCatalog::new(vec![
+            "nvidia::nvidia/riva-translate-4b-instruct-v1.1".into(),
+            "nvidia::meta/llama-3.3-70b-instruct".into(),
+        ]);
+        let r = cat.ranked_for(TaskTier::Trivial, &Pricing::default(), 5);
+        assert!(
+            !r.iter().any(|m| m.contains("riva-translate")),
+            "translation model must not be in the general routing pool: {r:?}"
+        );
+        assert_eq!(r.first().unwrap(), "nvidia::meta/llama-3.3-70b-instruct");
     }
 
     #[test]
