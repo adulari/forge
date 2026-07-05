@@ -8,6 +8,42 @@ use forge_tui::{HeadlessPresenter, Presenter, TuiPresenter};
 
 use crate::*;
 
+/// Build the `shell` tool's Landlock sandbox and/or scoped `CARGO_TARGET_DIR` carve-out from
+/// `[shell]` config (`sandbox` / `scoped_cargo_target`, ADR-0008 + PR #521). Returns `None` when
+/// both knobs are off, in which case the caller should keep the plain `ShellTool::default()`
+/// already registered by `ToolRegistry::with_core_tools()`. Shared by `forge run` (this file) and
+/// the `mcp-serve` CLI-bridge path (`crate::mcp_serve::run`) so the two entry points can't drift —
+/// a bridged claude/codex agent gets the same compile-check carve-out as a direct `forge run`
+/// session.
+pub(crate) fn sandboxed_shell_tool(
+    config: &forge_config::Config,
+) -> Option<forge_tools::ShellTool> {
+    if !(config.shell.sandbox || config.shell.scoped_cargo_target) {
+        return None;
+    }
+    let writable = config
+        .shell
+        .sandbox_writable
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    let cargo_target_base = config.shell.scoped_cargo_target.then(|| {
+        config
+            .shell
+            .scoped_cargo_target_dir
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join("forge-cargo-target"))
+    });
+    Some(forge_tools::ShellTool {
+        policy: forge_tools::SandboxPolicy {
+            enabled: config.shell.sandbox,
+            writable,
+            cargo_target_base,
+        },
+    })
+}
+
 /// A finished `/duel` result: the comparable report plus the still-alive worktree guards for
 /// every candidate (the picker owns picking a winner — merging it back and dropping every guard).
 /// Named so the background task ([`spawn_duel`]) and the done-signal drain that consumes it don't
@@ -324,29 +360,10 @@ pub(crate) async fn build_session_with_self_mcp(
     // Opt-in OS sandbox and/or scoped build-target dir: replace the default shell tool with one
     // that confines filesystem writes to the workspace via Landlock (Linux; no-op elsewhere) and/or
     // relocates cargo's CARGO_TARGET_DIR outside the (possibly read-only) workspace so a
-    // bypass-mode agent can compile-check its own edits under confinement.
-    if config.shell.sandbox || config.shell.scoped_cargo_target {
-        let writable = config
-            .shell
-            .sandbox_writable
-            .iter()
-            .map(std::path::PathBuf::from)
-            .collect();
-        let cargo_target_base = config.shell.scoped_cargo_target.then(|| {
-            config
-                .shell
-                .scoped_cargo_target_dir
-                .clone()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::env::temp_dir().join("forge-cargo-target"))
-        });
-        tools.register(Box::new(forge_tools::ShellTool {
-            policy: forge_tools::SandboxPolicy {
-                enabled: config.shell.sandbox,
-                writable,
-                cargo_target_base,
-            },
-        }));
+    // bypass-mode agent can compile-check its own edits under confinement. Shared with the
+    // `mcp-serve` bridge path via `sandboxed_shell_tool` so the two can't drift.
+    if let Some(shell_tool) = sandboxed_shell_tool(&config) {
+        tools.register(Box::new(shell_tool));
     }
     if let Some(lat) = &lattice {
         tools.register(Box::new(forge_tools::LatticeTool::new(Arc::clone(lat))));
