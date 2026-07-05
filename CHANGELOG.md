@@ -6,6 +6,31 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.5.3] - 2026-07-05
+
+### Fixed
+- **Hung turns no longer leak subprocess trees** (`crates/forge-provider/src/cli_provider.rs`):
+  a cancelled or timed-out turn (idle watchdog, per-turn timeout, or user interrupt) now
+  SIGKILLs the CLI-bridge child's whole process group on drop, not just the direct child —
+  so a grandchild (the bridge's `forge mcp-serve`, or a hung env-build subshell) can no
+  longer orphan and hang a run (a real bench once hung ~3h on this).
+- **`forge api` honors an explicit `model`** (`crates/forge-cli/src/api_serve.rs`,
+  `crates/forge-mesh`, `crates/forge-config`): the OpenAI-compatible endpoint now dispatches
+  an explicit `model` verbatim to its provider, bypassing mesh classification (completing
+  the incomplete #509 fix, which catalog-gated the pin and 404'd valid live models).
+  Explicit pins are single-candidate (no silent cross-model failover); unroutable/unknown/
+  keyless models return a clean 4xx instead of a silent reroute; `model:"auto"` still
+  mesh-routes. A shared `pin_is_dispatchable` predicate keeps the API and CLI pin paths
+  from diverging.
+
+### Added
+- **Token-budget continuation guard** (`crates/forge-core`): when a turn ends under ~90%
+  of budget with no real progress and the goal unverified, Forge compacts then nudges the
+  model to actually do the work instead of accepting a premature "done", stopping on
+  diminishing returns (3 continuations with <500 new tokens; hard ceiling 6). Progress
+  detection is CLI-bridge-aware (reads the real git worktree + sink tool activity), closing
+  a gap where bridged models could end a turn with an empty diff.
+
 ## [2.5.2] - 2026-07-05
 
 ### Fixed
@@ -2303,7 +2328,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.2...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.3...HEAD
+[2.5.3]: https://github.com/Adulari/forge/compare/v2.5.2...v2.5.3
 [2.5.2]: https://github.com/Adulari/forge/compare/v2.5.1...v2.5.2
 [2.5.1]: https://github.com/Adulari/forge/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/Adulari/forge/compare/v2.4.0...v2.5.0
