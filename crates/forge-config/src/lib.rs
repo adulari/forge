@@ -3662,6 +3662,17 @@ pub fn has_api_key(provider: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether `provider` is one Forge actually knows how to dispatch to — a keyed provider (native or
+/// custom OpenAI-compatible, incl. Azure), a keyless local server (`ollama`), or a subscription CLI
+/// bridge (`claude-cli`/`codex-cli`/`agy-cli`). Distinct from [`has_api_key`], which returns `true`
+/// for UNKNOWN providers (so it never blocks routing) — this returns `false` for them, letting a
+/// caller that must reject an unroutable pin (e.g. the OpenAI-compatible `forge api` endpoint) tell
+/// a real provider from a typo instead of dispatching a doomed request.
+pub fn is_known_provider(provider: &str) -> bool {
+    known_key_providers().any(|p| p == provider)
+        || matches!(provider, "ollama" | "claude-cli" | "codex-cli" | "agy-cli")
+}
+
 /// Resolve a single API key for a provider (the first usable one). Environment first, then the OS
 /// keyring. Used wherever exactly one key is needed (model listing, balance probes); for rotation
 /// across all configured keys see [`api_keys`].

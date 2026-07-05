@@ -342,46 +342,51 @@ fn model_pin(model: &Option<String>) -> Option<String> {
     }
 }
 
-/// Resolve the request's `model` into an optional hard pin, validated against what this server can
-/// actually route to. Returns:
-/// - `Ok(None)` for the mesh sentinels (`auto`/`mesh`/…) — let the mesh route.
-/// - `Ok(Some(id))` when `id` is an advertised, routable model — pin it.
-/// - `Err(msg)` when `id` is unknown/unadvertised — the caller returns a 404 instead of silently
-///   mesh-routing the request to some unrelated model (the original bug: a pin to an unreachable
-///   id fell through to a translation model).
+/// Resolve the request's `model` into an optional hard pin. An explicit model is honored EXACTLY as
+/// `forge run --model <id>` honors it — dispatched straight to its provider, bypassing mesh
+/// classification — so external OpenAI-compatible consumers get deterministic per-request model
+/// selection. Returns:
+/// - `Ok(None)` for the mesh sentinels (`auto`/`mesh`/…) — let the mesh classify + route.
+/// - `Ok(Some(id))` when `id` is a routable model this server can dispatch to (advertised, OR any
+///   model whose provider has a usable key — the [`forge_mesh::pin_is_dispatchable`] rule the CLI
+///   pin path uses). Crucially this is NOT gated on the advertised catalog: a caller must be able to
+///   pin any model their key reaches, even one auto-discovery didn't enumerate (a completion-only
+///   provider, or a model newer than the cached catalog). That un-advertised-but-valid case is the
+///   gap #509 missed — it "worked" only for models that happened to be in the discovery catalog.
+/// - `Err(msg)` when `id` is unroutable — a bare `provider::` prefix, a task-specific endpoint
+///   (translation/embedding/…), or an unknown provider — so the caller returns a clean 4xx instead
+///   of silently mesh-routing the request to some unrelated model, panicking, or 500ing.
 fn resolve_pin(models: &[String], model: &Option<String>) -> Result<Option<String>, String> {
     let Some(pin) = model_pin(model) else {
         return Ok(None);
     };
-    if models.iter().any(|m| m == &pin) {
+    let provider = forge_config::provider_of(&pin);
+    if provider.is_empty() || pin.trim_end().ends_with("::") {
+        return Err(format!(
+            "model '{pin}' is not a valid `provider::model` id — GET /v1/models for the routable \
+             ids, or use \"auto\" to let the mesh pick"
+        ));
+    }
+    if !forge_mesh::catalog::is_routable(&pin) {
+        return Err(format!(
+            "model '{pin}' is a task-specific endpoint (translation/embedding/TTS/image), not a \
+             chat model — it can't answer /v1/chat/completions; GET /v1/models for the routable ids"
+        ));
+    }
+    // An advertised model is dispatchable by definition (covers keyless/offline setups). Otherwise
+    // honor it iff its provider is one we know AND has a usable key — mirroring the CLI `--model`
+    // pin, which routes to any keyed provider regardless of the discovery catalog. A truly unknown
+    // provider (a typo) or a keyed provider with no key configured is rejected here, not dispatched.
+    if models.iter().any(|m| m == &pin)
+        || (forge_config::is_known_provider(provider) && forge_mesh::pin_is_dispatchable(&pin))
+    {
         Ok(Some(pin))
     } else {
         Err(format!(
-            "model '{pin}' is not available on this server — GET /v1/models for the routable ids, \
-             or use \"auto\" to let the mesh pick"
+            "model '{pin}' can't be routed on this server — unknown provider, or no API key \
+             configured for '{provider}'. GET /v1/models for the routable ids, or use \"auto\"."
         ))
     }
-}
-
-/// The failover chain for a pinned model: the pin first, then any OTHER advertised models from the
-/// SAME provider (in-provider failover only). Crucially it never crosses to a different provider's
-/// model, so a pin to (say) an OpenRouter id can't silently degrade to an unrelated NVIDIA
-/// translation endpoint — if every same-provider option fails, the request errors with the real
-/// cause instead.
-fn pinned_chain(models: &[String], pin: &str) -> Vec<String> {
-    let provider = forge_config::provider_of(pin);
-    let mut chain = vec![pin.to_string()];
-    chain.extend(
-        models
-            .iter()
-            .filter(|m| {
-                m.as_str() != "auto"
-                    && m.as_str() != pin
-                    && forge_config::provider_of(m) == provider
-            })
-            .cloned(),
-    );
-    chain
 }
 
 /// Strip a surrounding Markdown code fence (```` ```json … ``` ````) from `s`, returning the inner
@@ -506,9 +511,13 @@ async fn chat_completions(
 
     // Decide the ordered model chain to try.
     let decision = match &pin {
-        // Pinned: bypass the mesh classifier entirely and honor the caller's exact model, failing
-        // over only within its own provider (never across to an unrelated model).
-        Some(p) => pinned_chain(&state.models, p),
+        // Pinned: bypass the mesh classifier entirely and dispatch to the caller's EXACT model, with
+        // no cross-model failover — identical to `forge run --model <id>` strict-pin semantics
+        // (`mesh.pin_failover = false`, the default). A pin must pin: the mesh must never override
+        // the CHOICE of model, so `x_forge.routed_model` always equals the requested `model`. A
+        // transient error (429/5xx) on the pinned model surfaces as an error with its real cause,
+        // rather than silently degrading the caller to a different model they didn't ask for.
+        Some(p) => vec![p.clone()],
         // Unpinned ("auto"): ask the mesh which model to use and its ordered failover chain.
         None => {
             let prompt = routing_prompt(&messages);
@@ -1081,11 +1090,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pinning_an_unknown_model_is_a_404_not_a_silent_reroute() {
+    async fn pinning_an_unknown_provider_is_a_404_not_a_silent_reroute() {
         let router = api_router(mock_state());
+        // An UNKNOWN provider (typo) must be a clean 4xx — never a silent fall-through to mesh
+        // classification (the original riva-translate substitution bug) and never a 500/panic.
         let resp = router
             .oneshot(post_chat(serde_json::json!({
-                "model": "openrouter::definitely-not-a-real-model-xyz",
+                "model": "nonexistent::fake-model-xyz",
                 "messages": [{"role": "user", "content": "mock:code"}],
             })))
             .await
@@ -1095,37 +1106,68 @@ mod tests {
         assert_eq!(v["error"]["type"], "model_not_found");
     }
 
+    #[tokio::test]
+    async fn an_unadvertised_but_dispatchable_pin_is_honored_verbatim() {
+        // The #509 gap: a model this server can reach but that auto-discovery did NOT advertise was
+        // wrongly rejected. `ollama` is a known, keyless provider, so an un-advertised `ollama::` id
+        // must now be honored and routed to verbatim. Uses the EXACT shape that hid the bug in the
+        // field — a `response_format` + system message + trivial prompt — proving none of those
+        // divert an explicit pin back into mesh classification.
+        let state = mock_state();
+        let pin = "ollama::some-unadvertised-model";
+        assert!(
+            !state.models.iter().any(|m| m == pin),
+            "test premise: the pin must NOT be in the advertised catalog"
+        );
+        let router = api_router(state);
+        let resp = router
+            .oneshot(post_chat(serde_json::json!({
+                "model": pin,
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": "Classify into exactly one category. Respond JSON."},
+                    {"role": "user", "content": "Subject: invoice #4521"},
+                ],
+            })))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_slice(&body_bytes(resp).await).unwrap();
+        assert_eq!(v["model"], pin);
+        assert_eq!(v["x_forge"]["routed_model"], pin);
+    }
+
     #[test]
-    fn resolve_pin_validates_against_advertised_models() {
+    fn resolve_pin_honors_dispatchable_pins_and_rejects_unroutable() {
         let models = vec![
             "auto".to_string(),
             "groq::llama-3.3-70b".to_string(),
             "openai::gpt-4o-mini".to_string(),
         ];
+        // Sentinels / absent → mesh routes.
         assert_eq!(resolve_pin(&models, &Some("auto".into())), Ok(None));
         assert_eq!(resolve_pin(&models, &None), Ok(None));
+        // Advertised → honored (no key needed).
         assert_eq!(
             resolve_pin(&models, &Some("groq::llama-3.3-70b".into())),
             Ok(Some("groq::llama-3.3-70b".into()))
         );
-        assert!(resolve_pin(&models, &Some("groq::nope".into())).is_err());
-    }
-
-    #[test]
-    fn pinned_chain_fails_over_only_within_the_same_provider() {
-        let models = vec![
-            "auto".to_string(),
-            "openai::gpt-4o-mini".to_string(),
-            "openai::gpt-4o".to_string(),
-            "nvidia::riva-translate".to_string(),
-            "groq::llama-3.3-70b".to_string(),
-        ];
-        let chain = pinned_chain(&models, "openai::gpt-4o-mini");
-        assert_eq!(chain.first().unwrap(), "openai::gpt-4o-mini");
-        assert!(chain.iter().all(|m| m.starts_with("openai::")));
-        // Never crosses to another provider (the silent-degrade-to-translation bug).
-        assert!(!chain.iter().any(|m| m.contains("riva")));
-        assert!(!chain.iter().any(|m| m.starts_with("groq::")));
+        // THE FIX: an un-advertised model on a known, keyless provider (`ollama`) is honored, not
+        // rejected — matching `forge run --model`. (`ollama` needs no key, so this is env-independent.)
+        assert_eq!(
+            resolve_pin(&models, &Some("ollama::not-in-the-catalog".into())),
+            Ok(Some("ollama::not-in-the-catalog".into()))
+        );
+        // Unknown provider (typo) → clean error, not a dispatch.
+        assert!(resolve_pin(&models, &Some("nonexistent::whatever".into())).is_err());
+        // Bare `provider::` prefix → error.
+        assert!(resolve_pin(&models, &Some("groq::".into())).is_err());
+        // Task-specific (non-chat) endpoint → error even though the provider is known + keyless.
+        assert!(
+            resolve_pin(&models, &Some("ollama::nomic-embed-text".into())).is_err(),
+            "an embedding endpoint must not be pinnable for chat completions"
+        );
     }
 
     #[test]
