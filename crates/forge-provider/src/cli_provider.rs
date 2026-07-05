@@ -1596,6 +1596,12 @@ impl CliProvider {
         })?;
 
         let pgid = child.id().map(|id| id as i32);
+        // Arm a process-GROUP kill for the whole streaming period: if this future is dropped
+        // mid-turn (external per-turn timeout / idle watchdog / user interrupt), `kill_on_drop`
+        // reaps only the direct child — this reaps its grandchildren (a hung env-build) too.
+        // Disarmed the moment the read loop returns normally (below), where the stall/read-error/
+        // success paths each handle teardown explicitly.
+        let mut kill_guard = GroupKillGuard::new(pgid);
         // Feed the prompt to the child's stdin on a separate task so a large prompt can't deadlock
         // against the child filling its stdout pipe before it finishes reading stdin. Dropping the
         // handle after the write closes stdin (EOF), which both CLIs need to start processing.
@@ -1728,6 +1734,9 @@ impl CliProvider {
             Ok::<(), std::io::Error>(())
         }
         .await;
+        // The read future completed (was NOT dropped mid-stream), so the explicit cleanup below owns
+        // teardown — cancel the drop-time group kill.
+        kill_guard.disarm();
 
         if let Some(t) = tailer {
             t.abort();
@@ -2178,6 +2187,7 @@ impl LiveSession {
 
     /// Stop the process and clean up (called on model change, error, or drop-equivalent).
     async fn teardown(mut self) {
+        // (see `impl Drop for LiveSession` for the drop-without-teardown safety net)
         use tokio::io::AsyncWriteExt;
         if let Some(t) = self.tailer.take() {
             t.abort();
@@ -2191,6 +2201,20 @@ impl LiveSession {
         // Closing stdin (EOF) lets claude exit its input loop cleanly; then make sure it's gone.
         let _ = self.stdin.shutdown().await;
         terminate(&mut self.child, self.pgid).await;
+    }
+}
+
+impl Drop for LiveSession {
+    /// Belt-and-suspenders: if a `LiveSession` is dropped WITHOUT `teardown` (e.g. the `CliProvider`
+    /// itself is dropped while a session is still parked in `self.live`), reap the whole process
+    /// GROUP, not just the `kill_on_drop` direct child — otherwise a grandchild (the served
+    /// `forge mcp-serve`, or a hung env-build subshell) is orphaned and leaks. No-op on non-Unix.
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pg) = self.pgid {
+            // SIGKILL the group (negative pid). ESRCH (already reaped by `teardown`) is harmless.
+            unsafe { libc::kill(-pg, libc::SIGKILL) };
+        }
     }
 }
 
@@ -2335,6 +2359,12 @@ impl CliProvider {
         // Mark mid-turn BEFORE the writes/reads that can span minutes, so a cancelled caller leaves
         // this flag set and the next call refuses to reuse the session (see `turn_in_flight`).
         sess.turn_in_flight = true;
+        // Arm a process-GROUP kill for the mid-turn window. Unlike the one-shot path, a dropped
+        // future here does NOT drop the `LiveSession` (it stays parked in `self.live`), so its
+        // `kill_on_drop` child never fires — the whole bridge process TREE (claude + its
+        // `forge mcp-serve` + any hung grandchild) would leak until some later call tore it down,
+        // which may never come. On drop this SIGKILLs the group; disarmed once the turn finishes.
+        let mut kill_guard = GroupKillGuard::new(sess.pgid);
         if let Err(e) = sess.write_user(&payload).await {
             if let Some(old) = guard.take() {
                 old.teardown().await;
@@ -2353,7 +2383,12 @@ impl CliProvider {
             };
         }
 
-        match sess.drive_turn(self.timeout, self.kind, on_event).await {
+        let drive_result = sess.drive_turn(self.timeout, self.kind, on_event).await;
+        // The turn finished (Ok/Err) — it was NOT cancelled mid-flight — so disarm the group kill:
+        // a successful turn KEEPS the live process for the next turn, and the error paths below tear
+        // it down explicitly via `teardown`.
+        kill_guard.disarm();
+        match drive_result {
             Ok(turn) => {
                 sess.sent = messages.len();
                 sess.turn_in_flight = false;
@@ -2541,9 +2576,169 @@ async fn terminate(child: &mut Child, pgid: Option<i32>) {
     }
 }
 
+/// RAII guard that SIGKILLs a bridge child's whole PROCESS GROUP when dropped, unless disarmed
+/// first. `kill_on_drop(true)` only reaps the DIRECT child, so a bridge CLI that spawned a
+/// grandchild (its `forge mcp-serve`, or an env-build subshell that hung) LEAKS that grandchild
+/// whenever the turn future is dropped — by an external per-turn timeout, the idle watchdog
+/// (`run_with_idle_watchdog`), or a user interrupt (`handle.abort()`) — because the drop bypasses
+/// the explicit `terminate` cleanup that would have killed the group. A real bench once hung ~3h on
+/// exactly this leak. The guard is armed across the turn's await points and disarmed on the normal
+/// completion path (where teardown / keep-alive is handled explicitly), so the group is only nuked
+/// when the turn was genuinely cancelled mid-flight. No-op on non-Unix (no process groups there;
+/// `kill_on_drop` + the `taskkill /T` tree-kill in `terminate` cover the direct-child + tree).
+struct GroupKillGuard {
+    /// The child's process-group id (== its pid, since it was spawned `process_group(0)`), or
+    /// `None` once disarmed / when the pid was unavailable.
+    pgid: Option<i32>,
+}
+
+impl GroupKillGuard {
+    fn new(pgid: Option<i32>) -> Self {
+        Self { pgid }
+    }
+
+    /// Cancel the pending kill — call once the turn reached an explicit cleanup / keep-alive path.
+    fn disarm(&mut self) {
+        self.pgid = None;
+    }
+}
+
+impl Drop for GroupKillGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pg) = self.pgid {
+            unsafe { libc::kill(-pg, libc::SIGKILL) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Spawn a `sh` (its own process group, `kill_on_drop`) that backgrounds a grandchild `sleep`
+    /// and writes the grandchild's pid to `pidfile`, mirroring a bridge CLI that spawned a hung
+    /// env-build subshell. Returns the tokio `Child` and the grandchild pid once observed.
+    #[cfg(unix)]
+    async fn spawn_tree_with_grandchild(pidfile: &std::path::Path) -> (Child, i32) {
+        let script = format!("sleep 30 & echo $! > {pf}; wait", pf = pidfile.display());
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        put_in_own_process_group(&mut cmd);
+        let child = cmd.spawn().expect("spawn sh");
+        // Poll for the grandchild pid the subshell writes out.
+        let mut gpid = None;
+        for _ in 0..200 {
+            if let Ok(s) = std::fs::read_to_string(pidfile) {
+                if let Ok(p) = s.trim().parse::<i32>() {
+                    gpid = Some(p);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        (child, gpid.expect("grandchild pid not observed"))
+    }
+
+    #[cfg(unix)]
+    fn pid_alive(pid: i32) -> bool {
+        // signal 0 probes existence. The probed pid is always our own descendant (same uid), so
+        // EPERM can't occur — `kill(pid, 0) == 0` ⇒ alive, `-1` (ESRCH) ⇒ gone.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// REPRO: a bare `kill_on_drop` reaps only the DIRECT child — dropping it ORPHANS the grandchild
+    /// (the class of leak that froze a bench for ~3h). This documents the defect the guard fixes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bare_kill_on_drop_leaks_grandchild() {
+        let pidfile =
+            std::env::temp_dir().join(format!("forge-r1-repro-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&pidfile);
+        let (child, gpid) = spawn_tree_with_grandchild(&pidfile).await;
+        assert!(
+            pid_alive(gpid),
+            "grandchild should be running before the drop"
+        );
+        // Simulate the turn future being dropped/cancelled: only `kill_on_drop` fires.
+        drop(child);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let leaked = pid_alive(gpid);
+        // Clean up the leaked grandchild so the test host isn't polluted.
+        unsafe { libc::kill(gpid, libc::SIGKILL) };
+        let _ = std::fs::remove_file(&pidfile);
+        assert!(
+            leaked,
+            "grandchild was reaped by kill_on_drop alone — repro no longer valid"
+        );
+    }
+
+    /// FIX: the `GroupKillGuard` SIGKILLs the whole process GROUP on drop, so a cancelled turn takes
+    /// the grandchild down with it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn group_kill_guard_reaps_grandchild_on_drop() {
+        let pidfile = std::env::temp_dir().join(format!("forge-r1-fix-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&pidfile);
+        let (child, gpid) = spawn_tree_with_grandchild(&pidfile).await;
+        let pgid = child.id().map(|id| id as i32);
+        assert!(
+            pid_alive(gpid),
+            "grandchild should be running before the drop"
+        );
+        // Simulate a cancelled turn: the guard drops alongside the child.
+        {
+            let _guard = GroupKillGuard::new(pgid);
+            drop(child);
+        }
+        // Poll for the grandchild to disappear.
+        let mut gone = false;
+        for _ in 0..100 {
+            if !pid_alive(gpid) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if !gone {
+            unsafe { libc::kill(gpid, libc::SIGKILL) };
+        }
+        let _ = std::fs::remove_file(&pidfile);
+        assert!(
+            gone,
+            "GroupKillGuard did not reap the grandchild process group"
+        );
+    }
+
+    /// A disarmed guard must NOT kill the group (the normal-completion / keep-alive path).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disarmed_group_kill_guard_spares_the_group() {
+        let pidfile =
+            std::env::temp_dir().join(format!("forge-r1-disarm-{}.pid", std::process::id()));
+        let _ = std::fs::remove_file(&pidfile);
+        let (mut child, gpid) = spawn_tree_with_grandchild(&pidfile).await;
+        let pgid = child.id().map(|id| id as i32);
+        {
+            let mut guard = GroupKillGuard::new(pgid);
+            guard.disarm();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let alive = pid_alive(gpid);
+        // Explicit cleanup regardless of outcome.
+        if let Some(pg) = pgid {
+            unsafe { libc::kill(-pg, libc::SIGKILL) };
+        }
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        let _ = std::fs::remove_file(&pidfile);
+        assert!(alive, "a disarmed guard must not kill the process group");
+    }
 
     #[test]
     fn resolve_on_path_detects_present_and_absent() {
