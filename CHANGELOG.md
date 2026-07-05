@@ -6,6 +6,29 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.5.2] - 2026-07-05
+
+### Fixed
+- **NIM/vLLM streamed content loss** (vendored `genai` OpenAI streamer): vLLM-based
+  backends (e.g. NVIDIA NIM serving Kimi) send `"tool_calls": []` in every content delta;
+  the tool-call branch matched on "not null", found no calls, and skipped the chunk —
+  silently dropping the `content` in the same delta so only the final chunk survived
+  (`PONG`→`ONG`). The tool-call path now requires a non-empty array.
+- **Recap floods scrollback** (`forge-core`): the Recap event is a one-line contract but
+  `content` was emitted unbounded; a misbehaving trivial-tier model could dump its full
+  chain-of-thought. Recap output is now clamped to the first non-empty line (240 chars).
+- **`forge run "/rust"` sent the literal slash command to the model**
+  (`forge-cli` run command): one-shot runs did no catalog resolution. One-shot slash
+  commands now expand exactly like the interactive dispatcher (commands → prompt, skills
+  need a task, `//` escapes, unknown tokens pass through verbatim).
+- **Same-model retries claimed "finding another model…"** (`forge-core` + `forge-tui`):
+  pinned rate-limit backoff and transient retries reused the failover event, so the UI
+  contradicted the "a pin must pin" semantics. The event now distinguishes a retry;
+  headless prints "retrying…" and the TUI shows "retrying model".
+- **`forge doctor` echoed ollama stdout warnings as the version** (`forge-cli` local):
+  `ollama --version` with no server running prints `Warning:` lines on stdout; doctor now
+  extracts the version token instead of rendering them raw.
+
 ## [2.5.1] - 2026-07-05
 
 ### Fixed
@@ -2280,7 +2303,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.2...HEAD
+[2.5.2]: https://github.com/Adulari/forge/compare/v2.5.1...v2.5.2
 [2.5.1]: https://github.com/Adulari/forge/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/Adulari/forge/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/Adulari/forge/compare/v2.3.0...v2.4.0
