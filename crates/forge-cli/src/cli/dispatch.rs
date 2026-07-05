@@ -47,6 +47,12 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             rotate_token,
             mock,
         } => crate::serve::serve_cmd(local, anywhere, port, rotate_token, mock).await,
+        Command::Attach {
+            id,
+            url,
+            token,
+            list,
+        } => crate::attach::attach_cmd(id, url, token, list).await,
         Command::Api {
             host,
             port,

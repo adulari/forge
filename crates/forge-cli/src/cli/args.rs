@@ -380,6 +380,26 @@ pub(crate) enum Command {
         #[arg(long)]
         mock: bool,
     },
+    /// Attach a thin terminal client to a running `forge serve` daemon: watch a live session's
+    /// stream (assistant output, tool activity, turn boundaries) and drive it — submit prompts and
+    /// approve/deny permission prompts — from another terminal. With no id (or `--list`) it prints
+    /// the running sessions to pick from. Defaults target the local daemon (loopback + the persisted
+    /// daemon token); `--url` / `--token` override.
+    Attach {
+        /// Session id to attach to (a unique prefix is accepted). Omit to list running sessions.
+        id: Option<String>,
+        /// Daemon base URL (e.g. `http://127.0.0.1:7420`). Defaults to the local daemon's
+        /// loopback origin on the configured `[remote] port` (7420).
+        #[arg(long)]
+        url: Option<String>,
+        /// Daemon token. Defaults to the persisted `serve-token` in the config dir (what
+        /// `forge serve` reads).
+        #[arg(long)]
+        token: Option<String>,
+        /// Just list the running sessions and exit (don't attach).
+        #[arg(long)]
+        list: bool,
+    },
     /// Run an OpenAI-compatible HTTP endpoint backed by Forge's model mesh — embed Forge as your
     /// app's AI backend. Point any OpenAI-compatible client's `base_url` at `http://<host>:<port>/v1`
     /// and every chat completion is routed through the mesh (tier-based model choice, cross-provider

@@ -46,6 +46,7 @@ pub(crate) use cli::commands::tour::tour_cmd;
 
 mod api_serve;
 mod assay_output;
+mod attach;
 mod balance;
 mod bench;
 mod benchmarks;
