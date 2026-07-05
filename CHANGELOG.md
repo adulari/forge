@@ -6,6 +6,16 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-07-05
+
+### Fixed
+- **`forge api` routing + pinning correctness** (`crates/forge-cli` api server + mesh
+  routing): honor an explicitly pinned `model` instead of re-routing it through the mesh,
+  pass `response_format` through to the provider, exclude task-specific models
+  (translation/embedding) from mesh routing so a chat request never lands on one, return a
+  `404` for an unknown pinned model id, and inject the configured provider keys when
+  dispatching from `forge api`.
+
 ## [2.5.0] - 2026-07-04
 
 ### Added
@@ -2270,7 +2280,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.1...HEAD
+[2.5.1]: https://github.com/Adulari/forge/compare/v2.5.0...v2.5.1
 [2.5.0]: https://github.com/Adulari/forge/compare/v2.4.0...v2.5.0
 [2.4.0]: https://github.com/Adulari/forge/compare/v2.3.0...v2.4.0
 [2.3.0]: https://github.com/Adulari/forge/compare/v2.2.0...v2.3.0
