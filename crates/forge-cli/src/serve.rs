@@ -489,6 +489,7 @@ async fn create_session(
     }
 
     let session_cwd = worktree.clone().unwrap_or_else(|| cwd.clone());
+    let is_resume = req.resume.is_some();
     let spec = DriverSpec {
         cwd: session_cwd,
         worktree: worktree.clone(),
@@ -500,6 +501,12 @@ async fn create_session(
     };
     match spawn_session_driver(spec).await {
         Ok(handle) => {
+            // Resuming is an explicit "bring this back" — an archived session (from the
+            // past-sessions browser) should stop being hidden once it's live again, the same
+            // way the archive button hid it.
+            if is_resume {
+                let _ = state.store.unarchive_session(&handle.session_id);
+            }
             let handle = state.registry.insert(handle).await;
             json_response(&serde_json::json!({
                 "id": handle.session_id,
@@ -546,8 +553,9 @@ struct PastSessionRow {
     title: String,
     cwd: String,
     worktree: Option<String>,
-    /// Always `false` here: [`forge_store::Store::list_sessions`] already excludes archived
-    /// sessions. Carried explicitly so the client contract is stable if that ever changes.
+    /// `true` if the session was explicitly archived (the archive button, not just orphaned by
+    /// a daemon restart). The page marks these with an "archived" badge; they resume the same
+    /// way as any other past session (`POST /api/sessions {resume:<id>}` un-archives them).
     archived: bool,
     message_count: i64,
     cost_usd: f64,
@@ -568,8 +576,9 @@ struct PastParams {
 
 /// `GET /api/sessions/past` — persisted top-level sessions that are NOT currently running, newest
 /// activity first, so the page can browse and resurrect one (`POST /api/sessions {resume:<id>}`).
-/// Reuses [`forge_store::Store::list_sessions`] (MRU-ordered, archived + subagent rows already
-/// excluded) and simply drops the ids the registry is actively driving.
+/// Uses [`forge_store::Store::list_sessions_for_resume`] (MRU-ordered, subagent rows excluded,
+/// but — unlike `list_sessions` — archived rows INCLUDED and flagged) and simply drops the ids
+/// the registry is actively driving.
 async fn past_sessions(
     State(state): State<Arc<DaemonState>>,
     Query(params): Query<PastParams>,
@@ -587,7 +596,7 @@ async fn past_sessions(
     let store = state.store.clone();
     let rows: Vec<PastSessionRow> = tokio::task::spawn_blocking(move || {
         store
-            .list_sessions()
+            .list_sessions_for_resume()
             .unwrap_or_default()
             .into_iter()
             .filter(|s| !running.contains(&s.id))
@@ -597,7 +606,7 @@ async fn past_sessions(
                 title: s.title.clone().unwrap_or_default(),
                 cwd: s.cwd,
                 worktree: s.worktree_path,
-                archived: false,
+                archived: s.archived,
                 message_count: s.message_count,
                 cost_usd: s.total_cost_usd,
                 last_activity: s.last_activity,
@@ -1944,6 +1953,125 @@ mod tests {
 
         past.shutdown();
         running.shutdown();
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A session hidden by the archive button (not just orphaned by a daemon restart) is ALSO
+    /// browsable from `/api/sessions/past`, flagged `archived: true` — and resuming it works and
+    /// un-archives it, so it stops being hidden once it's live again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn past_sessions_includes_archived_and_resume_unarchives() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir =
+            std::env::temp_dir().join(format!("forge-serve-past-arch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("past-arch.db"));
+
+        let mk = |title: &str| DriverSpec {
+            cwd: dir.display().to_string(),
+            worktree: None,
+            title: title.to_string(),
+            mock: true,
+            model: None,
+            resume: None,
+            push: None,
+        };
+        let archived = Arc::new(spawn_session_driver(mk("was-archived")).await.unwrap());
+        archived
+            .input_tx
+            .send(remote::RemoteInput::Prompt {
+                text: "archived-marker".into(),
+            })
+            .await
+            .unwrap();
+
+        let wait_idle = |h: Arc<SessionDriverHandle>| async move {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                let s = h.snapshot_rx.borrow().clone();
+                if !s.busy && !s.transcript.is_empty() {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "turn never finished");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
+        wait_idle(archived.clone()).await;
+        let archived_id = archived.session_id.clone();
+
+        // Stop the driver and archive it, mirroring `POST .../archive`'s effect on the store.
+        archived.shutdown();
+        if let Ok(h) = Arc::try_unwrap(archived) {
+            h.join(std::time::Duration::from_secs(5)).await;
+        }
+        let store = crate::open_store().unwrap();
+        store.archive_session(&archived_id).unwrap();
+        assert!(store.session_archived(&archived_id).unwrap());
+
+        let registry = Arc::new(SessionRegistry::new());
+        let state = Arc::new(DaemonState {
+            registry: registry.clone(),
+            store: Arc::new(crate::open_store().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            push: None,
+        });
+        let router = daemon_router(state);
+
+        // (1) It's listed, flagged `archived: true` — distinct from the merely-orphaned case.
+        let resp = router
+            .clone()
+            .oneshot(
+                axum::http::Request::get("/tok/api/sessions/past?limit=50")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let rows = json_body(resp).await;
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == archived_id)
+            .expect("archived session listed in past-sessions");
+        assert_eq!(row["archived"], true, "flagged archived: {row}");
+
+        // (2) Resuming it succeeds and un-archives it.
+        let post_json = |path: &str, body: String| {
+            axum::http::Request::post(format!("/tok{path}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        };
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/sessions",
+                serde_json::json!({ "resume": archived_id }).to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK, "resume succeeds");
+        let body = json_body(resp).await;
+        assert_eq!(body["id"], archived_id, "resumed the same session");
+
+        let store = crate::open_store().unwrap();
+        assert!(
+            !store.session_archived(&archived_id).unwrap(),
+            "resume un-archives the session"
+        );
+
+        if let Some(h) = registry.remove(&archived_id).await {
+            h.shutdown();
+            if let Ok(h) = Arc::try_unwrap(h) {
+                h.join(std::time::Duration::from_secs(5)).await;
+            }
+        }
         std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
     }

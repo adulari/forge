@@ -164,6 +164,8 @@ footer { font-size: 11px; color: #4a4a54; text-align: center; padding: 4px 0 2px
 #pastwrap { margin-top: 10px; border-top: 1px solid #2a2a32; padding-top: 8px; }
 .pasthead { padding-bottom: 6px; }
 .pastmore { width: 100%; }
+.badge.archived { background: #2a2313; color: var(--acc); font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .5px; padding: 1px 6px; flex: 0 0 auto; }
 
 /* v7 — fleet dashboard */
 .sdot.wait { background: var(--no); animation: pulse .7s infinite; }
