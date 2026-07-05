@@ -6,6 +6,17 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.5.6] - 2026-07-06
+
+### Changed
+- **Base system prompt sharpened** (#530, `crates/forge-core/src/lib.rs`): `FORGE_SYSTEM` now
+  tells the model to solve the general case rather than hardcoding to the tests/examples at hand
+  (and to flag a test or task that looks wrong or infeasible instead of routing around it), and to
+  report outcomes truthfully — saying plainly when a test failed, verification was skipped, or
+  something is uncertain, instead of claiming success. Two concise, model-agnostic lines applied to
+  every model; the actionable result of a system-prompt-quality investigation (wholesale importing
+  large leaked frontier prompts was found net-negative, and Forge's preamble already covered the rest).
+
 ## [2.5.5] - 2026-07-05
 
 ### Added
@@ -2365,7 +2376,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.5...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.6...HEAD
+[2.5.6]: https://github.com/Adulari/forge/compare/v2.5.5...v2.5.6
 [2.5.5]: https://github.com/Adulari/forge/compare/v2.5.4...v2.5.5
 [2.5.4]: https://github.com/Adulari/forge/compare/v2.5.3...v2.5.4
 [2.5.3]: https://github.com/Adulari/forge/compare/v2.5.2...v2.5.3
