@@ -6,6 +6,22 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.5.5] - 2026-07-05
+
+### Added
+- **mcp-serve bridge compile-check** (#525): the `[shell] scoped_cargo_target` knob (v2.5.4) now
+  also applies on the CLI-bridge (`mcp-serve`) path, so a bridged `--mode bypass` agent can
+  `cargo check`/`build` in a scoped writable target dir — previously only the `forge run` path
+  got it. `crates/forge-cli/src/mcp_serve.rs`.
+- **Browse + resume explicitly-archived serve sessions** (#527): the `forge serve` past-sessions
+  browser now includes explicitly-archived sessions (badged) and can resume them, not just
+  daemon-restart-orphaned ones. `crates/forge-cli/src/serve.rs`, `crates/forge-store`,
+  `crates/forge-cli/src/remote_assets/*`.
+- **Edit truncation guard catches unbalanced brackets** (#526): the file-edit truncation guard
+  now also rejects an edit that leaves a `{`/`(`/`[` unclosed that wasn't unclosed before (a
+  cut-off-mid-block signature) — string/comment/lifetime-aware and regression-scoped so balanced
+  edits and pre-existing imbalance don't trip it. `crates/forge-tools/src/core_tools.rs`.
+
 ## [2.5.4] - 2026-07-05
 
 ### Added
@@ -2349,7 +2365,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.4...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.5...HEAD
+[2.5.5]: https://github.com/Adulari/forge/compare/v2.5.4...v2.5.5
 [2.5.4]: https://github.com/Adulari/forge/compare/v2.5.3...v2.5.4
 [2.5.3]: https://github.com/Adulari/forge/compare/v2.5.2...v2.5.3
 [2.5.2]: https://github.com/Adulari/forge/compare/v2.5.1...v2.5.2
