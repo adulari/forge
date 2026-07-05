@@ -644,6 +644,25 @@ pub struct ShellConfig {
     /// TOML key: `shell.sandbox_writable`
     #[serde(default)]
     pub sandbox_writable: Vec<String>,
+    /// When true, cargo/rust build commands run by the `shell` tool get a scoped, writable
+    /// `CARGO_TARGET_DIR` pointing OUTSIDE the workspace (a per-project subdir of
+    /// `scoped_cargo_target_dir`, or `<system-temp>/forge-cargo-target` when unset). This lets an
+    /// autonomous/bypass-mode agent run `cargo check`/`build` to verify its own edits even when the
+    /// workspace tree is read-only under confinement — without loosening the sandbox for arbitrary
+    /// writes (only the build-target dir is carved out, and only for recognized cargo commands). An
+    /// explicit `CARGO_TARGET_DIR` already in the environment always wins. Works with or without
+    /// `shell.sandbox` (an outer container can confine writes too). Default: false (opt-in).
+    ///
+    /// TOML key: `shell.scoped_cargo_target`
+    #[serde(default)]
+    pub scoped_cargo_target: bool,
+    /// Base directory for the scoped `CARGO_TARGET_DIR` (see `scoped_cargo_target`). Each project
+    /// gets a stable subdir here. When unset, defaults to `<system-temp>/forge-cargo-target`.
+    /// Ignored when `scoped_cargo_target = false`.
+    ///
+    /// TOML key: `shell.scoped_cargo_target_dir`
+    #[serde(default)]
+    pub scoped_cargo_target_dir: Option<String>,
 }
 
 impl Default for ShellConfig {
@@ -652,6 +671,8 @@ impl Default for ShellConfig {
             explain_errors: default_explain_errors(),
             sandbox: false,
             sandbox_writable: Vec::new(),
+            scoped_cargo_target: false,
+            scoped_cargo_target_dir: None,
         }
     }
 }

@@ -24,6 +24,14 @@ pub struct SandboxPolicy {
     pub enabled: bool,
     /// Extra writable paths beyond the cwd + temp dir pair that [`effective_writable`] always adds.
     pub writable: Vec<PathBuf>,
+    /// Base directory for a scoped, writable `CARGO_TARGET_DIR` injected into cargo/rust build
+    /// commands. `None` disables the behaviour (the default). When `Some`, the shell tool points
+    /// `CARGO_TARGET_DIR` at a per-project subdir of this base so `cargo check`/`build` write
+    /// their target tree here instead of `<workspace>/target` — letting an autonomous/bypass agent
+    /// compile-check its own edits even when the workspace tree is read-only under confinement.
+    /// The scoped dir is also added to the writable set so it works under the Landlock sandbox.
+    /// Independent of `enabled`: an outer container can confine writes without Forge's Landlock.
+    pub cargo_target_base: Option<PathBuf>,
 }
 
 /// Outcome of applying the Landlock ruleset (see [`linux::apply_landlock`]).
