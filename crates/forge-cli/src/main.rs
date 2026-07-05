@@ -37,7 +37,7 @@ pub(crate) use cli::commands::replay::{
     sessions, tree_cmd, ResumeMode,
 };
 pub(crate) use cli::commands::run::{
-    build_session, chat, fmt_age, nl_cmd, run, session_title, DoneGuard,
+    build_session, chat, fmt_age, nl_cmd, run, sandboxed_shell_tool, session_title, DoneGuard,
 };
 pub(crate) use cli::commands::schedule::schedule_cmd;
 pub(crate) use cli::commands::self_mcp::self_mcp_cmd;

@@ -875,8 +875,15 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         .map(|v| v == "1")
         .unwrap_or(false)
         || config.mesh.bridge_lean;
+    let mut registry = ToolRegistry::with_core_tools();
+    // Same opt-in Landlock sandbox / scoped `CARGO_TARGET_DIR` carve-out as `forge run` (PR #521);
+    // wired through the shared `sandboxed_shell_tool` helper so a bridged claude/codex agent driving
+    // Forge's tools via this MCP server can also `cargo check`/`build` under confinement.
+    if let Some(shell_tool) = crate::sandboxed_shell_tool(&config) {
+        registry.register(Box::new(shell_tool));
+    }
     let server = ForgeMcp {
-        registry: ToolRegistry::with_core_tools(),
+        registry,
         mode: config.permission_mode,
         rules: config.permission_rules(),
         config,
@@ -1048,6 +1055,33 @@ mod tests {
         ] {
             assert!(names.contains(&expected.to_string()), "missing {expected}");
         }
+    }
+
+    /// The bridge's `run()` builds its registry via `crate::sandboxed_shell_tool(&config)` — the
+    /// exact same helper `forge run` uses (see `cli::commands::run::sandboxed_shell_tool`) — so a
+    /// bridged claude/codex agent gets the same scoped `CARGO_TARGET_DIR` carve-out as a direct
+    /// `forge run` session (previously mcp-serve only ever registered the plain
+    /// `ShellTool::default()` from `with_core_tools()`, ignoring `[shell]` entirely).
+    #[test]
+    fn sandboxed_shell_tool_is_none_when_config_knobs_are_off() {
+        let config = Config::default();
+        assert!(crate::sandboxed_shell_tool(&config).is_none());
+    }
+
+    #[test]
+    fn sandboxed_shell_tool_wires_scoped_cargo_target_when_enabled() {
+        let mut config = Config::default();
+        config.shell.scoped_cargo_target = true;
+        config.shell.scoped_cargo_target_dir = Some("/tmp/bridge-cargo-target".to_string());
+
+        let shell_tool = crate::sandboxed_shell_tool(&config)
+            .expect("scoped_cargo_target=true must build a ShellTool");
+        assert_eq!(
+            shell_tool.policy.cargo_target_base,
+            Some(std::path::PathBuf::from("/tmp/bridge-cargo-target")),
+        );
+        // The knob is independent of the Landlock sandbox itself — left off here.
+        assert!(!shell_tool.policy.enabled);
     }
 
     #[test]
