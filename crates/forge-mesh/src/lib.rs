@@ -345,6 +345,16 @@ fn default_model_available(model: &str) -> bool {
     forge_config::has_api_key(forge_config::provider_of(model))
 }
 
+/// Whether an explicit `--model` pin can be dispatched straight to its provider, bypassing mesh
+/// classification: exactly the predicate [`HeuristicRouter::is_usable`] applies to a pin (the
+/// provider must have a usable key, or be keyless). Exposed as the SINGLE source of truth so any
+/// caller that honors a hard pin — `forge run --model <id>` and the OpenAI-compatible `forge api`
+/// endpoint alike — agrees on what "a dispatchable pin" is and the two paths cannot silently
+/// diverge (the gap that let #509's API fix miss valid, un-advertised models).
+pub fn pin_is_dispatchable(model: &str) -> bool {
+    default_model_available(model)
+}
+
 /// A model billed to an already-paid subscription (the CLI bridges) — $0 marginal cost.
 fn is_subscription(model: &str) -> bool {
     matches!(
@@ -2184,6 +2194,36 @@ mod tests {
             "strict pins (default): no cross-model fallback chain for a pinned model, got {:?}",
             d.fallbacks
         );
+    }
+
+    #[tokio::test]
+    async fn pin_honor_tracks_the_public_dispatchable_predicate() {
+        // `forge run --model <id>` and the OpenAI-compatible `forge api` endpoint must agree on which
+        // explicit pins are honored verbatim. Both consult `pin_is_dispatchable`; this binds that
+        // public predicate to the router's ACTUAL pin decision so the two can't drift — the exact
+        // divergence that let #509's API fix reject valid models the CLI pin path dispatches fine.
+        // No availability override: the router uses the same default (`has_api_key`) the predicate
+        // wraps, so both are env-independent here (a keyless provider and an unknown one both resolve
+        // "dispatchable" without any key configured).
+        for m in ["ollama::llama3.2", "nonexistent::typo-model"] {
+            let r = HeuristicRouter::new(Config::default()).with_pin(Some(m.to_string()));
+            let d = r
+                .route(
+                    "fix typo",
+                    BudgetState::default(),
+                    &ModelHealth::default(),
+                    &SubscriptionQuota::default(),
+                    None,
+                    &ProjectContext::default(),
+                )
+                .await;
+            let honored_verbatim = d.pinned && d.model == m;
+            assert_eq!(
+                honored_verbatim,
+                pin_is_dispatchable(m),
+                "router pin-honor for '{m}' must equal pin_is_dispatchable('{m}') — the shared rule"
+            );
+        }
     }
 
     #[tokio::test]
