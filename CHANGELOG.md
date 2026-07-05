@@ -6,6 +6,27 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.5.4] - 2026-07-05
+
+### Added
+- **`forge attach <id>`** (#518, `crates/forge-cli/src/attach.rs`): a thin TUI client that
+  connects to a running `forge serve` daemon over its WebSocket to watch and drive a live
+  session from another terminal. Authenticates via the persisted daemon token; supports
+  `--url` / `--token` / `--list` flags.
+- **Serve session management: past-session browser + one-tap worktree merge/discard**
+  (#519, `crates/forge-cli/src/serve.rs`, `crates/forge-cli/src/remote_assets/*`): the
+  `forge serve` control page can now browse and resume persisted sessions orphaned by a
+  daemon restart (`GET /api/sessions/past`), merge a worktree session's branch back into
+  its base (`POST /api/sessions/{id}/merge` — 3-way from the fork point, refuses a dirty
+  base, reports conflicts without altering state, stages rather than auto-commits), or
+  discard it (`POST /api/sessions/{id}/discard`, confirm-gated). New
+  `docs/features/embedding.md` documents driving Forge programmatically over the daemon.
+- **Scoped writable cargo target dir for sandboxed/bypass builds** (#521, `crates/forge-tools`,
+  `crates/forge-config`): opt-in `[shell] scoped_cargo_target` injects a scoped, writable
+  `CARGO_TARGET_DIR` (folded into the Landlock writable set) for cargo commands, so a
+  confined or `--mode bypass` agent can `cargo check`/`build` without loosening write
+  confinement. Default-off; an explicit `CARGO_TARGET_DIR` always wins.
+
 ## [2.5.3] - 2026-07-05
 
 ### Fixed
@@ -2328,7 +2349,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.3...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.4...HEAD
+[2.5.4]: https://github.com/Adulari/forge/compare/v2.5.3...v2.5.4
 [2.5.3]: https://github.com/Adulari/forge/compare/v2.5.2...v2.5.3
 [2.5.2]: https://github.com/Adulari/forge/compare/v2.5.1...v2.5.2
 [2.5.1]: https://github.com/Adulari/forge/compare/v2.5.0...v2.5.1
