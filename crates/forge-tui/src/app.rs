@@ -242,10 +242,11 @@ pub struct CompactionState {
 pub struct App {
     pub session_id: String,
     pub routing: Option<RoutingView>,
-    /// While `Some`, the mesh is failing over between models — drives the animated "finding a
-    /// model" status indicator. Set on a `ModelSearch` event, cleared the moment real output
-    /// (assistant text / a tool call) arrives, so it shows only during the search, never after.
-    pub model_search: Option<String>,
+    /// While `Some`, the mesh is recovering from a failed model attempt — drives the animated
+    /// status indicator. The bool is `retrying`: true = same-model retry (backoff), false =
+    /// searching for a replacement. Set on a `ModelSearch` event, cleared the moment real output
+    /// (assistant text / a tool call) arrives, so it shows only during the recovery, never after.
+    pub model_search: Option<(String, bool)>,
     pub cost_usd: f64,
     /// Live token counter (tui-token-counter.md): session totals + current context fill.
     pub session_in: u64,
@@ -1506,8 +1507,8 @@ impl App {
             // Failover in progress: keep a single animated indicator instead of one warning per
             // hop. The model that just failed is recorded only for the (dim) hint; the status bar's
             // own routing line shows the model now being tried.
-            PresenterEvent::ModelSearch { model } => {
-                self.model_search = Some(model);
+            PresenterEvent::ModelSearch { model, retrying } => {
+                self.model_search = Some((model, retrying));
             }
             // A complete (non-streamed) assistant message: render markdown into scrollback.
             PresenterEvent::AssistantText(text) => {
@@ -5298,8 +5299,12 @@ fn render_statusline_widget<'a>(
             let mut spans: Vec<Span> = Vec::new();
             if app.model_search.is_some() && w >= 40 {
                 let f = SPINNER[app.tick % SPINNER.len()];
+                let label = match &app.model_search {
+                    Some((_, true)) => "retrying model",
+                    _ => "finding a model",
+                };
                 spans.push(Span::styled(
-                    format!("{f} finding a model"),
+                    format!("{f} {label}"),
                     Style::default().fg(WARNYEL).bg(STATUSBG),
                 ));
                 spans.push(Span::styled(
@@ -6744,6 +6749,7 @@ mod tests {
         let mut app = App::default();
         app.apply(PresenterEvent::ModelSearch {
             model: "groq::llama-3.3-70b-versatile".into(),
+            retrying: false,
         });
         assert!(app.model_search.is_some());
         assert!(

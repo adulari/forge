@@ -332,6 +332,15 @@ pub async fn embed_one(cfg: &forge_config::EmbeddingsConfig, text: &str) -> Opti
         .filter(|e| !e.is_empty())
 }
 
+/// Reduce a recap completion to the single line the Recap event contract promises. A misbehaving
+/// trivial-tier model can ignore the "one sentence" instruction and dump whole paragraphs (or its
+/// chain of thought) — clamp to the first non-empty line and a sane length so the scrollback
+/// recap stays a recap. `None` when the completion had no usable text at all.
+fn recap_line(content: &str) -> Option<String> {
+    let line = content.lines().map(str::trim).find(|l| !l.is_empty())?;
+    Some(line.chars().take(240).collect())
+}
+
 /// Scope key for auto-memory: the current project directory's absolute path (memories are
 /// per-project). Matches the `forge memory` CLI so both see the same store.
 fn memory_scope() -> String {
@@ -2653,6 +2662,7 @@ Rules:\n\
             // A hop drives the animated "finding a model" indicator (no per-hop scrollback spam).
             Some(_) => self.presenter.emit(PresenterEvent::ModelSearch {
                 model: model.to_string(),
+                retrying: false,
             }),
             // The chain is exhausted — a real, terminal failure worth a visible warning.
             None => self.presenter.emit(PresenterEvent::Warning(format!(
@@ -2974,8 +2984,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         .await
                     {
                         let _ = store.record_side_call_usage(&id, "recap", &r.usage);
-                        let text = r.content.trim().to_string();
-                        if !text.is_empty() {
+                        if let Some(text) = recap_line(&r.content) {
                             sink.emit(PresenterEvent::Recap { text });
                         }
                     }
@@ -2988,8 +2997,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                     .await
                 {
                     let _ = store.record_side_call_usage(&id, "recap", &r.usage);
-                    let text = r.content.trim().to_string();
-                    if !text.is_empty() {
+                    if let Some(text) = recap_line(&r.content) {
                         self.presenter.emit(PresenterEvent::Recap { text });
                     }
                 }
@@ -3515,6 +3523,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             // retries don't spam the scrollback. The spinner already signals "working".
                             self.presenter.emit(PresenterEvent::ModelSearch {
                                 model: active_model.clone(),
+                                retrying: true,
                             });
                             tokio::time::sleep(backoff).await;
                             continue;
@@ -3569,6 +3578,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                                     )));
                                     self.presenter.emit(PresenterEvent::ModelSearch {
                                         model: active_model.clone(),
+                                        retrying: true,
                                     });
                                     tokio::time::sleep(delay).await;
                                     continue;
@@ -3611,6 +3621,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                                 )));
                                 self.presenter.emit(PresenterEvent::ModelSearch {
                                     model: active_model.clone(),
+                                    retrying: true,
                                 });
                                 tokio::time::sleep(reset).await;
                                 continue;
@@ -3634,6 +3645,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         // real output begins; the chain-exhausted case below still surfaces an error.
                         self.presenter.emit(PresenterEvent::ModelSearch {
                             model: active_model.clone(),
+                            retrying: false,
                         });
                         // Lazy 429-skip: the chain is in strict mesh-rank order, but a rate limit is
                         // usually provider-wide, so trying the failed provider's lower-ranked
