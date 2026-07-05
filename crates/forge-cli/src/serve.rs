@@ -13,8 +13,13 @@
 //! - `GET  /app.js|styles.css|manifest.webmanifest|sw.js|icon.svg`  PWA assets
 //! - `WS   /ws?session=<id>&rev=<n>`  per-session stream with replay-from-rev
 //! - `GET  /api/sessions`             running sessions (id, title, cwd, busy, cost, activity)
+//! - `GET  /api/sessions/past?limit=&before=`  persisted sessions NOT currently running — the
+//!   resurrection browser's data; `resume` one with `POST /api/sessions {resume:<id>}`
 //! - `POST /api/sessions`             create ({cwd, worktree, title?, model?, resume?})
 //! - `POST /api/sessions/{id}/archive` stop + hide a session (history kept; worktree kept)
+//! - `POST /api/sessions/{id}/merge`   stop, snapshot the worktree, and merge its branch back
+//!   into the base repo (3-way patch; conflicts are reported, never auto-resolved)
+//! - `POST /api/sessions/{id}/discard` stop and drop the worktree + branch WITHOUT merging
 //! - `GET  /api/history?session=<id>&before=<seq>&limit=<n>`  scrollback pagination
 //! - `GET  /api/push/key`             the VAPID public key (`applicationServerKey`)
 //! - `POST /api/push/subscribe`       store a Web Push subscription (dedupe by endpoint)
@@ -312,9 +317,18 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
             &format!("{base}/api/sessions"),
             get(list_sessions).post(create_session),
         )
+        .route(&format!("{base}/api/sessions/past"), get(past_sessions))
         .route(
             &format!("{base}/api/sessions/{{id}}/archive"),
             post(archive_session),
+        )
+        .route(
+            &format!("{base}/api/sessions/{{id}}/merge"),
+            post(merge_session),
+        )
+        .route(
+            &format!("{base}/api/sessions/{{id}}/discard"),
+            post(discard_session),
         )
         .route(&format!("{base}/api/history"), get(history_page))
         // File/image upload (v7): multipart, session-addressed, stored under the session's
@@ -521,6 +535,400 @@ async fn archive_session(
         h.join(ARCHIVE_JOIN_TIMEOUT).await;
     }
     json_response(&serde_json::json!({ "ok": true }))
+}
+
+/// One row of `GET /api/sessions/past` — a persisted session the user could resurrect. Distinct
+/// from [`SessionRow`] (which describes a LIVE driver): these come straight from the store, so
+/// there is no busy/waiting/context state to report, only the durable metadata.
+#[derive(serde::Serialize)]
+struct PastSessionRow {
+    id: String,
+    title: String,
+    cwd: String,
+    worktree: Option<String>,
+    /// Always `false` here: [`forge_store::Store::list_sessions`] already excludes archived
+    /// sessions. Carried explicitly so the client contract is stable if that ever changes.
+    archived: bool,
+    message_count: i64,
+    cost_usd: f64,
+    last_activity: i64,
+    created_at: i64,
+    /// First user message — a one-line hint of what the session was about.
+    preview: Option<String>,
+}
+
+/// Query for `GET /api/sessions/past` — cursor pagination over most-recently-used past sessions.
+#[derive(serde::Deserialize)]
+struct PastParams {
+    /// Max rows to return (clamped 1..=200, default 50).
+    limit: Option<usize>,
+    /// Return only sessions with `last_activity` strictly before this unix-seconds cursor.
+    before: Option<i64>,
+}
+
+/// `GET /api/sessions/past` — persisted top-level sessions that are NOT currently running, newest
+/// activity first, so the page can browse and resurrect one (`POST /api/sessions {resume:<id>}`).
+/// Reuses [`forge_store::Store::list_sessions`] (MRU-ordered, archived + subagent rows already
+/// excluded) and simply drops the ids the registry is actively driving.
+async fn past_sessions(
+    State(state): State<Arc<DaemonState>>,
+    Query(params): Query<PastParams>,
+) -> Response {
+    let limit = params.limit.unwrap_or(50).clamp(1, 200);
+    let before = params.before;
+    // Ids the daemon is currently driving — these are shown by `/api/sessions`, not here.
+    let running: std::collections::HashSet<String> = state
+        .registry
+        .all()
+        .await
+        .into_iter()
+        .map(|h| h.session_id.clone())
+        .collect();
+    let store = state.store.clone();
+    let rows: Vec<PastSessionRow> = tokio::task::spawn_blocking(move || {
+        store
+            .list_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| !running.contains(&s.id))
+            .filter(|s| before.is_none_or(|b| s.last_activity < b))
+            .take(limit)
+            .map(|s| PastSessionRow {
+                title: s.title.clone().unwrap_or_default(),
+                cwd: s.cwd,
+                worktree: s.worktree_path,
+                archived: false,
+                message_count: s.message_count,
+                cost_usd: s.total_cost_usd,
+                last_activity: s.last_activity,
+                created_at: s.created_at,
+                preview: s.preview.map(|p| p.chars().take(140).collect()),
+                id: s.id,
+            })
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
+    json_response(&rows)
+}
+
+/// Derive the base repo root and branch for a daemon worktree session from its stored worktree
+/// path. Worktrees are always created at `<repo_root>/.forge/worktrees/<child_id>` on branch
+/// `forge/subagent/<child_id>` (see [`forge_core::worktree::WorktreeGuard::create`]), so both are
+/// recoverable from the path alone — no extra state, and it matches exactly what the guard's own
+/// removal uses. Returns `None` if the path is too shallow to be one of ours.
+fn worktree_repo_and_branch(worktree: &str) -> Option<(std::path::PathBuf, String)> {
+    let wt = std::path::Path::new(worktree);
+    let child_id = wt.file_name()?.to_str()?.to_string();
+    // `<repo_root>/.forge/worktrees/<child_id>` → strip three components back to `<repo_root>`.
+    let repo_root = wt.parent()?.parent()?.parent()?.to_path_buf();
+    Some((repo_root, format!("forge/subagent/{child_id}")))
+}
+
+/// Tracked, staged-or-modified files in the base repo (`--untracked-files=no` so registered
+/// worktree dirs and other untracked cruft never count). A non-empty list means merging would
+/// apply a patch on top of uncommitted work — the merge route refuses rather than do that
+/// silently. Best-effort: a git failure returns empty (the 3-way apply is the real safety net).
+fn base_dirty_tracked(repo_root: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args([
+            "-C",
+            repo_root.to_str().unwrap_or("."),
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| l.get(3..).map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Remove a session's worktree directory and its branch. Uses `--force` on the worktree (the
+/// snapshot commit already captured its edits) and `branch -D` on the branch. Returns any git
+/// stderr so the caller can surface a partial failure. Callers MUST have stopped the driver
+/// first (its cwd is inside the worktree).
+fn remove_worktree(repo_root: &std::path::Path, worktree: &str, branch: &str) -> Vec<String> {
+    let root = repo_root.to_str().unwrap_or(".");
+    let mut errs = Vec::new();
+    for args in [
+        vec!["-C", root, "worktree", "remove", "--force", worktree],
+        vec!["-C", root, "branch", "-D", branch],
+    ] {
+        match std::process::Command::new("git").args(&args).output() {
+            Ok(o) if !o.status.success() => {
+                errs.push(String::from_utf8_lossy(&o.stderr).trim().to_string());
+            }
+            Err(e) => errs.push(e.to_string()),
+            _ => {}
+        }
+    }
+    errs
+}
+
+/// Outcome of the blocking git merge sequence (snapshot → 3-way apply → conditional cleanup).
+enum MergeOutcome {
+    /// Applied cleanly; the worktree + branch were removed. Staged (uncommitted) in the base.
+    Clean,
+    /// Overlapping edits — nothing removed, files listed for a manual resolution.
+    Conflicts(Vec<String>),
+    /// A hard git error (not a conflict); state left intact.
+    Error(String),
+}
+
+/// Run `git -C <root> <args>`, returning trimmed stdout on success.
+fn git_stdout(root: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let mut full = vec!["-C", root.to_str().unwrap_or(".")];
+    full.extend_from_slice(args);
+    let out = std::process::Command::new("git")
+        .args(&full)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Parse the conflicted-file list `git apply --3way` prints to stderr, tolerating both the modern
+/// `Applied patch to 'FILE' with conflicts.` and older `Applied patch FILE with conflicts.`
+/// wordings plus `error: patch failed: FILE:N`.
+fn parse_apply_conflicts(stderr: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .filter_map(|line| {
+            if let Some(rest) = line
+                .strip_prefix("Applied patch ")
+                .and_then(|r| r.strip_suffix(" with conflicts."))
+            {
+                let rest = rest.strip_prefix("to ").unwrap_or(rest);
+                return Some(rest.trim_matches(['\'', '"']).to_string());
+            }
+            if let Some(rest) = line.strip_prefix("error: patch failed: ") {
+                return rest.rsplit_once(':').map(|(p, _)| p.to_string());
+            }
+            None
+        })
+        .collect()
+}
+
+/// The blocking git merge sequence: snapshot the worktree's uncommitted edits onto its branch,
+/// then 3-way-apply the branch's changes SINCE THE FORK POINT (`merge-base`, not HEAD — so a base
+/// that advanced since the fork is 3-way-merged, never silently overwritten) onto the base tree.
+/// On a clean apply the changes are staged and the worktree + branch removed. On conflict the base
+/// tree is restored to its pre-merge state (`reset --hard`, safe because the caller guaranteed it
+/// was clean) so nothing is left half-applied, and the worktree + branch are kept for manual work.
+fn run_merge(repo_root: &std::path::Path, worktree: &str, branch: &str) -> MergeOutcome {
+    if let Err(e) = forge_core::worktree::commit_worktree(std::path::Path::new(worktree)) {
+        return MergeOutcome::Error(format!("snapshotting the worktree failed: {e}"));
+    }
+    let mergebase = match git_stdout(repo_root, &["merge-base", "HEAD", branch]) {
+        Ok(b) => b,
+        Err(e) => return MergeOutcome::Error(format!("finding the fork point failed: {e}")),
+    };
+    let diff = std::process::Command::new("git")
+        .args([
+            "-C",
+            repo_root.to_str().unwrap_or("."),
+            "diff",
+            "--diff-filter=ACDMR",
+            &mergebase,
+            branch,
+        ])
+        .output();
+    let patch = match diff {
+        Ok(o) if o.status.success() => o.stdout,
+        Ok(o) => return MergeOutcome::Error(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Err(e) => return MergeOutcome::Error(e.to_string()),
+    };
+    if patch.is_empty() {
+        // The branch adds nothing over the fork point — a no-op merge, cleanly done.
+        remove_worktree(repo_root, worktree, branch);
+        return MergeOutcome::Clean;
+    }
+    let apply = std::process::Command::new("git")
+        .args([
+            "-C",
+            repo_root.to_str().unwrap_or("."),
+            "apply",
+            "--3way",
+            "--index",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(&patch)?;
+            }
+            child.wait_with_output()
+        });
+    let apply = match apply {
+        Ok(o) => o,
+        Err(e) => return MergeOutcome::Error(e.to_string()),
+    };
+    if apply.status.success() {
+        remove_worktree(repo_root, worktree, branch);
+        return MergeOutcome::Clean;
+    }
+    // Conflict (or hard error): restore the base tree so it is left exactly as we found it —
+    // `git apply --3way` writes conflict markers + a conflicted index otherwise. Safe because the
+    // caller refused to start on a dirty base, so HEAD is the pre-merge state.
+    let stderr = String::from_utf8_lossy(&apply.stderr).into_owned();
+    let _ = std::process::Command::new("git")
+        .args([
+            "-C",
+            repo_root.to_str().unwrap_or("."),
+            "reset",
+            "--hard",
+            "HEAD",
+        ])
+        .output();
+    let conflicts = parse_apply_conflicts(&stderr);
+    if conflicts.is_empty() {
+        MergeOutcome::Error(stderr.trim().to_string())
+    } else {
+        MergeOutcome::Conflicts(conflicts)
+    }
+}
+
+/// Stop a driver and wait for it to wind down, so its worktree is quiescent before git touches it.
+async fn stop_and_join(handle: Arc<SessionDriverHandle>) {
+    handle.shutdown();
+    if let Ok(h) = Arc::try_unwrap(handle) {
+        h.join(ARCHIVE_JOIN_TIMEOUT).await;
+    }
+}
+
+/// `POST /api/sessions/{id}/merge` — stop the session, snapshot its worktree onto the branch, and
+/// merge that branch back into the base repo via a 3-way patch. Guards against data loss:
+/// - refuses (409) if the base repo has uncommitted TRACKED changes — never a silent merge on top;
+/// - snapshots the worktree first ([`forge_core::worktree::commit_worktree`]) so nothing is lost;
+/// - on conflict, reports the files and leaves the worktree + branch intact (no auto-resolution).
+///
+/// The merged changes are STAGED (not committed) in the base tree for the user to review + commit.
+async fn merge_session(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let Some(handle) = state.registry.get(&id).await else {
+        return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
+    };
+    let Some(worktree) = handle.worktree.clone() else {
+        return err_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "session has no worktree to merge",
+        );
+    };
+    let Some((repo_root, branch)) = worktree_repo_and_branch(&worktree) else {
+        return err_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "worktree path is not a recognised forge worktree",
+        );
+    };
+
+    // Guard BEFORE stopping the session: a refused merge must leave it running untouched.
+    let dirty = {
+        let root = repo_root.clone();
+        tokio::task::spawn_blocking(move || base_dirty_tracked(&root))
+            .await
+            .unwrap_or_default()
+    };
+    if !dirty.is_empty() {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            [
+                (axum::http::header::CONTENT_TYPE, "application/json"),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
+            serde_json::json!({
+                "error": "the base branch has uncommitted changes — commit or stash them, then merge",
+                "dirty_files": dirty,
+            })
+            .to_string(),
+        )
+            .into_response();
+    }
+
+    // Stop the driver so the worktree is quiescent, then run the git sequence off-thread.
+    state.registry.remove(&id).await;
+    stop_and_join(handle).await;
+    let outcome = {
+        let (root, br, wt) = (repo_root.clone(), branch.clone(), worktree.clone());
+        tokio::task::spawn_blocking(move || run_merge(&root, &wt, &br))
+            .await
+            .unwrap_or_else(|e| MergeOutcome::Error(format!("merge task failed: {e}")))
+    };
+    // The driver is stopped either way — hide the session from the live list.
+    let _ = state.store.archive_session(&id);
+    match outcome {
+        MergeOutcome::Clean => json_response(&serde_json::json!({
+            "ok": true, "merged": true, "branch": branch,
+        })),
+        MergeOutcome::Conflicts(files) => (
+            axum::http::StatusCode::CONFLICT,
+            [
+                (axum::http::header::CONTENT_TYPE, "application/json"),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
+            serde_json::json!({
+                "error": "merge conflicts — resolve them by hand in the worktree; nothing was changed",
+                "conflicts": files,
+                "branch": branch,
+                "worktree": worktree,
+            })
+            .to_string(),
+        )
+            .into_response(),
+        MergeOutcome::Error(msg) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("merge failed: {msg}"),
+        ),
+    }
+}
+
+/// `POST /api/sessions/{id}/discard` — stop the session and drop its worktree + branch WITHOUT
+/// merging. This force-deletes the branch (unmerged commits and all), so the client MUST confirm
+/// with the user first (the page's Discard button does); the request itself is that confirmation,
+/// mirroring how the archive button gates its own stop.
+async fn discard_session(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let Some(handle) = state.registry.get(&id).await else {
+        return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
+    };
+    let Some(worktree) = handle.worktree.clone() else {
+        return err_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "session has no worktree to discard",
+        );
+    };
+    let Some((repo_root, branch)) = worktree_repo_and_branch(&worktree) else {
+        return err_response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "worktree path is not a recognised forge worktree",
+        );
+    };
+    state.registry.remove(&id).await;
+    stop_and_join(handle).await;
+    let _ = state.store.archive_session(&id);
+    let errs = {
+        let (root, br, wt) = (repo_root, branch.clone(), worktree);
+        tokio::task::spawn_blocking(move || remove_worktree(&root, &wt, &br))
+            .await
+            .unwrap_or_default()
+    };
+    json_response(&serde_json::json!({
+        "ok": true, "discarded": true, "branch": branch,
+        "warnings": errs.into_iter().filter(|e| !e.is_empty()).collect::<Vec<_>>(),
+    }))
 }
 
 /// Query for the per-session WS handshake.
@@ -1103,6 +1511,439 @@ mod tests {
         );
         handle.shutdown();
         handle.join(std::time::Duration::from_secs(5)).await;
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A minimal real git repo under `dir` with one commit of `files`, returning a `git` runner.
+    fn init_repo(dir: &std::path::Path, files: &[(&str, &str)]) -> impl Fn(&[&str]) + use<> {
+        let d = dir.to_path_buf();
+        let git = move |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&d)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&["init", "-q"]);
+        for (name, content) in files {
+            std::fs::write(dir.join(name), content).unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-qm", "init"]);
+        git
+    }
+
+    /// Spawn a mock worktree-backed session (leaked guard, daemon semantics) and register it.
+    async fn spawn_worktree_session(
+        registry: &SessionRegistry,
+        repo: &std::path::Path,
+    ) -> (Arc<SessionDriverHandle>, String) {
+        let wt_id = forge_types::new_id().chars().take(12).collect::<String>();
+        let guard = forge_core::worktree::WorktreeGuard::create(repo, &wt_id).unwrap();
+        let wt_path = guard.path().display().to_string();
+        std::mem::forget(guard);
+        let handle = registry
+            .insert(
+                spawn_session_driver(DriverSpec {
+                    cwd: wt_path.clone(),
+                    worktree: Some(wt_path.clone()),
+                    title: "wt".into(),
+                    mock: true,
+                    model: None,
+                    resume: None,
+                    push: None,
+                })
+                .await
+                .unwrap(),
+            )
+            .await;
+        (handle, wt_path)
+    }
+
+    fn post_req(base_and_path: &str) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::post(base_and_path)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    async fn json_body(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// A clean worktree merge: the branch's new file applies onto the base tree (staged), and the
+    /// worktree directory + branch are removed. Runs over the REAL router + a REAL driver.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worktree_merge_clean_applies_and_removes() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("forge-serve-merge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("merge.db"));
+        let _ = init_repo(&dir, &[("README.md", "hi\n")]);
+
+        let registry = Arc::new(SessionRegistry::new());
+        let (handle, wt_path) = spawn_worktree_session(&registry, &dir).await;
+        // A brand-new file in the worktree — the change we expect to see merged back.
+        std::fs::write(
+            std::path::Path::new(&wt_path).join("added.txt"),
+            "from worktree\n",
+        )
+        .unwrap();
+
+        let state = Arc::new(DaemonState {
+            registry: registry.clone(),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            push: None,
+        });
+        let router = daemon_router(state);
+        let resp = router
+            .clone()
+            .oneshot(post_req(&format!(
+                "/tok/api/sessions/{}/merge",
+                handle.session_id
+            )))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::OK,
+            "clean merge is 200"
+        );
+        let j = json_body(resp).await;
+        assert_eq!(j["merged"], true);
+        // The change landed in the base tree, staged for review, not committed.
+        assert!(
+            dir.join("added.txt").exists(),
+            "merged file is in the base tree"
+        );
+        let staged = std::process::Command::new("git")
+            .args([
+                "-C",
+                dir.to_str().unwrap(),
+                "diff",
+                "--cached",
+                "--name-only",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&staged.stdout).contains("added.txt"),
+            "the merged change is staged"
+        );
+        // Worktree + branch are gone.
+        assert!(
+            !std::path::Path::new(&wt_path).exists(),
+            "worktree dir removed"
+        );
+        let branch = worktree_repo_and_branch(&wt_path).unwrap().1;
+        let exists = std::process::Command::new("git")
+            .args([
+                "-C",
+                dir.to_str().unwrap(),
+                "rev-parse",
+                "--verify",
+                &branch,
+            ])
+            .output()
+            .unwrap();
+        assert!(!exists.status.success(), "branch removed after clean merge");
+        // Idempotent-ish: a second merge on the now-unknown session is a 404, never a panic.
+        let resp = router
+            .oneshot(post_req(&format!(
+                "/tok/api/sessions/{}/merge",
+                handle.session_id
+            )))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A conflicting merge: the base committed a different edit to the same lines, so the 3-way
+    /// apply conflicts — the route reports the file and leaves the worktree + branch INTACT.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worktree_merge_conflict_reports_and_preserves() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("forge-serve-conf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("conf.db"));
+        let git = init_repo(&dir, &[("f.txt", "l1\nl2\nl3\n")]);
+
+        let registry = Arc::new(SessionRegistry::new());
+        let (handle, wt_path) = spawn_worktree_session(&registry, &dir).await;
+        // Worktree edits the middle line one way…
+        std::fs::write(
+            std::path::Path::new(&wt_path).join("f.txt"),
+            "l1\nWORKTREE\nl3\n",
+        )
+        .unwrap();
+        // …while the base COMMITS a different middle line (clean tree, but conflicting content).
+        std::fs::write(dir.join("f.txt"), "l1\nBASE\nl3\n").unwrap();
+        git(&["commit", "-qam", "base edit"]);
+
+        let state = Arc::new(DaemonState {
+            registry: registry.clone(),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            push: None,
+        });
+        let router = daemon_router(state);
+        let resp = router
+            .oneshot(post_req(&format!(
+                "/tok/api/sessions/{}/merge",
+                handle.session_id
+            )))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            axum::http::StatusCode::CONFLICT,
+            "conflict is 409"
+        );
+        let j = json_body(resp).await;
+        assert!(
+            j["conflicts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "f.txt"),
+            "the conflicting file is reported: {j}"
+        );
+        // Nothing destroyed: worktree + branch survive for a manual resolution.
+        assert!(
+            std::path::Path::new(&wt_path).exists(),
+            "worktree kept on conflict"
+        );
+        let branch = worktree_repo_and_branch(&wt_path).unwrap().1;
+        let exists = std::process::Command::new("git")
+            .args([
+                "-C",
+                dir.to_str().unwrap(),
+                "rev-parse",
+                "--verify",
+                &branch,
+            ])
+            .output()
+            .unwrap();
+        assert!(exists.status.success(), "branch kept on conflict");
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A dirty base tree refuses the merge (409) and leaves the session RUNNING — never a silent
+    /// apply on top of uncommitted work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worktree_merge_refuses_dirty_base() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("forge-serve-dirty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("dirty.db"));
+        let _ = init_repo(&dir, &[("f.txt", "base\n")]);
+
+        let registry = Arc::new(SessionRegistry::new());
+        let (handle, wt_path) = spawn_worktree_session(&registry, &dir).await;
+        std::fs::write(std::path::Path::new(&wt_path).join("x.txt"), "wt\n").unwrap();
+        // Uncommitted TRACKED edit in the base tree.
+        std::fs::write(dir.join("f.txt"), "dirty edit\n").unwrap();
+
+        let state = Arc::new(DaemonState {
+            registry: registry.clone(),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            push: None,
+        });
+        let router = daemon_router(state);
+        let resp = router
+            .oneshot(post_req(&format!(
+                "/tok/api/sessions/{}/merge",
+                handle.session_id
+            )))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::CONFLICT);
+        let j = json_body(resp).await;
+        assert!(j["dirty_files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "f.txt"));
+        // Refusal is non-destructive: the session is still registered and running.
+        assert!(
+            registry.get(&handle.session_id).await.is_some(),
+            "session untouched"
+        );
+        assert!(std::path::Path::new(&wt_path).exists());
+        handle.shutdown();
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Discard drops the worktree + branch without merging.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn worktree_discard_drops_worktree_and_branch() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("forge-serve-disc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("disc.db"));
+        let _ = init_repo(&dir, &[("README.md", "hi\n")]);
+
+        let registry = Arc::new(SessionRegistry::new());
+        let (handle, wt_path) = spawn_worktree_session(&registry, &dir).await;
+        std::fs::write(
+            std::path::Path::new(&wt_path).join("junk.txt"),
+            "throwaway\n",
+        )
+        .unwrap();
+        let branch = worktree_repo_and_branch(&wt_path).unwrap().1;
+
+        let state = Arc::new(DaemonState {
+            registry: registry.clone(),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            push: None,
+        });
+        let router = daemon_router(state);
+        let resp = router
+            .oneshot(post_req(&format!(
+                "/tok/api/sessions/{}/discard",
+                handle.session_id
+            )))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(json_body(resp).await["discarded"], true);
+        assert!(!std::path::Path::new(&wt_path).exists(), "worktree removed");
+        assert!(
+            !dir.join("junk.txt").exists(),
+            "worktree edit is NOT in the base tree"
+        );
+        let exists = std::process::Command::new("git")
+            .args([
+                "-C",
+                dir.to_str().unwrap(),
+                "rev-parse",
+                "--verify",
+                &branch,
+            ])
+            .output()
+            .unwrap();
+        assert!(!exists.status.success(), "branch removed on discard");
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The past-session browser lists persisted, non-running sessions and excludes the ones the
+    /// daemon is actively driving.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn past_sessions_lists_persisted_not_running() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("forge-serve-past-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("past.db"));
+
+        let mk = |title: &str| DriverSpec {
+            cwd: dir.display().to_string(),
+            worktree: None,
+            title: title.to_string(),
+            mock: true,
+            model: None,
+            resume: None,
+            push: None,
+        };
+        // A "past" session: driven to completion (so it has a user message) but NOT registered.
+        let past = Arc::new(spawn_session_driver(mk("gone")).await.unwrap());
+        past.input_tx
+            .send(remote::RemoteInput::Prompt {
+                text: "past-marker".into(),
+            })
+            .await
+            .unwrap();
+        // A "running" session: registered in the registry, so it must be excluded from the list.
+        let registry = Arc::new(SessionRegistry::new());
+        let running = registry
+            .insert(spawn_session_driver(mk("live")).await.unwrap())
+            .await;
+        running
+            .input_tx
+            .send(remote::RemoteInput::Prompt {
+                text: "live-marker".into(),
+            })
+            .await
+            .unwrap();
+
+        let wait_idle = |h: Arc<SessionDriverHandle>| async move {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                let s = h.snapshot_rx.borrow().clone();
+                if !s.busy && !s.transcript.is_empty() {
+                    return;
+                }
+                assert!(std::time::Instant::now() < deadline, "turn never finished");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
+        wait_idle(past.clone()).await;
+        wait_idle(running.clone()).await;
+
+        let state = Arc::new(DaemonState {
+            registry: registry.clone(),
+            store: Arc::new(crate::open_store().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            push: None,
+        });
+        let router = daemon_router(state);
+        let resp = router
+            .oneshot(
+                axum::http::Request::get("/tok/api/sessions/past?limit=50")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let rows = json_body(resp).await;
+        let ids: Vec<&str> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
+        assert!(
+            ids.contains(&past.session_id.as_str()),
+            "past session listed: {rows}"
+        );
+        assert!(
+            !ids.contains(&running.session_id.as_str()),
+            "the actively-driven session is NOT in the past list"
+        );
+
+        past.shutdown();
+        running.shutdown();
         std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
     }
