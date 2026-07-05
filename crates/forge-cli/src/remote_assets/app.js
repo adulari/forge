@@ -221,6 +221,7 @@ function renderPast(rows, append) {
     main.className = "sessmain";
     main.innerHTML = '<span class="sdot idle"></span><b>' +
       esc(r.title || (r.preview ? r.preview.slice(0, 40) : r.id.slice(0, 8))) + '</b>' +
+      (r.archived ? '<span class="badge archived">archived</span>' : "") +
       '<span class="sinfo">' + esc(baseName(r.cwd)) +
       (r.worktree ? " · ⎇ worktree" : "") +
       (r.message_count ? " · " + r.message_count + " msg" : "") +

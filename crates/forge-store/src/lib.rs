@@ -1881,6 +1881,49 @@ impl Store {
                 last_activity: row.get(7)?,
                 title: row.get(8)?,
                 worktree_path: row.get(9)?,
+                archived: false, // filtered to archived = 0 above
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Like [`Store::list_sessions`] but INCLUDES archived sessions (flagged via
+    /// [`SessionSummary::archived`]) instead of hiding them. Used by `forge serve`'s
+    /// past-sessions browser (`GET /api/sessions/past`) so a session the user explicitly
+    /// archived is still browsable and resumable — just visibly marked — rather than only
+    /// surfacing sessions orphaned by a daemon restart. Same MRU ordering, same exclusion of
+    /// subagent children and sessions that never received a real user message.
+    pub fn list_sessions_for_resume(&self) -> Result<Vec<SessionSummary>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT s.id, s.cwd, s.permission_mode, s.created_at, s.total_cost_usd,
+                    (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id AND m.active = 1),
+                    (SELECT content FROM message m WHERE m.session_id = s.id
+                       AND m.role = 'user' AND m.active = 1 ORDER BY m.seq LIMIT 1),
+                    COALESCE((SELECT MAX(m.created_at) FROM message m WHERE m.session_id = s.id),
+                             s.created_at) AS last_activity,
+                    s.title, s.worktree_path, s.archived
+             FROM session s WHERE s.parent_session_id IS NULL \
+             AND EXISTS ( \
+               SELECT 1 FROM message m \
+               WHERE m.session_id = s.id AND m.role = 'user' \
+             ) \
+             ORDER BY last_activity DESC, s.rowid DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(SessionSummary {
+                id: row.get(0)?,
+                cwd: row.get(1)?,
+                permission_mode: row.get(2)?,
+                created_at: row.get(3)?,
+                total_cost_usd: row.get(4)?,
+                message_count: row.get(5)?,
+                preview: row.get(6)?,
+                last_activity: row.get(7)?,
+                title: row.get(8)?,
+                worktree_path: row.get(9)?,
+                archived: row.get::<_, i64>(10)? != 0,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -1905,6 +1948,18 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(n > 0)
+    }
+
+    /// Un-archive a session: reverses [`Store::archive_session`]. `forge serve` calls this when
+    /// resuming a session from the past-sessions browser — resurrecting an archived session is
+    /// an explicit choice to bring it back, so it should reappear in [`Store::list_sessions`]
+    /// and the fleet list once it stops running again, rather than immediately re-hiding itself.
+    pub fn unarchive_session(&self, session_id: &str) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE session SET archived = 0 WHERE id = ?1",
+            [session_id],
+        )?;
+        Ok(())
     }
 
     /// Record the isolated worktree a daemon session runs in (`forge serve` with `worktree:true`).
@@ -2592,6 +2647,10 @@ pub struct SessionSummary {
     pub title: Option<String>,
     /// The isolated worktree this session runs in, if created with `worktree:true` (migration_0008).
     pub worktree_path: Option<String>,
+    /// Whether the session has been explicitly archived ([`Store::archive_session`]). Always
+    /// `false` from [`Store::list_sessions`] (which filters archived rows out); set from
+    /// [`Store::list_sessions_for_resume`], which includes them.
+    pub archived: bool,
 }
 
 // ---- Lattice: code-intelligence graph (code-intelligence.md) ----
