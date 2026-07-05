@@ -653,12 +653,21 @@ pub fn ollama_installed() -> bool {
 }
 
 /// The installed Ollama version string (`ollama --version`), if present.
+///
+/// `ollama --version` normally prints `ollama version is X.Y.Z`, but when no server is running
+/// it prints warning lines instead (`Warning: could not connect to a running Ollama instance` /
+/// `Warning: client version is X.Y.Z`) — on stdout. Extract the version token rather than
+/// echoing that multi-line output raw into reports like `forge doctor`.
 pub fn ollama_version() -> Option<String> {
     let out = Command::new("ollama").arg("--version").output().ok()?;
     if !out.status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .find_map(|l| l.split("version is ").nth(1))
+        .or_else(|| text.lines().find(|l| !l.trim().is_empty()))
+        .map(|v| v.trim().to_string())
 }
 
 /// Whether an Ollama server is already listening on localhost (so we don't double-spawn one).

@@ -146,11 +146,14 @@ pub enum PresenterEvent {
     /// A genuine failure (failed turn, provider hard-fail) — rendered distinctly from a benign
     /// [`Warning`](PresenterEvent::Warning) so users can tell an error from an advisory.
     Error(String),
-    /// The mesh is failing over: `model` just failed and a replacement is being tried. Drives a
-    /// single animated "finding a model" status indicator instead of one scrollback warning per
-    /// hop — cleared automatically when real output (assistant text / a tool call) begins.
+    /// A model attempt failed and the mesh is recovering: when `retrying` is false a replacement
+    /// model is being tried (failover); when true the SAME model is being retried after a
+    /// transient failure or rate-limit backoff (a pin must pin — no switch happens). Drives a
+    /// single animated status indicator instead of one scrollback warning per hop — cleared
+    /// automatically when real output (assistant text / a tool call) begins.
     ModelSearch {
         model: String,
+        retrying: bool,
     },
     ToolStart {
         name: String,
@@ -377,9 +380,14 @@ impl Presenter for HeadlessPresenter {
                 // Red + distinct glyph so a hard failure can't be mistaken for the yellow ⚠.
                 eprintln!("\x1b[31m  ✖ {msg}\x1b[0m");
             }
-            PresenterEvent::ModelSearch { model } => {
-                // Headless has no animated indicator; a concise dim line keeps the failover record.
-                println!("\x1b[2m  · {model} unavailable — finding another model…\x1b[0m");
+            PresenterEvent::ModelSearch { model, retrying } => {
+                // Headless has no animated indicator; a concise dim line keeps the failover
+                // record. A same-model retry must not claim a switch is happening (a pin pins).
+                if retrying {
+                    println!("\x1b[2m  · {model} unavailable — retrying…\x1b[0m");
+                } else {
+                    println!("\x1b[2m  · {model} unavailable — finding another model…\x1b[0m");
+                }
             }
             PresenterEvent::ToolStart { name, args } => {
                 println!("  ↳ {name}({args})");

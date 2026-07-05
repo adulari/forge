@@ -319,8 +319,16 @@ impl futures::Stream for OpenAIStreamer {
 							continue;
 						}
 						// -- Tool Call
+						// NOTE: vLLM-based backends (e.g. NVIDIA NIM serving Kimi) put an EMPTY
+						// `"tool_calls": []` array in every ordinary content delta. Treating "not
+						// Null" as "this is a tool-call delta" made this branch swallow those
+						// messages whole — the `content` riding in the same delta was silently
+						// dropped (the visible symptom: answers missing their leading characters,
+						// since only the final `finish_reason` chunk's content survived via the
+						// branch above). Only take this branch when the array actually has calls;
+						// an empty/absent array falls through to the content handling below.
 						else if let Ok(delta_tool_calls) = first_choice.x_take::<Value>("/delta/tool_calls")
-							&& delta_tool_calls != Value::Null
+							&& delta_tool_calls.as_array().is_some_and(|calls| !calls.is_empty())
 						{
 							// A single SSE delta can carry MORE THAN ONE tool-call entry — vLLM-based
 							// backends (e.g. NVIDIA NIM) commonly batch every parallel call's initial
