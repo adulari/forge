@@ -841,6 +841,76 @@ fn completion_gate(
     }
 }
 
+/// Decision of the token-budget continuation guard (H8): when a code-change turn ends without a
+/// verified result, should Forge nudge the model to actually do the work, accept the turn as-is, or
+/// halt an unproductive spiral with an honest reason? Resolved once per continuation from signals
+/// that work on BOTH the direct-API path AND the CLI bridge (see [`continuation_decision`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContinuationDecision {
+    /// Under budget, no real progress this turn, goal unverified — push back once more and re-drive
+    /// the model instead of accepting a premature "done".
+    Nudge,
+    /// Diminishing returns: it kept "continuing" while emitting almost nothing (or hit the absolute
+    /// ceiling). Halt with an honest surfaced reason rather than looping forever.
+    Stop,
+    /// Accept the turn as-is: the goal is verified, real progress was made, or there is no budget
+    /// headroom left for a productive re-drive.
+    Accept,
+}
+
+/// Continuations that must have already fired before a tiny-output turn counts as diminishing
+/// returns — the spec floor at which a "keeps saying done, emits nothing" spiral is stopped.
+const CONTINUATION_DIMINISHING_MIN: usize = 3;
+/// Transcript-growth (tokens) below which a continuation produced "almost nothing".
+const CONTINUATION_DIMINISHING_TOKEN_FLOOR: u64 = 500;
+/// Absolute continuation ceiling so the guard can NEVER loop forever, even if every re-drive keeps
+/// emitting more than [`CONTINUATION_DIMINISHING_TOKEN_FLOOR`] tokens without making real progress.
+const CONTINUATION_MAX: usize = 6;
+/// Only nudge with real budget headroom — at/above this fraction of the context window a re-drive
+/// has no room to work, so accept instead of nudging into the wall.
+const CONTINUATION_BUDGET_CEILING: f64 = 0.90;
+
+/// Pure decision for the token-budget continuation guard. No I/O, so it is offline-unit-testable
+/// with synthetic inputs — no live model required.
+///
+/// * `goal_verified`      — the completion authority accepts the turn (tasks done + verified, or
+///   nothing external to verify). A verified goal is never nudged.
+/// * `made_progress`      — BRIDGE-AWARE: this turn started ≥1 tool (direct calls AND bridge-sink
+///   `StreamEvent::ToolStarted`) or changed the working tree / closed a task. Real progress is
+///   never nudged — the caller derives this from `working_tree_unchanged` + the sink tool counter,
+///   both of which reflect a CLI bridge's activity, not just the direct `resp.tool_calls` path.
+/// * `budget_used`        — this turn's input tokens / model context window (≈0.0..=1.0). Only
+///   nudge below [`CONTINUATION_BUDGET_CEILING`].
+/// * `continuation_count` — continuation nudges already fired this turn (0 on the first check).
+/// * `delta_tokens_last`  — tokens the LAST continuation grew the managed transcript by; a tiny
+///   delta after several continuations is the diminishing-returns spiral. Pass a large sentinel
+///   (e.g. `u64::MAX`) before any continuation has run so the stop can't fire on the first check.
+fn continuation_decision(
+    goal_verified: bool,
+    made_progress: bool,
+    budget_used: f64,
+    continuation_count: usize,
+    delta_tokens_last: u64,
+) -> ContinuationDecision {
+    // A verified goal or a turn that actually did work needs no nudge.
+    if goal_verified || made_progress {
+        return ContinuationDecision::Accept;
+    }
+    // Diminishing returns / absolute ceiling: stop the spiral with an honest reason instead of
+    // re-driving a model that keeps "continuing" while producing nothing.
+    if continuation_count >= CONTINUATION_MAX
+        || (continuation_count >= CONTINUATION_DIMINISHING_MIN
+            && delta_tokens_last < CONTINUATION_DIMINISHING_TOKEN_FLOOR)
+    {
+        return ContinuationDecision::Stop;
+    }
+    // No budget headroom for a productive re-drive — accept rather than nudge into the window wall.
+    if budget_used >= CONTINUATION_BUDGET_CEILING {
+        return ContinuationDecision::Accept;
+    }
+    ContinuationDecision::Nudge
+}
+
 /// Classify a tool RESULT string as a failure of a given kind, or `None` if it looks like a success.
 ///
 /// Anchored on the markers Forge actually produces for failures (`invoke_tool` returns `"error: …"`
@@ -4773,59 +4843,109 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             }
         }
 
-        // ── Empty-diff completion nudge (harness-robustness wave 2, fix 4) ────────────────────
+        // ── Token-budget continuation guard (H8) — empty-diff pushback with a diminishing-returns
+        //    stop ────────────────────────────────────────────────────────────────────────────────
         // Headless code-change runs (`bench swe` marks the session via `set_expect_code_change`;
-        // interactive sessions never set it) sometimes end with the model having WORKED (tools
-        // ran) but changed NOTHING — the SWE-bench baseline "completed" 2 instances with an empty
-        // diff and no pushback: the model described the fix instead of making it. Push back
-        // exactly once: a synthetic user message demanding the implementation, then one more
-        // model loop. One-shot by construction (straight-line code, the same latch idea as
-        // `completeness_checked`); runs BEFORE self-review/autofix so any edits it produces are
-        // still lint/test-checked. `mesh.nudge_empty_diff = false` disables it wholesale.
+        // interactive sessions never set it) sometimes end with the model having WORKED (tools ran)
+        // but changed NOTHING — a `codex-cli::gpt-5.5` SWE-bench Lite sweep submitted 8/15 EMPTY
+        // patches (raw codex solved 4 of those), the model describing the fix instead of making it.
+        // Push back with a synthetic user message demanding the implementation, then re-drive — and
+        // keep re-driving while there's budget headroom and the turn still made no progress, so a
+        // single "still describing" reply after one nudge isn't silently accepted (the old one-shot
+        // gave up too early). STOP the moment it turns into a spiral: [`continuation_decision`] halts
+        // once the model has "continued" ≥ `CONTINUATION_DIMINISHING_MIN` times while emitting almost
+        // nothing (`< CONTINUATION_DIMINISHING_TOKEN_FLOOR` tokens of growth), or hits the absolute
+        // `CONTINUATION_MAX` ceiling — an honest surfaced halt, never an infinite loop.
         //
-        // Bridge-path robustness (wave 6): `turn_tools_ran` counts a CLI bridge's tools too — they
-        // surface through the stream sink as `StreamEvent::ToolStarted` (see run_model_loop) — so the
-        // nudge already fires for the common bridge turn that explored then described. But that count
-        // then hinges on the bridge's tool-event JSON parsing: if a bridge yields an empty diff having
-        // surfaced NO parseable tool event (a refusal, a prose-only reply, or codex/claude CLI output
-        // drift), the `> 0` gate would silently drop the pushback on the exact path every bench uses.
-        // A `codex-cli::gpt-5.5` SWE-bench Lite sweep resolved 3/15 vs raw codex 9/15, with 8/15
-        // submitting an empty patch — so an empty completion on a known code-change turn ALWAYS
-        // warrants one pushback on the bridge, whether or not a tool event was surfaced. Direct-path
-        // semantics are unchanged (`> 0`); only the bridge relaxes the tool-activity requirement.
+        // BRIDGE-AWARE progress: the predicate is `working_tree_unchanged` (the real git tree, which
+        // reflects a CLI bridge's `mcp-serve` edits, not just direct `resp.tool_calls`). A bridge
+        // that actually edited a file leaves the tree changed → `made_progress` → accepted without a
+        // nudge; a bridge that only described leaves it clean → nudged. The entry gate reuses the
+        // wave-6 relaxation (`turn_tools_ran > 0 || is_cli_bridge`) — `turn_tools_ran` counts sink
+        // `StreamEvent::ToolStarted`, so a bridge that surfaced NO parseable tool event is still
+        // covered via the `is_cli_bridge` arm. Pairs with compaction: each nudge compacts first if
+        // the transcript is near the window, so the re-drive has room to work. Runs BEFORE
+        // self-review/autofix so any edits it produces are still lint/test-checked.
+        // `mesh.nudge_empty_diff = false` disables it wholesale.
         if self.config.mesh.nudge_empty_diff
             && self.expect_code_change
             && (turn_tools_ran > 0 || forge_provider::is_cli_bridge(&active_model))
             && self.edits_this_turn == 0
-            // Past the soft deadline there is no budget for a re-drive (and the re-entered loop
-            // would end immediately, clobbering the final answer with an empty one).
-            && !self.past_turn_deadline()
-            && working_tree_unchanged(self.work_root.as_deref())
         {
-            self.presenter.emit(PresenterEvent::Warning(
-                "code-change task ended with an empty diff — pushing back once".to_string(),
-            ));
-            let seq = self.next_seq();
-            self.store
-                .add_message(&self.id, seq, Role::User, EMPTY_DIFF_NUDGE, None)?;
-            self.transcript.push(Message::user(EMPTY_DIFF_NUDGE));
-            let nudge_specs = self.tool_specs();
-            let nudge_outcome = self
-                .run_model_loop(
-                    active_model.clone(),
-                    &nudge_specs,
-                    primary_decision,
-                    max_steps,
-                    stream_idle,
-                )
-                .await?;
-            final_text = nudge_outcome.final_text;
-            context_tokens = nudge_outcome.context_tokens;
-            active_model = nudge_outcome.active_model;
-            hit_step_cap = nudge_outcome.hit_step_cap;
-            // The nudge re-drive spawns a FRESH bridge process (a new `mcp-serve`); if it too failed
-            // to start, this stays a toolless turn — carry the signal into the classification below.
-            saw_mcp_unavailable |= nudge_outcome.mcp_tools_unavailable;
+            let mut continuation_count = 0usize;
+            // No prior continuation yet: a sentinel that keeps the diminishing-returns stop from
+            // firing on the first check (it is only consulted once `continuation_count` is high).
+            let mut delta_tokens_last = u64::MAX;
+            loop {
+                // Past the soft deadline there is no budget for a re-drive (and the re-entered loop
+                // would end immediately, clobbering the final answer with an empty one).
+                if self.past_turn_deadline() {
+                    break;
+                }
+                // Bridge-aware progress: the working tree reflects direct-path AND bridge edits.
+                let made_progress = !working_tree_unchanged(self.work_root.as_deref());
+                let window = self.effective_context_window(&active_model).max(1) as f64;
+                let budget_used = context_tokens as f64 / window;
+                match continuation_decision(
+                    false,
+                    made_progress,
+                    budget_used,
+                    continuation_count,
+                    delta_tokens_last,
+                ) {
+                    ContinuationDecision::Accept => break,
+                    ContinuationDecision::Stop => {
+                        self.presenter.emit(PresenterEvent::Warning(format!(
+                            "code-change task still shows an empty diff after {continuation_count} \
+                             continuation nudge(s), each producing almost nothing — stopping instead \
+                             of looping. The fix was described but NOT made."
+                        )));
+                        break;
+                    }
+                    ContinuationDecision::Nudge => {
+                        self.presenter.emit(PresenterEvent::Warning(format!(
+                            "code-change task ended with an empty diff — pushing back \
+                             ({}/{CONTINUATION_MAX})",
+                            continuation_count + 1
+                        )));
+                        // Pair with compaction: compact BEFORE the re-drive if the transcript is
+                        // near the window, so the nudge has room to actually do the work.
+                        self.auto_compact_if_needed(&active_model).await;
+                        let seq = self.next_seq();
+                        self.store.add_message(
+                            &self.id,
+                            seq,
+                            Role::User,
+                            EMPTY_DIFF_NUDGE,
+                            None,
+                        )?;
+                        self.transcript.push(Message::user(EMPTY_DIFF_NUDGE));
+                        let tokens_before = context_tokens;
+                        let nudge_specs = self.tool_specs();
+                        let nudge_outcome = self
+                            .run_model_loop(
+                                active_model.clone(),
+                                &nudge_specs,
+                                primary_decision,
+                                max_steps,
+                                stream_idle,
+                            )
+                            .await?;
+                        final_text = nudge_outcome.final_text;
+                        context_tokens = nudge_outcome.context_tokens;
+                        active_model = nudge_outcome.active_model;
+                        hit_step_cap = nudge_outcome.hit_step_cap;
+                        // The nudge re-drive spawns a FRESH bridge process (a new `mcp-serve`); if it
+                        // too failed to start, this stays a toolless turn — carry the signal into the
+                        // classification below.
+                        saw_mcp_unavailable |= nudge_outcome.mcp_tools_unavailable;
+                        // How much the managed transcript grew across this continuation — the
+                        // diminishing-returns signal for the NEXT iteration.
+                        delta_tokens_last = context_tokens.saturating_sub(tokens_before);
+                        continuation_count += 1;
+                    }
+                }
+            }
         }
 
         // ── Existing-tests-are-spec guard (quality guards wave 4, fix 1) ──────────────────────
@@ -7388,6 +7508,81 @@ mod tests {
     use forge_tui::HeadlessPresenter;
     use forge_types::SideEffect;
     use std::sync::{Arc, Mutex};
+
+    // ── Token-budget continuation guard (H8) — pure decision, offline-unit-tested ──────────────
+    #[test]
+    fn continuation_nudges_when_under_budget_no_progress_unverified() {
+        // (turn under budget + no progress + goal unverified) → Nudge.
+        assert_eq!(
+            continuation_decision(false, false, 0.10, 0, u64::MAX),
+            ContinuationDecision::Nudge
+        );
+        // Just below the budget ceiling still nudges.
+        assert_eq!(
+            continuation_decision(false, false, 0.89, 1, 900),
+            ContinuationDecision::Nudge
+        );
+    }
+
+    #[test]
+    fn continuation_stops_on_diminishing_returns() {
+        // (continuation_count >= MIN && dtok < FLOOR) → Stop.
+        assert_eq!(
+            continuation_decision(
+                false,
+                false,
+                0.10,
+                CONTINUATION_DIMINISHING_MIN,
+                CONTINUATION_DIMINISHING_TOKEN_FLOOR - 1
+            ),
+            ContinuationDecision::Stop
+        );
+        // Under the min continuations it does NOT stop yet even with a tiny delta — it nudges.
+        assert_eq!(
+            continuation_decision(false, false, 0.10, CONTINUATION_DIMINISHING_MIN - 1, 0),
+            ContinuationDecision::Nudge
+        );
+        // Above the min but still producing real output (>= floor) keeps nudging (not diminishing)…
+        assert_eq!(
+            continuation_decision(
+                false,
+                false,
+                0.10,
+                CONTINUATION_DIMINISHING_MIN,
+                CONTINUATION_DIMINISHING_TOKEN_FLOOR
+            ),
+            ContinuationDecision::Nudge
+        );
+        // …until the absolute ceiling, which stops the loop regardless of output size.
+        assert_eq!(
+            continuation_decision(false, false, 0.10, CONTINUATION_MAX, 10_000),
+            ContinuationDecision::Stop
+        );
+    }
+
+    #[test]
+    fn continuation_accepts_on_progress_or_verified_or_no_budget() {
+        // Real progress made this turn → never nudge, even under budget and unverified.
+        assert_eq!(
+            continuation_decision(false, true, 0.10, 0, u64::MAX),
+            ContinuationDecision::Accept
+        );
+        // Goal verified → never nudge.
+        assert_eq!(
+            continuation_decision(true, false, 0.10, 0, u64::MAX),
+            ContinuationDecision::Accept
+        );
+        // No budget headroom (>= ceiling) → accept rather than nudge into the window wall.
+        assert_eq!(
+            continuation_decision(false, false, CONTINUATION_BUDGET_CEILING, 0, u64::MAX),
+            ContinuationDecision::Accept
+        );
+        // Progress wins even when the diminishing-returns counters would otherwise stop.
+        assert_eq!(
+            continuation_decision(false, true, 0.10, CONTINUATION_MAX, 0),
+            ContinuationDecision::Accept
+        );
+    }
 
     #[test]
     fn tool_failure_tracker_trips_at_threshold() {
@@ -11745,11 +11940,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_diff_code_change_run_is_nudged_exactly_once() {
+    async fn empty_diff_code_change_run_is_nudged_until_diminishing_returns() {
         // Baseline defect: 2 SWE-bench instances "completed" with an empty diff and no pushback.
         // A code-change run (bench sets `expect_code_change`) whose turn ran tools but edited
-        // nothing must get ONE "implement it" nudge — and only one (latch): the model here keeps
-        // describing, so the turn ends after the single re-drive rather than looping.
+        // nothing gets pushed back — and, under the H8 continuation guard, keeps being re-driven
+        // while there's budget headroom and no progress, then STOPS on diminishing returns. This
+        // model only ever describes (tiny output, empty tree), so the guard nudges CONTINUATION_
+        // DIMINISHING_MIN (3) times, sees each re-drive grow the transcript by < the token floor,
+        // and halts on the 4th check — 2 primary completions + 3 continuation re-drives.
         let dir = clean_git_repo();
         let provider = Arc::new(DescribeOnlyProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -11769,8 +11967,9 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            3,
-            "explore + describe (2 completions), then exactly ONE nudge re-drive"
+            2 + CONTINUATION_DIMINISHING_MIN,
+            "explore + describe (2 completions), then 3 continuation re-drives before the \
+             diminishing-returns stop"
         );
         assert_eq!(answer, "still only describing");
         let _ = std::fs::remove_dir_all(&dir);
@@ -11888,13 +12087,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_empty_diff_run_is_nudged_exactly_once() {
+    async fn bridge_empty_diff_run_is_nudged_until_diminishing_returns() {
         // Wave 6: the empty-diff nudge must fire on the CLI-BRIDGE path. Hard evidence: a 15-instance
         // SWE-bench Lite sweep on the codex-cli::gpt-5.5 bridge resolved 3/15 vs raw codex 9/15;
         // 8/15 bridge instances submitted an EMPTY patch and the nudge fired 0×. The bridge ran its
         // tools inside its subprocess (surfaced via the sink's ToolStarted), so the gate must see
-        // that activity. Here the bridge explores (one sink tool) then only describes → exactly ONE
-        // nudge re-drive, then the turn ends (the model keeps describing; the latch prevents a loop).
+        // that activity. Here the bridge explores (one sink tool) then only describes → the H8
+        // continuation guard nudges 3× (each re-drive tiny + empty tree) before the diminishing-
+        // returns stop: 1 primary bridge completion + 3 continuation re-drives.
         let dir = clean_git_repo();
         let provider = Arc::new(BridgeDescribeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -11914,8 +12114,9 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "bridge yields its whole loop in ONE completion, then exactly ONE nudge re-drive"
+            1 + CONTINUATION_DIMINISHING_MIN,
+            "bridge yields its whole loop in ONE completion, then 3 continuation re-drives before \
+             the diminishing-returns stop"
         );
         assert_eq!(answer, "still only describing after the nudge");
         // The synthetic nudge must actually have been injected (not just an extra completion).
@@ -11963,8 +12164,9 @@ mod tests {
     async fn bridge_empty_diff_with_no_surfaced_tool_still_nudges() {
         // Wave-6 bridge-path robustness: a bridge that yields an empty diff having surfaced NO
         // parseable tool event (refusal / prose-only / CLI output drift → `tools_ran == 0`) still
-        // gets exactly ONE pushback. The direct-path `tools_ran > 0` gate would have dropped it on
-        // the very path every bench uses; the bridge relaxes that requirement.
+        // gets pushed back. The direct-path `tools_ran > 0` gate would have dropped it on the very
+        // path every bench uses; the `is_cli_bridge` arm relaxes that requirement. Under the H8
+        // guard it is re-driven 3× before the diminishing-returns stop.
         let dir = clean_git_repo();
         let provider = Arc::new(BridgeDescribeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -11984,8 +12186,8 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "bridge empty diff with no surfaced tool must still be nudged exactly once"
+            1 + CONTINUATION_DIMINISHING_MIN,
+            "bridge empty diff with no surfaced tool must still be nudged (3× before the stop)"
         );
         assert_eq!(answer, "still only describing after the nudge");
         let _ = std::fs::remove_dir_all(&dir);
