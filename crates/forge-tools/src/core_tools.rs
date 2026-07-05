@@ -428,6 +428,151 @@ fn looks_truncated(new: &str) -> bool {
             == 1
 }
 
+/// Net *unclosed* count for `(`, `{`, `[` in `s` — `max(0, opens - closes)` for each — skipping
+/// characters inside `"..."`/`'...'` literals and `//` / `/* */` comments (best-effort, not a
+/// full lexer: raw strings, Python triple-quotes, and `#`-comments aren't specially handled).
+/// A bare `'` is only treated as opening a char literal when it actually closes nearby (`'x'`,
+/// `'\n'`, `'\u{1F600}'`); otherwise it's left alone so Rust lifetimes/labels (`'a`, `'static`)
+/// don't swallow the rest of the file as "inside a string".
+fn bracket_net_open(s: &str) -> (i64, i64, i64) {
+    #[derive(PartialEq)]
+    enum St {
+        Code,
+        Str(char),
+        Line,
+        Block,
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let (mut paren, mut brace, mut square) = (0i64, 0i64, 0i64);
+    let mut st = St::Code;
+    let mut i = 0;
+    while i < n {
+        let ch = chars[i];
+        match st {
+            St::Line => {
+                if ch == '\n' {
+                    st = St::Code;
+                }
+                i += 1;
+            }
+            St::Block => {
+                if ch == '*' && i + 1 < n && chars[i + 1] == '/' {
+                    st = St::Code;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            St::Str(q) => {
+                if ch == '\\' && i + 1 < n {
+                    i += 2;
+                } else {
+                    if ch == q {
+                        st = St::Code;
+                    }
+                    i += 1;
+                }
+            }
+            St::Code => match ch {
+                '"' => {
+                    st = St::Str('"');
+                    i += 1;
+                }
+                '\'' => {
+                    if let Some(close) = char_literal_end(&chars, i) {
+                        i = close + 1;
+                    } else {
+                        i += 1; // lifetime/label tick, not a string
+                    }
+                }
+                '/' if i + 1 < n && chars[i + 1] == '/' => {
+                    st = St::Line;
+                    i += 2;
+                }
+                '/' if i + 1 < n && chars[i + 1] == '*' => {
+                    st = St::Block;
+                    i += 2;
+                }
+                '(' => {
+                    paren += 1;
+                    i += 1;
+                }
+                ')' => {
+                    paren -= 1;
+                    i += 1;
+                }
+                '{' => {
+                    brace += 1;
+                    i += 1;
+                }
+                '}' => {
+                    brace -= 1;
+                    i += 1;
+                }
+                '[' => {
+                    square += 1;
+                    i += 1;
+                }
+                ']' => {
+                    square -= 1;
+                    i += 1;
+                }
+                _ => {
+                    i += 1;
+                }
+            },
+        }
+    }
+    (paren.max(0), brace.max(0), square.max(0))
+}
+
+/// If `chars[start]` (a `'`) opens a char literal — `'x'`, or an escape like `'\n'` / `'\''` /
+/// `'\u{1F600}'` — returns the index of its closing `'`. Returns `None` for a Rust
+/// lifetime/label tick (`'a`, `'static`), which never closes, so callers can leave it alone.
+fn char_literal_end(chars: &[char], start: usize) -> Option<usize> {
+    let n = chars.len();
+    let mut i = start + 1;
+    if i >= n {
+        return None;
+    }
+    if chars[i] == '\\' {
+        i += 1;
+        if i >= n {
+            return None;
+        }
+        if chars[i] == 'u' && i + 1 < n && chars[i + 1] == '{' {
+            i += 2;
+            while i < n && chars[i] != '}' {
+                i += 1;
+            }
+            if i >= n {
+                return None;
+            }
+            i += 1; // consume '}'
+        } else {
+            i += 1; // consume the escaped char itself
+        }
+    } else {
+        i += 1; // a single plain char
+    }
+    if i < n && chars[i] == '\'' {
+        Some(i)
+    } else {
+        None
+    }
+}
+
+/// True when `after` has MORE net-unclosed brackets than `before`, for `(`, `{`, or `[` — the
+/// signature of an edit that cut a block off mid-way. Comparing to `before` (rather than judging
+/// `after` in isolation) means pre-existing imbalance, or a snippet that legitimately opens a
+/// bracket the surrounding untouched file closes, doesn't trip it — only a REGRESSION does.
+fn looks_bracket_truncated(before: &str, after: &str) -> bool {
+    let (bp, bb, bs) = bracket_net_open(before);
+    let (ap, ab, asq) = bracket_net_open(after);
+    ap > bp || ab > bb || asq > bs
+}
+
 /// Hard cap on a single `read_file` result so one read can't flood the model's context. A whole
 /// file over this is truncated (head kept — imports/signatures live there) with a marker telling
 /// the model to request a specific line range instead.
@@ -583,7 +728,7 @@ fn apply_edit(content: &str, old: &str, new: &str) -> Result<(String, &'static s
         );
     }
 
-    match content.matches(old).count() {
+    let (updated, note) = match content.matches(old).count() {
         1 => Ok((content.replacen(old, new, 1), "")),
         0 => flexible_replace(content, old, new)
             .map(|u| (u, " (matched ignoring whitespace)"))
@@ -618,7 +763,18 @@ fn apply_edit(content: &str, old: &str, new: &str) -> Result<(String, &'static s
         n => Err(format!(
             "`old` is ambiguous: {n} occurrences — add surrounding context"
         )),
+    }?;
+
+    if looks_bracket_truncated(content, &updated) {
+        return Err(
+            "the edit looks truncated (unbalanced brackets — it leaves a `{`, `(`, or `[` \
+             unclosed that wasn't unclosed before, as if it was cut off mid-block). Make a \
+             smaller, targeted edit, or use write_file for a brand-new file."
+                .to_string(),
+        );
     }
+
+    Ok((updated, note))
 }
 
 /// Apply several `old → new` edits to ONE file in a single call. Mutates the workspace.
@@ -1592,6 +1748,78 @@ mod tests {
         let err =
             apply_edit("let s = \"old\";\n", "let s = \"old\";", "let s = \"new;").unwrap_err();
         assert!(err.contains("truncated"), "{err}");
+    }
+
+    #[test]
+    fn bracket_net_open_ignores_strings_comments_and_lifetimes() {
+        // Brackets inside a string or a comment don't count.
+        assert_eq!(bracket_net_open(r#"let s = "}{)((["; "#), (0, 0, 0));
+        assert_eq!(
+            bracket_net_open("// a stray { in a comment\nfn f() {}"),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            bracket_net_open("/* block { comment */ fn f() {}"),
+            (0, 0, 0)
+        );
+        // Rust lifetimes/labels aren't mistaken for an unterminated char literal that would
+        // swallow the rest of the file.
+        assert_eq!(
+            bracket_net_open("fn f<'a>(x: &'a str) -> &'a str { x }"),
+            (0, 0, 0)
+        );
+        // A genuine char literal is still skipped correctly.
+        assert_eq!(bracket_net_open("let c = '{'; fn f() {}"), (0, 0, 0));
+        // Real unclosed brackets are still counted.
+        assert_eq!(bracket_net_open("fn f() {\n    if x {\n"), (0, 2, 0));
+    }
+
+    #[test]
+    fn looks_bracket_truncated_flags_a_new_regression_only() {
+        // (a) truncated mid-block: edit introduces an unclosed `{` that wasn't there before.
+        assert!(looks_bracket_truncated(
+            "fn f() {\n    body();\n}\n",
+            "fn f() {\n    if cond {\n        body();\n"
+        ));
+        // (b) a normal, fully balanced edit is not flagged.
+        assert!(!looks_bracket_truncated(
+            "fn f() {\n    old();\n}\n",
+            "fn f() {\n    new();\n}\n"
+        ));
+        // (c) brackets inside strings/comments in the new text don't trip it.
+        assert!(!looks_bracket_truncated(
+            "fn f() {}\n",
+            "fn f() {\n    let s = \"}{[(\";\n    // } also fine\n}\n"
+        ));
+        // (d) file was already imbalanced before the edit and stays equally imbalanced — not a
+        // NEW regression, so it's not flagged even though the absolute count is nonzero.
+        assert!(!looks_bracket_truncated(
+            "fn f() {\n    if x {\n",
+            "fn f() {\n    if y {\n"
+        ));
+    }
+
+    #[test]
+    fn apply_edit_rejects_truncated_bracket_replacement() {
+        let err = apply_edit(
+            "fn f() {\n    body();\n}\n",
+            "    body();",
+            "    if cond {\n        body();",
+        )
+        .unwrap_err();
+        assert!(err.contains("truncated"), "{err}");
+        assert!(err.contains("brackets"), "{err}");
+    }
+
+    #[test]
+    fn apply_edit_allows_balanced_bracket_replacement() {
+        let (out, _) = apply_edit(
+            "fn f() {\n    old();\n}\n",
+            "    old();",
+            "    if cond {\n        new();\n    }",
+        )
+        .unwrap();
+        assert!(out.contains("if cond {"), "{out}");
     }
 
     #[test]
