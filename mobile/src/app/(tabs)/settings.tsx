@@ -143,6 +143,7 @@ export default function SettingsScreen() {
                   onPress={() => setPendingRemove(server)}
                 />
               }
+              hasInteractiveTrailing
             />
           ))}
           <ListRow

@@ -34,13 +34,13 @@ export function HeatEdge({ active = false }: HeatEdgeProps) {
 
   return (
     <LinearGradient
-      pointerEvents="none"
       colors={[tokens.heatEdgeFrom, tokens.heatEdgeTo]}
       start={{ x: 0, y: 0 }}
       end={{ x: 0, y: 1 }}
       style={[
         styles.bar,
         {
+          pointerEvents: "none",
           shadowColor: tokens.heatGlow,
           shadowOpacity: 1,
           shadowRadius: GLOW_RADIUS,

@@ -1,7 +1,7 @@
 // DESIGN_SYSTEM.md §6 Containers — ListRow: 56pt min, Strike, hairline separator
 // (inset 16), leading/trailing slots.
-import React, { useState } from "react";
-import { type AccessibilityRole, Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useEffect, useRef, useState } from "react";
+import { type AccessibilityRole, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import { useTokens } from "../../theme/ThemeProvider";
@@ -20,6 +20,14 @@ export interface ListRowProps {
   showSeparator?: boolean;
   accessibilityLabel?: string;
   accessibilityRole?: AccessibilityRole;
+  /**
+   * Set when `trailing` renders its own interactive control (e.g. a trailing IconButton).
+   * On react-native-web, `accessibilityRole="button"` renders an actual `<button>` — a
+   * `<button>` cannot legally contain another `<button>`, which breaks hydration. When true,
+   * the row's web element stays a plain focusable `<div>` instead (Enter/Space still trigger
+   * `onPress`); native (iOS/Android) behavior is unaffected either way.
+   */
+  hasInteractiveTrailing?: boolean;
 }
 
 export function ListRow({
@@ -32,11 +40,32 @@ export function ListRow({
   showSeparator = true,
   accessibilityLabel,
   accessibilityRole,
+  hasInteractiveTrailing = false,
 }: ListRowProps) {
   const tokens = useTokens();
   const { style: strikeStyle, onPressIn, onPressOut } = useStrike();
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
+  const pressableRef = useRef<React.ComponentRef<typeof Pressable>>(null);
+
+  const suppressWebButtonTag = Platform.OS === "web" && hasInteractiveTrailing;
+
+  // react-native-web only wires Space-to-activate for elements whose *DOM* role/tag is
+  // button-ish. Once we drop the role to keep the tag a <div> (above), Space needs its own
+  // handler — Enter already works unconditionally via RNW's press responder.
+  useEffect(() => {
+    if (!suppressWebButtonTag || !onPress || disabled) return;
+    const node = pressableRef.current as unknown as HTMLElement | null;
+    if (!node) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        onPress();
+      }
+    };
+    node.addEventListener("keydown", onKeyDown);
+    return () => node.removeEventListener("keydown", onKeyDown);
+  }, [suppressWebButtonTag, onPress, disabled]);
 
   const content = (
     <Animated.View
@@ -65,6 +94,7 @@ export function ListRow({
     <View style={disabled ? styles.disabled : undefined}>
       {onPress ? (
         <Pressable
+          ref={pressableRef}
           onPress={onPress}
           onPressIn={onPressIn}
           onPressOut={onPressOut}
@@ -73,7 +103,7 @@ export function ListRow({
           onFocus={() => setFocused(true)}
           onBlur={() => setFocused(false)}
           disabled={disabled}
-          accessibilityRole={accessibilityRole ?? "button"}
+          accessibilityRole={suppressWebButtonTag ? undefined : (accessibilityRole ?? "button")}
           accessibilityLabel={accessibilityLabel ?? title}
           accessibilityState={{ disabled }}
           style={{ borderWidth: 2, borderColor: focused ? tokens.accent : "transparent" }}

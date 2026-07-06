@@ -61,8 +61,8 @@ export function ToastHost({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      <SafeAreaView pointerEvents="box-none" style={styles.host} edges={["bottom"]}>
-        <View pointerEvents="box-none" style={styles.stack}>
+      <SafeAreaView style={[styles.host, { pointerEvents: "box-none" }]} edges={["bottom"]}>
+        <View style={[styles.stack, { pointerEvents: "box-none" }]}>
           {toasts.map((t) => (
             <Toast key={t.id} toast={t} onDismiss={dismiss} />
           ))}

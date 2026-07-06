@@ -66,7 +66,11 @@ export function BellowsSpinner({ active }: BellowsSpinnerProps) {
   if (!active) return null;
 
   return (
-    <View style={styles.wrap} pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+    <View
+      style={[styles.wrap, { pointerEvents: "none" }]}
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+    >
       <Svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`}>
         <AnimatedCircle
           cx={SIZE / 2}

@@ -68,8 +68,10 @@ export function Segmented<T extends string = string>({ options, value, onChange,
           style={[styles.thumb, thumbStyle, { backgroundColor: tokens.bg2, borderRadius: radii.radius8 - 2 }]}
         >
           <View
-            pointerEvents="none"
-            style={[styles.thumbInset, { borderColor: tokens.borderStrong, borderRadius: radii.radius8 - 3 }]}
+            style={[
+              styles.thumbInset,
+              { borderColor: tokens.borderStrong, borderRadius: radii.radius8 - 3, pointerEvents: "none" },
+            ]}
           />
         </Animated.View>
       ) : null}

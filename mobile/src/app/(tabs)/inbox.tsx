@@ -5,8 +5,8 @@
 // still navigates into the full session on tap.
 import { router } from "expo-router";
 import { CircleCheck, Eye } from "lucide-react-native";
-import React, { useCallback, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import { DecisionPeek } from "../../components/cards/DecisionPeek";
@@ -38,15 +38,38 @@ function InboxRowBase({ row, index, onPress, onPeek }: InboxRowProps) {
   const strike = useStrike();
   const entrance = useForgeline(index);
   const title = row.title || `#${row.id.slice(0, 8)}`;
+  const rowRef = useRef<React.ComponentRef<typeof Pressable>>(null);
+
+  const onRowPress = useCallback(() => onPress(row), [onPress, row]);
+
+  // The row's trailing "Peek" IconButton is a real nested <button>, so on react-native-web the
+  // row itself can't also be an actual <button> (accessibilityRole="button" renders one) — that's
+  // an invalid button-in-button and breaks hydration. Keep the row a plain focusable <div> on
+  // web and replicate Space-to-activate manually; Enter already works unconditionally via RNW's
+  // press responder. Native (iOS/Android) keeps accessibilityRole="button" as-is.
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    const node = rowRef.current as unknown as HTMLElement | null;
+    if (!node) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        onRowPress();
+      }
+    };
+    node.addEventListener("keydown", onKeyDown);
+    return () => node.removeEventListener("keydown", onKeyDown);
+  }, [onRowPress]);
 
   return (
     <Animated.View style={entrance}>
       <Animated.View style={strike.style}>
         <Pressable
-          onPress={() => onPress(row)}
+          ref={rowRef}
+          onPress={onRowPress}
           onPressIn={strike.onPressIn}
           onPressOut={strike.onPressOut}
-          accessibilityRole="button"
+          accessibilityRole={Platform.OS === "web" ? undefined : "button"}
           accessibilityLabel={`${title}, needs you`}
         >
           {/* DESIGN_ELEVATION.md Move 2 — de-boxed row: every Inbox row is waiting, so

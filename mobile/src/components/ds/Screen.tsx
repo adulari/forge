@@ -87,10 +87,9 @@ function ForgeWash({ tokens, scheme }: { tokens: ColorTokens; scheme: "light" | 
   if (Platform.OS === "web") {
     return (
       <View
-        pointerEvents="none"
         style={[
           StyleSheet.absoluteFill,
-          { backgroundImage: tokens.forgeWash } as object,
+          { backgroundImage: tokens.forgeWash, pointerEvents: "none" } as object,
         ]}
       />
     );

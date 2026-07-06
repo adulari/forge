@@ -8,7 +8,7 @@
 // toast (FEATURES.md §1.1), they get their own result sheet.
 import { router } from "expo-router";
 import { Archive, Ellipsis, GitMerge, Trash2 } from "lucide-react-native";
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
@@ -62,6 +62,7 @@ function SessionCardBase({ row, index }: SessionCardProps) {
   const [discardConfirmVisible, setDiscardConfirmVisible] = useState(false);
   const [mergeResult, setMergeResult] = useState<MergeDirtyConflictResponse | null>(null);
   const [discardWarnings, setDiscardWarnings] = useState<string[] | null>(null);
+  const rowRef = useRef<React.ComponentRef<typeof Pressable>>(null);
 
   const hasWorktree = !!row.worktree;
   const title = row.title || `session ${row.id.slice(0, 8)}`;
@@ -121,6 +122,29 @@ function SessionCardBase({ row, index }: SessionCardProps) {
     setActionsVisible(false);
     setDiscardConfirmVisible(true);
   }, [closeSwipe]);
+
+  const goToSession = useCallback(() => {
+    router.push(`/session/${row.id}`);
+  }, [row.id]);
+
+  // The row's trailing `…` IconButton is a real nested <button>, so on react-native-web the
+  // row itself can't also be an actual <button> (accessibilityRole="button" would render one) —
+  // that's an invalid button-in-button and breaks hydration. Keep the row a plain focusable
+  // <div> on web and replicate Space-to-activate manually; Enter already works unconditionally
+  // via RNW's press responder. Native (iOS/Android) keeps accessibilityRole="button" as-is.
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    const node = rowRef.current as unknown as HTMLElement | null;
+    if (!node) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        goToSession();
+      }
+    };
+    node.addEventListener("keydown", onKeyDown);
+    return () => node.removeEventListener("keydown", onKeyDown);
+  }, [goToSession]);
 
   const confirmDiscard = useCallback(() => {
     setDiscardConfirmVisible(false);
@@ -183,9 +207,10 @@ function SessionCardBase({ row, index }: SessionCardProps) {
           <GestureDetector gesture={pan}>
             <Animated.View style={cardStyle}>
               <Pressable
-                onPress={() => router.push(`/session/${row.id}`)}
+                ref={rowRef}
+                onPress={goToSession}
                 onLongPress={openActions}
-                accessibilityRole="button"
+                accessibilityRole={Platform.OS === "web" ? undefined : "button"}
                 accessibilityLabel={`${title}, ${state}`}
               >
                 <View

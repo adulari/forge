@@ -51,7 +51,7 @@ function offlineQueueKey(baseUrl: string | null, sessionId: string): string {
 }
 
 type TimelineItem =
-  | { kind: "streaming"; id: string; text: string }
+  | { kind: "streaming"; id: string; text: string; streaming: boolean }
   | { kind: "history"; id: string; row: HistoryRow }
   | { kind: "filler"; id: string; text: string };
 
@@ -163,10 +163,80 @@ export default function SessionChat() {
 
   const streamingText = snapshot?.busy ? snapshot.streaming : "";
 
+  // ---------------------------------------------------------------------
+  // Bridge the busy(true)->false gap (see module doc above): the instant `busy` flips false,
+  // `streamingText` above goes to "" but the finalized turn hasn't landed in `historyRows` yet
+  // (that only happens once `useTurnCompleted`'s invalidation refetch resolves). Without help,
+  // the just-finished message would vanish from both sources for one or more frames, then pop
+  // back in from history — the reported flicker.
+  //
+  // The retain-on-busy-edge step below runs during render (React's documented "adjust state
+  // while rendering" pattern — https://react.dev/learn/you-might-not-need-an-effect), NOT in a
+  // `useEffect`: an effect only runs *after* React has already committed (and painted) the
+  // render where `busy` just flipped false, so the gap frame would still exist for one paint.
+  // Calling `setTrack` synchronously here instead makes React throw away that in-between
+  // render and immediately re-render with the retained text already in place — nothing is ever
+  // committed with the message absent. Dropping the retained text once the finalized row lands
+  // is not paint-critical (the render-time `finalizingActive` check further below already stops
+  // rendering it the instant `historyRows` advances), so that half uses ordinary effects.
+  // ---------------------------------------------------------------------
+  const busy = snapshot?.busy ?? false;
+
+  const [track, setTrack] = useState(() => ({
+    sessionId,
+    busy,
+    retainedText: streamingText,
+    finalizing: null as { text: string; baselineSeq: number } | null,
+  }));
+
+  if (track.sessionId !== sessionId) {
+    // Session switch: nothing carries over.
+    setTrack({ sessionId, busy, retainedText: streamingText, finalizing: null });
+  } else if (busy !== track.busy) {
+    setTrack(
+      busy
+        ? { sessionId, busy, retainedText: streamingText, finalizing: null }
+        : {
+            sessionId,
+            busy,
+            retainedText: track.retainedText,
+            finalizing: track.retainedText
+              ? { text: track.retainedText, baselineSeq: historyRows[0]?.seq ?? -1 }
+              : null,
+          },
+    );
+  } else if (busy && streamingText !== track.retainedText) {
+    setTrack({ ...track, retainedText: streamingText });
+  }
+
+  const { finalizing } = track;
+
+  // Clear once the finalized row has actually arrived (state cleanup only — see comment above).
+  useEffect(() => {
+    if (!finalizing) return;
+    if ((historyRows[0]?.seq ?? -1) !== finalizing.baselineSeq) {
+      setTrack((prev) => (prev.finalizing === finalizing ? { ...prev, finalizing: null } : prev));
+    }
+  }, [finalizing, historyRows]);
+
+  // Never-get-stuck safety net: if history doesn't settle within a few seconds, drop it anyway
+  // rather than let it linger as a stale duplicate of whatever eventually lands.
+  useEffect(() => {
+    if (!finalizing) return;
+    const t = setTimeout(() => {
+      setTrack((prev) => (prev.finalizing === finalizing ? { ...prev, finalizing: null } : prev));
+    }, 4000);
+    return () => clearTimeout(t);
+  }, [finalizing]);
+
+  const finalizingActive =
+    !busy && finalizing !== null && (historyRows[0]?.seq ?? -1) === finalizing.baselineSeq;
+  const displayText = streamingText || (finalizingActive ? finalizing!.text : "");
+
   const items = useMemo<TimelineItem[]>(() => {
     const list: TimelineItem[] = [];
-    if (streamingText) {
-      list.push({ kind: "streaming", id: "streaming", text: streamingText });
+    if (displayText) {
+      list.push({ kind: "streaming", id: "streaming", text: displayText, streaming: Boolean(streamingText) });
     }
     if (historySettled) {
       for (const row of historyRows) {
@@ -181,7 +251,7 @@ export default function SessionChat() {
       }
     }
     return list;
-  }, [streamingText, historySettled, historyRows, snapshot?.transcript]);
+  }, [displayText, streamingText, historySettled, historyRows, snapshot?.transcript]);
 
   // Pin to the latest item when a NEW item lands at the newest slot — not on every streaming
   // text tick (same item id, StreamingText owns its own rAF coalescing), and not when an older
@@ -213,7 +283,7 @@ export default function SessionChat() {
         case "streaming":
           return (
             <View style={styles.streamingRow}>
-              <StreamingText text={item.text} streaming />
+              <StreamingText text={item.text} streaming={item.streaming} />
             </View>
           );
         case "filler":

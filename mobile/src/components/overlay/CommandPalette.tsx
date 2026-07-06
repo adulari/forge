@@ -100,6 +100,8 @@ interface PaletteItem {
   disabled?: boolean;
   leading?: React.ReactNode;
   trailing?: React.ReactNode;
+  /** Set when `trailing` renders its own interactive control (e.g. a trailing IconButton) — see ListRowProps.hasInteractiveTrailing. */
+  trailingInteractive?: boolean;
   onSelect: () => void;
 }
 
@@ -259,6 +261,7 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
               />
             </View>
           ) : undefined,
+          trailingInteractive: s.waiting,
           onSelect: () => {
             close();
             router.push(`/session/${s.id}`);
@@ -586,7 +589,7 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
                 accessibilityLabel="Close"
               />
             </Animated.View>
-            <View style={styles.centerWrap} pointerEvents="box-none">
+            <View style={[styles.centerWrap, { pointerEvents: "box-none" }]}>
               <Animated.View
                 style={[
                   styles.centeredPanel,
@@ -635,6 +638,7 @@ function PaletteRow({ item, selected }: { item: PaletteItem; selected: boolean }
         onPress={item.disabled ? undefined : item.onSelect}
         disabled={item.disabled}
         accessibilityLabel={item.subtitle ? `${item.title}, ${item.subtitle}` : item.title}
+        hasInteractiveTrailing={item.trailingInteractive}
       />
     </View>
   );

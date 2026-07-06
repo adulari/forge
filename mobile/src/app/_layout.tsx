@@ -79,7 +79,9 @@ function RootNavigator() {
         <Stack.Screen name="session/[id]" />
         <Stack.Screen
           name="new-session"
-          options={{ headerShown: true, presentation: "modal", title: "New session" }}
+          // headerShown: false — new-session.tsx owns its own themed header (matches
+          // every other screen instead of expo-router's default unthemed white bar).
+          options={{ headerShown: false, presentation: "modal" }}
         />
       </Stack>
       {/* Declarative redirect (rather than Stack.Protected) per T2.1 spec: whatever route

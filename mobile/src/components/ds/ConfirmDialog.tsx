@@ -129,8 +129,7 @@ export function ConfirmDialog({
                 style={[styles.button, styles.holdButton, { borderColor: tokens.danger }]}
               >
                 <Animated.View
-                  style={[styles.holdFill, { backgroundColor: tokens.dangerBg }, fillStyle]}
-                  pointerEvents="none"
+                  style={[styles.holdFill, { backgroundColor: tokens.dangerBg, pointerEvents: "none" }, fillStyle]}
                 />
                 <Text style={[type.bodyBold, { color: tokens.danger }]}>{confirmLabel}</Text>
               </Pressable>

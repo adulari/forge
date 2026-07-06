@@ -32,12 +32,11 @@ export function StatusDot({ state, accessibilityLabel }: StatusDotProps) {
     >
       {state === "waiting" ? (
         <Animated.View
-          pointerEvents="none"
-          style={[styles.ring, { borderColor: tokens.danger }, ringStyle]}
+          style={[styles.ring, { borderColor: tokens.danger, pointerEvents: "none" }, ringStyle]}
         />
       ) : null}
       {state === "busy" ? (
-        <View pointerEvents="none" style={[styles.glow, { backgroundColor: tokens.dotGlow }]} />
+        <View style={[styles.glow, { backgroundColor: tokens.dotGlow, pointerEvents: "none" }]} />
       ) : null}
       <Animated.View style={[styles.dot, { backgroundColor: color }, dotStyle]} />
     </View>
