@@ -107,7 +107,9 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
     if (!node) return;
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Enter" && !e.shiftKey) {
+      // Enter (no Shift) already sends; ⌘/Ctrl+Enter (T5.1 alias) sends too, even in the
+      // edge case both modifiers are held at once, so the desktop shortcut always works.
+      if (e.key === "Enter" && (!e.shiftKey || e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         commit(textRef.current);
       }

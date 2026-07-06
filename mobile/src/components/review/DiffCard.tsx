@@ -83,6 +83,7 @@ function DiffFileSection({ file, isLast }: { file: DiffFile; isLast: boolean }) 
           <ChevronRight size={16} strokeWidth={1.75} color={tokens.ink3} />
         )}
         <Text
+          selectable
           style={[typeScale.bodyBold, { color: tokens.ink, fontFamily: monoFamily.regular }, styles.filePath]}
           numberOfLines={1}
         >
@@ -103,7 +104,7 @@ function DiffFileSection({ file, isLast }: { file: DiffFile; isLast: boolean }) 
           <View>
             {file.hunks.map((hunk, hIdx) => (
               <View key={hIdx} style={styles.hunk}>
-                <Text style={[typeScale.codeSmall, { color: tokens.info }, styles.hunkHeader]}>{hunk.header}</Text>
+                <Text selectable style={[typeScale.codeSmall, { color: tokens.info }, styles.hunkHeader]}>{hunk.header}</Text>
                 {hunk.lines.map((line, lIdx) => {
                   const gutter = line[0] ?? " ";
                   const bg =
@@ -111,7 +112,7 @@ function DiffFileSection({ file, isLast }: { file: DiffFile; isLast: boolean }) 
                   const ink = gutter === "+" ? tokens.success : gutter === "-" ? tokens.danger : tokens.ink2;
                   return (
                     <View key={lIdx} style={[styles.lineRow, { backgroundColor: bg }]}>
-                      <Text style={[typeScale.codeSmall, { color: ink }]}>{line || " "}</Text>
+                      <Text selectable style={[typeScale.codeSmall, { color: ink }]}>{line || " "}</Text>
                     </View>
                   );
                 })}

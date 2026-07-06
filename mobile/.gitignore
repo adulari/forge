@@ -39,3 +39,7 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Tauri (mobile/src-tauri/)
+src-tauri/target/
+src-tauri/gen/

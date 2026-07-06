@@ -213,6 +213,7 @@ export function Markdown({ content, style }: MarkdownProps) {
               <Text
                 key={key}
                 accessibilityRole="header"
+                selectable
                 style={[type.heading, styles.heading, { color: tokens.ink }]}
               >
                 {renderInline(parseInline(block.text), key, tokens)}
@@ -232,7 +233,7 @@ export function Markdown({ content, style }: MarkdownProps) {
                     <Text style={[type.body, styles.listMarker, { color: tokens.ink3 }]}>
                       {block.ordered ? `${itemIdx + 1}.` : "•"}
                     </Text>
-                    <Text style={[type.body, styles.listText, { color: tokens.ink }, style]}>
+                    <Text selectable style={[type.body, styles.listText, { color: tokens.ink }, style]}>
                       {renderInline(parseInline(item), `${key}-${itemIdx}`, tokens)}
                     </Text>
                   </View>
@@ -242,7 +243,7 @@ export function Markdown({ content, style }: MarkdownProps) {
           case "paragraph":
           default:
             return (
-              <Text key={key} style={[type.body, styles.paragraph, { color: tokens.ink }, style]}>
+              <Text key={key} selectable style={[type.body, styles.paragraph, { color: tokens.ink }, style]}>
                 {renderInline(parseInline(block.text), key, tokens)}
               </Text>
             );

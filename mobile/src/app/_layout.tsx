@@ -22,6 +22,7 @@ import { Screen } from "../components/ds/Screen";
 import { ToastHost } from "../components/ds/ToastHost";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { AuthProvider, useAuth } from "../lib/auth";
+import { useGlobalShortcuts } from "../lib/shortcuts";
 import { ThemeProvider, useTokens } from "../theme/ThemeProvider";
 
 // Keep the native splash up until pairing state resolves (avoids a flash of the
@@ -91,6 +92,7 @@ function RootNavigator() {
 
 export default function RootLayout() {
   const persistOptions = useMemo(() => ({ persister: asyncStoragePersister }), []);
+  useGlobalShortcuts(); // HANDOFF(T5.1): ⌘1..4 tabs / ⌘N new session — web/desktop only, no-op native
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>

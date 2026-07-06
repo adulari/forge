@@ -1,6 +1,6 @@
 // DESIGN_SYSTEM.md §6 Containers — ListRow: 56pt min, Strike, hairline separator
 // (inset 16), leading/trailing slots.
-import React from "react";
+import React, { useState } from "react";
 import { type AccessibilityRole, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
@@ -35,9 +35,17 @@ export function ListRow({
 }: ListRowProps) {
   const tokens = useTokens();
   const { style: strikeStyle, onPressIn, onPressOut } = useStrike();
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
 
   const content = (
-    <Animated.View style={[styles.row, onPress ? strikeStyle : undefined]}>
+    <Animated.View
+      style={[
+        styles.row,
+        onPress ? strikeStyle : undefined,
+        onPress && hovered && !disabled ? { backgroundColor: tokens.bg3 } : undefined,
+      ]}
+    >
       {leading ? <View style={styles.slot}>{leading}</View> : null}
       <View style={styles.body}>
         <Text style={[type.body, { color: tokens.ink }]} numberOfLines={1}>
@@ -60,10 +68,15 @@ export function ListRow({
           onPress={onPress}
           onPressIn={onPressIn}
           onPressOut={onPressOut}
+          onHoverIn={() => setHovered(true)}
+          onHoverOut={() => setHovered(false)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
           disabled={disabled}
           accessibilityRole={accessibilityRole ?? "button"}
           accessibilityLabel={accessibilityLabel ?? title}
           accessibilityState={{ disabled }}
+          style={{ borderWidth: 2, borderColor: focused ? tokens.accent : "transparent" }}
         >
           {content}
         </Pressable>

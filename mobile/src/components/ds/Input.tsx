@@ -2,6 +2,7 @@
 // D/F/E/X; mono variant for URLs/paths; `clear` affordance.
 import React, { useState } from "react";
 import {
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -53,7 +54,9 @@ export function Input({
   const hasError = !!error;
   const showClear = clearable && !trailing && !disabled && !!value && value.length > 0;
 
-  const borderColor = hasError ? tokens.danger : focused ? tokens.borderStrong : tokens.border;
+  // DESIGN_SYSTEM §6 state legend: F = "2px accent ring, web/desktop; native: borderStrong".
+  const webFocusRing = focused && !hasError && Platform.OS === "web";
+  const borderColor = hasError ? tokens.danger : webFocusRing ? tokens.accent : focused ? tokens.borderStrong : tokens.border;
 
   return (
     <View style={containerStyle}>
@@ -64,6 +67,7 @@ export function Input({
           {
             backgroundColor: tokens.bg2,
             borderColor,
+            borderWidth: webFocusRing ? 2 : 1,
             borderRadius: radii.radius8,
             opacity: disabled ? 0.4 : 1,
           },

@@ -4,7 +4,14 @@ import React, { createContext, useCallback, useContext, useMemo, useRef, useStat
 import { StyleSheet, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { notifySupported, notify } from "../../lib/notify";
 import { Toast, type ToastData, type ToastTone } from "./Toast";
+
+// Only escalate to a system notification when the window/tab is backgrounded — while
+// Forge is focused the in-app toast already did the job (ARCHITECTURE.md §6.1/§6.2).
+function isBackgrounded(): boolean {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
 
 export interface ShowToastOptions {
   tone?: ToastTone;
@@ -41,6 +48,9 @@ export function ToastHost({ children }: { children: React.ReactNode }) {
       setToasts((prev) => [...prev, { id, message, tone: options?.tone }]);
       const timer = setTimeout(() => dismiss(id), options?.duration ?? AUTO_DISMISS_MS);
       timers.current.set(id, timer);
+      if (isBackgrounded() && notifySupported()) {
+        void notify("Forge", message);
+      }
       return id;
     },
     [dismiss],

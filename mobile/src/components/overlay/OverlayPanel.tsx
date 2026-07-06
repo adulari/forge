@@ -10,8 +10,8 @@
 // then `key{key:"Enter"}`, any close path -> `overlay_cancel` (owned by the
 // caller's `onClose`, so scrim/Esc/back-gesture/title-X all funnel through it).
 //
-// Keyboard passthrough (arrows/Enter/Esc while open, beyond this panel's own
-// Esc-to-close) is T5.1 — intentionally not implemented here.
+// Keyboard passthrough (arrows/Enter/Esc/Tab/PageUp/PageDown while open, beyond this
+// panel's own Esc-to-close) is implemented below (T5.1).
 import { Send, X } from "lucide-react-native";
 import React, { useEffect, useMemo, useState } from "react";
 import {
@@ -74,9 +74,33 @@ function groupRows(rows: OverlayRow[]): RowGroup[] {
   return groups;
 }
 
+const PASSTHROUGH_KEYS = new Set(["ArrowUp", "ArrowDown", "Enter", "Escape", "Tab", "PageUp", "PageDown"]);
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (typeof HTMLElement === "undefined" || !(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
+}
+
 export function OverlayPanel({ overlay, visible, send, onClose }: OverlayPanelProps) {
   const tokens = useTokens();
   const { isCompact } = useBreakpoint();
+
+  // T5.1 — overlay keyboard passthrough (closes the T4.1 deferral noted above): while open
+  // on web/desktop, forward navigation keys to the daemon as raw `key` inputs so the
+  // server-authoritative selection can be driven from the keyboard, not just row taps. Skips
+  // forwarding (except Esc, which should always reach the daemon) while focus is in the
+  // filter/free-text Input — those already handle their own Enter/typing locally.
+  useEffect(() => {
+    if (Platform.OS !== "web" || !visible) return;
+    const handler = (e: KeyboardEvent) => {
+      if (!PASSTHROUGH_KEYS.has(e.key)) return;
+      if (e.key !== "Escape" && isTypingTarget(e.target)) return;
+      send({ kind: "key", key: e.key });
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [visible, send]);
 
   // Local echo of the filter/free-text inputs — intentionally not resynced
   // from later snapshots (same pattern as QuestionCard's free-text row):

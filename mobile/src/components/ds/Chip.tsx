@@ -1,6 +1,6 @@
 // DESIGN_SYSTEM.md §6 Chip — pill radius 999, bg3, meta text; selectable state
 // (selection bg + ember/accent text); used for command chips + filters.
-import React from "react";
+import React, { useState } from "react";
 import { Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import Animated from "react-native-reanimated";
 
@@ -22,6 +22,8 @@ export interface ChipProps {
 export function Chip({ label, selected = false, onPress, disabled = false, icon, testID, style }: ChipProps) {
   const tokens = useTokens();
   const strike = useStrike();
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
 
   return (
     <Animated.View style={strike.style}>
@@ -29,6 +31,10 @@ export function Chip({ label, selected = false, onPress, disabled = false, icon,
         onPress={disabled ? undefined : onPress}
         onPressIn={disabled ? undefined : strike.onPressIn}
         onPressOut={disabled ? undefined : strike.onPressOut}
+        onHoverIn={() => setHovered(true)}
+        onHoverOut={() => setHovered(false)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
         disabled={disabled}
         testID={testID}
         accessibilityRole="button"
@@ -41,6 +47,8 @@ export function Chip({ label, selected = false, onPress, disabled = false, icon,
             backgroundColor: selected ? tokens.selection : tokens.bg3,
             borderRadius: radii.radiusPill,
             opacity: disabled ? 0.4 : 1,
+            borderWidth: 2,
+            borderColor: focused ? tokens.accent : hovered && !disabled ? tokens.borderStrong : "transparent",
           },
           style,
         ]}

@@ -6,10 +6,10 @@
 // would need @react-navigation/bottom-tabs prop types that aren't part of this app's
 // dependency surface, so this stays inside expo-router's public Tabs API
 // (tabBarIcon/tabBarBadge/tabBarStyle).
-import { Tabs } from "expo-router";
-import { BellDot, Flame, History, Settings2, type LucideIcon } from "lucide-react-native";
-import React, { useEffect } from "react";
-import { StyleSheet, View } from "react-native";
+import { router, Slot, Tabs, usePathname } from "expo-router";
+import { BellDot, Flame, History, Plus, Settings2, type LucideIcon } from "lucide-react-native";
+import React, { useEffect, useMemo } from "react";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 import Animated, {
   useAnimatedStyle,
   useReducedMotion,
@@ -19,10 +19,17 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
+import { Chip } from "../../components/ds/Chip";
+import { EmptyState } from "../../components/ds/EmptyState";
+import { IconButton } from "../../components/ds/IconButton";
+import { MasterDetail } from "../../components/ds/MasterDetail";
+import { SessionCard } from "../../components/fleet/SessionCard";
 import { useSessions } from "../../lib/queries";
 import { durations, easings, springs } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
-import { radii } from "../../theme/tokens";
+import { radii, space } from "../../theme/tokens";
+import { type as typeScale } from "../../theme/typography";
+import { useBreakpoint } from "../../theme/useBreakpoint";
 
 interface TabIconProps {
   focused: boolean;
@@ -129,15 +136,118 @@ function TabsNavigator() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Expanded (>=1024, DESIGN_SYSTEM §7) — MasterDetail rail. Rail = Fleet list +
+// Inbox filter pills + New Session; History/Settings collapse into the rail
+// footer (Fleet/Inbox aren't separate footer icons — the rail itself IS the
+// Fleet view, and the pills ARE the Inbox filter). `detail` renders whichever
+// (tabs) child route is active via `Slot`, so index/inbox/history/settings
+// stay the exact same route files (ARCHITECTURE.md: "route files stay
+// identical; expo-router renders the same screens into either layout").
+// ---------------------------------------------------------------------------
+
+function RailPill({ href, label, count }: { href: "/" | "/inbox"; label: string; count?: number }) {
+  const pathname = usePathname();
+  const selected = pathname === href;
+  return (
+    <Chip
+      label={count ? `${label} (${count})` : label}
+      selected={selected}
+      onPress={() => router.push(href)}
+    />
+  );
+}
+
+function RailFooterIcon({
+  href,
+  icon,
+  label,
+}: {
+  href: "/history" | "/settings";
+  icon: React.ReactNode;
+  label: string;
+}) {
+  const tokens = useTokens();
+  const pathname = usePathname();
+  const active = pathname === href;
+  return (
+    <IconButton
+      icon={icon}
+      onPress={() => router.push(href)}
+      accessibilityLabel={label}
+      style={active ? { backgroundColor: tokens.bg3, borderRadius: radii.radius8 } : undefined}
+    />
+  );
+}
+
+function ExpandedRail() {
+  const tokens = useTokens();
+  const pathname = usePathname();
+  const { data: sessions } = useSessions();
+
+  const rows = useMemo(() => sessions ?? [], [sessions]);
+  const waitingCount = useMemo(() => rows.filter((s) => s.waiting).length, [rows]);
+  const showingInbox = pathname === "/inbox";
+  const visibleRows = showingInbox ? rows.filter((s) => s.waiting) : rows;
+
+  return (
+    <View style={styles.rail}>
+      <View style={[styles.railHeader, { borderBottomColor: tokens.border }]}>
+        <Text style={[typeScale.heading, { color: tokens.ink }]}>Fleet</Text>
+        <IconButton
+          icon={<Plus size={20} strokeWidth={1.75} color={tokens.accent} />}
+          onPress={() => router.push("/new-session")}
+          accessibilityLabel="New session"
+        />
+      </View>
+
+      <View style={styles.pillsRow}>
+        <RailPill href="/" label="All" />
+        <RailPill href="/inbox" label="Waiting" count={waitingCount} />
+      </View>
+
+      <ScrollView style={styles.railList} contentContainerStyle={styles.railListContent}>
+        {visibleRows.length === 0 ? (
+          <EmptyState
+            icon={Flame}
+            message={showingInbox ? "nothing needs you right now." : "no live sessions — start one"}
+          />
+        ) : (
+          visibleRows.map((row, i) => <SessionCard key={row.id} row={row} index={i} />)
+        )}
+      </ScrollView>
+
+      <View style={[styles.railFooter, { borderTopColor: tokens.border }]}>
+        <RailFooterIcon
+          href="/history"
+          icon={<History size={20} strokeWidth={1.75} color={tokens.ink2} />}
+          label="History"
+        />
+        <RailFooterIcon
+          href="/settings"
+          icon={<Settings2 size={20} strokeWidth={1.75} color={tokens.ink2} />}
+          label="Settings"
+        />
+      </View>
+    </View>
+  );
+}
+
 export default function TabsLayout() {
-  // HANDOFF(T2.1 -> T5.1): `expanded` (>=1024, DESIGN_SYSTEM §7) is supposed to swap this
-  // for a persistent `MasterDetail` rail (fleet list + Inbox filter pills + New Session at
-  // top; History/Settings collapse into the rail footer) with the session detail on the
-  // right, and the bottom tab bar disappearing entirely. Wiring that up needs the Fleet
-  // (T2.3) and Inbox/History (T2.4) route content to compose into the rail, which isn't
-  // built yet in this task's scope — so `expanded` intentionally falls through to the same
-  // tab navigator as compact/medium for now (fully usable, just not the final desktop
-  // layout). T5.1 owns swapping this in.
+  const { isExpanded } = useBreakpoint();
+
+  // T5.1: expanded swaps the bottom tab bar for the persistent rail above.
+  // HANDOFF(T5.1 -> future work): `session/[id]` is a sibling Stack route
+  // outside this (tabs) group (see src/app/_layout.tsx's root Stack), so
+  // opening a session still pushes over the whole rail+detail pair here —
+  // same as compact/medium — rather than rendering inline in the detail pane
+  // next to a persistent rail. True inline session embedding on expanded
+  // would need `session/[id]` nested under (tabs) or `MasterDetail` lifted to
+  // the root Stack; both are routing-architecture changes out of this task's
+  // bounded file scope (this task only wires `(tabs)/_layout.tsx`).
+  if (isExpanded) {
+    return <MasterDetail master={<ExpandedRail />} detail={<Slot />} />;
+  }
   return <TabsNavigator />;
 }
 
@@ -145,4 +255,24 @@ const styles = StyleSheet.create({
   iconWrap: { alignItems: "center", justifyContent: "center", width: 40, height: 32 },
   pill: { position: "absolute", width: 40, height: 32 },
   underline: { position: "absolute", top: -8, alignSelf: "center", width: 24, height: 2, borderRadius: 1 },
+  rail: { flex: 1 },
+  railHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: space.space16,
+    paddingVertical: space.space12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  pillsRow: { flexDirection: "row", gap: space.space8, paddingHorizontal: space.space16, paddingVertical: space.space12 },
+  railList: { flex: 1 },
+  railListContent: { paddingBottom: space.space16 },
+  railFooter: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: space.space8,
+    paddingVertical: space.space8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
 });

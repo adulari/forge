@@ -76,21 +76,50 @@ export function Segmented<T extends string = string>({ options, value, onChange,
       {options.map((opt) => {
         const selected = opt.value === value;
         return (
-          <Pressable
+          <SegmentOption
             key={opt.value}
+            label={opt.label}
+            selected={selected}
             onPress={() => onChange(opt.value)}
-            accessibilityRole="tab"
-            accessibilityState={{ selected }}
-            accessibilityLabel={opt.label}
-            style={styles.segment}
-          >
-            <Text style={[type.section, { color: selected ? tokens.ink : tokens.ink3 }]} numberOfLines={1}>
-              {opt.label}
-            </Text>
-          </Pressable>
+          />
         );
       })}
     </View>
+  );
+}
+
+// Own component (not inline in the `.map`) so each segment can carry its own
+// hover/focus-visible state — hooks can't run conditionally/per-iteration
+// inside a parent's render body.
+function SegmentOption({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+  const tokens = useTokens();
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+
+  return (
+    <Pressable
+      onPress={onPress}
+      onHoverIn={() => setHovered(true)}
+      onHoverOut={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      accessibilityRole="tab"
+      accessibilityState={{ selected }}
+      accessibilityLabel={label}
+      style={[
+        styles.segment,
+        {
+          borderRadius: radii.radius8 - 2,
+          borderWidth: 2,
+          borderColor: focused ? tokens.accent : "transparent",
+          backgroundColor: hovered && !selected ? tokens.bg3 : "transparent",
+        },
+      ]}
+    >
+      <Text style={[type.section, { color: selected ? tokens.ink : tokens.ink3 }]} numberOfLines={1}>
+        {label}
+      </Text>
+    </Pressable>
   );
 }
 

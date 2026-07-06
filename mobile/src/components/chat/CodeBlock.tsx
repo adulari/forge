@@ -186,7 +186,7 @@ export function CodeBlock({ code, language }: CodeBlockProps) {
         />
       </View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-        <Text accessibilityRole="text" style={[type.code, styles.code, { color: tokens.ink }]}>
+        <Text accessibilityRole="text" selectable style={[type.code, styles.code, { color: tokens.ink }]}>
           {hlTokens.map((t, idx) => (
             <Text key={idx} style={tokenStyle(t.kind, tokens, keywordColor)}>
               {t.text}

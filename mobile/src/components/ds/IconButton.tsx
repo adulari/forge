@@ -30,6 +30,7 @@ export function IconButton({
   const tokens = useTokens();
   const strike = useStrike();
   const [focused, setFocused] = useState(false);
+  const [hovered, setHovered] = useState(false);
 
   return (
     <Animated.View style={strike.style}>
@@ -39,6 +40,8 @@ export function IconButton({
         onPressOut={disabled ? undefined : strike.onPressOut}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
+        onHoverIn={() => setHovered(true)}
+        onHoverOut={() => setHovered(false)}
         disabled={disabled}
         testID={testID}
         accessibilityRole="button"
@@ -49,6 +52,7 @@ export function IconButton({
           {
             borderRadius: radii.radius8,
             opacity: disabled ? 0.4 : 1,
+            backgroundColor: hovered && !disabled ? tokens.bg3 : "transparent",
             borderColor: focused ? tokens.accent : "transparent",
           },
           style,
