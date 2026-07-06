@@ -151,7 +151,10 @@ export default function SessionChat() {
   // ---------------------------------------------------------------------
   const historyRows = useMemo<HistoryRow[]>(() => {
     const pages = historyQuery.data?.pages ?? [];
-    return pages.flat().filter((r) => r.visibility === "ui");
+    // Render ALL rows: `visibility` is "llm" for normal turns and "ui" for user-facing
+    // notes — BOTH are part of the visible conversation (remote.rs HistoryRow doc; the web
+    // PWA renders every row, styling "ui" as a note). Filtering to one drops the conversation.
+    return pages.flat();
   }, [historyQuery.data]);
 
   // Once `data` has resolved once (cache or network) for this session, the filler is gone for
@@ -241,7 +244,9 @@ export default function SessionChat() {
       <View style={styles.flex}>
         <BoundedList<TimelineItem>
           ref={listRef}
-          inverted
+          // Only invert when there's content — an inverted FlatList mirrors its
+          // ListEmptyComponent upside-down, so the empty state must render upright.
+          inverted={items.length > 0}
           data={items}
           renderItem={renderItem}
           keyExtractor={keyExtractor}
