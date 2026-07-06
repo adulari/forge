@@ -65,7 +65,7 @@ fi
 echo "==> Configuring runner (--replace makes this safe to re-run)"
 cd "$RUNNER_DIR"
 sudo -u "$RUNNER_USER" ./config.sh --url "https://github.com/$OWNER_REPO" --token "$RUNNER_TOKEN" \
-  --name "$(hostname)" --labels "$LABELS" --work _work --replace --unattended
+  --name "$(uname -n)" --labels "$LABELS" --work _work --replace --unattended
 
 echo "==> Installing + starting as a system service"
 if [ ! -f "$RUNNER_DIR/.service" ]; then
