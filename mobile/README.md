@@ -59,6 +59,20 @@ https://adulari.github.io/forge/forge-source.json
 Full details, including the versioned release-asset fallback URL and update behavior: see
 [`docs/mobile/SIDELOAD.md`](../docs/mobile/SIDELOAD.md).
 
+## iOS simulator build (no Apple account)
+
+For a native iOS build with zero Apple Developer credentials, use the `simulator` EAS profile
+(unsigned, simulator-only):
+
+```bash
+eas build -p ios --profile simulator
+```
+
+This produces a simulator `.app` (tarball) in EAS's cloud — no credentials prompted. Run it by
+either dragging the `.app` onto a local iOS Simulator (macOS + Xcode), or uploading it to
+[Appetize.io](https://appetize.io) to drive it from a browser (works from a phone too). Then
+`npx expo start --dev-client` to hot-reload into it.
+
 ## Distribution posture (v1)
 
 Unsigned desktop builds + unsigned SideStore iOS + static web hosting. No store-submission
