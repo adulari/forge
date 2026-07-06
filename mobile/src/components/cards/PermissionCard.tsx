@@ -90,7 +90,6 @@ export function PermissionCard({ prompt, diff, promptSeq, send }: PermissionCard
               variant="danger"
               onPress={() => respond(false)}
               disabled={locked}
-              fullWidth
               icon={committed === "deny" ? <CommitIcon kind="x" color={tokens.onAccent} /> : undefined}
               style={styles.actionBtn}
             />
@@ -99,7 +98,6 @@ export function PermissionCard({ prompt, diff, promptSeq, send }: PermissionCard
               variant="allow"
               onPress={() => respond(true)}
               disabled={locked}
-              fullWidth
               icon={committed === "allow" ? <CommitIcon kind="check" color={tokens.onAccent} /> : undefined}
               style={styles.actionBtn}
             />
