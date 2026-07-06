@@ -11,11 +11,13 @@
 import { ArrowUp, Clock, FileText, Image as ImageIcon, Square } from "lucide-react-native";
 import React, { useEffect, useRef, useState } from "react";
 import { Platform, StyleSheet, Text, TextInput, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
 import { useUpload } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
-import { radii, space, tapTarget } from "../../theme/tokens";
+import { gutter, radii, space, tapTarget } from "../../theme/tokens";
+import { useBreakpoint } from "../../theme/useBreakpoint";
 import { type, webInputTextStyle } from "../../theme/typography";
 import { Chip } from "../ds/Chip";
 import { IconButton } from "../ds/IconButton";
@@ -48,6 +50,15 @@ export interface ComposerProps {
 export function Composer({ sessionId, busy, online, onSend, onInterrupt }: ComposerProps) {
   const tokens = useTokens();
   const upload = useUpload();
+  const { isCompact } = useBreakpoint();
+  const insets = useSafeAreaInsets();
+  // The parent `<Screen>` wraps ALL of its children (list, cards, composer) in one
+  // paddingHorizontal'd View for the message-list gutter — that's wanted for MessageRow/
+  // CardSlot, but it insets the composer's own bg2 panel from the true screen edges,
+  // leaving Screen's bg1 showing through as a side gutter. Cancel it here with a matching
+  // negative margin so the panel itself bleeds edge-to-edge; `styles.wrap`'s own
+  // paddingHorizontal keeps the icons/input/send button reasonably inset from that edge.
+  const screenGutter = isCompact ? gutter.compact : gutter.medium;
 
   const [text, setText] = useState("");
   const [height, setHeight] = useState(MIN_HEIGHT);
@@ -129,7 +140,20 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
   }, [sessionId]);
 
   return (
-    <View style={[styles.wrap, { backgroundColor: tokens.bg2, borderTopColor: tokens.border }]}>
+    <View
+      style={[
+        styles.wrap,
+        {
+          backgroundColor: tokens.bg2,
+          borderTopColor: tokens.border,
+          marginHorizontal: -screenGutter,
+          // `Screen` omits "bottom" from its safe-area edges for this route (see index.tsx) so
+          // this panel — not the screen's own bg1 — is what bleeds through the home-indicator
+          // inset; otherwise a black strip would show below the grey composer.
+          paddingBottom: space.space8 + insets.bottom,
+        },
+      ]}
+    >
       {attachments.length > 0 ? (
         <View style={styles.chipsRow}>
           {attachments.map((a) => (

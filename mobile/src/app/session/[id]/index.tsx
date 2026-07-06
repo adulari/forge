@@ -255,7 +255,14 @@ export default function SessionChat() {
               : null,
           },
     );
-  } else if (busy && streamingText !== track.retainedText) {
+  } else if (busy && streamingText && streamingText !== track.retainedText) {
+    // `streamingText` guard: the real daemon can (and does — verified live) send a snapshot
+    // with `streaming` already cleared to "" one tick BEFORE the `busy` true->false edge
+    // itself, not atomically with it. Without this guard that empty tick would blow away
+    // `retainedText` right before the edge, so `finalizing` below (`track.retainedText ? … :
+    // null`) would never arm and the just-finished reply would render as nothing at all —
+    // not a brief flicker but a real gap until the history refetch resolves. Only ever
+    // replace the retained text with another real chunk; a transient empty one is ignored.
     setTrack({ ...track, retainedText: streamingText });
   }
 
@@ -394,7 +401,9 @@ export default function SessionChat() {
   const hasPending = queued.length > 0 || offlineQueue.length > 0;
 
   return (
-    <Screen edges={["left", "right", "bottom"]} keyboardAvoiding>
+    // "bottom" deliberately omitted: Composer owns the home-indicator inset itself (its bg2
+    // panel bleeds through it) so Screen's bg1 never shows as a seam below the composer.
+    <Screen edges={["left", "right"]} keyboardAvoiding>
       <View style={styles.flex}>
         <BoundedList<TimelineItem>
           ref={listRef}
