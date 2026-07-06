@@ -1,9 +1,11 @@
-// Bottom tabs: Fleet · Alerts · History · More (BUILD_PLAN §6). Tab badge counts (waiting
-// count on Alerts) are explicit Batch 4 polish (BUILD_PLAN §7, W11) — not wired here.
+// Bottom tabs: Fleet · Alerts · History · More (BUILD_PLAN §6). The Alerts tab carries a
+// numeric badge = count of sessions currently `waiting` (from useSessions(), the same
+// polled list the Fleet/Alerts tabs render — no extra fetch).
 import { Tabs } from "expo-router/js-tabs";
 import React from "react";
 import { Text, type ColorValue } from "react-native";
 
+import { useSessions } from "../../lib/queries";
 import { colors } from "../../lib/theme";
 
 function TabGlyph({ glyph, color }: { glyph: string; color: ColorValue }) {
@@ -11,6 +13,9 @@ function TabGlyph({ glyph, color }: { glyph: string; color: ColorValue }) {
 }
 
 export default function TabsLayout() {
+  const { data: sessions } = useSessions();
+  const waitingCount = sessions?.filter((s) => s.waiting).length ?? 0;
+
   return (
     <Tabs
       screenOptions={{
@@ -34,6 +39,8 @@ export default function TabsLayout() {
         options={{
           title: "Alerts",
           tabBarIcon: ({ color }) => <TabGlyph glyph="⚠" color={color} />,
+          tabBarBadge: waitingCount > 0 ? waitingCount : undefined,
+          tabBarBadgeStyle: { backgroundColor: colors.no, color: colors.panel },
         }}
       />
       <Tabs.Screen
