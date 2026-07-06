@@ -18,6 +18,7 @@ import { IconButton } from "../components/ds/IconButton";
 import { Input } from "../components/ds/Input";
 import { Screen } from "../components/ds/Screen";
 import { ApiError } from "../lib/api";
+import { goBackOr } from "../lib/nav";
 import { useCreateSession } from "../lib/queries";
 import { useTokens } from "../theme/ThemeProvider";
 import { gutter, space } from "../theme/tokens";
@@ -58,7 +59,7 @@ export default function NewSessionScreen() {
     );
   }, [cwd, title, model, worktree, create]);
 
-  const onClose = useCallback(() => router.back(), []);
+  const onClose = useCallback(() => goBackOr("/(tabs)"), []);
 
   const serverError =
     create.error instanceof ApiError

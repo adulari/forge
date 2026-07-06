@@ -24,6 +24,7 @@ import { useToast } from "../../../components/ds/ToastHost";
 import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { SessionHeader } from "../../../components/session/SessionHeader";
 import { StatusStrip } from "../../../components/session/StatusStrip";
+import { goBackOr } from "../../../lib/nav";
 import { useTurnCompleted } from "../../../lib/queries";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
@@ -146,7 +147,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             cwd={snapshot?.cwd ?? sessionId}
             worktree={snapshot?.worktree ?? null}
             exposure={snapshot?.exposure ?? "loopback"}
-            onBack={() => router.back()}
+            onBack={() => goBackOr("/(tabs)")}
           />
         </View>
 
@@ -203,7 +204,7 @@ export default function SessionLayout() {
       <SafeAreaView style={styles.flex} edges={["top", "left", "right"]}>
         <IconButton
           icon={<ArrowLeft size={20} strokeWidth={1.75} />}
-          onPress={() => router.back()}
+          onPress={() => goBackOr("/(tabs)")}
           accessibilityLabel="Back"
         />
       </SafeAreaView>
