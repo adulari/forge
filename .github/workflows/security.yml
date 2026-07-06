@@ -23,7 +23,7 @@ permissions:
 jobs:
   audit:
     name: cargo audit (RUSTSEC)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
       - uses: taiki-e/install-action@v2
@@ -48,7 +48,7 @@ jobs:
 
   deny:
     name: cargo deny (licenses + bans + advisories)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
       # Need a real toolchain: `cargo deny check` runs `cargo metadata` under the hood.
