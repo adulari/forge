@@ -63,7 +63,7 @@ rand = "0.10"
 # new leaves). No cloud relay: the encrypted message goes straight to the browser vendor's
 # push endpoint over the in-tree reqwest/rustls.
 p256 = { version = "0.13", features = ["ecdh"] }
-hkdf = "0.12"
+hkdf = "0.13"
 sha2 = "0.10"
 aes-gcm = "0.10"
 sysinfo = { workspace = true }
