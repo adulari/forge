@@ -6,14 +6,48 @@
 import * as Clipboard from "expo-clipboard";
 import { Stack, useLocalSearchParams, useRouter, useSegments } from "expo-router";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Text, View } from "react-native";
+import { Platform, Pressable, Text, View } from "react-native";
+import Animated from "react-native-reanimated";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { Badge, Chip, EntranceView, Metric, Segmented, type SegmentedOption, StatusDot, type StatusDotState } from "../../../components/ui";
 import { PermissionCard } from "../../../components/permissionCard";
 import { QuestionCard } from "../../../components/questionCard";
+import { usePressScale } from "../../../lib/motion";
 import { colors } from "../../../lib/theme";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
+
+function lightHaptic() {
+  if (Platform.OS === "web") return;
+  import("expo-haptics")
+    .then((H) => H.impactAsync(H.ImpactFeedbackStyle.Light))
+    .catch(() => {});
+}
+
+// Compact affordance shown instead of the generic QuestionCard when a plan-approval question
+// is pending (BUILD_PLAN §6 Review "Build it"/"Cancel" flow) — the Review plan card is the
+// single Approve/Cancel/Revise surface, so this just jumps there instead of duplicating it.
+function PlanReadyJump({ onPress }: { onPress: () => void }) {
+  const { style, onPressIn, onPressOut } = usePressScale();
+  return (
+    <Animated.View style={style}>
+      <Pressable
+        onPress={onPress}
+        onPressIn={onPressIn}
+        onPressOut={onPressOut}
+        className="flex-row items-center gap-8 bg-panel border border-accent rounded-lg px-10 py-10"
+        style={{ minHeight: 44 }}
+      >
+        <Text className="text-accent text-[15px] font-bold">⬡</Text>
+        <View className="flex-1">
+          <Text className="text-accent text-[14px] font-bold">Plan ready</Text>
+          <Text className="text-dim text-[12px]">Tap to review &amp; approve</Text>
+        </View>
+        <Text className="text-dim text-[13px]">›</Text>
+      </Pressable>
+    </Animated.View>
+  );
+}
 
 function baseName(p: string | undefined | null): string {
   if (!p) return "";
@@ -103,6 +137,35 @@ function SessionShell() {
     lastNotesRef.current = notes;
   }, [snapshot?.notes, pushToast]);
 
+  // Overlay mirror: auto-present the modal the instant `snapshot.overlay` goes non-null, and
+  // auto-dismiss it the instant the server clears it (a picker action completing, `/help`
+  // toggled off, etc.) — this is the ONLY place that decides presentation; overlay.tsx itself
+  // never navigates on its own except via explicit close.
+  const overlayPresentedRef = useRef(false);
+  const overlayCancelSentRef = useRef(false);
+  const hasOverlay = !!snapshot?.overlay;
+  useEffect(() => {
+    if (hasOverlay && !overlayPresentedRef.current) {
+      overlayPresentedRef.current = true;
+      overlayCancelSentRef.current = false;
+      router.push(`/session/${sessionId}/overlay`);
+    } else if (!hasOverlay && overlayPresentedRef.current) {
+      overlayPresentedRef.current = false;
+      router.back();
+    }
+  }, [hasOverlay, sessionId, router]);
+
+  // Native header close button (the overlay Stack.Screen below sets headerShown:true and
+  // gestureEnabled:false, so this — plus Android hardware back inside overlay.tsx itself — is
+  // the only way to dismiss it; both funnel through the same `overlay_cancel` intent).
+  const handleOverlayClose = useCallback(() => {
+    if (!overlayCancelSentRef.current) {
+      overlayCancelSentRef.current = true;
+      send({ kind: "overlay_cancel" });
+    }
+    router.back();
+  }, [send, router]);
+
   const go = useCallback(
     (key: string) => {
       if (key === activeKey) return;
@@ -190,7 +253,29 @@ function SessionShell() {
           <Stack.Screen name="tasks" />
           <Stack.Screen name="agents" />
           <Stack.Screen name="review" />
-          <Stack.Screen name="overlay" options={{ presentation: "modal", animation: "slide_from_bottom" }} />
+          <Stack.Screen
+            name="overlay"
+            options={{
+              presentation: "modal",
+              animation: "slide_from_bottom",
+              headerShown: true,
+              headerBackVisible: false,
+              gestureEnabled: false,
+              title: snapshot?.overlay?.title || snapshot?.overlay?.kind || "Overlay",
+              headerStyle: { backgroundColor: colors.panel },
+              headerTitleStyle: { color: colors.ink, fontWeight: "700" },
+              headerTintColor: colors.accent,
+              headerRight: () => (
+                <Pressable
+                  onPress={handleOverlayClose}
+                  hitSlop={8}
+                  style={{ minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" }}
+                >
+                  <Text style={{ color: colors.dim, fontSize: 18 }}>✕</Text>
+                </Pressable>
+              ),
+            }}
+          />
         </Stack>
 
         {toasts.length ? (
@@ -208,32 +293,51 @@ function SessionShell() {
         {/* Urgent action sheet: pinned above whatever segment (Chat/Tasks/Agents/Review) is
             showing, so a pending approval is never missed. Permission takes priority over a
             question if both are ever active at once (mirrors the web control page's
-            if/else-if in renderActions, remote_assets/app.js). */}
-        {snapshot?.permission_prompt || snapshot?.question ? (
-          <View
-            className="absolute left-12 right-12 z-20"
-            style={{ bottom: 12 + insets.bottom }}
-            pointerEvents="box-none"
-          >
-            <EntranceView index={0}>
-              {snapshot.permission_prompt ? (
-                <PermissionCard
-                  permissionPrompt={snapshot.permission_prompt}
-                  seq={snapshot.prompt_seq}
-                  send={send}
-                />
-              ) : (
-                <QuestionCard
-                  question={snapshot.question as string}
-                  options={snapshot.question_options}
-                  allowOther={snapshot.question_allow_other}
-                  seq={snapshot.prompt_seq}
-                  send={send}
-                />
-              )}
-            </EntranceView>
-          </View>
-        ) : null}
+            if/else-if in renderActions, remote_assets/app.js). When a plan is in flight, the
+            Review plan card (review.tsx PlanCard) is the single Approve/Cancel/Revise surface
+            for it — this sheet must not ALSO render the raw question options (that was the
+            duplicate-UI bug), so it collapses to a compact jump affordance instead, and that
+            affordance itself is suppressed while already viewing Review (nothing to jump to —
+            the full plan card is right there). Non-plan questions are unaffected. */}
+        {(() => {
+          const hasPlanQuestion = snapshot?.plan != null && snapshot?.question != null;
+          const showPlanJump = hasPlanQuestion && activeKey !== "review";
+          const showQuestionCard = snapshot?.question != null && !hasPlanQuestion;
+          const showSheet = !!snapshot?.permission_prompt || showPlanJump || showQuestionCard;
+          if (!showSheet || !snapshot) return null;
+          return (
+            <View
+              className="absolute left-12 right-12 z-20"
+              style={{ bottom: 12 + insets.bottom }}
+              pointerEvents="box-none"
+            >
+              <EntranceView index={0}>
+                {snapshot.permission_prompt ? (
+                  <PermissionCard
+                    permissionPrompt={snapshot.permission_prompt}
+                    seq={snapshot.prompt_seq}
+                    send={send}
+                  />
+                ) : showPlanJump ? (
+                  <PlanReadyJump
+                    onPress={() => {
+                      lightHaptic();
+                      go("review");
+                    }}
+                  />
+                ) : (
+                  <QuestionCard
+                    question={snapshot.question as string}
+                    options={snapshot.question_options}
+                    allowOther={snapshot.question_allow_other}
+                    seq={snapshot.prompt_seq}
+                    send={send}
+                  />
+                )}
+              </EntranceView>
+            </View>
+          );
+        })()}
       </View>
     </View>
   );

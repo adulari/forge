@@ -11,9 +11,26 @@ const config: ExpoConfig = {
   icon: "./assets/icon.png",
   userInterfaceStyle: "dark",
   backgroundColor: "#16161c",
-  // TODO(w11-splash): SDK 57 moved splash screen config to the expo-splash-screen plugin
-  // (classic top-level `splash` key is gone from ExpoConfig). Wire the real splash
-  // (bg #16161c, accent mark) via that plugin in Batch 4 (BUILD_PLAN §7, W11).
+  // FLAGGED (w11-splash): SDK 57 moved splash config to the `expo-splash-screen` config
+  // plugin (the classic top-level `splash` key no longer exists on ExpoConfig). That
+  // package is NOT present in package.json / node_modules / package-lock.json in this
+  // checkout — it is a separate npm package, not bundled inside `expo` itself. Per the W11
+  // batch brief this worker must not install packages, so the plugin is intentionally left
+  // unwired rather than referencing an unresolvable plugin name (which would break
+  // `expo prebuild`/`expo-doctor` even though it wouldn't fail `tsc --noEmit`).
+  //
+  // To finish this once the package is installed (`npx expo install expo-splash-screen`),
+  // add to the `plugins` array below:
+  //   [
+  //     "expo-splash-screen",
+  //     {
+  //       backgroundColor: "#16161c",
+  //       image: "./assets/splash-icon.png",
+  //       imageWidth: 200,
+  //       dark: { backgroundColor: "#16161c", image: "./assets/splash-icon.png" },
+  //     },
+  //   ],
+  // `assets/splash-icon.png` already exists in this checkout and is otherwise unused.
   ios: {
     bundleIdentifier: BUNDLE_ID,
     supportsTablet: true,
