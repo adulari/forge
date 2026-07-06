@@ -1,17 +1,20 @@
 // Inbox — sessions waiting on a human (FEATURES.md §4: "waiting is the killer signal";
 // the server already sorts waiting sessions first, `useSessions()` just filters them
-// down). DecisionPeek approve-in-place (FEATURES §5, DESIGN_SYSTEM §6) is T4.3 — until
-// then a row tap only navigates into the full session.
+// down). DecisionPeek (T4.3) mounts a "peek" affordance per row so a waiting session's
+// PermissionCard/QuestionCard can be answered without leaving the Inbox; the row itself
+// still navigates into the full session on tap.
 import { router } from "expo-router";
-import { CircleCheck } from "lucide-react-native";
-import React, { useCallback, useMemo } from "react";
+import { CircleCheck, Eye } from "lucide-react-native";
+import React, { useCallback, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
+import { DecisionPeek } from "../../components/cards/DecisionPeek";
 import { Badge } from "../../components/ds/Badge";
 import { BoundedList } from "../../components/ds/BoundedList";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { HeatEdge } from "../../components/ds/HeatEdge";
+import { IconButton } from "../../components/ds/IconButton";
 import { RelativeTime } from "../../components/ds/RelativeTime";
 import { Screen } from "../../components/ds/Screen";
 import { Skeleton } from "../../components/ds/Skeleton";
@@ -27,9 +30,10 @@ interface InboxRowProps {
   row: SessionRow;
   index: number;
   onPress: (row: SessionRow) => void;
+  onPeek: (row: SessionRow) => void;
 }
 
-function InboxRowBase({ row, index, onPress }: InboxRowProps) {
+function InboxRowBase({ row, index, onPress, onPeek }: InboxRowProps) {
   const tokens = useTokens();
   const strike = useStrike();
   const entrance = useForgeline(index);
@@ -66,8 +70,13 @@ function InboxRowBase({ row, index, onPress }: InboxRowProps) {
               </Text>
               <View style={styles.footerRow}>
                 <RelativeTime timestampMs={row.last_activity * 1000} />
-                {/* HANDOFF(T4.3): mount a DecisionPeek trigger here so a waiting session's
-                    PermissionCard/QuestionCard can be answered without leaving the Inbox. */}
+                <View style={styles.footerSpacer} />
+                <IconButton
+                  icon={<Eye size={16} strokeWidth={1.75} color={tokens.ink2} />}
+                  onPress={() => onPeek(row)}
+                  accessibilityLabel={`Peek at ${title}`}
+                  style={styles.peekButton}
+                />
               </View>
             </View>
           </View>
@@ -84,6 +93,7 @@ const InboxRow = React.memo(InboxRowBase, (prev, next) => {
   return (
     prev.index === next.index &&
     prev.onPress === next.onPress &&
+    prev.onPeek === next.onPeek &&
     a.id === b.id &&
     a.title === b.title &&
     a.cwd === b.cwd &&
@@ -94,16 +104,21 @@ const InboxRow = React.memo(InboxRowBase, (prev, next) => {
 export default function InboxScreen() {
   const query = useSessions();
   const rows = useMemo(() => (query.data ?? []).filter((s) => s.waiting), [query.data]);
+  const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
 
   const onRowPress = useCallback((row: SessionRow) => {
     router.push(`/session/${row.id}`);
   }, []);
+  const onRowPeek = useCallback((row: SessionRow) => {
+    setPeekSessionId(row.id);
+  }, []);
+  const closePeek = useCallback(() => setPeekSessionId(null), []);
 
   const renderItem = useCallback(
     ({ item, index }: { item: SessionRow; index: number }) => (
-      <InboxRow row={item} index={index} onPress={onRowPress} />
+      <InboxRow row={item} index={index} onPress={onRowPress} onPeek={onRowPeek} />
     ),
-    [onRowPress],
+    [onRowPress, onRowPeek],
   );
   const keyExtractor = useCallback((item: SessionRow) => item.id, []);
 
@@ -132,6 +147,7 @@ export default function InboxScreen() {
         onRefresh={query.refetch}
         contentContainerStyle={styles.listPad}
       />
+      <DecisionPeek sessionId={peekSessionId} visible={peekSessionId != null} onClose={closePeek} />
     </Screen>
   );
 }
@@ -151,6 +167,8 @@ const styles = StyleSheet.create({
   title: { flex: 1 },
   cwd: {},
   footerRow: { flexDirection: "row", alignItems: "center" },
+  footerSpacer: { flex: 1 },
+  peekButton: { marginVertical: -space.space12 },
   skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonGap: { marginTop: space.space8 },
 });

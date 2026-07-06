@@ -89,9 +89,8 @@ function ForgeWash({ tokens, scheme }: { tokens: ColorTokens; scheme: "light" | 
       <View
         pointerEvents="none"
         style={[
-          StyleSheet.absoluteFillObject,
-          // @ts-expect-error react-native-web-only CSS background-image property
-          { backgroundImage: tokens.forgeWash },
+          StyleSheet.absoluteFill,
+          { backgroundImage: tokens.forgeWash } as object,
         ]}
       />
     );

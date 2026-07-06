@@ -16,7 +16,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import { router } from "expo-router";
 import { Plus, Trash2 } from "lucide-react-native";
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { Badge } from "../../components/ds/Badge";
@@ -29,10 +29,22 @@ import { Screen } from "../../components/ds/Screen";
 import { SectionHeader } from "../../components/ds/SectionHeader";
 import { Segmented } from "../../components/ds/Segmented";
 import { Switch } from "../../components/ds/Switch";
+import { useToast } from "../../components/ds/ToastHost";
 import { type StoredServer, useAuth } from "../../lib/auth";
+import {
+  enablePush,
+  disablePush,
+  getPushStatus,
+  initPush,
+  isPushSupported,
+  type PushSubscriptionState,
+} from "../../lib/push";
+import { isTauri, isWeb } from "../../lib/platform";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
+
+const NOTIFICATIONS_SUPPORTED = isWeb && !isTauri;
 
 const APP_LOCK_KEY = "forge.appLock";
 
@@ -43,12 +55,18 @@ function maskToken(token: string | null): string {
 
 export default function SettingsScreen() {
   const tokens = useTokens();
+  const toast = useToast();
   const { preference, setScheme } = useTheme();
-  const { servers, activeServerId, host, token: activeToken, setActive, removeServer } = useAuth();
+  const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer } = useAuth();
 
   const [appLock, setAppLock] = useState(false);
   const [appLockLoaded, setAppLockLoaded] = useState(false);
   const [pendingRemove, setPendingRemove] = useState<StoredServer | null>(null);
+
+  const [pushStatus, setPushStatus] = useState<PushSubscriptionState>("unsupported");
+  const [pushLoaded, setPushLoaded] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+  const pushSupported = NOTIFICATIONS_SUPPORTED && isPushSupported();
 
   useEffect(() => {
     let cancelled = false;
@@ -62,10 +80,43 @@ export default function SettingsScreen() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!NOTIFICATIONS_SUPPORTED) return;
+    let cancelled = false;
+    void initPush();
+    getPushStatus().then((status) => {
+      if (cancelled) return;
+      setPushStatus(status);
+      setPushLoaded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const onAppLockChange = (value: boolean) => {
     setAppLock(value);
     void AsyncStorage.setItem(APP_LOCK_KEY, value ? "true" : "false");
   };
+
+  const onPushChange = useCallback(
+    async (value: boolean) => {
+      if (!baseUrl || pushBusy) return;
+      setPushBusy(true);
+      try {
+        const next = value ? await enablePush(baseUrl) : await disablePush(baseUrl);
+        setPushStatus(next);
+        if (value && next !== "subscribed") {
+          toast.show("couldn't enable notifications — check the browser's permission prompt.", {
+            tone: "danger",
+          });
+        }
+      } finally {
+        setPushBusy(false);
+      }
+    },
+    [baseUrl, pushBusy, toast],
+  );
 
   const appVersion = Constants.expoConfig?.version ?? "—";
 
@@ -133,6 +184,35 @@ export default function SettingsScreen() {
           />
         </Card>
       </View>
+
+      {NOTIFICATIONS_SUPPORTED ? (
+        <View>
+          <SectionHeader>Notifications</SectionHeader>
+          <Card padded={false}>
+            <ListRow
+              title="Web push"
+              subtitle={
+                !pushSupported
+                  ? "not supported in this browser."
+                  : pushStatus === "subscribed"
+                    ? "Allow/Deny prompts reach you here, even with this tab closed."
+                    : "get notified in this browser when a session needs you."
+              }
+              showSeparator={false}
+              trailing={
+                pushSupported && pushLoaded ? (
+                  <Switch
+                    value={pushStatus === "subscribed"}
+                    onValueChange={onPushChange}
+                    disabled={pushBusy || !baseUrl}
+                    accessibilityLabel="Web push notifications"
+                  />
+                ) : undefined
+              }
+            />
+          </Card>
+        </View>
+      ) : null}
 
       <View>
         <SectionHeader>About &amp; diagnostics</SectionHeader>

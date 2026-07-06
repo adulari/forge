@@ -21,6 +21,7 @@ import { Banner } from "../../../components/ds/Banner";
 import { IconButton } from "../../../components/ds/IconButton";
 import { Segmented, type SegmentedOption } from "../../../components/ds/Segmented";
 import { useToast } from "../../../components/ds/ToastHost";
+import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { SessionHeader } from "../../../components/session/SessionHeader";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { useTurnCompleted } from "../../../lib/queries";
@@ -179,6 +180,8 @@ function SessionShell({ sessionId }: { sessionId: string }) {
       <View style={styles.flex}>
         <Slot />
       </View>
+      {/* HANDOFF(T4.1): overlay mirror — reads snapshot.overlay itself, no props. */}
+      <OverlayHost />
     </View>
   );
 }

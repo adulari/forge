@@ -123,6 +123,26 @@ export interface ErrorBody {
   error: string;
 }
 
+/** `GET /api/push/key` response — VAPID public key, base64url (§1.1). */
+export interface PushKeyResponse {
+  key: string;
+}
+
+/** Wire-verbatim mirror of the browser's `PushSubscription.toJSON()` shape. */
+export interface PushSubscriptionKeys {
+  p256dh: string;
+  auth: string;
+}
+
+export interface PushSubscribeRequest {
+  endpoint: string;
+  keys: PushSubscriptionKeys;
+}
+
+export interface PushUnsubscribeRequest {
+  endpoint: string;
+}
+
 // ---------------------------------------------------------------------------
 // Fetch wrapper
 // ---------------------------------------------------------------------------
@@ -261,4 +281,29 @@ export function answer(baseUrl: string, body: AnswerRequest): Promise<OkResponse
 /** Connectivity/auth probe — 200 array = good token, 404 = wrong token. */
 export function probeConnection(baseUrl: string): Promise<SessionRow[]> {
   return getSessions(baseUrl);
+}
+
+/** 503 (`ApiError.status === 503`) when the daemon has no VAPID key configured. */
+export function getPushKey(baseUrl: string): Promise<PushKeyResponse> {
+  return request(baseUrl, "/api/push/key");
+}
+
+export function subscribePush(
+  baseUrl: string,
+  body: PushSubscribeRequest,
+): Promise<OkResponse> {
+  return request(baseUrl, "/api/push/subscribe", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function unsubscribePush(
+  baseUrl: string,
+  body: PushUnsubscribeRequest,
+): Promise<OkResponse> {
+  return request(baseUrl, "/api/push/unsubscribe", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }

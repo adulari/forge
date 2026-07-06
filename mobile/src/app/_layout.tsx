@@ -20,6 +20,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { AppLock } from "../components/AppLock";
 import { Screen } from "../components/ds/Screen";
 import { ToastHost } from "../components/ds/ToastHost";
+import { PaletteHost } from "../components/overlay/CommandPalette";
 import { AuthProvider, useAuth } from "../lib/auth";
 import { ThemeProvider, useTokens } from "../theme/ThemeProvider";
 
@@ -98,12 +99,13 @@ export default function RootLayout() {
           <AuthProvider>
             <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
               <ToastHost>
-                {/* HANDOFF(B4/T4.2): mount the global <CommandPalette /> host here (the
-                    ⌘K/Ctrl+K overlay on web/desktop) once that task lands. Do not build the
-                    palette itself in T2.1 — this is just the reserved slot. */}
-                <AppLock>
-                  <RootNavigator />
-                </AppLock>
+                {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
+                    `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
+                <PaletteHost>
+                  <AppLock>
+                    <RootNavigator />
+                  </AppLock>
+                </PaletteHost>
               </ToastHost>
             </PersistQueryClientProvider>
           </AuthProvider>
