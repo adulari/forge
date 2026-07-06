@@ -35,8 +35,9 @@ mkdir -p "$RUNNER_DIR"
 
 if [ ! -f "$RUNNER_DIR/config.sh" ]; then
   echo "==> Fetching latest actions/runner release"
-  LATEST_TAG="$(curl -fsSL https://api.github.com/repos/actions/runner/releases/latest \
-    | grep -m1 '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')"
+  # Use gh (authed, no rate limit). Piping raw curl into `grep -m1` closes the pipe early,
+  # giving curl a SIGPIPE write error (curl exit 23) that `set -o pipefail` turns fatal.
+  LATEST_TAG="$(sudo -u "$RUN_USER" gh api repos/actions/runner/releases/latest -q .tag_name | sed 's/^v//')"
   if [ -z "$LATEST_TAG" ]; then
     echo "error: could not determine latest actions/runner version" >&2
     exit 1
