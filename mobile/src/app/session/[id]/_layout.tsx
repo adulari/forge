@@ -7,9 +7,11 @@ import * as Clipboard from "expo-clipboard";
 import { Stack, useLocalSearchParams, useRouter, useSegments } from "expo-router";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Text, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { Badge, Chip, Metric, Segmented, type SegmentedOption, StatusDot, type StatusDotState } from "../../../components/ui";
+import { Badge, Chip, EntranceView, Metric, Segmented, type SegmentedOption, StatusDot, type StatusDotState } from "../../../components/ui";
+import { PermissionCard } from "../../../components/permissionCard";
+import { QuestionCard } from "../../../components/questionCard";
 import { colors } from "../../../lib/theme";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
 
@@ -66,6 +68,7 @@ function SessionShell() {
   const { sessionId, snapshot, connectionState, send } = useSessionCtx();
   const router = useRouter();
   const segments = useSegments();
+  const insets = useSafeAreaInsets();
 
   const last = segments[segments.length - 1];
   const activeKey: SegmentKey = KNOWN_SEGMENTS.includes(last) ? (last as SegmentKey) : "chat";
@@ -199,6 +202,36 @@ function SessionShell() {
                 </Text>
               </View>
             ))}
+          </View>
+        ) : null}
+
+        {/* Urgent action sheet: pinned above whatever segment (Chat/Tasks/Agents/Review) is
+            showing, so a pending approval is never missed. Permission takes priority over a
+            question if both are ever active at once (mirrors the web control page's
+            if/else-if in renderActions, remote_assets/app.js). */}
+        {snapshot?.permission_prompt || snapshot?.question ? (
+          <View
+            className="absolute left-12 right-12 z-20"
+            style={{ bottom: 12 + insets.bottom }}
+            pointerEvents="box-none"
+          >
+            <EntranceView index={0}>
+              {snapshot.permission_prompt ? (
+                <PermissionCard
+                  permissionPrompt={snapshot.permission_prompt}
+                  seq={snapshot.prompt_seq}
+                  send={send}
+                />
+              ) : (
+                <QuestionCard
+                  question={snapshot.question as string}
+                  options={snapshot.question_options}
+                  allowOther={snapshot.question_allow_other}
+                  seq={snapshot.prompt_seq}
+                  send={send}
+                />
+              )}
+            </EntranceView>
           </View>
         ) : null}
       </View>
