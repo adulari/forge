@@ -1,61 +1,33 @@
-// Biometric app-lock gate (BUILD_PLAN §6/§10 native-deps batch). Wraps the whole app in
-// root `_layout.tsx`: when the user has enabled "Require Face ID" in Settings, this blocks
-// content behind a lock screen on cold start and every foreground return, until
-// `LocalAuthentication.authenticateAsync` succeeds. When the pref is off (default), this is
-// a no-op passthrough.
+// Biometric app-lock gate (T2.1 — "port the existing Face ID gate onto ds primitives").
+// Wraps the whole app in root `_layout.tsx`: when the user has enabled "Require Face ID" in
+// Settings, this blocks content behind a lock screen on cold start and every foreground
+// return, until `LocalAuthentication.authenticateAsync` succeeds. When the pref is off
+// (default), this is a no-op passthrough. No-op on web (no native biometric API there).
 //
-// The pref lives in AsyncStorage (not expo-secure-store — it's a UI preference, not a
-// credential) behind a tiny module-level cache + pub/sub so Settings' toggle and this gate
-// agree instantly within the same session, without waiting for a relaunch.
+// The pref lives in AsyncStorage key `forge.appLock` ("true"/"false") — see the HANDOFF
+// comment in `src/app/(tabs)/settings.tsx` (T2.2, owns the toggle UI). That screen writes
+// the key directly rather than through a shared setter here, since the two tasks' file
+// scopes are disjoint; this gate re-reads the key fresh on every foreground transition (not
+// just once at cold start), so a change made in Settings takes effect on the very next
+// background/foreground cycle without needing cross-file pub/sub.
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as LocalAuthentication from "expo-local-authentication";
 import type { LocalAuthenticationError } from "expo-local-authentication";
+import { Lock } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, AppState, Platform, Text, View } from "react-native";
+import { ActivityIndicator, AppState, Platform, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { PrimaryButton } from "./ui";
-import { theme } from "../lib/theme";
+import { Button } from "./ds/Button";
+import { useTokens } from "../theme/ThemeProvider";
+import { space } from "../theme/tokens";
+import { type } from "../theme/typography";
 
-const BIOMETRIC_LOCK_KEY = "forge.biometricLockEnabled";
+const APP_LOCK_KEY = "forge.appLock";
 
-let cachedEnabled: boolean | null = null;
-const listeners = new Set<(enabled: boolean) => void>();
-
-async function loadBiometricLockEnabled(): Promise<boolean> {
-  if (cachedEnabled != null) return cachedEnabled;
-  const raw = await AsyncStorage.getItem(BIOMETRIC_LOCK_KEY);
-  cachedEnabled = raw === "true";
-  return cachedEnabled;
-}
-
-/** Flips the pref, persists it, and notifies every `useBiometricLockEnabled()` subscriber
- * (Settings' toggle and this gate's effect) immediately — no relaunch needed to take effect. */
-export async function setBiometricLockEnabled(enabled: boolean): Promise<void> {
-  cachedEnabled = enabled;
-  await AsyncStorage.setItem(BIOMETRIC_LOCK_KEY, enabled ? "true" : "false");
-  listeners.forEach((listener) => listener(enabled));
-}
-
-/** `null` while the initial AsyncStorage read is in flight — callers that gate content on
- * this (AppLock) must treat `null` as "unknown, keep blocking" to avoid a cold-start flash. */
-export function useBiometricLockEnabled(): boolean | null {
-  const [enabled, setEnabled] = useState<boolean | null>(cachedEnabled);
-
-  useEffect(() => {
-    let mounted = true;
-    loadBiometricLockEnabled().then((value) => {
-      if (mounted) setEnabled(value);
-    });
-    const listener = (value: boolean) => setEnabled(value);
-    listeners.add(listener);
-    return () => {
-      mounted = false;
-      listeners.delete(listener);
-    };
-  }, []);
-
-  return enabled;
+async function readAppLockEnabled(): Promise<boolean> {
+  const raw = await AsyncStorage.getItem(APP_LOCK_KEY);
+  return raw === "true";
 }
 
 const AUTH_ERROR_COPY: Partial<Record<LocalAuthenticationError, string>> = {
@@ -71,11 +43,15 @@ const AUTH_ERROR_COPY: Partial<Record<LocalAuthenticationError, string>> = {
 type LockPhase = "checking" | "locked" | "unlocked";
 
 export function AppLock({ children }: { children: React.ReactNode }) {
-  const enabled = useBiometricLockEnabled();
+  const tokens = useTokens();
   const [phase, setPhase] = useState<LockPhase>("checking");
   const [authError, setAuthError] = useState<string | null>(null);
   const [authenticating, setAuthenticating] = useState(false);
   const appStateRef = useRef(AppState.currentState);
+  // Last-read value of the pref, kept in sync by `evaluateLock` so the AppState listener can
+  // decide synchronously whether to re-cover the screen the instant the app backgrounds
+  // (rather than waiting on an AsyncStorage read while the app switcher is snapshotting it).
+  const enabledRef = useRef(false);
 
   const tryAuthenticate = useCallback(async () => {
     setAuthenticating(true);
@@ -95,84 +71,99 @@ export function AppLock({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Resolve the initial phase whenever the pref (re)loads: unknown -> keep checking (no
-  // flash), off -> passthrough, on -> verify hardware is still usable (fail-open if not,
-  // rather than locking the user out forever) then lock + auth immediately (cold start).
-  useEffect(() => {
-    if (enabled === null) {
-      setPhase("checking");
-      return;
-    }
-    if (!enabled || Platform.OS === "web") {
+  // Re-reads the persisted pref, then either passes through, or verifies hardware is still
+  // usable (fail-open if not, rather than locking the user out forever), then locks + prompts.
+  const evaluateLock = useCallback(async () => {
+    if (Platform.OS === "web") {
+      enabledRef.current = false;
       setPhase("unlocked");
       return;
     }
-    let cancelled = false;
-    (async () => {
-      const [hasHardware, isEnrolled] = await Promise.all([
-        LocalAuthentication.hasHardwareAsync(),
-        LocalAuthentication.isEnrolledAsync(),
-      ]);
-      if (cancelled) return;
-      if (!hasHardware || !isEnrolled) {
-        setPhase("unlocked");
-        return;
-      }
-      setPhase("locked");
-      tryAuthenticate();
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled]);
+    const enabled = await readAppLockEnabled();
+    enabledRef.current = enabled;
+    if (!enabled) {
+      setPhase("unlocked");
+      return;
+    }
+    const [hasHardware, isEnrolled] = await Promise.all([
+      LocalAuthentication.hasHardwareAsync(),
+      LocalAuthentication.isEnrolledAsync(),
+    ]);
+    if (!hasHardware || !isEnrolled) {
+      setPhase("unlocked");
+      return;
+    }
+    setPhase("locked");
+    tryAuthenticate();
+  }, [tryAuthenticate]);
 
-  // Re-lock on backgrounding, re-authenticate on every return to foreground.
+  // Cold start.
   useEffect(() => {
-    if (!enabled || Platform.OS === "web") return;
+    evaluateLock();
+  }, [evaluateLock]);
+
+  // Re-lock the instant the app backgrounds (using the last-known pref, synchronously);
+  // re-evaluate (fresh pref read) + re-authenticate on every return to foreground.
+  useEffect(() => {
     const sub = AppState.addEventListener("change", (next) => {
       const prev = appStateRef.current;
       appStateRef.current = next;
-      if (prev === "active" && next.match(/inactive|background/)) {
+      if (prev === "active" && next.match(/inactive|background/) && enabledRef.current) {
         setPhase("locked");
       } else if (prev.match(/inactive|background/) && next === "active") {
-        tryAuthenticate();
+        evaluateLock();
       }
     });
     return () => sub.remove();
-  }, [enabled, tryAuthenticate]);
+  }, [evaluateLock]);
 
   if (phase === "checking") {
     return (
-      <SafeAreaView className="flex-1 bg-bg items-center justify-center">
-        <ActivityIndicator color={theme.colors.dim} />
-      </SafeAreaView>
+      <View style={[styles.flex, styles.center, { backgroundColor: tokens.bg1 }]}>
+        <ActivityIndicator color={tokens.ink3} />
+      </View>
     );
   }
 
   return (
-    <View style={{ flex: 1 }}>
+    <View style={styles.flex}>
       {children}
       {phase === "locked" ? (
-        <View
-          className="absolute inset-0 bg-bg items-center justify-center gap-16 px-16"
-          style={{ zIndex: 50, elevation: 50 }}
-        >
-          <Text className="text-accent text-[16px] font-bold">⚒ Forge is locked</Text>
-          <Text className="text-dim text-[13px] text-center">
+        <SafeAreaView style={[styles.overlay, styles.center, { backgroundColor: tokens.bg1 }]}>
+          <Lock size={32} color={tokens.accent} strokeWidth={1.75} />
+          <Text style={[type.heading, styles.title, { color: tokens.ink }]}>Forge is locked</Text>
+          <Text style={[type.sub, styles.message, { color: tokens.ink2 }]}>
             Unlock with Face ID to continue.
           </Text>
           {authError ? (
-            <Text className="text-no text-[13px] text-center">{authError}</Text>
+            <Text style={[type.sub, styles.message, { color: tokens.danger }]}>{authError}</Text>
           ) : null}
-          <PrimaryButton
+          <Button
             label={authenticating ? "Unlocking…" : "Unlock"}
             onPress={tryAuthenticate}
             loading={authenticating}
-            fullWidth={false}
+            style={styles.unlockButton}
           />
-        </View>
+        </SafeAreaView>
       ) : null}
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  flex: { flex: 1 },
+  center: { alignItems: "center", justifyContent: "center" },
+  overlay: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 50,
+    elevation: 50,
+    paddingHorizontal: space.space24,
+  },
+  title: { marginTop: space.space16 },
+  message: { textAlign: "center", marginTop: space.space4 },
+  unlockButton: { marginTop: space.space20 },
+});

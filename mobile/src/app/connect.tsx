@@ -1,74 +1,62 @@
-// Pairing screen (BUILD_PLAN §6 "Connect", Batch 1 W1). Paste the `connect:` URL that
-// `forge serve` prints (or QR-scans as a fallback — camera scanning is a marked stub, see
-// below), live-validate it against the real daemon via `testConnection()`, then persist via
-// `pair()` and route into the app. A manual host+token fallback covers cases where the
-// printed URL got mangled in transit.
-import {
-  CameraView,
-  useCameraPermissions,
-  type BarcodeScanningResult,
-} from "expo-camera";
-import { router } from "expo-router";
-import React, { useCallback, useRef, useState } from "react";
-import { Linking, Platform, Pressable, Text, View } from "react-native";
+// Pairing screen (ARCHITECTURE.md §3 "the daemon contract", §7 App Store review
+// posture; FEATURES.md §1.1/§4; DESIGN_SYSTEM.md §4 microcopy). Stands alone for
+// an App Store reviewer with no daemon running — explains what Forge is with a
+// bundled, no-network "how it works" note before any pairing UI. QR scan is the
+// primary path (native camera / web "scan on your phone" hint via the
+// `QRScan.native`/`.web` Metro split); a mono URL field covers paste + manual
+// entry; `?url=` deep links prefill the field.
+import { router, useLocalSearchParams } from "expo-router";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { StyleSheet, Text, View } from "react-native";
 
-import {
-  Card,
-  Chip,
-  EntranceView,
-  ErrorText,
-  PrimaryButton,
-  Screen,
-  SearchInput,
-  Segmented,
-  SectionTitle,
-} from "../components/ui";
+import { Button } from "../components/ds/Button";
+import { Card } from "../components/ds/Card";
+import { Input } from "../components/ds/Input";
+import { Screen } from "../components/ds/Screen";
+import { SectionHeader } from "../components/ds/SectionHeader";
+import { QRScan } from "../components/pairing/QRScan";
+import { haptics } from "../lib/haptics";
 import { type ConnectTestState, parseConnectUrl, useAuth } from "../lib/auth";
+import { useTokens } from "../theme/ThemeProvider";
+import { radii, space } from "../theme/tokens";
+import { type } from "../theme/typography";
 
-// QR scanning is native-only (BUILD_PLAN §9a: guard camera calls behind Platform checks so
-// every screen stays web-renderable for the fast QA loop). Web keeps paste + manual entry.
-const CAMERA_AVAILABLE = Platform.OS !== "web";
-
-type ScanState = "idle" | "scanning" | "denied";
-
-// Distinct copy per failure class (UI_RULES.md #14) — matches the language used in
-// BUILD_PLAN §1.1 (exposure modes) so the fix is always actionable, not just descriptive.
+// DESIGN_SYSTEM §4 voice: lowercase-calm, says what happened + what to do.
+// The unreachable copy carries the TLS guidance verbatim (FEATURES §3 /
+// ARCHITECTURE §3) — this is not app-fixable, so it must always be shown in full.
 const STATE_COPY: Record<Exclude<ConnectTestState, "idle" | "testing" | "ok">, string> = {
-  "bad-token": "Pairing invalid — re-scan or re-copy the connect URL from `forge serve`.",
+  "bad-token": "pairing invalid — re-scan the qr code or re-copy the connect url from `forge serve`.",
   unreachable:
-    "Server unreachable. On the same network? Try --local + Tailscale/VPN. Remote? Use --anywhere for a public tunnel.",
-  "server-error": "The server returned an error. Check the `forge serve` logs on the host.",
+    "server unreachable — is `forge serve` running? default `--lan` uses a self-signed certificate that native networking, browsers, and Tauri's WebView all reject. use `--anywhere` for a public tunnel with real TLS, or `--local` plus Tailscale/VPN to reach it directly.",
+  "server-error": "the server returned an error — check the `forge serve` logs on the host.",
 };
 
-function successHaptic() {
-  if (Platform.OS === "web") return;
-  import("expo-haptics")
-    .then((Haptics) =>
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success),
-    )
-    .catch(() => {});
+function decodeParam(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }
 
 export default function ConnectScreen() {
-  const { pair, testConnection } = useAuth();
+  const tokens = useTokens();
+  const { addServer, testConnection } = useAuth();
+  const params = useLocalSearchParams<{ url?: string }>();
+  const prefilled = useRef(false);
 
   const [url, setUrl] = useState("");
   const [testState, setTestState] = useState<ConnectTestState>("idle");
   const [formatError, setFormatError] = useState<string | null>(null);
 
-  const [scanState, setScanState] = useState<ScanState>("idle");
-  const [permission, requestPermission] = useCameraPermissions();
-  const scanLockRef = useRef(false);
-
-  const [manualOpen, setManualOpen] = useState(false);
-  const [manualScheme, setManualScheme] = useState<"https" | "http">("https");
-  const [manualHost, setManualHost] = useState("");
-  const [manualToken, setManualToken] = useState("");
-
-  const manualCandidate =
-    manualHost.trim().length > 0 && manualToken.trim().length > 0
-      ? `${manualScheme}://${manualHost.trim()}/${manualToken.trim()}`
-      : "";
+  useEffect(() => {
+    if (prefilled.current) return;
+    const raw = params.url;
+    if (typeof raw === "string" && raw.length > 0) {
+      prefilled.current = true;
+      setUrl(decodeParam(raw));
+    }
+  }, [params.url]);
 
   const busy = testState === "testing";
 
@@ -79,7 +67,7 @@ export default function ConnectScreen() {
       if (!parsed) {
         setTestState("idle");
         setFormatError(
-          "That doesn't look like a Forge connect URL. Paste it exactly as `forge serve` printed it.",
+          "that doesn't look like a forge connect url — paste it exactly as `forge serve` printed it, or scan its qr code.",
         );
         return;
       }
@@ -87,169 +75,103 @@ export default function ConnectScreen() {
       const result = await testConnection(parsed.baseUrl);
       setTestState(result);
       if (result === "ok") {
-        await pair(candidate);
-        successHaptic();
+        await addServer(candidate);
+        haptics.pairSuccess();
         router.replace("/(tabs)");
       }
     },
-    [pair, testConnection],
+    [addServer, testConnection],
   );
 
-  const onConnect = () => attemptConnect(url);
-  const onManualConnect = () => attemptConnect(manualCandidate);
-
-  const onScanPress = useCallback(async () => {
-    if (!permission?.granted) {
-      if (permission && !permission.canAskAgain) {
-        setScanState("denied");
-        return;
-      }
-      const result = await requestPermission();
-      if (!result.granted) {
-        setScanState("denied");
-        return;
-      }
-    }
-    scanLockRef.current = false;
-    setScanState("scanning");
-  }, [permission, requestPermission]);
-
-  const onBarcodeScanned = useCallback(
-    (result: BarcodeScanningResult) => {
-      if (scanLockRef.current) return;
-      scanLockRef.current = true;
-      setScanState("idle");
-      setUrl(result.data);
-      attemptConnect(result.data);
+  const onScanned = useCallback(
+    (data: string) => {
+      setUrl(data);
+      attemptConnect(data);
     },
     [attemptConnect],
   );
 
+  const onConnectPress = () => attemptConnect(url);
+
   return (
-    <Screen keyboardAvoiding contentContainerClassName="gap-16 pt-24">
-      <EntranceView index={0}>
-        <View className="gap-4">
-          <Text className="text-accent text-[16px] font-bold">⚒ Connect to Forge</Text>
-          <Text className="text-dim text-[13px]">
-            Paste the connect URL printed by `forge serve` in your terminal — the same one
-            rendered there as a QR code.
+    <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
+      <View style={styles.hero}>
+        <Text style={[type.display, { color: tokens.ink }]}>Forge</Text>
+        <Text style={[type.body, { color: tokens.ink2 }]}>
+          Forge is a control surface for a fleet of AI coding agents. Connect to a{" "}
+          <Text style={{ fontWeight: "600" }}>forge serve</Text> daemon on your machine or server
+          to create sessions, review diffs, answer permission prompts, and keep tabs on every
+          agent at once.
+        </Text>
+      </View>
+
+      <Card style={styles.gapCard}>
+        <SectionHeader>How it works</SectionHeader>
+        <View style={styles.howItWorksBody}>
+          <Text style={[type.sub, { color: tokens.ink2 }]}>
+            1. run <Text style={{ fontWeight: "600" }}>forge serve</Text> on the machine where
+            your code lives.
+          </Text>
+          <Text style={[type.sub, { color: tokens.ink2 }]}>
+            2. scan the qr code it prints, or paste the connect url below.
+          </Text>
+          <Text style={[type.sub, { color: tokens.ink2 }]}>
+            3. this app is just the window — your session state stays on that machine.
           </Text>
         </View>
-      </EntranceView>
+      </Card>
 
-      <EntranceView index={1}>
-        <Card variant="feature" className="gap-10">
-          <SectionTitle>Connect URL</SectionTitle>
-          <SearchInput
-            value={url}
-            onChangeText={(t) => {
-              setUrl(t);
-              setFormatError(null);
-            }}
-            placeholder="connect://host:7420/<token>"
-            autoCapitalize="none"
-            autoCorrect={false}
-            returnKeyType="go"
-            editable={!busy}
-            onSubmitEditing={onConnect}
-          />
-          {CAMERA_AVAILABLE ? (
-            <Chip
-              label={scanState === "scanning" ? "Cancel scan" : "⌗ Scan QR"}
-              onPress={() =>
-                scanState === "scanning" ? setScanState("idle") : onScanPress()
-              }
-            />
-          ) : null}
-          {scanState === "scanning" ? (
-            <View className="rounded-lg overflow-hidden border border-borderSoft aspect-square">
-              <CameraView
-                style={{ flex: 1 }}
-                facing="back"
-                barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-                onBarcodeScanned={onBarcodeScanned}
-              />
-            </View>
-          ) : null}
-          {scanState === "denied" ? (
-            <Text className="text-no text-[13px]">
-              Camera permission denied — open Settings to allow camera access, or paste the
-              connect URL instead.
-              <Text
-                className="text-accent underline"
-                onPress={() => Linking.openSettings()}
-              >
-                {" "}
-                Open Settings
-              </Text>
-            </Text>
-          ) : null}
-          <PrimaryButton
-            label={busy ? "Connecting…" : "Connect"}
-            onPress={onConnect}
-            loading={busy}
-            disabled={busy || url.trim().length === 0}
-          />
-        </Card>
-      </EntranceView>
+      <Card variant="feature" style={styles.gapCard}>
+        <SectionHeader>Scan to connect</SectionHeader>
+        <QRScan onScanned={onScanned} paused={busy} />
+      </Card>
 
-      {formatError ? <ErrorText message={formatError} /> : null}
+      <Card style={styles.gapCard}>
+        <Input
+          label="Connect URL"
+          mono
+          value={url}
+          onChangeText={(t) => {
+            setUrl(t);
+            setFormatError(null);
+          }}
+          placeholder="connect://host:7420/<token>"
+          autoCapitalize="none"
+          autoCorrect={false}
+          returnKeyType="go"
+          editable={!busy}
+          onSubmitEditing={onConnectPress}
+          error={formatError ?? undefined}
+        />
+        <Button
+          label={busy ? "Connecting…" : "Connect"}
+          onPress={onConnectPress}
+          loading={busy}
+          disabled={busy || url.trim().length === 0}
+          fullWidth
+        />
+      </Card>
+
       {testState !== "idle" && testState !== "testing" && testState !== "ok" ? (
-        <ErrorText message={STATE_COPY[testState]} onRetry={onConnect} />
+        <View style={[styles.banner, { backgroundColor: tokens.dangerBg }]} accessibilityRole="alert">
+          <Text style={[type.sub, { color: tokens.danger }]}>{STATE_COPY[testState]}</Text>
+        </View>
       ) : null}
+
       {testState === "ok" ? (
-        <Text className="text-ok text-[14px] text-center">Connected — opening Forge…</Text>
-      ) : null}
-
-      <EntranceView index={2}>
-        <Pressable
-          onPress={() => setManualOpen((v) => !v)}
-          hitSlop={8}
-          style={{ minHeight: 44, justifyContent: "center" }}
-        >
-          <Text className="text-dim text-[13px] text-center underline">
-            {manualOpen ? "Hide manual entry" : "Enter host + token manually"}
-          </Text>
-        </Pressable>
-      </EntranceView>
-
-      {manualOpen ? (
-        <EntranceView index={3}>
-          <Card className="gap-10">
-            <SectionTitle>Manual pairing</SectionTitle>
-            <Segmented
-              options={[
-                { key: "https", label: "https (--anywhere)" },
-                { key: "http", label: "http (--local)" },
-              ]}
-              value={manualScheme}
-              onChange={(k) => setManualScheme(k as "https" | "http")}
-            />
-            <SearchInput
-              value={manualHost}
-              onChangeText={setManualHost}
-              placeholder="host:port — e.g. 127.0.0.1:7420"
-              autoCapitalize="none"
-              autoCorrect={false}
-              editable={!busy}
-            />
-            <SearchInput
-              value={manualToken}
-              onChangeText={setManualToken}
-              placeholder="daemon token (16-64 hex chars)"
-              autoCapitalize="none"
-              autoCorrect={false}
-              editable={!busy}
-            />
-            <PrimaryButton
-              label={busy ? "Connecting…" : "Connect"}
-              onPress={onManualConnect}
-              loading={busy}
-              disabled={busy || manualCandidate.length === 0}
-            />
-          </Card>
-        </EntranceView>
+        <Text style={[type.body, styles.successText, { color: tokens.success }]}>
+          connected — opening forge…
+        </Text>
       ) : null}
     </Screen>
   );
 }
+
+const styles = StyleSheet.create({
+  content: { paddingTop: space.space24, paddingBottom: space.space32, gap: space.space16 },
+  hero: { gap: space.space8 },
+  gapCard: { gap: space.space12 },
+  howItWorksBody: { gap: space.space8, paddingBottom: space.space4 },
+  banner: { borderRadius: radii.radius12, padding: space.space12 },
+  successText: { textAlign: "center" },
+});

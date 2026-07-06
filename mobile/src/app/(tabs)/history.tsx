@@ -1,48 +1,32 @@
-// History — past-session browser + resurrection (BUILD_PLAN §6 "History", Batch 1 W3).
-// Infinite/cursor scroll over usePastSessions() (`before` = last row's last_activity),
-// client-side search filter over title/cwd/preview, tap-to-resume via useCreateSession.
+// History — past-session browser + resurrection (FEATURES.md §1.1, §4). Infinite/
+// cursor scroll over usePastSessions() (`before` = last row's last_activity),
+// client-side search filter over title/cwd, tap-to-resume via useCreateSession.
 import { router } from "expo-router";
+import { History as HistoryIcon } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
-import { Alert, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import Animated from "react-native-reanimated";
 
-import type { PastSessionRow } from "../../lib/api";
-import { ApiError } from "../../lib/api";
-import {
-  Badge,
-  BoundedList,
-  Card,
-  EmptyState,
-  EntranceView,
-  ErrorText,
-  formatMetric,
-  Loading,
-  Metric,
-  Screen,
-  SearchInput,
-  SectionTitle,
-} from "../../components/ui";
+import { Badge } from "../../components/ds/Badge";
+import { BoundedList } from "../../components/ds/BoundedList";
+import { Card } from "../../components/ds/Card";
+import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
+import { EmptyState } from "../../components/ds/EmptyState";
+import { RelativeTime } from "../../components/ds/RelativeTime";
+import { Screen } from "../../components/ds/Screen";
+import { SearchField } from "../../components/ds/SearchField";
+import { Skeleton } from "../../components/ds/Skeleton";
+import { useToast } from "../../components/ds/ToastHost";
+import { ApiError, type PastSessionRow } from "../../lib/api";
 import { useCreateSession, usePastSessions } from "../../lib/queries";
-import { theme } from "../../lib/theme";
-
-function formatRelativeTime(unixSeconds: number): string {
-  const diffSec = Math.max(0, Date.now() / 1000 - unixSeconds);
-  if (diffSec < 60) return "just now";
-  const mins = Math.floor(diffSec / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w ago`;
-  const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo ago`;
-  return `${Math.floor(days / 365)}y ago`;
-}
+import { useForgeline, useStrike } from "../../theme/motion";
+import { useTokens } from "../../theme/ThemeProvider";
+import { space } from "../../theme/tokens";
+import { formatCost, monoFamily, type } from "../../theme/typography";
 
 function matchesQuery(row: PastSessionRow, query: string): boolean {
   if (!query) return true;
-  const haystack = `${row.title} ${row.cwd} ${row.preview ?? ""}`.toLowerCase();
+  const haystack = `${row.title} ${row.cwd}`.toLowerCase();
   return haystack.includes(query);
 }
 
@@ -53,38 +37,53 @@ interface HistoryRowProps {
 }
 
 function HistoryRowBase({ row, index, onPress }: HistoryRowProps) {
+  const tokens = useTokens();
+  const strike = useStrike();
+  const entrance = useForgeline(index);
+  const title = row.title || `#${row.id.slice(0, 8)}`;
+
   return (
-    <EntranceView index={index} style={{ marginBottom: 8 }}>
-      <Card onPress={() => onPress(row)} className="gap-4">
-        <View className="flex-row items-center justify-between gap-8">
-          <Text numberOfLines={1} className="flex-1 text-ink text-[15px] font-semibold">
-            {row.title || row.id.slice(0, 8)}
-          </Text>
-          {row.archived ? <Badge label="ARCHIVED" tone="accent" /> : null}
-        </View>
-        <Text
-          numberOfLines={1}
-          ellipsizeMode="head"
-          className="text-dim text-[12px]"
+    <Animated.View style={entrance}>
+      <Animated.View style={[strike.style, styles.cardGap]}>
+        <Pressable
+          onPress={() => onPress(row)}
+          onPressIn={strike.onPressIn}
+          onPressOut={strike.onPressOut}
+          accessibilityRole="button"
+          accessibilityLabel={`Resume ${title}`}
         >
-          {row.cwd}
-        </Text>
-        {row.preview ? (
-          <Text numberOfLines={2} className="text-dim text-[13px]">
-            {row.preview}
-          </Text>
-        ) : null}
-        <View className="flex-row items-center justify-between gap-8 mt-2">
-          <Text className="text-dim text-[12px]">{formatRelativeTime(row.last_activity)}</Text>
-          <View className="flex-row items-center gap-10">
-            <Text className="text-dim text-[12px]" style={{ fontVariant: ["tabular-nums"] }}>
-              {formatMetric(row.message_count, "int")} msgs
+          <Card>
+            <View style={styles.headerRow}>
+              <Text style={[type.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
+                {title}
+              </Text>
+              {row.archived ? <Badge label="archived" tone="neutral" /> : null}
+            </View>
+            <Text
+              style={[type.codeSmall, styles.cwd, { color: tokens.ink3, fontFamily: monoFamily.regular }]}
+              numberOfLines={1}
+              ellipsizeMode="head"
+            >
+              {row.cwd}
             </Text>
-            <Metric value={row.cost_usd} format="cost" tone="ok" />
-          </View>
-        </View>
-      </Card>
-    </EntranceView>
+            {row.preview ? (
+              <Text style={[type.sub, styles.preview, { color: tokens.ink2 }]} numberOfLines={2}>
+                {row.preview}
+              </Text>
+            ) : null}
+            <View style={styles.footerRow}>
+              <RelativeTime timestampMs={row.last_activity * 1000} />
+              <View style={styles.metaRight}>
+                <Text style={[type.meta, styles.msgCount, { color: tokens.ink3 }]}>
+                  {row.message_count} msgs
+                </Text>
+                <Text style={[type.meta, { color: tokens.success }]}>{formatCost(row.cost_usd)}</Text>
+              </View>
+            </View>
+          </Card>
+        </Pressable>
+      </Animated.View>
+    </Animated.View>
   );
 }
 
@@ -92,6 +91,8 @@ const HistoryRow = React.memo(HistoryRowBase, (prev, next) => {
   const a = prev.row;
   const b = next.row;
   return (
+    prev.index === next.index &&
+    prev.onPress === next.onPress &&
     a.id === b.id &&
     a.title === b.title &&
     a.cwd === b.cwd &&
@@ -99,26 +100,27 @@ const HistoryRow = React.memo(HistoryRowBase, (prev, next) => {
     a.message_count === b.message_count &&
     a.cost_usd === b.cost_usd &&
     a.preview === b.preview &&
-    a.last_activity === b.last_activity &&
-    prev.index === next.index
+    a.last_activity === b.last_activity
   );
 });
 
 export default function HistoryScreen() {
+  const tokens = useTokens();
+  const toast = useToast();
   const [query, setQuery] = useState("");
+  const [confirmRow, setConfirmRow] = useState<PastSessionRow | null>(null);
+  const [resumingId, setResumingId] = useState<string | null>(null);
+
   const {
     data,
     isLoading,
-    isError,
-    error,
-    refetch,
-    isRefetching,
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
+    refetch,
+    isRefetching,
   } = usePastSessions();
   const createSession = useCreateSession();
-  const [resumingId, setResumingId] = useState<string | null>(null);
 
   const rows = useMemo(() => data?.pages.flat() ?? [], [data]);
   const normalizedQuery = query.trim().toLowerCase();
@@ -139,24 +141,17 @@ export default function HistoryScreen() {
           },
           onError: (err) => {
             setResumingId(null);
-            const message = err instanceof ApiError ? err.message : "Could not resume session.";
-            Alert.alert("Resume failed", message);
+            toast.show(err instanceof ApiError ? err.message : "could not resume session.", {
+              tone: "danger",
+            });
           },
         },
       );
     },
-    [createSession],
+    [createSession, toast],
   );
 
-  const onRowPress = useCallback(
-    (row: PastSessionRow) => {
-      Alert.alert("Resume this session?", row.title || row.id.slice(0, 8), [
-        { text: "Cancel", style: "cancel" },
-        { text: "Resume", onPress: () => resume(row) },
-      ]);
-    },
-    [resume],
-  );
+  const onRowPress = useCallback((row: PastSessionRow) => setConfirmRow(row), []);
 
   const renderItem = useCallback(
     ({ item, index }: { item: PastSessionRow; index: number }) => (
@@ -164,68 +159,82 @@ export default function HistoryScreen() {
     ),
     [onRowPress],
   );
-
   const keyExtractor = useCallback((item: PastSessionRow) => item.id, []);
 
   const onEndReached = useCallback(() => {
     if (hasNextPage && !isFetchingNextPage) fetchNextPage();
   }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
 
-  let body: React.ReactNode;
-  if (isLoading) {
-    body = <Loading label="Loading past sessions…" />;
-  } else if (isError) {
-    body = (
-      <ErrorText
-        message={error instanceof ApiError ? error.message : "Could not load history."}
-        onRetry={() => refetch()}
-      />
-    );
-  } else {
-    body = (
-      <BoundedList
-        data={filteredRows}
-        keyExtractor={keyExtractor}
-        renderItem={renderItem}
-        ListEmptyComponent={
-          <EmptyState
-            glyph="◷"
-            title={
-              normalizedQuery
-                ? "No past sessions match your search."
-                : "No past sessions yet."
-            }
-          />
-        }
-        refreshing={isRefetching}
-        onRefresh={refetch}
-        onEndReached={onEndReached}
-        onEndReachedThreshold={0.4}
-        ListFooterComponent={isFetchingNextPage ? <Loading /> : null}
-      />
-    );
-  }
-
   return (
-    <Screen scroll={false}>
-      <SectionTitle>History</SectionTitle>
-      <SearchInput
+    <Screen scroll={false} contentContainerStyle={styles.screenPad}>
+      <SearchField
         value={query}
         onChangeText={setQuery}
-        placeholder="Search title or cwd…"
+        placeholder="search title or cwd…"
         autoCapitalize="none"
         autoCorrect={false}
-        className="mb-8"
+        containerStyle={styles.search}
       />
-      <View className="flex-1">{body}</View>
+      {isLoading ? (
+        <View>
+          {[0, 1, 2].map((i) => (
+            <Card key={i} style={styles.cardGap}>
+              <Skeleton width="55%" height={17} />
+              <Skeleton width="70%" height={12} style={styles.skeletonGap} />
+              <Skeleton width="40%" height={12} style={styles.skeletonGap} />
+            </Card>
+          ))}
+        </View>
+      ) : (
+        <BoundedList
+          data={filteredRows}
+          keyExtractor={keyExtractor}
+          renderItem={renderItem}
+          ListEmptyComponent={
+            <EmptyState
+              icon={HistoryIcon}
+              message={normalizedQuery ? "no past sessions match your search." : "no past sessions yet."}
+            />
+          }
+          refreshing={isRefetching}
+          onRefresh={refetch}
+          onEndReached={onEndReached}
+          loadingMore={isFetchingNextPage}
+          contentContainerStyle={styles.listPad}
+        />
+      )}
+      <ConfirmDialog
+        visible={confirmRow != null}
+        title="resume this session?"
+        message={confirmRow?.title || confirmRow?.id.slice(0, 8)}
+        confirmLabel="resume"
+        onConfirm={() => {
+          if (confirmRow) resume(confirmRow);
+          setConfirmRow(null);
+        }}
+        onCancel={() => setConfirmRow(null)}
+      />
       {resumingId ? (
-        <View
-          className="absolute inset-0 items-center justify-center"
-          style={{ backgroundColor: theme.colors.panelDeep }}
-        >
-          <Loading label="Resuming…" />
+        <View style={[StyleSheet.absoluteFill, styles.resumeOverlay, { backgroundColor: tokens.overlayScrim }]}>
+          <ActivityIndicator color={tokens.accent} />
         </View>
       ) : null}
     </Screen>
   );
 }
+
+const styles = StyleSheet.create({
+  screenPad: { paddingTop: space.space12 },
+  search: { marginBottom: space.space8 },
+  listPad: { paddingBottom: space.space32 },
+  cardGap: { marginBottom: space.space8 },
+  headerRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  title: { flex: 1 },
+  cwd: { marginTop: space.space4 },
+  preview: { marginTop: space.space4 },
+  footerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: space.space8 },
+  metaRight: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  msgCount: {},
+  skeletonGap: { marginTop: space.space8 },
+  resumeOverlay: { alignItems: "center", justifyContent: "center" },
+});
