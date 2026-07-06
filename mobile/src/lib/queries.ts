@@ -8,7 +8,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { useIsFocused } from "expo-router";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   answer as apiAnswer,
@@ -165,20 +165,20 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
   const { baseUrl } = useAuth();
   const queryClient = useQueryClient();
   const prevBusyRef = useRef<boolean | undefined>(undefined);
+  const [completed, setCompleted] = useState(false);
 
   const busy = snapshot?.busy;
   const sessionId = snapshot?.session_id ?? null;
-  const completed = prevBusyRef.current === true && busy === false;
 
+  // Detect the busy true->false edge in an effect (never read the ref during render).
   useEffect(() => {
-    if (completed && sessionId) {
+    const didComplete = prevBusyRef.current === true && busy === false;
+    prevBusyRef.current = busy;
+    setCompleted(didComplete);
+    if (didComplete && sessionId) {
       queryClient.invalidateQueries({ queryKey: keys(baseUrl).history(sessionId) });
     }
-  }, [completed, sessionId, baseUrl, queryClient]);
-
-  useEffect(() => {
-    prevBusyRef.current = busy;
-  }, [busy]);
+  }, [busy, sessionId, baseUrl, queryClient]);
 
   return completed;
 }

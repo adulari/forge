@@ -96,7 +96,7 @@ export default function ConnectScreen() {
   return (
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
       <View style={styles.hero}>
-        <Text style={[type.display, { color: tokens.ink }]}>Forge</Text>
+        <Text style={[type.display, styles.heroTitle, { color: tokens.ink }]}>Forge</Text>
         <Text style={[type.body, { color: tokens.ink2 }]}>
           Forge is a control surface for a fleet of AI coding agents. Connect to a{" "}
           <Text style={{ fontWeight: "600" }}>forge serve</Text> daemon on your machine or server
@@ -170,6 +170,7 @@ export default function ConnectScreen() {
 const styles = StyleSheet.create({
   content: { paddingTop: space.space24, paddingBottom: space.space32, gap: space.space16 },
   hero: { gap: space.space8 },
+  heroTitle: { letterSpacing: -0.4 },
   gapCard: { gap: space.space12 },
   howItWorksBody: { gap: space.space8, paddingBottom: space.space4 },
   banner: { borderRadius: radii.radius12, padding: space.space12 },

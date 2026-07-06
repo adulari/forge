@@ -11,7 +11,6 @@ import { StyleSheet, Text, View } from "react-native";
 import { SessionCard } from "../../components/fleet/SessionCard";
 import { BoundedList } from "../../components/ds/BoundedList";
 import { Button } from "../../components/ds/Button";
-import { Card } from "../../components/ds/Card";
 import { CostMetric } from "../../components/ds/CostMetric";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { IconButton } from "../../components/ds/IconButton";
@@ -23,6 +22,25 @@ import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, space } from "../../theme/tokens";
 import { tabularNums, type as typeScale } from "../../theme/typography";
 
+// DESIGN_ELEVATION.md Move 3 — the one identity moment: the ⚒ mark beside the Fleet title.
+function FleetTitle() {
+  const tokens = useTokens();
+  return (
+    <View style={styles.titleRow}>
+      <Text style={[typeScale.title, styles.titleText, { color: tokens.ink }]}>Fleet</Text>
+      <Text
+        style={[styles.mark, { color: tokens.ink3 }]}
+        accessibilityElementsHidden
+        importantForAccessibility="no-hide-descendants"
+      >
+        ⚒
+      </Text>
+    </View>
+  );
+}
+
+// DESIGN_ELEVATION.md Move 2 — airy 3-up of *type* (big tabular number + tiny uppercase
+// label), hairline-separated, NOT three bordered tiles.
 function FleetHeader({ sessions }: { sessions: SessionRow[] }) {
   const tokens = useTokens();
   const totalCost = useMemo(() => sessions.reduce((sum, s) => sum + s.cost_usd, 0), [sessions]);
@@ -30,7 +48,7 @@ function FleetHeader({ sessions }: { sessions: SessionRow[] }) {
   const busyCount = useMemo(() => sessions.filter((s) => s.busy).length, [sessions]);
 
   return (
-    <Card style={styles.header}>
+    <View style={[styles.header, { borderBottomColor: tokens.border }]}>
       <View style={styles.headerStat}>
         <Text style={[typeScale.section, { color: tokens.ink3 }]}>spend</Text>
         <CostMetric valueUsd={totalCost} variant="bodyBold" />
@@ -50,20 +68,20 @@ function FleetHeader({ sessions }: { sessions: SessionRow[] }) {
           {busyCount}
         </Text>
       </View>
-    </Card>
+    </View>
   );
 }
 
 function FleetRowSkeleton() {
   return (
-    <Card style={styles.skeletonCard}>
+    <View style={styles.skeletonRow}>
       <View style={styles.skeletonRow1}>
         <Skeleton width={8} height={8} radius={4} />
         <Skeleton width="45%" height={17} />
       </View>
       <Skeleton width="70%" height={12} style={styles.skeletonGap} />
       <Skeleton width="40%" height={12} style={styles.skeletonGap} />
-    </Card>
+    </View>
   );
 }
 
@@ -103,6 +121,7 @@ export default function FleetScreen() {
 
   return (
     <Screen scroll={false}>
+      <FleetTitle />
       {isFirstLoad ? (
         <View style={styles.list}>
           {[0, 1, 2, 3].map((i) => (
@@ -147,12 +166,20 @@ export default function FleetScreen() {
 const FAB_SIZE = 56;
 
 const styles = StyleSheet.create({
+  titleRow: { flexDirection: "row", alignItems: "center", paddingTop: space.space12 },
+  titleText: { letterSpacing: -0.4 },
+  mark: { fontSize: 14, marginLeft: space.space8 },
   list: { paddingTop: space.space12 },
   listContent: { paddingTop: space.space12, paddingBottom: 96 },
-  header: { flexDirection: "row", marginBottom: space.space8 },
+  header: {
+    flexDirection: "row",
+    paddingTop: space.space16,
+    paddingBottom: space.space16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
   headerStat: { flex: 1, gap: space.space4, alignItems: "flex-start" },
   headerDivider: { borderLeftWidth: StyleSheet.hairlineWidth, paddingLeft: space.space12 },
-  skeletonCard: { marginBottom: space.space8, gap: space.space8 },
+  skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonRow1: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   skeletonGap: { marginTop: space.space4 },
   fab: {

@@ -10,8 +10,8 @@ import Animated from "react-native-reanimated";
 
 import { Badge } from "../../components/ds/Badge";
 import { BoundedList } from "../../components/ds/BoundedList";
-import { Card } from "../../components/ds/Card";
 import { EmptyState } from "../../components/ds/EmptyState";
+import { HeatEdge } from "../../components/ds/HeatEdge";
 import { RelativeTime } from "../../components/ds/RelativeTime";
 import { Screen } from "../../components/ds/Screen";
 import { Skeleton } from "../../components/ds/Skeleton";
@@ -37,7 +37,7 @@ function InboxRowBase({ row, index, onPress }: InboxRowProps) {
 
   return (
     <Animated.View style={entrance}>
-      <Animated.View style={[strike.style, styles.cardGap]}>
+      <Animated.View style={strike.style}>
         <Pressable
           onPress={() => onPress(row)}
           onPressIn={strike.onPressIn}
@@ -45,29 +45,35 @@ function InboxRowBase({ row, index, onPress }: InboxRowProps) {
           accessibilityRole="button"
           accessibilityLabel={`${title}, needs you`}
         >
-          <Card>
-            <View style={styles.headerRow}>
-              <StatusDot state="waiting" />
-              <Text style={[type.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
-                {title}
+          {/* DESIGN_ELEVATION.md Move 2 — de-boxed row: every Inbox row is waiting, so
+              every row carries the selection wash + heat edge (no per-row card). */}
+          <View style={[styles.rowBg, { backgroundColor: tokens.selection }]}>
+            <HeatEdge active />
+            <View style={styles.inner}>
+              <View style={styles.headerRow}>
+                <StatusDot state="waiting" />
+                <Text style={[type.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
+                  {title}
+                </Text>
+                <Badge label="NEEDS YOU" tone="danger" shape="pill" />
+              </View>
+              <Text
+                style={[type.sub, styles.cwd, { color: tokens.ink2, fontFamily: monoFamily.regular }]}
+                numberOfLines={1}
+                ellipsizeMode="head"
+              >
+                {row.cwd}
               </Text>
-              <Badge label="NEEDS YOU" tone="danger" shape="pill" />
+              <View style={styles.footerRow}>
+                <RelativeTime timestampMs={row.last_activity * 1000} />
+                {/* HANDOFF(T4.3): mount a DecisionPeek trigger here so a waiting session's
+                    PermissionCard/QuestionCard can be answered without leaving the Inbox. */}
+              </View>
             </View>
-            <Text
-              style={[type.codeSmall, styles.cwd, { color: tokens.ink3, fontFamily: monoFamily.regular }]}
-              numberOfLines={1}
-              ellipsizeMode="head"
-            >
-              {row.cwd}
-            </Text>
-            <View style={styles.footerRow}>
-              <RelativeTime timestampMs={row.last_activity * 1000} />
-              {/* HANDOFF(T4.3): mount a DecisionPeek trigger here so a waiting session's
-                  PermissionCard/QuestionCard can be answered without leaving the Inbox. */}
-            </View>
-          </Card>
+          </View>
         </Pressable>
       </Animated.View>
+      <View style={[styles.separator, { backgroundColor: tokens.border }]} />
     </Animated.View>
   );
 }
@@ -105,11 +111,11 @@ export default function InboxScreen() {
     return (
       <Screen scroll={false} contentContainerStyle={styles.listPad}>
         {[0, 1, 2].map((i) => (
-          <Card key={i} style={styles.cardGap}>
+          <View key={i} style={styles.skeletonRow}>
             <Skeleton width="55%" height={17} />
             <Skeleton width="70%" height={12} style={styles.skeletonGap} />
             <Skeleton width="30%" height={12} style={styles.skeletonGap} />
-          </Card>
+          </View>
         ))}
       </Screen>
     );
@@ -132,10 +138,19 @@ export default function InboxScreen() {
 
 const styles = StyleSheet.create({
   listPad: { paddingTop: space.space12, paddingBottom: space.space32 },
-  cardGap: { marginBottom: space.space8 },
+  rowBg: { position: "relative" },
+  inner: {
+    minHeight: 72,
+    justifyContent: "center",
+    paddingHorizontal: space.space16,
+    paddingVertical: space.space16,
+    gap: space.space8,
+  },
+  separator: { height: StyleSheet.hairlineWidth, marginLeft: space.space16 },
   headerRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   title: { flex: 1 },
-  cwd: { marginTop: space.space4 },
-  footerRow: { flexDirection: "row", alignItems: "center", marginTop: space.space8 },
+  cwd: {},
+  footerRow: { flexDirection: "row", alignItems: "center" },
+  skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonGap: { marginTop: space.space8 },
 });

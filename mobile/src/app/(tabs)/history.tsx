@@ -9,7 +9,6 @@ import Animated from "react-native-reanimated";
 
 import { Badge } from "../../components/ds/Badge";
 import { BoundedList } from "../../components/ds/BoundedList";
-import { Card } from "../../components/ds/Card";
 import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { RelativeTime } from "../../components/ds/RelativeTime";
@@ -44,7 +43,7 @@ function HistoryRowBase({ row, index, onPress }: HistoryRowProps) {
 
   return (
     <Animated.View style={entrance}>
-      <Animated.View style={[strike.style, styles.cardGap]}>
+      <Animated.View style={strike.style}>
         <Pressable
           onPress={() => onPress(row)}
           onPressIn={strike.onPressIn}
@@ -52,37 +51,39 @@ function HistoryRowBase({ row, index, onPress }: HistoryRowProps) {
           accessibilityRole="button"
           accessibilityLabel={`Resume ${title}`}
         >
-          <Card>
-            <View style={styles.headerRow}>
-              <Text style={[type.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
-                {title}
-              </Text>
-              {row.archived ? <Badge label="archived" tone="neutral" /> : null}
-            </View>
-            <Text
-              style={[type.codeSmall, styles.cwd, { color: tokens.ink3, fontFamily: monoFamily.regular }]}
-              numberOfLines={1}
-              ellipsizeMode="head"
-            >
-              {row.cwd}
-            </Text>
-            {row.preview ? (
-              <Text style={[type.sub, styles.preview, { color: tokens.ink2 }]} numberOfLines={2}>
-                {row.preview}
-              </Text>
-            ) : null}
-            <View style={styles.footerRow}>
-              <RelativeTime timestampMs={row.last_activity * 1000} />
-              <View style={styles.metaRight}>
-                <Text style={[type.meta, styles.msgCount, { color: tokens.ink3 }]}>
-                  {row.message_count} msgs
+          {/* DESIGN_ELEVATION.md Move 2 — de-boxed row: past sessions are cool, no heat edge. */}
+          <View style={[styles.rowBg, { backgroundColor: tokens.bg1 }]}>
+            <View style={styles.inner}>
+              <View style={styles.headerRow}>
+                <Text style={[type.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
+                  {title}
                 </Text>
-                <Text style={[type.meta, { color: tokens.success }]}>{formatCost(row.cost_usd)}</Text>
+                {row.archived ? <Badge label="archived" tone="neutral" /> : null}
+              </View>
+              <Text
+                style={[type.sub, styles.cwd, { color: tokens.ink3, fontFamily: monoFamily.regular }]}
+                numberOfLines={1}
+                ellipsizeMode="head"
+              >
+                {row.cwd}
+              </Text>
+              {row.preview ? (
+                <Text style={[type.sub, { color: tokens.ink2 }]} numberOfLines={2}>
+                  {row.preview}
+                </Text>
+              ) : null}
+              <View style={styles.footerRow}>
+                <RelativeTime timestampMs={row.last_activity * 1000} />
+                <View style={styles.metaRight}>
+                  <Text style={[type.meta, { color: tokens.ink3 }]}>{row.message_count} msgs</Text>
+                  <Text style={[type.meta, { color: tokens.success }]}>{formatCost(row.cost_usd)}</Text>
+                </View>
               </View>
             </View>
-          </Card>
+          </View>
         </Pressable>
       </Animated.View>
+      <View style={[styles.separator, { backgroundColor: tokens.border }]} />
     </Animated.View>
   );
 }
@@ -178,11 +179,11 @@ export default function HistoryScreen() {
       {isLoading ? (
         <View>
           {[0, 1, 2].map((i) => (
-            <Card key={i} style={styles.cardGap}>
+            <View key={i} style={styles.skeletonRow}>
               <Skeleton width="55%" height={17} />
               <Skeleton width="70%" height={12} style={styles.skeletonGap} />
               <Skeleton width="40%" height={12} style={styles.skeletonGap} />
-            </Card>
+            </View>
           ))}
         </View>
       ) : (
@@ -227,14 +228,19 @@ const styles = StyleSheet.create({
   screenPad: { paddingTop: space.space12 },
   search: { marginBottom: space.space8 },
   listPad: { paddingBottom: space.space32 },
-  cardGap: { marginBottom: space.space8 },
+  rowBg: { position: "relative" },
+  inner: {
+    paddingHorizontal: space.space16,
+    paddingVertical: space.space16,
+    gap: space.space8,
+  },
+  separator: { height: StyleSheet.hairlineWidth, marginLeft: space.space16 },
   headerRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   title: { flex: 1 },
-  cwd: { marginTop: space.space4 },
-  preview: { marginTop: space.space4 },
-  footerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: space.space8 },
+  cwd: {},
+  footerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   metaRight: { flexDirection: "row", alignItems: "center", gap: space.space8 },
-  msgCount: {},
+  skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonGap: { marginTop: space.space8 },
   resumeOverlay: { alignItems: "center", justifyContent: "center" },
 });
