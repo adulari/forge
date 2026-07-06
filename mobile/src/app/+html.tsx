@@ -22,7 +22,12 @@ const THEME_COLOR = darkTokens.bg1;
 // BoundedList) is what actually stops rubber-band, `overscroll-behavior: none` here is
 // the page-level backstop.
 const GLOBAL_WEB_CSS = `
-html, body, #root { height: 100%; margin: 0; }
+html, body, #root {
+  height: 100%;
+  height: 100vh;
+  height: 100dvh;
+  margin: 0;
+}
 body { overscroll-behavior: none; -webkit-overflow-scrolling: touch; touch-action: manipulation; }
 * { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }

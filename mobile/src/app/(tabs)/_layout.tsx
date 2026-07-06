@@ -9,7 +9,8 @@
 import { router, Slot, Tabs, usePathname } from "expo-router";
 import { BellDot, Flame, History, Plus, Settings2, type LucideIcon } from "lucide-react-native";
 import React, { useEffect, useMemo } from "react";
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { Platform, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, {
   useAnimatedStyle,
   useReducedMotion,
@@ -83,6 +84,13 @@ function TabsNavigator() {
   const tokens = useTokens();
   const { data: sessions } = useSessions();
   const waitingCount = sessions?.filter((s) => s.waiting).length ?? 0;
+  // Web: react-navigation's default tab bar height doesn't account for `env(safe-area-inset-bottom)`
+  // the way its native counterpart does — without this, the home-indicator/PWA-standalone inset
+  // eats into the label row and clips it (reported as "Settings" -> "Settinas"). `viewport-fit=cover`
+  // (+html.tsx) is what makes `useSafeAreaInsets()` read a non-zero value here on web at all.
+  // Native is untouched: react-navigation already reserves the inset there.
+  const insets = useSafeAreaInsets();
+  const webTabBar = Platform.OS === "web" ? { height: 58 + insets.bottom, paddingBottom: insets.bottom } : null;
 
   return (
     <Tabs
@@ -92,6 +100,7 @@ function TabsNavigator() {
           backgroundColor: tokens.bg2,
           borderTopColor: tokens.border,
           borderTopWidth: StyleSheet.hairlineWidth,
+          ...webTabBar,
         },
         tabBarActiveTintColor: tokens.accent,
         tabBarInactiveTintColor: tokens.ink3,

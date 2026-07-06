@@ -11,9 +11,10 @@
 // co-exist. Turn-completion history invalidation (busy true->false) is already wired by the
 // T3.1 session shell's `useTurnCompleted(snapshot)` call in `_layout.tsx` — not repeated here.
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { ChevronDown, MessageSquare } from "lucide-react-native";
+import { ChevronDown, Clock, MessageSquare } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   FlatList,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -53,7 +54,20 @@ function offlineQueueKey(baseUrl: string | null, sessionId: string): string {
 type TimelineItem =
   | { kind: "streaming"; id: string; text: string; streaming: boolean }
   | { kind: "history"; id: string; row: HistoryRow }
-  | { kind: "filler"; id: string; text: string };
+  | { kind: "filler"; id: string; text: string }
+  | { kind: "pendingSent"; id: string; text: string };
+
+// How long an optimistic "pendingSent" bubble is allowed to linger without a real history row
+// ever landing for it (session closed mid-turn, WS never came back, etc.) — a safety net, not
+// the normal clearing path (that's the historyRows-advanced-past-baseline effect below).
+const PENDING_SENT_TIMEOUT_MS = 120_000;
+
+interface PendingSent {
+  id: string;
+  text: string;
+  /** `historyRows[0]?.seq` at send time — cleared once a newer row lands. */
+  baselineSeq: number;
+}
 
 export default function SessionChat() {
   const tokens = useTokens();
@@ -119,8 +133,19 @@ export default function SessionChat() {
 
   const online = connectionState === "open";
 
+  // Optimistic "sent" bubble (ARCHITECTURE §4.1.4 timeline is otherwise server-truth-only):
+  // without this, the user's own message doesn't appear anywhere until the whole turn
+  // completes and history is invalidated/refetched — the composer looked like it swallowed
+  // the prompt. `latestSeqRef` mirrors `historyRows[0]?.seq` (computed further down) so
+  // `handleSend`, defined here, can read its current value without reordering the file.
+  const [pendingSent, setPendingSent] = useState<PendingSent[]>([]);
+  const latestSeqRef = useRef(-1);
+
   const handleSend = useCallback(
     (text: string) => {
+      const id = `p${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current }]);
+
       if (online) {
         send({ kind: "prompt", text });
         return;
@@ -129,6 +154,7 @@ export default function SessionChat() {
         if (prev.length >= OFFLINE_QUEUE_CAP) {
           toast.show("offline queue full (20) — prompt dropped", { tone: "danger" });
           haptics.mergeConflict();
+          setPendingSent((p) => p.filter((x) => x.id !== id));
           return prev;
         }
         return [...prev, text];
@@ -156,6 +182,30 @@ export default function SessionChat() {
     // PWA renders every row, styling "ui" as a note). Filtering to one drops the conversation.
     return pages.flat();
   }, [historyQuery.data]);
+
+  useEffect(() => {
+    latestSeqRef.current = historyRows[0]?.seq ?? -1;
+  }, [historyRows]);
+
+  // Clear pendingSent bubbles once a real history row has landed since they were sent (turn
+  // completed, ARCHITECTURE §4.1.4 invalidation) — same baselineSeq idea as `finalizing` below.
+  useEffect(() => {
+    if (pendingSent.length === 0) return;
+    const newestSeq = historyRows[0]?.seq ?? -1;
+    setPendingSent((prev) => prev.filter((p) => p.baselineSeq === newestSeq));
+  }, [historyRows, pendingSent.length]);
+
+  // Safety net: never let a pendingSent bubble linger forever if history never advances for it
+  // (session closed mid-turn, connection never came back, ...).
+  useEffect(() => {
+    if (pendingSent.length === 0) return;
+    const timers = pendingSent.map((p) =>
+      setTimeout(() => {
+        setPendingSent((prev) => prev.filter((x) => x.id !== p.id));
+      }, PENDING_SENT_TIMEOUT_MS),
+    );
+    return () => timers.forEach(clearTimeout);
+  }, [pendingSent]);
 
   // Once `data` has resolved once (cache or network) for this session, the filler is gone for
   // good — never re-armed by a later refetch/invalidation.
@@ -235,8 +285,19 @@ export default function SessionChat() {
 
   const items = useMemo<TimelineItem[]>(() => {
     const list: TimelineItem[] = [];
-    if (displayText) {
-      list.push({ kind: "streaming", id: "streaming", text: displayText, streaming: Boolean(streamingText) });
+    // `busy` alone (before any tokens arrive) still gets a "streaming" slot — rendered with
+    // empty text as the thinking indicator below — so there's never a silent gap between
+    // submit and the first token (previously nothing rendered here at all until `displayText`
+    // was non-empty, which read as "stuck").
+    if (displayText || busy) {
+      list.push({ kind: "streaming", id: "streaming", text: displayText, streaming: busy || Boolean(streamingText) });
+    }
+    // Newest-first (inverted list): the user's own just-sent message is more recent than any
+    // settled history row but older than the in-progress reply above, and later sends are newer
+    // than earlier ones — walk pendingSent back-to-front.
+    for (let i = pendingSent.length - 1; i >= 0; i--) {
+      const p = pendingSent[i];
+      list.push({ kind: "pendingSent", id: p.id, text: p.text });
     }
     if (historySettled) {
       for (const row of historyRows) {
@@ -251,7 +312,7 @@ export default function SessionChat() {
       }
     }
     return list;
-  }, [displayText, streamingText, historySettled, historyRows, snapshot?.transcript]);
+  }, [displayText, streamingText, busy, pendingSent, historySettled, historyRows, snapshot?.transcript]);
 
   // Pin to the latest item when a NEW item lands at the newest slot — not on every streaming
   // text tick (same item id, StreamingText owns its own rAF coalescing), and not when an older
@@ -280,10 +341,33 @@ export default function SessionChat() {
       switch (item.kind) {
         case "history":
           return <MessageRow row={item.row} />;
-        case "streaming":
+        case "pendingSent":
+          // Renders through the same MessageRow the real (server-truth) row will use once
+          // history lands, so there's no visual "jump" when this optimistic bubble is replaced.
           return (
+            <MessageRow
+              row={{
+                seq: -1,
+                role: "user",
+                content: item.text,
+                model: null,
+                created_at: Date.now() / 1000,
+                visibility: "llm",
+              }}
+            />
+          );
+        case "streaming":
+          return item.text ? (
             <View style={styles.streamingRow}>
               <StreamingText text={item.text} streaming={item.streaming} />
+            </View>
+          ) : (
+            // Queued/busy but no tokens yet — an explicit "thinking" affordance (same
+            // ActivityIndicator+accent pairing BoundedList's loadingMore footer uses) so this
+            // phase never reads as stuck.
+            <View style={[styles.streamingRow, styles.thinkingRow]}>
+              <ActivityIndicator size="small" color={tokens.accent} />
+              <Text style={[typeScale.meta, { color: tokens.ink3 }]}>thinking…</Text>
             </View>
           );
         case "filler":
@@ -295,7 +379,7 @@ export default function SessionChat() {
           );
       }
     },
-    [tokens.ink2],
+    [tokens.ink2, tokens.ink3, tokens.accent],
   );
 
   const keyExtractor = useCallback((item: TimelineItem) => item.id, []);
@@ -348,10 +432,13 @@ export default function SessionChat() {
             <Chip key={`q${i}`} label={text} />
           ))}
           {offlineQueue.map((text, i) => (
+            // Deliberately NOT `selected` (ember/accent) — this is a normal "will send on
+            // reconnect" queue state, not an error, and the message itself already rendered as
+            // a normal sent bubble via `pendingSent` above. Calm ink3 + a clock glyph instead.
             <Chip
               key={`o${i}`}
               label={`${text} (offline)`}
-              selected
+              icon={<Clock size={13} strokeWidth={1.75} color={tokens.ink3} />}
               onPress={() => removeQueuedOffline(i)}
             />
           ))}
@@ -374,6 +461,7 @@ export default function SessionChat() {
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   streamingRow: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
+  thinkingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   jumpPill: {
     position: "absolute",
     bottom: space.space16,
