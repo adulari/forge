@@ -1,0 +1,51 @@
+{
+  "cli": {
+    "version": ">= 13.2.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "base": {
+      "node": "20.18.0",
+      "ios": {
+        "resourceClass": "m-medium"
+      }
+    },
+    "development": {
+      "extends": "base",
+      "developmentClient": true,
+      "distribution": "internal",
+      "channel": "development",
+      "ios": {
+        "resourceClass": "m-medium",
+        "simulator": false
+      }
+    },
+    "preview": {
+      "extends": "base",
+      "distribution": "internal",
+      "channel": "preview",
+      "ios": {
+        "resourceClass": "m-medium",
+        "appleTeamId": "TODO(team-id): set once Apple Developer account is approved"
+      }
+    },
+    "production": {
+      "extends": "base",
+      "autoIncrement": true,
+      "channel": "production",
+      "ios": {
+        "resourceClass": "m-medium",
+        "appleTeamId": "TODO(team-id): set once Apple Developer account is approved"
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "appleId": "TODO(apple-id): Apple ID email for App Store Connect",
+        "ascAppId": "TODO(asc-app-id): App Store Connect app numeric ID (create the app record in App Store Connect first, or let `eas submit` create it on first run)",
+        "appleTeamId": "TODO(team-id): set once Apple Developer account is approved"
+      }
+    }
+  }
+}
