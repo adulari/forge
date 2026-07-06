@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Apple privacy manifest for the Forge app target (SDK 57 pattern:
+  https://docs.expo.dev/guides/apple-privacy-manifests/).
+
+  This is the human-reviewable, checked-in source of truth. It is NOT copied into the
+  generated Xcode project automatically by prebuild — the equivalent `ios.privacyManifests`
+  block in app.config.ts is what Expo's core config plugin reads to actually emit
+  ios/Forge/PrivacyInfo.xcprivacy during `expo prebuild`/`eas build`. Keep the two in sync
+  if either changes.
+
+  Data use: the app stores a pairing token (daemon URL/token) locally via expo-secure-store
+  (Keychain) and persists a react-query cache via AsyncStorage. It talks only to the
+  self-hosted Forge daemon the user pairs with — no analytics, no ad networks, no
+  third-party data collection or tracking.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

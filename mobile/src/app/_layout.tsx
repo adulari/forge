@@ -13,6 +13,7 @@ import { StatusBar } from "expo-status-bar";
 import React, { useMemo } from "react";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
+import { AppLock } from "../components/AppLock";
 import { Loading, Screen } from "../components/ui";
 import { AuthProvider, useAuth } from "../lib/auth";
 import { colors } from "../lib/theme";
@@ -82,7 +83,9 @@ export default function RootLayout() {
       >
         <AuthProvider>
           <StatusBar style="light" />
-          <RootNavigator />
+          <AppLock>
+            <RootNavigator />
+          </AppLock>
         </AuthProvider>
       </PersistQueryClientProvider>
     </SafeAreaProvider>

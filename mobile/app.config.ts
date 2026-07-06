@@ -11,26 +11,6 @@ const config: ExpoConfig = {
   icon: "./assets/icon.png",
   userInterfaceStyle: "dark",
   backgroundColor: "#16161c",
-  // FLAGGED (w11-splash): SDK 57 moved splash config to the `expo-splash-screen` config
-  // plugin (the classic top-level `splash` key no longer exists on ExpoConfig). That
-  // package is NOT present in package.json / node_modules / package-lock.json in this
-  // checkout — it is a separate npm package, not bundled inside `expo` itself. Per the W11
-  // batch brief this worker must not install packages, so the plugin is intentionally left
-  // unwired rather than referencing an unresolvable plugin name (which would break
-  // `expo prebuild`/`expo-doctor` even though it wouldn't fail `tsc --noEmit`).
-  //
-  // To finish this once the package is installed (`npx expo install expo-splash-screen`),
-  // add to the `plugins` array below:
-  //   [
-  //     "expo-splash-screen",
-  //     {
-  //       backgroundColor: "#16161c",
-  //       image: "./assets/splash-icon.png",
-  //       imageWidth: 200,
-  //       dark: { backgroundColor: "#16161c", image: "./assets/splash-icon.png" },
-  //     },
-  //   ],
-  // `assets/splash-icon.png` already exists in this checkout and is otherwise unused.
   ios: {
     bundleIdentifier: BUNDLE_ID,
     supportsTablet: true,
@@ -38,11 +18,24 @@ const config: ExpoConfig = {
     // Set appleTeamId once approved. Does NOT block Expo web or SideStore sideload testing.
     infoPlist: {
       NSCameraUsageDescription:
-        "Forge uses the camera to scan the QR code printed by `forge serve` to pair with your daemon.",
+        "Scan a Forge pairing QR code to connect to your server.",
+      NSFaceIDUsageDescription: "Unlock Forge with Face ID.",
       NSPhotoLibraryUsageDescription:
         "Forge lets you attach photos from your library to a session.",
       NSDocumentsFolderUsageDescription:
         "Forge lets you attach documents to a session.",
+    },
+    // SDK 57 privacy manifest mechanism: a `PrivacyInfo.xcprivacy` file at the project
+    // root, wired in via `ios.privacyManifests` (expo-build-properties-free path — expo
+    // itself merges this into the generated Xcode project during prebuild). See
+    // PrivacyInfo.xcprivacy for the declared data use / required-reason APIs.
+    privacyManifests: {
+      NSPrivacyAccessedAPITypes: [
+        {
+          NSPrivacyAccessedAPIType: "NSPrivacyAccessedAPICategoryUserDefaults",
+          NSPrivacyAccessedAPITypeReasons: ["CA92.1"],
+        },
+      ],
     },
   },
   android: {
@@ -66,8 +59,7 @@ const config: ExpoConfig = {
     [
       "expo-camera",
       {
-        cameraPermission:
-          "Forge uses the camera to scan the QR code printed by `forge serve` to pair with your daemon.",
+        cameraPermission: "Scan a Forge pairing QR code to connect to your server.",
       },
     ],
     [
@@ -75,6 +67,15 @@ const config: ExpoConfig = {
       {
         photosPermission:
           "Forge lets you attach photos from your library to a session.",
+      },
+    ],
+    [
+      "expo-splash-screen",
+      {
+        backgroundColor: "#16161c",
+        image: "./assets/splash-icon.png",
+        imageWidth: 200,
+        dark: { backgroundColor: "#16161c", image: "./assets/splash-icon.png" },
       },
     ],
   ],

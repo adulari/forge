@@ -1,14 +1,14 @@
 // Settings (BUILD_PLAN §6 "Settings", Batch 1 W1). Reached from More. Shows the paired
 // server, lets the user test the connection, re-pair, or forget the server, and surfaces
 // the handful of app-level facts (reduce-motion status, version, theme) BUILD_PLAN calls
-// for. Two things here are explicitly flagged stubs per the batch brief rather than new
-// dependencies: biometric app-lock (needs expo-local-authentication, not installed) and
-// native push (backend only speaks Web Push — see BUILD_PLAN §5 flag #1).
+// for. Biometric app-lock is wired here (flips the pref AppLock.tsx gates on); native push
+// is still N/A — the backend only speaks Web Push (see BUILD_PLAN §5 flag #1).
 import { useQueryClient } from "@tanstack/react-query";
 import Constants from "expo-constants";
 import { router } from "expo-router";
-import React, { useCallback, useState } from "react";
-import { Alert, Switch, View } from "react-native";
+import * as LocalAuthentication from "expo-local-authentication";
+import React, { useCallback, useEffect, useState } from "react";
+import { Alert, Platform, Switch, View } from "react-native";
 
 import {
   Badge,
@@ -19,6 +19,7 @@ import {
   Screen,
   SectionTitle,
 } from "../components/ui";
+import { setBiometricLockEnabled, useBiometricLockEnabled } from "../components/AppLock";
 import { type ConnectTestState, useAuth } from "../lib/auth";
 import { useMotionEnabled } from "../lib/motion";
 import { colors } from "../lib/theme";
@@ -58,6 +59,54 @@ export default function SettingsScreen() {
 
   const [testState, setTestState] = useState<ConnectTestState>("idle");
   const [forgetting, setForgetting] = useState(false);
+
+  const biometricEnabled = useBiometricLockEnabled();
+  const [biometricAvailable, setBiometricAvailable] = useState<boolean | null>(null);
+  const [biometricUnavailableReason, setBiometricUnavailableReason] = useState<
+    string | null
+  >(null);
+  const [biometricBusy, setBiometricBusy] = useState(false);
+
+  useEffect(() => {
+    if (Platform.OS === "web") {
+      setBiometricAvailable(false);
+      setBiometricUnavailableReason("Not available on web — use the app on a device.");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const [hasHardware, isEnrolled] = await Promise.all([
+        LocalAuthentication.hasHardwareAsync(),
+        LocalAuthentication.isEnrolledAsync(),
+      ]);
+      if (cancelled) return;
+      if (!hasHardware) {
+        setBiometricAvailable(false);
+        setBiometricUnavailableReason("This device has no Face ID/Touch ID hardware.");
+      } else if (!isEnrolled) {
+        setBiometricAvailable(false);
+        setBiometricUnavailableReason("No Face ID/Touch ID enrolled — set it up in device Settings.");
+      } else {
+        setBiometricAvailable(true);
+        setBiometricUnavailableReason(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const onToggleBiometric = useCallback(
+    async (next: boolean) => {
+      setBiometricBusy(true);
+      try {
+        await setBiometricLockEnabled(next);
+      } finally {
+        setBiometricBusy(false);
+      }
+    },
+    [],
+  );
 
   const onTest = useCallback(async () => {
     setTestState("testing");
@@ -142,11 +191,18 @@ export default function SettingsScreen() {
         <SectionWell>
           <ListRow
             title="Biometric app lock"
-            subtitle="Needs expo-local-authentication (not installed) — flagged for a later batch"
+            subtitle={
+              biometricAvailable === false
+                ? biometricUnavailableReason ?? "Unavailable on this device"
+                : biometricEnabled
+                  ? "On — Face ID/Touch ID required to open Forge"
+                  : "Off — require Face ID/Touch ID to open Forge"
+            }
             right={
               <Switch
-                value={false}
-                disabled
+                value={biometricAvailable === true && !!biometricEnabled}
+                onValueChange={onToggleBiometric}
+                disabled={biometricAvailable !== true || biometricBusy}
                 trackColor={{ false: colors.border, true: colors.ok }}
                 thumbColor={colors.dim}
               />

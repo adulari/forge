@@ -3,9 +3,14 @@
 // below), live-validate it against the real daemon via `testConnection()`, then persist via
 // `pair()` and route into the app. A manual host+token fallback covers cases where the
 // printed URL got mangled in transit.
+import {
+  CameraView,
+  useCameraPermissions,
+  type BarcodeScanningResult,
+} from "expo-camera";
 import { router } from "expo-router";
-import React, { useCallback, useState } from "react";
-import { Platform, Pressable, Text, View } from "react-native";
+import React, { useCallback, useRef, useState } from "react";
+import { Linking, Platform, Pressable, Text, View } from "react-native";
 
 import {
   Card,
@@ -19,6 +24,12 @@ import {
   SectionTitle,
 } from "../components/ui";
 import { type ConnectTestState, parseConnectUrl, useAuth } from "../lib/auth";
+
+// QR scanning is native-only (BUILD_PLAN §9a: guard camera calls behind Platform checks so
+// every screen stays web-renderable for the fast QA loop). Web keeps paste + manual entry.
+const CAMERA_AVAILABLE = Platform.OS !== "web";
+
+type ScanState = "idle" | "scanning" | "denied";
 
 // Distinct copy per failure class (UI_RULES.md #14) — matches the language used in
 // BUILD_PLAN §1.1 (exposure modes) so the fix is always actionable, not just descriptive.
@@ -44,6 +55,10 @@ export default function ConnectScreen() {
   const [url, setUrl] = useState("");
   const [testState, setTestState] = useState<ConnectTestState>("idle");
   const [formatError, setFormatError] = useState<string | null>(null);
+
+  const [scanState, setScanState] = useState<ScanState>("idle");
+  const [permission, requestPermission] = useCameraPermissions();
+  const scanLockRef = useRef(false);
 
   const [manualOpen, setManualOpen] = useState(false);
   const [manualScheme, setManualScheme] = useState<"https" | "http">("https");
@@ -83,6 +98,33 @@ export default function ConnectScreen() {
   const onConnect = () => attemptConnect(url);
   const onManualConnect = () => attemptConnect(manualCandidate);
 
+  const onScanPress = useCallback(async () => {
+    if (!permission?.granted) {
+      if (permission && !permission.canAskAgain) {
+        setScanState("denied");
+        return;
+      }
+      const result = await requestPermission();
+      if (!result.granted) {
+        setScanState("denied");
+        return;
+      }
+    }
+    scanLockRef.current = false;
+    setScanState("scanning");
+  }, [permission, requestPermission]);
+
+  const onBarcodeScanned = useCallback(
+    (result: BarcodeScanningResult) => {
+      if (scanLockRef.current) return;
+      scanLockRef.current = true;
+      setScanState("idle");
+      setUrl(result.data);
+      attemptConnect(result.data);
+    },
+    [attemptConnect],
+  );
+
   return (
     <Screen keyboardAvoiding contentContainerClassName="gap-16 pt-24">
       <EntranceView index={0}>
@@ -111,7 +153,37 @@ export default function ConnectScreen() {
             editable={!busy}
             onSubmitEditing={onConnect}
           />
-          <Chip label="⌗ Scan QR (coming soon)" disabled />
+          {CAMERA_AVAILABLE ? (
+            <Chip
+              label={scanState === "scanning" ? "Cancel scan" : "⌗ Scan QR"}
+              onPress={() =>
+                scanState === "scanning" ? setScanState("idle") : onScanPress()
+              }
+            />
+          ) : null}
+          {scanState === "scanning" ? (
+            <View className="rounded-lg overflow-hidden border border-borderSoft aspect-square">
+              <CameraView
+                style={{ flex: 1 }}
+                facing="back"
+                barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+                onBarcodeScanned={onBarcodeScanned}
+              />
+            </View>
+          ) : null}
+          {scanState === "denied" ? (
+            <Text className="text-no text-[13px]">
+              Camera permission denied — open Settings to allow camera access, or paste the
+              connect URL instead.
+              <Text
+                className="text-accent underline"
+                onPress={() => Linking.openSettings()}
+              >
+                {" "}
+                Open Settings
+              </Text>
+            </Text>
+          ) : null}
           <PrimaryButton
             label={busy ? "Connecting…" : "Connect"}
             onPress={onConnect}
