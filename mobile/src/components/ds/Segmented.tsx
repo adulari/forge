@@ -1,6 +1,7 @@
 // DESIGN_SYSTEM.md §6 Segmented — bg3 track, bg2 thumb (Tabshift: thumb slides
 // with `press` spring), section-style labels; used for Chat/Tasks/Agents/Review.
-import React, { useEffect, useState } from "react";
+// DESIGN_ELEVATION.md Move 3 — 1px inset hairline on the thumb ("machined" edge).
+import React, { useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSpring } from "react-native-reanimated";
 
@@ -26,6 +27,10 @@ export function Segmented<T extends string = string>({ options, value, onChange,
   const reduced = useReducedMotion();
   const [width, setWidth] = useState(0);
   const translateX = useSharedValue(0);
+  // Tracks whether the thumb has been placed once at its measured width yet —
+  // that first placement snaps instantly (no spring "slide-in" from the left
+  // edge on mount); every switch after that runs the `press` spring.
+  const hasPlaced = useRef(false);
   const index = Math.max(
     0,
     options.findIndex((o) => o.value === value),
@@ -33,8 +38,14 @@ export function Segmented<T extends string = string>({ options, value, onChange,
   const segmentWidth = options.length > 0 ? width / options.length : 0;
 
   useEffect(() => {
+    if (segmentWidth <= 0) return;
     const target = index * segmentWidth;
-    translateX.value = reduced ? target : withSpring(target, springs.press);
+    if (reduced || !hasPlaced.current) {
+      translateX.value = target;
+      hasPlaced.current = true;
+    } else {
+      translateX.value = withSpring(target, springs.press);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [index, segmentWidth, reduced]);
 
@@ -55,7 +66,12 @@ export function Segmented<T extends string = string>({ options, value, onChange,
       {width > 0 ? (
         <Animated.View
           style={[styles.thumb, thumbStyle, { backgroundColor: tokens.bg2, borderRadius: radii.radius8 - 2 }]}
-        />
+        >
+          <View
+            pointerEvents="none"
+            style={[styles.thumbInset, { borderColor: tokens.borderStrong, borderRadius: radii.radius8 - 3 }]}
+          />
+        </Animated.View>
       ) : null}
       {options.map((opt) => {
         const selected = opt.value === value;
@@ -90,6 +106,14 @@ const styles = StyleSheet.create({
     top: 2,
     bottom: 2,
     left: 0,
+  },
+  thumbInset: {
+    position: "absolute",
+    top: 1,
+    left: 1,
+    right: 1,
+    bottom: 1,
+    borderWidth: StyleSheet.hairlineWidth,
   },
   segment: {
     flex: 1,

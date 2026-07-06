@@ -11,6 +11,8 @@ import { statusDotColor, type StatusDotState } from "../../theme/tokens";
 
 const DOT_SIZE = 8;
 const RING_BORDER_WIDTH = 1.5;
+// DESIGN_ELEVATION.md Move 1 — busy gains a 12px radial ember glow halo behind the dot.
+const GLOW_SIZE = 12;
 
 export interface StatusDotProps {
   state: StatusDotState;
@@ -33,6 +35,9 @@ export function StatusDot({ state, accessibilityLabel }: StatusDotProps) {
           pointerEvents="none"
           style={[styles.ring, { borderColor: tokens.danger }, ringStyle]}
         />
+      ) : null}
+      {state === "busy" ? (
+        <View pointerEvents="none" style={[styles.glow, { backgroundColor: tokens.dotGlow }]} />
       ) : null}
       <Animated.View style={[styles.dot, { backgroundColor: color }, dotStyle]} />
     </View>
@@ -57,5 +62,13 @@ const styles = StyleSheet.create({
     height: DOT_SIZE,
     borderRadius: DOT_SIZE / 2,
     borderWidth: RING_BORDER_WIDTH,
+  },
+  glow: {
+    position: "absolute",
+    top: (DOT_SIZE - GLOW_SIZE) / 2,
+    left: (DOT_SIZE - GLOW_SIZE) / 2,
+    width: GLOW_SIZE,
+    height: GLOW_SIZE,
+    borderRadius: GLOW_SIZE / 2,
   },
 });

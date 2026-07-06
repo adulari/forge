@@ -68,6 +68,15 @@ export function Button({
       break;
   }
 
+  // DESIGN_ELEVATION.md Move 3 — disabled: flat `bg3` fill + `ink4` label for
+  // every variant, not a dimmed accent (which read muddy-brown). This is the
+  // `disabled` prop specifically — `loading` keeps its own variant color and
+  // dims only the inner content (spinner/label) below, per §6's L/X states.
+  if (disabled) {
+    bg = tokens.bg3;
+    ink = tokens.ink4;
+  }
+
   const minHeight = variant === "primary" ? 48 : tapTarget;
 
   return (
@@ -91,7 +100,6 @@ export function Button({
             backgroundColor: bg,
             minHeight,
             borderRadius: radii.radius8,
-            opacity: isDisabled ? 0.4 : 1,
             borderColor: focused ? tokens.accent : "transparent",
           },
           style,

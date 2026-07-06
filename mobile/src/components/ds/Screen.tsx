@@ -11,9 +11,10 @@ import {
   type ViewStyle,
 } from "react-native";
 import { type Edge, SafeAreaView } from "react-native-safe-area-context";
+import { LinearGradient } from "expo-linear-gradient";
 
-import { useTokens } from "../../theme/ThemeProvider";
-import { gutter } from "../../theme/tokens";
+import { useTheme } from "../../theme/ThemeProvider";
+import { gutter, type ColorTokens } from "../../theme/tokens";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 
 export interface ScreenProps {
@@ -40,7 +41,7 @@ export function Screen({
   contentContainerStyle,
   style,
 }: ScreenProps) {
-  const tokens = useTokens();
+  const { tokens, scheme } = useTheme();
   const { isCompact } = useBreakpoint();
   const paddingHorizontal = isCompact ? gutter.compact : gutter.medium;
 
@@ -59,6 +60,7 @@ export function Screen({
 
   return (
     <SafeAreaView style={[styles.flex, { backgroundColor: tokens.bg1 }, style]} edges={edges}>
+      <ForgeWash tokens={tokens} scheme={scheme} />
       {keyboardAvoiding ? (
         <KeyboardAvoidingView
           style={styles.flex}
@@ -74,6 +76,45 @@ export function Screen({
   );
 }
 
+/**
+ * DESIGN_ELEVATION.md Move 1 — the ONE subtle top ambient ember wash, implemented
+ * once here (never per-card). Web: real CSS radial-gradient via `forgeWash`.
+ * Native: a top-anchored `expo-linear-gradient` approximation (radial gradients
+ * aren't supported natively), tinted with the theme's accent at the same low
+ * alpha the token spec calls for (5% dark / 4% light).
+ */
+function ForgeWash({ tokens, scheme }: { tokens: ColorTokens; scheme: "light" | "dark" }) {
+  if (Platform.OS === "web") {
+    return (
+      <View
+        pointerEvents="none"
+        style={[
+          StyleSheet.absoluteFillObject,
+          // @ts-expect-error react-native-web-only CSS background-image property
+          { backgroundImage: tokens.forgeWash },
+        ]}
+      />
+    );
+  }
+
+  return (
+    <LinearGradient
+      pointerEvents="none"
+      colors={[tokens.accent, "transparent"]}
+      start={{ x: 0.5, y: 0 }}
+      end={{ x: 0.5, y: 1 }}
+      style={[styles.wash, { opacity: scheme === "light" ? 0.04 : 0.05 }]}
+    />
+  );
+}
+
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  wash: {
+    position: "absolute",
+    top: -80,
+    left: "-20%",
+    right: "-20%",
+    height: 420,
+  },
 });

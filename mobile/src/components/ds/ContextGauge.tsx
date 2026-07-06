@@ -23,6 +23,9 @@ export function ContextGauge({ used, total }: ContextGaugeProps) {
   const clampedPct = Math.max(0, Math.min(100, pct));
   const { style: fillStyle } = useGaugeflow(pct);
   const fillColor = gaugeColor(pct, tokens);
+  // DESIGN_ELEVATION.md Move 1 — "overheat": faint same-color glow once the
+  // gauge crosses into warn (>70%) / danger (>90%). Below 70%: accent, no glow.
+  const overheat = pct > 70;
 
   return (
     <View
@@ -32,7 +35,19 @@ export function ContextGauge({ used, total }: ContextGaugeProps) {
       accessibilityLabel={`context used ${formatTokenPair(used, total)}`}
     >
       <View style={[styles.track, { backgroundColor: tokens.border }]}>
-        <Animated.View style={[styles.fill, { backgroundColor: fillColor }, fillStyle]} />
+        <Animated.View
+          style={[
+            styles.fill,
+            { backgroundColor: fillColor },
+            overheat && {
+              shadowColor: fillColor,
+              shadowOpacity: 0.6,
+              shadowRadius: 4,
+              shadowOffset: { width: 0, height: 0 },
+            },
+            fillStyle,
+          ]}
+        />
       </View>
       <Text style={[typeScale.meta, tabularNums, { color: tokens.ink3 }]} numberOfLines={1}>
         {formatTokenPair(used, total)}
@@ -51,7 +66,8 @@ const styles = StyleSheet.create({
     flex: 1,
     height: TRACK_HEIGHT,
     borderRadius: radii.radiusPill,
-    overflow: "hidden",
+    // Not `overflow: "hidden"` — the fill carries its own matching radius, and an
+    // overheat glow (Move 1) needs to bleed a few px beyond the 3px track.
   },
   fill: {
     height: "100%",

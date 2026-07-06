@@ -58,6 +58,16 @@ export interface ColorTokens {
   selection: string;
   overlayScrim: string;
   ember: EmberScale;
+  /** Move 1 (thermal identity) — HeatEdge gradient start (ember400). */
+  heatEdgeFrom: string;
+  /** Move 1 (thermal identity) — HeatEdge gradient end (ember500). */
+  heatEdgeTo: string;
+  /** Move 1 — HeatEdge outward glow shadow color (ember-tinted, low alpha). */
+  heatGlow: string;
+  /** Move 1 — StatusDot busy-state radial halo behind the dot. */
+  dotGlow: string;
+  /** Move 1 — Screen's single top ambient ember wash (web CSS radial-gradient string). */
+  forgeWash: string;
 }
 
 export const darkTokens: ColorTokens = {
@@ -85,6 +95,11 @@ export const darkTokens: ColorTokens = {
   selection: "#2E2415",
   overlayScrim: "rgba(8,8,12,0.6)",
   ember: emberScale,
+  heatEdgeFrom: emberScale.ember400,
+  heatEdgeTo: emberScale.ember500,
+  heatGlow: "rgba(255,145,60,0.22)",
+  dotGlow: "rgba(255,145,60,0.18)",
+  forgeWash: "radial-gradient(1100px 420px at 50% -8%, rgba(255,145,60,0.05), transparent 62%)",
 };
 
 export const lightTokens: ColorTokens = {
@@ -114,6 +129,11 @@ export const lightTokens: ColorTokens = {
   selection: "#F6E7D2",
   overlayScrim: "rgba(30,26,20,0.35)",
   ember: emberScale,
+  heatEdgeFrom: emberScale.ember400,
+  heatEdgeTo: emberScale.ember500,
+  heatGlow: "rgba(199,93,16,0.20)",
+  dotGlow: "rgba(199,93,16,0.16)",
+  forgeWash: "radial-gradient(1100px 420px at 50% -8%, rgba(199,93,16,0.04), transparent 62%)",
 };
 
 // ---------------------------------------------------------------------------
