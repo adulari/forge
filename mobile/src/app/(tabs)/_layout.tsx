@@ -1,7 +1,7 @@
 // Bottom tabs: Fleet · Alerts · History · More (BUILD_PLAN §6). The Alerts tab carries a
 // numeric badge = count of sessions currently `waiting` (from useSessions(), the same
 // polled list the Fleet/Alerts tabs render — no extra fetch).
-import { Tabs } from "expo-router/js-tabs";
+import { Tabs } from "expo-router";
 import React from "react";
 import { Text, type ColorValue } from "react-native";
 
@@ -31,14 +31,18 @@ export default function TabsLayout() {
         name="index"
         options={{
           title: "Fleet",
-          tabBarIcon: ({ color }) => <TabGlyph glyph="⚙" color={color} />,
+          tabBarIcon: ({ color }: { color: ColorValue }) => (
+            <TabGlyph glyph="⚙" color={color} />
+          ),
         }}
       />
       <Tabs.Screen
         name="alerts"
         options={{
           title: "Alerts",
-          tabBarIcon: ({ color }) => <TabGlyph glyph="⚠" color={color} />,
+          tabBarIcon: ({ color }: { color: ColorValue }) => (
+            <TabGlyph glyph="⚠" color={color} />
+          ),
           tabBarBadge: waitingCount > 0 ? waitingCount : undefined,
           tabBarBadgeStyle: { backgroundColor: colors.no, color: colors.panel },
         }}
@@ -47,14 +51,18 @@ export default function TabsLayout() {
         name="history"
         options={{
           title: "History",
-          tabBarIcon: ({ color }) => <TabGlyph glyph="◷" color={color} />,
+          tabBarIcon: ({ color }: { color: ColorValue }) => (
+            <TabGlyph glyph="◷" color={color} />
+          ),
         }}
       />
       <Tabs.Screen
         name="more"
         options={{
           title: "More",
-          tabBarIcon: ({ color }) => <TabGlyph glyph="•••" color={color} />,
+          tabBarIcon: ({ color }: { color: ColorValue }) => (
+            <TabGlyph glyph="•••" color={color} />
+          ),
         }}
       />
     </Tabs>

@@ -7,7 +7,7 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useIsFocused } from "expo-router";
+import { useIsFocused } from "@react-navigation/native";
 
 import {
   answer as apiAnswer,

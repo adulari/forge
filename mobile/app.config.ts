@@ -53,7 +53,6 @@ const config: ExpoConfig = {
   },
   plugins: [
     "expo-router",
-    "expo-status-bar",
     "expo-secure-store",
     "expo-font",
     [
