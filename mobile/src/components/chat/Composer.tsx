@@ -80,6 +80,15 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
     setAttachments([]);
     setHeight(MIN_HEIGHT);
   };
+  // `commit` closes over `onSend` (and whatever connection state it reads), so it's a new
+  // function every render. The web keydown listener below is only bound once per session —
+  // route it through this ref so Enter always calls the CURRENT commit/onSend, not the one
+  // captured when the listener was attached (otherwise a mount-while-disconnected session
+  // would queue Enter-sent messages offline forever, even after the WS reconnects).
+  const commitRef = useRef(commit);
+  useEffect(() => {
+    commitRef.current = commit;
+  });
 
   const runUpload = async (picked: PickedFile, webFile?: File) => {
     const id = makeAttachmentId();
@@ -122,7 +131,7 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
       // edge case both modifiers are held at once, so the desktop shortcut always works.
       if (e.key === "Enter" && (!e.shiftKey || e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        commit(textRef.current);
+        commitRef.current(textRef.current);
       }
     };
     const onPasteEvt = (e: ClipboardEvent) => {
