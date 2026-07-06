@@ -31,13 +31,13 @@ async function readAppLockEnabled(): Promise<boolean> {
 }
 
 const AUTH_ERROR_COPY: Partial<Record<LocalAuthenticationError, string>> = {
-  user_cancel: "Cancelled — tap Unlock to try again.",
-  system_cancel: "Cancelled — tap Unlock to try again.",
-  user_fallback: "Tap Unlock to try again.",
-  lockout: "Too many attempts — unlock your device, then reopen Forge.",
-  not_enrolled: "No Face ID/Touch ID enrolled on this device.",
-  not_available: "Biometric authentication isn't available on this device.",
-  passcode_not_set: "Set a device passcode to use app lock.",
+  user_cancel: "cancelled — tap unlock to try again.",
+  system_cancel: "cancelled — tap unlock to try again.",
+  user_fallback: "tap unlock to try again.",
+  lockout: "too many attempts — unlock your device, then reopen Forge.",
+  not_enrolled: "no Face ID/Touch ID enrolled on this device.",
+  not_available: "biometric authentication isn't available on this device.",
+  passcode_not_set: "set a device passcode to use app lock.",
 };
 
 type LockPhase = "checking" | "locked" | "unlocked";
@@ -64,7 +64,7 @@ export function AppLock({ children }: { children: React.ReactNode }) {
         setPhase("unlocked");
       } else {
         setPhase("locked");
-        setAuthError(AUTH_ERROR_COPY[result.error] ?? "Authentication failed. Try again.");
+        setAuthError(AUTH_ERROR_COPY[result.error] ?? "authentication failed — try again.");
       }
     } finally {
       setAuthenticating(false);
@@ -133,7 +133,7 @@ export function AppLock({ children }: { children: React.ReactNode }) {
           <Lock size={32} color={tokens.accent} strokeWidth={1.75} />
           <Text style={[type.heading, styles.title, { color: tokens.ink }]}>Forge is locked</Text>
           <Text style={[type.sub, styles.message, { color: tokens.ink2 }]}>
-            Unlock with Face ID to continue.
+            unlock with Face ID to continue.
           </Text>
           {authError ? (
             <Text style={[type.sub, styles.message, { color: tokens.danger }]}>{authError}</Text>

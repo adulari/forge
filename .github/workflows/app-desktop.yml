@@ -1,0 +1,74 @@
+name: app-desktop
+
+# 3-OS Tauri v2 desktop build of the unified app (ARCHITECTURE.md §6, §8 / BUILD_ORDER.md T6.3).
+# `npm run tauri:build` drives everything, including the web export via `beforeBuildCommand`
+# in mobile/src-tauri/tauri.conf.json. Unsigned in v1 (no notarization/codesign secrets) — the
+# raw per-OS bundles are published as build artifacts only, never auto-released.
+
+on:
+  push:
+    tags:
+      - "app-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: app-desktop-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Tauri v2 Linux prerequisites (webkit2gtk + appindicator + rsvg + patchelf for
+      # AppImage bundling). macOS (WKWebView) and Windows (WebView2) runners need nothing extra.
+      - name: Install Linux webview deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "mobile/src-tauri -> target"
+          key: ${{ matrix.os }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install dependencies
+        working-directory: mobile
+        run: npm ci
+
+      - name: Build desktop bundle
+        working-directory: mobile
+        run: npm run tauri:build
+
+      - name: Upload bundle artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: forge-desktop-${{ matrix.os }}
+          path: mobile/src-tauri/target/release/bundle/**
+          if-no-files-found: error

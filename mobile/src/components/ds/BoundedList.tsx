@@ -2,11 +2,16 @@
 // keys, a mandatory ListEmptyComponent, pagination hooks, Bellows pull-to-refresh
 // (native), memoized rows.
 //
-// Bellows note: full pull-distance arc tracking (§5.2) is swept in BUILD_ORDER
-// Batch 6 (T6.1 animation & feel pass). This wires a working native refresh loop
-// today via RefreshControl (tinted with the accent color) plus the settle haptic
-// on the refreshing:true -> false edge — the visual "ember arc" polish layers on
-// top of this without changing the props contract.
+// T6.1: the native RefreshControl still owns the actual pull gesture + refresh
+// trigger (reliable cross-platform; there's no safe way to intercept raw
+// overscroll distance from a shared FlatList wrapper without real device
+// verification). On iOS its default spinner glyph is hidden (`tintColor`
+// "transparent" — a supported RefreshControl value; the pull gesture keeps
+// working) and BellowsSpinner's ember arc takes over visually the moment
+// `refreshing` flips true, rotating for the duration. Android keeps its native
+// accent-tinted spinner (RefreshControl there has no fully-transparent tint, and
+// stacking a second custom spinner on top would read as a glitch, not polish).
+// Settle haptic fires on the refreshing:true -> false edge either way.
 import React, { forwardRef, useCallback, useEffect, useRef } from "react";
 import {
   ActivityIndicator,
@@ -21,6 +26,7 @@ import {
 import { haptics } from "../../lib/haptics";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
+import { BellowsSpinner } from "./BellowsSpinner";
 
 export interface BoundedListProps<T>
   extends Omit<FlatListProps<T>, "renderItem" | "keyExtractor" | "ListEmptyComponent" | "data"> {
@@ -81,32 +87,35 @@ function BoundedListInner<T>(
   const isEmpty = !data || data.length === 0;
 
   return (
-    <FlatList<T>
-      ref={ref}
-      data={(data as T[]) ?? []}
-      renderItem={stableRenderItem}
-      keyExtractor={keyExtractor}
-      ListEmptyComponent={ListEmptyComponent}
-      ListFooterComponent={footer}
-      onEndReached={onEndReached}
-      onEndReachedThreshold={onEndReachedThreshold}
-      contentContainerStyle={[isEmpty && styles.grow, contentContainerStyle]}
-      refreshControl={
-        Platform.OS !== "web" && onRefresh ? (
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            tintColor={tokens.accent}
-            colors={[tokens.accent]}
-          />
-        ) : undefined
-      }
-      removeClippedSubviews={Platform.OS !== "web"}
-      maxToRenderPerBatch={12}
-      windowSize={9}
-      initialNumToRender={12}
-      {...rest}
-    />
+    <View style={styles.fill}>
+      <FlatList<T>
+        ref={ref}
+        data={(data as T[]) ?? []}
+        renderItem={stableRenderItem}
+        keyExtractor={keyExtractor}
+        ListEmptyComponent={ListEmptyComponent}
+        ListFooterComponent={footer}
+        onEndReached={onEndReached}
+        onEndReachedThreshold={onEndReachedThreshold}
+        contentContainerStyle={[isEmpty && styles.grow, contentContainerStyle]}
+        refreshControl={
+          Platform.OS !== "web" && onRefresh ? (
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={Platform.OS === "ios" ? "transparent" : tokens.accent}
+              colors={[tokens.accent]}
+            />
+          ) : undefined
+        }
+        removeClippedSubviews={Platform.OS !== "web"}
+        maxToRenderPerBatch={12}
+        windowSize={9}
+        initialNumToRender={12}
+        {...rest}
+      />
+      {Platform.OS === "ios" ? <BellowsSpinner active={refreshing} /> : null}
+    </View>
   );
 }
 
@@ -115,6 +124,7 @@ export const BoundedList = forwardRef(BoundedListInner) as <T>(
 ) => React.ReactElement | null;
 
 const styles = StyleSheet.create({
+  fill: { flex: 1 },
   footer: { paddingVertical: space.space16, alignItems: "center" },
   grow: { flexGrow: 1 },
 });

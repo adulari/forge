@@ -1,0 +1,76 @@
+name: app-web
+
+# Static web build of the unified app (ARCHITECTURE.md §5, §8 / BUILD_ORDER.md T6.3).
+# `expo export -p web` produces a deployable static site (`mobile/dist`) — no server, no
+# secrets required. Published as a build artifact on every run; GitHub Pages deploy is
+# optional and OFF by default (see the `deploy-pages` job below).
+
+on:
+  push:
+    tags:
+      - "app-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: app-web-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  export:
+    name: expo export (web)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Export static web build
+        run: npx expo export -p web
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: forge-web-dist
+          path: mobile/dist
+          if-no-files-found: error
+
+      # Optional Pages deploy, guarded behind a repo variable — OFF unless explicitly enabled
+      # (Settings -> Secrets and variables -> Actions -> Variables -> DEPLOY_WEB_TO_PAGES=true).
+      # NOTE: mobile-sidestore.yml already publishes the SideStore/AltStore source manifest to
+      # this same repo's GitHub Pages site. GitHub Pages serves exactly one deployment per repo,
+      # so enabling this would overwrite that manifest (and vice versa) unless the two are
+      # reconciled (e.g. one of them moves to a subpath, or the web app is hosted elsewhere).
+      # Left off by default for that reason — the artifact above is the primary deliverable.
+      - name: Upload Pages artifact
+        if: vars.DEPLOY_WEB_TO_PAGES == 'true'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: mobile/dist
+
+  deploy-pages:
+    name: publish to GitHub Pages (optional)
+    needs: export
+    if: vars.DEPLOY_WEB_TO_PAGES == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

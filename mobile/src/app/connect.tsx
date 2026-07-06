@@ -9,6 +9,7 @@ import { router, useLocalSearchParams } from "expo-router";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
+import { Banner } from "../components/ds/Banner";
 import { Button } from "../components/ds/Button";
 import { Card } from "../components/ds/Card";
 import { Input } from "../components/ds/Input";
@@ -18,7 +19,7 @@ import { QRScan } from "../components/pairing/QRScan";
 import { haptics } from "../lib/haptics";
 import { type ConnectTestState, parseConnectUrl, useAuth } from "../lib/auth";
 import { useTokens } from "../theme/ThemeProvider";
-import { radii, space } from "../theme/tokens";
+import { space } from "../theme/tokens";
 import { type } from "../theme/typography";
 
 // DESIGN_SYSTEM §4 voice: lowercase-calm, says what happened + what to do.
@@ -153,9 +154,7 @@ export default function ConnectScreen() {
       </Card>
 
       {testState !== "idle" && testState !== "testing" && testState !== "ok" ? (
-        <View style={[styles.banner, { backgroundColor: tokens.dangerBg }]} accessibilityRole="alert">
-          <Text style={[type.sub, { color: tokens.danger }]}>{STATE_COPY[testState]}</Text>
-        </View>
+        <Banner tone="danger" message={STATE_COPY[testState]} />
       ) : null}
 
       {testState === "ok" ? (
@@ -173,6 +172,5 @@ const styles = StyleSheet.create({
   heroTitle: { letterSpacing: -0.4 },
   gapCard: { gap: space.space12 },
   howItWorksBody: { gap: space.space8, paddingBottom: space.space4 },
-  banner: { borderRadius: radii.radius12, padding: space.space12 },
   successText: { textAlign: "center" },
 });

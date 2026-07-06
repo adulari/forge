@@ -9,14 +9,15 @@
 // snapshot (a new `prompt_seq`) is what unlocks the card again, and by then the
 // parent has usually stopped rendering this card entirely (permission_prompt
 // went null).
-import { AlertTriangle, Check, X } from "lucide-react-native";
+import { AlertTriangle } from "lucide-react-native";
 import React, { useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
-import Animated, { useAnimatedStyle, useReducedMotion, withTiming } from "react-native-reanimated";
+import Animated, { FadeOut, useAnimatedStyle, useReducedMotion, withTiming } from "react-native-reanimated";
 
 import { Badge } from "../ds/Badge";
 import { Button } from "../ds/Button";
 import { Card } from "../ds/Card";
+import { CommitIcon } from "../ds/CommitIcon";
 import { HeatEdge } from "../ds/HeatEdge";
 import { haptics } from "../../lib/haptics";
 import { type Diff, type RemoteInput } from "../../lib/ws";
@@ -46,8 +47,9 @@ export function PermissionCard({ prompt, diff, promptSeq, send }: PermissionCard
     setCommitted(null);
   }, [promptSeq]);
 
+  // DESIGN_SYSTEM.md §5.2 Approve/Deny commit — "the card's other actions fade to 0.4".
   const dim = useAnimatedStyle(() => ({
-    opacity: withTiming(lockedSeq === promptSeq ? 0.6 : 1, {
+    opacity: withTiming(lockedSeq === promptSeq ? 0.4 : 1, {
       duration: reduced ? 0 : durations.gentle,
       easing: easings.standard,
     }),
@@ -65,7 +67,7 @@ export function PermissionCard({ prompt, diff, promptSeq, send }: PermissionCard
   };
 
   return (
-    <View style={styles.wrap}>
+    <Animated.View style={styles.wrap} exiting={reduced ? undefined : FadeOut.duration(durations.gentle)}>
       <HeatEdge active />
       <Card variant="feature" style={[styles.card, { borderColor: tokens.danger }]}>
         <Animated.View style={dim}>
@@ -89,7 +91,7 @@ export function PermissionCard({ prompt, diff, promptSeq, send }: PermissionCard
               onPress={() => respond(false)}
               disabled={locked}
               fullWidth
-              icon={committed === "deny" ? <X size={16} strokeWidth={2} color={tokens.onAccent} /> : undefined}
+              icon={committed === "deny" ? <CommitIcon kind="x" color={tokens.onAccent} /> : undefined}
               style={styles.actionBtn}
             />
             <Button
@@ -98,13 +100,13 @@ export function PermissionCard({ prompt, diff, promptSeq, send }: PermissionCard
               onPress={() => respond(true)}
               disabled={locked}
               fullWidth
-              icon={committed === "allow" ? <Check size={16} strokeWidth={2} color={tokens.onAccent} /> : undefined}
+              icon={committed === "allow" ? <CommitIcon kind="check" color={tokens.onAccent} /> : undefined}
               style={styles.actionBtn}
             />
           </View>
         </Animated.View>
       </Card>
-    </View>
+    </Animated.View>
   );
 }
 

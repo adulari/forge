@@ -18,13 +18,16 @@
 // variant to ds/Button if the red tint from DESIGN_SYSTEM.md is required.
 import React, { useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
+import Animated, { FadeOut, useAnimatedStyle, useReducedMotion, withTiming } from "react-native-reanimated";
 
 import { Button } from "../ds/Button";
 import { Card } from "../ds/Card";
+import { CommitIcon } from "../ds/CommitIcon";
 import { IconButton } from "../ds/IconButton";
 import { Input } from "../ds/Input";
 import { haptics } from "../../lib/haptics";
 import { type Plan, type QuestionOption, type RemoteInput } from "../../lib/ws";
+import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
@@ -44,21 +47,33 @@ function findOptionNumber(options: QuestionOption[], pattern: RegExp, fallback: 
 
 export function PlanCard({ plan, questionOptions, promptSeq, send }: PlanCardProps) {
   const tokens = useTokens();
+  const reduced = useReducedMotion();
   const [lockedSeq, setLockedSeq] = useState<number | null>(null);
   const [revising, setRevising] = useState(false);
   const [reviseText, setReviseText] = useState("");
+  // DESIGN_SYSTEM.md §5.2 Approve/Deny commit: which action was tapped, for the
+  // check/x CommitIcon — only Approve/Cancel are binary commits; Revise opens a
+  // free-text row instead of resolving the prompt, so it never sets this.
+  const [committed, setCommitted] = useState<"approve" | "cancel" | null>(null);
 
   useEffect(() => {
     setLockedSeq(null);
     setRevising(false);
     setReviseText("");
+    setCommitted(null);
   }, [promptSeq]);
 
   const locked = lockedSeq === promptSeq;
 
-  const commit = (text: string, haptic: () => void) => {
+  // The card's other actions fade to 0.4 once a choice locks in.
+  const dim = useAnimatedStyle(() => ({
+    opacity: withTiming(locked ? 0.4 : 1, { duration: reduced ? 0 : durations.gentle, easing: easings.standard }),
+  }));
+
+  const commit = (text: string, haptic: () => void, which?: "approve" | "cancel") => {
     if (locked || text.trim().length === 0) return;
     setLockedSeq(promptSeq);
+    if (which) setCommitted(which);
     haptic();
     send({ kind: "answer", text, seq: promptSeq });
   };
@@ -67,73 +82,79 @@ export function PlanCard({ plan, questionOptions, promptSeq, send }: PlanCardPro
   const cancelNumber = findOptionNumber(questionOptions, /cancel/i, "2");
 
   return (
-    <Card variant="feature" style={styles.card}>
-      <Text style={[typeScale.section, { color: tokens.accent }]}>⬡ PLAN</Text>
-      <Text style={[typeScale.heading, { color: tokens.ink }, styles.title]}>{plan.title}</Text>
+    <Animated.View exiting={reduced ? undefined : FadeOut.duration(durations.gentle)}>
+      <Card variant="feature" style={styles.card}>
+        <Animated.View style={dim}>
+          <Text style={[typeScale.section, { color: tokens.accent }]}>⬡ PLAN</Text>
+          <Text style={[typeScale.heading, { color: tokens.ink }, styles.title]}>{plan.title}</Text>
 
-      <View style={styles.steps}>
-        {plan.steps.map((step, idx) => (
-          <View key={idx} style={styles.step}>
-            <Text style={[typeScale.bodyBold, { color: tokens.ink3 }, styles.stepNumber]}>{idx + 1}</Text>
-            <View style={styles.stepBody}>
-              <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>{step.title}</Text>
-              {step.detail ? (
-                <Text style={[typeScale.sub, { color: tokens.ink2 }, styles.stepDetail]}>{step.detail}</Text>
-              ) : null}
-            </View>
+          <View style={styles.steps}>
+            {plan.steps.map((step, idx) => (
+              <View key={idx} style={styles.step}>
+                <Text style={[typeScale.bodyBold, { color: tokens.ink3 }, styles.stepNumber]}>{idx + 1}</Text>
+                <View style={styles.stepBody}>
+                  <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>{step.title}</Text>
+                  {step.detail ? (
+                    <Text style={[typeScale.sub, { color: tokens.ink2 }, styles.stepDetail]}>{step.detail}</Text>
+                  ) : null}
+                </View>
+              </View>
+            ))}
           </View>
-        ))}
-      </View>
 
-      {plan.notes ? (
-        <View style={[styles.notes, { backgroundColor: tokens.warnBg }]}>
-          <Text style={[typeScale.sub, { color: tokens.warnBgInk }]}>{plan.notes}</Text>
-        </View>
-      ) : null}
+          {plan.notes ? (
+            <View style={[styles.notes, { backgroundColor: tokens.warnBg }]}>
+              <Text style={[typeScale.sub, { color: tokens.warnBgInk }]}>{plan.notes}</Text>
+            </View>
+          ) : null}
 
-      <View style={styles.actions}>
-        <Button
-          label="Cancel"
-          variant="ghost"
-          onPress={() => commit(cancelNumber, haptics.deny)}
-          disabled={locked}
-        />
-        <Button
-          label="Revise"
-          variant="ghost"
-          onPress={() => setRevising((v) => !v)}
-          disabled={locked}
-        />
-        <Button
-          label="Approve"
-          variant="allow"
-          onPress={() => commit(approveNumber, haptics.allow)}
-          disabled={locked}
-          style={styles.approveBtn}
-        />
-      </View>
+          <View style={styles.actions}>
+            <Button
+              label="Cancel"
+              variant="ghost"
+              onPress={() => commit(cancelNumber, haptics.deny, "cancel")}
+              disabled={locked}
+              icon={committed === "cancel" ? <CommitIcon kind="x" color={tokens.ink2} /> : undefined}
+            />
+            <Button
+              label="Revise"
+              variant="ghost"
+              onPress={() => setRevising((v) => !v)}
+              disabled={locked}
+            />
+            <Button
+              label="Approve"
+              variant="allow"
+              onPress={() => commit(approveNumber, haptics.allow, "approve")}
+              disabled={locked}
+              icon={committed === "approve" ? <CommitIcon kind="check" color={tokens.onAccent} /> : undefined}
+              style={styles.approveBtn}
+            />
+          </View>
 
-      {revising ? (
-        <View style={styles.reviseRow}>
-          <Input
-            value={reviseText}
-            onChangeText={setReviseText}
-            placeholder="what should change?"
-            editable={!locked}
-            onSubmitEditing={() => commit(reviseText, haptics.select)}
-            returnKeyType="send"
-            containerStyle={styles.reviseInput}
-            accessibilityLabel="plan revision"
-          />
-          <IconButton
-            icon={<Send size={20} strokeWidth={1.75} color={tokens.ink} />}
-            onPress={() => commit(reviseText, haptics.select)}
-            disabled={locked || reviseText.trim().length === 0}
-            accessibilityLabel="send revision"
-          />
-        </View>
-      ) : null}
-    </Card>
+          {revising ? (
+            <View style={styles.reviseRow}>
+              <Input
+                value={reviseText}
+                onChangeText={setReviseText}
+                placeholder="what should change?"
+                editable={!locked}
+                onSubmitEditing={() => commit(reviseText, haptics.select)}
+                returnKeyType="send"
+                containerStyle={styles.reviseInput}
+                accessibilityLabel="plan revision"
+              />
+              <IconButton
+                icon={<Send size={20} strokeWidth={1.75} color={tokens.ink} />}
+                onPress={() => commit(reviseText, haptics.select)}
+                disabled={locked || reviseText.trim().length === 0}
+                accessibilityLabel="send revision"
+              />
+            </View>
+          ) : null}
+        </Animated.View>
+      </Card>
+    </Animated.View>
   );
 }
 

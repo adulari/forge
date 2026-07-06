@@ -206,9 +206,9 @@ export default function HistoryScreen() {
       )}
       <ConfirmDialog
         visible={confirmRow != null}
-        title="resume this session?"
+        title="Resume this session?"
         message={confirmRow?.title || confirmRow?.id.slice(0, 8)}
-        confirmLabel="resume"
+        confirmLabel="Resume"
         onConfirm={() => {
           if (confirmRow) resume(confirmRow);
           setConfirmRow(null);

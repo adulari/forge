@@ -525,7 +525,7 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
         <SearchField
           value={query}
           onChangeText={setQuery}
-          placeholder="Jump to a session, run a command…"
+          placeholder="jump to a session, run a command…"
           showCancel={false}
           autoFocus={visible}
           accessibilityLabel="Command palette search"
@@ -548,7 +548,7 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
             ) : null,
           )
         ) : (
-          <EmptyState icon={Search} message="No results" />
+          <EmptyState icon={Search} message="no matches for that search" />
         )}
       </ScrollView>
     </View>
