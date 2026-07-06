@@ -32,7 +32,6 @@ fi
 loginctl enable-linger "$RUNNER_USER"
 
 mkdir -p "$RUNNER_DIR"
-chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
 
 if [ ! -f "$RUNNER_DIR/config.sh" ]; then
   echo "==> Fetching latest actions/runner release"
@@ -44,13 +43,16 @@ if [ ! -f "$RUNNER_DIR/config.sh" ]; then
   fi
   TARBALL="actions-runner-linux-x64-${LATEST_TAG}.tar.gz"
   echo "==> Downloading $TARBALL"
-  sudo -u "$RUNNER_USER" curl -fsSL -o "$RUNNER_DIR/$TARBALL" \
+  # Download + extract as root, then chown. Running curl as the unprivileged runner user
+  # can hit a PAM fsize ulimit that truncates the ~60MB tarball mid-write (curl error 23).
+  curl -fSL -o "$RUNNER_DIR/$TARBALL" \
     "https://github.com/actions/runner/releases/download/v${LATEST_TAG}/${TARBALL}"
-  sudo -u "$RUNNER_USER" tar xzf "$RUNNER_DIR/$TARBALL" -C "$RUNNER_DIR"
+  tar xzf "$RUNNER_DIR/$TARBALL" -C "$RUNNER_DIR"
   rm -f "$RUNNER_DIR/$TARBALL"
 else
   echo "==> Runner already extracted at $RUNNER_DIR — skipping download (reconfigure still runs below)"
 fi
+chown -R "$RUNNER_USER:$RUNNER_USER" "$RUNNER_DIR"
 
 echo "==> Minting registration token as $RUN_USER"
 RUNNER_TOKEN="${RUNNER_TOKEN:-$(sudo -u "$RUN_USER" gh api -X POST "repos/$OWNER_REPO/actions/runners/registration-token" -q .token)}"
