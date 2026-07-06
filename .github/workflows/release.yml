@@ -45,7 +45,10 @@ jobs:
           - os: [self-hosted, linux, x64]
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
-          - os: [self-hosted, linux, x64]
+          # arm64 stays on GitHub's native-arm runner: the self-hosted x64 box can't build
+          # aarch64 natively, and cross-compiling would need a linker that isn't set up. This
+          # leg only runs on release tags (rare), so keeping it hosted is cheap and correct.
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             archive: tar.gz
           - os: macos-latest
