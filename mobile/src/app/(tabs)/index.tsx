@@ -13,6 +13,7 @@ import {
   Badge,
   BoundedList,
   Card,
+  ContextGauge,
   EmptyState,
   ErrorText,
   FAB,
@@ -21,66 +22,9 @@ import {
   Screen,
   StatusDot,
   type StatusDotState,
-  type Tone,
   EntranceView,
 } from "../../components/ui";
 import { type SessionActionTarget, useSessionActions } from "../../components/sessionActions";
-
-function formatTokenCount(n: number): string {
-  if (n >= 10_000) return `${Math.round(n / 1000)}k`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(n);
-}
-
-function contextTone(pct: number): Tone {
-  if (pct > 0.9) return "no";
-  if (pct > 0.7) return "accent";
-  return "dim";
-}
-
-const contextBarClass: Record<Tone, string> = {
-  no: "bg-no",
-  accent: "bg-accent",
-  dim: "bg-dim",
-  ok: "bg-ok",
-  ink: "bg-ink",
-};
-
-const contextTextClass: Record<Tone, string> = {
-  no: "text-no",
-  accent: "text-accent",
-  dim: "text-dim",
-  ok: "text-ok",
-  ink: "text-ink",
-};
-
-function ContextGauge({ tokens, limit }: { tokens: number; limit: number | null }) {
-  if (!limit) {
-    return (
-      <Text className="text-dim text-[12px]" style={{ fontVariant: ["tabular-nums"] }}>
-        {formatTokenCount(tokens)}
-      </Text>
-    );
-  }
-  const pct = Math.min(1, tokens / limit);
-  const tone = contextTone(pct);
-  return (
-    <View className="items-end gap-2">
-      <Text
-        className={`text-[12px] ${contextTextClass[tone]}`}
-        style={{ fontVariant: ["tabular-nums"] }}
-      >
-        {formatTokenCount(tokens)}/{formatTokenCount(limit)}
-      </Text>
-      <View className="w-[40px] h-[3px] rounded-full bg-borderSoft overflow-hidden">
-        <View
-          className={`h-[3px] rounded-full ${contextBarClass[tone]}`}
-          style={{ width: `${pct * 100}%` }}
-        />
-      </View>
-    </View>
-  );
-}
 
 interface FleetRowProps {
   row: SessionRow;
@@ -215,6 +159,7 @@ export default function FleetScreen() {
         ListEmptyComponent={emptyComponent}
         refreshing={query.isRefetching}
         onRefresh={query.refetch}
+        contentContainerStyle={{ paddingBottom: 72 }}
       />
       <FAB label="New" onPress={() => router.push("/new-session")} />
       {sheet}

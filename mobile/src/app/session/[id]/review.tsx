@@ -5,7 +5,7 @@
 // pending-permission change or everything that landed this turn). Content only — the session
 // shell owns the Screen header/status strip (UI_RULES.md #1-#2).
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 
 import {
   Badge,
@@ -17,7 +17,6 @@ import {
   EmptyState,
   Loading,
   PrimaryButton,
-  Screen,
 } from "../../../components/ui";
 import { theme } from "../../../lib/theme";
 import { useSessionCtx } from "../../../lib/sessionContext";
@@ -29,7 +28,7 @@ const monoStyle = {
   lineHeight: 18,
 } as const;
 
-function optionNumber(options: QuestionOption[], label: string): number {
+export function optionNumber(options: QuestionOption[], label: string): number {
   const i = options.findIndex((o) => o.label === label);
   return i < 0 ? 0 : i + 1;
 }
@@ -342,14 +341,18 @@ export default function ReviewScreen() {
 
   if (!snapshot) {
     return (
-      <Screen scroll={false}>
+      <View className="flex-1">
         <Loading label="Connecting to session…" />
-      </Screen>
+      </View>
     );
   }
 
   return (
-    <Screen scroll={false} keyboardAvoiding>
+    <KeyboardAvoidingView
+      className="flex-1"
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+      keyboardVerticalOffset={Platform.OS === "ios" ? 8 : 0}
+    >
       <BoundedList
         data={rows}
         keyExtractor={reviewRowKey}
@@ -357,6 +360,6 @@ export default function ReviewScreen() {
         ListEmptyComponent={emptyComponent}
         contentContainerStyle={{ paddingTop: 4, paddingBottom: 16, gap: 10 }}
       />
-    </Screen>
+    </KeyboardAvoidingView>
   );
 }

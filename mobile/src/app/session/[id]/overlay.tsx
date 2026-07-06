@@ -269,6 +269,8 @@ export default function OverlayScreen() {
             <Pressable
               onPress={() => onNav(-1)}
               hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Previous match"
               className="bg-chipBg border border-border rounded-md items-center justify-center"
               style={{ minWidth: 44, minHeight: 44 }}
             >
@@ -277,6 +279,8 @@ export default function OverlayScreen() {
             <Pressable
               onPress={() => onNav(1)}
               hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Next match"
               className="bg-chipBg border border-border rounded-md items-center justify-center"
               style={{ minWidth: 44, minHeight: 44 }}
             >

@@ -10,12 +10,13 @@ import { Platform, Pressable, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { Badge, Chip, EntranceView, Metric, Segmented, type SegmentedOption, StatusDot, type StatusDotState } from "../../../components/ui";
+import { Badge, Chip, ContextGauge, EntranceView, Metric, Segmented, type SegmentedOption, StatusDot, type StatusDotState } from "../../../components/ui";
 import { PermissionCard } from "../../../components/permissionCard";
 import { QuestionCard } from "../../../components/questionCard";
 import { usePressScale } from "../../../lib/motion";
 import { colors } from "../../../lib/theme";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
+import { optionNumber } from "./review";
 
 function lightHaptic() {
   if (Platform.OS === "web") return;
@@ -53,41 +54,6 @@ function baseName(p: string | undefined | null): string {
   if (!p) return "";
   const parts = p.replace(/[\\/]+$/, "").split(/[\\/]/);
   return parts[parts.length - 1] || p;
-}
-
-function formatTokenCount(n: number): string {
-  if (n >= 10_000) return `${Math.round(n / 1000)}k`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
-  return String(n);
-}
-
-function contextToneClass(pct: number): { bar: string; text: string } {
-  if (pct > 0.9) return { bar: "bg-no", text: "text-no" };
-  if (pct > 0.7) return { bar: "bg-accent", text: "text-accent" };
-  return { bar: "bg-dim", text: "text-dim" };
-}
-
-function ContextGauge({ tokens, limit }: { tokens: number; limit: number | null }) {
-  if (!tokens) return null;
-  if (!limit) {
-    return (
-      <Text className="text-dim text-[12px]" style={{ fontVariant: ["tabular-nums"] }}>
-        {formatTokenCount(tokens)}
-      </Text>
-    );
-  }
-  const pct = Math.min(1, tokens / limit);
-  const tone = contextToneClass(pct);
-  return (
-    <View className="items-end gap-2">
-      <Text className={`text-[12px] ${tone.text}`} style={{ fontVariant: ["tabular-nums"] }}>
-        {formatTokenCount(tokens)}/{formatTokenCount(limit)}
-      </Text>
-      <View className="w-[40px] h-[3px] rounded-full bg-borderSoft overflow-hidden">
-        <View className={`h-[3px] rounded-full ${tone.bar}`} style={{ width: `${pct * 100}%` }} />
-      </View>
-    </View>
-  );
 }
 
 type SegmentKey = "chat" | "tasks" | "agents" | "review";
@@ -250,9 +216,28 @@ function SessionShell() {
           }}
         >
           <Stack.Screen name="index" />
-          <Stack.Screen name="tasks" />
-          <Stack.Screen name="agents" />
-          <Stack.Screen name="review" />
+          {/* Tasks/Agents/Review no longer wrap themselves in <Screen> (which duplicated
+              safe-area + horizontal-gutter handling) — the shell owns that gutter here, via
+              contentStyle, for these three segments. Chat keeps managing its own edge-to-edge
+              layout (full-bleed row dividers + input bar) so it's deliberately left out. */}
+          <Stack.Screen
+            name="tasks"
+            options={{
+              contentStyle: { backgroundColor: colors.bg, paddingHorizontal: 12, paddingBottom: insets.bottom },
+            }}
+          />
+          <Stack.Screen
+            name="agents"
+            options={{
+              contentStyle: { backgroundColor: colors.bg, paddingHorizontal: 12, paddingBottom: insets.bottom },
+            }}
+          />
+          <Stack.Screen
+            name="review"
+            options={{
+              contentStyle: { backgroundColor: colors.bg, paddingHorizontal: 12, paddingBottom: insets.bottom },
+            }}
+          />
           <Stack.Screen
             name="overlay"
             options={{
@@ -269,6 +254,8 @@ function SessionShell() {
                 <Pressable
                   onPress={handleOverlayClose}
                   hitSlop={8}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close overlay"
                   style={{ minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" }}
                 >
                   <Text style={{ color: colors.dim, fontSize: 18 }}>✕</Text>
@@ -300,7 +287,14 @@ function SessionShell() {
             affordance itself is suppressed while already viewing Review (nothing to jump to —
             the full plan card is right there). Non-plan questions are unaffected. */}
         {(() => {
-          const hasPlanQuestion = snapshot?.plan != null && snapshot?.question != null;
+          // A pending question only belongs to the plan if it carries the plan-approval
+          // "Build it" option (same check PlanCard/review.tsx uses to decide `decidable`) —
+          // otherwise an unrelated question would get silently swallowed by the plan-jump
+          // affordance below, stranding the user with no controls for it.
+          const hasPlanQuestion =
+            snapshot?.plan != null &&
+            snapshot?.question != null &&
+            optionNumber(snapshot.question_options, "Build it") > 0;
           const showPlanJump = hasPlanQuestion && activeKey !== "review";
           const showQuestionCard = snapshot?.question != null && !hasPlanQuestion;
           const showSheet = !!snapshot?.permission_prompt || showPlanJump || showQuestionCard;

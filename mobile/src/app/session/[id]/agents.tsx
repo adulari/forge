@@ -13,7 +13,6 @@ import {
   EmptyState,
   Loading,
   Metric,
-  Screen,
   StatusDot,
 } from "../../../components/ui";
 import { useSessionCtx } from "../../../lib/sessionContext";
@@ -94,20 +93,20 @@ export default function AgentsScreen() {
 
   if (!snapshot) {
     return (
-      <Screen>
+      <View className="flex-1">
         <Loading label="Connecting to session…" />
-      </Screen>
+      </View>
     );
   }
 
   return (
-    <Screen scroll={false}>
+    <View className="flex-1">
       <BoundedList
         data={data}
         keyExtractor={keyExtractor}
         renderItem={renderItem}
         ListEmptyComponent={emptyComponent}
       />
-    </Screen>
+    </View>
   );
 }

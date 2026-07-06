@@ -117,7 +117,13 @@ function SessionActionSheet({
               <Text numberOfLines={1} className="flex-1 text-ink text-[16px] font-bold">
                 {displayTarget.title || `#${displayTarget.id.slice(0, 8)}`}
               </Text>
-              <Pressable onPress={handleClose} hitSlop={12} style={{ minWidth: 44, minHeight: 44, alignItems: "flex-end", justifyContent: "center" }}>
+              <Pressable
+                onPress={handleClose}
+                hitSlop={12}
+                accessibilityRole="button"
+                accessibilityLabel="Close"
+                style={{ minWidth: 44, minHeight: 44, alignItems: "flex-end", justifyContent: "center" }}
+              >
                 <Text className="text-dim text-[18px]">×</Text>
               </Pressable>
             </View>

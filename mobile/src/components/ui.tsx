@@ -27,7 +27,7 @@ import {
 import Animated from "react-native-reanimated";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { useEntranceAnimation, usePressScale, usePulse } from "../lib/motion";
+import { useCountUp, useEntranceAnimation, usePressScale, usePulse } from "../lib/motion";
 import { minTapTarget, theme } from "../lib/theme";
 
 function cn(...parts: Array<string | false | null | undefined>): string {
@@ -136,6 +136,7 @@ export function Card({ children, onPress, variant = "default", className }: Card
         onPress={onPress}
         onPressIn={onPressIn}
         onPressOut={onPressOut}
+        accessibilityRole="button"
         className={cn(
           "bg-panel border border-borderSoft px-10 py-8",
           radiusClass,
@@ -244,6 +245,7 @@ function ListRowBase({
         onPressIn={onPressIn}
         onPressOut={onPressOut}
         disabled={disabled}
+        accessibilityRole="button"
       >
         {content}
       </Pressable>
@@ -309,13 +311,65 @@ export function formatMetric(value: number, format: MetricProps["format"] = "raw
 }
 
 export function Metric({ value, format = "raw", tone = "ink", className }: MetricProps) {
+  const displayValue = useCountUp(value);
   return (
     <Text
       className={cn("text-[13px]", toneClass[tone], className)}
       style={{ fontVariant: ["tabular-nums"] }}
     >
-      {formatMetric(value, format)}
+      {formatMetric(displayValue, format)}
     </Text>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ContextGauge — token-usage badge (compact "12.3k/32k" text + thin bar), shared by
+// Fleet rows and the session shell status strip (single source of truth, was duplicated).
+// ---------------------------------------------------------------------------
+
+const toneBgClass: Record<Tone, string> = {
+  ink: "bg-ink",
+  ok: "bg-ok",
+  no: "bg-no",
+  accent: "bg-accent",
+  dim: "bg-dim",
+};
+
+export function formatTokenCount(n: number): string {
+  if (n >= 10_000) return `${Math.round(n / 1000)}k`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
+}
+
+function contextTone(pct: number): Tone {
+  if (pct > 0.9) return "no";
+  if (pct > 0.7) return "accent";
+  return "dim";
+}
+
+export function ContextGauge({ tokens, limit }: { tokens: number; limit: number | null }) {
+  if (!tokens) return null;
+  if (!limit) {
+    return (
+      <Text className="text-dim text-[12px]" style={{ fontVariant: ["tabular-nums"] }}>
+        {formatTokenCount(tokens)}
+      </Text>
+    );
+  }
+  const pct = Math.min(1, tokens / limit);
+  const tone = contextTone(pct);
+  return (
+    <View className="items-end gap-2">
+      <Text className={cn("text-[12px]", toneClass[tone])} style={{ fontVariant: ["tabular-nums"] }}>
+        {formatTokenCount(tokens)}/{formatTokenCount(limit)}
+      </Text>
+      <View className="w-[40px] h-[3px] rounded-full bg-borderSoft overflow-hidden">
+        <View
+          className={cn("h-[3px] rounded-full", toneBgClass[tone])}
+          style={{ width: `${pct * 100}%` }}
+        />
+      </View>
+    </View>
   );
 }
 
@@ -389,6 +443,7 @@ export function Chip({ label, selected, onPress, tone = "default", disabled }: C
         onPressOut={onPressOut}
         disabled={disabled}
         hitSlop={8}
+        accessibilityRole="button"
         className={cn(
           "rounded-pill border px-16 py-11 items-center justify-center",
           selected ? "bg-selBg border-accent" : "bg-chipBg border-border",
@@ -436,11 +491,13 @@ export function Segmented({ options, value, onChange }: SegmentedProps) {
           <Pressable
             key={opt.key}
             onPress={() => onChange(opt.key)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: active }}
             className={cn(
               "flex-1 flex-row items-center justify-center rounded-sm py-8 gap-4",
               active && "bg-panel",
             )}
-            style={{ minHeight: minTapTarget - 8 }}
+            style={{ minHeight: minTapTarget }}
           >
             <Text
               numberOfLines={1}
@@ -524,6 +581,7 @@ export function PrimaryButton({
         onPressIn={onPressIn}
         onPressOut={onPressOut}
         disabled={isDisabled}
+        accessibilityRole="button"
         className={cn(
           "bg-accent rounded-md items-center justify-center flex-row gap-8 px-16",
           isDisabled && "opacity-50",
@@ -580,6 +638,7 @@ export function ConfirmButton({
         onPressIn={onPressIn}
         onPressOut={onPressOut}
         disabled={isDisabled}
+        accessibilityRole="button"
         className={cn(
           "rounded-md items-center justify-center flex-row gap-8 px-16",
           tone === "ok" ? "bg-ok" : "bg-no",
@@ -615,6 +674,7 @@ export function FAB({ onPress, label, glyph = "+" }: FABProps) {
         onPress={onPress}
         onPressIn={onPressIn}
         onPressOut={onPressOut}
+        accessibilityRole="button"
         accessibilityLabel={label ?? "New"}
         className="bg-accent rounded-full items-center justify-center px-16 flex-row gap-6"
         style={{ minHeight: 56, minWidth: label ? undefined : 56 }}
@@ -693,17 +753,23 @@ export interface BoundedListProps<T>
 /**
  * The ONLY sanctioned way to render a list (UI_RULES.md #7). Never `.map()` an unbounded
  * array in a ScrollView. Virtualized with sane perf defaults (UI_RULES.md #26-27).
+ *
+ * Forwards its ref to the inner FlatList so callers can drive imperative scroll (e.g.
+ * `scrollToOffset`) instead of remounting the whole list via a changing `key`.
  */
-export function BoundedList<T>({
-  data,
-  keyExtractor,
-  renderItem,
-  ListEmptyComponent,
-  loading,
-  refreshing,
-  onRefresh,
-  ...rest
-}: BoundedListProps<T>) {
+function BoundedListInner<T>(
+  {
+    data,
+    keyExtractor,
+    renderItem,
+    ListEmptyComponent,
+    loading,
+    refreshing,
+    onRefresh,
+    ...rest
+  }: BoundedListProps<T>,
+  ref: React.Ref<FlatList<T>>,
+) {
   const keyExtractorStable = useCallback(
     (item: T) => keyExtractor(item),
     [keyExtractor],
@@ -719,6 +785,7 @@ export function BoundedList<T>({
 
   return (
     <FlatList
+      ref={ref}
       data={data}
       keyExtractor={keyExtractorStable}
       renderItem={renderItemStable}
@@ -740,6 +807,10 @@ export function BoundedList<T>({
     />
   );
 }
+
+export const BoundedList = React.forwardRef(BoundedListInner) as <T>(
+  props: BoundedListProps<T> & { ref?: React.Ref<FlatList<T>> },
+) => React.ReactElement;
 
 // ---------------------------------------------------------------------------
 // StatusDot — busy/waiting/idle pulse (used by Fleet rows + session header)

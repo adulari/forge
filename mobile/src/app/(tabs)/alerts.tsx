@@ -17,6 +17,7 @@ import {
   EmptyState,
   EntranceView,
   ErrorText,
+  formatTokenCount,
   Loading,
   Metric,
   Screen,
@@ -24,14 +25,6 @@ import {
   StatusDot,
 } from "../../components/ui";
 import { useSessions } from "../../lib/queries";
-
-function formatTokens(n: number): string {
-  if (n >= 1000) {
-    const k = n / 1000;
-    return `${k < 10 ? k.toFixed(1) : Math.round(k)}k`;
-  }
-  return String(Math.round(n));
-}
 
 interface AlertRowProps {
   row: SessionRow;
@@ -74,7 +67,7 @@ function AlertRowBase({ row, index, onPress }: AlertRowProps) {
         {row.context_limit ? (
           <View className="gap-4">
             <Text className="text-dim text-[12px]" style={{ fontVariant: ["tabular-nums"] }}>
-              {formatTokens(row.context_tokens)}/{formatTokens(row.context_limit)}
+              {formatTokenCount(row.context_tokens)}/{formatTokenCount(row.context_limit)}
             </Text>
             <View className="h-2 rounded-pill bg-border overflow-hidden">
               <View

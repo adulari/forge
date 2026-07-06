@@ -5,7 +5,7 @@
 import React, { useCallback, useMemo } from "react";
 import { Text, View } from "react-native";
 
-import { BoundedList, EmptyState, Loading, Screen } from "../../../components/ui";
+import { BoundedList, EmptyState, Loading } from "../../../components/ui";
 import { useSessionCtx } from "../../../lib/sessionContext";
 import type { SnapshotTask } from "../../../lib/ws";
 
@@ -67,16 +67,16 @@ export default function TasksScreen() {
 
   if (!snapshot) {
     return (
-      <Screen>
+      <View className="flex-1">
         <Loading label="Connecting to session…" />
-      </Screen>
+      </View>
     );
   }
 
   const done = data.filter((t) => t.status === "done").length;
 
   return (
-    <Screen scroll={false}>
+    <View className="flex-1">
       {data.length ? (
         <Text
           className="text-dim text-[12px] font-semibold uppercase tracking-[0.5px] mb-6"
@@ -91,6 +91,6 @@ export default function TasksScreen() {
         renderItem={renderItem}
         ListEmptyComponent={emptyComponent}
       />
-    </Screen>
+    </View>
   );
 }

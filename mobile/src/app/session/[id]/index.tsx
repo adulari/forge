@@ -9,6 +9,7 @@ import * as ImagePicker from "expo-image-picker";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  type FlatList,
   KeyboardAvoidingView,
   Modal,
   type NativeScrollEvent,
@@ -20,6 +21,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { ApiError, type HistoryRow } from "../../../lib/api";
 import { theme } from "../../../lib/theme";
@@ -341,10 +343,11 @@ export default function ChatScreen() {
   const { sessionId, baseUrl, snapshot, connectionState, send } = useSessionCtx();
   const historyQuery = useHistory(sessionId);
   const uploadMutation = useUpload();
+  const insets = useSafeAreaInsets();
 
   const [text, setText] = useState("");
   const [nearBottom, setNearBottom] = useState(true);
-  const [listEpoch, setListEpoch] = useState(0);
+  const listRef = useRef<FlatList<ChatRow>>(null);
   const [offlineQueue, setOfflineQueue] = useState<string[]>([]);
   const [offlineDropped, setOfflineDropped] = useState(0);
   const [uploads, setUploads] = useState<UploadChip[]>([]);
@@ -518,7 +521,9 @@ export default function ChatScreen() {
     setNearBottom(e.nativeEvent.contentOffset.y < 80);
   }, []);
 
-  const jumpToLatest = useCallback(() => setListEpoch((e) => e + 1), []);
+  const jumpToLatest = useCallback(() => {
+    listRef.current?.scrollToOffset({ offset: 0, animated: true });
+  }, []);
 
   const queued = snapshot?.queued ?? [];
   const showLoading = historyQuery.isLoading && combined.length === 0;
@@ -541,7 +546,7 @@ export default function ChatScreen() {
             />
           ) : (
             <BoundedList
-              key={listEpoch}
+              ref={listRef}
               data={combined}
               keyExtractor={keyExtractor}
               renderItem={renderItem}
@@ -565,7 +570,10 @@ export default function ChatScreen() {
           ) : null}
         </View>
 
-        <View className="border-t border-borderSoft bg-panel px-12 pt-8 pb-8 gap-8">
+        <View
+          className="border-t border-borderSoft bg-panel px-12 pt-8 gap-8"
+          style={{ paddingBottom: 8 + insets.bottom }}
+        >
           {uploads.length ? (
             <View className="flex-row flex-wrap gap-6">
               {uploads.map((u) => (
@@ -609,6 +617,8 @@ export default function ChatScreen() {
             <Pressable
               onPress={() => setAttachOpen(true)}
               hitSlop={8}
+              accessibilityRole="button"
+              accessibilityLabel="Attach a file or photo"
               style={{ minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" }}
             >
               <Text className="text-dim text-[20px]">📎</Text>
