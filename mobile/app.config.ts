@@ -9,7 +9,7 @@ const config: ExpoConfig = {
   version: "1.0.0",
   orientation: "portrait",
   icon: "./assets/icon.png",
-  userInterfaceStyle: "dark",
+  userInterfaceStyle: "automatic",
   backgroundColor: "#16161c",
   ios: {
     bundleIdentifier: BUNDLE_ID,
@@ -50,11 +50,21 @@ const config: ExpoConfig = {
   web: {
     favicon: "./assets/favicon.png",
     bundler: "metro",
+    output: "static",
   },
   plugins: [
     "expo-router",
     "expo-secure-store",
-    "expo-font",
+    "expo-status-bar",
+    [
+      "expo-font",
+      {
+        fonts: [
+          "./assets/JetBrainsMono-Regular.ttf",
+          "./assets/JetBrainsMono-Bold.ttf",
+        ],
+      },
+    ],
     [
       "expo-camera",
       {

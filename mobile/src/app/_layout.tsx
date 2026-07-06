@@ -2,8 +2,9 @@
 // auth/pairing gate, and the top-level Stack. No custom fonts are loaded — the web UI
 // uses the system font stack (-apple-system/system-ui), so this app matches it with
 // platform defaults (BUILD_PLAN §3) rather than bundling a font asset.
-import "../../global.css";
-
+// HANDOFF(T0.1): removed the NativeWind global.css import (file deleted, T0.1 dropped
+// NativeWind/Tailwind per ARCHITECTURE §1). This whole file is replaced by T2.1
+// (ThemeProvider, AuthProvider, PersistQueryClientProvider root shell).
 import { createAsyncStoragePersister } from "@tanstack/query-async-storage-persister";
 import { QueryClient } from "@tanstack/react-query";
 import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";

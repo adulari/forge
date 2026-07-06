@@ -7,7 +7,8 @@ import {
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
-import { useIsFocused } from "@react-navigation/native";
+import { useIsFocused } from "expo-router";
+import { useEffect, useRef } from "react";
 
 import {
   answer as apiAnswer,
@@ -25,6 +26,7 @@ import {
   uploadFile,
 } from "./api";
 import { useAuth } from "./auth";
+import type { Snapshot } from "./ws";
 
 const SESSIONS_POLL_MS = 3000;
 const PAST_PAGE_SIZE = 50;
@@ -150,4 +152,33 @@ export function useUpload() {
     mutationFn: ({ sessionId, form }: { sessionId: string; form: FormData }) =>
       uploadFile(baseUrl as string, sessionId, form),
   });
+}
+
+/**
+ * Fires the history-invalidation rule from ARCHITECTURE.md §4.1.4: on a turn's `busy`
+ * true→false edge, invalidate that session's `useHistory` query so the finalized turn
+ * appears from the store instead of the (now-stale) streaming/transcript fields. Returns
+ * `true` on the render where the edge was detected, so the session shell can also react
+ * (e.g. haptic/toast) without wiring its own busy-tracking ref.
+ */
+export function useTurnCompleted(snapshot: Snapshot | null): boolean {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  const prevBusyRef = useRef<boolean | undefined>(undefined);
+
+  const busy = snapshot?.busy;
+  const sessionId = snapshot?.session_id ?? null;
+  const completed = prevBusyRef.current === true && busy === false;
+
+  useEffect(() => {
+    if (completed && sessionId) {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).history(sessionId) });
+    }
+  }, [completed, sessionId, baseUrl, queryClient]);
+
+  useEffect(() => {
+    prevBusyRef.current = busy;
+  }, [busy]);
+
+  return completed;
 }

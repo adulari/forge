@@ -5,7 +5,9 @@
 // frames are accepted even though `revision` jumps. `closed:true` stops all reconnects.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AppState, type AppStateStatus } from "react-native";
+import { AppState, type AppStateStatus, Platform } from "react-native";
+
+import { TWebSocket } from "./transport";
 
 export const PROTOCOL_VERSION = 7;
 
@@ -200,7 +202,7 @@ export function useSessionSocket(
     teardown();
     setConnectionState((s) => (s === "idle" ? "connecting" : "reconnecting"));
 
-    const ws = new WebSocket(wsUrl(baseUrl, sessionId, revRef.current));
+    const ws = new TWebSocket(wsUrl(baseUrl, sessionId, revRef.current));
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -262,16 +264,39 @@ export function useSessionSocket(
   }, [baseUrl, sessionId]);
 
   useEffect(() => {
+    const goBackground = () => {
+      shouldRunRef.current = false;
+      teardown();
+      setConnectionState("idle");
+    };
+    const goForeground = () => {
+      shouldRunRef.current = true;
+      connect();
+    };
+
+    // Web has no AppState lifecycle — branch on the DOM's visibilitychange directly.
+    if (Platform.OS === "web") {
+      const wasHidden = { current: document.visibilityState === "hidden" };
+      const onVisibilityChange = () => {
+        const isHidden = document.visibilityState === "hidden";
+        if (isHidden && !wasHidden.current) {
+          goBackground();
+        } else if (!isHidden && wasHidden.current) {
+          goForeground();
+        }
+        wasHidden.current = isHidden;
+      };
+      document.addEventListener("visibilitychange", onVisibilityChange);
+      return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+    }
+
     const sub = AppState.addEventListener("change", (next: AppStateStatus) => {
       const prev = appStateRef.current;
       appStateRef.current = next;
       if (next.match(/inactive|background/)) {
-        shouldRunRef.current = false;
-        teardown();
-        setConnectionState("idle");
+        goBackground();
       } else if (prev.match(/inactive|background/) && next === "active") {
-        shouldRunRef.current = true;
-        connect();
+        goForeground();
       }
     });
     return () => sub.remove();
@@ -279,7 +304,7 @@ export function useSessionSocket(
 
   const send = useCallback((input: RemoteInput) => {
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === TWebSocket.OPEN) {
       ws.send(JSON.stringify(input));
     }
   }, []);

@@ -8,6 +8,8 @@
 // Types mirror the serde struct field names VERBATIM (snake_case) — do not camelCase the
 // wire (UI_RULES.md #4).
 
+import { tFetch } from "./transport";
+
 export class ApiError extends Error {
   status: number;
   body: unknown;
@@ -132,7 +134,7 @@ async function request<T>(
 ): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${baseUrl}${path}`, {
+    res = await tFetch(`${baseUrl}${path}`, {
       ...init,
       headers: {
         Accept: "application/json",
