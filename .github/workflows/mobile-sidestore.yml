@@ -71,11 +71,10 @@ jobs:
       - name: Resolve version
         id: meta
         run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            VERSION="${GITHUB_REF_NAME#mobile-v}"
-          else
-            VERSION="$(node -p "require('./package.json').version")-dev.${GITHUB_RUN_NUMBER}"
-          fi
+          # MUST equal the IPA's CFBundleShortVersionString — SideStore rejects a mismatch
+          # ("expected X found Y"). Expo bakes that from the resolved app-config version, so
+          # read it from there rather than from the git tag.
+          VERSION="$(npx expo config --json | jq -r '.version // "0.0.0"')"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Prebuild native iOS project
@@ -130,22 +129,29 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: "Forge iOS ${{ needs.build-ipa.outputs.ipa-version }} (sideload)"
-          files: dist/Forge.ipa
+          files: |
+            dist/Forge.ipa
+            mobile/assets/icon.png
           generate_release_notes: true
 
       - name: Generate SideStore/AltStore source manifest
         id: manifest
         run: |
           mkdir -p site
+          cp mobile/assets/icon.png site/icon.png
           VERSION="${{ needs.build-ipa.outputs.ipa-version }}"
           SIZE="${{ needs.build-ipa.outputs.ipa-size }}"
           DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/Forge.ipa"
+          ICON_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/icon.png"
 
+          # SideStore's AltSource decoder requires a per-app iconURL (nil → decode error) and a
+          # versions[].version that equals the IPA's CFBundleShortVersionString.
           jq -n \
             --arg version "$VERSION" \
             --arg date "$DATE" \
             --arg url "$DOWNLOAD_URL" \
+            --arg icon "$ICON_URL" \
             --argjson size "$SIZE" \
             --arg bundleId "$BUNDLE_ID" \
             --arg dev "$DEVELOPER_NAME" \
@@ -158,19 +164,25 @@ jobs:
                   name: "Forge",
                   bundleIdentifier: $bundleId,
                   developerName: $dev,
+                  subtitle: "Control your forge daemon from your phone",
                   localizedDescription: "Native iOS companion for the forge coding-agent daemon (forge serve). Fleet view, live chat, tasks, agents, diffs, and plan approval over your own daemon.",
+                  iconURL: $icon,
                   tintColor: "ff913c",
+                  category: "developer",
+                  screenshotURLs: [],
                   versions: [
                     {
                       version: $version,
                       date: $date,
+                      localizedDescription: "SideStore build.",
                       downloadURL: $url,
                       size: $size,
                       minOSVersion: "16.0"
                     }
                   ]
                 }
-              ]
+              ],
+              news: []
             }' > site/forge-source.json
 
           cat site/forge-source.json
