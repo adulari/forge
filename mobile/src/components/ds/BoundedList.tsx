@@ -113,6 +113,7 @@ function BoundedListInner<T>(
         windowSize={9}
         initialNumToRender={12}
         {...rest}
+        style={[rest.style, Platform.OS === "web" && (webScrollContain as object)]}
       />
       {Platform.OS === "ios" ? <BellowsSpinner active={refreshing} /> : null}
     </View>
@@ -122,6 +123,10 @@ function BoundedListInner<T>(
 export const BoundedList = forwardRef(BoundedListInner) as <T>(
   props: BoundedListProps<T> & { ref?: React.ForwardedRef<FlatList<T>> },
 ) => React.ReactElement | null;
+
+// Web-only: stops this list's rubber-band from chaining into a page-level bounce
+// (same untyped-CSS-passthrough escape hatch as Screen.tsx's ForgeWash `backgroundImage`).
+const webScrollContain = { overscrollBehavior: "contain" };
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },

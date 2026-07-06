@@ -16,7 +16,7 @@ import { X } from "lucide-react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
-import { monoFamily, type } from "../../theme/typography";
+import { monoFamily, type, webInputTextStyle } from "../../theme/typography";
 
 export interface InputProps extends Omit<TextInputProps, "style"> {
   label?: string;
@@ -88,7 +88,12 @@ export function Input({
             onBlur?.(e);
           }}
           placeholderTextColor={tokens.ink3}
-          style={[styles.input, type.body, { color: tokens.ink, fontFamily: mono ? monoFamily.regular : undefined }]}
+          style={[
+            styles.input,
+            type.body,
+            webInputTextStyle,
+            { color: tokens.ink, fontFamily: mono ? monoFamily.regular : undefined },
+          ]}
           testID={testID}
           accessibilityLabel={accessibilityLabel ?? label}
         />

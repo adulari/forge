@@ -47,7 +47,7 @@ export function Screen({
 
   const content = scroll ? (
     <ScrollView
-      style={styles.flex}
+      style={[styles.flex, Platform.OS === "web" && (webScrollContain as object)]}
       contentContainerStyle={[{ paddingHorizontal }, contentContainerStyle]}
       keyboardShouldPersistTaps="handled"
       refreshControl={refreshControl}
@@ -105,6 +105,11 @@ function ForgeWash({ tokens, scheme }: { tokens: ColorTokens; scheme: "light" | 
     />
   );
 }
+
+// Web-only: stops this scroll surface's rubber-band from chaining into a page-level
+// bounce (RN has no typed `overscrollBehavior`, RN-web passes unknown style keys through
+// to the underlying DOM node — same escape hatch `forgeWash`'s `backgroundImage` uses above).
+const webScrollContain = { overscrollBehavior: "contain" };
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },

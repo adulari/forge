@@ -1,5 +1,5 @@
 // DESIGN_SYSTEM.md §2 (Typography), verbatim scale.
-import type { TextStyle } from "react-native";
+import { Platform, type TextStyle } from "react-native";
 
 /**
  * Bundled mono font (JetBrains Mono). Native embedding (expo-font config plugin)
@@ -53,6 +53,12 @@ export const type = {
 } as const;
 
 export type TypeToken = keyof typeof type;
+
+// iOS Safari auto-zooms the page when focusing a text input rendered below 16px —
+// `type.body` is 15px, below that threshold. Web-only bump applied on top of
+// `type.body` at the two TextInput call sites (Input.tsx, Composer.tsx); native
+// sizes are untouched (empty object, no fontSize key, on iOS/Android).
+export const webInputTextStyle: TextStyle = Platform.OS === "web" ? { fontSize: 16 } : {};
 
 // ---------------------------------------------------------------------------
 // Format helpers (§2)

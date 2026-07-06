@@ -16,7 +16,7 @@ import { haptics } from "../../lib/haptics";
 import { useUpload } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, tapTarget } from "../../theme/tokens";
-import { type } from "../../theme/typography";
+import { type, webInputTextStyle } from "../../theme/typography";
 import { Chip } from "../ds/Chip";
 import { IconButton } from "../ds/IconButton";
 import {
@@ -170,7 +170,7 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
           multiline
           placeholder="message…"
           placeholderTextColor={tokens.ink3}
-          style={[type.body, styles.input, { color: tokens.ink, height }]}
+          style={[type.body, styles.input, webInputTextStyle, { color: tokens.ink, height }]}
           accessibilityLabel="message"
           testID="composer-input"
         />
