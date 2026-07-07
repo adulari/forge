@@ -443,11 +443,20 @@ fn normalize_namespace(prefix: &str) -> &str {
 }
 
 fn to_genai_messages(messages: &[Message]) -> Vec<ChatMessage> {
+    // Providers replay the whole transcript on every call, and several enforce a hard cap
+    // (e.g. "At most 1 image(s) may be provided in one prompt") on the total images in a
+    // request. Images are only useful on the turn that introduced them, so only the most
+    // recent image-bearing user turn keeps its images; earlier ones fall back to text-only.
+    let last_image_turn = messages
+        .iter()
+        .rposition(|m| matches!(m.role, Role::User) && !m.images.is_empty());
     let mut out = Vec::with_capacity(messages.len());
-    for m in messages {
+    for (i, m) in messages.iter().enumerate() {
         match m.role {
             Role::System => out.push(ChatMessage::system(m.content.clone())),
-            Role::User if m.images.is_empty() => out.push(ChatMessage::user(m.content.clone())),
+            Role::User if m.images.is_empty() || Some(i) != last_image_turn => {
+                out.push(ChatMessage::user(m.content.clone()))
+            }
             Role::User => {
                 // Multimodal user turn: text part (if any) followed by each image as a binary part.
                 let mut parts: Vec<ContentPart> = Vec::new();
@@ -1480,6 +1489,35 @@ mod tests {
         let out = to_genai_messages(&msgs);
         // system, user, assistant-text, assistant-tool-call, tool-response = 5
         assert_eq!(out.len(), 5, "every role maps to a genai message");
+    }
+
+    #[test]
+    fn only_the_latest_image_turn_keeps_its_images() {
+        use forge_types::ImageAttachment;
+        use genai::chat::BinarySource;
+
+        let img = |b: &str| ImageAttachment {
+            media_type: "image/png".into(),
+            data_base64: b.into(),
+        };
+        let msgs = vec![
+            Message::user_with_images("first", vec![img("aaa")]),
+            Message::assistant("ok"),
+            Message::user_with_images("second", vec![img("bbb")]),
+        ];
+        let out = to_genai_messages(&msgs);
+        let all_binaries: Vec<_> = out.iter().flat_map(|m| m.content.binaries()).collect();
+        assert_eq!(
+            all_binaries.len(),
+            1,
+            "only the most recent image-bearing turn should carry images into the request"
+        );
+        match &all_binaries[0].source {
+            BinarySource::Base64(s) => assert_eq!(s.as_ref(), "bbb"),
+            other => panic!("expected base64 source, got {other:?}"),
+        }
+        // The older turn's text must still be present, just without its image.
+        assert_eq!(out[0].content.first_text(), Some("first"));
     }
 
     #[test]

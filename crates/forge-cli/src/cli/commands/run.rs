@@ -4795,6 +4795,11 @@ pub(crate) async fn resolve_prompt_attachments(
     let mut mentions = Vec::new();
     for att in attachments {
         if !remote_attach_confined(&att.path, cwd) {
+            tracing::warn!(
+                path = %att.path,
+                cwd = %cwd,
+                "prompt attachment rejected: outside session's upload area"
+            );
             push_remote_note(
                 remote_notes,
                 "⚠ attach ignored — not a file from this session's upload area",
@@ -4804,10 +4809,14 @@ pub(crate) async fn resolve_prompt_attachments(
         if att.image {
             match crate::image_input::load_image_file(&att.path) {
                 Ok((img, label)) => {
+                    tracing::info!(path = %att.path, %label, "prompt image attachment resolved");
                     session.lock().await.attach_images(vec![img]);
                     app.note(&format!("🖼 image attached ({label}) — rides this prompt"));
                 }
-                Err(e) => app.note(&format!("⚠ image attach failed: {e}")),
+                Err(e) => {
+                    tracing::warn!(path = %att.path, error = %e, "prompt image attachment failed to load");
+                    app.note(&format!("⚠ image attach failed: {e}"));
+                }
             }
         } else {
             mentions.push(att.path);
