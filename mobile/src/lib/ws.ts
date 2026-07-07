@@ -120,7 +120,16 @@ export interface Snapshot {
 }
 
 export type RemoteInput =
-  | { kind: "prompt"; text: string }
+  | {
+      kind: "prompt";
+      text: string;
+      /** Server-relative upload paths this specific prompt carries (Composer's `SentAttachment`s
+       * with a `path`) — correlates an attachment to THIS send so it can't leak into an
+       * unrelated adjacent prompt. Omitted (not just empty) by any caller that predates this
+       * field; the server treats a missing/empty list as "fall back to the old ambient
+       * upload-then-prompt sequence". */
+      attachments?: { path: string; image: boolean }[];
+    }
   | { kind: "allow"; yes: boolean; seq: number }
   | { kind: "answer"; text: string; seq: number }
   | { kind: "interrupt" }

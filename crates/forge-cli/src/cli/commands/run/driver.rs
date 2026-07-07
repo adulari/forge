@@ -467,10 +467,31 @@ impl DriverState {
     /// host-terminal cases (`/remote` toggling, host clipboard).
     async fn handle_input(&mut self, input: remote::RemoteInput) -> Result<()> {
         match input {
-            remote::RemoteInput::Prompt { text } => {
+            remote::RemoteInput::Prompt { text, attachments } => {
                 // A fresh prompt starts a fresh interaction — drop stale notices + copy payload.
                 self.notes.clear();
                 self.copy_text = None;
+
+                // A message-correlated attachment list (mobile upload race fix, mirrors
+                // `run_chat_tui`'s remote drain) is authoritative for THIS turn when non-empty:
+                // discard stale ambient state from an unrelated `Attach` up front (image
+                // attachment happens inside `resolve_prompt_attachments` regardless of dispatch
+                // branch, matching how it already applied ambiently); non-image mentions are
+                // threaded into `submit_line` and only actually prepended in its plain-prompt
+                // branch, exactly where the old ambient `pending_mentions` were.
+                let has_explicit_attachments = !attachments.is_empty();
+                if has_explicit_attachments {
+                    self.pending_mentions.clear();
+                }
+                let explicit_mentions = resolve_prompt_attachments(
+                    &self.session,
+                    &mut self.app,
+                    &mut self.notes,
+                    &self.cwd,
+                    attachments,
+                )
+                .await;
+
                 if self.busy {
                     let trimmed = text.trim();
                     if trimmed.is_empty() {
@@ -488,7 +509,8 @@ impl DriverState {
                     }
                     return Ok(());
                 }
-                self.submit_line(text).await?;
+                self.submit_line(text, has_explicit_attachments.then_some(explicit_mentions))
+                    .await?;
             }
             remote::RemoteInput::Allow { yes, seq } => {
                 if !remote::prompt_seq_current(self.prompt_seq, seq) {
@@ -587,8 +609,16 @@ impl DriverState {
     }
 
     /// Submit one idle-state line: `//` escape, `/command` dispatch, or a plain prompt —
-    /// the same routing the TUI's submit path applies.
-    async fn submit_line(&mut self, line: String) -> Result<()> {
+    /// the same routing the TUI's submit path applies. `explicit_mentions`, when `Some`, is the
+    /// current `Prompt`'s own message-correlated non-image attachment list (mobile upload race
+    /// fix) and is authoritative in the plain-prompt branch below; `None` (every other caller —
+    /// the local key-driven submit paths, which never carry a fresh attachment list) falls back
+    /// to exactly the old ambient `pending_mentions` behavior.
+    async fn submit_line(
+        &mut self,
+        line: String,
+        explicit_mentions: Option<Vec<String>>,
+    ) -> Result<()> {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return Ok(());
@@ -624,8 +654,13 @@ impl DriverState {
             self.handle_outcome(outcome);
             return Ok(());
         }
-        // Uploaded text files ride this prompt as @path mentions.
-        let line = prepend_attach_mentions(&mut self.pending_mentions, line);
+        // Uploaded text files ride this prompt as @path mentions — the explicit,
+        // message-correlated list (if this prompt carried one) is authoritative; otherwise fall
+        // back to exactly the old ambient `Attach`-then-`Prompt` behavior.
+        let line = match explicit_mentions {
+            Some(mut mentions) => prepend_attach_mentions(&mut mentions, line),
+            None => prepend_attach_mentions(&mut self.pending_mentions, line),
+        };
         let hooks = self.session.lock().await.hooks().to_vec();
         match forge_core::hooks::run_prompt_hooks(&hooks, &line).await {
             Err(reason) => self
@@ -949,7 +984,7 @@ impl DriverState {
                     } else {
                         // Route through the shared submit path (identical DispatchOutcome
                         // handling to a directly-typed command).
-                        Box::pin(self.submit_line(line)).await?;
+                        Box::pin(self.submit_line(line, None)).await?;
                     }
                 }
                 _ => {
@@ -1094,7 +1129,7 @@ impl DriverState {
                     self.app.set_queued(&self.queued_prompts);
                 }
             } else {
-                Box::pin(self.submit_line(line)).await?;
+                Box::pin(self.submit_line(line, None)).await?;
             }
         } else {
             // Keep the palette/@-picker in sync with what the (remote) cursor sits in, same as

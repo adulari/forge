@@ -807,7 +807,19 @@ pub type HistoryProvider = Arc<dyn Fn(&str, Option<i64>, usize) -> Vec<HistoryRo
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RemoteInput {
     /// Submit a prompt (or a `/command`) — exactly as if typed + Enter in the TUI.
-    Prompt { text: String },
+    ///
+    /// `attachments` (added v7.1) is the message-correlated, client-computed list of uploads
+    /// that ride THIS specific prompt — e.g. the mobile composer's tray at send time. When
+    /// non-empty it is authoritative for this turn and any stale ambient `Attach` state (from an
+    /// unrelated upload for an adjacent message) is discarded instead of used. `#[serde(default)]`
+    /// keeps a bare `{"kind":"prompt","text":"..."}` (older clients, or the local TUI's own
+    /// ambient `/image <path>` flow) parsing fine — an empty list falls back to exactly the old
+    /// ambient `Attach`-then-`Prompt` behavior.
+    Prompt {
+        text: String,
+        #[serde(default)]
+        attachments: Vec<PromptAttachment>,
+    },
     /// Answer a pending permission prompt: `true` = allow (y), `false` = deny (n). `seq` echoes
     /// the [`Snapshot::prompt_seq`] the page rendered its buttons from; the drain ignores a
     /// mismatch (the prompt changed under the tap). REQUIRED — a seq-less legacy (v2) answer
@@ -840,6 +852,15 @@ pub enum RemoteInput {
     /// this input exists only as the upload route's delivery leg, so an arbitrary host path
     /// (e.g. a WS client probing for secret files) is refused with a note.
     Attach { path: String, image: bool },
+}
+
+/// One message-correlated attachment riding a [`RemoteInput::Prompt`] (v7.1) — the client's own
+/// upload path for a file it already POSTed to `/api/upload`. Confined to the session's
+/// `.forge/uploads/` scratch area at resolution time, exactly like [`RemoteInput::Attach`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct PromptAttachment {
+    pub path: String,
+    pub image: bool,
 }
 
 /// Map a wire key name to the TUI key it injects. The names are part of the v4 protocol:
@@ -2014,7 +2035,8 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<RemoteInput>(r#"{"kind":"prompt","text":"fix it"}"#).unwrap(),
             RemoteInput::Prompt {
-                text: "fix it".into()
+                text: "fix it".into(),
+                attachments: Vec::new(),
             }
         );
         assert_eq!(
@@ -2089,6 +2111,29 @@ mod tests {
         assert_eq!(named_key("Char:"), None);
         assert_eq!(named_key("Char:ab"), None, "exactly one char");
         assert_eq!(named_key(""), None);
+    }
+
+    #[test]
+    fn prompt_input_with_attachments_deserializes() {
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(
+                r#"{"kind":"prompt","text":"look at this","attachments":[{"path":"/tmp/x/.forge/uploads/s1/1-shot.png","image":true},{"path":"/tmp/x/.forge/uploads/s1/2-notes.txt","image":false}]}"#
+            )
+            .unwrap(),
+            RemoteInput::Prompt {
+                text: "look at this".into(),
+                attachments: vec![
+                    PromptAttachment {
+                        path: "/tmp/x/.forge/uploads/s1/1-shot.png".into(),
+                        image: true,
+                    },
+                    PromptAttachment {
+                        path: "/tmp/x/.forge/uploads/s1/2-notes.txt".into(),
+                        image: false,
+                    },
+                ],
+            }
+        );
     }
 
     #[test]

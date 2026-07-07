@@ -117,4 +117,8 @@ export interface SentAttachment {
   name: string;
   image: boolean;
   uri?: string;
+  /** Server-relative upload path (`UploadedFile.path`) — rides the `prompt` WS message so the
+   * daemon can correlate this exact attachment to this exact send, instead of relying on
+   * whichever ambient upload happens to be pending when the next prompt is submitted. */
+  path?: string;
 }

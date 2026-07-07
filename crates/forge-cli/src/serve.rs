@@ -1442,12 +1442,14 @@ mod tests {
         a.input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "alpha-marker task".into(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
         b.input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "beta-marker task".into(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
@@ -1483,6 +1485,7 @@ mod tests {
         a.input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "second-marker follow-up".into(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
@@ -1589,6 +1592,7 @@ mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "hello worktree".into(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
@@ -1981,6 +1985,7 @@ mod tests {
         past.input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "past-marker".into(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
@@ -1993,6 +1998,7 @@ mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "live-marker".into(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
@@ -2077,6 +2083,7 @@ mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "archived-marker".into(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
@@ -2444,6 +2451,7 @@ mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "mock:write please".into(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
@@ -2605,6 +2613,7 @@ mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "quick check".into(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
@@ -2826,6 +2835,7 @@ mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "use the attached notes".into(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();
@@ -2888,6 +2898,7 @@ mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "/plan mock:plan the feature".into(),
+                attachments: Vec::new(),
             })
             .await
             .unwrap();

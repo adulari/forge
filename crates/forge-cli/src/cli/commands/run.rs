@@ -3320,11 +3320,34 @@ pub(crate) async fn run_chat_tui(
             while let Ok(input) = rc.input_rx.try_recv() {
                 dirty = true;
                 match input {
-                    remote::RemoteInput::Prompt { text } => {
+                    remote::RemoteInput::Prompt { text, attachments } => {
                         // A fresh prompt starts a fresh interaction — drop the previous notices
                         // (and the served /copy payload) so they don't linger on the page forever.
                         remote_notes.clear();
                         remote_copy_text = None;
+
+                        // A message-correlated attachment list (mobile upload race fix) is
+                        // authoritative for THIS turn when non-empty: any stale ambient upload
+                        // for an unrelated adjacent message must not leak in, so it's discarded
+                        // up front — image attachment happens here too (it already applied
+                        // ambiently regardless of dispatch branch before this fix, so this keeps
+                        // that same reach); non-image mentions are resolved into
+                        // `explicit_mentions` but only actually prepended onto `text` in the
+                        // plain-prompt branch below, exactly where the old ambient
+                        // `remote_attach_mentions` were — so a `//`-escape or `/command` typed
+                        // alongside an attachment still parses the ORIGINAL text, unchanged.
+                        let has_explicit_attachments = !attachments.is_empty();
+                        if has_explicit_attachments {
+                            remote_attach_mentions.clear();
+                        }
+                        let mut explicit_mentions = resolve_prompt_attachments(
+                            &session,
+                            &mut app,
+                            &mut remote_notes,
+                            &remote_cwd,
+                            attachments,
+                        )
+                        .await;
                         // `/keys` is host-only BY DESIGN: it runs a blocking fullscreen
                         // configurator loop on the host terminal — dispatching it from here
                         // would freeze the host TUI on a screen the remote can't see or drive.
@@ -3508,8 +3531,15 @@ pub(crate) async fn run_chat_tui(
                                 }
                             }
                         } else {
-                            // Uploaded text files ride this prompt as @path mentions.
-                            let text = prepend_attach_mentions(&mut remote_attach_mentions, text);
+                            // Uploaded text files ride this prompt as @path mentions — the
+                            // explicit, message-correlated list (if this prompt carried one) is
+                            // authoritative; otherwise fall back to exactly the old ambient
+                            // `Attach`-then-`Prompt` behavior.
+                            let text = if has_explicit_attachments {
+                                prepend_attach_mentions(&mut explicit_mentions, text)
+                            } else {
+                                prepend_attach_mentions(&mut remote_attach_mentions, text)
+                            };
                             let hooks = session.lock().await.hooks().to_vec();
                             if let Ok(prompt) =
                                 forge_core::hooks::run_prompt_hooks(&hooks, &text).await
@@ -4679,6 +4709,20 @@ pub(crate) fn prepend_attach_mentions(mentions: &mut Vec<String>, text: String) 
 /// The path is confined to the session's `.forge/uploads/` scratch area (canonicalized — no
 /// symlink or `..` escape): `Attach` exists only to deliver uploads, so a WS client injecting
 /// an arbitrary host path (`~/.ssh/id_rsa`) is refused with a note instead of read.
+/// Confine an upload path to `<cwd>/.forge/uploads/` (canonicalized — no symlink/`..` escape).
+/// Shared by [`handle_remote_attach`] (the ambient `Attach` input) and
+/// [`resolve_prompt_attachments`] (the explicit, message-correlated attachment list on a
+/// `Prompt`) — both exist only to deliver `POST /api/upload` results, so an arbitrary host path
+/// (e.g. a WS client probing for secret files) must be refused either way.
+fn remote_attach_confined(path: &str, cwd: &str) -> bool {
+    let root = std::path::Path::new(cwd).join(".forge").join("uploads");
+    std::fs::canonicalize(path)
+        .ok()
+        .zip(std::fs::canonicalize(&root).ok())
+        .map(|(p, r)| p.starts_with(&r))
+        .unwrap_or(false)
+}
+
 pub(crate) async fn handle_remote_attach(
     session: &Arc<tokio::sync::Mutex<Session>>,
     app: &mut forge_tui::App,
@@ -4687,13 +4731,7 @@ pub(crate) async fn handle_remote_attach(
     path: String,
     image: bool,
 ) {
-    let root = std::path::Path::new(cwd).join(".forge").join("uploads");
-    let confined = std::fs::canonicalize(&path)
-        .ok()
-        .zip(std::fs::canonicalize(&root).ok())
-        .map(|(p, r)| p.starts_with(&r))
-        .unwrap_or(false);
-    if !confined {
+    if !remote_attach_confined(&path, cwd) {
         app.note("⚠ attach ignored — not a file from this session's upload area");
         return;
     }
@@ -4724,6 +4762,58 @@ pub(crate) async fn handle_remote_attach(
             "📎 attached {name} — included with the next prompt"
         ));
     }
+}
+
+/// Resolve a [`remote::RemoteInput::Prompt`]'s explicit, message-correlated `attachments` list
+/// (mobile-upload-race fix): when non-empty it is AUTHORITATIVE for this turn, so any stale
+/// `pending_images` left over from an unrelated `Attach` (e.g. an image already uploading for a
+/// different, adjacent message) is discarded first — it must never leak into this turn — then
+/// each listed attachment is resolved fresh with the same confinement check
+/// [`handle_remote_attach`] uses. Images ride straight onto the session; non-image files come
+/// back as plain paths (the caller prepends them onto the prompt text as `@path` mentions via
+/// [`prepend_attach_mentions`] itself, at the point where the old ambient mentions were applied —
+/// this function never touches `text`, so a `//`-escape or `/command` dispatched off the SAME
+/// prompt still parses cleanly).
+///
+/// An empty list (older client, or a plain message with genuinely no attachments) is a no-op that
+/// returns an empty `Vec` without touching any session state — callers fall back to exactly the
+/// pre-existing ambient `Attach`-then-`Prompt` behavior.
+pub(crate) async fn resolve_prompt_attachments(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    app: &mut forge_tui::App,
+    remote_notes: &mut Vec<String>,
+    cwd: &str,
+    attachments: Vec<remote::PromptAttachment>,
+) -> Vec<String> {
+    if attachments.is_empty() {
+        return Vec::new();
+    }
+    // Drop, don't use: whatever's ambiently pending belongs to no turn now that an explicit,
+    // authoritative list has arrived for THIS one.
+    let _ = session.lock().await.take_pending_images();
+
+    let mut mentions = Vec::new();
+    for att in attachments {
+        if !remote_attach_confined(&att.path, cwd) {
+            push_remote_note(
+                remote_notes,
+                "⚠ attach ignored — not a file from this session's upload area",
+            );
+            continue;
+        }
+        if att.image {
+            match crate::image_input::load_image_file(&att.path) {
+                Ok((img, label)) => {
+                    session.lock().await.attach_images(vec![img]);
+                    app.note(&format!("🖼 image attached ({label}) — rides this prompt"));
+                }
+                Err(e) => app.note(&format!("⚠ image attach failed: {e}")),
+            }
+        } else {
+            mentions.push(att.path);
+        }
+    }
+    mentions
 }
 
 /// Start or stop remote control in response to `/remote`. On: bind the server (LAN-reachable by
@@ -5112,6 +5202,153 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(session.lock().await.pinned_model(), None, "pin cleared");
+    }
+
+    /// The actual race being fixed: an `Attach` for an unrelated image lands first (ambient
+    /// `pending_images`, e.g. from an adjacent message's upload), then a `Prompt` arrives with
+    /// its OWN explicit `attachments` list — the resulting turn must carry ONLY what that list
+    /// specified, never the stale ambient one.
+    #[tokio::test]
+    async fn explicit_prompt_attachments_discard_stale_ambient_pending_images() {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-prompt-attach-race-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let uploads = dir.join(".forge").join("uploads");
+        std::fs::create_dir_all(&uploads).unwrap();
+        let cwd = dir.display().to_string();
+
+        let config = forge_config::Config::default();
+        let session = Arc::new(tokio::sync::Mutex::new(
+            Session::start(
+                Arc::new(forge_store::Store::open_in_memory().unwrap()),
+                Arc::new(forge_provider::MockProvider),
+                Arc::new(forge_mesh::HeuristicRouter::new(config.clone())),
+                ToolRegistry::with_core_tools(),
+                Box::new(forge_tui::HeadlessPresenter::new(false)),
+                config,
+                ".",
+            )
+            .unwrap(),
+        ));
+
+        // Simulate the stale ambient `Attach`: an image meant for a DIFFERENT, adjacent
+        // message, already sitting in the session's pending-images queue.
+        session
+            .lock()
+            .await
+            .attach_images(vec![forge_types::ImageAttachment {
+                media_type: "image/jpeg".into(),
+                data_base64: "stale-unrelated-image".into(),
+            }]);
+
+        let mut app = forge_tui::App::default();
+        let mut remote_notes = Vec::new();
+
+        // This message's OWN correlated attachment: a real image inside the upload area.
+        let real_path = uploads.join("real.png");
+        std::fs::write(&real_path, b"not-real-png-bytes-but-thats-fine-here").unwrap();
+        let attachments = vec![remote::PromptAttachment {
+            path: real_path.display().to_string(),
+            image: true,
+        }];
+
+        let mentions =
+            resolve_prompt_attachments(&session, &mut app, &mut remote_notes, &cwd, attachments)
+                .await;
+        assert!(mentions.is_empty(), "no non-image attachments in this list");
+
+        let images = session.lock().await.take_pending_images();
+        assert_eq!(
+            images.len(),
+            1,
+            "only the explicit list's image rides this turn"
+        );
+        assert_eq!(images[0].media_type, "image/png");
+        assert_ne!(
+            images[0].data_base64, "stale-unrelated-image",
+            "the stale ambient image from the unrelated Attach must not leak in"
+        );
+
+        // An empty attachments list (the fallback case) must leave ambient state untouched —
+        // it's a no-op, not a second discard.
+        session
+            .lock()
+            .await
+            .attach_images(vec![forge_types::ImageAttachment {
+                media_type: "image/gif".into(),
+                data_base64: "still-ambient".into(),
+            }]);
+        let mentions =
+            resolve_prompt_attachments(&session, &mut app, &mut remote_notes, &cwd, Vec::new())
+                .await;
+        assert!(mentions.is_empty());
+        let images = session.lock().await.take_pending_images();
+        assert_eq!(
+            images.len(),
+            1,
+            "empty list leaves ambient pending_images alone"
+        );
+        assert_eq!(images[0].data_base64, "still-ambient");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path outside `.forge/uploads/` in an explicit attachments list is refused with a note,
+    /// exactly like the ambient `Attach` confinement check — a WS client can't use the new
+    /// correlated path to read an arbitrary host file either.
+    #[tokio::test]
+    async fn explicit_prompt_attachments_confines_paths_to_the_upload_area() {
+        let dir = std::env::temp_dir().join(format!(
+            "forge-prompt-attach-confine-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join(".forge").join("uploads")).unwrap();
+        let outside = dir.join("outside.txt");
+        std::fs::write(&outside, b"not an upload").unwrap();
+        let cwd = dir.display().to_string();
+
+        let config = forge_config::Config::default();
+        let session = Arc::new(tokio::sync::Mutex::new(
+            Session::start(
+                Arc::new(forge_store::Store::open_in_memory().unwrap()),
+                Arc::new(forge_provider::MockProvider),
+                Arc::new(forge_mesh::HeuristicRouter::new(config.clone())),
+                ToolRegistry::with_core_tools(),
+                Box::new(forge_tui::HeadlessPresenter::new(false)),
+                config,
+                ".",
+            )
+            .unwrap(),
+        ));
+        let mut app = forge_tui::App::default();
+        let mut remote_notes = Vec::new();
+
+        let mentions = resolve_prompt_attachments(
+            &session,
+            &mut app,
+            &mut remote_notes,
+            &cwd,
+            vec![remote::PromptAttachment {
+                path: outside.display().to_string(),
+                image: false,
+            }],
+        )
+        .await;
+        assert!(mentions.is_empty(), "refused path never becomes a mention");
+        assert!(remote_notes
+            .iter()
+            .any(|n| n.contains("not a file from this session's upload area")));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
