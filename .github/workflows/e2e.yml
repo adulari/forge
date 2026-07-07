@@ -18,12 +18,21 @@ on:
 
 jobs:
   realturn:
-    name: real turn (${{ matrix.os }})
+    name: real turn (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+        # `label` stays a plain string for the artifact/log names below; `runner` is what
+        # actually goes to runs-on and differs for the ubuntu leg (self-hosted array vs
+        # hosted string) — macOS/Windows stay on their GitHub-hosted runners.
+        include:
+          - label: ubuntu-latest
+            runner: [self-hosted, linux, x64]
+          - label: windows-latest
+            runner: windows-latest
+          - label: macos-latest
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
     defaults:
       run:
         shell: bash # bash is present on the Windows runner too — one script for all OSes
@@ -44,7 +53,7 @@ jobs:
 
       - name: doctor (diagnostics — never fails the job)
         continue-on-error: true
-        run: cargo run --release -q --bin forge -- doctor 2>&1 | tee doctor-${{ matrix.os }}.txt
+        run: cargo run --release -q --bin forge -- doctor 2>&1 | tee doctor-${{ matrix.label }}.txt
 
       - name: real turn
         run: |
@@ -52,14 +61,14 @@ jobs:
           echo "model: $E2E_MODEL"
           cargo run --release -q --bin forge -- run \
             "Reply with exactly the single word: PONG" --model "$E2E_MODEL" \
-            2>&1 | tee turn-${{ matrix.os }}.txt
+            2>&1 | tee turn-${{ matrix.label }}.txt
           # Fail on the cross-platform failure signatures we care about.
-          if grep -qiE "panic|Resolver error|No usable model|provider auth failed|RUST_BACKTRACE" turn-${{ matrix.os }}.txt; then
-            echo "::error::real turn produced an error marker on ${{ matrix.os }}"
+          if grep -qiE "panic|Resolver error|No usable model|provider auth failed|RUST_BACKTRACE" turn-${{ matrix.label }}.txt; then
+            echo "::error::real turn produced an error marker on ${{ matrix.label }}"
             exit 1
           fi
-          if [ -z "$(tr -d '[:space:]' < turn-${{ matrix.os }}.txt)" ]; then
-            echo "::error::real turn produced no output on ${{ matrix.os }}"
+          if [ -z "$(tr -d '[:space:]' < turn-${{ matrix.label }}.txt)" ]; then
+            echo "::error::real turn produced no output on ${{ matrix.label }}"
             exit 1
           fi
 
@@ -67,8 +76,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: e2e-${{ matrix.os }}
+          name: e2e-${{ matrix.label }}
           path: |
-            doctor-${{ matrix.os }}.txt
-            turn-${{ matrix.os }}.txt
+            doctor-${{ matrix.label }}.txt
+            turn-${{ matrix.label }}.txt
           if-no-files-found: ignore

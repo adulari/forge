@@ -33,7 +33,7 @@ use base64::Engine;
 use hkdf::Hkdf;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{Signature, SigningKey};
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
 use sha2::Sha256;
 
 use crate::remote::Snapshot;
@@ -134,7 +134,7 @@ impl VapidKey {
     /// The public key as the base64url (unpadded) uncompressed SEC1 point — exactly what
     /// `PushManager.subscribe({applicationServerKey})` wants and what `k=` carries.
     pub(crate) fn public_key_b64url(&self) -> String {
-        b64url(self.secret.public_key().to_encoded_point(false).as_bytes())
+        b64url(self.secret.public_key().to_sec1_point(false).as_bytes())
     }
 
     /// The `Authorization: vapid t=<jwt>, k=<pub>` header value for a push `endpoint`
@@ -230,7 +230,7 @@ fn encrypt_with(
 ) -> anyhow::Result<Vec<u8>> {
     let ua_pub = p256::PublicKey::from_sec1_bytes(ua_public)
         .map_err(|e| anyhow::anyhow!("invalid p256dh key: {e}"))?;
-    let as_public = as_secret.public_key().to_encoded_point(false);
+    let as_public = as_secret.public_key().to_sec1_point(false);
     let as_public = as_public.as_bytes();
     let ecdh = p256::ecdh::diffie_hellman(as_secret.to_nonzero_scalar(), ua_pub.as_affine());
 
@@ -260,7 +260,7 @@ fn encrypt_with(
     record.push(0x02);
     let cipher = Aes128Gcm::new_from_slice(&cek).expect("cek is 16 bytes");
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&nonce), record.as_slice())
+        .encrypt(&Nonce::from(nonce), record.as_slice())
         .map_err(|e| anyhow::anyhow!("aes128gcm seal: {e}"))?;
 
     // aes128gcm header: salt(16) || rs(4) || idlen(1) || keyid(as_public, 65) || ciphertext.
@@ -290,7 +290,7 @@ pub(crate) fn decrypt_payload(
     let ciphertext = &message[21 + 65..];
 
     let as_pub = p256::PublicKey::from_sec1_bytes(as_public)?;
-    let ua_public = ua_secret.public_key().to_encoded_point(false);
+    let ua_public = ua_secret.public_key().to_sec1_point(false);
     let ecdh = p256::ecdh::diffie_hellman(ua_secret.to_nonzero_scalar(), as_pub.as_affine());
     let mut key_info = Vec::with_capacity(14 + 65 + 65);
     key_info.extend_from_slice(b"WebPush: info\0");
@@ -309,7 +309,7 @@ pub(crate) fn decrypt_payload(
         .map_err(|e| anyhow::anyhow!("hkdf nonce: {e}"))?;
     let cipher = Aes128Gcm::new_from_slice(&cek).expect("cek is 16 bytes");
     let mut record = cipher
-        .decrypt(Nonce::from_slice(&nonce), ciphertext)
+        .decrypt(&Nonce::from(nonce), ciphertext)
         .map_err(|e| anyhow::anyhow!("aes128gcm open: {e}"))?;
     // Strip the record delimiter (0x02 for the last record) + any zero padding after it.
     while record.last() == Some(&0) {
@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn encrypt_then_decrypt_round_trips() {
         let ua_secret = p256::SecretKey::from_slice(&[11u8; 32]).unwrap();
-        let ua_public = ua_secret.public_key().to_encoded_point(false);
+        let ua_public = ua_secret.public_key().to_sec1_point(false);
         let auth: [u8; 16] = [5u8; 16];
         let plaintext = br#"{"kind":"permission","seq":3}"#;
         let sealed = encrypt_payload(ua_public.as_bytes(), &auth, plaintext).unwrap();
@@ -603,7 +603,7 @@ mod tests {
     #[test]
     fn encrypt_payload_is_randomized_and_well_formed() {
         let ua_secret = p256::SecretKey::from_slice(&[7u8; 32]).unwrap();
-        let ua_public = ua_secret.public_key().to_encoded_point(false);
+        let ua_public = ua_secret.public_key().to_sec1_point(false);
         let auth = [3u8; 16];
         let a = encrypt_payload(ua_public.as_bytes(), &auth, b"hi").unwrap();
         let b = encrypt_payload(ua_public.as_bytes(), &auth, b"hi").unwrap();

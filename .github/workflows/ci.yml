@@ -10,6 +10,11 @@ on:
   # release.yml can manually dispatch a real "CI" run against its bot-opened brew-formula PR
   # branch — that PR's own `pull_request` event never fires one, since it's opened with GITHUB_TOKEN.
   workflow_dispatch:
+  # macOS/Windows legs of `test` only run off-PR (cost gate, see below) — this keeps their
+  # coverage from going stale between PRs. Staggered an hour after e2e.yml/security.yml's
+  # Monday cron so the three weekly workflows don't all hit the runner at once.
+  schedule:
+    - cron: "0 8 * * 1"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -22,7 +27,7 @@ env:
 jobs:
   # Skip the Rust matrix gracefully until the cargo project exists (design phase).
   guard:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     outputs:
       has_cargo: ${{ steps.check.outputs.has_cargo }}
     steps:
@@ -39,7 +44,7 @@ jobs:
   fmt:
     needs: guard
     if: needs.guard.outputs.has_cargo == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -50,7 +55,7 @@ jobs:
   clippy:
     needs: guard
     if: needs.guard.outputs.has_cargo == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -63,22 +68,43 @@ jobs:
       # `--locked` (cost us a failed v0.4.42 release). Catch the drift here, on every PR.
       - run: cargo clippy --locked --all-targets --all-features
 
+  # PR path: only the (now self-hosted) Linux leg runs, to keep macOS/Windows minutes off the
+  # per-PR cost. Full 3-OS coverage still runs on workflow_dispatch/schedule via `test-full` below.
   test:
+    name: test (ubuntu-latest)
     needs: guard
-    if: needs.guard.outputs.has_cargo == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    if: needs.guard.outputs.has_cargo == 'true' && github.event_name == 'pull_request'
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all --all-features
       # No release build in CI: tests already compile the whole workspace (debug), and the
-      # `lto = "thin"` release profile is slow to link ×3 OSes. Release binaries are built on demand
+      # `lto = "thin"` release profile is slow to link. Release binaries are built on demand
       # (tags / manual), not on every PR.
+
+  # Off-PR path: full 3-OS matrix, so macOS/Windows coverage doesn't go stale between PRs.
+  test-full:
+    name: test (${{ matrix.label }})
+    needs: guard
+    if: needs.guard.outputs.has_cargo == 'true' && github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: [self-hosted, linux, x64]
+            label: ubuntu-latest
+          - os: macos-latest
+            label: macos-latest
+          - os: windows-latest
+            label: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all --all-features
 
   # Release-profile + `--locked` smoke on one platform. The release workflow builds with
   # `--release --locked`, and breakages there (LTO-only failures, a Cargo.lock that drifted from
@@ -87,7 +113,7 @@ jobs:
   release-build:
     needs: guard
     if: needs.guard.outputs.has_cargo == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -97,9 +123,9 @@ jobs:
       - run: cargo build --release --locked --bin forge
 
   CI:
-    needs: [guard, fmt, clippy, test, release-build]
+    needs: [guard, fmt, clippy, test, test-full, release-build]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - name: Check all jobs passed
         run: |
