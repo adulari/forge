@@ -24,6 +24,7 @@ import {
   View,
 } from "react-native";
 
+import type { SentAttachment } from "../../../components/chat/attach";
 import CardSlot from "../../../components/chat/CardSlot";
 import { Composer } from "../../../components/chat/Composer";
 import { MessageRow } from "../../../components/chat/MessageRow";
@@ -57,7 +58,7 @@ type TimelineItem =
   | { kind: "streaming"; id: string; text: string; streaming: boolean }
   | { kind: "history"; id: string; row: HistoryRow }
   | { kind: "filler"; id: string; text: string }
-  | { kind: "pendingSent"; id: string; text: string };
+  | { kind: "pendingSent"; id: string; text: string; attachments: SentAttachment[] };
 
 // How long an optimistic "pendingSent" bubble is allowed to linger without a real history row
 // ever landing for it (session closed mid-turn, WS never came back, etc.) — a safety net, not
@@ -69,6 +70,9 @@ interface PendingSent {
   text: string;
   /** `historyRows[0]?.seq` at send time — cleared once a newer row lands. */
   baselineSeq: number;
+  /** Attachments that rode this prompt (already uploaded — Composer only ever hands over
+   * `state === "done"` ones), rendered on the bubble since the daemon never persists them. */
+  attachments: SentAttachment[];
 }
 
 export default function SessionChat() {
@@ -144,9 +148,9 @@ export default function SessionChat() {
   const latestSeqRef = useRef(-1);
 
   const handleSend = useCallback(
-    (text: string) => {
+    (text: string, attachments: SentAttachment[]) => {
       const id = `p${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current }]);
+      setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current, attachments }]);
 
       if (online) {
         send({ kind: "prompt", text });
@@ -313,7 +317,7 @@ export default function SessionChat() {
     // than earlier ones — walk pendingSent back-to-front.
     for (let i = pendingSent.length - 1; i >= 0; i--) {
       const p = pendingSent[i];
-      list.push({ kind: "pendingSent", id: p.id, text: p.text });
+      list.push({ kind: "pendingSent", id: p.id, text: p.text, attachments: p.attachments });
     }
     if (historySettled) {
       for (const row of historyRows) {
@@ -360,6 +364,8 @@ export default function SessionChat() {
         case "pendingSent":
           // Renders through the same MessageRow the real (server-truth) row will use once
           // history lands, so there's no visual "jump" when this optimistic bubble is replaced.
+          // `attachments` rides separately (not embedded in `row.content`) since the daemon
+          // never persists them — see MessageRowProps' doc comment.
           return (
             <MessageRow
               row={{
@@ -370,6 +376,7 @@ export default function SessionChat() {
                 created_at: Date.now() / 1000,
                 visibility: "llm",
               }}
+              attachments={item.attachments}
             />
           );
         case "streaming": {

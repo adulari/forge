@@ -15,6 +15,9 @@ export interface Attachment {
   state: AttachmentState;
   /** Server-relative path once uploaded (`UploadedFile.path` from api.ts). */
   path?: string;
+  /** Local preview source (native `file://`/`ph://` URI, or a web `blob:` object URL) — used
+   * for the composer thumbnail and carried through to the optimistic sent bubble. */
+  uri?: string;
 }
 
 /** A picked file in RN's `{uri,name,type}` shape, before upload. */
@@ -23,6 +26,14 @@ export interface PickedFile {
   name: string;
   mimeType: string;
   image: boolean;
+  /**
+   * The real web `File`, present only on `Platform.OS === "web"`. RN's `{uri,name,type}`
+   * shorthand only becomes a multipart file part through React Native's OWN networking layer
+   * (native iOS/Android) — a real browser's `fetch`/`FormData` has no such magic and will
+   * just `String()`-coerce a plain object, uploading garbage. Web callers MUST append this
+   * `File` (via `formDataFromWebFiles`) instead of the shorthand.
+   */
+  file?: File;
 }
 
 let nextId = 0;
@@ -45,6 +56,7 @@ export async function pickImages(): Promise<PickedFile[]> {
     name: a.fileName ?? a.uri.split("/").pop() ?? "image.jpg",
     mimeType: a.mimeType ?? "image/jpeg",
     image: true,
+    file: a.file,
   }));
 }
 
@@ -57,6 +69,7 @@ export async function pickDocuments(): Promise<PickedFile[]> {
     name: a.name,
     mimeType: a.mimeType ?? "application/octet-stream",
     image: (a.mimeType ?? "").startsWith("image/"),
+    file: a.file,
   }));
 }
 
@@ -90,4 +103,16 @@ export function formDataFromWebFiles(files: File[]): FormData {
   const form = new FormData();
   for (const f of files) form.append("files", f, f.name);
   return form;
+}
+
+/**
+ * A successfully-uploaded attachment as it rides the optimistic "just sent" bubble
+ * (MessageRow renders these directly — the daemon never persists attachment metadata into
+ * `HistoryRow.content`, so this is client-local memory of what THIS device just sent).
+ */
+export interface SentAttachment {
+  id: string;
+  name: string;
+  image: boolean;
+  uri?: string;
 }

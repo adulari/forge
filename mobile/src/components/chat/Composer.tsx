@@ -10,7 +10,7 @@
 // a non-functional mic button would be worse than none.
 import { ArrowUp, Clock, FileText, Image as ImageIcon, Square } from "lucide-react-native";
 import React, { useEffect, useRef, useState } from "react";
-import { Platform, StyleSheet, Text, TextInput, View } from "react-native";
+import { Image, Platform, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
@@ -30,6 +30,7 @@ import {
   type PickedFile,
   pickDocuments,
   pickImages,
+  type SentAttachment,
 } from "./attach";
 
 const MAX_LINES = 6;
@@ -43,7 +44,7 @@ export interface ComposerProps {
   busy: boolean;
   /** true when the session WS is `open` — false swaps the send affordance to "queue". */
   online: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string, attachments: SentAttachment[]) => void;
   onInterrupt: () => void;
 }
 
@@ -74,7 +75,13 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
   const commit = (value: string) => {
     const trimmed = value.trim();
     if (!trimmed) return;
-    onSend(trimmed);
+    // Only fully-uploaded attachments actually ride the daemon's next prompt (remote.rs
+    // `RemoteInput::Attach`) — a failed upload never reached the session's pending queue, so it
+    // must not be claimed on the sent bubble either.
+    const sent: SentAttachment[] = attachments
+      .filter((a) => a.state === "done")
+      .map((a) => ({ id: a.id, name: a.name, image: a.image, uri: a.uri }));
+    onSend(trimmed, sent);
     haptics.sendPrompt();
     setText("");
     setAttachments([]);
@@ -92,9 +99,17 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
 
   const runUpload = async (picked: PickedFile, webFile?: File) => {
     const id = makeAttachmentId();
-    setAttachments((prev) => [...prev, { id, name: picked.name, image: picked.image, state: "uploading" }]);
+    setAttachments((prev) => [
+      ...prev,
+      { id, name: picked.name, image: picked.image, state: "uploading", uri: picked.uri },
+    ]);
     try {
-      const form = webFile ? formDataFromWebFiles([webFile]) : formDataFromPicked([picked]);
+      // Web: a real `File` is required (RN's `{uri,name,type}` shorthand only means anything
+      // to React Native's OWN native networking layer — a real browser `FormData` just
+      // `String()`-coerces a plain object, uploading garbage). `picked.file` covers the
+      // image/document pickers; `webFile` covers paste, which hands one over directly.
+      const file = webFile ?? picked.file;
+      const form = file ? formDataFromWebFiles([file]) : formDataFromPicked([picked]);
       const res = await upload.mutateAsync({ sessionId, form });
       const uploaded = res.files[0];
       setAttachments((prev) =>
@@ -136,7 +151,10 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
     };
     const onPasteEvt = (e: ClipboardEvent) => {
       const files = imagesFromClipboardEvent(e);
-      for (const f of files) void runUpload({ uri: "", name: f.name || "pasted-image.png", mimeType: f.type, image: true }, f);
+      for (const f of files) {
+        const uri = URL.createObjectURL(f);
+        void runUpload({ uri, name: f.name || "pasted-image.png", mimeType: f.type, image: true }, f);
+      }
     };
 
     node.addEventListener("keydown", onKeyDown);
@@ -168,6 +186,13 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
           {attachments.map((a) => (
             <Chip
               key={a.id}
+              icon={
+                a.image && a.uri ? (
+                  <Image source={{ uri: a.uri }} style={styles.chipThumb} />
+                ) : (
+                  <FileText size={14} strokeWidth={1.75} color={tokens.ink3} />
+                )
+              }
               label={a.state === "uploading" ? `${a.name} …` : a.state === "error" ? `${a.name} ⚠` : a.name}
               selected={a.state === "done"}
               onPress={() => removeAttachment(a.id)}
@@ -249,6 +274,7 @@ const styles = StyleSheet.create({
     gap: space.space8,
   },
   chipsRow: { flexDirection: "row", flexWrap: "wrap", gap: space.space8 },
+  chipThumb: { width: 20, height: 20, borderRadius: radii.radius4 },
   row: { flexDirection: "row", alignItems: "flex-end", gap: space.space4 },
   input: { flex: 1, paddingHorizontal: space.space8, paddingVertical: space.space8 },
   sendCircle: { borderRadius: radii.radiusPill, width: tapTarget, height: tapTarget },
