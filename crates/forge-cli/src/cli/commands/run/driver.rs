@@ -41,6 +41,10 @@ pub(crate) struct DriverSpec {
     /// notification-worthy snapshot transitions ([`crate::push::detect_trigger`]) — but only
     /// while zero WS clients are attached ([`crate::push::should_push`]).
     pub push: Option<std::sync::Arc<crate::push::PushNotifier>>,
+    /// The daemon's native (APNs) sender (`None` = native push disabled). Fired alongside `push`
+    /// on the same notification-worthy transitions, plus a Live Activity content-state update at
+    /// the same moments (see the dispatch site in `drive_session`).
+    pub apns: Option<std::sync::Arc<crate::apns::ApnsNotifier>>,
 }
 
 /// The daemon-side handle to a running session driver — everything `forge serve`'s HTTP layer
@@ -147,6 +151,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         shutdown_rx,
         last_activity.clone(),
         spec.push,
+        spec.apns,
         ws_clients.clone(),
     ));
 
@@ -224,6 +229,7 @@ async fn drive_session(
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     last_activity: std::sync::Arc<AtomicI64>,
     push: Option<std::sync::Arc<crate::push::PushNotifier>>,
+    apns: Option<std::sync::Arc<crate::apns::ApnsNotifier>>,
     ws_clients: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) {
     let (done_tx, done_rx) = std::sync::mpsc::channel::<u64>();
@@ -407,18 +413,34 @@ async fn drive_session(
                 if snap.busy && last_snap.as_ref().is_none_or(|p| !p.busy) {
                     turn_error = None;
                 }
-                // Actionable Web Push: needs-a-decision / turn-done / turn-failed transitions,
-                // debounced to zero-connected-clients, dispatched fire-and-forget — the
-                // broadcast below never waits on push delivery.
-                if let Some(notifier) = &push {
-                    if crate::push::should_push(
-                        ws_clients.load(std::sync::atomic::Ordering::Relaxed),
+                // Actionable notifications: needs-a-decision / turn-done / turn-failed
+                // transitions, debounced to zero-connected-clients, dispatched fire-and-forget
+                // across every configured channel (Web Push + native APNs) — the broadcast below
+                // never waits on delivery. Computed once regardless of which channels are
+                // configured, so native-only (no Web Push) deployments still notify.
+                if crate::push::should_push(ws_clients.load(std::sync::atomic::Ordering::Relaxed)) {
+                    if let Some(msg) = crate::push::detect_trigger(
+                        last_snap.as_ref(),
+                        &snap,
+                        turn_error.as_deref(),
                     ) {
-                        if let Some(msg) = crate::push::detect_trigger(
-                            last_snap.as_ref(),
-                            &snap,
-                            turn_error.as_deref(),
-                        ) {
+                        if let Some(notifier) = &apns {
+                            // Also nudge this session's Live Activity (if any) at the same
+                            // discrete moments rather than on every streaming-token snapshot
+                            // tick — Apple throttles overly-frequent remote updates.
+                            notifier.dispatch_live_activity(
+                                session_id.clone(),
+                                crate::apns::LiveActivityContentState {
+                                    busy: snap.busy,
+                                    waiting: snap.permission_prompt.is_some()
+                                        || snap.question.is_some(),
+                                    cost_usd: snap.cost_usd,
+                                    context_tokens: snap.context_tokens,
+                                },
+                            );
+                            notifier.dispatch_alert(msg.clone());
+                        }
+                        if let Some(notifier) = &push {
                             notifier.dispatch(msg);
                         }
                     }

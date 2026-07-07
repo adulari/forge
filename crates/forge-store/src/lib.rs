@@ -16,7 +16,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 11;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -571,6 +571,36 @@ fn migration_0009(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Migration #10: native (APNs) push subscriptions, alongside the existing Web Push table —
+/// iOS/Android have no `PushManager`, so a device token + environment ("sandbox" vs
+/// "production", since Apple routes each to a different host and a token from one is rejected by
+/// the other) is the native equivalent of a `push_subscription` row.
+fn migration_0010(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS apns_subscription (
+            id           TEXT PRIMARY KEY,
+            device_token TEXT NOT NULL,
+            environment  TEXT NOT NULL,
+            created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         )",
+    )
+}
+
+/// Migration #11: Live Activity remote-update push tokens (ActivityKit). A Live Activity has
+/// its own push token, separate from the device's general APNs token (`apns_subscription`) —
+/// Apple issues a fresh one per activity instance via `Activity.pushTokenUpdates`. At most one
+/// active Live Activity token per session, so this is keyed by `session_id`, not an id+list.
+fn migration_0011(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS live_activity_token (
+            session_id   TEXT PRIMARY KEY,
+            push_token   TEXT NOT NULL,
+            environment  TEXT NOT NULL,
+            updated_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         )",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -583,6 +613,8 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0007,
     migration_0008,
     migration_0009,
+    migration_0010,
+    migration_0011,
 ];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
@@ -613,6 +645,27 @@ pub struct PushSubscription {
     pub endpoint: String,
     pub p256dh: String,
     pub auth: String,
+}
+
+/// One stored APNs (native iOS) push subscription: a device token plus which APNs environment
+/// it belongs to ("sandbox" for Xcode/TestFlight debug builds, "production" for App Store
+/// builds) — Apple routes each to a different host, and a token from one is rejected by the
+/// other. Deduplicated by `device_token` on write, mirroring [`PushSubscription`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApnsSubscription {
+    pub id: String,
+    pub device_token: String,
+    pub environment: String,
+}
+
+/// The Live Activity remote-update push token for one session's ActivityKit activity (see
+/// migration_0010). Keyed by session, not deduplicated by token — starting a new Live Activity
+/// for the same session replaces the old token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveActivityToken {
+    pub session_id: String,
+    pub push_token: String,
+    pub environment: String,
 }
 
 impl Store {
@@ -2152,6 +2205,115 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Store (or refresh) an APNs subscription, deduplicating by `device_token` — Apple may
+    /// reissue the same device a new token, but a re-registration with an unchanged token must
+    /// update the row in place, never pile up duplicates. Returns the row id (existing or new).
+    pub fn upsert_apns_subscription(
+        &self,
+        device_token: &str,
+        environment: &str,
+    ) -> Result<String> {
+        let conn = self.lock()?;
+        if let Some(id) = conn
+            .query_row(
+                "SELECT id FROM apns_subscription WHERE device_token = ?1",
+                [device_token],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            conn.execute(
+                "UPDATE apns_subscription SET environment = ?2 WHERE id = ?1",
+                (&id, environment),
+            )?;
+            return Ok(id);
+        }
+        let id = forge_types::new_id();
+        conn.execute(
+            "INSERT INTO apns_subscription (id, device_token, environment) VALUES (?1, ?2, ?3)",
+            (&id, device_token, environment),
+        )?;
+        Ok(id)
+    }
+
+    /// Remove an APNs subscription by its device token (unsubscribe, or APNs answering
+    /// `BadDeviceToken`/`Unregistered`). `Ok(true)` when a row was actually deleted.
+    pub fn delete_apns_subscription(&self, device_token: &str) -> Result<bool> {
+        let n = self.lock()?.execute(
+            "DELETE FROM apns_subscription WHERE device_token = ?1",
+            [device_token],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Every stored APNs subscription, oldest first.
+    pub fn list_apns_subscriptions(&self) -> Result<Vec<ApnsSubscription>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, device_token, environment FROM apns_subscription ORDER BY created_at, id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ApnsSubscription {
+                    id: row.get(0)?,
+                    device_token: row.get(1)?,
+                    environment: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Store (or refresh) a session's Live Activity remote-update push token. Keyed by
+    /// `session_id` (the table's primary key), so a re-registration for the same session
+    /// replaces the existing token/environment in place rather than adding a row.
+    pub fn upsert_live_activity_token(
+        &self,
+        session_id: &str,
+        push_token: &str,
+        environment: &str,
+    ) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO live_activity_token (session_id, push_token, environment)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_id) DO UPDATE SET
+                push_token = excluded.push_token,
+                environment = excluded.environment,
+                updated_at = strftime('%s','now')",
+            (session_id, push_token, environment),
+        )?;
+        Ok(())
+    }
+
+    /// Remove a session's Live Activity push token (the activity ended). `Ok(true)` when a row
+    /// was actually deleted.
+    pub fn delete_live_activity_token(&self, session_id: &str) -> Result<bool> {
+        let n = self.lock()?.execute(
+            "DELETE FROM live_activity_token WHERE session_id = ?1",
+            [session_id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// A session's stored Live Activity push token, if any.
+    pub fn get_live_activity_token(&self, session_id: &str) -> Result<Option<LiveActivityToken>> {
+        self.lock()?
+            .query_row(
+                "SELECT session_id, push_token, environment FROM live_activity_token
+                 WHERE session_id = ?1",
+                [session_id],
+                |row| {
+                    Ok(LiveActivityToken {
+                        session_id: row.get(0)?,
+                        push_token: row.get(1)?,
+                        environment: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     /// A session's stored title, if any.
@@ -5388,6 +5550,74 @@ mod tests {
         let left = store.list_push_subscriptions().unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].endpoint, "https://push.example/b");
+    }
+
+    #[test]
+    fn apns_subscription_crud_dedupes_by_device_token() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.list_apns_subscriptions().unwrap().is_empty());
+
+        let id1 = store.upsert_apns_subscription("tokenA", "sandbox").unwrap();
+        let id2 = store
+            .upsert_apns_subscription("tokenB", "production")
+            .unwrap();
+        assert_ne!(id1, id2);
+        assert_eq!(store.list_apns_subscriptions().unwrap().len(), 2);
+
+        // Re-registering the SAME device token refreshes its environment in place — no
+        // duplicate row (e.g. a debug build reinstalled as a TestFlight build, same device).
+        let id1b = store
+            .upsert_apns_subscription("tokenA", "production")
+            .unwrap();
+        assert_eq!(id1, id1b, "same device token keeps its row id");
+        let subs = store.list_apns_subscriptions().unwrap();
+        assert_eq!(subs.len(), 2, "dedupe by device token");
+        let a = subs.iter().find(|s| s.id == id1).unwrap();
+        assert_eq!(a.environment, "production");
+        assert_eq!(a.device_token, "tokenA");
+
+        // Delete by device token; deleting again reports nothing removed.
+        assert!(store.delete_apns_subscription("tokenA").unwrap());
+        assert!(!store.delete_apns_subscription("tokenA").unwrap());
+        let left = store.list_apns_subscriptions().unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].device_token, "tokenB");
+    }
+
+    #[test]
+    fn live_activity_token_upserts_and_replaces_by_session() {
+        let store = Store::open_in_memory().unwrap();
+        assert!(store.get_live_activity_token("sess1").unwrap().is_none());
+
+        store
+            .upsert_live_activity_token("sess1", "tokA", "sandbox")
+            .unwrap();
+        let got = store.get_live_activity_token("sess1").unwrap().unwrap();
+        assert_eq!(got.session_id, "sess1");
+        assert_eq!(got.push_token, "tokA");
+        assert_eq!(got.environment, "sandbox");
+
+        // Re-registering the SAME session replaces the token/environment in place — no
+        // duplicate row (e.g. the OS reissues a fresh token for a still-running activity).
+        store
+            .upsert_live_activity_token("sess1", "tokB", "production")
+            .unwrap();
+        let got = store.get_live_activity_token("sess1").unwrap().unwrap();
+        assert_eq!(got.push_token, "tokB");
+        assert_eq!(got.environment, "production");
+
+        // A different session's token doesn't collide with sess1's row.
+        store
+            .upsert_live_activity_token("sess2", "tokC", "sandbox")
+            .unwrap();
+        let sess1_again = store.get_live_activity_token("sess1").unwrap().unwrap();
+        assert_eq!(sess1_again.push_token, "tokB", "sess1 unaffected by sess2");
+        let sess2 = store.get_live_activity_token("sess2").unwrap().unwrap();
+        assert_eq!(sess2.push_token, "tokC");
+
+        assert!(store.delete_live_activity_token("sess1").unwrap());
+        assert!(!store.delete_live_activity_token("sess1").unwrap());
+        assert!(store.get_live_activity_token("sess1").unwrap().is_none());
     }
 
     #[test]

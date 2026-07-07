@@ -23,10 +23,17 @@ import {
   mergeSession,
   type PastSessionRow,
   type SessionRow,
+  subscribePush,
   uploadFile,
 } from "./api";
 import { useAuth } from "./auth";
 import type { Snapshot } from "./ws";
+import { syncWidgetSessions } from "./widgetData";
+import {
+  endLiveActivity,
+  startLiveActivity,
+  updateLiveActivity,
+} from "../../modules/live-activity";
 
 const SESSIONS_POLL_MS = 3000;
 const PAST_PAGE_SIZE = 50;
@@ -44,13 +51,17 @@ function keys(baseUrl: string | null) {
 export function useSessions() {
   const { baseUrl } = useAuth();
   const isFocused = useIsFocused();
-  return useQuery<SessionRow[]>({
+  const query = useQuery<SessionRow[]>({
     queryKey: keys(baseUrl).sessions,
     queryFn: () => getSessions(baseUrl as string),
     enabled: baseUrl != null,
     refetchInterval: isFocused ? SESSIONS_POLL_MS : false,
     refetchOnWindowFocus: true,
   });
+  useEffect(() => {
+    if (query.data) syncWidgetSessions(query.data);
+  }, [query.data]);
+  return query;
 }
 
 /** Past (archived/finished) sessions, infinite by `before` = last row's last_activity. */
@@ -160,25 +171,63 @@ export function useUpload() {
  * appears from the store instead of the (now-stale) streaming/transcript fields. Returns
  * `true` on the render where the edge was detected, so the session shell can also react
  * (e.g. haptic/toast) without wiring its own busy-tracking ref.
+ *
+ * Same effect also drives this session's Live Activity (iOS-only, no-ops elsewhere): starts
+ * one on the idle->busy edge, updates it on every subsequent snapshot change while a turn is
+ * running, and ends it on the busy->idle edge — reusing this hook's existing busy-edge
+ * detection rather than tracking it a second time elsewhere.
  */
 export function useTurnCompleted(snapshot: Snapshot | null): boolean {
   const { baseUrl } = useAuth();
   const queryClient = useQueryClient();
   const prevBusyRef = useRef<boolean | undefined>(undefined);
+  const activityIdRef = useRef<string | null>(null);
   const [completed, setCompleted] = useState(false);
 
-  const busy = snapshot?.busy;
+  const busy = snapshot?.busy ?? false;
+  const waiting = snapshot != null && (snapshot.permission_prompt != null || snapshot.question != null);
   const sessionId = snapshot?.session_id ?? null;
+  const title = snapshot?.title ?? "";
+  const costUsd = snapshot?.cost_usd ?? 0;
+  const contextTokens = snapshot?.context_tokens ?? 0;
 
   // Detect the busy true->false edge in an effect (never read the ref during render).
   useEffect(() => {
-    const didComplete = prevBusyRef.current === true && busy === false;
+    const wasBusy = prevBusyRef.current;
+    const didComplete = wasBusy === true && !busy;
+    const didBegin = wasBusy === false && busy;
     prevBusyRef.current = busy;
     setCompleted(didComplete);
     if (didComplete && sessionId) {
       queryClient.invalidateQueries({ queryKey: keys(baseUrl).history(sessionId) });
     }
-  }, [busy, sessionId, baseUrl, queryClient]);
+
+    if (!sessionId) return;
+    if (didBegin) {
+      startLiveActivity(sessionId, title, busy, waiting, costUsd, contextTokens).then(
+        ({ activityId, pushToken }) => {
+          activityIdRef.current = activityId;
+          if (activityId && pushToken && baseUrl) {
+            subscribePush(baseUrl, {
+              session_id: sessionId,
+              push_token: pushToken,
+              environment: __DEV__ ? "sandbox" : "production",
+            }).catch(() => {});
+          }
+        },
+      );
+    } else if (activityIdRef.current) {
+      if (didComplete) {
+        const id = activityIdRef.current;
+        activityIdRef.current = null;
+        endLiveActivity(id).catch(() => {});
+      } else {
+        updateLiveActivity(activityIdRef.current, busy, waiting, costUsd, contextTokens).catch(
+          () => {},
+        );
+      }
+    }
+  }, [busy, waiting, sessionId, title, costUsd, contextTokens, baseUrl, queryClient]);
 
   return completed;
 }

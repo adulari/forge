@@ -134,14 +134,50 @@ export interface PushSubscriptionKeys {
   auth: string;
 }
 
-export interface PushSubscribeRequest {
+export interface WebPushSubscribeRequest {
   endpoint: string;
   keys: PushSubscriptionKeys;
 }
 
-export interface PushUnsubscribeRequest {
+/** A native device token (APNs) — the daemon's `SubscribeReq` discriminates by field
+ * presence, not an explicit `kind` tag (see crates/forge-cli/src/serve.rs). */
+export interface ApnsSubscribeRequest {
+  device_token: string;
+  environment: "sandbox" | "production";
+}
+
+/** A Live Activity's own push token — distinct from the general APNs device token above,
+ * issued per-activity-instance (see crates/forge-cli/src/serve.rs's `SubscribeReq::LiveActivity`). */
+export interface LiveActivitySubscribeRequest {
+  session_id: string;
+  push_token: string;
+  environment: "sandbox" | "production";
+}
+
+export type PushSubscribeRequest =
+  | WebPushSubscribeRequest
+  | ApnsSubscribeRequest
+  | LiveActivitySubscribeRequest;
+
+export interface WebPushUnsubscribeRequest {
   endpoint: string;
 }
+
+export interface ApnsUnsubscribeRequest {
+  device_token: string;
+}
+
+/** `push_token` is unused server-side for the delete (`session_id` is the key) but must still be
+ * present — the untagged `SubscribeReq` discriminator matches on field presence. */
+export interface LiveActivityUnsubscribeRequest {
+  session_id: string;
+  push_token: string;
+}
+
+export type PushUnsubscribeRequest =
+  | WebPushUnsubscribeRequest
+  | ApnsUnsubscribeRequest
+  | LiveActivityUnsubscribeRequest;
 
 // ---------------------------------------------------------------------------
 // Fetch wrapper
