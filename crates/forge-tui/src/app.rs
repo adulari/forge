@@ -136,6 +136,20 @@ impl UsageOverlay {
     }
 }
 
+/// The statusline's pace meter, one window at a time — whichever subscription window the latest
+/// `QuotaPace` events say is closest to exhaustion (quota-pace-tracking.md). Plain data pushed in
+/// by the core (which owns the store + the pure `compute_quota_pace`); the TUI only renders it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaPaceInfo {
+    pub provider: String,
+    pub window: String,
+    /// Fraction of the window consumed per hour, at the observed rate.
+    pub rate_per_hour: f64,
+    /// Fraction of the window projected to be used at its reset time, if known.
+    pub projected_fraction_at_reset: Option<f64>,
+    pub exhaustion_warning: bool,
+}
+
 /// One subscription's quota row in the `/mesh` inspector.
 #[derive(Debug, Default, Clone)]
 pub struct MeshQuotaRow {
@@ -388,6 +402,11 @@ pub struct App {
     pub repo_name: Option<String>,
     /// Number of connected MCP servers (from the last `McpStatus` event). Shown by `McpStatus` widget.
     pub mcp_count: usize,
+    /// The subscription window currently projected closest to exhaustion (from the latest
+    /// `QuotaPace` event), if any history-derived projection is available yet. Shown by the
+    /// `QuotaPace` statusline widget; `None` degrades that widget to render nothing (no panic,
+    /// no fake reading) when there isn't enough quota history for the active provider(s).
+    pub quota_pace: Option<QuotaPaceInfo>,
     /// Statusline layout loaded from config at startup. Drives `render_statusline`.
     pub statusline_config: forge_config::StatuslineConfig,
     /// Latest stdout from each shell-backed `Custom` widget, keyed by its `shell` command string
@@ -1832,6 +1851,41 @@ impl App {
                     ("codex-cli", "five_hour") => self.usage_overlay.codex_5h_pct = pct,
                     ("codex-cli", "weekly") => self.usage_overlay.codex_weekly_pct = pct,
                     _ => {}
+                }
+            }
+            PresenterEvent::QuotaPace {
+                provider,
+                window,
+                rate_per_hour,
+                projected_fraction_at_reset,
+                exhaustion_warning,
+            } => {
+                let candidate = QuotaPaceInfo {
+                    provider,
+                    window,
+                    rate_per_hour,
+                    projected_fraction_at_reset,
+                    exhaustion_warning,
+                };
+                // "Closest to exhaustion" = highest projected fraction at reset (unprojected
+                // windows sort last); a warning always outranks a non-warning candidate.
+                let replace = match &self.quota_pace {
+                    None => true,
+                    Some(current)
+                        if current.provider == candidate.provider
+                            && current.window == candidate.window =>
+                    {
+                        true // refresh this same window's reading
+                    }
+                    Some(current) => {
+                        candidate.exhaustion_warning && !current.exhaustion_warning
+                            || candidate.exhaustion_warning == current.exhaustion_warning
+                                && candidate.projected_fraction_at_reset.unwrap_or(0.0)
+                                    > current.projected_fraction_at_reset.unwrap_or(0.0)
+                    }
+                };
+                if replace {
+                    self.quota_pace = Some(candidate);
                 }
             }
             PresenterEvent::CustomWidgetOutput { id, text } => {
@@ -5461,6 +5515,38 @@ fn render_statusline_widget<'a>(
             };
             Some(vec![Span::styled(
                 format!("codex {pct:.0}%"),
+                Style::default().fg(color).bg(STATUSBG),
+            )])
+        }
+        W::QuotaPace => {
+            let p = app.quota_pace.as_ref()?;
+            let color = if p.exhaustion_warning {
+                ERRRED
+            } else if p.projected_fraction_at_reset.unwrap_or(0.0) >= 0.70 {
+                WARNYEL
+            } else {
+                DIM
+            };
+            let short_window = match p.window.as_str() {
+                "five_hour" => "5h",
+                "weekly" => "wk",
+                "" => "?",
+                other => other,
+            };
+            let text = match p.projected_fraction_at_reset {
+                Some(proj) => format!(
+                    "⏱ {} {short_window} → {:.0}%",
+                    p.provider.trim_end_matches("-cli"),
+                    proj * 100.0
+                ),
+                None => format!(
+                    "⏱ {} {short_window} {:+.1}%/hr",
+                    p.provider.trim_end_matches("-cli"),
+                    p.rate_per_hour * 100.0
+                ),
+            };
+            Some(vec![Span::styled(
+                text,
                 Style::default().fg(color).bg(STATUSBG),
             )])
         }

@@ -246,6 +246,19 @@ pub enum PresenterEvent {
         window: String,
         fraction: f64,
     },
+    /// A pace/projection was derived for one subscription window from its usage history
+    /// (quota-pace-tracking.md, `forge_types::compute_quota_pace`). Drives the statusline pace
+    /// meter; only emitted once there's enough history to project (never a guess from one point).
+    QuotaPace {
+        provider: String,
+        window: String,
+        /// Fraction of the window consumed per hour, at the observed rate.
+        rate_per_hour: f64,
+        /// Fraction of the window projected to be used AT its reset time, if known.
+        projected_fraction_at_reset: Option<f64>,
+        /// True when the projected usage would exceed the window before it resets.
+        exhaustion_warning: bool,
+    },
     /// A shell-backed `Custom` statusline widget's periodic refresh completed. `id` is the
     /// command string itself (see `StatuslineWidget::Custom`); `text` is its trimmed stdout.
     CustomWidgetOutput {
@@ -505,8 +518,9 @@ impl Presenter for HeadlessPresenter {
             // The final answer was already streamed via AssistantText; Done is a
             // lifecycle marker, so the headless renderer needs no extra output here.
             PresenterEvent::Done { .. } => {}
-            // Real-time quota updates are for the TUI overlay; headless ignores them.
+            // Real-time quota updates/pace are for the TUI overlay/statusline; headless ignores them.
             PresenterEvent::QuotaUpdate { .. } => {}
+            PresenterEvent::QuotaPace { .. } => {}
             PresenterEvent::CustomWidgetOutput { .. } => {}
             PresenterEvent::CompactionStarted { auto } => {
                 println!("  ⟳ compacting{}…", if auto { " (auto)" } else { "" });

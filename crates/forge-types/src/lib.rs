@@ -1056,6 +1056,108 @@ impl SubscriptionQuota {
     }
 }
 
+/// One historical observation of a subscription window's usage (quota-pace-tracking.md),
+/// read back from the store's append-only `quota_history` table. Distinct from [`QuotaHint`]
+/// (the latest snapshot only) — a series of these is what lets [`compute_quota_pace`] derive a
+/// rate of consumption instead of just a point-in-time fraction.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuotaHistoryPoint {
+    /// Epoch seconds this observation was recorded.
+    pub observed_at: i64,
+    /// Fraction of the window consumed at `observed_at` (0.0–1.0).
+    pub fraction_used: f64,
+}
+
+/// A minimum span of wall-clock time between the earliest and latest history point before
+/// [`compute_quota_pace`] will derive a rate from them. Two samples seconds apart (e.g. right
+/// after a window resets) would otherwise divide by a near-zero denominator and spike into a
+/// nonsensical rate/projection — this floor makes "not enough data yet" an explicit `None`
+/// instead of a false reading.
+pub const QUOTA_PACE_MIN_ELAPSED_SECS: i64 = 300;
+
+/// A projection of where a subscription window's usage is headed, derived from a short history
+/// of `(observed_at, fraction_used)` points by [`compute_quota_pace`]. Pure/deterministic: no
+/// clock or I/O, so it's trivially unit-testable — the caller supplies "now".
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QuotaPace {
+    /// Fraction of the window consumed per hour, at the observed rate (>= 0.0).
+    pub rate_per_hour: f64,
+    /// Fraction of the window consumed per day, at the observed rate (>= 0.0).
+    pub rate_per_day: f64,
+    /// Fraction of the window projected to be used AT `resets_at`, linearly extrapolating the
+    /// observed rate. `None` when the window's reset time isn't known (nothing to project to).
+    pub projected_fraction_at_reset: Option<f64>,
+    /// Seconds until the window would hit 100% at the current rate. `None` when the rate is
+    /// zero/negative (usage isn't climbing, so it will never reach 100% on its own).
+    pub time_to_exhaustion_secs: Option<f64>,
+    /// True when the projected usage will exceed the window before it resets — i.e.
+    /// `time_to_exhaustion_secs < time remaining in the window`. The signal the statusline/mesh
+    /// use to warn ahead of an overrun, not just react to one already at `QuotaStatus::Warning`.
+    pub exhaustion_warning: bool,
+}
+
+/// Derive a [`QuotaPace`] from a subscription window's usage history. `history` need not be
+/// sorted; `resets_at` is the window's known reset time (epoch secs, if any); `now` is the
+/// caller-supplied clock (epoch secs) — this function performs no I/O and reads no clock itself.
+///
+/// Returns `None` when there isn't enough data to derive a rate: fewer than two points, or the
+/// earliest and latest point are within [`QUOTA_PACE_MIN_ELAPSED_SECS`] of each other (guards the
+/// "just reset" near-zero-denominator case described on [`QUOTA_PACE_MIN_ELAPSED_SECS`]).
+pub fn compute_quota_pace(
+    history: &[QuotaHistoryPoint],
+    resets_at: Option<i64>,
+    now: i64,
+) -> Option<QuotaPace> {
+    if history.len() < 2 {
+        return None;
+    }
+    let mut sorted: Vec<QuotaHistoryPoint> = history.to_vec();
+    sorted.sort_by_key(|p| p.observed_at);
+    let earliest = sorted.first().copied()?;
+    let latest = sorted.last().copied()?;
+
+    let elapsed_secs = latest.observed_at - earliest.observed_at;
+    if elapsed_secs < QUOTA_PACE_MIN_ELAPSED_SECS {
+        return None;
+    }
+
+    // A window rollover mid-history would show fraction_used dropping; clamp to 0 rather than
+    // report a negative rate — there's nothing sensible to project from a reset in-range.
+    let delta_fraction = (latest.fraction_used - earliest.fraction_used).max(0.0);
+    let rate_per_sec = delta_fraction / elapsed_secs as f64;
+    let rate_per_hour = rate_per_sec * 3600.0;
+    let rate_per_day = rate_per_sec * 86_400.0;
+
+    let time_to_exhaustion_secs = if rate_per_sec > 0.0 && latest.fraction_used < 1.0 {
+        Some((1.0 - latest.fraction_used) / rate_per_sec)
+    } else if latest.fraction_used >= 1.0 {
+        Some(0.0)
+    } else {
+        None
+    };
+
+    let projected_fraction_at_reset = resets_at.map(|r| {
+        let remaining = (r - now).max(0) as f64;
+        latest.fraction_used + rate_per_sec * remaining
+    });
+
+    let exhaustion_warning = match (resets_at, time_to_exhaustion_secs) {
+        (Some(r), Some(t)) => {
+            let remaining = (r - now).max(0) as f64;
+            t < remaining
+        }
+        _ => false,
+    };
+
+    Some(QuotaPace {
+        rate_per_hour,
+        rate_per_day,
+        projected_fraction_at_reset,
+        time_to_exhaustion_secs,
+        exhaustion_warning,
+    })
+}
+
 /// Why a `run_turn_with` loop ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1355,5 +1457,77 @@ mod tests {
             Some(PermissionMode::AcceptEdits)
         );
         assert_eq!(PermissionMode::from_key("nope"), None);
+    }
+
+    fn hp(observed_at: i64, fraction_used: f64) -> QuotaHistoryPoint {
+        QuotaHistoryPoint {
+            observed_at,
+            fraction_used,
+        }
+    }
+
+    #[test]
+    fn quota_pace_normal_rate_projects_comfortably_under_limit_no_warning() {
+        // 10% used, climbing to 20% over 5 hours -> 2%/hr. A 5-hour window with 2 hours left to
+        // run projects to 20% + 2%*2 = 24% at reset: comfortably under 100%, no warning.
+        let now = 10_000_i64;
+        let history = vec![hp(now - 5 * 3600, 0.10), hp(now, 0.20)];
+        let resets_at = now + 2 * 3600;
+        let pace = compute_quota_pace(&history, Some(resets_at), now).expect("enough data");
+
+        assert!((pace.rate_per_hour - 0.02).abs() < 1e-9, "{pace:?}");
+        let projected = pace.projected_fraction_at_reset.expect("has reset time");
+        assert!((projected - 0.24).abs() < 1e-9, "{pace:?}");
+        assert!(!pace.exhaustion_warning, "{pace:?}");
+    }
+
+    #[test]
+    fn quota_pace_over_pace_warns_with_sane_projection_and_ttl() {
+        // 20% used, climbing to 80% over 1 hour -> 60%/hr. 2 hours left in the window: at that
+        // rate usage would hit 100% well before reset, so the warning must fire, and the specific
+        // projected percentage / time-to-exhaustion must be sane (not just "warning is true").
+        let now = 20_000_i64;
+        let history = vec![hp(now - 3600, 0.20), hp(now, 0.80)];
+        let resets_at = now + 2 * 3600;
+        let pace = compute_quota_pace(&history, Some(resets_at), now).expect("enough data");
+
+        assert!((pace.rate_per_hour - 0.60).abs() < 1e-9, "{pace:?}");
+        // Projected at reset: 80% + 60%/hr * 2hr = 200%.
+        let projected = pace.projected_fraction_at_reset.expect("has reset time");
+        assert!((projected - 2.0).abs() < 1e-9, "{pace:?}");
+        // Time to 100%: (1.0 - 0.8) / (0.60/3600) = 1200s = 20 minutes.
+        let ttl = pace.time_to_exhaustion_secs.expect("rate is positive");
+        assert!((ttl - 1200.0).abs() < 1e-6, "{pace:?}");
+        assert!(pace.exhaustion_warning, "{pace:?}");
+    }
+
+    #[test]
+    fn quota_pace_just_reset_guards_against_near_zero_denominator() {
+        // Two samples 2 seconds apart, both near 0% used (right after a window rollover). Must
+        // NOT compute a rate off a near-zero elapsed time and must NOT report a false warning —
+        // it must report "not enough data yet" instead.
+        let now = 30_000_i64;
+        let history = vec![hp(now - 2, 0.001), hp(now, 0.0011)];
+        let pace = compute_quota_pace(&history, Some(now + 5 * 3600), now);
+        assert!(
+            pace.is_none(),
+            "expected not-enough-data guard, got {pace:?}"
+        );
+    }
+
+    #[test]
+    fn quota_pace_needs_at_least_two_points() {
+        assert!(compute_quota_pace(&[], None, 0).is_none());
+        assert!(compute_quota_pace(&[hp(0, 0.1)], None, 100_000).is_none());
+    }
+
+    #[test]
+    fn quota_pace_without_reset_time_still_reports_rate_but_no_projection_or_warning() {
+        let now = 40_000_i64;
+        let history = vec![hp(now - 3600, 0.10), hp(now, 0.20)];
+        let pace = compute_quota_pace(&history, None, now).expect("enough data");
+        assert!((pace.rate_per_hour - 0.10).abs() < 1e-9, "{pace:?}");
+        assert!(pace.projected_fraction_at_reset.is_none());
+        assert!(!pace.exhaustion_warning);
     }
 }

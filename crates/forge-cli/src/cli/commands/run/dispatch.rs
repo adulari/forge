@@ -886,6 +886,7 @@ and keep going."
                     forge_config::StatuslineWidget::RepoName => "repo_name".into(),
                     forge_config::StatuslineWidget::QuotaClaude => "quota_claude".into(),
                     forge_config::StatuslineWidget::QuotaCodex => "quota_codex".into(),
+                    forge_config::StatuslineWidget::QuotaPace => "quota_pace".into(),
                     forge_config::StatuslineWidget::McpStatus => "mcp_status".into(),
                     forge_config::StatuslineWidget::Custom {
                         text,
@@ -930,14 +931,15 @@ and keep going."
                         "repo_name" | "repo" => forge_config::StatuslineWidget::RepoName,
                         "quota_claude" | "claude" => forge_config::StatuslineWidget::QuotaClaude,
                         "quota_codex" | "codex" => forge_config::StatuslineWidget::QuotaCodex,
+                        "quota_pace" | "pace" => forge_config::StatuslineWidget::QuotaPace,
                         "mcp_status" | "mcp" => forge_config::StatuslineWidget::McpStatus,
                         other => {
                             app.note(&format!(
                                 "⚠ unknown widget '{other}' — use: model, tier, session_cost, \
                                  effort, mode, turn_elapsed, tokens_in, tokens_out, \
                                  session_tokens, git_branch, repo_name, quota_claude, \
-                                 quota_codex, mcp_status (custom/shell widgets are edited \
-                                 directly in the config file — see `/statusline edit`)"
+                                 quota_codex, quota_pace, mcp_status (custom/shell widgets are \
+                                 edited directly in the config file — see `/statusline edit`)"
                             ));
                             return Ok(DispatchOutcome::Handled);
                         }

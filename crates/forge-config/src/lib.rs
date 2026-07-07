@@ -1738,6 +1738,10 @@ pub enum StatuslineWidget {
     QuotaClaude,
     /// Codex usage % "codex N%" (only when data is available)
     QuotaCodex,
+    /// Consumption-pace meter (quota-pace-tracking.md) for whichever subscription window is
+    /// projected closest to exhaustion, e.g. "⏱ claude 5h → 120%" — only renders once enough
+    /// usage history has built up to derive a rate (silently absent otherwise, never a guess).
+    QuotaPace,
     /// MCP server count "⌬ N mcp" (only when servers are connected)
     McpStatus,
     /// Tier bracket only "[tier]"
