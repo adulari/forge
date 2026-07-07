@@ -80,7 +80,7 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
     // must not be claimed on the sent bubble either.
     const sent: SentAttachment[] = attachments
       .filter((a) => a.state === "done")
-      .map((a) => ({ id: a.id, name: a.name, image: a.image, uri: a.uri }));
+      .map((a) => ({ id: a.id, name: a.name, image: a.image, uri: a.uri, path: a.path }));
     onSend(trimmed, sent);
     haptics.sendPrompt();
     setText("");

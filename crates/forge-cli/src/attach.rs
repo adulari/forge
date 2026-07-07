@@ -470,7 +470,8 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<RemoteInput>(prompt).unwrap(),
             RemoteInput::Prompt {
-                text: "fix the bug".into()
+                text: "fix the bug".into(),
+                attachments: Vec::new(),
             }
         );
 

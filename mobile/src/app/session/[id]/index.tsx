@@ -153,7 +153,13 @@ export default function SessionChat() {
       setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current, attachments }]);
 
       if (online) {
-        send({ kind: "prompt", text });
+        // Only uploaded (path-bearing) attachments can ride the wire — correlates this exact
+        // send's attachments to this exact prompt, instead of the daemon guessing from whatever
+        // upload happens to be ambiently pending (ARCHITECTURE §4.1.4 note / mobile upload race).
+        const withPath = attachments
+          .filter((a): a is SentAttachment & { path: string } => a.path != null)
+          .map((a) => ({ path: a.path, image: a.image }));
+        send({ kind: "prompt", text, attachments: withPath });
         return;
       }
       setOfflineQueue((prev) => {

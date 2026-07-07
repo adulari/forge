@@ -1333,6 +1333,14 @@ impl Session {
         self.pending_images.extend(images);
     }
 
+    /// Discard whatever's queued for the next turn's vision input WITHOUT using it — the
+    /// counterpart to [`Session::attach_images`]. Used when an explicit, message-correlated
+    /// attachment list has arrived for a turn and any stale ambient state from an unrelated
+    /// upload must not leak into it (or any future turn).
+    pub fn take_pending_images(&mut self) -> Vec<forge_types::ImageAttachment> {
+        std::mem::take(&mut self.pending_images)
+    }
+
     /// Root every tool call's relative `path`/`cwd` args at `root` (see the `work_root` field).
     /// Set by the `forge serve` driver for sessions whose working directory differs from the
     /// daemon process's cwd (per-session dirs, isolated worktrees). `None` restores the default.
