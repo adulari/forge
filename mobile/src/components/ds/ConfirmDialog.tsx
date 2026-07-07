@@ -1,6 +1,11 @@
 // DESIGN_SYSTEM.md §6 Containers — ConfirmDialog: centered <=360pt card.
 // Destructive variant is 2-step: primary (safe) action is Cancel, the danger
-// action requires a 400ms press-and-hold with a filling background.
+// action shows a 400ms press-and-hold fill for deliberate tactile confirmation,
+// but a plain tap/click also confirms immediately — otherwise a normal press
+// (release well under 400ms, as any mouse click or quick tap is) triggers
+// onPressIn+onPressOut back-to-back, cancels the fill before it can complete,
+// and silently no-ops. A bare `onPress` fallback (mirroring the accessibility
+// "activate" action below) keeps this from reading as a dead button.
 //
 // The two action buttons are built inline rather than composed from
 // `ds/Button` (owned by the parallel T1.1 task): the danger action's
@@ -117,6 +122,7 @@ export function ConfirmDialog({
 
             {destructive ? (
               <Pressable
+                onPress={complete}
                 onPressIn={onHoldIn}
                 onPressOut={onHoldOut}
                 accessibilityRole="button"

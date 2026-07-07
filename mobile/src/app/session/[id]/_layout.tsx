@@ -52,7 +52,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const tokens = useTokens();
   const toast = useToast();
   const pathname = usePathname();
-  const { isCompact, isExpanded } = useBreakpoint();
+  const { isCompact } = useBreakpoint();
   const { snapshot, connectionState } = useSessionCtx();
 
   // ARCHITECTURE §4.1.4: on the `busy` true->false edge, invalidate this session's history
@@ -130,18 +130,17 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             : "idle";
 
   const gutter = { paddingHorizontal: isCompact ? space.space16 : space.space24 };
-  // DESIGN_SYSTEM.md §7 expanded: "Chat content column max-width 840". The full spec calls for
-  // session/[id] to render inline as the right pane of a persistent Fleet rail (master-detail),
-  // but that's a routing-architecture change (session/[id] is a sibling Stack route outside
-  // (tabs) on purpose — see the HANDOFF in (tabs)/_layout.tsx) out of this fix's bounded scope.
-  // Until that lands, center a capped column at the expanded breakpoint so the shell doesn't
-  // stretch header/segmented/chat content edge-to-edge across a wide desktop viewport.
-  const wideCol = isExpanded ? styles.wideCol : null;
+  // DESIGN_SYSTEM.md §7 expanded: the full spec calls for session/[id] to render inline as the
+  // right pane of a persistent Fleet rail (master-detail), but that's a routing-architecture
+  // change (session/[id] is a sibling Stack route outside (tabs) on purpose — see the HANDOFF
+  // in (tabs)/_layout.tsx) out of this fix's bounded scope. Until that lands, the expanded
+  // breakpoint fills the full viewport width like every other screen — only `gutter` (space24)
+  // keeps header/status/segmented/chat content off the screen edges, no extra centered cap.
 
   return (
     <View style={[styles.flex, { backgroundColor: tokens.bg1 }]}>
       <SafeAreaView edges={["top", "left", "right"]} style={{ backgroundColor: tokens.bg1 }}>
-        <View style={[gutter, wideCol]}>
+        <View style={gutter}>
           <SessionHeader
             title={snapshot?.title || `session ${sessionId.slice(0, 8)}`}
             cwd={snapshot?.cwd ?? sessionId}
@@ -163,7 +162,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         {closed ? <Banner tone="danger" message="session ended — see History to review it" /> : null}
         {reconnecting ? <Banner tone="neutral" compact message="reconnecting…" /> : null}
 
-        <View style={[gutter, wideCol]}>
+        <View style={gutter}>
           <StatusStrip
             state={statusState}
             tier={snapshot?.tier ?? null}
@@ -175,7 +174,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           />
         </View>
 
-        <View style={[gutter, styles.segmentedWrap, wideCol]}>
+        <View style={[gutter, styles.segmentedWrap]}>
           <Segmented
             options={segmentOptions}
             value={activeSegment}
@@ -185,7 +184,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         </View>
       </SafeAreaView>
 
-      <View style={[styles.flex, wideCol]}>
+      <View style={styles.flex}>
         <Slot />
       </View>
       {/* HANDOFF(T4.1): overlay mirror — reads snapshot.overlay itself, no props. */}
@@ -221,5 +220,4 @@ export default function SessionLayout() {
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   segmentedWrap: { paddingBottom: space.space8 },
-  wideCol: { width: "100%", maxWidth: 840, alignSelf: "center" },
 });

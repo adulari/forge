@@ -10,6 +10,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createAsyncStoragePersister } from "@tanstack/query-async-storage-persister";
 import { QueryClient } from "@tanstack/react-query";
 import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
+import { useFonts } from "expo-font";
 import { Redirect, Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import React, { useEffect, useMemo } from "react";
@@ -24,6 +25,7 @@ import { PaletteHost } from "../components/overlay/CommandPalette";
 import { AuthProvider, useAuth } from "../lib/auth";
 import { useGlobalShortcuts } from "../lib/shortcuts";
 import { ThemeProvider, useTokens } from "../theme/ThemeProvider";
+import { monoFamily } from "../theme/typography";
 
 // Keep the native splash up until pairing state resolves (avoids a flash of the
 // "unpaired" redirect before AuthProvider finishes its one AsyncStorage/secure-store read).
@@ -95,6 +97,17 @@ function RootNavigator() {
 export default function RootLayout() {
   const persistOptions = useMemo(() => ({ persister: asyncStoragePersister }), []);
   useGlobalShortcuts(); // HANDOFF(T5.1): ⌘1..4 tabs / ⌘N new session — web/desktop only, no-op native
+
+  // Native gets JetBrains Mono from the expo-font config plugin's build-time embed;
+  // that plugin has no effect on the web export, so web needs this runtime load too
+  // (it registers a @font-face under the same family names — resolves near-instantly
+  // since the ttf is bundled, and is a no-op check on native where it's already embedded).
+  const [monoFontsLoaded] = useFonts({
+    [monoFamily.regular]: require("../../assets/JetBrainsMono-Regular.ttf"),
+    [monoFamily.bold]: require("../../assets/JetBrainsMono-Bold.ttf"),
+  });
+
+  if (!monoFontsLoaded) return null;
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>

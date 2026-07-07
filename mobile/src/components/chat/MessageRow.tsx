@@ -65,7 +65,9 @@ function MessageRowImpl({ row, attachments }: MessageRowProps) {
       <View
         style={[
           styles.bubble,
-          isUser ? { backgroundColor: tokens.bg3 } : { backgroundColor: "transparent" },
+          isUser
+            ? [styles.userBubble, { backgroundColor: tokens.bg3 }]
+            : { backgroundColor: "transparent" },
         ]}
       >
         {attachments && attachments.length > 0 ? <AttachmentRow attachments={attachments} /> : null}
@@ -100,6 +102,7 @@ export const MessageRow = React.memo(MessageRowImpl);
 const styles = StyleSheet.create({
   row: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
   userRow: { alignItems: "flex-end" },
-  bubble: { borderRadius: 12, paddingHorizontal: space.space12, paddingVertical: space.space8, maxWidth: "92%" },
+  bubble: { borderRadius: 12, paddingHorizontal: space.space12, paddingVertical: space.space8 },
+  userBubble: { maxWidth: "92%" },
   meta: { marginTop: space.space4 },
 });

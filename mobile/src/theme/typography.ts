@@ -17,18 +17,26 @@ export function monoFamilyFor(weight: 400 | 700): string {
 
 export const tabularNums: TextStyle = { fontVariant: ["tabular-nums"] };
 
+// §2: "Sans: platform system stack (SF / Roboto / system-ui). No custom sans." On
+// native, leaving fontFamily unset already renders the platform system font. On web,
+// react-native-web's own Text default falls back to the invalid CSS family "System"
+// (not the `system-ui` keyword), which browsers can't match — hence the serif fallback
+// this constant fixes. Native is left untouched (undefined = no-op style key).
+const sansFamily =
+  Platform.OS === "web" ? "system-ui, -apple-system, BlinkMacSystemFont, sans-serif" : undefined;
+
 // ---------------------------------------------------------------------------
 // §2 type scale — size / line-height / weight, the only allowed combinations.
 // ---------------------------------------------------------------------------
 
 export const type = {
-  display: { fontSize: 28, lineHeight: 34, fontWeight: "700" } satisfies TextStyle,
-  title: { fontSize: 20, lineHeight: 26, fontWeight: "700" } satisfies TextStyle,
-  heading: { fontSize: 17, lineHeight: 24, fontWeight: "600" } satisfies TextStyle,
-  body: { fontSize: 15, lineHeight: 22, fontWeight: "400" } satisfies TextStyle,
-  bodyBold: { fontSize: 15, lineHeight: 22, fontWeight: "600" } satisfies TextStyle,
-  sub: { fontSize: 13, lineHeight: 18, fontWeight: "400" } satisfies TextStyle,
-  meta: { fontSize: 12, lineHeight: 16, fontWeight: "500" } satisfies TextStyle,
+  display: { fontSize: 28, lineHeight: 34, fontWeight: "700", fontFamily: sansFamily } satisfies TextStyle,
+  title: { fontSize: 20, lineHeight: 26, fontWeight: "700", fontFamily: sansFamily } satisfies TextStyle,
+  heading: { fontSize: 17, lineHeight: 24, fontWeight: "600", fontFamily: sansFamily } satisfies TextStyle,
+  body: { fontSize: 15, lineHeight: 22, fontWeight: "400", fontFamily: sansFamily } satisfies TextStyle,
+  bodyBold: { fontSize: 15, lineHeight: 22, fontWeight: "600", fontFamily: sansFamily } satisfies TextStyle,
+  sub: { fontSize: 13, lineHeight: 18, fontWeight: "400", fontFamily: sansFamily } satisfies TextStyle,
+  meta: { fontSize: 12, lineHeight: 16, fontWeight: "500", fontFamily: sansFamily } satisfies TextStyle,
   // §1.4/§2: section headers are also ink3 + uppercase — color lives in tokens.ts
   // (ColorTokens.ink3), so consumers merge `type.section` with `{ color: tokens.ink3 }`.
   section: {
@@ -37,6 +45,7 @@ export const type = {
     fontWeight: "700",
     letterSpacing: 0.6,
     textTransform: "uppercase",
+    fontFamily: sansFamily,
   } satisfies TextStyle,
   code: {
     fontSize: 13,
