@@ -36,7 +36,7 @@
       "channel": "preview",
       "ios": {
         "resourceClass": "m-medium",
-        "appleTeamId": "TODO(team-id): set once Apple Developer account is approved"
+        "appleTeamId": "95VXXPD28Y"
       }
     },
     "production": {
@@ -45,7 +45,7 @@
       "channel": "production",
       "ios": {
         "resourceClass": "m-medium",
-        "appleTeamId": "TODO(team-id): set once Apple Developer account is approved"
+        "appleTeamId": "95VXXPD28Y"
       }
     }
   },
@@ -54,7 +54,7 @@
       "ios": {
         "appleId": "TODO(apple-id): Apple ID email for App Store Connect",
         "ascAppId": "TODO(asc-app-id): App Store Connect app numeric ID (create the app record in App Store Connect first, or let `eas submit` create it on first run)",
-        "appleTeamId": "TODO(team-id): set once Apple Developer account is approved"
+        "appleTeamId": "95VXXPD28Y"
       }
     }
   }
