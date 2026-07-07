@@ -27,6 +27,7 @@ import {
 import CardSlot from "../../../components/chat/CardSlot";
 import { Composer } from "../../../components/chat/Composer";
 import { MessageRow } from "../../../components/chat/MessageRow";
+import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
 import { StreamingText } from "../../../components/chat/StreamingText";
 import { BoundedList } from "../../../components/ds/BoundedList";
 import { Chip } from "../../../components/ds/Chip";
@@ -36,6 +37,7 @@ import { useToast } from "../../../components/ds/ToastHost";
 import { type HistoryRow } from "../../../lib/api";
 import { haptics } from "../../../lib/haptics";
 import { useHistory } from "../../../lib/queries";
+import { parseReasoning } from "../../../lib/reasoning";
 import { useSessionCtx } from "../../../lib/sessionContext";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { space } from "../../../theme/tokens";
@@ -288,7 +290,14 @@ export default function SessionChat() {
 
   const finalizingActive =
     !busy && finalizing !== null && (historyRows[0]?.seq ?? -1) === finalizing.baselineSeq;
-  const displayText = streamingText || (finalizingActive ? finalizing!.text : "");
+  // Bridge the mid-busy empty tick too (root cause of the residual flicker): the daemon flushes
+  // the reply out of `streaming` into `transcript` one or more frames BEFORE `busy` flips false
+  // (verified live — `streaming` goes "" while still busy). Falling back to `track.retainedText`
+  // while busy keeps the just-streamed answer on screen through those frames instead of blanking
+  // it back to the "thinking…" indicator, then `finalizing` carries it across the busy->false
+  // edge until the history row lands. No frame ever renders the answer absent.
+  const displayText =
+    streamingText || (busy ? track.retainedText : "") || (finalizingActive ? finalizing!.text : "");
 
   const items = useMemo<TimelineItem[]>(() => {
     const list: TimelineItem[] = [];
@@ -363,20 +372,36 @@ export default function SessionChat() {
               }}
             />
           );
-        case "streaming":
-          return item.text ? (
-            <View style={styles.streamingRow}>
-              <StreamingText text={item.text} streaming={item.streaming} />
-            </View>
-          ) : (
-            // Queued/busy but no tokens yet — an explicit "thinking" affordance (same
+        case "streaming": {
+          // Split inline `<think>…</think>` out of the live text: reasoning goes to the collapsed
+          // disclosure, only the answer streams in the main slot (never the raw thinking log).
+          const parsed = parseReasoning(item.text);
+          const hasReasoning = parsed.reasoning.length > 0 || parsed.thinking;
+          if (!hasReasoning && !parsed.answer) {
+            // Queued/busy but no answer/reasoning yet — an explicit "thinking" affordance (same
             // ActivityIndicator+accent pairing BoundedList's loadingMore footer uses) so this
             // phase never reads as stuck.
-            <View style={[styles.streamingRow, styles.thinkingRow]}>
-              <ActivityIndicator size="small" color={tokens.accent} />
-              <Text style={[typeScale.meta, { color: tokens.ink3 }]}>thinking…</Text>
+            return item.streaming ? (
+              <View style={[styles.streamingRow, styles.thinkingRow]}>
+                <ActivityIndicator size="small" color={tokens.accent} />
+                <Text style={[typeScale.meta, { color: tokens.ink3 }]}>thinking…</Text>
+              </View>
+            ) : null;
+          }
+          return (
+            <View style={styles.streamingRow}>
+              {hasReasoning ? (
+                <ReasoningDisclosure
+                  reasoning={parsed.reasoning}
+                  active={parsed.thinking && item.streaming}
+                />
+              ) : null}
+              {parsed.answer ? (
+                <StreamingText text={parsed.answer} streaming={item.streaming} />
+              ) : null}
             </View>
           );
+        }
         case "filler":
         default:
           return (

@@ -5,10 +5,12 @@ import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import type { HistoryRow } from "../../lib/api";
+import { parseReasoning } from "../../lib/reasoning";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
 import { Markdown } from "./Markdown";
+import { ReasoningDisclosure } from "./ReasoningDisclosure";
 
 export interface MessageRowProps {
   row: HistoryRow;
@@ -18,6 +20,10 @@ function MessageRowImpl({ row }: MessageRowProps) {
   const tokens = useTokens();
   const isUser = row.role === "user";
   const isSystem = row.role === "system";
+
+  // Only assistant turns carry inline `<think>` reasoning; a past turn's reasoning renders
+  // collapsed here too, so scrollback isn't full of expanded thinking logs.
+  const parsed = isUser || isSystem ? null : parseReasoning(row.content);
 
   return (
     <View style={[styles.row, isUser && styles.userRow]}>
@@ -34,6 +40,11 @@ function MessageRowImpl({ row }: MessageRowProps) {
           >
             {row.content}
           </Text>
+        ) : parsed ? (
+          <>
+            {parsed.reasoning ? <ReasoningDisclosure reasoning={parsed.reasoning} /> : null}
+            <Markdown content={parsed.answer} />
+          </>
         ) : (
           <Markdown content={row.content} />
         )}
