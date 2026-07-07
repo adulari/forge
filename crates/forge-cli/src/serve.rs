@@ -2076,7 +2076,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
+    use p256::elliptic_curve::sec1::ToSec1Point;
     use tower::util::ServiceExt;
 
     /// A daemon state + router over an in-memory store with NO push configured — the push
@@ -2167,7 +2167,7 @@ mod tests {
 
         // The "browser": a fixed receiver keypair + auth secret we can decrypt with.
         let ua_secret = p256::SecretKey::from_slice(&[42u8; 32]).unwrap();
-        let ua_public = ua_secret.public_key().to_encoded_point(false);
+        let ua_public = ua_secret.public_key().to_sec1_point(false);
         let auth: [u8; 16] = [7u8; 16];
         let endpoint = format!("http://{push_addr}/wp/sub1");
 
