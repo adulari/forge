@@ -14,8 +14,7 @@ const config: ExpoConfig = {
   ios: {
     bundleIdentifier: BUNDLE_ID,
     supportsTablet: true,
-    // TODO(team-id): Apple Developer account pending approval (~12-14h from 2026-07-06).
-    // Set appleTeamId once approved. Does NOT block Expo web or SideStore sideload testing.
+    appleTeamId: "95VXXPD28Y",
     infoPlist: {
       NSCameraUsageDescription:
         "Scan a Forge pairing QR code to connect to your server.",

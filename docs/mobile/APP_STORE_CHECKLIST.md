@@ -5,18 +5,14 @@ Human-facing checklist for shipping Forge to TestFlight/App Store via EAS (`mobi
 step that cannot be scripted, or a piece of app content owned by another workstream — this doc
 just tells you what still needs doing and where.
 
-Current blocker: **Apple Developer Program enrollment is pending approval** (~12–14h from
-2026-07-06). Nothing below can be finished until that clears; `TODO(team-id)` markers in
-`mobile/eas.json` and `mobile/app.config.ts` are waiting on it.
+Apple Developer Program enrollment approved 2026-07-08. Team ID `95VXXPD28Y` is now wired into
+`mobile/eas.json` (`build.preview`/`build.production`/`submit.production`) and
+`mobile/app.config.ts` (`ios.appleTeamId`) — confirmed via `npx expo config --type public`.
 
-## 0. Prerequisites (blocked on Apple approval)
+## 0. Prerequisites
 
-- [ ] Apple Developer Program membership approved.
-- [ ] Note the **Team ID** (Apple Developer → Membership) and replace every
-      `TODO(team-id)` marker: `mobile/eas.json` (`build.preview.ios.appleTeamId`,
-      `build.production.ios.appleTeamId`, `submit.production.ios.appleTeamId`) and
-      `mobile/app.config.ts` (`ios.appleTeamId`, owned by another worker — flag it to them, don't
-      edit it yourself if that's still someone else's file).
+- [x] Apple Developer Program membership approved.
+- [x] Team ID `95VXXPD28Y` set in `mobile/eas.json` and `mobile/app.config.ts`.
 - [ ] Create an **App Store Connect** app record for `dev.adulari.forge` (or let
       `eas submit` create it on first run) and fill in `submit.production.ios.ascAppId` in
       `mobile/eas.json` with the resulting numeric App ID.
