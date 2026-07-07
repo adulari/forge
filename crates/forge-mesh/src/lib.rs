@@ -113,10 +113,17 @@ pub struct RoutingDecision {
 /// is the set of currently-benched models to route around (failover).
 #[async_trait]
 pub trait Router: Send + Sync {
+    /// `has_images` is whether the CURRENT turn has pending image (vision) attachments — when
+    /// true, implementations should prefer a vision-capable model (see
+    /// [`catalog::supports_vision`]) and only fail open to a non-vision model if no vision-capable
+    /// candidate is usable. Without this signal a turn with an image attached can silently route
+    /// to a text-only model and get an immediate provider 404 ("No endpoints found that support
+    /// image input").
     #[allow(clippy::too_many_arguments)]
     async fn route(
         &self,
         prompt: &str,
+        has_images: bool,
         budget: BudgetState,
         health: &ModelHealth,
         quota: &SubscriptionQuota,
@@ -132,6 +139,7 @@ pub trait Router: Send + Sync {
     async fn route_hinted(
         &self,
         prompt: &str,
+        has_images: bool,
         budget: BudgetState,
         health: &ModelHealth,
         quota: &SubscriptionQuota,
@@ -139,7 +147,7 @@ pub trait Router: Send + Sync {
         effort: Option<EffortLevel>,
         project: &ProjectContext,
     ) -> RoutingDecision {
-        self.route(prompt, budget, health, quota, effort, project)
+        self.route(prompt, has_images, budget, health, quota, effort, project)
             .await
     }
 
@@ -153,6 +161,7 @@ pub trait Router: Send + Sync {
     async fn route_candidates(
         &self,
         prompt: &str,
+        has_images: bool,
         budget: BudgetState,
         health: &ModelHealth,
         quota: &SubscriptionQuota,
@@ -161,7 +170,7 @@ pub trait Router: Send + Sync {
         _n: usize,
     ) -> Vec<RoutingDecision> {
         vec![
-            self.route(prompt, budget, health, quota, effort, project)
+            self.route(prompt, has_images, budget, health, quota, effort, project)
                 .await,
         ]
     }
@@ -774,6 +783,7 @@ impl HeuristicRouter {
     /// Usable candidates for one tier, in preference order: the auto-discovered capability
     /// ranking (cost folded in) when auto is active, else cheapest-first over the configured
     /// candidates.
+    #[allow(clippy::too_many_arguments)]
     fn ordered_usable_for_tier(
         &self,
         tier: TaskTier,
@@ -782,6 +792,7 @@ impl HeuristicRouter {
         quota: &SubscriptionQuota,
         effort: Option<EffortLevel>,
         min_context: Option<u32>,
+        has_images: bool,
     ) -> Vec<String> {
         let candidates = self.candidates_for_tier(tier, hints, quota, effort);
         let min = effective_min_context(min_context, effort);
@@ -792,6 +803,20 @@ impl HeuristicRouter {
             .filter(|m| self.context_fits(m, min))
             .cloned()
             .collect();
+        if has_images {
+            // Prefer a vision-capable model when this turn has image attachments; fail OPEN to
+            // the unfiltered list if none of the usable candidates support vision — better to
+            // attempt with a non-vision model (and surface the provider's real error) than to
+            // refuse to route at all.
+            let vision_only: Vec<String> = usable
+                .iter()
+                .filter(|m| catalog::supports_vision(m))
+                .cloned()
+                .collect();
+            if !vision_only.is_empty() {
+                usable = vision_only;
+            }
+        }
         if !self.auto_active() {
             // Configured path: cost-aware order (auto path keeps the ranked order verbatim).
             usable.sort_by_key(|m| self.cost_rank(m));
@@ -811,6 +836,7 @@ impl HeuristicRouter {
 
     /// Build the ordered failover chain for the routed tier: that tier's usable models first,
     /// then the other tiers (Complex → Standard → Trivial) as cross-tier fallbacks, deduped.
+    #[allow(clippy::too_many_arguments)]
     fn build_chain(
         &self,
         routed: TaskTier,
@@ -819,14 +845,30 @@ impl HeuristicRouter {
         quota: &SubscriptionQuota,
         effort: Option<EffortLevel>,
         min_context: Option<u32>,
+        has_images: bool,
     ) -> Vec<String> {
-        let mut chain =
-            self.ordered_usable_for_tier(routed, health, hints, quota, effort, min_context);
+        let mut chain = self.ordered_usable_for_tier(
+            routed,
+            health,
+            hints,
+            quota,
+            effort,
+            min_context,
+            has_images,
+        );
         for tier in [TaskTier::Complex, TaskTier::Standard, TaskTier::Trivial] {
             if tier == routed {
                 continue;
             }
-            for m in self.ordered_usable_for_tier(tier, health, hints, quota, effort, min_context) {
+            for m in self.ordered_usable_for_tier(
+                tier,
+                health,
+                hints,
+                quota,
+                effort,
+                min_context,
+                has_images,
+            ) {
                 if !chain.contains(&m) {
                     chain.push(m);
                 }
@@ -857,6 +899,7 @@ impl HeuristicRouter {
     /// reason it was chosen, apply pin / budget pressure / cost-aware candidate selection.
     /// Pure + sync, so any [`Router`] (incl. the LLM one) can reuse the whole selection path.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn decide(
         &self,
         classified_tier: TaskTier,
@@ -866,6 +909,7 @@ impl HeuristicRouter {
         hints: RouteHints,
         quota: &SubscriptionQuota,
         effort: Option<EffortLevel>,
+        has_images: bool,
     ) -> RoutingDecision {
         let exhausted = budget.status() == BudgetStatus::Exhausted;
         let bg_override_pin = self.config.mesh.budget.cap_overrides_pin;
@@ -878,8 +922,15 @@ impl HeuristicRouter {
             .filter(|_| !(exhausted && bg_override_pin))
         {
             let mut why = "pinned via --model".to_string();
-            let mut chain =
-                self.build_chain(classified_tier, health, hints, quota, effort, min_context);
+            let mut chain = self.build_chain(
+                classified_tier,
+                health,
+                hints,
+                quota,
+                effort,
+                min_context,
+                has_images,
+            );
             let model = if self.is_usable(pin, health, quota) {
                 pin.clone()
             } else {
@@ -935,9 +986,17 @@ impl HeuristicRouter {
         // `routed_usable` lets us tell a same-tier pick (normal rationale) from a cross-tier
         // fallback ("fell back …") for the message.
         let auto = self.auto_active();
-        let routed_usable =
-            self.ordered_usable_for_tier(tier, health, hints, quota, effort, min_context);
-        let mut chain = self.build_chain(tier, health, hints, quota, effort, min_context);
+        let routed_usable = self.ordered_usable_for_tier(
+            tier,
+            health,
+            hints,
+            quota,
+            effort,
+            min_context,
+            has_images,
+        );
+        let mut chain =
+            self.build_chain(tier, health, hints, quota, effort, min_context, has_images);
         match chain.first().cloned() {
             Some(model) => {
                 if routed_usable.contains(&model) {
@@ -1021,6 +1080,7 @@ impl Router for HeuristicRouter {
     async fn route(
         &self,
         prompt: &str,
+        has_images: bool,
         budget: BudgetState,
         health: &ModelHealth,
         quota: &SubscriptionQuota,
@@ -1036,12 +1096,14 @@ impl Router for HeuristicRouter {
             RouteHints::from_prompt(prompt),
             quota,
             effort,
+            has_images,
         )
     }
 
     async fn route_hinted(
         &self,
         prompt: &str,
+        has_images: bool,
         budget: BudgetState,
         health: &ModelHealth,
         quota: &SubscriptionQuota,
@@ -1060,9 +1122,10 @@ impl Router for HeuristicRouter {
                 RouteHints::from_prompt(prompt),
                 quota,
                 effort,
+                has_images,
             ),
             None => {
-                self.route(prompt, budget, health, quota, effort, project)
+                self.route(prompt, has_images, budget, health, quota, effort, project)
                     .await
             }
         }
@@ -1071,6 +1134,7 @@ impl Router for HeuristicRouter {
     async fn route_candidates(
         &self,
         prompt: &str,
+        has_images: bool,
         budget: BudgetState,
         health: &ModelHealth,
         quota: &SubscriptionQuota,
@@ -1087,6 +1151,7 @@ impl Router for HeuristicRouter {
             quota,
             effort,
             budget.min_context_tokens,
+            has_images,
         );
 
         // Distinct-provider top-n: a duel across three models of the SAME provider isn't a useful
@@ -1325,7 +1390,7 @@ mod tests {
             .into_iter()
             .filter(|m| r.is_usable(m, &health, &quota))
             .collect();
-        let chain = r.ordered_usable_for_tier(tier, &health, hints, &quota, None, None);
+        let chain = r.ordered_usable_for_tier(tier, &health, hints, &quota, None, None, false);
         assert_eq!(
             chain, ranked_usable,
             "failover order must equal mesh rank order with no provider interleaving"
@@ -1355,7 +1420,15 @@ mod tests {
             SubscriptionQuota::default(),
             RouteHints::default(),
         );
-        let chain = strict.build_chain(TaskTier::Standard, &health, hints, &quota, None, None);
+        let chain = strict.build_chain(
+            TaskTier::Standard,
+            &health,
+            hints,
+            &quota,
+            None,
+            None,
+            false,
+        );
         // Paid, metered model is gone from the WHOLE chain (primary + every failover step).
         assert!(
             !chain.iter().any(|m| m == "gemini::gemini-2.5-pro"),
@@ -1373,8 +1446,15 @@ mod tests {
 
         // Control: under Normal (default) the paid model stays in the chain.
         let normal = mixed_router();
-        let normal_chain =
-            normal.build_chain(TaskTier::Standard, &health, hints, &quota, None, None);
+        let normal_chain = normal.build_chain(
+            TaskTier::Standard,
+            &health,
+            hints,
+            &quota,
+            None,
+            None,
+            false,
+        );
         assert!(
             normal_chain.iter().any(|m| m == "gemini::gemini-2.5-pro"),
             "normal mode keeps paid models routable"
@@ -1398,6 +1478,7 @@ mod tests {
         let d = r
             .route(
                 &prompt,
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -1453,6 +1534,7 @@ mod tests {
     async fn route_model(r: &HeuristicRouter, prompt: &str) -> String {
         r.route(
             prompt,
+            false,
             BudgetState::default(),
             &ModelHealth::default(),
             &SubscriptionQuota::default(),
@@ -1466,6 +1548,7 @@ mod tests {
     async fn route_model_q(r: &HeuristicRouter, prompt: &str, q: &SubscriptionQuota) -> String {
         r.route(
             prompt,
+            false,
             BudgetState::default(),
             &ModelHealth::default(),
             q,
@@ -1607,6 +1690,7 @@ mod tests {
         let d = r
             .route_hinted(
                 "fix typo",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -1622,6 +1706,7 @@ mod tests {
         let none_hint = r
             .route_hinted(
                 "fix typo",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -1660,6 +1745,7 @@ mod tests {
             let d = r
                 .route(
                     p,
+                    false,
                     BudgetState::default(),
                     &ModelHealth::default(),
                     &SubscriptionQuota::default(),
@@ -1744,6 +1830,7 @@ mod tests {
         let d = r
             .route(
                 "design a lock-free queue and prove it is correct",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &quota,
@@ -1774,6 +1861,7 @@ mod tests {
         let d = r
             .route(
                 "design a lock-free queue and prove it is correct",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &quota,
@@ -1802,6 +1890,7 @@ mod tests {
         let d = r
             .route(
                 "design a lock-free queue and prove it is correct",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &quota,
@@ -1842,6 +1931,7 @@ mod tests {
             let d = r
                 .route(
                     p,
+                    false,
                     BudgetState::default(),
                     &ModelHealth::default(),
                     &quota,
@@ -1914,6 +2004,7 @@ mod tests {
             let d = r
                 .route(
                     p,
+                    false,
                     BudgetState::default(),
                     &ModelHealth::default(),
                     &SubscriptionQuota::default(),
@@ -1931,6 +2022,7 @@ mod tests {
         let d = router()
             .route(
                 "fix typo",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2057,6 +2149,7 @@ mod tests {
         let d = router()
             .route(
                 "refactor the auth module",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2073,6 +2166,7 @@ mod tests {
         let d = router()
             .route(
                 &prompt,
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2093,6 +2187,7 @@ mod tests {
         let d = router()
             .route(
                 "refactor the whole architecture",
+                false,
                 budget,
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2111,6 +2206,7 @@ mod tests {
         let d = router()
             .route(
                 "rename x; but think hard about edge cases",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2126,6 +2222,7 @@ mod tests {
         let d = router()
             .route(
                 "```rust\nlet x=1;\n```",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2141,6 +2238,7 @@ mod tests {
         let d = router()
             .route(
                 "integrate the parser",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2156,6 +2254,7 @@ mod tests {
         let d = router()
             .route(
                 "fix typo",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2176,6 +2275,7 @@ mod tests {
         let d = r
             .route(
                 "fix typo",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2210,6 +2310,7 @@ mod tests {
             let d = r
                 .route(
                     "fix typo",
+                    false,
                     BudgetState::default(),
                     &ModelHealth::default(),
                     &SubscriptionQuota::default(),
@@ -2238,6 +2339,7 @@ mod tests {
         let d = r
             .route(
                 "fix typo",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2269,6 +2371,7 @@ mod tests {
         let d = r
             .route(
                 "design a system",
+                false,
                 budget,
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2294,6 +2397,7 @@ mod tests {
         let d = r
             .route(
                 "design the architecture",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2317,6 +2421,7 @@ mod tests {
         let d = r
             .route(
                 "design the architecture",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2382,6 +2487,7 @@ mod tests {
         let d = r
             .route(
                 &prompt,
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2409,6 +2515,7 @@ mod tests {
         let d = r
             .route(
                 prompt,
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2433,6 +2540,7 @@ mod tests {
         let d = r
             .route(
                 "fix typo",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2459,6 +2567,7 @@ mod tests {
         let d = r
             .route(
                 "design and architect a complex concurrency refactor across modules",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2483,6 +2592,7 @@ mod tests {
         let d = r
             .route(
                 &prompt,
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2504,6 +2614,7 @@ mod tests {
         let d = r
             .route(
                 "design the system architecture carefully",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2525,6 +2636,7 @@ mod tests {
         let d = r
             .route(
                 "design the system architecture carefully",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2556,6 +2668,7 @@ mod tests {
         let d = r
             .route(
                 prompt,
+                false,
                 BudgetState::default(),
                 &benched(&["anthropic::claude-opus-4-8"]),
                 &SubscriptionQuota::default(),
@@ -2588,6 +2701,7 @@ mod tests {
         let d = r
             .route(
                 "design and architect a complex concurrency refactor across modules",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2631,6 +2745,7 @@ mod tests {
         let d = r
             .route(
                 "design the architecture",
+                false,
                 BudgetState::default(),
                 &benched(&all_refs),
                 &SubscriptionQuota::default(),
@@ -2862,6 +2977,7 @@ mod tests {
         let cands = r
             .route_candidates(
                 "implement pagination for the /users endpoint",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2901,6 +3017,7 @@ mod tests {
             async fn route(
                 &self,
                 _prompt: &str,
+                _has_images: bool,
                 _budget: BudgetState,
                 _health: &ModelHealth,
                 _quota: &SubscriptionQuota,
@@ -2919,6 +3036,7 @@ mod tests {
         let cands = Trivial
             .route_candidates(
                 "anything",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -2966,5 +3084,82 @@ mod tests {
             .with_availability(|_| true)
             .with_repo_boosts(std::collections::HashMap::new());
         assert_eq!(route_model(&empty_boosted, prompt).await, baseline);
+    }
+
+    // --- Part A: route around image-incapable models (vision routing) ---
+
+    #[test]
+    fn has_images_filters_candidates_to_vision_capable_models() {
+        let mut c = Config::default();
+        c.mesh.models.insert(
+            TaskTier::Standard.as_str().into(),
+            forge_config::OneOrMany::Many(vec![
+                "textonly::model-a".to_string(),
+                "anthropic::claude-opus-4-8".to_string(),
+            ]),
+        );
+        let r = HeuristicRouter::new(c).with_availability(|_| true);
+        let hints = RouteHints::default();
+
+        // Baseline (no images): the first configured candidate wins, same as today.
+        let no_images = r.decide(
+            TaskTier::Standard,
+            "test".into(),
+            BudgetState::default(),
+            &ModelHealth::default(),
+            hints,
+            &SubscriptionQuota::default(),
+            None,
+            false,
+        );
+        assert_eq!(no_images.model, "textonly::model-a");
+
+        // With images attached, the mesh must route to the vision-capable candidate instead.
+        let with_images = r.decide(
+            TaskTier::Standard,
+            "test".into(),
+            BudgetState::default(),
+            &ModelHealth::default(),
+            hints,
+            &SubscriptionQuota::default(),
+            None,
+            true,
+        );
+        assert!(
+            catalog::supports_vision(&with_images.model),
+            "has_images=true must pick a vision-capable model: {}",
+            with_images.model
+        );
+        assert_eq!(with_images.model, "anthropic::claude-opus-4-8");
+    }
+
+    #[test]
+    fn has_images_fails_open_when_no_vision_candidate_is_usable() {
+        // Every configured candidate is text-only — has_images must NOT refuse to route; it
+        // falls back to the unfiltered list rather than leaving the turn with no model at all.
+        let mut c = Config::default();
+        c.mesh.models.insert(
+            TaskTier::Standard.as_str().into(),
+            forge_config::OneOrMany::Many(vec![
+                "textonly::model-a".to_string(),
+                "textonly::model-b".to_string(),
+            ]),
+        );
+        let r = HeuristicRouter::new(c).with_availability(|_| true);
+        let hints = RouteHints::default();
+        let d = r.decide(
+            TaskTier::Standard,
+            "test".into(),
+            BudgetState::default(),
+            &ModelHealth::default(),
+            hints,
+            &SubscriptionQuota::default(),
+            None,
+            true,
+        );
+        assert_eq!(
+            d.model, "textonly::model-a",
+            "fail-open: still routes even though no candidate supports vision"
+        );
     }
 }

@@ -324,6 +324,13 @@ async fn drive_session(
                 UiMsg::Event(e) => {
                     if let forge_tui::PresenterEvent::Error(m) = &e {
                         turn_error = Some(m.clone());
+                        // A turn-ending error only reached `view.transcript` (scrollback) before
+                        // this — never `Snapshot::notes`, the remote toast/banner mechanism the
+                        // mobile app renders (see the doc comment on `mobile/src/app/session/
+                        // [id]/_layout.tsx` re: `snapshot.notes`). `busy` already clears correctly
+                        // via `on_turn_done` regardless of this event, so the gap was purely a
+                        // missing user-visible signal, not a stuck turn.
+                        push_remote_note(&mut st.notes, &format!("⚠ {m}"));
                     }
                     st.app.apply(e)
                 }

@@ -77,6 +77,8 @@ impl HeuristicRouter {
         // table + conservation data must describe the tier that ACTUALLY drove the pick, not the
         // classified one — otherwise `/mesh` shows the Trivial pick ranked last among Complex rows
         // with a Complex-tier conservation probability.
+        // `/mesh explain` describes what a hypothetical prompt WOULD do; it has no notion of a
+        // live turn's image attachments, so it always explains the text-only routing path.
         let decision = self.decide(
             tier,
             cls.reasons.join(", "),
@@ -85,6 +87,7 @@ impl HeuristicRouter {
             hints,
             quota,
             effort,
+            false,
         );
         let routed_tier = decision.tier;
 

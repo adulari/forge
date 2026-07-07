@@ -105,6 +105,7 @@ pub async fn run(
         .router
         .route_candidates(
             task,
+            false,
             budget,
             &health,
             &quota,

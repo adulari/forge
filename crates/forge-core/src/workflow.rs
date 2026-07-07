@@ -679,6 +679,7 @@ mod tests {
         async fn route(
             &self,
             _p: &str,
+            _has_images: bool,
             _b: BudgetState,
             _h: &ModelHealth,
             _q: &SubscriptionQuota,

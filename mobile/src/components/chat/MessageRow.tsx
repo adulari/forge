@@ -6,6 +6,7 @@ import { StyleSheet, Text, View } from "react-native";
 
 import type { HistoryRow } from "../../lib/api";
 import { parseReasoning } from "../../lib/reasoning";
+import { useSessionCtx } from "../../lib/sessionContext";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
@@ -24,41 +25,74 @@ export interface MessageRowProps {
   attachments?: SentAttachment[];
 }
 
-// A text-file upload rides the NEXT prompt as a `@<path>` mention the daemon itself prepends
+// A file upload rides the NEXT prompt as a `@<path>` mention the daemon itself prepends
 // server-side (forge-cli run.rs `prepend_attach_mentions`) — e.g.
 // "@/tmp/.forge/uploads/<session>/1699999999999-notes.txt\n<the typed text>". That's the ONLY
-// attachment trace a reloaded history row can carry (images leave none at all — see the
-// `attachments` doc above), so it's parsed back out here into a file chip. Requiring
+// attachment trace a reloaded history row can carry, so it's parsed back out here. Requiring
 // `.forge/uploads/` in the path keeps this from ever misfiring on a real `@mention` a user typed.
+// Images ride the same `@path` convention (server-side extension set mirrored in
+// `crates/forge-cli/src/image_input.rs`) — those render as an inline thumbnail (fetched from
+// `GET /api/upload`) instead of a file chip; everything else stays a file chip as before.
 const ATTACH_MENTION_RE = /^((?:@\S*\.forge\/uploads\/\S+ ?)+)\n([\s\S]*)$/;
+const IMAGE_MENTION_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
 
-function mentionsFromContent(content: string): { text: string; files: string[] } {
+interface ImageMention {
+  name: string;
+  path: string;
+}
+
+function mentionsFromContent(content: string): {
+  text: string;
+  files: string[];
+  images: ImageMention[];
+} {
   const m = content.match(ATTACH_MENTION_RE);
-  if (!m) return { text: content, files: [] };
-  const files = m[1]
-    .trim()
-    .split(/\s+/)
-    .map((tok) => tok.slice(1).split("/").pop() ?? tok)
-    .map((name) => name.replace(/^\d+-/, ""));
-  return { text: m[2], files };
+  if (!m) return { text: content, files: [], images: [] };
+  const files: string[] = [];
+  const images: ImageMention[] = [];
+  for (const tok of m[1].trim().split(/\s+/)) {
+    const path = tok.slice(1);
+    const name = (path.split("/").pop() ?? tok).replace(/^\d+-/, "");
+    if (IMAGE_MENTION_RE.test(path)) {
+      images.push({ name, path });
+    } else {
+      files.push(name);
+    }
+  }
+  return { text: m[2], files, images };
 }
 
 function MessageRowImpl({ row, attachments }: MessageRowProps) {
   const tokens = useTokens();
+  const { baseUrl, sessionId } = useSessionCtx();
   const isUser = row.role === "user";
   const isSystem = row.role === "system";
 
   // Only assistant turns carry inline `<think>` reasoning; a past turn's reasoning renders
   // collapsed here too, so scrollback isn't full of expanded thinking logs.
   const parsed = isUser || isSystem ? null : parseReasoning(row.content);
-  const { text: userText, files: mentionFiles } = isUser
+  const {
+    text: userText,
+    files: mentionFiles,
+    images: mentionImages,
+  } = isUser
     ? mentionsFromContent(row.content)
-    : { text: row.content, files: [] as string[] };
-  const historyFileAttachments: SentAttachment[] = mentionFiles.map((name, i) => ({
-    id: `mention-${row.seq}-${i}`,
-    name,
-    image: false,
-  }));
+    : { text: row.content, files: [] as string[], images: [] as ImageMention[] };
+  const historyFileAttachments: SentAttachment[] = [
+    ...mentionImages.map((img, i) => ({
+      id: `mention-img-${row.seq}-${i}`,
+      name: img.name,
+      image: true,
+      uri: baseUrl
+        ? `${baseUrl}/api/upload?session=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(img.path)}`
+        : undefined,
+    })),
+    ...mentionFiles.map((name, i) => ({
+      id: `mention-${row.seq}-${i}`,
+      name,
+      image: false,
+    })),
+  ];
 
   return (
     <View style={[styles.row, isUser && styles.userRow]}>

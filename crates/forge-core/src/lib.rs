@@ -2159,11 +2159,23 @@ impl Session {
         self.presenter.read_line()
     }
 
-    /// Surface a turn-level failure to the UI (a warning + a Done marker) so the caller's
+    /// Surface a turn-level failure to the UI (an Error event + a Done marker) so the caller's
     /// loop ends the turn cleanly instead of leaving it hanging.
+    ///
+    /// Emits [`PresenterEvent::Error`], not [`PresenterEvent::Warning`]: every OTHER genuine
+    /// turn-ending failure in this file (chain-exhausted, no-usable-model, empty-response
+    /// give-up) already emits `Error` — this was the one caller that mislabeled a real failure as
+    /// a mere warning. That mislabeling was a real, user-visible gap: the headless `forge serve`
+    /// driver (`run/driver.rs`) specifically latches `PresenterEvent::Error` (not `Warning`) to
+    /// detect "this turn ended in failure" for its Web Push trigger AND for pushing a
+    /// remote-facing note (`Snapshot::notes`, what the mobile app renders as a toast) — so a turn
+    /// that failed via THIS function (e.g. every model in the routed+fallback chain rejecting a
+    /// vision-attached prompt) reached neither: no push, no toast, just a scrollback line easy to
+    /// miss. `busy` itself always cleared correctly (that's driven independently by the turn
+    /// task's completion, not by which presenter event fired) — the gap was purely "no visible
+    /// error signal", not "stuck busy forever".
     pub fn notify_error(&mut self, msg: &str) {
-        self.presenter
-            .emit(PresenterEvent::Warning(msg.to_string()));
+        self.presenter.emit(PresenterEvent::Error(msg.to_string()));
         self.presenter.emit(PresenterEvent::Done {
             final_text: String::new(),
             stop_reason: StopReason::FinalAnswer,
@@ -2507,6 +2519,7 @@ Rules:\n\
                 .router
                 .route_hinted(
                     "plan a complex software task",
+                    false,
                     budget,
                     &health,
                     &quota,
@@ -2797,6 +2810,7 @@ Rules:\n\
             .router
             .route_hinted(
                 "summarize this conversation",
+                false,
                 budget,
                 &health,
                 &quota,
@@ -2943,6 +2957,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             let decision = router
                 .route_hinted(
                     "extract durable facts",
+                    false,
                     budget,
                     &health,
                     &quota,
@@ -3025,6 +3040,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             .router
             .route_hinted(
                 "summarize in one sentence",
+                false,
                 budget,
                 &health,
                 &quota,
@@ -3115,6 +3131,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             .router
             .route_hinted(
                 "explain a shell error",
+                false,
                 budget,
                 &health,
                 &quota,
@@ -4503,10 +4520,14 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         // A per-turn `tier_override` (command/skill `tier:` hint) wins; otherwise the in-session
         // tier pin (set by the `tier_up`/`tier_down` keybinds) biases routing.
         let effective_tier = tier_override.or(self.pinned_tier);
+        // Whether THIS turn has image attachments queued (vision input) — route around a
+        // text-only model so an image doesn't land on a provider that 404s on it.
+        let has_images = !self.pending_images.is_empty();
         let decision = self
             .router
             .route_hinted(
                 prompt,
+                has_images,
                 budget,
                 &health,
                 &quota,
@@ -10645,6 +10666,50 @@ mod tests {
         .unwrap()
     }
 
+    /// Part C (mobile "stuck busy, no error" bug): a turn-ending failure must surface as an
+    /// `Error` event, not a mere `Warning` — the headless `forge serve` driver only latches
+    /// `Error` for its push-notification trigger and remote toast note (`Snapshot::notes`), so a
+    /// `Warning` here was silently invisible to the mobile app even though `busy` itself always
+    /// cleared correctly.
+    #[test]
+    fn notify_error_emits_an_error_event_not_just_a_warning() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let config = Config::default();
+        let mut s = Session::start(
+            Arc::new(Store::open_in_memory().unwrap()),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools(),
+            Box::new(CapturePresenter {
+                events: events.clone(),
+            }),
+            config,
+            ".",
+        )
+        .unwrap();
+        s.notify_error("turn failed: no endpoints found that support image input");
+        let captured = events.lock().unwrap();
+        assert!(
+            captured.iter().any(|e| matches!(
+                e,
+                PresenterEvent::Error(m) if m.contains("no endpoints found")
+            )),
+            "notify_error must emit a PresenterEvent::Error carrying the real failure: {captured:?}"
+        );
+        assert!(
+            !captured
+                .iter()
+                .any(|e| matches!(e, PresenterEvent::Warning(_))),
+            "notify_error must not ALSO downgrade to a Warning: {captured:?}"
+        );
+        assert!(
+            captured
+                .iter()
+                .any(|e| matches!(e, PresenterEvent::Done { .. })),
+            "notify_error must still end the turn with a Done marker so busy clears: {captured:?}"
+        );
+    }
+
     #[tokio::test]
     async fn recap_is_skipped_when_the_turn_produced_no_final_text() {
         // A stalled turn (empty-response give-up / failover exhaustion) leaves final_text empty.
@@ -11360,6 +11425,7 @@ mod tests {
         async fn route(
             &self,
             _prompt: &str,
+            _has_images: bool,
             _budget: BudgetState,
             _health: &forge_types::ModelHealth,
             _quota: &forge_types::SubscriptionQuota,
@@ -11388,6 +11454,7 @@ mod tests {
         async fn route(
             &self,
             _prompt: &str,
+            _has_images: bool,
             _budget: BudgetState,
             _health: &forge_types::ModelHealth,
             _quota: &forge_types::SubscriptionQuota,

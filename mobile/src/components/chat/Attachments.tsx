@@ -1,8 +1,8 @@
 // Attachment rendering shared by MessageRow: image thumbnails (tap → full-size, since there's
 // no existing lightbox in the app to defer to) and file chips (name + icon) for non-images.
-// Used both for the optimistic "just sent" bubble (client-local `SentAttachment[]`) and for
-// text-file mentions recovered from a persisted history row's content (see MessageRow.tsx —
-// the daemon never persists image attachments, only a leading `@path` mention for text files).
+// Used both for the optimistic "just sent" bubble (client-local `SentAttachment[]`, local
+// picker URI) and for `@path` mentions recovered from a persisted history row's content (see
+// MessageRow.tsx) — there the `uri` is a `GET /api/upload` URL instead of a local file URI.
 import { FileText } from "lucide-react-native";
 import React, { useState } from "react";
 import { Image, Modal, Pressable, StyleSheet, Text, View } from "react-native";
