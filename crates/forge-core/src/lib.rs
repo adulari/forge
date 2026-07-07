@@ -1967,6 +1967,43 @@ impl Session {
         });
     }
 
+    /// A lookback window wide enough to cover a `weekly` subscription window's history without
+    /// pulling the whole table (quota_history rows are one per turn's quota hint, so this is
+    /// small even at 8 days).
+    const QUOTA_PACE_LOOKBACK_SECS: i64 = 8 * 24 * 3600;
+
+    /// After a fresh [`forge_types::QuotaHint`] is recorded, look back at that window's history
+    /// and — if there's enough of it — derive a [`forge_types::QuotaPace`] projection and push it
+    /// to the presenter for the statusline meter (quota-pace-tracking.md). A no-op (no event) when
+    /// the hint carries no fraction, or when there isn't yet enough history to project from
+    /// (single sample, or samples too close together — see `compute_quota_pace`'s guard).
+    fn emit_quota_pace(&mut self, hint: &forge_types::QuotaHint) {
+        let Some(_fraction) = hint.fraction_used else {
+            return;
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let since = now - Self::QUOTA_PACE_LOOKBACK_SECS;
+        let Ok(history) = self
+            .store
+            .quota_history_since(&hint.provider, &hint.window, since)
+        else {
+            return;
+        };
+        let Some(pace) = forge_types::compute_quota_pace(&history, hint.resets_at, now) else {
+            return;
+        };
+        self.presenter.emit(forge_tui::PresenterEvent::QuotaPace {
+            provider: hint.provider.clone(),
+            window: hint.window.clone(),
+            rate_per_hour: pace.rate_per_hour,
+            projected_fraction_at_reset: pace.projected_fraction_at_reset,
+            exhaustion_warning: pace.exhaustion_warning,
+        });
+    }
+
     /// Advance the temper through the SHIFT+TAB cycle, persist it, and return the new temper
     /// (RFC/temper-modes). Takes effect on the next turn's permission decisions.
     pub fn cycle_temper(&mut self) -> PermissionMode {
@@ -3872,6 +3909,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             fraction: f,
                         });
                     }
+                    self.emit_quota_pace(hint);
                 }
             }
             self.store.record_usage(&self.id, &msg_id, &resp.usage)?;

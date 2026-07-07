@@ -16,7 +16,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -550,6 +550,27 @@ fn migration_0008(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Migration #9: append-only quota usage history (quota-pace-tracking.md, extends L3 in
+/// docs/features/provider-cost-routing.md). `subscription_usage` only ever holds the LATEST
+/// snapshot per (provider, window) — there's no way to derive a rate of consumption from it. This
+/// table keeps every observation so [`forge_types::compute_quota_pace`] can project where a
+/// window is headed. Deliberately NOT touching `subscription_usage`'s schema or upsert behavior —
+/// the mesh router depends on that table staying "latest row per provider/window".
+fn migration_0009(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS quota_history (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider      TEXT NOT NULL,
+            window_kind   TEXT NOT NULL,
+            fraction_used REAL NOT NULL,
+            resets_at     INTEGER,
+            observed_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+         );
+         CREATE INDEX IF NOT EXISTS idx_quota_history_lookup
+             ON quota_history(provider, window_kind, observed_at)",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -561,6 +582,7 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0006,
     migration_0007,
     migration_0008,
+    migration_0009,
 ];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
@@ -1678,6 +1700,11 @@ impl Store {
 
     /// Record the latest subscription quota observation (quota-aware routing, L3). One row per
     /// bridge provider, upserted — the most recent `rate_limit_event` wins.
+    ///
+    /// Also appends the observation to the append-only `quota_history` table (quota-pace-tracking.md)
+    /// when a `fraction_used` is reported, so [`quota_history_since`](Self::quota_history_since) can
+    /// later derive a consumption rate. This does NOT change `subscription_usage`'s upsert
+    /// (latest-snapshot-only) semantics — it's a pure addition alongside it.
     pub fn record_quota(&self, hint: &forge_types::QuotaHint) -> Result<()> {
         let status = match hint.status {
             forge_types::QuotaStatus::Ok => "ok",
@@ -1700,7 +1727,72 @@ impl Store {
                 hint.fraction_used,
             ),
         )?;
+        if let Some(fraction_used) = hint.fraction_used {
+            self.record_quota_history(&hint.provider, &hint.window, fraction_used, hint.resets_at)?;
+        }
         Ok(())
+    }
+
+    /// Append one observation to the quota usage history (quota-pace-tracking.md). Called by
+    /// [`record_quota`](Self::record_quota) for every hint that carries a `fraction_used`; exposed
+    /// separately so callers/tests can seed history points directly (e.g. with a fixed
+    /// `observed_at` via [`Self::record_quota_history_at`]).
+    pub fn record_quota_history(
+        &self,
+        provider: &str,
+        window: &str,
+        fraction_used: f64,
+        resets_at: Option<i64>,
+    ) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO quota_history (provider, window_kind, fraction_used, resets_at, observed_at)
+             VALUES (?1, ?2, ?3, ?4, strftime('%s','now'))",
+            (provider, window, fraction_used, resets_at),
+        )?;
+        Ok(())
+    }
+
+    /// [`record_quota_history`](Self::record_quota_history) with an explicit `observed_at` (epoch
+    /// secs) — a testable clock, mirroring [`quota_at`](Self::quota_at) for `current_quota`.
+    pub fn record_quota_history_at(
+        &self,
+        provider: &str,
+        window: &str,
+        fraction_used: f64,
+        resets_at: Option<i64>,
+        observed_at: i64,
+    ) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO quota_history (provider, window_kind, fraction_used, resets_at, observed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            (provider, window, fraction_used, resets_at, observed_at),
+        )?;
+        Ok(())
+    }
+
+    /// History points for one provider+window, observed at or after `since` (epoch secs),
+    /// oldest first — the input [`forge_types::compute_quota_pace`] needs to derive a rate.
+    pub fn quota_history_since(
+        &self,
+        provider: &str,
+        window: &str,
+        since: i64,
+    ) -> Result<Vec<forge_types::QuotaHistoryPoint>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT observed_at, fraction_used FROM quota_history
+             WHERE provider = ?1 AND window_kind = ?2 AND observed_at >= ?3
+             ORDER BY observed_at ASC",
+        )?;
+        let rows = stmt
+            .query_map((provider, window, since), |row| {
+                Ok(forge_types::QuotaHistoryPoint {
+                    observed_at: row.get(0)?,
+                    fraction_used: row.get(1)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Replace a session's task list (the `update_tasks` tool). Stored as one JSON row so a
@@ -4249,6 +4341,87 @@ mod tests {
             })
             .unwrap();
         assert!(!store.quota_at(500).unwrap().is_pressured("codex-cli"));
+    }
+
+    #[test]
+    fn record_quota_also_appends_history_when_fraction_is_known() {
+        // record_quota's history side-effect is additive: subscription_usage still upserts to one
+        // row per (provider, window), but quota_history grows one row per call.
+        let store = Store::open_in_memory().unwrap();
+        let hint = |fraction| forge_types::QuotaHint {
+            provider: "claude-cli".into(),
+            window: "five_hour".into(),
+            status: forge_types::QuotaStatus::Ok,
+            resets_at: Some(9999),
+            fraction_used: Some(fraction),
+        };
+        store.record_quota(&hint(0.1)).unwrap();
+        store.record_quota(&hint(0.2)).unwrap();
+
+        let history = store
+            .quota_history_since("claude-cli", "five_hour", 0)
+            .unwrap();
+        assert_eq!(history.len(), 2, "one history row per record_quota call");
+        assert_eq!(history[0].fraction_used, 0.1);
+        assert_eq!(history[1].fraction_used, 0.2);
+
+        // subscription_usage itself still reflects only the latest snapshot.
+        assert!(store.quota_at(0).unwrap().is_empty(), "Ok isn't carried");
+    }
+
+    #[test]
+    fn record_quota_skips_history_when_fraction_is_unknown() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .record_quota(&forge_types::QuotaHint {
+                provider: "codex-cli".into(),
+                window: "weekly".into(),
+                status: forge_types::QuotaStatus::Ok,
+                resets_at: None,
+                fraction_used: None,
+            })
+            .unwrap();
+        assert!(store
+            .quota_history_since("codex-cli", "weekly", 0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn quota_history_since_filters_by_cutoff_and_orders_oldest_first() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .record_quota_history_at("claude-cli", "five_hour", 0.05, None, 100)
+            .unwrap();
+        store
+            .record_quota_history_at("claude-cli", "five_hour", 0.50, None, 300)
+            .unwrap();
+        store
+            .record_quota_history_at("claude-cli", "five_hour", 0.90, None, 500)
+            .unwrap();
+
+        let all = store
+            .quota_history_since("claude-cli", "five_hour", 0)
+            .unwrap();
+        assert_eq!(
+            all.iter().map(|p| p.observed_at).collect::<Vec<_>>(),
+            vec![100, 300, 500]
+        );
+
+        let recent = store
+            .quota_history_since("claude-cli", "five_hour", 200)
+            .unwrap();
+        assert_eq!(
+            recent.iter().map(|p| p.observed_at).collect::<Vec<_>>(),
+            vec![300, 500],
+            "cutoff excludes the earlier point"
+        );
+
+        // A different provider/window is isolated.
+        assert!(store
+            .quota_history_since("codex-cli", "five_hour", 0)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
