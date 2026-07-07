@@ -1,0 +1,211 @@
+name: mobile-sidestore
+
+# Track A distribution (see docs/mobile/SIDELOAD.md): an UNSIGNED iOS IPA, sideloaded via
+# SideStore. No Apple Developer account, no code-signing certs, no GitHub secrets required —
+# CODE_SIGNING_ALLOWED=NO end to end. This unblocks real-device testing before Apple Developer
+# approval lands (Track B, mobile-eas.yml, is the signed/App Store path for later).
+#
+# Publishes on every `mobile-v*` tag:
+#   1. A GitHub Release with Forge.ipa attached.
+#   2. A SideStore/AltStore "source" manifest (forge-source.json), both as a release asset and
+#      to GitHub Pages for a stable add-source URL that always points at the latest release.
+#
+# One-time manual setup required (cannot be automated from the workflow):
+#   Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
+
+on:
+  push:
+    tags:
+      - "mobile-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: mobile-sidestore-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BUNDLE_ID: dev.adulari.forge
+  DEVELOPER_NAME: adulari
+  # Xcode scheme name that `npx expo prebuild -p ios` generates from app.config.ts `name: "Forge"`.
+  # TODO: verify against ios/Forge.xcodeproj/xcshareddata/xcschemes/ after a local prebuild if the
+  # xcodebuild step below fails to find the scheme.
+  IOS_SCHEME: Forge
+
+jobs:
+  build-ipa:
+    name: build unsigned IPA
+    runs-on: macos-15
+    defaults:
+      run:
+        working-directory: mobile
+    outputs:
+      ipa-version: ${{ steps.meta.outputs.version }}
+      ipa-size: ${{ steps.package.outputs.size }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Expo SDK 57 / RN 0.86 Podfile requires Xcode 16+. The macos runner's default
+      # Xcode can be older (macos-14 defaulted to 15.4 → `pod install` fails with
+      # "Invalid Podfile: Please upgrade XCode"). Select the newest Xcode on the image.
+      - name: Select newest Xcode
+        run: |
+          XC="$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+          echo "Using $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
+          xcodebuild -version
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve version
+        id: meta
+        run: |
+          # MUST equal the IPA's CFBundleShortVersionString — SideStore rejects a mismatch
+          # ("expected X found Y"). Expo bakes that from the resolved app-config version, so
+          # read it from there rather than from the git tag.
+          VERSION="$(npx expo config --json | jq -r '.version // "0.0.0"')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Prebuild native iOS project
+        run: npx expo prebuild -p ios --clean
+
+      - name: Archive (unsigned)
+        run: |
+          WS="$(ls -d ios/*.xcworkspace 2>/dev/null | head -1)"
+          if [ -z "$WS" ]; then echo "No .xcworkspace found in ios/ — pod install likely failed"; ls -la ios; exit 1; fi
+          echo "Archiving workspace: $WS"
+          xcodebuild \
+            -workspace "$WS" \
+            -scheme "$IOS_SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath build/Forge.xcarchive \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Package IPA
+        id: package
+        run: |
+          mkdir -p build/Payload
+          cp -r build/Forge.xcarchive/Products/Applications/*.app build/Payload/Forge.app
+          (cd build && zip -r -y Forge.ipa Payload)
+          echo "size=$(stat -f%z build/Forge.ipa)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: forge-ipa
+          path: mobile/build/Forge.ipa
+          if-no-files-found: error
+
+  release:
+    name: publish release + source manifest
+    needs: build-ipa
+    runs-on: ubuntu-latest
+    outputs:
+      manifest-generated: ${{ steps.manifest.outcome }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: forge-ipa
+          path: dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Forge iOS ${{ needs.build-ipa.outputs.ipa-version }} (sideload)"
+          files: |
+            dist/Forge.ipa
+            mobile/assets/icon.png
+          generate_release_notes: true
+
+      - name: Generate SideStore/AltStore source manifest
+        id: manifest
+        run: |
+          mkdir -p site
+          cp mobile/assets/icon.png site/icon.png
+          VERSION="${{ needs.build-ipa.outputs.ipa-version }}"
+          SIZE="${{ needs.build-ipa.outputs.ipa-size }}"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/Forge.ipa"
+          ICON_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/icon.png"
+
+          # SideStore's AltSource decoder requires a per-app iconURL (nil → decode error) and a
+          # versions[].version that equals the IPA's CFBundleShortVersionString.
+          jq -n \
+            --arg version "$VERSION" \
+            --arg date "$DATE" \
+            --arg url "$DOWNLOAD_URL" \
+            --arg icon "$ICON_URL" \
+            --argjson size "$SIZE" \
+            --arg bundleId "$BUNDLE_ID" \
+            --arg dev "$DEVELOPER_NAME" \
+            '{
+              name: "Forge",
+              identifier: ($bundleId + ".source"),
+              sourceURL: "https://\($dev).github.io/forge/forge-source.json",
+              apps: [
+                {
+                  name: "Forge",
+                  bundleIdentifier: $bundleId,
+                  developerName: $dev,
+                  subtitle: "Control your forge daemon from your phone",
+                  localizedDescription: "Native iOS companion for the forge coding-agent daemon (forge serve). Fleet view, live chat, tasks, agents, diffs, and plan approval over your own daemon.",
+                  iconURL: $icon,
+                  tintColor: "ff913c",
+                  category: "developer",
+                  screenshotURLs: [],
+                  versions: [
+                    {
+                      version: $version,
+                      date: $date,
+                      localizedDescription: "SideStore build.",
+                      downloadURL: $url,
+                      size: $size,
+                      minOSVersion: "16.0"
+                    }
+                  ]
+                }
+              ],
+              news: []
+            }' > site/forge-source.json
+
+          cat site/forge-source.json
+
+      - name: Upload manifest as release asset
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: site/forge-source.json
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy-pages:
+    name: publish stable add-source URL
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

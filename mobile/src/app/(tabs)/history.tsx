@@ -1,0 +1,246 @@
+// History — past-session browser + resurrection (FEATURES.md §1.1, §4). Infinite/
+// cursor scroll over usePastSessions() (`before` = last row's last_activity),
+// client-side search filter over title/cwd, tap-to-resume via useCreateSession.
+import { router } from "expo-router";
+import { History as HistoryIcon } from "lucide-react-native";
+import React, { useCallback, useMemo, useState } from "react";
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import Animated from "react-native-reanimated";
+
+import { Badge } from "../../components/ds/Badge";
+import { BoundedList } from "../../components/ds/BoundedList";
+import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
+import { EmptyState } from "../../components/ds/EmptyState";
+import { RelativeTime } from "../../components/ds/RelativeTime";
+import { Screen } from "../../components/ds/Screen";
+import { SearchField } from "../../components/ds/SearchField";
+import { Skeleton } from "../../components/ds/Skeleton";
+import { useToast } from "../../components/ds/ToastHost";
+import { ApiError, type PastSessionRow } from "../../lib/api";
+import { useCreateSession, usePastSessions } from "../../lib/queries";
+import { useForgeline, useStrike } from "../../theme/motion";
+import { useTokens } from "../../theme/ThemeProvider";
+import { space } from "../../theme/tokens";
+import { formatCost, monoFamily, type } from "../../theme/typography";
+
+function matchesQuery(row: PastSessionRow, query: string): boolean {
+  if (!query) return true;
+  const haystack = `${row.title} ${row.cwd}`.toLowerCase();
+  return haystack.includes(query);
+}
+
+interface HistoryRowProps {
+  row: PastSessionRow;
+  index: number;
+  onPress: (row: PastSessionRow) => void;
+}
+
+function HistoryRowBase({ row, index, onPress }: HistoryRowProps) {
+  const tokens = useTokens();
+  const strike = useStrike();
+  const entrance = useForgeline(index);
+  const title = row.title || `#${row.id.slice(0, 8)}`;
+
+  return (
+    <Animated.View style={entrance}>
+      <Animated.View style={strike.style}>
+        <Pressable
+          onPress={() => onPress(row)}
+          onPressIn={strike.onPressIn}
+          onPressOut={strike.onPressOut}
+          accessibilityRole="button"
+          accessibilityLabel={`Resume ${title}`}
+        >
+          {/* DESIGN_ELEVATION.md Move 2 — de-boxed row: past sessions are cool, no heat edge. */}
+          <View style={[styles.rowBg, { backgroundColor: tokens.bg1 }]}>
+            <View style={styles.inner}>
+              <View style={styles.headerRow}>
+                <Text style={[type.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
+                  {title}
+                </Text>
+                {row.archived ? <Badge label="archived" tone="neutral" /> : null}
+              </View>
+              <Text
+                style={[type.sub, styles.cwd, { color: tokens.ink3, fontFamily: monoFamily.regular }]}
+                numberOfLines={1}
+                ellipsizeMode="head"
+              >
+                {row.cwd}
+              </Text>
+              {row.preview ? (
+                <Text style={[type.sub, { color: tokens.ink2 }]} numberOfLines={2}>
+                  {row.preview}
+                </Text>
+              ) : null}
+              <View style={styles.footerRow}>
+                <RelativeTime timestampMs={row.last_activity * 1000} />
+                <View style={styles.metaRight}>
+                  <Text style={[type.meta, { color: tokens.ink3 }]}>{row.message_count} msgs</Text>
+                  <Text style={[type.meta, { color: tokens.success }]}>{formatCost(row.cost_usd)}</Text>
+                </View>
+              </View>
+            </View>
+          </View>
+        </Pressable>
+      </Animated.View>
+      <View style={[styles.separator, { backgroundColor: tokens.border }]} />
+    </Animated.View>
+  );
+}
+
+const HistoryRow = React.memo(HistoryRowBase, (prev, next) => {
+  const a = prev.row;
+  const b = next.row;
+  return (
+    prev.index === next.index &&
+    prev.onPress === next.onPress &&
+    a.id === b.id &&
+    a.title === b.title &&
+    a.cwd === b.cwd &&
+    a.archived === b.archived &&
+    a.message_count === b.message_count &&
+    a.cost_usd === b.cost_usd &&
+    a.preview === b.preview &&
+    a.last_activity === b.last_activity
+  );
+});
+
+export default function HistoryScreen() {
+  const tokens = useTokens();
+  const toast = useToast();
+  const [query, setQuery] = useState("");
+  const [confirmRow, setConfirmRow] = useState<PastSessionRow | null>(null);
+  const [resumingId, setResumingId] = useState<string | null>(null);
+
+  const {
+    data,
+    isLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    refetch,
+    isRefetching,
+  } = usePastSessions();
+  const createSession = useCreateSession();
+
+  const rows = useMemo(() => data?.pages.flat() ?? [], [data]);
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredRows = useMemo(
+    () => rows.filter((row) => matchesQuery(row, normalizedQuery)),
+    [rows, normalizedQuery],
+  );
+
+  const resume = useCallback(
+    (row: PastSessionRow) => {
+      setResumingId(row.id);
+      createSession.mutate(
+        { resume: row.id },
+        {
+          onSuccess: (created) => {
+            setResumingId(null);
+            router.push(`/session/${created.id}`);
+          },
+          onError: (err) => {
+            setResumingId(null);
+            toast.show(err instanceof ApiError ? err.message : "could not resume session.", {
+              tone: "danger",
+            });
+          },
+        },
+      );
+    },
+    [createSession, toast],
+  );
+
+  const onRowPress = useCallback((row: PastSessionRow) => setConfirmRow(row), []);
+
+  const renderItem = useCallback(
+    ({ item, index }: { item: PastSessionRow; index: number }) => (
+      <HistoryRow row={item} index={index} onPress={onRowPress} />
+    ),
+    [onRowPress],
+  );
+  const keyExtractor = useCallback((item: PastSessionRow) => item.id, []);
+
+  const onEndReached = useCallback(() => {
+    if (hasNextPage && !isFetchingNextPage) fetchNextPage();
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+
+  return (
+    <Screen scroll={false} contentContainerStyle={styles.screenPad}>
+      <SearchField
+        value={query}
+        onChangeText={setQuery}
+        placeholder="search title or cwd…"
+        autoCapitalize="none"
+        autoCorrect={false}
+        containerStyle={styles.search}
+      />
+      {isLoading ? (
+        <View>
+          {[0, 1, 2].map((i) => (
+            <View key={i} style={styles.skeletonRow}>
+              <Skeleton width="55%" height={17} />
+              <Skeleton width="70%" height={12} style={styles.skeletonGap} />
+              <Skeleton width="40%" height={12} style={styles.skeletonGap} />
+            </View>
+          ))}
+        </View>
+      ) : (
+        <BoundedList
+          data={filteredRows}
+          keyExtractor={keyExtractor}
+          renderItem={renderItem}
+          ListEmptyComponent={
+            <EmptyState
+              icon={HistoryIcon}
+              message={normalizedQuery ? "no past sessions match your search." : "no past sessions yet."}
+            />
+          }
+          refreshing={isRefetching}
+          onRefresh={refetch}
+          onEndReached={onEndReached}
+          loadingMore={isFetchingNextPage}
+          contentContainerStyle={styles.listPad}
+        />
+      )}
+      <ConfirmDialog
+        visible={confirmRow != null}
+        title="Resume this session?"
+        message={confirmRow?.title || confirmRow?.id.slice(0, 8)}
+        confirmLabel="Resume"
+        onConfirm={() => {
+          if (confirmRow) resume(confirmRow);
+          setConfirmRow(null);
+        }}
+        onCancel={() => setConfirmRow(null)}
+      />
+      {resumingId ? (
+        <View style={[StyleSheet.absoluteFill, styles.resumeOverlay, { backgroundColor: tokens.overlayScrim }]}>
+          <ActivityIndicator color={tokens.accent} />
+        </View>
+      ) : null}
+    </Screen>
+  );
+}
+
+const styles = StyleSheet.create({
+  screenPad: { paddingTop: space.space12 },
+  search: { marginBottom: space.space8 },
+  listPad: { paddingBottom: space.space32 },
+  rowBg: { position: "relative" },
+  inner: {
+    paddingHorizontal: space.space16,
+    paddingVertical: space.space16,
+    gap: space.space8,
+  },
+  separator: { height: StyleSheet.hairlineWidth, marginLeft: space.space16 },
+  headerRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  title: { flex: 1 },
+  cwd: {},
+  footerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  metaRight: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
+  skeletonGap: { marginTop: space.space8 },
+  resumeOverlay: { alignItems: "center", justifyContent: "center" },
+});

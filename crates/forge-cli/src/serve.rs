@@ -308,6 +308,7 @@ pub(crate) async fn serve_cmd(
 /// The daemon's full route table over `state.base` — extracted from [`serve_cmd`] so tests can
 /// drive the real router (tower `oneshot`) without binding a socket.
 fn daemon_router(state: Arc<DaemonState>) -> Router {
+    use tower_http::cors::CorsLayer;
     let base = state.base.clone();
     Router::new()
         .route(&base, get(page))
@@ -353,6 +354,10 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(&format!("{base}/sw.js"), get(service_worker))
         .route(&format!("{base}/icon.svg"), get(icon))
         .fallback(|| async { (axum::http::StatusCode::NOT_FOUND, "Not Found").into_response() })
+        // Allow cross-origin browser clients (e.g. the Expo-web build served from
+        // localhost:8081) to reach a daemon on a different origin. The daemon is
+        // authed by the URL-path token, not cookies, so a permissive policy is safe.
+        .layer(CorsLayer::very_permissive())
         .with_state(state)
 }
 

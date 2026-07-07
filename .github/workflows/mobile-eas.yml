@@ -1,0 +1,76 @@
+name: mobile-eas
+
+# Track B distribution (see docs/mobile/APP_STORE_CHECKLIST.md): signed EAS build submitted to
+# TestFlight/App Store. Blocked on Apple Developer account approval + EAS credentials, so this
+# whole job is guarded on the EXPO_TOKEN secret being present and skips cleanly (not a failure)
+# when it isn't set yet — Track A (mobile-sidestore.yml) is not blocked on this.
+#
+# Required secrets:
+#   EXPO_TOKEN  - Expo/EAS access token for non-interactive `eas` CLI auth
+#                 (create at https://expo.dev/accounts/<account>/settings/access-tokens,
+#                 add as a repo secret). Apple signing credentials (distribution cert,
+#                 provisioning profile, App Store Connect API key) are NOT GitHub secrets -
+#                 they're configured once via `eas credentials` and stored server-side by EAS,
+#                 keyed to this same account. See docs/mobile/APP_STORE_CHECKLIST.md.
+
+on:
+  push:
+    tags:
+      - "mobile-release-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    name: check EXPO_TOKEN
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - name: Check EXPO_TOKEN secret
+        id: check
+        run: |
+          if [ -n "${{ secrets.EXPO_TOKEN }}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::EXPO_TOKEN is not set - skipping EAS build+submit. Expected until \
+            the Apple Developer account is approved and EAS credentials are configured \
+            (see docs/mobile/APP_STORE_CHECKLIST.md). Use mobile-sidestore.yml (Track A) for \
+            testing in the meantime."
+          fi
+
+  build-and-submit:
+    name: eas build + submit (production, iOS)
+    needs: guard
+    if: needs.guard.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # TODO: verify this major version against expo/expo-github-action releases at merge time.
+      - name: Setup EAS CLI
+        uses: expo/expo-github-action@v9
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: EAS build (production profile, iOS)
+        run: eas build --platform ios --profile production --non-interactive --wait
+
+      - name: EAS submit (App Store Connect)
+        run: eas submit --platform ios --profile production --non-interactive --latest
