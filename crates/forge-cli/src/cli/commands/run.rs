@@ -4701,6 +4701,13 @@ pub(crate) async fn handle_remote_attach(
         match crate::image_input::load_image_file(&path) {
             Ok((att, label)) => {
                 session.lock().await.attach_images(vec![att]);
+                // Also record a `@path` mention, exactly like the non-image branch below: the
+                // vision attachment only rides THIS turn's provider call (`attach_images` is
+                // transient), so without a durable mention the image reference never reaches
+                // persisted history — it renders fine live, then silently vanishes after any
+                // history reload (new device, app restart). The mention gives the mobile client
+                // something resolvable to detect and re-render on reload via `GET /api/upload`.
+                mentions.push(path);
                 app.note(&format!(
                     "🖼 image attached ({label}) — rides the next prompt"
                 ));

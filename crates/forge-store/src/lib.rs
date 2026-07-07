@@ -752,6 +752,20 @@ impl Store {
         Ok(id)
     }
 
+    /// The working directory recorded for a session at creation time, or `None` if no such
+    /// session exists. Unlike `SessionRegistry::get` (the daemon's in-memory map of currently
+    /// running drivers), this reads straight from the store — like [`Store::load_history_page`]
+    /// it works for ANY persisted session, live or not, so a historical image can still be served
+    /// after a daemon restart or once the session's driver has wound down.
+    pub fn session_cwd(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        match conn.query_row("SELECT cwd FROM session WHERE id = ?1", [id], |r| r.get(0)) {
+            Ok(cwd) => Ok(Some(cwd)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Delete up to `max_sessions` sessions that have NEVER received a real (role='user') message —
     /// checked regardless of `active`, so a session whose sole user message was later soft-deleted
     /// by `/undo` or a checkpoint restore (which only flips `active`, it never removes the row) is

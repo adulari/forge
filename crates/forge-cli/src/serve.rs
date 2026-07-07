@@ -337,9 +337,11 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         // per-route body limit replaces axum's 2 MB default.
         .route(
             &format!("{base}/api/upload"),
-            post(upload).layer(axum::extract::DefaultBodyLimit::max(
-                remote::UPLOAD_BODY_LIMIT,
-            )),
+            get(serve_upload)
+                .post(upload)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    remote::UPLOAD_BODY_LIMIT,
+                )),
         )
         .route(&format!("{base}/api/push/key"), get(push_key))
         .route(&format!("{base}/api/push/subscribe"), post(push_subscribe))
@@ -1207,6 +1209,93 @@ async fn upload(
         return err_response(axum::http::StatusCode::BAD_REQUEST, "no files in the body");
     }
     json_response(&serde_json::json!({ "files": stored }))
+}
+
+/// Query for `GET /api/upload` — which session's upload area to serve from, and which stored
+/// file inside it.
+#[derive(serde::Deserialize)]
+struct ServeUploadParams {
+    #[serde(default)]
+    session: String,
+    #[serde(default)]
+    path: String,
+}
+
+/// `GET /api/upload?session=<id>&path=<stored-path>` — stream back the raw bytes of a file
+/// previously stored by `POST /api/upload` (the `path` in its response, and the same string
+/// mirrored into a persisted `@path` mention). `POST /api/upload` only ever accepted bytes; there
+/// was previously no way to retrieve them, so a client re-rendering history after a reload (new
+/// device, app restart) had no way to show a historical image — it was gone the moment the live
+/// optimistic bubble scrolled away.
+///
+/// Reads the session's cwd straight from the store — like [`history_page`], NOT from the
+/// in-memory `SessionRegistry` — so a historical image still renders even after the session's
+/// driver has wound down or the daemon restarted. `path` is confined to that session's own
+/// `.forge/uploads/` directory with the exact same canonicalize + `starts_with` check used in
+/// `handle_remote_attach`/`store_upload`'s callers; anything outside it (or an unknown session,
+/// or a missing file) is a 403/404 — never a 500.
+async fn serve_upload(
+    State(state): State<Arc<DaemonState>>,
+    Query(params): Query<ServeUploadParams>,
+) -> Response {
+    if params.session.is_empty() || params.path.is_empty() {
+        return err_response(axum::http::StatusCode::NOT_FOUND, "missing session or path");
+    }
+    let store = state.store.clone();
+    let session = params.session.clone();
+    let cwd = match tokio::task::spawn_blocking(move || store.session_cwd(&session))
+        .await
+        .unwrap_or(Ok(None))
+    {
+        Ok(Some(cwd)) => cwd,
+        _ => return err_response(axum::http::StatusCode::NOT_FOUND, "no such session"),
+    };
+    let root = std::path::Path::new(&cwd).join(".forge").join("uploads");
+    let confined = std::fs::canonicalize(&params.path)
+        .ok()
+        .zip(std::fs::canonicalize(&root).ok())
+        .map(|(p, r)| p.starts_with(&r))
+        .unwrap_or(false);
+    if !confined {
+        return err_response(
+            axum::http::StatusCode::FORBIDDEN,
+            "path is outside this session's uploads",
+        );
+    }
+    let bytes = match tokio::fs::read(&params.path).await {
+        Ok(b) => b,
+        Err(_) => return err_response(axum::http::StatusCode::NOT_FOUND, "file not found"),
+    };
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                guess_content_type(&params.path),
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "private, max-age=31536000, immutable",
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+/// Content-Type by file extension — the uploads store only ever accepts images and UTF-8 text
+/// ([`remote::store_upload`]), so this only needs to cover those; anything else falls back to a
+/// generic binary type rather than guessing wrong.
+fn guess_content_type(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "txt" | "md" => "text/plain; charset=utf-8",
+        "json" => "application/json",
+        _ => "application/octet-stream",
+    }
 }
 
 /// Query for `GET /api/history` — Phase 3's route plus the session address.
@@ -2110,6 +2199,84 @@ mod tests {
             .unwrap();
         let resp = router.clone().oneshot(answer).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    /// `GET /api/upload` (v7 history-image playback): serves back a file previously stored by
+    /// `POST /api/upload` — success, path-traversal rejection, and an unknown session all in one
+    /// pass, since they share the same confinement check.
+    #[tokio::test]
+    async fn serve_upload_streams_a_stored_file_and_rejects_traversal() {
+        let dir = std::env::temp_dir().join(format!("forge-serve-upload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let session_id = store
+            .create_session(&dir.display().to_string(), "safe")
+            .unwrap();
+
+        // Stash a file exactly where `remote::store_upload` would have put it.
+        let uploads = dir
+            .join(".forge")
+            .join("uploads")
+            .join(remote::sanitize_upload_name(&session_id));
+        std::fs::create_dir_all(&uploads).unwrap();
+        let file_path = uploads.join("123-photo.png");
+        std::fs::write(&file_path, b"fake-png-bytes").unwrap();
+        let path_str = file_path.display().to_string();
+
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.display().to_string(),
+            push: None,
+        });
+        let router = daemon_router(state);
+
+        // Successful serve: 200, right bytes, content-type inferred from the extension.
+        let req = axum::http::Request::get(format!(
+            "/tok/api/upload?session={session_id}&path={path_str}"
+        ))
+        .body(axum::body::Body::empty())
+        .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
+            "image/png"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"fake-png-bytes");
+
+        // A path outside THIS session's `.forge/uploads/` (a traversal / wrong-session attempt)
+        // is a 403, never a 500 — even though the file genuinely exists on disk.
+        let outside = dir.join("secret.txt");
+        std::fs::write(&outside, b"nope").unwrap();
+        let req = axum::http::Request::get(format!(
+            "/tok/api/upload?session={session_id}&path={}",
+            outside.display()
+        ))
+        .body(axum::body::Body::empty())
+        .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+
+        // An unknown session is a 404, never a 500.
+        let req = axum::http::Request::get(format!(
+            "/tok/api/upload?session=nope-not-a-real-session&path={path_str}"
+        ))
+        .body(axum::body::Body::empty())
+        .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The whole Phase-5 promise, end to end over a REAL driver (offline mock provider,

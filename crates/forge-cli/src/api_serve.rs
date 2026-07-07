@@ -525,6 +525,9 @@ async fn chat_completions(
                 .router
                 .route(
                     &prompt,
+                    // This OpenAI-compatible surface doesn't parse `image_url` content parts yet
+                    // (`to_forge_messages` is text-only), so there's no image signal to pass.
+                    false,
                     BudgetState::default(),
                     &state.health,
                     &SubscriptionQuota::default(),

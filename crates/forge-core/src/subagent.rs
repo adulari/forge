@@ -356,7 +356,7 @@ pub async fn route_child(
                 .with_conserve(ctx.config.mesh.subscription_conserve);
             let project = crate::project_context::compute(&ctx.repo_root);
             ctx.router
-                .route(&agent.task, budget, &health, &quota, None, &project)
+                .route(&agent.task, false, budget, &health, &quota, None, &project)
                 .await
         }
     }
@@ -1189,6 +1189,7 @@ mod tests {
         async fn route(
             &self,
             _p: &str,
+            _has_images: bool,
             _b: BudgetState,
             _h: &forge_types::ModelHealth,
             _q: &forge_types::SubscriptionQuota,

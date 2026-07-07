@@ -99,6 +99,7 @@ impl Router for LlmRouter {
     async fn route(
         &self,
         prompt: &str,
+        has_images: bool,
         budget: BudgetState,
         health: &ModelHealth,
         quota: &SubscriptionQuota,
@@ -122,6 +123,7 @@ impl Router for LlmRouter {
                     hints,
                     quota,
                     effort,
+                    has_images,
                 );
             }
         }
@@ -149,12 +151,13 @@ impl Router for LlmRouter {
                 hints,
                 quota,
                 effort,
+                has_images,
             ),
             None => {
                 // Couldn't classify → deterministic heuristic, noted in the rationale.
                 let mut d = self
                     .fallback
-                    .route(prompt, budget, health, quota, effort, project)
+                    .route(prompt, has_images, budget, health, quota, effort, project)
                     .await;
                 d.rationale
                     .push_str(" (llm classify unavailable → heuristic)");
@@ -166,6 +169,7 @@ impl Router for LlmRouter {
     async fn route_hinted(
         &self,
         prompt: &str,
+        has_images: bool,
         budget: BudgetState,
         health: &ModelHealth,
         quota: &SubscriptionQuota,
@@ -183,9 +187,10 @@ impl Router for LlmRouter {
                 RouteHints::from_prompt(prompt),
                 quota,
                 effort,
+                has_images,
             ),
             None => {
-                self.route(prompt, budget, health, quota, effort, project)
+                self.route(prompt, has_images, budget, health, quota, effort, project)
                     .await
             }
         }
@@ -246,6 +251,7 @@ mod tests {
         let d = llm_router(Ok("complex"))
             .route(
                 "tweak it",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -262,6 +268,7 @@ mod tests {
         let d = llm_router(Ok("banana"))
             .route(
                 "design a lock-free queue",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -279,6 +286,7 @@ mod tests {
         let d = llm_router(Err(()))
             .route(
                 "fix typo",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -303,6 +311,7 @@ mod tests {
         let d = hybrid_router(Ok("complex"))
             .route(
                 "fix the typo in the readme",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -330,6 +339,7 @@ mod tests {
         let d = hybrid_router(Ok("trivial"))
             .route(
                 "analyze the performance bottleneck in the authentication service",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -357,6 +367,7 @@ mod tests {
         let d = hybrid_router(Ok("complex"))
             .route(
                 "add a function that validates emails",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -384,6 +395,7 @@ mod tests {
         let d = hybrid_router(Ok("standard"))
             .route(
                 "refactor this helper",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),
@@ -405,6 +417,7 @@ mod tests {
         let d = hybrid_router(Err(()))
             .route(
                 "implement a small utility function",
+                false,
                 BudgetState::default(),
                 &ModelHealth::default(),
                 &SubscriptionQuota::default(),

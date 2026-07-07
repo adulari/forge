@@ -107,8 +107,10 @@ export function formDataFromWebFiles(files: File[]): FormData {
 
 /**
  * A successfully-uploaded attachment as it rides the optimistic "just sent" bubble
- * (MessageRow renders these directly — the daemon never persists attachment metadata into
- * `HistoryRow.content`, so this is client-local memory of what THIS device just sent).
+ * (MessageRow renders these directly — client-local memory of what THIS device just sent,
+ * before the history refetch lands). MessageRow also builds this same shape for a persisted
+ * history row's `@path` mention (files always had one; images now do too), so `AttachmentRow`
+ * renders both the live and the reconstructed-from-history case identically.
  */
 export interface SentAttachment {
   id: string;
