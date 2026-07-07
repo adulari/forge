@@ -62,10 +62,10 @@ rand = "0.10"
 # sha2/aes are already in the dependency tree via other crates; p256 + aes-gcm are the only
 # new leaves). No cloud relay: the encrypted message goes straight to the browser vendor's
 # push endpoint over the in-tree reqwest/rustls.
-p256 = { version = "0.13", features = ["ecdh"] }
-hkdf = "0.12"
-sha2 = "0.10"
-aes-gcm = "0.10"
+p256 = { version = "0.14", features = ["ecdh"] }
+hkdf = "0.13"
+sha2 = "0.11"
+aes-gcm = "0.11"
 sysinfo = { workspace = true }
 self_update = { version = "0.44.0", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "reqwest", "rustls"] }
 
