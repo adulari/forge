@@ -7,6 +7,7 @@
 use async_trait::async_trait;
 use forge_types::{EffortLevel, Message, QuotaHint, ToolCall, Usage};
 
+mod claude_bridge_home;
 mod cli_provider;
 mod embedder;
 mod genai_provider;

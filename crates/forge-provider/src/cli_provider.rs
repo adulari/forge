@@ -1581,6 +1581,7 @@ impl CliProvider {
         if let Some(p) = &sink_path {
             cmd.env(SUBAGENT_SINK_ENV, p);
         }
+        apply_claude_bridge_home(self.kind, &mut cmd);
         put_in_own_process_group(&mut cmd);
 
         let mut child = cmd.spawn().map_err(|e| {
@@ -2266,6 +2267,7 @@ impl CliProvider {
         if let Some(p) = &sink_path {
             cmd.env(SUBAGENT_SINK_ENV, p);
         }
+        apply_claude_bridge_home(self.kind, &mut cmd);
         put_in_own_process_group(&mut cmd);
 
         let mut child = cmd.spawn()?;
@@ -2539,6 +2541,35 @@ fn put_in_own_process_group(cmd: &mut Command) {
     #[cfg(not(unix))]
     {
         let _ = cmd;
+    }
+}
+
+/// Point a claude bridge subprocess at an isolated `CLAUDE_CONFIG_DIR` that mirrors the user's real
+/// claude config but with hooks stripped from its settings (see `claude_bridge_home` module docs).
+/// No-op for `Codex`/`Antigravity` — codex already isolates via `--ignore-user-config`, and
+/// antigravity has no hook concept here. Fails open on any error: a turn that runs with the user's
+/// real hooks is worse than desired but strictly better than a turn that fails to run at all.
+fn apply_claude_bridge_home(kind: CliKind, cmd: &mut Command) {
+    if kind != CliKind::ClaudeCode {
+        return;
+    }
+    let Some(real_home) = crate::claude_bridge_home::real_claude_config_dir() else {
+        return;
+    };
+    let Some(base) = forge_config::config_dir() else {
+        return;
+    };
+    let isolated_dir = base.join("claude-bridge-home");
+    match crate::claude_bridge_home::prepare_claude_bridge_home(&real_home, &isolated_dir) {
+        Ok(()) => {
+            cmd.env("CLAUDE_CONFIG_DIR", &isolated_dir);
+        }
+        Err(e) => {
+            tracing::warn!(
+                "failed to prepare isolated claude bridge home ({e}); running with the user's own \
+claude config (hooks may fire)"
+            );
+        }
     }
 }
 

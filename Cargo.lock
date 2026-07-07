@@ -1984,6 +1984,7 @@ dependencies = [
 name = "forge-agent-provider"
 version = "2.5.6"
 dependencies = [
+ "anyhow",
  "async-trait",
  "forge-agent-config",
  "forge-agent-index",
@@ -1994,6 +1995,7 @@ dependencies = [
  "libc",
  "reqwest",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
