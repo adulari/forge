@@ -53,7 +53,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const toast = useToast();
   const pathname = usePathname();
   const { isCompact } = useBreakpoint();
-  const { snapshot, connectionState } = useSessionCtx();
+  const { snapshot, connectionState, setHeaderHeight } = useSessionCtx();
 
   // ARCHITECTURE §4.1.4: on the `busy` true->false edge, invalidate this session's history
   // query so the finalized turn appears from the store. The shell only needs to call the
@@ -139,7 +139,15 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
   return (
     <View style={[styles.flex, { backgroundColor: tokens.bg1 }]}>
-      <SafeAreaView edges={["top", "left", "right"]} style={{ backgroundColor: tokens.bg1 }}>
+      <SafeAreaView
+        edges={["top", "left", "right"]}
+        style={{ backgroundColor: tokens.bg1 }}
+        // Real height of everything stacked above `<Slot/>` (header + any banners + status +
+        // segmented) — Chat's `Screen` reads this back as `keyboardVerticalOffset` so
+        // KeyboardAvoidingView knows how much real content sits above it instead of a guessed
+        // constant. Banners are conditional, so this legitimately changes across snapshots.
+        onLayout={(e) => setHeaderHeight(e.nativeEvent.layout.height)}
+      >
         <View style={gutter}>
           <SessionHeader
             title={snapshot?.title || `session ${sessionId.slice(0, 8)}`}

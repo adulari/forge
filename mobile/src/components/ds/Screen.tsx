@@ -22,6 +22,10 @@ export interface ScreenProps {
   /** Wraps children in a ScrollView. Set false when the body owns a BoundedList/FlatList. */
   scroll?: boolean;
   keyboardAvoiding?: boolean;
+  /** Distance from the true screen top to this Screen instance (e.g. a session shell's header
+   * block) — RN's `KeyboardAvoidingView` docs call for this explicitly on iOS "padding" mode;
+   * it is not inferred from layout automatically. Defaults to 8 (bare screen, nothing above). */
+  keyboardVerticalOffset?: number;
   edges?: Edge[];
   refreshControl?: ScrollViewProps["refreshControl"];
   contentContainerStyle?: ViewStyle;
@@ -36,6 +40,7 @@ export function Screen({
   children,
   scroll = false,
   keyboardAvoiding = false,
+  keyboardVerticalOffset = Platform.OS === "ios" ? 8 : 0,
   edges = ["top", "left", "right", "bottom"],
   refreshControl,
   contentContainerStyle,
@@ -65,7 +70,7 @@ export function Screen({
         <KeyboardAvoidingView
           style={styles.flex}
           behavior={Platform.OS === "ios" ? "padding" : undefined}
-          keyboardVerticalOffset={Platform.OS === "ios" ? 8 : 0}
+          keyboardVerticalOffset={keyboardVerticalOffset}
         >
           {content}
         </KeyboardAvoidingView>

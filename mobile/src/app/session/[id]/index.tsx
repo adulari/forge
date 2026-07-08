@@ -78,7 +78,7 @@ interface PendingSent {
 export default function SessionChat() {
   const tokens = useTokens();
   const toast = useToast();
-  const { sessionId, baseUrl, snapshot, connectionState, send } = useSessionCtx();
+  const { sessionId, baseUrl, snapshot, connectionState, send, headerHeight } = useSessionCtx();
 
   const historyQuery = useHistory(sessionId);
 
@@ -441,7 +441,7 @@ export default function SessionChat() {
   return (
     // "bottom" deliberately omitted: Composer owns the home-indicator inset itself (its bg2
     // panel bleeds through it) so Screen's bg1 never shows as a seam below the composer.
-    <Screen edges={["left", "right"]} keyboardAvoiding>
+    <Screen edges={["left", "right"]} keyboardAvoiding keyboardVerticalOffset={headerHeight}>
       <View style={styles.flex}>
         <BoundedList<TimelineItem>
           ref={listRef}
