@@ -117,9 +117,17 @@ URL (QR or paste). Apple's reviewer will not have a daemon to pair with unless o
   - **Or** a short written walkthrough + screen-recording showing pairing and core flows, if
     standing up a live reviewer-accessible daemon for the review window isn't practical.
 - [ ] Explicitly note in reviewer comments: "this app requires a running instance of the
-  open-source `forge` CLI (`forge serve`) that the user runs on their own machine; no account
-  creation, no backend service operated by us." This heads off a common rejection reason (apps
-  that appear to require an unreachable backend).
+  open-source `forge` CLI (`forge serve`) that the user runs on their own machine; there is no
+  user-account system. Native iOS push notifications are, by default, relayed through a small
+  operator-run forwarding service (source: `crates/forge-relay`, see ADR-0012) that sees only
+  an opaque device token and the notification's title/body/status payload — never session
+  content, source code, or credentials — and any user may point their own daemon at their own
+  Apple Developer key (or their own relay instance) to bypass it entirely." This heads off a
+  common rejection reason (apps that appear to require an unreachable backend) while staying
+  accurate about the one small forwarding service that does exist.
+  - Note if the reviewer-demo daemon (above) is configured with `FORGE_APNS_TEAM_ID`/`_KEY_ID`/
+    `_KEY_PATH` (Direct mode) rather than the default relay, so reviewer notes describe
+    whichever path is actually being exercised.
 - [ ] Re-generate/rotate the demo token before and after the review window
   (`forge serve --rotate-token`) so a stale reviewer credential doesn't linger.
 

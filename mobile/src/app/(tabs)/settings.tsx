@@ -194,13 +194,17 @@ export default function SettingsScreen() {
           <SectionHeader>Notifications</SectionHeader>
           <Card padded={false}>
             <ListRow
-              title="Web push"
+              title={isIOS ? "Push notifications" : "Web push"}
               subtitle={
                 !pushSupported
                   ? "not supported in this browser."
                   : pushStatus === "subscribed"
-                    ? "Allow/Deny prompts reach you here, even with this tab closed."
-                    : "get notified in this browser when a session needs you."
+                    ? isIOS
+                      ? "Forge can notify you here when a session needs you."
+                      : "Allow/Deny prompts reach you here, even with this tab closed."
+                    : isIOS
+                      ? "get notified when a session needs your input."
+                      : "get notified in this browser when a session needs you."
               }
               showSeparator={false}
               trailing={
