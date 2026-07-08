@@ -14,7 +14,6 @@
       "extends": "base",
       "developmentClient": true,
       "distribution": "internal",
-      "channel": "development",
       "ios": {
         "resourceClass": "m-medium",
         "simulator": false
@@ -24,7 +23,6 @@
       "extends": "base",
       "developmentClient": true,
       "distribution": "internal",
-      "channel": "development",
       "ios": {
         "resourceClass": "m-medium",
         "simulator": true
@@ -33,7 +31,6 @@
     "preview": {
       "extends": "base",
       "distribution": "internal",
-      "channel": "preview",
       "ios": {
         "resourceClass": "m-medium"
       }
@@ -41,7 +38,6 @@
     "production": {
       "extends": "base",
       "autoIncrement": true,
-      "channel": "production",
       "ios": {
         "resourceClass": "m-medium"
       }
