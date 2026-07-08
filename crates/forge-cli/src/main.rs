@@ -45,6 +45,7 @@ pub(crate) use cli::commands::skill::{commands_cmd, skill_cmd};
 pub(crate) use cli::commands::tour::tour_cmd;
 
 mod api_serve;
+mod apns;
 mod assay_output;
 mod attach;
 mod balance;

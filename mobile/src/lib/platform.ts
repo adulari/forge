@@ -7,3 +7,4 @@ export const isTauri =
 
 export const isWeb = Platform.OS === "web";
 export const isNative = !isWeb;
+export const isIOS = Platform.OS === "ios";

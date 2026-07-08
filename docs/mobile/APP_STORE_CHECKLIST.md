@@ -28,8 +28,7 @@ set up for.
 - [ ] Run `eas credentials` (interactively, once, from `mobile/`) and let EAS generate/upload:
   - iOS **Distribution Certificate**.
   - iOS **Provisioning Profile** (App Store distribution type) for `dev.adulari.forge`.
-  - An **APNs key**, only if/when push is added (currently out of scope — see
-    `mobile/BUILD_PLAN.md` §5, native push is flagged, not built).
+  - An **APNs key** — see §7 below, native push/widgets/Live Activities now build against it.
 - [ ] Create an **App Store Connect API Key** (App Store Connect → Users and Access → Integrations
       → App Store Connect API → "+") and register it with EAS
       (`eas credentials` → iOS → App Store Connect API Key) so `eas submit` in CI can authenticate
@@ -124,7 +123,46 @@ URL (QR or paste). Apple's reviewer will not have a daemon to pair with unless o
 - [ ] Re-generate/rotate the demo token before and after the review window
   (`forge serve --rotate-token`) so a stale reviewer credential doesn't linger.
 
-## 7. What a human must do that cannot be automated
+## 7. APNs key, App Group, Widgets/Live Activities, Xcode Cloud
+
+Added once Team ID `95VXXPD28Y` unblocked these entitlement-gated capabilities: native push
+(`crates/forge-cli/src/apns.rs`), a Home Screen widget + Live Activity (`mobile/targets/widget/`,
+`mobile/modules/live-activity/`), and Xcode Cloud as the CI that actually compiles the Swift
+(this repo's dev environment has no macOS/Xcode, so this is the only real build verification for
+that code until a device/TestFlight test).
+
+- [ ] **APNs key**: **developer.apple.com/account** (not App Store Connect — different site) →
+      Certificates, Identifiers & Profiles → Keys → "+", enable "Apple Push Notifications service
+      (APNs)". Download the `.p8` **once** (Apple won't let you re-download it) and record its Key
+      ID and this account's Team ID (`95VXXPD28Y`).
+- [ ] Configure the `forge serve` host with `FORGE_APNS_TEAM_ID=95VXXPD28Y`,
+      `FORGE_APNS_KEY_ID=<key id>`, `FORGE_APNS_KEY_PATH=/path/to/AuthKey_<key id>.p8` (see
+      `ApnsConfig::from_env` in `crates/forge-cli/src/apns.rs`). Never commit the `.p8` file.
+- [ ] **App ID capabilities**: in the Developer Portal, edit the `dev.adulari.forge` App ID and
+      enable **Push Notifications** and **App Groups** (both require the paid membership, both
+      were unavailable before enrollment). Register the App Group
+      `group.dev.adulari.forge` (must match `mobile/app.config.ts`'s `APP_GROUP` constant exactly
+      — the widget/Live Activity extension and the main app share data through it).
+- [ ] Re-run `eas credentials` (or let the next `eas build` regenerate the provisioning profile)
+      so the profile picks up the two new capabilities — an existing profile won't auto-update.
+- [ ] **Xcode Cloud workflow**: App Store Connect → your app → Xcode Cloud → Get Started, connect
+      the `adulari/forge` GitHub repo, and create a workflow scoped to `mobile/` changes on
+      `main` (Xcode Cloud can filter by path). `mobile/ci_scripts/ci_post_clone.sh` (already in
+      the repo) runs `npm ci && npx expo prebuild` automatically post-clone — no other config
+      needed for it to materialize the widget/Live-Activity extension target and build. Set the
+      workflow to build the `Forge` scheme, archive, and (optionally) auto-distribute to
+      TestFlight internal testers on success.
+- [ ] TestFlight builds are **production-signed**, not sandbox — a common misconception. Both
+      TestFlight and App Store builds talk to APNs' production host; only Xcode
+      Debug-run-on-device builds are sandbox (`ApnsNotifier`/`push.ios.ts` both derive this from
+      `__DEV__`, matching that split).
+- [ ] Once a device/TestFlight build exists, manually verify: the widget renders on the Home
+      Screen and updates after a session's state changes; starting a turn shows a Live Activity
+      on the Lock Screen and in the Dynamic Island; ending a turn dismisses/updates it correctly.
+      **This cannot be confirmed from this environment** — nothing here has run on a real device
+      or Simulator.
+
+## 8. What a human must do that cannot be automated
 
 Summary of the manual, Apple-side/App-Store-Connect-side actions from the sections above:
 
@@ -139,8 +177,11 @@ Summary of the manual, Apple-side/App-Store-Connect-side actions from the sectio
 9. Coordinate with whoever owns `mobile/app.config.ts` to finish the splash-screen plugin wiring
    before the first production submission (not required for Track A/TestFlight-internal testing,
    but expected for a real App Store listing).
+10. Generate the APNs `.p8` key, register the App Group, enable Push Notifications/App Groups on
+    the App ID, and set up the Xcode Cloud workflow (§7) — then verify the widget/Live Activity
+    on a real device or TestFlight build, since none of that can be confirmed headlessly.
 
-None of steps 1–8 are things `mobile-eas.yml` or `eas.json` can do on their own — the workflow's
+None of steps 1–9 are things `mobile-eas.yml` or `eas.json` can do on their own — the workflow's
 `guard` job simply keeps CI quiet (skips, doesn't fail) until step 4 is done, and `eas build`/
 `eas submit` will still fail loudly if steps 1–3 aren't finished, with EAS's own error messages
 pointing at what's missing.

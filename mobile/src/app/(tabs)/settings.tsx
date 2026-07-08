@@ -39,12 +39,12 @@ import {
   isPushSupported,
   type PushSubscriptionState,
 } from "../../lib/push";
-import { isTauri, isWeb } from "../../lib/platform";
+import { isIOS, isTauri, isWeb } from "../../lib/platform";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
 
-const NOTIFICATIONS_SUPPORTED = isWeb && !isTauri;
+const NOTIFICATIONS_SUPPORTED = (isWeb && !isTauri) || isIOS;
 
 const APP_LOCK_KEY = "forge.appLock";
 

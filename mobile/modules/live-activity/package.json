@@ -1,0 +1,9 @@
+{
+  "name": "live-activity",
+  "version": "1.0.0",
+  "description": "Local Expo Module: start/update/end the Forge session Live Activity (ActivityKit).",
+  "main": "index.ts",
+  "license": "MIT",
+  "author": "Forge <forge@adulari.dev>",
+  "homepage": "https://github.com/adulari/forge"
+}

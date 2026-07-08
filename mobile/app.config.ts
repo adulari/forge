@@ -1,6 +1,9 @@
 import type { ExpoConfig } from "expo/config";
 
 const BUNDLE_ID = "dev.adulari.forge";
+// Shared container for the app <-> widget/Live Activity extension (mobile/targets/widget) — the
+// convention @bacons/apple-targets' own docs recommend (`group.<bundle-id>`).
+const APP_GROUP = `group.${BUNDLE_ID}`;
 
 const config: ExpoConfig = {
   name: "Forge",
@@ -15,6 +18,9 @@ const config: ExpoConfig = {
     bundleIdentifier: BUNDLE_ID,
     supportsTablet: true,
     appleTeamId: "95VXXPD28Y",
+    entitlements: {
+      "com.apple.security.application-groups": [APP_GROUP],
+    },
     infoPlist: {
       NSCameraUsageDescription:
         "Scan a Forge pairing QR code to connect to your server.",
@@ -55,6 +61,8 @@ const config: ExpoConfig = {
     "expo-router",
     "expo-secure-store",
     "expo-status-bar",
+    "expo-notifications",
+    "@bacons/apple-targets",
     [
       "expo-font",
       {

@@ -135,6 +135,9 @@ struct DaemonState {
     /// The Web Push sender (`None` when the VAPID key couldn't be loaded/minted — the push
     /// routes then answer 503 and everything else works normally).
     push: Option<Arc<crate::push::PushNotifier>>,
+    /// The native iOS (APNs) sender (`None` when `FORGE_APNS_TEAM_ID`/`_KEY_ID`/`_KEY_PATH`
+    /// aren't all set — same graceful-absence contract as `push`).
+    apns: Option<Arc<crate::apns::ApnsNotifier>>,
 }
 
 /// One row of `GET /api/sessions` — the fleet dashboard's data. `waiting` is the killer signal
@@ -216,6 +219,18 @@ pub(crate) async fn serve_cmd(
             None
         }
     };
+    // Native push: optional, same graceful-absence contract as Web Push above. Absent unless
+    // FORGE_APNS_TEAM_ID/_KEY_ID/_KEY_PATH are all set (see docs/mobile/APP_STORE_CHECKLIST.md).
+    let apns = match crate::apns::ApnsConfig::from_env() {
+        Some(config) => match crate::apns::ApnsNotifier::new(store.clone(), config) {
+            Ok(n) => Some(Arc::new(n)),
+            Err(e) => {
+                eprintln!("⚠ native push disabled — APNs key invalid: {e}");
+                None
+            }
+        },
+        None => None,
+    };
     let state = Arc::new(DaemonState {
         registry: registry.clone(),
         store,
@@ -223,6 +238,7 @@ pub(crate) async fn serve_cmd(
         mock,
         default_cwd,
         push,
+        apns,
     });
     let app = daemon_router(state);
 
@@ -505,6 +521,7 @@ async fn create_session(
         model: req.model,
         resume: req.resume,
         push: state.push.clone(),
+        apns: state.apns.clone(),
     };
     match spawn_session_driver(spec).await {
         Ok(handle) => {
@@ -1006,13 +1023,35 @@ async fn push_key(State(state): State<Arc<DaemonState>>) -> Response {
     }
 }
 
-/// Body of `POST /api/push/subscribe` / `unsubscribe` — the browser's
-/// `PushSubscription.toJSON()` shape (unsubscribe only needs `endpoint`).
+/// Body of `POST /api/push/subscribe` / `unsubscribe` — three shapes on the same two routes,
+/// discriminated structurally (untagged) by which fields are present:
+/// - the browser's `PushSubscription.toJSON()` (Web Push) — `{endpoint, keys}`. No explicit
+///   `kind` marker, since existing web clients already POST exactly this shape.
+/// - a native device token (APNs) — `{device_token, environment}`.
+/// - a Live Activity's per-activity push token — `{session_id, push_token, environment}`.
+///
+/// Untagged deserialization tries each variant in order and picks the first whose required
+/// fields are all present, so field NAMES (not a `kind` tag) are the discriminator — every
+/// variant here has a field name no other variant shares.
 #[derive(serde::Deserialize)]
-struct SubscribeReq {
-    endpoint: String,
-    #[serde(default)]
-    keys: SubscribeKeys,
+#[serde(untagged)]
+enum SubscribeReq {
+    LiveActivity {
+        session_id: String,
+        push_token: String,
+        #[serde(default)]
+        environment: String,
+    },
+    Apns {
+        device_token: String,
+        #[serde(default)]
+        environment: String,
+    },
+    Webpush {
+        endpoint: String,
+        #[serde(default)]
+        keys: SubscribeKeys,
+    },
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -1023,63 +1062,156 @@ struct SubscribeKeys {
     auth: String,
 }
 
-/// Validate a subscription before storing it: a well-formed push endpoint URL plus decodable
-/// RFC 8291 keys of exactly the right shape (65-byte uncompressed P-256 point, 16-byte auth).
-/// Garbage is rejected at the door, not discovered at send time.
-fn validate_subscription(req: &SubscribeReq) -> Result<(), &'static str> {
-    if req.endpoint.len() > 2048 {
+/// Validate a Web Push subscription before storing it: a well-formed push endpoint URL plus
+/// decodable RFC 8291 keys of exactly the right shape (65-byte uncompressed P-256 point, 16-byte
+/// auth). Garbage is rejected at the door, not discovered at send time.
+fn validate_subscription(endpoint: &str, keys: &SubscribeKeys) -> Result<(), &'static str> {
+    if endpoint.len() > 2048 {
         return Err("endpoint too long");
     }
-    if crate::push::endpoint_origin(&req.endpoint).is_none() {
+    if crate::push::endpoint_origin(endpoint).is_none() {
         return Err("endpoint is not an http(s) URL");
     }
-    match crate::push::b64url_decode(&req.keys.p256dh) {
+    match crate::push::b64url_decode(&keys.p256dh) {
         Some(k) if k.len() == 65 && k[0] == 0x04 => {}
         _ => return Err("keys.p256dh must be a base64url 65-byte uncompressed P-256 point"),
     }
-    match crate::push::b64url_decode(&req.keys.auth) {
+    match crate::push::b64url_decode(&keys.auth) {
         Some(a) if a.len() == 16 => {}
         _ => return Err("keys.auth must be a base64url 16-byte secret"),
     }
     Ok(())
 }
 
-/// `POST /api/push/subscribe` — store (dedupe by endpoint) so pushes reach this browser.
+/// A stored APNs environment is either `"production"` or `"sandbox"` — anything else (including
+/// an omitted/empty field) safely falls back to sandbox, mirroring `ApnsNotifier::host`'s own
+/// fallback: a misrouted sandbox token merely fails rather than reaching the wrong audience.
+fn normalize_apns_environment(environment: &str) -> &'static str {
+    if environment == "production" {
+        "production"
+    } else {
+        "sandbox"
+    }
+}
+
+/// `POST /api/push/subscribe` — store (deduped) so a notification reaches this
+/// browser/device/Live Activity.
 async fn push_subscribe(
     State(state): State<Arc<DaemonState>>,
     axum::Json(req): axum::Json<SubscribeReq>,
 ) -> Response {
-    if state.push.is_none() {
-        return err_response(
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "web push is unavailable (no VAPID key)",
-        );
-    }
-    if let Err(msg) = validate_subscription(&req) {
-        return err_response(axum::http::StatusCode::BAD_REQUEST, msg);
-    }
-    let store = state.store.clone();
-    let stored = tokio::task::spawn_blocking(move || {
-        store.upsert_push_subscription(&req.endpoint, &req.keys.p256dh, &req.keys.auth)
-    })
-    .await;
-    match stored {
-        Ok(Ok(_)) => json_response(&serde_json::json!({ "ok": true })),
-        _ => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "storing the subscription failed",
-        ),
+    match req {
+        SubscribeReq::LiveActivity {
+            session_id,
+            push_token,
+            environment,
+        } => {
+            if state.apns.is_none() {
+                return err_response(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "native push is unavailable (no APNs key configured)",
+                );
+            }
+            if push_token.is_empty() || push_token.len() > 512 || session_id.is_empty() {
+                return err_response(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "session_id and push_token must be non-empty and reasonably sized",
+                );
+            }
+            let environment = normalize_apns_environment(&environment).to_string();
+            let store = state.store.clone();
+            let stored = tokio::task::spawn_blocking(move || {
+                store.upsert_live_activity_token(&session_id, &push_token, &environment)
+            })
+            .await;
+            match stored {
+                Ok(Ok(())) => json_response(&serde_json::json!({ "ok": true })),
+                _ => err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "storing the live activity token failed",
+                ),
+            }
+        }
+        SubscribeReq::Apns {
+            device_token,
+            environment,
+        } => {
+            if state.apns.is_none() {
+                return err_response(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "native push is unavailable (no APNs key configured)",
+                );
+            }
+            if device_token.is_empty() || device_token.len() > 512 {
+                return err_response(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "device_token must be non-empty and reasonably sized",
+                );
+            }
+            let environment = normalize_apns_environment(&environment).to_string();
+            let store = state.store.clone();
+            let stored = tokio::task::spawn_blocking(move || {
+                store.upsert_apns_subscription(&device_token, &environment)
+            })
+            .await;
+            match stored {
+                Ok(Ok(_)) => json_response(&serde_json::json!({ "ok": true })),
+                _ => err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "storing the subscription failed",
+                ),
+            }
+        }
+        SubscribeReq::Webpush { endpoint, keys } => {
+            if state.push.is_none() {
+                return err_response(
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "web push is unavailable (no VAPID key)",
+                );
+            }
+            if let Err(msg) = validate_subscription(&endpoint, &keys) {
+                return err_response(axum::http::StatusCode::BAD_REQUEST, msg);
+            }
+            let store = state.store.clone();
+            let stored = tokio::task::spawn_blocking(move || {
+                store.upsert_push_subscription(&endpoint, &keys.p256dh, &keys.auth)
+            })
+            .await;
+            match stored {
+                Ok(Ok(_)) => json_response(&serde_json::json!({ "ok": true })),
+                _ => err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "storing the subscription failed",
+                ),
+            }
+        }
     }
 }
 
-/// `POST /api/push/unsubscribe` — forget a subscription (by endpoint).
+/// `POST /api/push/unsubscribe` — forget a subscription (by endpoint/device token/session id).
 async fn push_unsubscribe(
     State(state): State<Arc<DaemonState>>,
     axum::Json(req): axum::Json<SubscribeReq>,
 ) -> Response {
     let store = state.store.clone();
-    let _ =
-        tokio::task::spawn_blocking(move || store.delete_push_subscription(&req.endpoint)).await;
+    match req {
+        // `push_token` isn't needed to delete (session_id is the key) — it's only required by
+        // the shared request shape's discriminator.
+        SubscribeReq::LiveActivity { session_id, .. } => {
+            let _ =
+                tokio::task::spawn_blocking(move || store.delete_live_activity_token(&session_id))
+                    .await;
+        }
+        SubscribeReq::Apns { device_token, .. } => {
+            let _ =
+                tokio::task::spawn_blocking(move || store.delete_apns_subscription(&device_token))
+                    .await;
+        }
+        SubscribeReq::Webpush { endpoint, .. } => {
+            let _ = tokio::task::spawn_blocking(move || store.delete_push_subscription(&endpoint))
+                .await;
+        }
+    }
     json_response(&serde_json::json!({ "ok": true }))
 }
 
@@ -1428,6 +1560,7 @@ mod tests {
             model: None,
             resume: None,
             push: None,
+            apns: None,
         };
         let a = registry
             .insert(spawn_session_driver(mk("alpha")).await.unwrap())
@@ -1584,6 +1717,7 @@ mod tests {
             model: None,
             resume: None,
             push: None,
+            apns: None,
         })
         .await
         .unwrap();
@@ -1665,6 +1799,7 @@ mod tests {
                     model: None,
                     resume: None,
                     push: None,
+                    apns: None,
                 })
                 .await
                 .unwrap(),
@@ -1713,6 +1848,7 @@ mod tests {
             mock: true,
             default_cwd: dir.display().to_string(),
             push: None,
+            apns: None,
         });
         let router = daemon_router(state);
         let resp = router
@@ -1809,6 +1945,7 @@ mod tests {
             mock: true,
             default_cwd: dir.display().to_string(),
             push: None,
+            apns: None,
         });
         let router = daemon_router(state);
         let resp = router
@@ -1877,6 +2014,7 @@ mod tests {
             mock: true,
             default_cwd: dir.display().to_string(),
             push: None,
+            apns: None,
         });
         let router = daemon_router(state);
         let resp = router
@@ -1930,6 +2068,7 @@ mod tests {
             mock: true,
             default_cwd: dir.display().to_string(),
             push: None,
+            apns: None,
         });
         let router = daemon_router(state);
         let resp = router
@@ -1979,6 +2118,7 @@ mod tests {
             model: None,
             resume: None,
             push: None,
+            apns: None,
         };
         // A "past" session: driven to completion (so it has a user message) but NOT registered.
         let past = Arc::new(spawn_session_driver(mk("gone")).await.unwrap());
@@ -2024,6 +2164,7 @@ mod tests {
             mock: true,
             default_cwd: dir.display().to_string(),
             push: None,
+            apns: None,
         });
         let router = daemon_router(state);
         let resp = router
@@ -2077,6 +2218,7 @@ mod tests {
             model: None,
             resume: None,
             push: None,
+            apns: None,
         };
         let archived = Arc::new(spawn_session_driver(mk("was-archived")).await.unwrap());
         archived
@@ -2119,6 +2261,7 @@ mod tests {
             mock: true,
             default_cwd: dir.display().to_string(),
             push: None,
+            apns: None,
         });
         let router = daemon_router(state);
 
@@ -2191,6 +2334,7 @@ mod tests {
             mock: true,
             default_cwd: ".".into(),
             push: None,
+            apns: None,
         });
         let router = daemon_router(state);
         let get_key = axum::http::Request::get("/tok/api/push/key")
@@ -2206,6 +2350,147 @@ mod tests {
             .unwrap();
         let resp = router.clone().oneshot(answer).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    /// A device-token (APNs) or Live Activity subscribe attempt with no APNs key configured
+    /// degrades to a 503 — same contract as the Web Push routes above, never a panic.
+    #[tokio::test]
+    async fn apns_routes_degrade_cleanly_without_a_key() {
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: ".".into(),
+            push: None,
+            apns: None,
+        });
+        let router = daemon_router(state);
+        let post_json = |path: &str, body: String| {
+            axum::http::Request::post(format!("/tok{path}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        };
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/push/subscribe",
+                serde_json::json!({ "device_token": "abc", "environment": "sandbox" }).to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/push/subscribe",
+                serde_json::json!({
+                    "session_id": "s1", "push_token": "tok", "environment": "sandbox"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// A throwaway PKCS8 EC test key (`openssl ecparam -genkey -name prime256v1 | openssl pkcs8
+    /// -topk8 -nocrypt`) — not a real Apple credential, purely so tests can construct a real
+    /// `ApnsNotifier` without touching the filesystem or a real Apple account.
+    #[cfg(test)]
+    const TEST_APNS_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+        MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQggdRyR/MhlcExmPgF\n\
+        bvIV3tJ+Aa3erm2iVpWJnKOfBRWhRANCAATERnMvcXzCXFTZmK+y7nBo+w+1DKDY\n\
+        Zr6aHkQuv2itYFWLLjJmaTE17aL3i0yDIvQ3G1FZIPWcsyL2qfK1T5el\n\
+        -----END PRIVATE KEY-----\n";
+
+    /// The three subscribe shapes (Web Push, APNs device token, Live Activity token) route to
+    /// the right store table via the untagged `SubscribeReq` discriminator, and each unsubscribe
+    /// actually removes what its subscribe stored.
+    #[tokio::test]
+    async fn apns_and_live_activity_subscribe_unsubscribe_round_trip() {
+        let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let apns_config = crate::apns::ApnsConfig::from_pem_for_test(
+            TEST_APNS_KEY_PEM,
+            "TEAM123456",
+            "KEY7890AB",
+        );
+        let apns = Arc::new(crate::apns::ApnsNotifier::new(store.clone(), apns_config).unwrap());
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: ".".into(),
+            push: None,
+            apns: Some(apns),
+        });
+        let router = daemon_router(state);
+        let post_json = |path: &str, body: String| {
+            axum::http::Request::post(format!("/tok{path}"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        };
+
+        // APNs device token: subscribe stores it, unsubscribe removes it.
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/push/subscribe",
+                serde_json::json!({ "device_token": "devtok1", "environment": "production" })
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(store.list_apns_subscriptions().unwrap().len(), 1);
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/push/unsubscribe",
+                serde_json::json!({ "device_token": "devtok1" }).to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert!(store.list_apns_subscriptions().unwrap().is_empty());
+
+        // Live Activity token: subscribe stores it keyed by session, unsubscribe removes it.
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/push/subscribe",
+                serde_json::json!({
+                    "session_id": "sess-1", "push_token": "activity-tok", "environment": "sandbox"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            store
+                .get_live_activity_token("sess-1")
+                .unwrap()
+                .expect("stored")
+                .push_token,
+            "activity-tok"
+        );
+        let resp = router
+            .clone()
+            .oneshot(post_json(
+                "/api/push/unsubscribe",
+                serde_json::json!({
+                    "session_id": "sess-1", "push_token": "activity-tok"
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert!(store.get_live_activity_token("sess-1").unwrap().is_none());
     }
 
     /// `GET /api/upload` (v7 history-image playback): serves back a file previously stored by
@@ -2239,6 +2524,7 @@ mod tests {
             mock: true,
             default_cwd: dir.display().to_string(),
             push: None,
+            apns: None,
         });
         let router = daemon_router(state);
 
@@ -2376,6 +2662,7 @@ mod tests {
                     model: None,
                     resume: None,
                     push: Some(notifier.clone()),
+                    apns: None,
                 })
                 .await
                 .unwrap(),
@@ -2388,6 +2675,7 @@ mod tests {
             mock: true,
             default_cwd: dir.display().to_string(),
             push: Some(notifier),
+            apns: None,
         });
         let router = daemon_router(state);
         let post_json = |path: &str, body: String| {
@@ -2728,6 +3016,7 @@ mod tests {
                     model: None,
                     resume: None,
                     push: None,
+                    apns: None,
                 })
                 .await
                 .unwrap(),
@@ -2740,6 +3029,7 @@ mod tests {
             mock: true,
             default_cwd: dir.display().to_string(),
             push: None,
+            apns: None,
         });
         let router = daemon_router(state);
         let multipart = |session: &str, filename: &str, ctype: &str, body: &[u8]| {
@@ -2891,6 +3181,7 @@ mod tests {
             model: None,
             resume: None,
             push: None,
+            apns: None,
         })
         .await
         .unwrap();
