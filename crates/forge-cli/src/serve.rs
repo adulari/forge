@@ -219,17 +219,41 @@ pub(crate) async fn serve_cmd(
             None
         }
     };
-    // Native push: optional, same graceful-absence contract as Web Push above. Absent unless
-    // FORGE_APNS_TEAM_ID/_KEY_ID/_KEY_PATH are all set (see docs/mobile/APP_STORE_CHECKLIST.md).
-    let apns = match crate::apns::ApnsConfig::from_env() {
-        Some(config) => match crate::apns::ApnsNotifier::new(store.clone(), config) {
-            Ok(n) => Some(Arc::new(n)),
-            Err(e) => {
-                eprintln!("⚠ native push disabled — APNs key invalid: {e}");
-                None
+    // Native push (ADR-0012): bring-your-own Apple key always wins when set — fully local, no
+    // relay involvement. Otherwise default to the hosted relay (zero setup, works out of the
+    // box) unless the operator opts out entirely. Same graceful-absence contract as Web Push
+    // above: never blocks daemon startup. Precedence logic lives in
+    // `apns::choose_apns_backend` so it has its own unit test.
+    let apns = match crate::apns::choose_apns_backend() {
+        crate::apns::ApnsChoice::Direct(config) => {
+            match crate::apns::ApnsNotifier::new_direct(store.clone(), config) {
+                Ok(n) => Some(Arc::new(n)),
+                Err(e) => {
+                    eprintln!("⚠ native push disabled — APNs key invalid: {e}");
+                    None
+                }
             }
-        },
-        None => None,
+        }
+        crate::apns::ApnsChoice::Relay {
+            base_url,
+            relay_token,
+        } => {
+            match crate::apns::ApnsNotifier::new_relay(store.clone(), base_url.clone(), relay_token)
+            {
+                Ok(n) => {
+                    println!(
+                    "⚒ native push via hosted relay ({base_url}) — bring your own key with \
+                     FORGE_APNS_TEAM_ID/_KEY_ID/_KEY_PATH, or opt out with FORGE_APNS_DISABLE_RELAY=1"
+                );
+                    Some(Arc::new(n))
+                }
+                Err(e) => {
+                    eprintln!("⚠ native push disabled — relay unavailable: {e}");
+                    None
+                }
+            }
+        }
+        crate::apns::ApnsChoice::Disabled => None,
     };
     let state = Arc::new(DaemonState {
         registry: registry.clone(),
@@ -2416,7 +2440,8 @@ mod tests {
             "TEAM123456",
             "KEY7890AB",
         );
-        let apns = Arc::new(crate::apns::ApnsNotifier::new(store.clone(), apns_config).unwrap());
+        let apns =
+            Arc::new(crate::apns::ApnsNotifier::new_direct(store.clone(), apns_config).unwrap());
         let state = Arc::new(DaemonState {
             registry: Arc::new(SessionRegistry::new()),
             store: store.clone(),

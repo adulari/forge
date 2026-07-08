@@ -355,7 +355,10 @@ carries **Allow / Deny actions**: the service worker answers them itself over
 the app. Push is a `forge serve` feature (subscriptions bind to an origin; only the daemon's
 is stable).
 
-**Self-hosted, no relay.** Forge mints its own **VAPID (RFC 8292) P-256 keypair** once, into
+**Self-hosted, no relay — this applies to Web Push specifically.** (Native iOS push added
+later, §2f, does default to an optional hosted relay — that claim doesn't extend to it; read
+§2f before assuming "no relay" covers the whole push story.) Forge mints its own **VAPID
+(RFC 8292) P-256 keypair** once, into
 `<config>/vapid-key` (0600, next to `serve-token`). There is no Firebase project, no
 third-party relay account, no vendor SDK: the daemon POSTs each message **directly to the
 push endpoint the browser handed out** (that endpoint — run by the browser vendor — is how
@@ -461,6 +464,41 @@ paste-an-image support in the prompt box, and upload chips showing each file's s
 transcript lands **in the prompt box** — never auto-sent. Hidden where `SpeechRecognition`
 is unavailable. Zero dependencies, zero wire surface, CSP-safe (recognition runs in the
 browser engine, not against our origin).
+
+## 2f. Native iOS Push (APNs) + the hosted relay
+
+Web Push (§2d) only reaches an **installed** PWA on iOS, and Safari's implementation is
+comparatively unreliable for lock-screen delivery. The mobile app (Expo/React Native)
+additionally registers for real native push via Apple's APNs — see ADR-0012 for the full
+design rationale.
+
+**Two ways this gets your Apple credential to Apple**, and the daemon (`forge serve`) picks
+between them automatically:
+
+- **Bring your own Apple key** — set `FORGE_APNS_TEAM_ID`/`FORGE_APNS_KEY_ID`/
+  `FORGE_APNS_KEY_PATH` (an Apple Developer APNs Auth Key `.p8` you generate yourself in App
+  Store Connect). Fully local, exactly the same "no relay" posture as Web Push above: the
+  daemon signs its own ES256 JWT and POSTs straight to `api(.sandbox).push.apple.com`. Always
+  wins if configured, regardless of the option below.
+- **The hosted relay (default, zero setup)** — if no local key is configured, the daemon
+  forwards through a small relay (`crates/forge-relay`, source in-tree, deployed by the
+  project operator) that holds the operator's own Apple key centrally. This is what makes
+  native push work out of the box for a typical self-hoster, without requiring everyone to
+  personally enroll in the Apple Developer Program just to receive notifications.
+
+**What crosses the relay, precisely** (don't understate this): an opaque device token, an
+environment string (`sandbox`/`production`), and the notification payload itself — title/body
+text for alerts, and `busy`/`waiting`/`cost_usd`/`context_tokens` for Live Activity updates.
+It does **not** see session content, source code, credentials, or your daemon's own auth
+token. The relay's only gate is a topic allowlist scoped to this app's bundle id — it cannot
+be used to reach devices or apps outside that.
+
+**Opting out.** `FORGE_APNS_DISABLE_RELAY=1` turns native push off entirely rather than
+silently falling back to some other behavior — an explicit choice, not a silent downgrade.
+Since the relay's source lives in this repo (`crates/forge-relay`), anyone uncomfortable
+trusting the project operator's instance can run their own and point `FORGE_APNS_RELAY_URL`
+at it — a strictly better answer for a team/multi-machine setup than "bring your own key
+only," since it centralizes one key without requiring the operator's trust.
 
 ## 4. Surfaces touched
 

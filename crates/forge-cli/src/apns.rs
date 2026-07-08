@@ -88,6 +88,41 @@ impl ApnsConfig {
     }
 }
 
+/// The default hosted relay (ADR-0012) — used when no local Apple key is configured and the
+/// operator hasn't overridden `FORGE_APNS_RELAY_URL` or opted out entirely.
+const DEFAULT_RELAY_URL: &str = "https://relay.adulari.dev";
+
+/// Which `ApnsNotifier` construction path `serve_cmd` should take, given the environment. A
+/// pure function (no I/O beyond env var reads) purely so this precedence decision has a unit
+/// test independent of spinning up the whole daemon — see the tests below.
+pub(crate) enum ApnsChoice {
+    /// Bring-your-own Apple key — always wins when configured, fully local.
+    Direct(ApnsConfig),
+    /// Zero-config default: forward through the operator-run relay.
+    Relay {
+        base_url: String,
+        relay_token: Option<String>,
+    },
+    /// `FORGE_APNS_DISABLE_RELAY` set and no local key — native push off entirely.
+    Disabled,
+}
+
+pub(crate) fn choose_apns_backend() -> ApnsChoice {
+    if let Some(config) = ApnsConfig::from_env() {
+        return ApnsChoice::Direct(config);
+    }
+    if std::env::var("FORGE_APNS_DISABLE_RELAY").is_ok() {
+        return ApnsChoice::Disabled;
+    }
+    let base_url =
+        std::env::var("FORGE_APNS_RELAY_URL").unwrap_or_else(|_| DEFAULT_RELAY_URL.to_string());
+    let relay_token = std::env::var("FORGE_APNS_RELAY_TOKEN").ok();
+    ApnsChoice::Relay {
+        base_url,
+        relay_token,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Auth JWT (ES256), cached
 // ---------------------------------------------------------------------------
@@ -202,33 +237,75 @@ pub(crate) fn live_activity_payload(
 // The sender
 // ---------------------------------------------------------------------------
 
-/// Owns the cached auth JWT, the store (device tokens + Live Activity tokens), and an HTTP
-/// client; delivers alert pushes and Live Activity updates, pruning dead tokens exactly as
-/// [`crate::push::PushNotifier`] prunes dead Web Push subscriptions.
+/// Where a push actually gets sent from — see ADR-0012. `Direct` is today's original behavior
+/// (mint/cache an Apple ES256 JWT locally, POST straight to Apple); `Relay` forwards to a hosted
+/// relay this daemon doesn't need any Apple credential to talk to. Only [`ApnsNotifier::send_one`]
+/// branches on this — every other method (dispatch/prune/store logic) is identical either way.
+enum ApnsBackend {
+    Direct {
+        auth: ApnsAuth,
+    },
+    Relay {
+        base_url: String,
+        relay_token: Option<String>,
+    },
+}
+
+/// Owns the backend (direct-to-Apple or hosted-relay), the store (device tokens + Live Activity
+/// tokens), and an HTTP client; delivers alert pushes and Live Activity updates, pruning dead
+/// tokens exactly as [`crate::push::PushNotifier`] prunes dead Web Push subscriptions.
 pub(crate) struct ApnsNotifier {
-    auth: ApnsAuth,
+    backend: ApnsBackend,
     store: std::sync::Arc<forge_store::Store>,
     client: reqwest::Client,
 }
 
+fn build_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| anyhow::anyhow!("building reqwest client for apns notifier: {e}"))
+}
+
 impl ApnsNotifier {
-    pub(crate) fn new(
+    /// Bring-your-own Apple key — fully local, no relay involvement at all. Always wins over
+    /// relay mode when configured (see `serve_cmd`'s precedence in `serve.rs`).
+    pub(crate) fn new_direct(
         store: std::sync::Arc<forge_store::Store>,
         config: ApnsConfig,
     ) -> anyhow::Result<Self> {
         Ok(Self {
-            auth: ApnsAuth::new(&config)?,
+            backend: ApnsBackend::Direct {
+                auth: ApnsAuth::new(&config)?,
+            },
             store,
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(8))
-                .build()
-                .map_err(|e| anyhow::anyhow!("building reqwest client for apns notifier: {e}"))?,
+            client: build_client()?,
+        })
+    }
+
+    /// Forward every send through a hosted relay instead — this daemon holds no Apple credential
+    /// at all. `relay_token` is an optional extension point for a future per-installation token
+    /// (see ADR-0012 §4); unused today, just forwarded as a header if present.
+    pub(crate) fn new_relay(
+        store: std::sync::Arc<forge_store::Store>,
+        base_url: String,
+        relay_token: Option<String>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            backend: ApnsBackend::Relay {
+                base_url,
+                relay_token,
+            },
+            store,
+            client: build_client()?,
         })
     }
 
     /// The host for a stored subscription's environment — "production" routes to the App Store
     /// host, anything else (including "sandbox" and any unrecognized value) routes to sandbox,
     /// since a misrouted sandbox token merely fails rather than reaching the wrong audience.
+    /// Only meaningful in [`ApnsBackend::Direct`] mode — relay mode instead sends the
+    /// environment as a header and lets the relay pick Apple's host.
     fn host(environment: &str) -> &'static str {
         if environment == "production" {
             "https://api.push.apple.com"
@@ -347,24 +424,42 @@ impl ApnsNotifier {
         payload: &serde_json::Value,
         topic: &str,
     ) -> anyhow::Result<u16> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let url = format!("{}/3/device/{device_token}", Self::host(environment));
-        let resp = self
-            .client
-            .post(&url)
-            .header(
-                "authorization",
-                format!("bearer {}", self.auth.bearer_token(now)),
-            )
-            .header("apns-topic", topic)
-            .header("apns-push-type", push_type)
-            .header("apns-priority", "10")
-            .json(payload)
-            .send()
-            .await?;
+        let req = match &self.backend {
+            ApnsBackend::Direct { auth } => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let url = format!("{}/3/device/{device_token}", Self::host(environment));
+                self.client
+                    .post(&url)
+                    .header(
+                        "authorization",
+                        format!("bearer {}", auth.bearer_token(now)),
+                    )
+                    .header("apns-topic", topic)
+                    .header("apns-push-type", push_type)
+                    .header("apns-priority", "10")
+            }
+            ApnsBackend::Relay {
+                base_url,
+                relay_token,
+            } => {
+                let url = format!("{base_url}/3/device/{device_token}");
+                let mut req = self
+                    .client
+                    .post(&url)
+                    .header("apns-topic", topic)
+                    .header("apns-push-type", push_type)
+                    .header("apns-priority", "10")
+                    .header("apns-environment", environment);
+                if let Some(token) = relay_token {
+                    req = req.header("x-forge-relay-token", token);
+                }
+                req
+            }
+        };
+        let resp = req.json(payload).send().await?;
         Ok(resp.status().as_u16())
     }
 }
@@ -474,28 +569,204 @@ mod tests {
         assert_eq!(cs["context_tokens"], 4567);
     }
 
-    /// `ApnsConfig::from_env` must degrade to `None` — never panic or error — when the feature
-    /// isn't configured; saves/restores the three vars so this doesn't leak state into whatever
-    /// else runs in this test binary.
-    #[test]
-    fn config_from_env_is_none_without_all_three_vars() {
-        let vars = [
-            "FORGE_APNS_TEAM_ID",
-            "FORGE_APNS_KEY_ID",
-            "FORGE_APNS_KEY_PATH",
-        ];
-        let saved: Vec<Option<String>> = vars.iter().map(|v| std::env::var(v).ok()).collect();
-        for v in vars {
+    /// All tests below mutate process-global env vars (`std::env::set_var`/`remove_var`) to
+    /// exercise `ApnsConfig::from_env`/`choose_apns_backend` — since `cargo test` runs tests in
+    /// this file concurrently by default, every such test must hold this lock for its whole
+    /// body, or two tests racing on the same vars would flake unpredictably.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    const APNS_ENV_VARS: [&str; 6] = [
+        "FORGE_APNS_TEAM_ID",
+        "FORGE_APNS_KEY_ID",
+        "FORGE_APNS_KEY_PATH",
+        "FORGE_APNS_DISABLE_RELAY",
+        "FORGE_APNS_RELAY_URL",
+        "FORGE_APNS_RELAY_TOKEN",
+    ];
+
+    /// Snapshots every APNs-related env var, clears them all, runs `body`, then restores the
+    /// snapshot — so a test only ever sets the handful of vars it actually cares about and never
+    /// leaks state into whatever else runs in this test binary.
+    fn with_clean_apns_env(body: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved: Vec<Option<String>> = APNS_ENV_VARS
+            .iter()
+            .map(|v| std::env::var(v).ok())
+            .collect();
+        for v in APNS_ENV_VARS {
             std::env::remove_var(v);
         }
-
-        assert!(ApnsConfig::from_env().is_none());
-
-        for (v, val) in vars.iter().zip(saved) {
+        body();
+        for (v, val) in APNS_ENV_VARS.iter().zip(saved) {
             match val {
                 Some(val) => std::env::set_var(v, val),
                 None => std::env::remove_var(v),
             }
         }
+    }
+
+    /// `ApnsConfig::from_env` must degrade to `None` — never panic or error — when the feature
+    /// isn't configured.
+    #[test]
+    fn config_from_env_is_none_without_all_three_vars() {
+        with_clean_apns_env(|| {
+            assert!(ApnsConfig::from_env().is_none());
+        });
+    }
+
+    /// Bring-your-own key always wins, even when relay env vars are ALSO set — this is exactly
+    /// the kind of precedence bug that regresses silently, so pin it down explicitly.
+    #[test]
+    fn direct_wins_over_relay_when_both_configured() {
+        with_clean_apns_env(|| {
+            std::env::set_var("FORGE_APNS_TEAM_ID", "TEAM");
+            std::env::set_var("FORGE_APNS_KEY_ID", "KEY");
+            let tmp = std::env::temp_dir().join("forge-apns-test-key.p8");
+            std::fs::write(&tmp, "not a real key, just needs to exist").unwrap();
+            std::env::set_var("FORGE_APNS_KEY_PATH", &tmp);
+            std::env::set_var("FORGE_APNS_RELAY_URL", "https://should-not-be-used.example");
+
+            assert!(
+                matches!(choose_apns_backend(), ApnsChoice::Direct(_)),
+                "a configured local key must win over relay mode"
+            );
+
+            std::fs::remove_file(&tmp).ok();
+        });
+    }
+
+    /// Zero-config default (no local key, no explicit opt-out): relay mode, pointed at the
+    /// built-in default URL.
+    #[test]
+    fn relay_is_the_zero_config_default() {
+        with_clean_apns_env(|| match choose_apns_backend() {
+            ApnsChoice::Relay { base_url, .. } => assert_eq!(base_url, DEFAULT_RELAY_URL),
+            _ => panic!("expected relay mode as the zero-config default"),
+        });
+    }
+
+    /// `FORGE_APNS_RELAY_URL` overrides the default relay endpoint.
+    #[test]
+    fn relay_url_is_overridable() {
+        with_clean_apns_env(|| {
+            std::env::set_var("FORGE_APNS_RELAY_URL", "https://my-own-relay.example");
+            match choose_apns_backend() {
+                ApnsChoice::Relay { base_url, .. } => {
+                    assert_eq!(base_url, "https://my-own-relay.example")
+                }
+                _ => panic!("expected relay mode"),
+            }
+        });
+    }
+
+    /// `FORGE_APNS_DISABLE_RELAY` turns native push off entirely when no local key is set,
+    /// rather than silently falling back to some other behavior.
+    #[test]
+    fn disable_relay_wins_when_no_local_key() {
+        with_clean_apns_env(|| {
+            std::env::set_var("FORGE_APNS_DISABLE_RELAY", "1");
+            assert!(matches!(choose_apns_backend(), ApnsChoice::Disabled));
+        });
+    }
+
+    /// A relay-mode request must carry `apns-environment` and NOT an Apple bearer JWT (the
+    /// daemon has no Apple credential at all in this mode) — proven against a tiny local HTTP
+    /// mock standing in for the relay, since there's no real relay to hit in unit tests.
+    #[tokio::test]
+    async fn relay_mode_sends_environment_header_not_bearer_auth() {
+        let (base_url, mut rx) = mock_http_server(410).await;
+        let notifier = ApnsNotifier {
+            backend: ApnsBackend::Relay {
+                base_url,
+                relay_token: None,
+            },
+            store: std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            client: reqwest::Client::new(),
+        };
+        let status = notifier
+            .send_one(
+                &"a".repeat(64),
+                "sandbox",
+                "alert",
+                &serde_json::json!({"aps":{}}),
+                APNS_BUNDLE_ID,
+            )
+            .await
+            .unwrap();
+        assert_eq!(status, 410);
+
+        let captured = rx.try_recv().expect("mock server captured a request");
+        assert!(
+            captured.contains("apns-environment: sandbox"),
+            "relay request must carry the environment header: {captured}"
+        );
+        assert!(
+            !captured.to_lowercase().contains("authorization:"),
+            "relay mode must never send an Apple bearer JWT: {captured}"
+        );
+    }
+
+    /// A mocked 410 in relay mode must still trigger the existing prune-on-410 path in
+    /// `send_alert_all` unchanged — proving the pruning logic genuinely didn't need to change
+    /// for relay mode, exactly as ADR-0012 claims.
+    #[tokio::test]
+    async fn relay_mode_410_still_prunes_the_dead_token() {
+        let (base_url, _rx) = mock_http_server(410).await;
+        let store = std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap());
+        store
+            .upsert_apns_subscription(&"b".repeat(64), "sandbox")
+            .unwrap();
+        assert_eq!(store.list_apns_subscriptions().unwrap().len(), 1);
+
+        let notifier = ApnsNotifier {
+            backend: ApnsBackend::Relay {
+                base_url,
+                relay_token: None,
+            },
+            store: store.clone(),
+            client: reqwest::Client::new(),
+        };
+        notifier
+            .send_alert_all(crate::push::PushMessage {
+                kind: "permission",
+                session: "sess-1".into(),
+                title: "t".into(),
+                body: "b".into(),
+                seq: 1,
+                ttl: 300,
+            })
+            .await;
+
+        assert!(
+            store.list_apns_subscriptions().unwrap().is_empty(),
+            "the 410 response must prune the dead subscription even in relay mode"
+        );
+    }
+
+    /// A minimal local HTTP/1.1 mock: accepts exactly one connection, captures the raw request
+    /// text (so a test can assert on headers) into the returned channel, and replies with
+    /// `status` and an empty body. Good enough to stand in for "the relay" in unit tests — full
+    /// relay behavior itself is tested in `crates/forge-relay`.
+    async fn mock_http_server(
+        status: u16,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = stream.read(&mut buf).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = tx.send(request);
+            let reason = if status == 410 { "Gone" } else { "OK" };
+            let resp = format!("HTTP/1.1 {status} {reason}\r\ncontent-length: 0\r\n\r\n");
+            let _ = stream.write_all(resp.as_bytes()).await;
+        });
+
+        (format!("http://{addr}"), rx)
     }
 }

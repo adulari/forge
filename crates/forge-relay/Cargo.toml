@@ -1,0 +1,30 @@
+[package]
+name = "forge-relay"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "forge-relay"
+path = "src/main.rs"
+
+# A standalone deployable service (see ADR-0012), NOT part of forge-cli's single-binary
+# delivery promise (ADR-0002 anticipated exactly this as the one plausible exception).
+# Deliberately depends on zero forge-* workspace crates — it never touches session/code data,
+# only opaque device tokens and notification payloads forwarded from a daemon it doesn't trust.
+[dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+axum = { workspace = true }
+reqwest = { workspace = true, features = ["http2"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+p256 = { version = "0.14", features = ["ecdh", "pem", "pkcs8"] }
+base64 = "0.22"
+governor = "0.7"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

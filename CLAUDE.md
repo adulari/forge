@@ -93,3 +93,18 @@ When the user signals they are done (e.g. "bye", "done", "wrap up", "end session
 - **Next Steps**: bullet list, max 3 items
 
 Keep `CONTEXT.md` under 20 lines total. Do NOT summarize the full conversation — only what's needed to resume next session.
+
+## Model & Effort Selection
+
+**This is a hard default. It governs the main thread, every subagent spawned via the Agent tool, and every workflow agent.** Always pick the CHEAPEST model and effort that will do the job well. Escalate only with a stated justification.
+
+- **Model by task complexity:**
+  - Simple / trivial → **Sonnet 5** (`model: sonnet`). Default for anything mechanical, bounded, or low-stakes: small edits, single-file lookups, formatting, straightforward searches, mechanical refactors.
+  - Normal to complex → **Opus 4.8** (`model: opus`). Default for real engineering work: multi-file changes, design, debugging, reviews, anything requiring judgment.
+  - Extremely complex, ONLY when absolutely justified → **Fable** (`model: fable`). Fable is very expensive and must be the rare exception, never a default. Reserve it for genuinely hard problems where Opus is demonstrably insufficient, and briefly justify the choice whenever you use it.
+
+- **Reasoning effort:**
+  - NEVER exceed **high**. Never default to `xhigh`/`max`.
+  - Lower effort (`medium`/`low`) is allowed and encouraged when the task is simple enough — but the choice must be deliberate and justified.
+
+- **Ceiling:** Fable and high effort are the ceiling, reserved for exceptional cases. When in doubt, go cheaper.
