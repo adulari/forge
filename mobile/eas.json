@@ -35,8 +35,7 @@
       "distribution": "internal",
       "channel": "preview",
       "ios": {
-        "resourceClass": "m-medium",
-        "appleTeamId": "95VXXPD28Y"
+        "resourceClass": "m-medium"
       }
     },
     "production": {
@@ -44,8 +43,7 @@
       "autoIncrement": true,
       "channel": "production",
       "ios": {
-        "resourceClass": "m-medium",
-        "appleTeamId": "95VXXPD28Y"
+        "resourceClass": "m-medium"
       }
     }
   },
