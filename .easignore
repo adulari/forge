@@ -1,0 +1,9 @@
+# EAS Build uploads a tarball of the whole monorepo. .gitignore's `/target` only anchors to the
+# repo root, so it misses Rust build artifacts under nested worktrees (agent worktrees, other
+# feature checkouts living inside this tree) — those can be huge and their incremental-compile
+# object files have tripped copy errors during tarball creation. None of it is needed for a
+# mobile build.
+.claude/worktrees/
+.forge/worktrees/
+**/target/
+**/target-e2e/
