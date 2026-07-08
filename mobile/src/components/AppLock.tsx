@@ -52,6 +52,16 @@ export function AppLock({ children }: { children: React.ReactNode }) {
   // decide synchronously whether to re-cover the screen the instant the app backgrounds
   // (rather than waiting on an AsyncStorage read while the app switcher is snapshotting it).
   const enabledRef = useRef(false);
+  // Mirrors `phase` for the AppState listener's closure (effect runs once; reading `phase`
+  // directly there would capture a stale value). Needed to guard against re-authenticating on
+  // every foreground-return: the Face ID system sheet's OWN dismissal can itself cause an
+  // inactive->active blip, and without this guard that re-triggers `evaluateLock` ->
+  // `tryAuthenticate` -> another Face ID prompt -> another blip, forever, regardless of what the
+  // user actually does. Only a return from a genuine "locked" state has anything to re-auth for.
+  const phaseRef = useRef<LockPhase>("checking");
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
 
   const tryAuthenticate = useCallback(async () => {
     setAuthenticating(true);
@@ -113,7 +123,7 @@ export function AppLock({ children }: { children: React.ReactNode }) {
       // notification-permission prompt itself), which was re-triggering Face ID far too often.
       if (prev === "active" && next === "background" && enabledRef.current) {
         setPhase("locked");
-      } else if (prev.match(/inactive|background/) && next === "active") {
+      } else if (prev.match(/inactive|background/) && next === "active" && phaseRef.current === "locked") {
         evaluateLock();
       }
     });
