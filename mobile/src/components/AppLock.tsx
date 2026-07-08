@@ -108,7 +108,10 @@ export function AppLock({ children }: { children: React.ReactNode }) {
     const sub = AppState.addEventListener("change", (next) => {
       const prev = appStateRef.current;
       appStateRef.current = next;
-      if (prev === "active" && next.match(/inactive|background/) && enabledRef.current) {
+      // Only re-lock on a real backgrounding — iOS also fires "inactive" for many transient,
+      // non-backgrounding events (Control Center, an incoming call/system alert, even the
+      // notification-permission prompt itself), which was re-triggering Face ID far too often.
+      if (prev === "active" && next === "background" && enabledRef.current) {
         setPhase("locked");
       } else if (prev.match(/inactive|background/) && next === "active") {
         evaluateLock();
