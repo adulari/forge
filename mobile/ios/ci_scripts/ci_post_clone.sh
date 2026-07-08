@@ -15,4 +15,13 @@ node -v
 npm ci
 npx expo prebuild -p ios --no-install
 cd ios
+
+# expo prebuild always writes a fresh Info.plist with a hardcoded CFBundleVersion of "1".
+# The old EAS pipeline already uploaded builds up to 11 for version 1.0.0, and Apple
+# rejects any build whose CFBundleVersion isn't strictly higher than the last one
+# uploaded for that version. CI_BUILD_NUMBER is Xcode Cloud's own per-product build
+# counter (starts at 1) — offset it well clear of the EAS-era builds so every future
+# Xcode Cloud build is guaranteed to keep increasing from here on.
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $((20 + CI_BUILD_NUMBER))" Forge/Info.plist
+
 pod install
