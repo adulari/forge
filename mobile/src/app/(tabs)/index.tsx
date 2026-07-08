@@ -5,7 +5,7 @@
 // stable indices across polls (see theme/motion.ts useForgeline) — nothing extra to wire here.
 import { router } from "expo-router";
 import { Flame, Plus } from "lucide-react-native";
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { SessionCard } from "../../components/fleet/SessionCard";
@@ -91,6 +91,17 @@ export default function FleetScreen() {
   const depth = scheme === "dark" ? depthDark : depthLight;
   const query = useSessions();
 
+  // `useSessions` polls every few seconds while focused (module doc above) — react-query's own
+  // `isRefetching` flips true on THAT background poll too, not just a manual pull, so wiring it
+  // straight into `refreshing` made the pull-to-refresh spinner fire on its own every poll tick.
+  // Track only the pull-triggered refetch instead.
+  const [manualRefreshing, setManualRefreshing] = useState(false);
+  const { refetch } = query;
+  const onRefresh = useCallback(() => {
+    setManualRefreshing(true);
+    void refetch().finally(() => setManualRefreshing(false));
+  }, [refetch]);
+
   const data = useMemo(() => query.data ?? [], [query.data]);
   const hasData = data.length > 0;
   const isFirstLoad = query.isLoading && !hasData;
@@ -135,8 +146,8 @@ export default function FleetScreen() {
           renderItem={renderItem}
           ListHeaderComponent={hasData ? <FleetHeader sessions={data} /> : undefined}
           ListEmptyComponent={emptyComponent}
-          refreshing={query.isRefetching && !query.isLoading}
-          onRefresh={query.refetch}
+          refreshing={manualRefreshing}
+          onRefresh={onRefresh}
           contentContainerStyle={styles.listContent}
         />
       )}

@@ -107,9 +107,12 @@ export default function SettingsScreen() {
         const next = value ? await enablePush(baseUrl) : await disablePush(baseUrl);
         setPushStatus(next);
         if (value && next !== "subscribed") {
-          toast.show("couldn't enable notifications — check the browser's permission prompt.", {
-            tone: "danger",
-          });
+          toast.show(
+            isIOS
+              ? "couldn't enable notifications — check Settings > Forge > Notifications is allowed."
+              : "couldn't enable notifications — check the browser's permission prompt.",
+            { tone: "danger" },
+          );
         }
       } finally {
         setPushBusy(false);
