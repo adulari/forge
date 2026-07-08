@@ -6,7 +6,7 @@ set -e
 # — this script regenerates it fresh from app.config.js and re-installs Pods on
 # every real build, so the committed copy never has to be kept in sync by hand.
 
-cd "$CI_WORKSPACE/mobile"
+cd "$CI_PRIMARY_REPOSITORY_PATH/mobile"
 
 brew install node@20
 brew link --overwrite --force node@20
