@@ -52,8 +52,8 @@
   "submit": {
     "production": {
       "ios": {
-        "appleId": "TODO(apple-id): Apple ID email for App Store Connect",
-        "ascAppId": "TODO(asc-app-id): App Store Connect app numeric ID (create the app record in App Store Connect first, or let `eas submit` create it on first run)",
+        "appleId": "floris.voskamp@outlook.com",
+        "ascAppId": "6788563586",
         "appleTeamId": "95VXXPD28Y"
       }
     }

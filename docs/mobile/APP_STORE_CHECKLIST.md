@@ -131,9 +131,10 @@ Added once Team ID `95VXXPD28Y` unblocked these entitlement-gated capabilities: 
 (this repo's dev environment has no macOS/Xcode, so this is the only real build verification for
 that code until a device/TestFlight test).
 
-- [ ] **APNs key**: App Store Connect → Users and Access → Integrations → Keys → "+", enable
-      "Apple Push Notifications service (APNs)". Download the `.p8` **once** (Apple won't let you
-      re-download it) and record its Key ID and this account's Team ID (`95VXXPD28Y`).
+- [ ] **APNs key**: **developer.apple.com/account** (not App Store Connect — different site) →
+      Certificates, Identifiers & Profiles → Keys → "+", enable "Apple Push Notifications service
+      (APNs)". Download the `.p8` **once** (Apple won't let you re-download it) and record its Key
+      ID and this account's Team ID (`95VXXPD28Y`).
 - [ ] Configure the `forge serve` host with `FORGE_APNS_TEAM_ID=95VXXPD28Y`,
       `FORGE_APNS_KEY_ID=<key id>`, `FORGE_APNS_KEY_PATH=/path/to/AuthKey_<key id>.p8` (see
       `ApnsConfig::from_env` in `crates/forge-cli/src/apns.rs`). Never commit the `.p8` file.
