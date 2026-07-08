@@ -2,9 +2,11 @@
 // to JS — there is no JS-callable API for Live Activities anywhere else in this project's
 // dependency tree, so this is a small first-party Expo Module rather than a third-party
 // package (keeps this on ActivityKit's own supported surface, no dependency on an
-// unmaintained-risk community wrapper). `ForgeSessionActivityAttributes` is shared by
-// reference with the widget extension target (mobile/targets/widget/ForgeSessionActivity.swift)
-// via the `_shared` folder convention @bacons/apple-targets documents.
+// unmaintained-risk community wrapper). This module compiles as its own CocoaPod, separate from
+// the widget extension target, so `ForgeSessionActivityAttributes` (this file's sibling
+// ForgeSessionActivityAttributes.swift) is a literal duplicate of
+// mobile/targets/widget/ForgeSessionActivityAttributes.swift, not a shared reference — see that
+// file's header for why `_shared` doesn't reach here.
 import ActivityKit
 import ExpoModulesCore
 
