@@ -3,7 +3,11 @@
 // Kept symbol-compatible so callers never branch on platform themselves.
 export type HotkeyHandler = () => void;
 
-export function useHotkey(_key: string, _handler: HotkeyHandler, _options?: { meta?: boolean }): void {
+export function useHotkey(
+  _key: string,
+  _handler: HotkeyHandler,
+  _options?: { meta?: boolean; alt?: boolean },
+): void {
   // no-op on native
 }
 

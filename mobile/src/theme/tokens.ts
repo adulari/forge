@@ -1,6 +1,7 @@
 // DESIGN_SYSTEM.md §1 (Color) + §3 (space/shape/depth), verbatim.
 // This is the ONLY file in src/theme allowed to contain raw hex color literals —
 // every other theme module imports tokens from here instead of inlining hex.
+import { Platform } from "react-native";
 
 // ---------------------------------------------------------------------------
 // §1.1 Ember scale (brand, shared by both themes)
@@ -260,3 +261,30 @@ export const depthLight: DepthTokens = {
     elevation: 4,
   },
 };
+
+function hexToRgba(hex: string, alpha: number): string {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.substring(0, 2), 16);
+  const g = parseInt(h.substring(2, 4), 16);
+  const b = parseInt(h.substring(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+/**
+ * Cross-platform shadow: RN Web warns that `shadow*`/`elevation` props are deprecated in
+ * favor of `boxShadow`, but native (iOS/Android) has no `boxShadow` support at all — only
+ * web gets the CSS translation, native keeps the RN shadow props verbatim.
+ */
+export function shadowStyle(s: ShadowStyle): Record<string, unknown> {
+  if (Platform.OS === "web") {
+    const color = s.shadowColor.startsWith("#") ? hexToRgba(s.shadowColor, s.shadowOpacity) : s.shadowColor;
+    return { boxShadow: `${s.shadowOffset.width}px ${s.shadowOffset.height}px ${s.shadowRadius}px ${color}` };
+  }
+  return {
+    shadowColor: s.shadowColor,
+    shadowOpacity: s.shadowOpacity,
+    shadowRadius: s.shadowRadius,
+    shadowOffset: s.shadowOffset,
+    elevation: s.elevation,
+  };
+}

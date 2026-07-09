@@ -7,8 +7,8 @@
 // this route (headerShown: false).
 import { router } from "expo-router";
 import { X } from "lucide-react-native";
-import React, { useCallback, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useEffect, useState } from "react";
+import { Platform, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { Button } from "../components/ds/Button";
@@ -60,6 +60,17 @@ export default function NewSessionScreen() {
   }, [cwd, title, model, worktree, create]);
 
   const onClose = useCallback(() => goBackOr("/(tabs)"), []);
+
+  // Web/desktop: Escape closes the modal, same as the X button. Bypasses the typing-target
+  // guard other hotkeys use — a modal-dismiss key should work even while a field is focused.
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
 
   const serverError =
     create.error instanceof ApiError

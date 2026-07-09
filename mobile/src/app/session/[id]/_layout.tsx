@@ -117,6 +117,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const protocolMismatch = snapshot != null && snapshot.protocol !== PROTOCOL_VERSION;
   const publicExposure = (snapshot?.exposure ?? "").startsWith("public");
   const reconnecting = connectionState === "reconnecting";
+  const unreachable = connectionState === "unreachable";
 
   const statusState: StatusDotState =
     snapshot == null
@@ -168,7 +169,15 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           />
         ) : null}
         {closed ? <Banner tone="danger" message="session ended — see History to review it" /> : null}
-        {reconnecting ? <Banner tone="neutral" compact message="reconnecting…" /> : null}
+        {unreachable ? (
+          <Banner
+            tone="danger"
+            compact
+            message="can't reach forge serve — check it's running. will keep retrying automatically."
+          />
+        ) : reconnecting ? (
+          <Banner tone="neutral" compact message="reconnecting…" />
+        ) : null}
 
         <View style={gutter}>
           <StatusStrip
