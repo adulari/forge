@@ -25,25 +25,7 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  # Skip the Rust matrix gracefully until the cargo project exists (design phase).
-  guard:
-    runs-on: [self-hosted, linux, x64]
-    outputs:
-      has_cargo: ${{ steps.check.outputs.has_cargo }}
-    steps:
-      - uses: actions/checkout@v7
-      - id: check
-        run: |
-          if [ -f Cargo.toml ]; then
-            echo "has_cargo=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_cargo=false" >> "$GITHUB_OUTPUT"
-            echo "No Cargo.toml yet — design phase, skipping Rust checks."
-          fi
-
   fmt:
-    needs: guard
-    if: needs.guard.outputs.has_cargo == 'true'
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
@@ -53,15 +35,15 @@ jobs:
       - run: cargo fmt --all -- --check
 
   clippy:
-    needs: guard
-    if: needs.guard.outputs.has_cargo == 'true'
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      # No Swatinem/rust-cache here: this is a persistent self-hosted runner whose `target/`
+      # already survives on local disk between jobs — restoring/saving a cache over the network
+      # would be pure overhead on top of an already-warm build dir.
       # `--locked` fails if Cargo.lock is out of sync with Cargo.toml. Without it, a version bump
       # that forgets to refresh the lock (e.g. `cargo update -p forge` — a no-op, the root crate is
       # forge-cli) sails through every PR and only blows up at release time, where the build DOES use
@@ -72,13 +54,11 @@ jobs:
   # per-PR cost. Full 3-OS coverage still runs on workflow_dispatch/schedule via `test-full` below.
   test:
     name: test (ubuntu-latest)
-    needs: guard
-    if: needs.guard.outputs.has_cargo == 'true' && github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request'
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
       - run: cargo test --all --all-features
       # No release build in CI: tests already compile the whole workspace (debug), and the
       # `lto = "thin"` release profile is slow to link. Release binaries are built on demand
@@ -87,8 +67,7 @@ jobs:
   # Off-PR path: full 3-OS matrix, so macOS/Windows coverage doesn't go stale between PRs.
   test-full:
     name: test (${{ matrix.label }})
-    needs: guard
-    if: needs.guard.outputs.has_cargo == 'true' && github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -103,7 +82,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # macOS/Windows legs are ephemeral GitHub-hosted runners — no warm local target/, so the
+      # cache action earns its keep there. The self-hosted Linux leg skips it (see clippy above).
+      - if: matrix.label != 'ubuntu-latest'
+        uses: Swatinem/rust-cache@v2
       - run: cargo test --all --all-features
 
   # Release-profile + `--locked` smoke on one platform. The release workflow builds with
@@ -111,19 +93,14 @@ jobs:
   # Cargo.toml) surface only at tag time otherwise — exactly what failed v0.4.42's first release.
   # Catch it on every PR. One platform keeps it cheap; the `lto = "thin"` link runs once.
   release-build:
-    needs: guard
-    if: needs.guard.outputs.has_cargo == 'true'
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: release-build
       - run: cargo build --release --locked --bin forge
 
   CI:
-    needs: [guard, fmt, clippy, test, test-full, release-build]
+    needs: [fmt, clippy, test, test-full, release-build]
     if: always()
     runs-on: [self-hosted, linux, x64]
     steps:
