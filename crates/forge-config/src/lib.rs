@@ -3559,6 +3559,7 @@ pub fn is_non_chat_model(id: &str) -> bool {
         "veo3",
         "lyria",
         "nano-banana",
+        "grok-imagine",
         "diffusion",
         "stable-diffusion",
         "flux",
@@ -4290,6 +4291,8 @@ auto = "local"
             "nvidia::baai/bge-m3",
             "nvidia::nvidia/nemotron-parse",
             "openrouter::meta-llama/llama-guard-4-12b",
+            "xai-oauth::grok-imagine-image",
+            "xai-oauth::grok-imagine-video",
         ] {
             assert!(is_non_chat_model(id), "{id} should be non-chat");
         }
@@ -4302,6 +4305,8 @@ auto = "local"
             "gemini::gemini-3.5-flash",
             "nvidia::meta/llama-3.2-90b-vision-instruct",
             "openrouter::qwen/qwen3.5-397b-a17b",
+            "xai-oauth::grok-4.3",
+            "xai-oauth::grok-build-0.1",
         ] {
             assert!(!is_non_chat_model(id), "{id} is a chat model, must be kept");
         }
