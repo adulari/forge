@@ -7,6 +7,7 @@ import React, { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
+import { stripLeadingAttachMentions } from "../../components/chat/MessageRow";
 import { Badge } from "../../components/ds/Badge";
 import { BoundedList } from "../../components/ds/BoundedList";
 import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
@@ -69,7 +70,7 @@ function HistoryRowBase({ row, index, onPress }: HistoryRowProps) {
               </Text>
               {row.preview ? (
                 <Text style={[type.sub, { color: tokens.ink2 }]} numberOfLines={2}>
-                  {row.preview}
+                  {stripLeadingAttachMentions(row.preview)}
                 </Text>
               ) : null}
               <View style={styles.footerRow}>

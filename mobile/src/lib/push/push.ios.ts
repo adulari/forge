@@ -59,14 +59,14 @@ export async function enablePush(baseUrl: string): Promise<PushSubscriptionState
     return "unsubscribed";
   }
 
-  try {
-    await apiSubscribePush(baseUrl, {
-      device_token: deviceToken,
-      environment: currentEnvironment(),
-    });
-  } catch {
-    return "unsubscribed";
-  }
+  // Unlike the permission/device-token failures above (genuinely "no subscription possible"),
+  // a subscribe-call failure is usually transient (daemon unreachable) — let it propagate
+  // instead of collapsing into "unsubscribed" so the caller can tell the two apart and show
+  // an accurate message (mirrors push.web.ts, which never catches this call either).
+  await apiSubscribePush(baseUrl, {
+    device_token: deviceToken,
+    environment: currentEnvironment(),
+  });
 
   await AsyncStorage.setItem(SUBSCRIBED_TOKEN_KEY, deviceToken);
   return "subscribed";
