@@ -35,6 +35,21 @@ export interface MessageRowProps {
 // `GET /api/upload`) instead of a file chip; everything else stays a file chip as before.
 const ATTACH_MENTION_RE = /^((?:@\S*\.forge\/uploads\/\S+ ?)+)\n([\s\S]*)$/;
 const IMAGE_MENTION_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
+// Same convention as ATTACH_MENTION_RE, but not anchored to the trailing `\n<text>` — a
+// `PastSessionRow.preview` (History tab) can be server-truncated mid-mention and never carry
+// the full match, so it needs a lenient leading-strip instead of the exact chat-transcript parse.
+const LEADING_MENTION_RE = /^((?:@\S*\.forge\/uploads\/\S+\s*)+)/;
+
+/** Strips a leading upload-mention prefix from preview text, replacing an attachment-only
+ * preview with a human-readable placeholder instead of leaking the raw `.forge/uploads/` path. */
+export function stripLeadingAttachMentions(text: string): string {
+  const m = text.match(LEADING_MENTION_RE);
+  if (!m) return text;
+  const rest = text.slice(m[0].length).trim();
+  if (rest) return rest;
+  const hasImage = m[1].trim().split(/\s+/).some((tok) => IMAGE_MENTION_RE.test(tok));
+  return hasImage ? "[image attached]" : "[file attached]";
+}
 
 interface ImageMention {
   name: string;

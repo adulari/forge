@@ -6,12 +6,9 @@
 // (ds/ListRow has no swipe-action variant yet — that's a fleet/SessionCard-
 // level concern per BUILD_ORDER T2.3, out of this task's scope).
 //
-// HANDOFF(T2.2): the app-lock preference key is `forge.appLock` (AsyncStorage,
-// boolean "true"/"false") — the redesigned `src/components/AppLock.tsx` (owned
-// by T2.1, "port the existing Face ID gate onto ds primitives") must read/write
-// this same key so the Settings toggle and the lock gate agree. The current
-// legacy AppLock.tsx (pre-redesign) uses a different key (`forge.biometricLockEnabled`)
-// and is out of this task's file scope.
+// The app-lock preference key is `forge.appLock` (AsyncStorage, boolean "true"/"false") —
+// `src/components/AppLock.tsx` reads/writes the same key so the Settings toggle and the
+// lock gate agree.
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import { router } from "expo-router";
@@ -39,6 +36,7 @@ import {
   isPushSupported,
   type PushSubscriptionState,
 } from "../../lib/push";
+import { ApiError } from "../../lib/api";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
@@ -114,6 +112,13 @@ export default function SettingsScreen() {
             { tone: "danger" },
           );
         }
+      } catch (err) {
+        // A thrown error (vs. a resolved non-"subscribed" state) means permission was fine but
+        // the subscribe/unsubscribe call itself failed — say so, rather than reusing the
+        // permission-denied copy above.
+        toast.show(err instanceof ApiError ? err.message : "couldn't reach the server — try again.", {
+          tone: "danger",
+        });
       } finally {
         setPushBusy(false);
       }

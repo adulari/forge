@@ -27,12 +27,12 @@ export function KeyValueRow({ label, value, onPress, chevron = false, accessibil
     <Animated.View
       style={[styles.row, { borderBottomColor: tokens.border }, onPress ? strikeStyle : null]}
     >
-      <Text style={[typeScale.body, { color: tokens.ink }]} numberOfLines={1}>
+      <Text style={[typeScale.body, styles.label, { color: tokens.ink }]} numberOfLines={1}>
         {label}
       </Text>
       <View style={styles.trailing}>
         {value != null ? (
-          <Text style={[typeScale.body, { color: tokens.ink2 }]} numberOfLines={1}>
+          <Text style={[typeScale.body, styles.value, { color: tokens.ink2 }]} numberOfLines={1}>
             {value}
           </Text>
         ) : null}
@@ -64,10 +64,17 @@ const styles = StyleSheet.create({
     minHeight: rowHeight.dense,
     paddingHorizontal: space.space16,
     borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: space.space12,
   },
+  // A long value (e.g. a full server hostname) otherwise refuses to shrink — RN's Text
+  // defaults to flexShrink: 0, so `space-between` collapses to zero gap and the label and
+  // value render touching, with numberOfLines={1} never getting a chance to ellipsize.
+  label: { flexShrink: 0 },
   trailing: {
     flexDirection: "row",
     alignItems: "center",
     gap: space.space8,
+    flexShrink: 1,
   },
+  value: { flexShrink: 1 },
 });
