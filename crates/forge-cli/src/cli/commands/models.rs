@@ -220,6 +220,22 @@ pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mes
             models.extend(az.deployments.iter().map(|d| format!("azure::{d}")));
         }
     }
+    // xAI OAuth (SuperGrok/X Premium subscription, `forge auth xai-oauth`): only worth probing if
+    // a session is actually stored — skips a needless network call/timeout for the vast majority
+    // of users who never signed in. `list_xai_oauth_models` itself falls back to a small seed list
+    // on any live-listing failure, so this can't leave the catalog empty on a blip.
+    if forge_provider::has_xai_oauth_session() {
+        match tokio::time::timeout(
+            Duration::from_secs(8),
+            forge_provider::list_xai_oauth_models(),
+        )
+        .await
+        {
+            Ok(Ok(list)) => models.extend(list),
+            Ok(Err(e)) => tracing::debug!("xai-oauth model discovery failed: {e}"),
+            Err(_) => tracing::debug!("xai-oauth model discovery timed out"),
+        }
+    }
     // Always-available subscription bridges (claude-cli/codex-cli) if their CLI is installed.
     // They don't rate-limit like the free API tiers, so the mesh can rely on them — and being
     // $0 subscriptions they rank first (prefer_subscription), so routing reaches a working model

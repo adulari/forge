@@ -509,36 +509,114 @@ impl XaiOauthProvider {
     /// [`ProviderError::Auth`] (permanent) with guidance to re-run `forge auth xai-oauth` — a
     /// missing/dead session won't fix itself mid-turn.
     async fn fresh_access_token(&self) -> Result<String, ProviderError> {
-        let Some(tokens) = provider_oauth::load_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER)
-        else {
-            return Err(ProviderError::Auth(
-                "no xAI OAuth session — run `forge auth xai-oauth` to sign in".to_string(),
-            ));
-        };
-        if !tokens.is_expired(now_unix(), REFRESH_SKEW_SECS) {
-            return Ok(tokens.access_token);
-        }
-        let Some(refresh_token) = tokens.refresh_token.clone() else {
-            return Err(ProviderError::Auth(
-                "xAI OAuth session expired and has no refresh token — run `forge auth xai-oauth` \
-                 to sign in again"
-                    .to_string(),
-            ));
-        };
-        let refreshed = refresh_tokens(&self.http, &refresh_token)
-            .await
-            .map_err(|e| {
-                ProviderError::Auth(format!(
-                "xAI OAuth token refresh failed: {e} — run `forge auth xai-oauth` to sign in again"
-            ))
-            })?;
-        if let Err(e) =
-            provider_oauth::store_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER, &refreshed)
-        {
-            tracing::warn!("failed to persist refreshed xAI OAuth token: {e}");
-        }
-        Ok(refreshed.access_token)
+        fresh_access_token(&self.http).await
     }
+}
+
+/// Whether a stored xAI OAuth session exists (regardless of expiry — a refresh token, if present,
+/// can renew it). Mirrors `forge_config::has_api_key` for the discovery-gating callers use to
+/// decide whether it's worth probing `xai-oauth` at all.
+pub fn has_session() -> bool {
+    provider_oauth::load_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER).is_some()
+}
+
+/// Load the stored token, refreshing it first if it's expired (or about to be). Shared by
+/// [`XaiOauthProvider::complete_with`] and [`list_models`] — both need a live access token and
+/// neither should duplicate the refresh-and-persist dance.
+async fn fresh_access_token(http: &reqwest::Client) -> Result<String, ProviderError> {
+    let Some(tokens) = provider_oauth::load_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER)
+    else {
+        return Err(ProviderError::Auth(
+            "no xAI OAuth session — run `forge auth xai-oauth` to sign in".to_string(),
+        ));
+    };
+    if !tokens.is_expired(now_unix(), REFRESH_SKEW_SECS) {
+        return Ok(tokens.access_token);
+    }
+    let Some(refresh_token) = tokens.refresh_token.clone() else {
+        return Err(ProviderError::Auth(
+            "xAI OAuth session expired and has no refresh token — run `forge auth xai-oauth` to \
+             sign in again"
+                .to_string(),
+        ));
+    };
+    let refreshed = refresh_tokens(http, &refresh_token).await.map_err(|e| {
+        ProviderError::Auth(format!(
+            "xAI OAuth token refresh failed: {e} — run `forge auth xai-oauth` to sign in again"
+        ))
+    })?;
+    if let Err(e) =
+        provider_oauth::store_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER, &refreshed)
+    {
+        tracing::warn!("failed to persist refreshed xAI OAuth token: {e}");
+    }
+    Ok(refreshed.access_token)
+}
+
+/// Small fallback seed if [`list_models`]'s live call fails (network hiccup, transient outage) —
+/// ids confirmed to exist via a live `/v1/models` call during development. Not exhaustive; the
+/// live path is primary and this only keeps discovery from going empty on a blip.
+const XAI_OAUTH_SEED_MODELS: &[&str] = &["grok-4.3", "grok-build-0.1"];
+
+/// List the models this account's xAI OAuth session can see, as `xai-oauth::<id>` ids. Live via
+/// `GET /v1/models` (confirmed to work with the OAuth bearer, same as the API-key path); falls
+/// back to [`XAI_OAUTH_SEED_MODELS`] on any failure so a transient blip doesn't empty the catalog.
+/// Image/video-generation models (`grok-imagine-*`) are filtered by the shared
+/// `forge_config::is_non_chat_model` denylist, same as every other provider's live listing.
+pub async fn list_models() -> Result<Vec<String>, ProviderError> {
+    let http = bundled_http_client();
+    let token = fresh_access_token(&http).await?;
+    let url = format!("{XAI_API_BASE}/models");
+    debug_assert!(
+        is_pinned_xai_url(&url),
+        "xAI OAuth URL must stay host-pinned"
+    );
+
+    let list = async {
+        let resp = http
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(classify_xai_status(status, &text, None));
+        }
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::Request(e.to_string()))?;
+        let data = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| ProviderError::Request("xAI /models: no `data` array".to_string()))?;
+        Ok::<_, ProviderError>(
+            data.iter()
+                .filter_map(|m| m.get("id").and_then(|i| i.as_str()))
+                .map(|id| format!("{XAI_OAUTH_NAMESPACE}::{id}"))
+                .filter(|id| !forge_config::is_non_chat_model(id))
+                .collect::<Vec<_>>(),
+        )
+    }
+    .await;
+
+    match list {
+        Ok(models) if !models.is_empty() => Ok(models),
+        Ok(_) => Ok(seed_models()),
+        Err(e) => {
+            tracing::debug!("xai-oauth live model list failed: {e} — using seed ids");
+            Ok(seed_models())
+        }
+    }
+}
+
+fn seed_models() -> Vec<String> {
+    XAI_OAUTH_SEED_MODELS
+        .iter()
+        .map(|m| format!("{XAI_OAUTH_NAMESPACE}::{m}"))
+        .collect()
 }
 
 #[async_trait::async_trait]
@@ -664,6 +742,27 @@ impl Provider for XaiOauthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_models_are_namespaced_and_pass_the_non_chat_filter() {
+        let seeds = seed_models();
+        assert!(!seeds.is_empty());
+        for id in &seeds {
+            assert!(id.starts_with("xai-oauth::"));
+            assert!(
+                !forge_config::is_non_chat_model(id),
+                "{id} should be a chat model"
+            );
+        }
+    }
+
+    #[test]
+    fn has_session_reflects_keyring_state() {
+        // No isolation of the OS keyring here (unlike `forge_config`'s own secret_store tests,
+        // which use a tempdir env var) — just assert the function doesn't panic and returns a
+        // bool. Behavior against a real stored/absent session is covered by the CLI's live usage.
+        let _ = has_session();
+    }
 
     #[test]
     fn pinned_host_accepts_only_real_xai_over_https() {

@@ -22,7 +22,7 @@ either confirms API access or explains why it can't.
 Once signed in, pin a model with the `xai-oauth::` namespace:
 
 ```
-forge --model xai-oauth::grok-4
+forge --model xai-oauth::grok-4.3
 ```
 
 Other commands:
@@ -31,6 +31,15 @@ Other commands:
 forge auth xai-oauth --list     # session status (token expiry, scopes)
 forge auth xai-oauth --remove   # sign out (deletes the stored tokens)
 ```
+
+## Discovery
+
+`forge models` / auto-discovery only probes `xai-oauth` if a session is already stored (no
+needless network call for users who never signed in). It lists live via `GET /v1/models` with the
+OAuth bearer — confirmed to work the same as the API-key path — filtering image/video-generation
+models (`grok-imagine-*`) through the same `forge_config::is_non_chat_model` denylist every other
+provider's live listing uses. A transient listing failure falls back to a small hardcoded seed list
+rather than leaving the catalog empty.
 
 ## The entitlement gotcha
 
@@ -66,7 +75,6 @@ from both the API-key `xai` provider and any MCP server named `xai`
 
 ## Deferred / out of scope (Phase 1)
 
-- Model auto-discovery for `xai-oauth` — pin `xai-oauth::<model>` explicitly.
 - `web_search` / `x_search` / `code_execution` server-side tool passthrough on the Responses API.
 - Mesh-routing auto-selection of `xai-oauth` models as a default tier — they participate only when
   explicitly pinned.
