@@ -151,15 +151,22 @@ that code until a device/TestFlight test).
       were unavailable before enrollment). Register the App Group
       `group.dev.adulari.forge` (must match `mobile/app.config.ts`'s `APP_GROUP` constant exactly
       — the widget/Live Activity extension and the main app share data through it).
-- [ ] Re-run `eas credentials` (or let the next `eas build` regenerate the provisioning profile)
-      so the profile picks up the two new capabilities — an existing profile won't auto-update.
-- [ ] **Xcode Cloud workflow**: App Store Connect → your app → Xcode Cloud → Get Started, connect
+- [x] **Xcode Cloud workflow**: App Store Connect → your app → Xcode Cloud → Get Started, connect
       the `adulari/forge` GitHub repo, and create a workflow scoped to `mobile/` changes on
-      `main` (Xcode Cloud can filter by path). `mobile/ci_scripts/ci_post_clone.sh` (already in
+      `main` (Xcode Cloud can filter by path). `mobile/ios/ci_scripts/ci_post_clone.sh` (already in
       the repo) runs `npm ci && npx expo prebuild` automatically post-clone — no other config
-      needed for it to materialize the widget/Live-Activity extension target and build. Set the
-      workflow to build the `Forge` scheme, archive, and (optionally) auto-distribute to
-      TestFlight internal testers on success.
+      needed for it to materialize the widget/Live-Activity extension target and build. Xcode
+      Cloud handles signing itself (no `eas credentials`/EAS provisioning profile needed — that
+      pipeline is gone, this is the only build/distribution path now). Workflow's Archive action
+      has `buildDistributionAudience: INTERNAL_ONLY` set, so it auto-uploads to TestFlight on
+      success — but each new build still needs manually assigning to a beta group (App Store
+      Connect → TestFlight → the group → Builds → add) before any tester actually sees it; this
+      isn't automatic even with the audience set.
+- [ ] Also set the marketing version (`mobile/app.config.ts`'s `version`) higher than any build
+      number Xcode Cloud's own automatic build-number management has already used for the current
+      version string, if builds start failing "bundle version must be higher than previously
+      uploaded" again — that setting isn't exposed via Xcode Cloud's UI/API, only inferable from
+      failures.
 - [ ] TestFlight builds are **production-signed**, not sandbox — a common misconception. Both
       TestFlight and App Store builds talk to APNs' production host; only Xcode
       Debug-run-on-device builds are sandbox (`ApnsNotifier`/`push.ios.ts` both derive this from

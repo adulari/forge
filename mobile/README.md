@@ -39,14 +39,14 @@ Gate before any PR: `npx tsc --noEmit` clean, `npm run lint` clean.
 | Target | Build | CI |
 |---|---|---|
 | iOS (sideload) | unsigned IPA, `xcodebuild archive` with `CODE_SIGNING_ALLOWED=NO` | [`mobile-sidestore.yml`](../.github/workflows/mobile-sidestore.yml) — tag `mobile-v*` |
-| iOS (App Store) | `eas build`/`eas submit`, profile `production` | [`mobile-eas.yml`](../.github/workflows/mobile-eas.yml) — tag `mobile-release-v*`, requires `EXPO_TOKEN`; skips cleanly until Apple Developer approval + EAS credentials land |
+| iOS (App Store) | Xcode Cloud (`mobile/ios/ci_scripts/ci_post_clone.sh` runs `expo prebuild`, Xcode Cloud archives/signs/uploads) | App Store Connect → Xcode Cloud, workflow on `main` scoped to `mobile/`; see [`docs/mobile/APP_STORE_CHECKLIST.md`](../docs/mobile/APP_STORE_CHECKLIST.md) §7 |
 | Android | `eas build -p android` (APK for sideload, AAB for Play later) | not yet wired in CI — build locally with `eas build -p android --profile preview` |
 | Web | `npx expo export -p web` → `dist/` (static, deployable anywhere over HTTPS) | [`app-web.yml`](../.github/workflows/app-web.yml) — tag `app-v*` or manual dispatch |
 | Windows / macOS / Linux | `npm run tauri:build` (Tauri v2, unsigned in v1) → `.exe`/`.msi`, `.dmg`, `.AppImage`/`.deb` | [`app-desktop.yml`](../.github/workflows/app-desktop.yml) — 3-OS matrix, tag `app-v*` or manual dispatch |
 
-`eas.json` has `development` / `preview` / `production` build profiles; `ios.appleTeamId` is a
-tracked TODO until the Apple Developer account is approved (does not block Android, web, or
-desktop).
+`eas.json` has `development` / `preview` / `production` build profiles, used for Android builds
+and the iOS simulator build below — the iOS App Store submit path no longer uses EAS (Xcode
+Cloud handles that end to end now, see the table above).
 
 ## iOS sideloading (SideStore)
 
@@ -75,9 +75,9 @@ either dragging the `.app` onto a local iOS Simulator (macOS + Xcode), or upload
 
 ## Distribution posture (v1)
 
-Unsigned desktop builds + unsigned SideStore iOS + static web hosting. No store-submission
-automation — the `mobile-eas.yml` App Store path is gated on `EXPO_TOKEN` and Apple approval,
-and there is no auto-publish step anywhere in `app-desktop.yml`/`app-web.yml`; both only produce
-build artifacts (plus an opt-in GitHub Pages deploy for the web export, off by default — see the
-comments in `app-web.yml`). See [`docs/mobile/APP_STORE_CHECKLIST.md`](../docs/mobile/APP_STORE_CHECKLIST.md)
-for what's still needed to flip the App Store path on.
+Unsigned desktop builds + unsigned SideStore iOS + static web hosting, plus a working signed iOS
+App Store path via Xcode Cloud (see the build matrix above). There is no auto-publish step
+anywhere in `app-desktop.yml`/`app-web.yml`; both only produce build artifacts (plus an opt-in
+GitHub Pages deploy for the web export, off by default — see the comments in `app-web.yml`). See
+[`docs/mobile/APP_STORE_CHECKLIST.md`](../docs/mobile/APP_STORE_CHECKLIST.md) for the remaining
+manual App Store Connect steps (beta group assignment, App Store listing, etc).

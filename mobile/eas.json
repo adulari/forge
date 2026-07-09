@@ -42,14 +42,5 @@
         "resourceClass": "m-medium"
       }
     }
-  },
-  "submit": {
-    "production": {
-      "ios": {
-        "appleId": "floris.voskamp@outlook.com",
-        "ascAppId": "6788563586",
-        "appleTeamId": "95VXXPD28Y"
-      }
-    }
   }
 }
