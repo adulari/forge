@@ -12,7 +12,9 @@ brew install node@20
 brew link --overwrite --force node@20
 node -v
 
-npm ci
+# --prefer-offline/--no-audit/--no-fund skip npm's registry-freshness-check and audit/funding
+# network calls — pure network round-trip savings, doesn't change what gets installed.
+npm ci --prefer-offline --no-audit --no-fund
 npx expo prebuild -p ios --no-install
 cd ios
 
