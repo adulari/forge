@@ -759,7 +759,10 @@ fn abort_turn_before_quit(
 /// keyless ones (local `ollama`, the `claude-cli`/`codex-cli` bridges). Used to reject a clearly
 /// invalid `--model provider::id` even when no catalog is available to check the full id against.
 fn is_known_provider_prefix(prefix: &str) -> bool {
-    const KEYLESS: &[&str] = &["ollama", "claude-cli", "codex-cli"];
+    // `xai-oauth` authenticates via a keyring OAuth session (`forge auth xai-oauth`), not an
+    // env-var API key, so it's never in `known_key_providers()` — same reason the CLI bridges
+    // are keyless here.
+    const KEYLESS: &[&str] = &["ollama", "claude-cli", "codex-cli", "xai-oauth"];
     KEYLESS.contains(&prefix) || forge_config::known_key_providers().any(|p| p == prefix)
 }
 
