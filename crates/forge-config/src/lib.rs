@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 pub mod agents;
 pub mod mcp;
 pub mod oauth;
+pub mod provider_oauth;
 pub mod secret_store;
 pub use agents::{load_agents, AgentDef};
 pub use mcp::{

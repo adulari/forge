@@ -11,6 +11,7 @@ pub(crate) fn auth(provider: &str, remove: bool, list: bool, replace: bool) -> R
         let mut known: Vec<_> = forge_config::known_key_providers().collect();
         known.extend(forge_config::known_search_providers());
         known.push("artificialanalysis");
+        known.push("xai-oauth");
         anyhow::bail!(
             "unknown provider '{provider}' — known providers are: {}",
             known.join(", ")
@@ -71,6 +72,125 @@ pub(crate) fn auth(provider: &str, remove: bool, list: bool, replace: bool) -> R
     Ok(())
 }
 
+/// Sign in to xAI/Grok via device-code OAuth (SuperGrok / X Premium subscription — no API key,
+/// billed against the subscription instead of metered credits). `--list` shows session status,
+/// `--remove` signs out; the default (and `--replace`, kept only for CLI-shape symmetry with the
+/// key-based `auth` command) starts a fresh login. Experimental (Phase 1): xAI enforces OAuth API
+/// entitlement server-side per account/tier, so a successful login does NOT guarantee inference
+/// works — the post-login probe below says so plainly instead of silently retrying.
+pub(crate) async fn auth_xai_oauth(remove: bool, list: bool, _replace: bool) -> Result<()> {
+    use forge_config::provider_oauth::{self, XAI_OAUTH_KEYRING_PROVIDER};
+
+    if list {
+        match provider_oauth::load_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER) {
+            Some(tokens) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let expiry = if tokens.expires_at == 0 {
+                    "no expiry reported".to_string()
+                } else {
+                    let remaining = tokens.expires_at - now;
+                    if remaining > 0 {
+                        format!("access token expires in {}", human_secs(remaining))
+                    } else {
+                        "access token expired".to_string()
+                    }
+                };
+                println!(
+                    "xai-oauth: signed in ({expiry}, refresh token {}, scopes: {})",
+                    if tokens.refresh_token.is_some() {
+                        "present"
+                    } else {
+                        "absent"
+                    },
+                    tokens.scopes.join(" ")
+                );
+            }
+            None => println!("xai-oauth: not signed in — run `forge auth xai-oauth`"),
+        }
+        return Ok(());
+    }
+
+    if remove {
+        let removed = provider_oauth::clear_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER)
+            .context("removing xAI OAuth tokens from the OS keyring")?;
+        println!(
+            "{}",
+            if removed {
+                "removed stored xAI OAuth tokens from the OS keyring"
+            } else {
+                "no xAI OAuth tokens stored — nothing to remove"
+            }
+        );
+        return Ok(());
+    }
+
+    println!("To sign in to xAI (Grok) with your SuperGrok / X Premium account, open:\n");
+    let dc = forge_provider::start_device_login()
+        .await
+        .context("starting xAI device-code login")?;
+    match &dc.verification_uri_complete {
+        Some(url) => println!("    {url}\n"),
+        None => println!(
+            "    {}\n\nand enter code: {}\n",
+            dc.verification_uri, dc.user_code
+        ),
+    }
+    println!("Waiting for approval… press Ctrl-C to cancel.");
+
+    let tokens = forge_provider::poll_for_tokens(&dc)
+        .await
+        .context("waiting for xAI sign-in")?;
+    provider_oauth::store_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER, &tokens)
+        .context("storing xAI OAuth tokens")?;
+
+    match forge_provider::probe_entitlement(&tokens.access_token).await {
+        Ok(forge_provider::EntitlementStatus::Entitled) => println!(
+            "signed in to xAI via OAuth — API access confirmed (tokens stored in the OS keyring)\n\
+             use models with the xai-oauth:: prefix, e.g.:  forge --model xai-oauth::grok-4\n\
+             note: costs show as $0 — usage is billed to your xAI subscription, not metered API credits"
+        ),
+        Ok(forge_provider::EntitlementStatus::NotEntitled(msg)) => anyhow::bail!(
+            "OAuth sign-in succeeded, but xAI returned 403 for API access: this account's \
+             subscription tier is not entitled to use the API via OAuth. This is enforced \
+             server-side by xAI — signing in again will not fix it. ({msg})\n\n\
+             Tokens are stored (the account may gain entitlement later). To use Grok with Forge \
+             now, create an API key at https://console.x.ai and run:\n\n    forge auth xai"
+        ),
+        Ok(forge_provider::EntitlementStatus::AuthFailed(msg)) => anyhow::bail!(
+            "sign-in produced a token xAI rejected (401) — try `forge auth xai-oauth` again, or \
+             use `forge auth xai` with an API key. ({msg})"
+        ),
+        Ok(forge_provider::EntitlementStatus::RateLimited) => println!(
+            "signed in; the entitlement check was rate-limited (429) — assuming access is OK. \
+             If inference fails with 403, run `forge auth xai` instead."
+        ),
+        Ok(forge_provider::EntitlementStatus::Other(status, msg)) => println!(
+            "signed in; the entitlement check returned an unexpected status ({status}: {msg}) — \
+             tokens are stored, try using xai-oauth:: models directly."
+        ),
+        Err(e) => println!(
+            "signed in, but the entitlement check itself failed ({e}) — tokens are stored, try \
+             using xai-oauth:: models directly."
+        ),
+    }
+    Ok(())
+}
+
+/// Render a whole number of seconds as the coarsest useful unit (`"54m"`, `"3h"`, `"2d"`).
+fn human_secs(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs < 3600 {
+        format!("{}m", (secs / 60).max(1))
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
 /// A human label + free/paid hint for a key-based provider, shown in `forge init`.
 pub(crate) fn provider_label(provider: &str) -> &'static str {
     match provider {
@@ -78,6 +198,7 @@ pub(crate) fn provider_label(provider: &str) -> &'static str {
         "openai" => "OpenAI (GPT API) — paid",
         "gemini" => "Google Gemini — free tier + paid",
         "xai" => "xAI (Grok) — paid",
+        "xai-oauth" => "xAI (Grok) — SuperGrok/X Premium subscription (OAuth, no API key)",
         "deepseek" => "DeepSeek — paid",
         "openrouter" => "OpenRouter (gateway, many models) — paid + some :free",
         "groq" => "Groq — free tier (fast)",

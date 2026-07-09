@@ -562,7 +562,9 @@ pub(crate) enum Command {
     /// `--remove` deletes them all.
     Auth {
         /// Provider: anthropic, openai, gemini, groq, nvidia, sambanova, mistral, openrouter,
-        /// together, fireworks, perplexity, bedrock, vertex, …
+        /// together, fireworks, perplexity, bedrock, vertex, …, or `xai-oauth` (SuperGrok/X
+        /// Premium device-code login — no key, reads nothing from stdin; experimental, see
+        /// docs' xai-oauth guide).
         provider: String,
         /// Delete all stored keys for this provider instead of setting one.
         #[arg(long)]
