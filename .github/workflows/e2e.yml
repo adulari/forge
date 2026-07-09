@@ -46,7 +46,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      # Ephemeral GitHub-hosted legs have no warm target/ dir, so the cache earns its keep.
+      # The self-hosted ubuntu leg skips it: target/ already persists on that box's local disk
+      # between runs, so a network cache round-trip would be pure overhead on top of that.
+      - if: matrix.label != 'ubuntu-latest'
+        uses: Swatinem/rust-cache@v2
 
       - name: Build forge
         run: cargo build --release --bin forge

@@ -14,18 +14,18 @@ permissions:
   actions: write # lets the Homebrew-formula step `gh workflow run ci.yml` against the PR branch
 
 jobs:
-  # Generate shell completions + the man page ONCE (they're platform-independent text), then
-  # bundle the same set into every OS archive below. Driven by `xtasks gen-dist`, which reads
-  # forge-cli's clap tree via its library facade — no runtime CLI subcommand.
+  # Generate shell completions + the man page ONCE (they're platform-independent text). Runs
+  # fully in parallel with `build` below (no `needs` either way) — it used to hard-block every
+  # platform build for its own ~6min compile (it links most of forge-cli's dependency graph in
+  # release mode just to introspect the clap tree), even though nothing needs its output until
+  # `release` assembles the final archives. Driven by `xtasks gen-dist`, which reads forge-cli's
+  # clap tree via its library facade — no runtime CLI subcommand.
   assets:
     name: completions + man page
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: xtasks-assets
       - name: Generate completions + man page
         run: cargo run --release -p xtasks -- gen-dist dist-assets
       - uses: actions/upload-artifact@v7
@@ -34,9 +34,11 @@ jobs:
           path: dist-assets/**
           if-no-files-found: error
 
+  # Raw per-platform binary only — no packaging here. Packaging (bundling README/LICENSE/
+  # completions/man page into the final archive) now happens once in `release`, after both this
+  # and `assets` finish, so this job has zero dependency on `assets` and starts immediately.
   build:
     name: build ${{ matrix.target }}
-    needs: assets
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -44,22 +46,27 @@ jobs:
         include:
           - os: [self-hosted, linux, x64]
             target: x86_64-unknown-linux-gnu
-            archive: tar.gz
+            self_hosted: true
+            bin: forge
           # arm64 stays on GitHub's native-arm runner: the self-hosted x64 box can't build
           # aarch64 natively, and cross-compiling would need a linker that isn't set up. This
           # leg only runs on release tags (rare), so keeping it hosted is cheap and correct.
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            archive: tar.gz
+            self_hosted: false
+            bin: forge
           - os: macos-latest
             target: aarch64-apple-darwin
-            archive: tar.gz
+            self_hosted: false
+            bin: forge
           - os: macos-latest
             target: x86_64-apple-darwin
-            archive: tar.gz
+            self_hosted: false
+            bin: forge
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            archive: zip
+            self_hosted: false
+            bin: forge.exe
     steps:
       - uses: actions/checkout@v7
 
@@ -68,62 +75,79 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      # Ephemeral GitHub-hosted legs have no warm target/ dir, so the cache earns its keep.
+      # The self-hosted linux leg skips it: target/ already persists on that box's local disk
+      # between runs, so a network cache round-trip would be pure overhead on top of that.
+      - if: ${{ !matrix.self_hosted }}
+        uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
       - name: Build
         run: cargo build --release --locked --bin forge --target ${{ matrix.target }}
 
-      - name: Fetch generated assets
-        uses: actions/download-artifact@v8
+      - name: Upload raw binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: forge-raw-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.bin }}
+          if-no-files-found: error
+
+  release:
+    name: package + publish release
+    needs: [assets, build]
+    runs-on: [self-hosted, linux, x64]
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
         with:
           name: forge-assets
           path: dist-assets
 
-      - name: Package (unix)
-        if: matrix.archive == 'tar.gz'
-        shell: bash
-        run: |
-          dir="forge-${{ matrix.target }}"
-          mkdir "$dir"
-          cp "target/${{ matrix.target }}/release/forge" "$dir/"
-          cp README.md LICENSE "$dir/" 2>/dev/null || true
-          cp -r dist-assets/completions "$dir/" 2>/dev/null || true
-          cp dist-assets/forge.1 "$dir/" 2>/dev/null || true
-          tar czf "$dir.tar.gz" "$dir"
-
-      - name: Package (windows)
-        if: matrix.archive == 'zip'
-        shell: pwsh
-        run: |
-          $dir = "forge-${{ matrix.target }}"
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/forge.exe" "$dir/"
-          Copy-Item README.md, LICENSE "$dir/" -ErrorAction SilentlyContinue
-          Copy-Item -Recurse dist-assets/completions "$dir/" -ErrorAction SilentlyContinue
-          Copy-Item dist-assets/forge.1 "$dir/" -ErrorAction SilentlyContinue
-          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: forge-${{ matrix.target }}
-          path: |
-            forge-${{ matrix.target }}.tar.gz
-            forge-${{ matrix.target }}.zip
-          if-no-files-found: ignore
-
-  release:
-    name: publish release
-    needs: build
-    runs-on: [self-hosted, linux, x64]
-    if: startsWith(github.ref, 'refs/tags/')
-    steps:
       - uses: actions/download-artifact@v8
         with:
-          path: dist
-          merge-multiple: true
+          pattern: forge-raw-*
+          path: raw
+
+      # Assemble each platform's final archive here (not per-matrix-leg): now that `assets` and
+      # `build` run fully in parallel, this is the one place that needs both. Doing it once also
+      # collapses the old per-OS bash/pwsh packaging duplication into a single script — a
+      # zip/tar.gz archive is just a generic container, it doesn't need to be built on the OS
+      # it's targeting.
+      - name: Package all platforms
+        run: |
+          set -e
+          declare -A ARCHIVE=(
+            [x86_64-unknown-linux-gnu]=tar.gz
+            [aarch64-unknown-linux-gnu]=tar.gz
+            [aarch64-apple-darwin]=tar.gz
+            [x86_64-apple-darwin]=tar.gz
+            [x86_64-pc-windows-msvc]=zip
+          )
+          declare -A BIN=(
+            [x86_64-unknown-linux-gnu]=forge
+            [aarch64-unknown-linux-gnu]=forge
+            [aarch64-apple-darwin]=forge
+            [x86_64-apple-darwin]=forge
+            [x86_64-pc-windows-msvc]=forge.exe
+          )
+          mkdir -p dist
+          for target in "${!ARCHIVE[@]}"; do
+            dir="forge-${target}"
+            mkdir "$dir"
+            cp "raw/forge-raw-${target}/${BIN[$target]}" "$dir/"
+            cp README.md LICENSE "$dir/" 2>/dev/null || true
+            cp -r dist-assets/completions "$dir/" 2>/dev/null || true
+            cp dist-assets/forge.1 "$dir/" 2>/dev/null || true
+            if [ "${ARCHIVE[$target]}" = "zip" ]; then
+              zip -r -y "dist/$dir.zip" "$dir"
+            else
+              tar czf "dist/$dir.tar.gz" "$dir"
+            fi
+          done
+          ls -la dist
 
       - name: Checksums
         shell: bash
