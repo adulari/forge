@@ -45,10 +45,14 @@ fn de_named_models<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>
     Ok(models)
 }
 
-/// A $0-marginal subscription bridge (the locally-installed claude/codex CLI), as opposed to a
-/// metered or genuinely-free API. Kept separate from "free" in the overview counts.
+/// A $0-marginal subscription bridge (the locally-installed claude/codex CLI) or subscription
+/// OAuth provider (`xai-oauth::`), as opposed to a metered or genuinely-free API. Kept separate
+/// from "free" in the overview counts.
 pub fn is_subscription(id: &str) -> bool {
-    id.starts_with("claude-cli::") || id.starts_with("codex-cli::") || id.starts_with("agy-cli::")
+    id.starts_with("claude-cli::")
+        || id.starts_with("codex-cli::")
+        || id.starts_with("agy-cli::")
+        || id.starts_with("xai-oauth::")
 }
 
 /// Whether a model is genuinely free to call. "Free" needs *positive* evidence, not just a missing
@@ -932,6 +936,12 @@ mod tests {
             "anthropic::claude-opus-4-8".into(),
             "ollama::llama3.2".into(),
         ])
+    }
+
+    #[test]
+    fn xai_oauth_is_subscription_not_free() {
+        assert!(is_subscription("xai-oauth::grok-4"));
+        assert!(!is_free("xai-oauth::grok-4", 0.0, true));
     }
 
     #[test]

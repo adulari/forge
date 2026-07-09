@@ -13,6 +13,7 @@ mod embedder;
 mod genai_provider;
 mod mock;
 mod tool_recovery;
+mod xai_oauth;
 
 pub use cli_provider::{CliKind, CliProvider, SUBAGENT_SINK_ENV};
 pub use embedder::{select_embedder, GenaiEmbedder};
@@ -23,9 +24,14 @@ pub use mock::MockProvider;
 pub use tool_recovery::{
     looks_like_unexecuted_tool_call, recover_text_tool_calls, repair_malformed_args,
 };
+pub use xai_oauth::{
+    is_pinned_xai_url, poll_for_tokens, probe_entitlement, start_device_login, EntitlementStatus,
+    XaiOauthProvider, XAI_OAUTH_NAMESPACE,
+};
 
-/// Normalize legacy underscore-prefixed bridge ids to the canonical hyphen form so
-/// `codex_cli::gpt-5.4-mini` and `claude_cli::opus` work identically to their hyphen forms.
+/// Normalize legacy underscore-prefixed bridge/provider ids to the canonical hyphen form so
+/// `codex_cli::gpt-5.4-mini` / `claude_cli::opus` / `xai_oauth::grok-4` work identically to their
+/// hyphen forms.
 pub fn normalize_model_id(model: &str) -> std::borrow::Cow<'_, str> {
     if let Some(rest) = model.strip_prefix("claude_cli::") {
         return std::borrow::Cow::Owned(format!("claude-cli::{rest}"));
@@ -36,13 +42,19 @@ pub fn normalize_model_id(model: &str) -> std::borrow::Cow<'_, str> {
     if let Some(rest) = model.strip_prefix("agy_cli::") {
         return std::borrow::Cow::Owned(format!("agy-cli::{rest}"));
     }
+    if let Some(rest) = model.strip_prefix("xai_oauth::") {
+        return std::borrow::Cow::Owned(format!("xai-oauth::{rest}"));
+    }
     std::borrow::Cow::Borrowed(model)
 }
 
-/// True when `model` routes to a subscription CLI bridge (`claude-cli::…` / `codex-cli::…`). A
-/// bridge runs its OWN internal tool loop and returns the finished turn as a single text response
-/// (no tool calls surface to the parent), so the parent must treat a bridge response as terminal —
-/// it must NOT nudge it to "keep calling tools," which only re-runs the whole bridge in confusion.
+/// True when `model` routes to a subscription CLI bridge (`claude-cli::…` / `codex-cli::…` /
+/// `agy-cli::…`). A bridge runs its OWN internal tool loop and returns the finished turn as a
+/// single text response (no tool calls surface to the parent), so the parent must treat a bridge
+/// response as terminal — it must NOT nudge it to "keep calling tools," which only re-runs the
+/// whole bridge in confusion. `xai-oauth::…` is deliberately EXCLUDED: it's subscription-billed
+/// like a bridge, but it's a normal single-turn API call whose tool calls DO surface to the
+/// parent's own loop.
 pub fn is_cli_bridge(model: &str) -> bool {
     let m = normalize_model_id(model);
     m.starts_with("claude-cli::") || m.starts_with("codex-cli::") || m.starts_with("agy-cli::")
@@ -182,6 +194,16 @@ mod error_tests {
         assert!(!is_cli_bridge("openrouter::google/gemini-3.5-flash"));
         assert!(!is_cli_bridge("gemini::gemini-3.5-flash"));
         assert!(!is_cli_bridge("ollama::llama3.2"));
+        assert!(
+            !is_cli_bridge("xai-oauth::grok-4"),
+            "subscription-billed but not a bridge loop"
+        );
+    }
+
+    #[test]
+    fn normalize_model_id_handles_xai_oauth_legacy_underscore() {
+        assert_eq!(normalize_model_id("xai_oauth::grok-4"), "xai-oauth::grok-4");
+        assert_eq!(normalize_model_id("xai-oauth::grok-4"), "xai-oauth::grok-4");
     }
 
     #[test]
@@ -398,6 +420,7 @@ pub struct DispatchProvider {
     codex_cli: CliProvider,
     /// Google Antigravity (`agy`) — text-mode only (no MCP), so always built `with_harness(false)`.
     agy_cli: CliProvider,
+    xai_oauth: XaiOauthProvider,
     /// One-time CLI-bridge ToS/discretion notice (FR-Part-B AC-B8).
     notice: std::sync::Once,
 }
@@ -412,14 +435,16 @@ impl DispatchProvider {
             codex_cli: CliProvider::codex().with_harness(harness),
             // agy has no MCP/`--tools` wiring → always text mode, never the Forge-MCP harness.
             agy_cli: CliProvider::antigravity().with_harness(false),
+            xai_oauth: XaiOauthProvider::new(),
             notice: std::sync::Once::new(),
         }
     }
 
-    /// Cap output tokens on the genai (API-provider) path. `0` disables the cap. The CLI bridges
-    /// manage their own output, so this only affects the genai backend.
+    /// Cap output tokens on the genai (API-provider) and xAI-OAuth paths. `0` disables the cap.
+    /// The CLI bridges manage their own output, so this doesn't affect them.
     pub fn with_max_output_tokens(mut self, cap: u32) -> Self {
         self.genai = self.genai.with_max_output_tokens(cap);
+        self.xai_oauth = self.xai_oauth.with_max_output_tokens(cap);
         self
     }
 
@@ -467,6 +492,10 @@ impl Provider for DispatchProvider {
             self.agy_cli
                 .complete(model, messages, tools, on_event)
                 .await
+        } else if model.starts_with("xai-oauth::") {
+            self.xai_oauth
+                .complete(model, messages, tools, on_event)
+                .await
         } else {
             self.genai.complete(model, messages, tools, on_event).await
         }
@@ -495,6 +524,10 @@ impl Provider for DispatchProvider {
         } else if model.starts_with("agy-cli::") {
             self.cli_notice();
             self.agy_cli
+                .complete_with(model, messages, tools, opts, on_event)
+                .await
+        } else if model.starts_with("xai-oauth::") {
+            self.xai_oauth
                 .complete_with(model, messages, tools, opts, on_event)
                 .await
         } else {

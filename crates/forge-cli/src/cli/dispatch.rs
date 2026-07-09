@@ -150,7 +150,13 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             remove,
             list,
             replace,
-        } => auth(&provider, remove, list, replace),
+        } => {
+            if provider == "xai-oauth" || provider == "xai_oauth" {
+                auth_xai_oauth(remove, list, replace).await
+            } else {
+                auth(&provider, remove, list, replace)
+            }
+        }
         Command::Provider { cmd } => provider_cmd(cmd),
         Command::Setup | Command::Init => setup(),
         Command::Mcp { cmd } => mcp_cmd(cmd).await,

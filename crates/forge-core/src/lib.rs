@@ -969,8 +969,11 @@ fn classify_tool_failure(result: &str) -> Option<ErrorCategory> {
 /// loop and reports CUMULATIVE usage across every internal step — not the size of the request we
 /// sent — so over a long turn it balloons past the window (e.g. 900k against a 272k context). There
 /// the conservative transcript estimate, which reflects the context we actually manage, is correct.
+/// Gated on `is_cli_bridge`, NOT `is_subscription`: `xai-oauth::` is subscription-billed but is a
+/// normal single-request API call (not an internal multi-step loop), so its `reported_input` is
+/// already accurate — using the transcript estimate for it would just be a worse number.
 fn context_fill_tokens(model: &str, transcript_est: u64, reported_input: u64) -> u64 {
-    if forge_mesh::catalog::is_subscription(model) {
+    if forge_provider::is_cli_bridge(model) {
         transcript_est
     } else {
         reported_input
@@ -14559,6 +14562,12 @@ mod tests {
         assert_eq!(
             context_fill_tokens("codex-cli::gpt-5.5", 90_000, 900_000),
             90_000
+        );
+        // xai-oauth:: is subscription-billed but NOT a cli bridge — it's a normal single-request
+        // API call, so its reported input is accurate and must be trusted like a direct API model.
+        assert_eq!(
+            context_fill_tokens("xai-oauth::grok-4", 1_000, 50_000),
+            50_000
         );
     }
 
