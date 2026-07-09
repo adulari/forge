@@ -18,6 +18,7 @@ import { StyleSheet } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 
 import { useTokens } from "../../theme/ThemeProvider";
+import { shadowStyle } from "../../theme/tokens";
 
 const WIDTH = 3;
 const GLOW_RADIUS = 16;
@@ -41,10 +42,13 @@ export function HeatEdge({ active = false }: HeatEdgeProps) {
         styles.bar,
         {
           pointerEvents: "none",
-          shadowColor: tokens.heatGlow,
-          shadowOpacity: 1,
-          shadowRadius: GLOW_RADIUS,
-          shadowOffset: { width: 0, height: 0 },
+          ...shadowStyle({
+            shadowColor: tokens.heatGlow,
+            shadowOpacity: 1,
+            shadowRadius: GLOW_RADIUS,
+            shadowOffset: { width: 0, height: 0 },
+            elevation: 0,
+          }),
         },
       ]}
     />

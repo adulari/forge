@@ -144,9 +144,15 @@ export type ConnectionState =
   | "connecting"
   | "open"
   | "reconnecting"
+  | "unreachable"
   | "closed";
 
 const BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 15000];
+// After this many consecutive failed attempts (~15s of backoff), stop presenting the
+// outage as a routine "reconnecting…" blip and escalate to a harder "unreachable"
+// state — retries keep running in the background, but the UI should say so plainly
+// instead of leaving the user staring at a soft, indefinite "reconnecting…" forever.
+const UNREACHABLE_AFTER_ATTEMPTS = 5;
 
 function wsUrl(baseUrl: string, sessionId: string, rev: number): string {
   const u = new URL(`${baseUrl}/ws`);
@@ -209,7 +215,9 @@ export function useSessionSocket(
   const connect = useCallback(() => {
     if (!baseUrl || !sessionId || closedRef.current || !shouldRunRef.current) return;
     teardown();
-    setConnectionState((s) => (s === "idle" ? "connecting" : "reconnecting"));
+    setConnectionState((s) =>
+      s === "idle" ? "connecting" : s === "unreachable" ? "unreachable" : "reconnecting",
+    );
 
     const ws = new TWebSocket(wsUrl(baseUrl, sessionId, revRef.current));
     wsRef.current = ws;
@@ -248,7 +256,7 @@ export function useSessionSocket(
     ws.onclose = () => {
       wsRef.current = null;
       if (closedRef.current || !shouldRunRef.current) return;
-      setConnectionState("reconnecting");
+      setConnectionState(attemptRef.current >= UNREACHABLE_AFTER_ATTEMPTS ? "unreachable" : "reconnecting");
       const delay =
         BACKOFF_MS[Math.min(attemptRef.current, BACKOFF_MS.length - 1)];
       attemptRef.current += 1;

@@ -7,7 +7,7 @@ import Animated from "react-native-reanimated";
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { useGaugeflow } from "../../theme/motion";
-import { gaugeColor, radii, space } from "../../theme/tokens";
+import { gaugeColor, radii, shadowStyle, space } from "../../theme/tokens";
 import { formatTokenPair, tabularNums, type as typeScale } from "../../theme/typography";
 
 export interface ContextGaugeProps {
@@ -39,12 +39,14 @@ export function ContextGauge({ used, total }: ContextGaugeProps) {
           style={[
             styles.fill,
             { backgroundColor: fillColor },
-            overheat && {
-              shadowColor: fillColor,
-              shadowOpacity: 0.6,
-              shadowRadius: 4,
-              shadowOffset: { width: 0, height: 0 },
-            },
+            overheat &&
+              shadowStyle({
+                shadowColor: fillColor,
+                shadowOpacity: 0.6,
+                shadowRadius: 4,
+                shadowOffset: { width: 0, height: 0 },
+                elevation: 0,
+              }),
             fillStyle,
           ]}
         />

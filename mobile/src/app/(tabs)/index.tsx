@@ -19,7 +19,7 @@ import { Skeleton } from "../../components/ds/Skeleton";
 import { ApiError, type SessionRow } from "../../lib/api";
 import { useSessions } from "../../lib/queries";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
-import { depthDark, depthLight, radii, space } from "../../theme/tokens";
+import { depthDark, depthLight, radii, shadowStyle, space } from "../../theme/tokens";
 import { tabularNums, type as typeScale } from "../../theme/typography";
 
 // DESIGN_ELEVATION.md Move 3 — the one identity moment: the ⚒ mark beside the Fleet title.
@@ -159,15 +159,7 @@ export default function FleetScreen() {
         style={[
           styles.fab,
           { backgroundColor: tokens.accent },
-          depth.raised
-            ? {
-                shadowColor: depth.raised.shadowColor,
-                shadowOpacity: depth.raised.shadowOpacity,
-                shadowRadius: depth.raised.shadowRadius,
-                shadowOffset: depth.raised.shadowOffset,
-                elevation: depth.raised.elevation,
-              }
-            : null,
+          depth.raised ? shadowStyle(depth.raised) : null,
         ]}
       />
     </Screen>
