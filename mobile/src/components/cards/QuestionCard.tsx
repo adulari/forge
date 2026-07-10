@@ -17,6 +17,7 @@ import Animated from "react-native-reanimated";
 
 import { IconButton } from "../ds/IconButton";
 import { Input } from "../ds/Input";
+import { useToast } from "../ds/ToastHost";
 import { haptics } from "../../lib/haptics";
 import { type QuestionOption, type RemoteInput } from "../../lib/ws";
 import { useStrike } from "../../theme/motion";
@@ -29,11 +30,12 @@ export interface QuestionCardProps {
   options: QuestionOption[];
   allowOther: boolean;
   promptSeq: number;
-  send: (input: RemoteInput) => void;
+  send: (input: RemoteInput) => boolean;
 }
 
 export function QuestionCard({ question, options, allowOther, promptSeq, send }: QuestionCardProps) {
   const tokens = useTokens();
+  const toast = useToast();
   const [lockedSeq, setLockedSeq] = useState<number | null>(null);
   const [freeText, setFreeText] = useState("");
 
@@ -48,7 +50,11 @@ export function QuestionCard({ question, options, allowOther, promptSeq, send }:
     if (locked || text.trim().length === 0) return;
     setLockedSeq(promptSeq);
     haptics.select();
-    send({ kind: "answer", text, seq: promptSeq });
+    if (!send({ kind: "answer", text, seq: promptSeq })) {
+      setLockedSeq(null);
+      toast.show("not sent — reconnect and try again", { tone: "danger" });
+      haptics.mergeConflict();
+    }
   };
 
   const showFreeText = allowOther || options.length === 0;

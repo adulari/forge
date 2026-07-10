@@ -168,7 +168,7 @@ function wsUrl(baseUrl: string, sessionId: string, rev: number): string {
 export interface UseSessionSocketResult {
   snapshot: Snapshot | null;
   connectionState: ConnectionState;
-  send: (input: RemoteInput) => void;
+  send: (input: RemoteInput) => boolean;
 }
 
 /**
@@ -187,6 +187,7 @@ export function useSessionSocket(
   const revRef = useRef(0);
   const attemptRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const socketGenerationRef = useRef(0);
   const closedRef = useRef(false);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const shouldRunRef = useRef(true);
@@ -222,15 +223,18 @@ export function useSessionSocket(
       s === "idle" ? "connecting" : s === "unreachable" ? "unreachable" : "reconnecting",
     );
 
+    const generation = ++socketGenerationRef.current;
     const ws = new TWebSocket(wsUrl(baseUrl, sessionId, revRef.current));
     wsRef.current = ws;
 
     ws.onopen = () => {
+      if (generation !== socketGenerationRef.current) return;
       attemptRef.current = 0;
       setConnectionState("open");
     };
 
     ws.onmessage = (event) => {
+      if (generation !== socketGenerationRef.current) return;
       let data: Snapshot;
       try {
         data = JSON.parse(String(event.data));
@@ -238,6 +242,16 @@ export function useSessionSocket(
         return;
       }
       if (data.revision != null) {
+        if (
+          !data.resync &&
+          revRef.current !== 0 &&
+          data.revision > revRef.current + 1
+        ) {
+          // A non-contiguous frame means replay/watch coalescing skipped state. Reconnect
+          // from the last known-good revision so the server can replay or explicitly resync.
+          ws.close();
+          return;
+        }
         // Dedupe on revision, but always accept resync frames (revision may jump).
         if (!data.resync && data.revision <= revRef.current && revRef.current !== 0) {
           return;
@@ -257,6 +271,7 @@ export function useSessionSocket(
     };
 
     ws.onclose = () => {
+      if (generation !== socketGenerationRef.current) return;
       wsRef.current = null;
       if (closedRef.current || !shouldRunRef.current) return;
       setConnectionState(attemptRef.current >= UNREACHABLE_AFTER_ATTEMPTS ? "unreachable" : "reconnecting");
@@ -322,11 +337,17 @@ export function useSessionSocket(
     return () => sub.remove();
   }, [connect, teardown]);
 
-  const send = useCallback((input: RemoteInput) => {
+  const send = useCallback((input: RemoteInput): boolean => {
     const ws = wsRef.current;
     if (ws && ws.readyState === TWebSocket.OPEN) {
-      ws.send(JSON.stringify(input));
+      try {
+        ws.send(JSON.stringify(input));
+        return true;
+      } catch {
+        ws.close();
+      }
     }
+    return false;
   }, []);
 
   return { snapshot, connectionState, send };

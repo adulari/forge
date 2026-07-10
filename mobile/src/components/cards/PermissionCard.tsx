@@ -32,7 +32,7 @@ export interface PermissionCardProps {
   prompt: string;
   diff: Diff | null;
   promptSeq: number;
-  send: (input: RemoteInput) => void;
+  send: (input: RemoteInput) => boolean;
 }
 
 // A large embedded diff must never push Allow/Deny off-screen (this card sits in a
@@ -87,7 +87,13 @@ export function PermissionCard({ prompt, diff, promptSeq, send }: PermissionCard
     setCommitted(yes ? "allow" : "deny");
     if (yes) haptics.allow();
     else haptics.deny();
-    send({ kind: "allow", yes, seq: promptSeq });
+    if (!send({ kind: "allow", yes, seq: promptSeq })) {
+      setLockedSeq(null);
+      setCommitted(null);
+      toast.show("not sent — reconnect and try again", { tone: "danger" });
+      haptics.mergeConflict();
+      return;
+    }
 
     // Safety net: only a new `prompt_seq` is supposed to unlock this card (see the effect
     // above), but that never comes if this tap's `send` didn't actually reach the daemon

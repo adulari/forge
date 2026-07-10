@@ -25,6 +25,7 @@ import { Card } from "../ds/Card";
 import { CommitIcon } from "../ds/CommitIcon";
 import { IconButton } from "../ds/IconButton";
 import { Input } from "../ds/Input";
+import { useToast } from "../ds/ToastHost";
 import { haptics } from "../../lib/haptics";
 import { type Plan, type QuestionOption, type RemoteInput } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
@@ -37,7 +38,7 @@ export interface PlanCardProps {
   plan: Plan;
   questionOptions: QuestionOption[];
   promptSeq: number;
-  send: (input: RemoteInput) => void;
+  send: (input: RemoteInput) => boolean;
 }
 
 function findOptionNumber(options: QuestionOption[], pattern: RegExp, fallback: string): string {
@@ -47,6 +48,7 @@ function findOptionNumber(options: QuestionOption[], pattern: RegExp, fallback: 
 
 export function PlanCard({ plan, questionOptions, promptSeq, send }: PlanCardProps) {
   const tokens = useTokens();
+  const toast = useToast();
   const reduced = useReducedMotion();
   const [lockedSeq, setLockedSeq] = useState<number | null>(null);
   const [revising, setRevising] = useState(false);
@@ -75,7 +77,12 @@ export function PlanCard({ plan, questionOptions, promptSeq, send }: PlanCardPro
     setLockedSeq(promptSeq);
     if (which) setCommitted(which);
     haptic();
-    send({ kind: "answer", text, seq: promptSeq });
+    if (!send({ kind: "answer", text, seq: promptSeq })) {
+      setLockedSeq(null);
+      setCommitted(null);
+      toast.show("not sent — reconnect and try again", { tone: "danger" });
+      haptics.mergeConflict();
+    }
   };
 
   const approveNumber = findOptionNumber(questionOptions, /build/i, "1");
