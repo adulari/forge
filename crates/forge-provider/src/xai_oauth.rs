@@ -493,11 +493,24 @@ fn take_event(buf: &mut String) -> Option<String> {
 // Provider
 // ---------------------------------------------------------------------------------------------
 
+/// Where OAuth accounts are loaded/refreshed from. Production uses the OS keyring; tests inject
+/// an in-memory store so they never touch `secret_store` / `provider-oauth:*` entries.
+enum AccountSource {
+    Keyring,
+    Memory(std::sync::Mutex<forge_config::oauth::OAuthAccountStore>),
+}
+
 pub struct XaiOauthProvider {
     http: reqwest::Client,
     /// Per-completion output cap (`mesh.max_output_tokens`), same knob `GenAiProvider` honors.
     /// `0` = uncapped.
     max_output_tokens: u32,
+    /// API base URL. Production always uses [`XAI_API_BASE`]; tests inject a mock via
+    /// [`Self::with_api_base`].
+    api_base: String,
+    /// When true, skip the host-pin security check (only set by [`Self::with_api_base`] for tests).
+    skip_host_pin: bool,
+    accounts: AccountSource,
 }
 
 impl Default for XaiOauthProvider {
@@ -511,6 +524,9 @@ impl XaiOauthProvider {
         Self {
             http: bundled_http_client(),
             max_output_tokens: 0,
+            api_base: XAI_API_BASE.to_string(),
+            skip_host_pin: false,
+            accounts: AccountSource::Keyring,
         }
     }
 
@@ -519,11 +535,151 @@ impl XaiOauthProvider {
         self
     }
 
-    /// Load the stored token, refreshing it first if it's expired (or about to be). Errors are
-    /// [`ProviderError::Auth`] (permanent) with guidance to re-run `forge auth xai-oauth` — a
-    /// missing/dead session won't fix itself mid-turn.
-    async fn fresh_access_token(&self) -> Result<String, ProviderError> {
-        fresh_access_token(&self.http).await
+    /// Override the API base (tests inject an httpmock server). Disables the host-pin check so
+    /// loopback mock URLs work. Not used in production.
+    pub fn with_api_base(mut self, base: impl Into<String>) -> Self {
+        self.api_base = base.into().trim_end_matches('/').to_string();
+        self.skip_host_pin = true;
+        self
+    }
+
+    /// Inject an in-memory account store (tests only). Never touches the OS keyring / secret_store.
+    pub fn with_accounts(mut self, store: forge_config::oauth::OAuthAccountStore) -> Self {
+        self.accounts = AccountSource::Memory(std::sync::Mutex::new(store));
+        self
+    }
+
+    fn responses_url(&self) -> String {
+        format!("{}/responses", self.api_base.trim_end_matches('/'))
+    }
+
+    /// Assert the security invariant unless a test overrode the base URL.
+    fn ensure_pinned(&self, url: &str) {
+        if self.skip_host_pin {
+            return;
+        }
+        debug_assert!(
+            is_pinned_xai_url(url),
+            "xAI OAuth URL must stay host-pinned"
+        );
+    }
+
+    fn account_pool(&self) -> forge_config::oauth::OAuthAccountPool {
+        match &self.accounts {
+            AccountSource::Keyring => {
+                provider_oauth::provider_oauth_account_pool(XAI_OAUTH_KEYRING_PROVIDER)
+            }
+            AccountSource::Memory(store) => {
+                let guard = store.lock().unwrap_or_else(|e| e.into_inner());
+                forge_config::oauth::OAuthAccountPool::from_store(&guard)
+            }
+        }
+    }
+
+    /// Load tokens for `account_id` (or the active account when `None`), refresh if needed, and
+    /// persist back through the same source.
+    async fn access_token_for(&self, account_id: Option<&str>) -> Result<String, ProviderError> {
+        let tokens = match (&self.accounts, account_id) {
+            (AccountSource::Keyring, Some(id)) => {
+                provider_oauth::load_provider_oauth_account_tokens(XAI_OAUTH_KEYRING_PROVIDER, id)
+                    .ok_or_else(|| {
+                    ProviderError::Auth(format!(
+                        "no xAI OAuth account '{id}' — run `forge auth xai-oauth` to sign in"
+                    ))
+                })?
+            }
+            (AccountSource::Keyring, None) => provider_oauth::load_provider_oauth_tokens(
+                XAI_OAUTH_KEYRING_PROVIDER,
+            )
+            .ok_or_else(|| {
+                ProviderError::Auth(
+                    "no xAI OAuth session — run `forge auth xai-oauth` to sign in".to_string(),
+                )
+            })?,
+            (AccountSource::Memory(store), Some(id)) => {
+                let guard = store.lock().unwrap_or_else(|e| e.into_inner());
+                guard.tokens_for(id).cloned().ok_or_else(|| {
+                    ProviderError::Auth(format!(
+                        "no xAI OAuth account '{id}' — run `forge auth xai-oauth` to sign in"
+                    ))
+                })?
+            }
+            (AccountSource::Memory(store), None) => {
+                let guard = store.lock().unwrap_or_else(|e| e.into_inner());
+                guard.active_tokens().cloned().ok_or_else(|| {
+                    ProviderError::Auth(
+                        "no xAI OAuth session — run `forge auth xai-oauth` to sign in".to_string(),
+                    )
+                })?
+            }
+        };
+        self.refresh_if_needed(account_id, tokens).await
+    }
+
+    async fn refresh_if_needed(
+        &self,
+        account_id: Option<&str>,
+        tokens: forge_config::oauth::OAuthTokens,
+    ) -> Result<String, ProviderError> {
+        if !tokens.is_expired(now_unix(), REFRESH_SKEW_SECS) {
+            return Ok(tokens.access_token);
+        }
+        let Some(refresh_token) = tokens.refresh_token.clone() else {
+            return Err(ProviderError::Auth(
+                "xAI OAuth session expired and has no refresh token — run `forge auth xai-oauth` to \
+                 sign in again"
+                    .to_string(),
+            ));
+        };
+        let refreshed = refresh_tokens(&self.http, &refresh_token)
+            .await
+            .map_err(|e| {
+                ProviderError::Auth(format!(
+                "xAI OAuth token refresh failed: {e} — run `forge auth xai-oauth` to sign in again"
+            ))
+            })?;
+        match &self.accounts {
+            AccountSource::Keyring => {
+                let store_result = match account_id {
+                    Some(id) => provider_oauth::store_provider_oauth_account_tokens(
+                        XAI_OAUTH_KEYRING_PROVIDER,
+                        id,
+                        &refreshed,
+                    ),
+                    None => provider_oauth::store_provider_oauth_tokens(
+                        XAI_OAUTH_KEYRING_PROVIDER,
+                        &refreshed,
+                    ),
+                };
+                if let Err(e) = store_result {
+                    tracing::warn!("failed to persist refreshed xAI OAuth token: {e}");
+                }
+            }
+            AccountSource::Memory(store) => {
+                let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(id) = account_id {
+                    if let Err(e) = guard.set_tokens(id, refreshed.clone()) {
+                        tracing::warn!("failed to persist refreshed xAI OAuth token: {e}");
+                    }
+                } else {
+                    guard.set_active_tokens(refreshed.clone());
+                }
+            }
+        }
+        Ok(refreshed.access_token)
+    }
+
+    /// Pick the access token for this completion: round-robin across accounts when ≥2 are stored,
+    /// otherwise the active account.
+    async fn pick_access_token(
+        &self,
+        pool: &forge_config::oauth::OAuthAccountPool,
+    ) -> Result<String, ProviderError> {
+        if let Some(id) = pool.next() {
+            self.access_token_for(Some(&id)).await
+        } else {
+            self.access_token_for(None).await
+        }
     }
 }
 
@@ -534,9 +690,7 @@ pub fn has_session() -> bool {
     provider_oauth::load_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER).is_some()
 }
 
-/// Load the stored token, refreshing it first if it's expired (or about to be). Shared by
-/// [`XaiOauthProvider::complete_with`] and [`list_models`] — both need a live access token and
-/// neither should duplicate the refresh-and-persist dance.
+/// Load the *active* account's token, refreshing it first if expired. Used by [`list_models`].
 async fn fresh_access_token(http: &reqwest::Client) -> Result<String, ProviderError> {
     let Some(tokens) = provider_oauth::load_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER)
     else {
@@ -633,6 +787,96 @@ fn seed_models() -> Vec<String> {
         .collect()
 }
 
+/// One HTTP+SSE completion against the Responses endpoint with a fixed bearer token.
+async fn execute_responses_request(
+    http: &reqwest::Client,
+    url: &str,
+    token: &str,
+    body: &serde_json::Value,
+    on_event: &mut EventSink<'_>,
+) -> Result<ModelResponse, ProviderError> {
+    let resp = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        http.post(url)
+            .bearer_auth(token)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .json(body)
+            .send(),
+    )
+    .await
+    .map_err(|_| {
+        ProviderError::Unavailable(format!(
+            "no response while connecting (no data for {}s)",
+            CONNECT_TIMEOUT.as_secs()
+        ))
+    })?
+    .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(std::time::Duration::from_secs);
+        let text = resp.text().await.unwrap_or_default();
+        return Err(classify_xai_status(status.as_u16(), &text, retry_after));
+    }
+
+    let mut acc = ResponseAccumulator::default();
+    let mut buf = String::new();
+    let mut stream = resp.bytes_stream();
+    loop {
+        let chunk = tokio::time::timeout(IDLE_TIMEOUT, stream.next())
+            .await
+            .map_err(|_| {
+                ProviderError::Unavailable(format!(
+                    "stream stalled (no data for {}s)",
+                    IDLE_TIMEOUT.as_secs()
+                ))
+            })?;
+        let Some(chunk) = chunk else { break };
+        let bytes = chunk.map_err(|e| ProviderError::Unavailable(e.to_string()))?;
+        buf.extend(
+            String::from_utf8_lossy(&bytes)
+                .chars()
+                .filter(|&c| c != '\r'),
+        );
+        while let Some(raw) = take_event(&mut buf) {
+            let (event, data) = parse_sse_frame(&raw);
+            let Some(event) = event else { continue };
+            if data.is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
+                continue;
+            };
+            apply_sse_event(&mut acc, &event, &value, on_event)?;
+        }
+    }
+
+    // Phantom-truncation guard, same rationale as `genai_provider`: a stream that closes
+    // without a completion signal and produced nothing usable was almost certainly cut off
+    // mid-flight, not a legitimate empty answer.
+    if !acc.saw_terminal
+        && acc.tool_calls.is_empty()
+        && acc.usage.input_tokens == 0
+        && acc.usage.output_tokens == 0
+    {
+        return Err(ProviderError::Unavailable(
+            "stream closed without a completion signal (truncated mid-generation)".to_string(),
+        ));
+    }
+
+    Ok(ModelResponse {
+        content: acc.content,
+        tool_calls: acc.tool_calls,
+        usage: acc.usage,
+        quotas: Vec::new(),
+    })
+}
+
 #[async_trait::async_trait]
 impl Provider for XaiOauthProvider {
     async fn complete(
@@ -660,96 +904,30 @@ impl Provider for XaiOauthProvider {
         opts: &CompletionOptions,
         on_event: &mut EventSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
-        let token = self.fresh_access_token().await?;
-        let url = responses_url();
-        debug_assert!(
-            is_pinned_xai_url(&url),
-            "xAI OAuth URL must stay host-pinned"
-        );
+        // Snapshot the multi-account pool each call so a mid-session `forge auth xai-oauth` that
+        // adds an account is picked up without restarting (keyring path). Memory path is static.
+        let pool = self.account_pool();
+        let token = self.pick_access_token(&pool).await?;
+
+        let url = self.responses_url();
+        self.ensure_pinned(&url);
 
         let body = build_responses_request(model, messages, tools, opts, self.max_output_tokens);
 
-        let resp = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            self.http
-                .post(&url)
-                .bearer_auth(&token)
-                .header(reqwest::header::ACCEPT, "text/event-stream")
-                .json(&body)
-                .send(),
-        )
-        .await
-        .map_err(|_| {
-            ProviderError::Unavailable(format!(
-                "no response while connecting (no data for {}s)",
-                CONNECT_TIMEOUT.as_secs()
-            ))
-        })?
-        .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
+        // First attempt with the picked account.
+        let first = execute_responses_request(&self.http, &url, &token, &body, on_event).await;
 
-        let status = resp.status();
-        if !status.is_success() {
-            let retry_after = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.trim().parse::<u64>().ok())
-                .map(std::time::Duration::from_secs);
-            let text = resp.text().await.unwrap_or_default();
-            return Err(classify_xai_status(status.as_u16(), &text, retry_after));
-        }
-
-        let mut acc = ResponseAccumulator::default();
-        let mut buf = String::new();
-        let mut stream = resp.bytes_stream();
-        loop {
-            let chunk = tokio::time::timeout(IDLE_TIMEOUT, stream.next())
-                .await
-                .map_err(|_| {
-                    ProviderError::Unavailable(format!(
-                        "stream stalled (no data for {}s)",
-                        IDLE_TIMEOUT.as_secs()
-                    ))
-                })?;
-            let Some(chunk) = chunk else { break };
-            let bytes = chunk.map_err(|e| ProviderError::Unavailable(e.to_string()))?;
-            buf.extend(
-                String::from_utf8_lossy(&bytes)
-                    .chars()
-                    .filter(|&c| c != '\r'),
-            );
-            while let Some(raw) = take_event(&mut buf) {
-                let (event, data) = parse_sse_frame(&raw);
-                let Some(event) = event else { continue };
-                if data.is_empty() {
-                    continue;
-                }
-                let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
-                    continue;
-                };
-                apply_sse_event(&mut acc, &event, &value, on_event)?;
+        // On 429: if ≥2 accounts, retry ONCE with the next account (cursor already advanced by
+        // the first pick's `next`, and we call `next` again here). Mirrors genai KeyPool: one
+        // intra-provider hop, then surface the error so the mesh wait/failover chain runs once.
+        // 401/403 stay permanent Auth — never rotated as rate-limits.
+        match first {
+            Err(ref e) if e.is_rate_limited() && pool.has_rotation() => {
+                let token2 = self.pick_access_token(&pool).await?;
+                execute_responses_request(&self.http, &url, &token2, &body, on_event).await
             }
+            other => other,
         }
-
-        // Phantom-truncation guard, same rationale as `genai_provider`: a stream that closes
-        // without a completion signal and produced nothing usable was almost certainly cut off
-        // mid-flight, not a legitimate empty answer.
-        if !acc.saw_terminal
-            && acc.tool_calls.is_empty()
-            && acc.usage.input_tokens == 0
-            && acc.usage.output_tokens == 0
-        {
-            return Err(ProviderError::Unavailable(
-                "stream closed without a completion signal (truncated mid-generation)".to_string(),
-            ));
-        }
-
-        Ok(ModelResponse {
-            content: acc.content,
-            tool_calls: acc.tool_calls,
-            usage: acc.usage,
-            quotas: Vec::new(),
-        })
     }
 }
 
@@ -804,6 +982,8 @@ mod tests {
     #[test]
     fn responses_url_is_always_pinned() {
         assert!(is_pinned_xai_url(&responses_url()));
+        let p = XaiOauthProvider::new();
+        assert!(is_pinned_xai_url(&p.responses_url()));
     }
 
     #[test]
@@ -837,6 +1017,23 @@ mod tests {
             classify_xai_status(503, "{}", None),
             ProviderError::Unavailable(_)
         ));
+    }
+
+    #[test]
+    fn rate_limited_is_rotatable_auth_is_not() {
+        // Contract for the complete_with rotation branch: only RateLimited hops accounts.
+        let rl = ProviderError::RateLimited {
+            message: "slow down".into(),
+            retry_after: None,
+        };
+        assert!(rl.is_rate_limited());
+        assert!(!rl.is_permanent());
+        let auth = ProviderError::Auth("401".into());
+        assert!(!auth.is_rate_limited());
+        assert!(auth.is_permanent());
+        let forbidden = classify_xai_status(403, r#"{"error":{"message":"nope"}}"#, None);
+        assert!(!forbidden.is_rate_limited());
+        assert!(forbidden.is_permanent());
     }
 
     #[test]
@@ -910,5 +1107,194 @@ mod tests {
         assert_eq!(body["max_output_tokens"], 512);
         // `opts.temperature` is f32; compare against the same f32→f64 widening `json!` performs.
         assert_eq!(body["temperature"], serde_json::json!(0.2f32));
+    }
+
+    /// Minimal SSE body that a successful Responses stream produces.
+    fn ok_sse() -> String {
+        "event: response.output_text.delta\ndata: {\"delta\":\"hi\"}\n\n\
+         event: response.completed\ndata: {\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+            .to_string()
+    }
+
+    fn sample_oauth_tokens(label: &str) -> forge_config::oauth::OAuthTokens {
+        forge_config::oauth::OAuthTokens {
+            access_token: format!("at-{label}"),
+            refresh_token: Some(format!("rt-{label}")),
+            expires_at: 0, // never expired → no refresh in these tests
+            token_endpoint: forge_config::provider_oauth::XAI_TOKEN_ENDPOINT.into(),
+            client_id: forge_config::provider_oauth::XAI_OAUTH_CLIENT_ID.into(),
+            scopes: vec![],
+        }
+    }
+
+    /// In-memory multi-account store for tests — never touches secret_store / the OS keyring.
+    fn memory_store(
+        accounts: &[(&str, &str)],
+        active: &str,
+    ) -> forge_config::oauth::OAuthAccountStore {
+        let mut store = forge_config::oauth::OAuthAccountStore::new_single(
+            accounts[0].0,
+            sample_oauth_tokens(accounts[0].1),
+        );
+        for (id, label) in &accounts[1..] {
+            store.add(id, sample_oauth_tokens(label));
+        }
+        store.switch(active).unwrap();
+        store
+    }
+
+    #[tokio::test]
+    async fn rotation_retries_next_account_on_429() {
+        // A returns 429, B succeeds — one next-account retry, mesh never sees the first 429.
+        let server = httpmock::MockServer::start();
+        let a_hit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/v1/responses")
+                .header("authorization", "Bearer at-a");
+            then.status(429)
+                .header("content-type", "application/json")
+                .body(r#"{"error":{"message":"rate limited"}}"#);
+        });
+        let b_hit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/v1/responses")
+                .header("authorization", "Bearer at-b");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(ok_sse());
+        });
+
+        // acct-a active so the pool seeds there first (BTreeMap order: acct-a, acct-b).
+        let store = memory_store(&[("acct-a", "a"), ("acct-b", "b")], "acct-a");
+        let provider = XaiOauthProvider::new()
+            .with_api_base(server.base_url() + "/v1")
+            .with_accounts(store);
+        let mut sink = |_: StreamEvent| {};
+        let resp = provider
+            .complete("xai-oauth::grok-4", &[Message::user("hi")], &[], &mut sink)
+            .await
+            .expect("B should succeed after A's 429");
+        assert_eq!(resp.content, "hi");
+        a_hit.assert();
+        b_hit.assert();
+    }
+
+    #[tokio::test]
+    async fn both_accounts_429_surfaces_single_rate_limited() {
+        let server = httpmock::MockServer::start();
+        let limited = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/v1/responses");
+            then.status(429)
+                .header("content-type", "application/json")
+                .body(r#"{"error":{"message":"rate limited"}}"#);
+        });
+
+        let store = memory_store(&[("acct-a", "a"), ("acct-b", "b")], "acct-a");
+        let provider = XaiOauthProvider::new()
+            .with_api_base(server.base_url() + "/v1")
+            .with_accounts(store);
+        let mut sink = |_: StreamEvent| {};
+        let err = provider
+            .complete("xai-oauth::grok-4", &[Message::user("hi")], &[], &mut sink)
+            .await
+            .expect_err("both accounts limited");
+        assert!(err.is_rate_limited(), "got {err:?}");
+        // Exactly two attempts (A then B) — not N retries looping.
+        assert_eq!(limited.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn single_account_does_not_retry_on_429() {
+        let server = httpmock::MockServer::start();
+        let limited = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/v1/responses");
+            then.status(429)
+                .header("content-type", "application/json")
+                .body(r#"{"error":{"message":"rate limited"}}"#);
+        });
+
+        let store = memory_store(&[("only", "only")], "only");
+        let provider = XaiOauthProvider::new()
+            .with_api_base(server.base_url() + "/v1")
+            .with_accounts(store);
+        let mut sink = |_: StreamEvent| {};
+        let err = provider
+            .complete("xai-oauth::grok-4", &[Message::user("hi")], &[], &mut sink)
+            .await
+            .expect_err("single account 429");
+        assert!(err.is_rate_limited());
+        assert_eq!(limited.calls(), 1, "no second request without rotation");
+    }
+
+    #[tokio::test]
+    async fn auth_401_does_not_rotate_to_next_account() {
+        let server = httpmock::MockServer::start();
+        let auth_fail = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/v1/responses");
+            then.status(401)
+                .header("content-type", "application/json")
+                .body(r#"{"error":{"message":"bad token"}}"#);
+        });
+
+        let store = memory_store(&[("acct-a", "a"), ("acct-b", "b")], "acct-a");
+        let provider = XaiOauthProvider::new()
+            .with_api_base(server.base_url() + "/v1")
+            .with_accounts(store);
+        let mut sink = |_: StreamEvent| {};
+        let err = provider
+            .complete("xai-oauth::grok-4", &[Message::user("hi")], &[], &mut sink)
+            .await
+            .expect_err("401 is permanent");
+        assert!(matches!(err, ProviderError::Auth(_)), "got {err:?}");
+        assert_eq!(auth_fail.calls(), 1, "must not hop accounts on Auth");
+    }
+
+    #[test]
+    fn memory_refresh_targets_named_account_only() {
+        // Expired account A refreshes and persists only A; B is untouched.
+        // (Pure store mutation — mirrors what refresh_if_needed does on the memory path.)
+        let mut store = forge_config::oauth::OAuthAccountStore::new_single(
+            "acct-a",
+            forge_config::oauth::OAuthTokens {
+                access_token: "at-a".into(),
+                refresh_token: Some("rt-a".into()),
+                expires_at: 1, // expired
+                token_endpoint: forge_config::provider_oauth::XAI_TOKEN_ENDPOINT.into(),
+                client_id: forge_config::provider_oauth::XAI_OAUTH_CLIENT_ID.into(),
+                scopes: vec![],
+            },
+        );
+        store.add(
+            "acct-b",
+            forge_config::oauth::OAuthTokens {
+                access_token: "at-b".into(),
+                refresh_token: Some("rt-b".into()),
+                expires_at: 0,
+                token_endpoint: forge_config::provider_oauth::XAI_TOKEN_ENDPOINT.into(),
+                client_id: forge_config::provider_oauth::XAI_OAUTH_CLIENT_ID.into(),
+                scopes: vec![],
+            },
+        );
+        store.switch("acct-a").unwrap();
+
+        let refreshed = forge_config::oauth::OAuthTokens {
+            access_token: "at-a-refreshed".into(),
+            refresh_token: Some("rt-a".into()),
+            expires_at: 9_999_999_999,
+            token_endpoint: forge_config::provider_oauth::XAI_TOKEN_ENDPOINT.into(),
+            client_id: forge_config::provider_oauth::XAI_OAUTH_CLIENT_ID.into(),
+            scopes: vec![],
+        };
+        store.set_tokens("acct-a", refreshed.clone()).unwrap();
+        assert_eq!(
+            store.tokens_for("acct-a").map(|t| t.access_token.as_str()),
+            Some("at-a-refreshed")
+        );
+        assert_eq!(
+            store.tokens_for("acct-b").map(|t| t.access_token.as_str()),
+            Some("at-b"),
+            "non-refreshed account must be untouched"
+        );
+        assert_eq!(store.active, "acct-a");
     }
 }

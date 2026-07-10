@@ -24,3 +24,7 @@ tokio.workspace = true
 pulldown-cmark.workspace = true
 syntect.workspace = true
 similar.workspace = true
+
+[dev-dependencies]
+# In-memory secret_store for tests (resolver=2: does not leak into production builds).
+forge-config = { workspace = true, features = ["test-secrets"] }

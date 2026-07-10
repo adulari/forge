@@ -28,9 +28,25 @@ forge --model xai-oauth::grok-4.3
 Other commands:
 
 ```
-forge auth xai-oauth --list     # session status (token expiry, scopes)
+forge auth xai-oauth --list     # session status (token expiry, scopes; rotation state when ≥2)
 forge auth xai-oauth --remove   # sign out (deletes the stored tokens)
+forge auth xai-oauth --switch --account <id>   # set the manual-active / rotation seed
 ```
+
+## Multiple accounts (auto-rotation)
+
+Re-running `forge auth xai-oauth` **adds** another account (labeled from the id_token email when
+present, else `account-N`) and makes it active. With **≥2** stored accounts Forge **auto-rotates**
+round-robin across them on every completion request, and on a 429/quota error retries **once** with
+the next account before the mesh wait/failover chain runs — same shape as multi-key API rotation
+(`docs/features/free-models.md`). A single account is unchanged (no second request on 429).
+
+`forge auth xai-oauth --list` shows `auto-rotation ON (round-robin)` when multiple accounts are
+stored; `*` marks the manual active / rotation seed (`--switch --account <id>`).
+
+Tokens (access + refresh) for every account live in one keyring entry under `provider-oauth:xai`
+(see `OAuthAccountStore` / `OAuthAccountPool` in `forge-config`). Each account refreshes
+independently; a refresh never clobbers another account's tokens.
 
 ## Discovery
 
@@ -71,7 +87,8 @@ comment.
 
 Tokens (access + refresh) live in the OS keyring under `provider-oauth:xai` — a namespace distinct
 from both the API-key `xai` provider and any MCP server named `xai`
-(`forge_config::provider_oauth`).
+(`forge_config::provider_oauth`). Multiple accounts share that one keyring entry (see
+[Multiple accounts](#multiple-accounts-auto-rotation)).
 
 ## Deferred / out of scope (Phase 1)
 

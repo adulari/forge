@@ -10,6 +10,13 @@ repository.workspace = true
 [lib]
 name = "forge_config"
 
+[features]
+default = []
+# Process-local in-memory secret_store backend for tests. Enabled from dependents'
+# [dev-dependencies] (and this crate's self dev-dep). resolver=2: does NOT leak into
+# production `cargo build` artifacts.
+test-secrets = []
+
 [dependencies]
 forge-types.workspace = true
 forge-skills.workspace = true
@@ -35,3 +42,6 @@ chacha20poly1305 = "0.11"
 
 [dev-dependencies]
 tempfile = "3"
+# Self-dep so this crate's own unit tests get the in-memory secret_store (resolver=2: does not
+# affect production builds of dependents).
+forge-agent-config = { path = ".", features = ["test-secrets"] }

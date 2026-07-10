@@ -368,9 +368,10 @@ const MAX_RATE_LIMIT_WAITS: u32 = 2;
 // When the model was EXPLICITLY pinned (`--model` / `/model`), a rate limit must not fail the turn
 // and must not switch models (a pin must pin — the SWE-bench baseline lost 4 instances to
 // "skipped: rate limited" with zero retry). Instead the SAME model is retried on this schedule.
-// Provider-level multi-key rotation runs FIRST: on a 429 the genai provider already retries once
-// with the next configured key before the error ever reaches this loop (genai_provider.rs), so
-// waiting only starts once every key is limited.
+// Provider-level multi-credential rotation runs FIRST: on a 429 the genai provider already retries
+// once with the next configured API key (genai_provider.rs KeyPool), and the OAuth provider
+// (xai_oauth.rs OAuthAccountPool) retries once with the next stored account — before the error
+// ever reaches this loop. Waiting only starts once every key/account is limited.
 
 /// Max same-model retry attempts for a rate-limited pinned model before failing the turn.
 const PINNED_RL_MAX_ATTEMPTS: u32 = 6;
@@ -3677,10 +3678,11 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             // model on the documented schedule (5s/15s/45s, then 60s-capped, ±20%
                             // jitter, ≤6 attempts, ≤180s total — the PINNED_RL_* constants),
                             // honoring a server `Retry-After` verbatim when the error carried one.
-                            // Multi-key rotation already ran inside the provider (one next-key
-                            // retry per 429, genai_provider.rs), so by the time the error reaches
-                            // this loop every configured key is limited and waiting is the only
-                            // same-model option left.
+                            // Multi-credential rotation already ran inside the provider (one
+                            // next-key retry for API keys in genai_provider.rs, one next-account
+                            // retry for OAuth in xai_oauth.rs), so by the time the error reaches
+                            // this loop every configured key/account is limited and waiting is the
+                            // only same-model option left.
                             FailoverPolicy::BackoffSameModel => {
                                 let retry_after = match &e {
                                     forge_provider::ProviderError::RateLimited {

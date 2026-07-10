@@ -808,13 +808,11 @@ mod tests {
             3,
             "all 3 ran concurrently"
         );
-        // Same rationale as forge-workflow's own concurrency test (see its comment): a slow/shared
-        // CI runner needs a wide margin. Serialized would take 150ms+ (3×50ms); concurrent should
-        // land well under that even accounting for CI scheduling overhead.
-        assert!(
-            elapsed < std::time::Duration::from_millis(120),
-            "3×50ms serialized would take ~150ms+; concurrent should take ~50-90ms, took {elapsed:?}"
-        );
+        // No wall-clock bound here, deliberately: `peak == 3` above is the decisive concurrency
+        // assertion (serialized execution can never overlap, so peak would be 1). An elapsed-time
+        // bound only re-tests the same property with a load-sensitive margin — it flaked at
+        // 144ms/120ms on a busy machine while peak==3 still proved the calls overlapped.
+        let _ = elapsed;
         assert_eq!(
             evs.iter()
                 .filter(|e| matches!(e, WorkflowEvent::AgentDone { .. }))
