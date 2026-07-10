@@ -11,7 +11,7 @@
 // co-exist. Turn-completion history invalidation (busy true->false) is already wired by the
 // T3.1 session shell's `useTurnCompleted(snapshot)` call in `_layout.tsx` — not repeated here.
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { ChevronDown, Clock, MessageSquare } from "lucide-react-native";
+import { ChevronDown, Clock, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -313,6 +313,13 @@ export default function SessionChat() {
   // good — never re-armed by a later refetch/invalidation.
   const historySettled = historyQuery.data !== undefined;
 
+  // A deep link into a nonexistent/foreign session: `useHistory` 404s and no Snapshot ever
+  // arrives over WS. All three conditions matter — `!historySettled` and `snapshot == null`
+  // keep a transient history error on an otherwise-live session (cached history or a WS
+  // snapshot already present) from flashing this scary state.
+  const historyDead = historyQuery.isError && !historySettled && snapshot == null;
+  const historyErrorStatus = (historyQuery.error as { status?: number } | null)?.status;
+
   const streamingText = snapshot?.busy ? snapshot.streaming : "";
 
   // ---------------------------------------------------------------------
@@ -546,7 +553,18 @@ export default function SessionChat() {
           onEndReached={onEndReached}
           loadingMore={historyQuery.isFetchingNextPage}
           ListEmptyComponent={
-            <EmptyState icon={MessageSquare} message="no messages yet — say something to get started" />
+            historyDead ? (
+              <EmptyState
+                icon={historyErrorStatus === 404 ? SearchX : WifiOff}
+                message={
+                  historyErrorStatus === 404
+                    ? "session not found on this server"
+                    : "couldn't load this session — check the server connection"
+                }
+              />
+            ) : (
+              <EmptyState icon={MessageSquare} message="no messages yet — say something to get started" />
+            )
           }
         />
 
