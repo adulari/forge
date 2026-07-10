@@ -13,7 +13,7 @@ pub(crate) async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
         }
         Some(McpCmd::Import { path }) => return mcp_import(path),
         Some(McpCmd::Login { server }) => return mcp_login(&server).await,
-        Some(McpCmd::Logout { server }) => return mcp_logout(&server),
+        Some(McpCmd::Logout { server, account }) => return mcp_logout(&server, account.as_deref()),
         Some(McpCmd::Add {
             name,
             transport,
@@ -267,12 +267,20 @@ pub(crate) fn finish_import(
     Ok(())
 }
 
-/// Remove a server's stored OAuth tokens (`forge mcp logout <server>`).
-pub(crate) fn mcp_logout(server: &str) -> Result<()> {
-    match forge_config::clear_oauth_tokens(server) {
-        Ok(true) => println!("✓ OAuth tokens for '{server}' removed from the keyring."),
-        Ok(false) => println!("no stored OAuth tokens found for '{server}'."),
-        Err(e) => anyhow::bail!("keyring error: {e}"),
+/// Remove a server's stored OAuth tokens (`forge mcp logout <server>`). Bare removes every
+/// account; `account` (when set) removes just that one.
+pub(crate) fn mcp_logout(server: &str, account: Option<&str>) -> Result<()> {
+    match account {
+        Some(id) => match forge_config::remove_oauth_account(server, id) {
+            Ok(true) => println!("✓ OAuth account '{id}' for '{server}' removed from the keyring."),
+            Ok(false) => println!("no stored OAuth account '{id}' found for '{server}'."),
+            Err(e) => anyhow::bail!("keyring error: {e}"),
+        },
+        None => match forge_config::clear_oauth_tokens(server) {
+            Ok(true) => println!("✓ OAuth tokens for '{server}' removed from the keyring."),
+            Ok(false) => println!("no stored OAuth tokens found for '{server}'."),
+            Err(e) => anyhow::bail!("keyring error: {e}"),
+        },
     }
     Ok(())
 }
@@ -437,10 +445,18 @@ pub(crate) async fn mcp_login(server: &str) -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("token exchange: {e}"))?;
 
-    // Store in keyring.
-    forge_config::store_oauth_tokens(server, &tokens).context("storing OAuth tokens in keyring")?;
+    // Store in keyring, as a new account (the authorization_code flow has no generic way to get
+    // an account label like device-code's id_token email, so this falls back to `account-N`) —
+    // and make it active, so a re-login always lands on the freshest tokens.
+    let account_id = forge_config::next_oauth_account_id(server);
+    forge_config::add_oauth_account(server, &account_id, &tokens)
+        .context("storing OAuth tokens in keyring")?;
 
-    println!("✓ OAuth tokens stored for '{server}'. Forge will refresh them automatically.");
+    println!(
+        "✓ OAuth tokens stored for '{server}' (account '{account_id}'). Forge will refresh them \
+         automatically. Multiple accounts? `forge mcp login {server}` again to add another, or \
+         `forge mcp logout {server} --account <id>` to remove one."
+    );
     Ok(())
 }
 

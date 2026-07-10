@@ -154,21 +154,241 @@ pub fn oauth_keyring_key(server: &str) -> String {
 }
 
 /// Persist a server's OAuth tokens (keyring, encrypted-file fallback; ADR-0007: never in
-/// config/logs).
+/// config/logs). Updates the *active* account only — see [`OAuthAccountStore`].
 pub fn store_oauth_tokens(server: &str, tokens: &OAuthTokens) -> Result<(), ConfigError> {
-    let json = serde_json::to_string(tokens).map_err(|e| ConfigError::Keyring(e.to_string()))?;
-    crate::secret_store::set(&oauth_keyring_key(server), &json)
+    store_active_tokens(&oauth_keyring_key(server), tokens)
 }
 
-/// Load a server's OAuth tokens, or `None` if none stored / unreadable.
+/// Load a server's *active* OAuth tokens, or `None` if none stored / unreadable.
 pub fn load_oauth_tokens(server: &str) -> Option<OAuthTokens> {
-    let json = crate::secret_store::get(&oauth_keyring_key(server))?;
-    serde_json::from_str(&json).ok()
+    load_active_tokens(&oauth_keyring_key(server))
 }
 
-/// Delete a server's stored OAuth tokens (`forge mcp logout`). Idempotent: `Ok(false)` if none.
+/// Delete a server's stored OAuth tokens — every account (`forge mcp logout`). Idempotent:
+/// `Ok(false)` if none.
 pub fn clear_oauth_tokens(server: &str) -> Result<bool, ConfigError> {
-    crate::secret_store::delete(&oauth_keyring_key(server))
+    clear_account_store(&oauth_keyring_key(server))
+}
+
+/// Add (or overwrite) an OAuth account for `server` and make it active.
+pub fn add_oauth_account(server: &str, id: &str, tokens: &OAuthTokens) -> Result<(), ConfigError> {
+    add_account(&oauth_keyring_key(server), id, tokens)
+}
+
+/// `(id, tokens, is_active)` for every OAuth account stored for `server`.
+pub fn list_oauth_accounts(server: &str) -> Vec<(String, OAuthTokens, bool)> {
+    list_accounts(&oauth_keyring_key(server))
+}
+
+/// Switch `server`'s active OAuth account. Errors if `id` isn't stored.
+pub fn switch_oauth_account(server: &str, id: &str) -> Result<(), ConfigError> {
+    switch_account(&oauth_keyring_key(server), id)
+}
+
+/// Remove one OAuth account for `server`. Promotes a remaining account to active if the removed
+/// one was active; deletes the whole entry if none remain. `Ok(false)` if `id` wasn't stored.
+pub fn remove_oauth_account(server: &str, id: &str) -> Result<bool, ConfigError> {
+    remove_account(&oauth_keyring_key(server), id)
+}
+
+/// First free `account-N` id for a fresh `server` login with no better label available.
+pub fn next_oauth_account_id(server: &str) -> String {
+    next_default_account_id(&oauth_keyring_key(server))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Multi-account storage (RFC multi-account-oauth). One keyring entry (`mcp-oauth:<server>` or
+// `provider-oauth:<provider>`, see [`crate::provider_oauth`]) holds N accounts with one "active".
+// Kept generic here — keyed by the FULL keyring key string — so both OAuth kinds share one
+// implementation. Split into a pure half (parsing/mutation on [`OAuthAccountStore`], fully
+// offline-testable) and thin I/O wrappers over [`crate::secret_store`].
+// ---------------------------------------------------------------------------------------------
+
+/// Current on-disk shape. v1 (pre-multi-account) was a bare [`OAuthTokens`] blob; migrated
+/// transparently on read by [`parse_account_store`], never requiring a manual step.
+const ACCOUNT_STORE_VERSION: u32 = 2;
+
+/// The account id a migrated v1 store (or a store created before any account has a real label)
+/// uses.
+pub const DEFAULT_ACCOUNT_ID: &str = "default";
+
+/// N accounts under one keyring entry, with one marked active. `load_oauth_tokens` /
+/// `store_oauth_tokens` / `clear_oauth_tokens` (and their `provider_oauth` counterparts) are
+/// "active-account" views over this that preserve the pre-multi-account single-account behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthAccountStore {
+    pub version: u32,
+    pub active: String,
+    pub accounts: std::collections::BTreeMap<String, OAuthTokens>,
+}
+
+impl OAuthAccountStore {
+    /// `pub(crate)`: an implementation detail of the load/migrate path, but also handy for
+    /// building a store directly in offline tests (incl. `provider_oauth`'s).
+    pub(crate) fn new_single(id: impl Into<String>, tokens: OAuthTokens) -> Self {
+        let id = id.into();
+        let mut accounts = std::collections::BTreeMap::new();
+        accounts.insert(id.clone(), tokens);
+        Self {
+            version: ACCOUNT_STORE_VERSION,
+            active: id,
+            accounts,
+        }
+    }
+
+    /// The active account's tokens.
+    pub fn active_tokens(&self) -> Option<&OAuthTokens> {
+        self.accounts.get(&self.active)
+    }
+
+    /// Add (or overwrite) an account and make it active.
+    pub fn add(&mut self, id: &str, tokens: OAuthTokens) {
+        self.accounts.insert(id.to_string(), tokens);
+        self.active = id.to_string();
+    }
+
+    /// Overwrite the active account's tokens in place (the refresh path) — every other account
+    /// is left untouched.
+    pub fn set_active_tokens(&mut self, tokens: OAuthTokens) {
+        self.accounts.insert(self.active.clone(), tokens);
+    }
+
+    /// `(id, tokens, is_active)` for every stored account, in id order.
+    pub fn list(&self) -> Vec<(String, OAuthTokens, bool)> {
+        self.accounts
+            .iter()
+            .map(|(id, tokens)| (id.clone(), tokens.clone(), *id == self.active))
+            .collect()
+    }
+
+    /// Switch the active account. Errors if `id` isn't stored.
+    pub fn switch(&mut self, id: &str) -> Result<(), ConfigError> {
+        if !self.accounts.contains_key(id) {
+            return Err(ConfigError::Keyring(format!("no account '{id}' stored")));
+        }
+        self.active = id.to_string();
+        Ok(())
+    }
+
+    /// Remove one account. If it was active, promote the first remaining account (id order) to
+    /// active. Returns whether `id` was actually stored.
+    pub fn remove(&mut self, id: &str) -> bool {
+        if self.accounts.remove(id).is_none() {
+            return false;
+        }
+        if self.active == id {
+            if let Some(next) = self.accounts.keys().next() {
+                self.active = next.clone();
+            }
+        }
+        true
+    }
+}
+
+/// Parse a stored blob into an [`OAuthAccountStore`], transparently migrating a v1 bare
+/// [`OAuthTokens`] JSON into a single-account v2 store under [`DEFAULT_ACCOUNT_ID`]. `None` if
+/// `json` matches neither shape.
+pub fn parse_account_store(json: &str) -> Option<OAuthAccountStore> {
+    if let Ok(store) = serde_json::from_str::<OAuthAccountStore>(json) {
+        return Some(store);
+    }
+    let tokens: OAuthTokens = serde_json::from_str(json).ok()?;
+    Some(OAuthAccountStore::new_single(DEFAULT_ACCOUNT_ID, tokens))
+}
+
+/// First `account-N` (1-based) id not already present in `existing`.
+pub fn next_default_id(existing: &std::collections::BTreeMap<String, OAuthTokens>) -> String {
+    let mut n = 1u32;
+    loop {
+        let candidate = format!("account-{n}");
+        if !existing.contains_key(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
+/// Load the account store at `key` (transparent v1→v2 migration on read). `None` if nothing is
+/// stored / unreadable.
+pub fn load_account_store(key: &str) -> Option<OAuthAccountStore> {
+    crate::secret_store::get(key).and_then(|json| parse_account_store(&json))
+}
+
+/// Persist an account store at `key`.
+pub fn save_account_store(key: &str, store: &OAuthAccountStore) -> Result<(), ConfigError> {
+    let json = serde_json::to_string(store).map_err(|e| ConfigError::Keyring(e.to_string()))?;
+    crate::secret_store::set(key, &json)
+}
+
+/// The active account's tokens at `key`.
+pub fn load_active_tokens(key: &str) -> Option<OAuthTokens> {
+    load_account_store(key).and_then(|s| s.active_tokens().cloned())
+}
+
+/// Update the active account's tokens, creating a single-account store (id
+/// [`DEFAULT_ACCOUNT_ID`]) if none exists yet.
+pub fn store_active_tokens(key: &str, tokens: &OAuthTokens) -> Result<(), ConfigError> {
+    let mut store = load_account_store(key)
+        .unwrap_or_else(|| OAuthAccountStore::new_single(DEFAULT_ACCOUNT_ID, tokens.clone()));
+    store.set_active_tokens(tokens.clone());
+    save_account_store(key, &store)
+}
+
+/// Delete the whole entry (every account) at `key`. Idempotent: `Ok(false)` if none.
+pub fn clear_account_store(key: &str) -> Result<bool, ConfigError> {
+    crate::secret_store::delete(key)
+}
+
+/// Add (or overwrite) an account at `key` and make it active.
+pub fn add_account(key: &str, id: &str, tokens: &OAuthTokens) -> Result<(), ConfigError> {
+    let mut store = load_account_store(key).unwrap_or_else(|| OAuthAccountStore {
+        version: ACCOUNT_STORE_VERSION,
+        active: id.to_string(),
+        accounts: Default::default(),
+    });
+    store.add(id, tokens.clone());
+    save_account_store(key, &store)
+}
+
+/// `(id, tokens, is_active)` for every account stored at `key`. Empty if nothing is stored.
+pub fn list_accounts(key: &str) -> Vec<(String, OAuthTokens, bool)> {
+    load_account_store(key)
+        .map(|s| s.list())
+        .unwrap_or_default()
+}
+
+/// Switch the active account at `key`. Errors if nothing is stored, or `id` isn't one of the
+/// stored accounts.
+pub fn switch_account(key: &str, id: &str) -> Result<(), ConfigError> {
+    let mut store = load_account_store(key)
+        .ok_or_else(|| ConfigError::Keyring("no accounts stored".to_string()))?;
+    store.switch(id)?;
+    save_account_store(key, &store)
+}
+
+/// Remove one account at `key`. If it was active, promote a remaining account to active; if none
+/// remain, delete the whole entry. `Ok(false)` if `id` wasn't stored (or nothing was stored).
+pub fn remove_account(key: &str, id: &str) -> Result<bool, ConfigError> {
+    let Some(mut store) = load_account_store(key) else {
+        return Ok(false);
+    };
+    if !store.remove(id) {
+        return Ok(false);
+    }
+    if store.accounts.is_empty() {
+        crate::secret_store::delete(key)?;
+    } else {
+        save_account_store(key, &store)?;
+    }
+    Ok(true)
+}
+
+/// First free `account-N` id for a fresh login at `key` (no email/JWT label available).
+pub fn next_default_account_id(key: &str) -> String {
+    let existing = load_account_store(key)
+        .map(|s| s.accounts)
+        .unwrap_or_default();
+    next_default_id(&existing)
 }
 
 #[cfg(test)]
@@ -275,5 +495,104 @@ mod tests {
     #[test]
     fn keyring_key_is_namespaced() {
         assert_eq!(oauth_keyring_key("helm"), "mcp-oauth:helm");
+    }
+
+    fn sample_tokens(label: &str) -> OAuthTokens {
+        OAuthTokens {
+            access_token: format!("at-{label}"),
+            refresh_token: Some(format!("rt-{label}")),
+            expires_at: 1000,
+            token_endpoint: "https://helm/token".into(),
+            client_id: "cid".into(),
+            scopes: vec!["mcp".into()],
+        }
+    }
+
+    #[test]
+    fn v1_bare_tokens_blob_migrates_to_a_single_default_account() {
+        let t = sample_tokens("a");
+        let v1_json = serde_json::to_string(&t).unwrap();
+        let store = parse_account_store(&v1_json).expect("v1 blob should parse");
+        assert_eq!(store.version, ACCOUNT_STORE_VERSION);
+        assert_eq!(store.active, DEFAULT_ACCOUNT_ID);
+        assert_eq!(store.accounts.len(), 1);
+        assert_eq!(store.accounts.get(DEFAULT_ACCOUNT_ID), Some(&t));
+        assert_eq!(store.active_tokens(), Some(&t));
+    }
+
+    #[test]
+    fn v2_store_round_trips_without_migration() {
+        let mut store = OAuthAccountStore::new_single("default", sample_tokens("a"));
+        store.add("work", sample_tokens("b"));
+        let json = serde_json::to_string(&store).unwrap();
+        let parsed = parse_account_store(&json).unwrap();
+        assert_eq!(parsed, store);
+        assert_eq!(parsed.active, "work");
+    }
+
+    #[test]
+    fn add_list_switch_remove_round_trip_with_active_promotion() {
+        let mut store = OAuthAccountStore::new_single("personal", sample_tokens("p"));
+        store.add("work", sample_tokens("w"));
+        assert_eq!(store.active, "work", "add() makes the new account active");
+
+        let listed = store.list();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|(id, _, active)| id == "work" && *active));
+        assert!(listed
+            .iter()
+            .any(|(id, _, active)| id == "personal" && !*active));
+
+        store.switch("personal").unwrap();
+        assert_eq!(store.active, "personal");
+        assert_eq!(store.active_tokens(), Some(&sample_tokens("p")));
+
+        assert!(
+            store.switch("nope").is_err(),
+            "switching to an unknown id must error"
+        );
+
+        // Removing the active account promotes a remaining one (id order: "work" < ...).
+        assert!(store.remove("personal"));
+        assert_eq!(store.active, "work", "active promoted after removing it");
+        assert_eq!(store.accounts.len(), 1);
+
+        // Removing the last account empties the map (the I/O wrapper deletes the whole entry).
+        assert!(store.remove("work"));
+        assert!(store.accounts.is_empty());
+
+        assert!(!store.remove("gone"), "removing an unknown id is a no-op");
+    }
+
+    #[test]
+    fn set_active_tokens_updates_only_the_active_account() {
+        let mut store = OAuthAccountStore::new_single("personal", sample_tokens("p"));
+        store.add("work", sample_tokens("w"));
+        store.switch("personal").unwrap();
+
+        let refreshed = OAuthTokens {
+            access_token: "refreshed".into(),
+            ..sample_tokens("p")
+        };
+        store.set_active_tokens(refreshed.clone());
+
+        assert_eq!(store.accounts.get("personal"), Some(&refreshed));
+        assert_eq!(
+            store.accounts.get("work"),
+            Some(&sample_tokens("w")),
+            "the non-active account must be untouched by a refresh"
+        );
+        assert_eq!(store.active, "personal");
+    }
+
+    #[test]
+    fn next_default_id_finds_first_free_slot() {
+        let mut existing = std::collections::BTreeMap::new();
+        assert_eq!(next_default_id(&existing), "account-1");
+        existing.insert("account-1".to_string(), sample_tokens("a"));
+        assert_eq!(next_default_id(&existing), "account-2");
+        existing.insert("account-3".to_string(), sample_tokens("c"));
+        // account-2 is still free even though account-3 is taken.
+        assert_eq!(next_default_id(&existing), "account-2");
     }
 }

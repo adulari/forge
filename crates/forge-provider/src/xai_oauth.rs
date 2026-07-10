@@ -91,9 +91,14 @@ pub async fn start_device_login() -> anyhow::Result<forge_config::provider_oauth
 /// Poll the token endpoint until the device-code flow reaches a terminal state (tokens, denied,
 /// or expired), honoring `authorization_pending`/`slow_down` per RFC 8628 §3.5. Never loops past
 /// the device code's own `expires_in` deadline.
+///
+/// Returns the tokens plus the raw `id_token` if xAI's response included one — the caller (the
+/// login CLI command) decodes its `email` claim to label the new account
+/// ([`forge_config::provider_oauth::extract_email_from_id_token`]); this module stays agnostic to
+/// account labeling.
 pub async fn poll_for_tokens(
     dc: &forge_config::provider_oauth::DeviceCodeResponse,
-) -> anyhow::Result<forge_config::oauth::OAuthTokens> {
+) -> anyhow::Result<(forge_config::oauth::OAuthTokens, Option<String>)> {
     let http = bundled_http_client();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(dc.expires_in);
     let mut interval = dc.poll_interval();
@@ -120,7 +125,16 @@ pub async fn poll_for_tokens(
         let status = resp.status().as_u16();
         let body = resp.text().await?;
         match provider_oauth::parse_device_token_response(status, &body, now_unix())? {
-            provider_oauth::DevicePollOutcome::Tokens(tokens) => return Ok(tokens),
+            provider_oauth::DevicePollOutcome::Tokens(tokens) => {
+                let id_token = serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("id_token")
+                            .and_then(|t| t.as_str())
+                            .map(str::to_string)
+                    });
+                return Ok((tokens, id_token));
+            }
             provider_oauth::DevicePollOutcome::Pending => continue,
             provider_oauth::DevicePollOutcome::SlowDown => {
                 interval += std::time::Duration::from_secs(5);

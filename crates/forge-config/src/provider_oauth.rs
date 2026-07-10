@@ -7,6 +7,8 @@
 //! config/logs). The networked half (device-code request, token polling, refresh, inference)
 //! lands in forge-provider; it builds on these types.
 
+use base64::Engine as _;
+
 use crate::ConfigError;
 
 /// xAI's OAuth issuer (device-code + refresh token endpoint host).
@@ -127,24 +129,72 @@ pub fn provider_oauth_keyring_key(provider: &str) -> String {
 }
 
 /// Persist a provider's OAuth tokens (keyring, encrypted-file fallback; ADR-0007: never in
-/// config/logs).
+/// config/logs). Updates the *active* account only — see [`crate::oauth::OAuthAccountStore`].
 pub fn store_provider_oauth_tokens(
     provider: &str,
     tokens: &crate::oauth::OAuthTokens,
 ) -> Result<(), ConfigError> {
-    let json = serde_json::to_string(tokens).map_err(|e| ConfigError::Keyring(e.to_string()))?;
-    crate::secret_store::set(&provider_oauth_keyring_key(provider), &json)
+    crate::oauth::store_active_tokens(&provider_oauth_keyring_key(provider), tokens)
 }
 
-/// Load a provider's OAuth tokens, or `None` if none stored / unreadable.
+/// Load a provider's *active* OAuth tokens, or `None` if none stored / unreadable.
 pub fn load_provider_oauth_tokens(provider: &str) -> Option<crate::oauth::OAuthTokens> {
-    let json = crate::secret_store::get(&provider_oauth_keyring_key(provider))?;
-    serde_json::from_str(&json).ok()
+    crate::oauth::load_active_tokens(&provider_oauth_keyring_key(provider))
 }
 
-/// Delete a provider's stored OAuth tokens. Idempotent: `Ok(false)` if none were stored.
+/// Delete a provider's stored OAuth tokens — every account. Idempotent: `Ok(false)` if none were
+/// stored.
 pub fn clear_provider_oauth_tokens(provider: &str) -> Result<bool, ConfigError> {
-    crate::secret_store::delete(&provider_oauth_keyring_key(provider))
+    crate::oauth::clear_account_store(&provider_oauth_keyring_key(provider))
+}
+
+/// Add (or overwrite) an OAuth account for `provider` and make it active.
+pub fn add_provider_oauth_account(
+    provider: &str,
+    id: &str,
+    tokens: &crate::oauth::OAuthTokens,
+) -> Result<(), ConfigError> {
+    crate::oauth::add_account(&provider_oauth_keyring_key(provider), id, tokens)
+}
+
+/// `(id, tokens, is_active)` for every OAuth account stored for `provider`.
+pub fn list_provider_oauth_accounts(
+    provider: &str,
+) -> Vec<(String, crate::oauth::OAuthTokens, bool)> {
+    crate::oauth::list_accounts(&provider_oauth_keyring_key(provider))
+}
+
+/// Switch `provider`'s active OAuth account. Errors if `id` isn't stored.
+pub fn switch_provider_oauth_account(provider: &str, id: &str) -> Result<(), ConfigError> {
+    crate::oauth::switch_account(&provider_oauth_keyring_key(provider), id)
+}
+
+/// Remove one OAuth account for `provider`. Promotes a remaining account to active if the removed
+/// one was active; deletes the whole entry if none remain. `Ok(false)` if `id` wasn't stored.
+pub fn remove_provider_oauth_account(provider: &str, id: &str) -> Result<bool, ConfigError> {
+    crate::oauth::remove_account(&provider_oauth_keyring_key(provider), id)
+}
+
+/// First free `account-N` id for a fresh `provider` login with no better label available.
+pub fn next_provider_oauth_account_id(provider: &str) -> String {
+    crate::oauth::next_default_account_id(&provider_oauth_keyring_key(provider))
+}
+
+/// Best-effort account label from a device-code response's `id_token` (a JWT): decode the
+/// payload (base64url — **no signature verification**, this is only a display label, the
+/// device-code grant itself already authenticated the account) and return its `email` claim.
+/// `None` if `id_token` isn't a 3-part JWT, the payload doesn't decode, or there's no `email`.
+pub fn extract_email_from_id_token(id_token: &str) -> Option<String> {
+    let payload_b64 = id_token.split('.').nth(1)?;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload_b64))
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    claims
+        .get("email")
+        .and_then(|e| e.as_str())
+        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -246,5 +296,75 @@ mod tests {
         };
         assert!(t.is_expired(950, 60));
         assert!(!t.is_expired(800, 60));
+    }
+
+    /// Hand-build an unsigned JWT (`header.payload.signature`, base64url no-pad) carrying the
+    /// given claims — `extract_email_from_id_token` never checks the signature, so an empty one
+    /// is fine for this test.
+    fn fake_id_token(claims_json: &str) -> String {
+        let b64 = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s);
+        format!(
+            "{}.{}.{}",
+            b64(r#"{"alg":"none"}"#),
+            b64(claims_json),
+            "sig"
+        )
+    }
+
+    #[test]
+    fn extracts_email_claim_from_id_token_payload() {
+        let jwt = fake_id_token(r#"{"sub":"123","email":"trader@x.ai","name":"Trader"}"#);
+        assert_eq!(
+            extract_email_from_id_token(&jwt),
+            Some("trader@x.ai".to_string())
+        );
+    }
+
+    #[test]
+    fn id_token_without_email_claim_returns_none() {
+        let jwt = fake_id_token(r#"{"sub":"123"}"#);
+        assert_eq!(extract_email_from_id_token(&jwt), None);
+    }
+
+    #[test]
+    fn malformed_id_token_returns_none_not_a_panic() {
+        assert_eq!(extract_email_from_id_token("not-a-jwt"), None);
+        assert_eq!(extract_email_from_id_token("a.b"), None);
+        assert_eq!(extract_email_from_id_token("a.!!!notb64!!!.c"), None);
+    }
+
+    #[test]
+    fn provider_account_helpers_add_list_switch_remove() {
+        // Exercises the provider_oauth-flavored wrappers end to end using the same
+        // OAuthAccountStore the mcp-oauth flavor uses — construct a store directly (offline,
+        // no keyring I/O) and drive it through the same methods the wrappers delegate to.
+        let mut store = crate::oauth::OAuthAccountStore::new_single(
+            "personal",
+            crate::oauth::OAuthTokens {
+                access_token: "at1".into(),
+                refresh_token: None,
+                expires_at: 0,
+                token_endpoint: XAI_TOKEN_ENDPOINT.into(),
+                client_id: XAI_OAUTH_CLIENT_ID.into(),
+                scopes: vec![],
+            },
+        );
+        store.add(
+            "supergrok@x.ai",
+            crate::oauth::OAuthTokens {
+                access_token: "at2".into(),
+                refresh_token: None,
+                expires_at: 0,
+                token_endpoint: XAI_TOKEN_ENDPOINT.into(),
+                client_id: XAI_OAUTH_CLIENT_ID.into(),
+                scopes: vec![],
+            },
+        );
+        assert_eq!(store.active, "supergrok@x.ai");
+        assert_eq!(store.list().len(), 2);
+        store.switch("personal").unwrap();
+        assert_eq!(store.active_tokens().unwrap().access_token, "at1");
+        assert!(store.remove("personal"));
+        assert_eq!(store.active, "supergrok@x.ai", "promoted the last account");
     }
 }

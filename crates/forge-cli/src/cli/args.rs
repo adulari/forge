@@ -566,15 +566,24 @@ pub(crate) enum Command {
         /// Premium device-code login — no key, reads nothing from stdin; experimental, see
         /// docs' xai-oauth guide).
         provider: String,
-        /// Delete all stored keys for this provider instead of setting one.
+        /// Delete all stored keys for this provider instead of setting one. For `xai-oauth`:
+        /// bare `--remove` signs out every account; pair with `--account <id>` to remove one.
         #[arg(long)]
         remove: bool,
-        /// Show how many keys are stored for this provider (masked), don't read a new one.
+        /// Show how many keys are stored for this provider (masked), don't read a new one. For
+        /// `xai-oauth`, lists every signed-in account and which one is active.
         #[arg(long)]
         list: bool,
         /// Replace all stored keys with the single key read from stdin (instead of appending).
+        /// Ignored for `xai-oauth`.
         #[arg(long)]
         replace: bool,
+        /// `xai-oauth` only: target account id for `--switch` / `--remove`.
+        #[arg(long)]
+        account: Option<String>,
+        /// `xai-oauth` only: switch the active account to `--account <id>` instead of logging in.
+        #[arg(long)]
+        switch: bool,
     },
     /// Manage custom OpenAI-compatible providers (LM Studio, vLLM, llama.cpp, proxies, …): register
     /// a runtime endpoint, list providers, or remove one. Complements `forge auth` (which stores
@@ -1144,10 +1153,14 @@ pub(crate) enum McpCmd {
         /// Server name (as declared in `.forge/mcp.toml`).
         server: String,
     },
-    /// Remove stored OAuth tokens for a server (`forge mcp logout <server>`).
+    /// Remove stored OAuth tokens for a server (`forge mcp logout <server>`). Bare removes every
+    /// account; `--account <id>` removes just one.
     Logout {
         /// Server name (as declared in `.forge/mcp.toml`).
         server: String,
+        /// Remove just this account instead of every account stored for the server.
+        #[arg(long)]
+        account: Option<String>,
     },
 }
 

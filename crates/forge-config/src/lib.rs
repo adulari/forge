@@ -23,9 +23,10 @@ pub use mcp::{
     McpAllowlist, McpAuth, McpConfig, McpServerConfig, McpTransport, ParsedServers,
 };
 pub use oauth::{
-    authorize_url, clear_oauth_tokens, load_oauth_tokens, oauth_keyring_key, random_state,
-    store_oauth_tokens, AuthServerMetadata, OAuthConfig, OAuthTokens, Pkce,
-    ProtectedResourceMetadata,
+    add_oauth_account, authorize_url, clear_oauth_tokens, list_oauth_accounts, load_oauth_tokens,
+    next_oauth_account_id, oauth_keyring_key, random_state, remove_oauth_account,
+    store_oauth_tokens, switch_oauth_account, AuthServerMetadata, OAuthAccountStore, OAuthConfig,
+    OAuthTokens, Pkce, ProtectedResourceMetadata,
 };
 
 #[derive(Debug, thiserror::Error)]
