@@ -19,12 +19,16 @@
 //! instead of benching-and-retrying it every turn.
 
 use forge_config::provider_oauth::{self, XAI_OAUTH_KEYRING_PROVIDER};
-use forge_types::{Message, Role, ToolCall, Usage};
-use futures::StreamExt;
+use forge_types::Message;
 
+use crate::oauth_responses::{
+    build_responses_request, error_message,
+    execute_responses_request as shared_execute_responses_request, now_unix, should_hop_account,
+    REFRESH_SKEW_SECS,
+};
 use crate::{
     bundled_http_client, CompletionOptions, EventSink, ModelResponse, Provider, ProviderError,
-    StreamEvent, ToolSpec,
+    ToolSpec,
 };
 
 /// The `xai-oauth::` model-id namespace [`crate::DispatchProvider`] routes on.
@@ -33,20 +37,6 @@ pub const XAI_OAUTH_NAMESPACE: &str = "xai-oauth";
 /// Hardcoded — deliberately NOT read from config/env/the custom-provider registry. See the
 /// module doc's security invariant.
 const XAI_API_BASE: &str = "https://api.x.ai/v1";
-
-/// Refresh the access token this long before it actually expires, so a request never races an
-/// in-flight expiry.
-const REFRESH_SKEW_SECS: i64 = 120;
-
-const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-
-fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 /// True iff `url` is `https` and its host is exactly `api.x.ai` or a genuine `*.x.ai`
 /// subdomain — rejects lookalikes (`evilx.ai`, `api.x.ai.evil.com`, `api-x.ai`) and any
@@ -218,30 +208,6 @@ pub async fn probe_entitlement(access_token: &str) -> anyhow::Result<Entitlement
     })
 }
 
-/// Extract `error.message` (or `message`) from a JSON error body; falls back to the first line of
-/// the raw body, capped so a huge/binary body can't flood the CLI or logs.
-fn error_message(body: &str) -> String {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Some(m) = v
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-        {
-            return m.to_string();
-        }
-        if let Some(m) = v.get("message").and_then(|m| m.as_str()) {
-            return m.to_string();
-        }
-    }
-    let line = body.lines().next().unwrap_or(body).trim();
-    if line.chars().count() > 200 {
-        let cut: String = line.chars().take(197).collect();
-        format!("{cut}…")
-    } else {
-        line.to_string()
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // Error classification
 // ---------------------------------------------------------------------------------------------
@@ -271,241 +237,6 @@ fn classify_xai_status(
         500..=599 => ProviderError::Unavailable(message),
         _ => ProviderError::Request(message),
     }
-}
-
-/// Whether a completion failure should trigger the one-hop next-account retry in
-/// [`XaiOauthProvider::complete_with`]: rate limits (429) and `Unavailable` connection-level
-/// failures. A fresh account gets a fresh edge session/connection, which is often enough to
-/// route around a per-connection blip (stall, connect timeout, dropped stream).
-///
-/// Every `ProviderError::Unavailable` this provider produces is connection-level — there's no
-/// separate "server processed the request but something else went wrong" `Unavailable` variant
-/// to exclude: `execute_responses_request`'s connect-timeout, `send()` transport error, 5xx
-/// response, stream idle-timeout, mid-stream chunk-read error, and phantom-truncation
-/// (stream closed with no completion signal) paths are all connection/stream failures. So a
-/// blanket `is_unavailable` check is correct here without a finer split.
-///
-/// Permanent `Auth` (401/403) is deliberately excluded — never hop on it, see the module doc's
-/// "known gotcha" (a 403 is a server-side entitlement decision that a different account's
-/// session won't change, and a 401 means the bearer itself was rejected, not the connection).
-fn should_hop_account(e: &ProviderError) -> bool {
-    e.is_rate_limited() || matches!(e, ProviderError::Unavailable(_))
-}
-
-// ---------------------------------------------------------------------------------------------
-// Responses-API request/response mapping (pure, testable)
-// ---------------------------------------------------------------------------------------------
-
-/// Strip the `xai-oauth::` namespace: `"xai-oauth::grok-4"` → `"grok-4"`.
-fn bare_model(model: &str) -> &str {
-    model
-        .split_once("::")
-        .map(|(_, name)| name)
-        .unwrap_or(model)
-}
-
-fn build_responses_request(
-    model: &str,
-    messages: &[Message],
-    tools: &[ToolSpec],
-    opts: &CompletionOptions,
-    max_output_tokens: u32,
-) -> serde_json::Value {
-    let mut instructions = String::new();
-    let mut input = Vec::new();
-    for m in messages {
-        match m.role {
-            Role::System => {
-                if !instructions.is_empty() {
-                    instructions.push_str("\n\n");
-                }
-                instructions.push_str(&m.content);
-            }
-            Role::User => {
-                input.push(serde_json::json!({"role": "user", "content": m.content}));
-            }
-            Role::Assistant => {
-                if !m.content.is_empty() {
-                    input.push(serde_json::json!({"role": "assistant", "content": m.content}));
-                }
-                for call in &m.tool_calls {
-                    input.push(serde_json::json!({
-                        "type": "function_call",
-                        "call_id": call.id,
-                        "name": call.name,
-                        "arguments": call.args.to_string(),
-                    }));
-                }
-            }
-            Role::Tool => {
-                input.push(serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": m.tool_call_id.clone().unwrap_or_default(),
-                    "output": m.content,
-                }));
-            }
-        }
-    }
-
-    let mut body = serde_json::json!({
-        "model": bare_model(model),
-        "input": input,
-        "stream": true,
-    });
-    if !instructions.is_empty() {
-        body["instructions"] = serde_json::Value::String(instructions);
-    }
-    if !tools.is_empty() {
-        body["tools"] = serde_json::Value::Array(
-            tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "type": "function",
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": t.schema,
-                    })
-                })
-                .collect(),
-        );
-    }
-    if max_output_tokens > 0 {
-        body["max_output_tokens"] = serde_json::json!(max_output_tokens);
-    }
-    if let Some(temp) = opts.temperature {
-        body["temperature"] = serde_json::json!(temp);
-    }
-    body
-}
-
-/// Accumulates a streamed Responses-API completion.
-#[derive(Debug, Default)]
-struct ResponseAccumulator {
-    content: String,
-    tool_calls: Vec<ToolCall>,
-    usage: Usage,
-    /// Whether a `response.completed` (or `.failed`) event arrived — distinguishes a clean finish
-    /// from a stream that just dropped mid-generation (the same phantom-truncation risk
-    /// `genai_provider` guards against).
-    saw_terminal: bool,
-}
-
-/// Fold one decoded SSE event into `acc`. Event-name matching is intentionally loose
-/// (`ends_with`/`contains` rather than an exact enum) because xAI's exact Responses-API event
-/// vocabulary isn't pinned down anywhere Forge can verify offline — this degrades gracefully
-/// (an unrecognized event is just ignored) rather than hard-failing on a naming detail.
-fn apply_sse_event(
-    acc: &mut ResponseAccumulator,
-    event: &str,
-    data: &serde_json::Value,
-    on_event: &mut EventSink<'_>,
-) -> Result<(), ProviderError> {
-    if event == "error" || event == "response.failed" {
-        let msg = data
-            .get("error")
-            .or_else(|| data.get("response").and_then(|r| r.get("error")))
-            .and_then(|e| e.get("message").and_then(|m| m.as_str()).or(e.as_str()))
-            .unwrap_or("xAI returned a stream error")
-            .to_string();
-        return Err(ProviderError::Request(msg));
-    }
-    if event.ends_with("output_text.delta") {
-        if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
-            acc.content.push_str(delta);
-            on_event(StreamEvent::Text(delta.to_string()));
-        }
-    } else if event.contains("reasoning") && event.ends_with(".delta") {
-        if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
-            on_event(StreamEvent::Reasoning(delta.to_string()));
-        }
-    } else if event == "response.output_item.done" {
-        if let Some(item) = data.get("item") {
-            if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
-                let id = item
-                    .get("call_id")
-                    .or_else(|| item.get("id"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let name = item
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let args_str = item
-                    .get("arguments")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}");
-                let args = serde_json::from_str(args_str).unwrap_or_else(|_| serde_json::json!({}));
-                acc.tool_calls.push(ToolCall { id, name, args });
-            }
-        }
-    } else if event == "response.completed" {
-        acc.saw_terminal = true;
-        if let Some(resp) = data.get("response") {
-            if let Some(u) = resp.get("usage") {
-                let input_tokens = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                let output_tokens = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                let cached_input_tokens = u
-                    .get("input_tokens_details")
-                    .and_then(|d| d.get("cached_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                acc.usage = Usage {
-                    input_tokens,
-                    output_tokens,
-                    cached_input_tokens,
-                    cost_usd: 0.0,
-                };
-            }
-            // Some responses only carry text in the final snapshot, not as deltas.
-            if acc.content.is_empty() {
-                if let Some(output) = resp.get("output").and_then(|o| o.as_array()) {
-                    for item in output {
-                        if item.get("type").and_then(|t| t.as_str()) != Some("message") {
-                            continue;
-                        }
-                        if let Some(parts) = item.get("content").and_then(|c| c.as_array()) {
-                            for part in parts {
-                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                    acc.content.push_str(text);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Parse one SSE event block (text between two blank-line boundaries): `event:`/`data:` lines,
-/// `data:` lines joined with `\n`, comments (`:`-prefixed) ignored. Mirrors
-/// `forge_mcp::sse`'s framing (not shared across crates — this is the same handful of lines).
-fn parse_sse_frame(block: &str) -> (Option<String>, String) {
-    let mut event = None;
-    let mut data_lines: Vec<String> = Vec::new();
-    for line in block.lines() {
-        if line.is_empty() || line.starts_with(':') {
-            continue;
-        }
-        let (field, value) = match line.split_once(':') {
-            Some((f, v)) => (f, v.strip_prefix(' ').unwrap_or(v)),
-            None => (line, ""),
-        };
-        match field {
-            "event" => event = Some(value.to_string()),
-            "data" => data_lines.push(value.to_string()),
-            _ => {}
-        }
-    }
-    (event, data_lines.join("\n"))
-}
-
-fn take_event(buf: &mut String) -> Option<String> {
-    buf.find("\n\n").map(|pos| buf.drain(..pos + 2).collect())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -814,86 +545,8 @@ async fn execute_responses_request(
     body: &serde_json::Value,
     on_event: &mut EventSink<'_>,
 ) -> Result<ModelResponse, ProviderError> {
-    let resp = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        http.post(url)
-            .bearer_auth(token)
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .json(body)
-            .send(),
-    )
-    .await
-    .map_err(|_| {
-        ProviderError::Unavailable(format!(
-            "no response while connecting (no data for {}s)",
-            CONNECT_TIMEOUT.as_secs()
-        ))
-    })?
-    .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
-
-    let status = resp.status();
-    if !status.is_success() {
-        let retry_after = resp
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .map(std::time::Duration::from_secs);
-        let text = resp.text().await.unwrap_or_default();
-        return Err(classify_xai_status(status.as_u16(), &text, retry_after));
-    }
-
-    let mut acc = ResponseAccumulator::default();
-    let mut buf = String::new();
-    let mut stream = resp.bytes_stream();
-    loop {
-        let chunk = tokio::time::timeout(IDLE_TIMEOUT, stream.next())
-            .await
-            .map_err(|_| {
-                ProviderError::Unavailable(format!(
-                    "stream stalled (no data for {}s)",
-                    IDLE_TIMEOUT.as_secs()
-                ))
-            })?;
-        let Some(chunk) = chunk else { break };
-        let bytes = chunk.map_err(|e| ProviderError::Unavailable(e.to_string()))?;
-        buf.extend(
-            String::from_utf8_lossy(&bytes)
-                .chars()
-                .filter(|&c| c != '\r'),
-        );
-        while let Some(raw) = take_event(&mut buf) {
-            let (event, data) = parse_sse_frame(&raw);
-            let Some(event) = event else { continue };
-            if data.is_empty() {
-                continue;
-            }
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) else {
-                continue;
-            };
-            apply_sse_event(&mut acc, &event, &value, on_event)?;
-        }
-    }
-
-    // Phantom-truncation guard, same rationale as `genai_provider`: a stream that closes
-    // without a completion signal and produced nothing usable was almost certainly cut off
-    // mid-flight, not a legitimate empty answer.
-    if !acc.saw_terminal
-        && acc.tool_calls.is_empty()
-        && acc.usage.input_tokens == 0
-        && acc.usage.output_tokens == 0
-    {
-        return Err(ProviderError::Unavailable(
-            "stream closed without a completion signal (truncated mid-generation)".to_string(),
-        ));
-    }
-
-    Ok(ModelResponse {
-        content: acc.content,
-        tool_calls: acc.tool_calls,
-        usage: acc.usage,
-        quotas: Vec::new(),
-    })
+    shared_execute_responses_request(http, url, token, body, &[], on_event, classify_xai_status)
+        .await
 }
 
 #[async_trait::async_trait]
@@ -956,6 +609,9 @@ impl Provider for XaiOauthProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oauth_responses::{apply_sse_event, bare_model, ResponseAccumulator};
+    use crate::StreamEvent;
+    use forge_types::Role;
 
     #[test]
     fn seed_models_are_namespaced_and_pass_the_non_chat_filter() {

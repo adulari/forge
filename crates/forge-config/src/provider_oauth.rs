@@ -26,6 +26,24 @@ pub const XAI_DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device
 /// provider and from any MCP server named `xai`).
 pub const XAI_OAUTH_KEYRING_PROVIDER: &str = "xai";
 
+// ---------------------------------------------------------------------------------------------
+// ChatGPT / Codex subscription OAuth (authorization-code + PKCE; docs/design/codex-oauth.md)
+// ---------------------------------------------------------------------------------------------
+
+/// OpenAI auth issuer for ChatGPT subscription OAuth (official Codex CLI client).
+pub const CODEX_OAUTH_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+pub const CODEX_OAUTH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/token";
+/// Public client id used by the official Codex CLI (OpenAI permits subscription OAuth in
+/// third-party tools).
+pub const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+/// Loopback callback port registered for the public Codex client — must stay 1455.
+pub const CODEX_OAUTH_CALLBACK_PORT: u16 = 1455;
+pub const CODEX_OAUTH_REDIRECT_URI: &str = "http://127.0.0.1:1455/auth/callback";
+/// Scopes requested for ChatGPT subscription access (Codex CLI parity).
+pub const CODEX_OAUTH_SCOPE: &str = "openid profile email offline_access";
+/// Keyring provider-key `codex-oauth` tokens are stored under (`provider-oauth:codex`).
+pub const CODEX_OAUTH_KEYRING_PROVIDER: &str = "codex";
+
 /// RFC 8628 §3.2 device-authorization response.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct DeviceCodeResponse {
@@ -207,16 +225,100 @@ pub fn provider_oauth_account_pool(provider: &str) -> crate::oauth::OAuthAccount
 /// device-code grant itself already authenticated the account) and return its `email` claim.
 /// `None` if `id_token` isn't a 3-part JWT, the payload doesn't decode, or there's no `email`.
 pub fn extract_email_from_id_token(id_token: &str) -> Option<String> {
-    let payload_b64 = id_token.split('.').nth(1)?;
+    jwt_claim(id_token, "email")
+}
+
+/// Decode a JWT payload (base64url, **no signature verification**) and return the named claim as
+/// a string. Used for display labels and the ChatGPT account id (`chatgpt_account_id`) — the
+/// OAuth grant already authenticated the token; we only read claims for routing/storage keys.
+pub fn jwt_claim(jwt: &str, claim: &str) -> Option<String> {
+    let payload_b64 = jwt.split('.').nth(1)?;
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload_b64)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload_b64))
         .ok()?;
     let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
     claims
-        .get("email")
-        .and_then(|e| e.as_str())
+        .get(claim)
+        .and_then(|v| v.as_str())
         .map(str::to_string)
+}
+
+/// ChatGPT account id from an access-token JWT (`chatgpt_account_id` claim). Tries a few known
+/// claim aliases so a rename degrades to `None` rather than a hard failure.
+pub fn extract_chatgpt_account_id(access_token: &str) -> Option<String> {
+    if let Some(id) = jwt_claim(access_token, "chatgpt_account_id") {
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    if let Some(id) = jwt_claim(access_token, "account_id") {
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    // Nested shape some tokens use: `https://api.openai.com/auth` → object with `chatgpt_account_id`.
+    let payload_b64 = access_token.split('.').nth(1)?;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload_b64))
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    claims
+        .get("https://api.openai.com/auth")
+        .and_then(|v| v.get("chatgpt_account_id"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Parse a ChatGPT / Codex OAuth token-endpoint JSON body into [`crate::oauth::OAuthTokens`].
+/// `now` is unix seconds for absolute `expires_at`.
+pub fn parse_codex_token_response(
+    status: u16,
+    body: &str,
+    now: i64,
+) -> Result<crate::oauth::OAuthTokens, ConfigError> {
+    let v: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| ConfigError::Keyring(format!("invalid Codex token response: {e}")))?;
+    if status != 200 {
+        let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("error");
+        let desc = v
+            .get("error_description")
+            .and_then(|x| x.as_str())
+            .unwrap_or(body);
+        return Err(ConfigError::Keyring(format!(
+            "Codex token exchange failed (HTTP {status}): {err} — {desc}"
+        )));
+    }
+    let access_token = v
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| ConfigError::Keyring("Codex token response missing access_token".into()))?
+        .to_string();
+    let refresh_token = v
+        .get("refresh_token")
+        .and_then(|x| x.as_str())
+        .map(str::to_string);
+    let expires_in = v.get("expires_in").and_then(|x| x.as_i64()).unwrap_or(0);
+    let scopes = v
+        .get("scope")
+        .and_then(|x| x.as_str())
+        .map(|s| s.split_whitespace().map(str::to_string).collect())
+        .unwrap_or_else(|| {
+            CODEX_OAUTH_SCOPE
+                .split_whitespace()
+                .map(str::to_string)
+                .collect()
+        });
+    Ok(crate::oauth::OAuthTokens {
+        access_token,
+        refresh_token,
+        expires_at: if expires_in > 0 { now + expires_in } else { 0 },
+        token_endpoint: CODEX_OAUTH_TOKEN_ENDPOINT.to_string(),
+        client_id: CODEX_OAUTH_CLIENT_ID.to_string(),
+        scopes,
+    })
 }
 
 #[cfg(test)]
@@ -339,6 +441,45 @@ mod tests {
         assert_eq!(
             extract_email_from_id_token(&jwt),
             Some("trader@x.ai".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_chatgpt_account_id_from_access_token() {
+        let jwt = fake_id_token(r#"{"sub":"u1","chatgpt_account_id":"acct-abc-123"}"#);
+        assert_eq!(
+            extract_chatgpt_account_id(&jwt),
+            Some("acct-abc-123".to_string())
+        );
+        let nested =
+            fake_id_token(r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"nested-id"}}"#);
+        assert_eq!(
+            extract_chatgpt_account_id(&nested),
+            Some("nested-id".to_string())
+        );
+        assert_eq!(extract_chatgpt_account_id("not-a-jwt"), None);
+    }
+
+    #[test]
+    fn codex_token_response_builds_tokens() {
+        let t = parse_codex_token_response(
+            200,
+            r#"{"access_token":"at","refresh_token":"rt","expires_in":3600,"scope":"openid email"}"#,
+            1000,
+        )
+        .unwrap();
+        assert_eq!(t.access_token, "at");
+        assert_eq!(t.refresh_token.as_deref(), Some("rt"));
+        assert_eq!(t.expires_at, 4600);
+        assert_eq!(t.token_endpoint, CODEX_OAUTH_TOKEN_ENDPOINT);
+        assert_eq!(t.client_id, CODEX_OAUTH_CLIENT_ID);
+    }
+
+    #[test]
+    fn codex_keyring_key_is_namespaced() {
+        assert_eq!(
+            provider_oauth_keyring_key(CODEX_OAUTH_KEYRING_PROVIDER),
+            "provider-oauth:codex"
         );
     }
 

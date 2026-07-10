@@ -562,26 +562,26 @@ pub(crate) enum Command {
     /// `--remove` deletes them all.
     Auth {
         /// Provider: anthropic, openai, gemini, groq, nvidia, sambanova, mistral, openrouter,
-        /// together, fireworks, perplexity, bedrock, vertex, …, or `xai-oauth` (SuperGrok/X
-        /// Premium device-code login — no key, reads nothing from stdin; experimental, see
-        /// docs' xai-oauth guide).
+        /// together, fireworks, perplexity, bedrock, vertex, …, or `xai-oauth` / `codex-oauth`
+        /// (subscription OAuth login — no key, reads nothing from stdin; experimental).
         provider: String,
-        /// Delete all stored keys for this provider instead of setting one. For `xai-oauth`:
-        /// bare `--remove` signs out every account; pair with `--account <id>` to remove one.
+        /// Delete all stored keys for this provider instead of setting one. For `xai-oauth` /
+        /// `codex-oauth`: bare `--remove` signs out every account; pair with `--account <id>` to
+        /// remove one.
         #[arg(long)]
         remove: bool,
         /// Show how many keys are stored for this provider (masked), don't read a new one. For
-        /// `xai-oauth`, lists every signed-in account and which one is active.
+        /// `xai-oauth` / `codex-oauth`, lists every signed-in account and which one is active.
         #[arg(long)]
         list: bool,
         /// Replace all stored keys with the single key read from stdin (instead of appending).
-        /// Ignored for `xai-oauth`.
+        /// Ignored for OAuth providers.
         #[arg(long)]
         replace: bool,
-        /// `xai-oauth` only: target account id for `--switch` / `--remove`.
+        /// OAuth providers only: target account id for `--switch` / `--remove`.
         #[arg(long)]
         account: Option<String>,
-        /// `xai-oauth` only: switch the active account to `--account <id>` instead of logging in.
+        /// OAuth providers only: switch the active account to `--account <id>` instead of logging in.
         #[arg(long)]
         switch: bool,
     },

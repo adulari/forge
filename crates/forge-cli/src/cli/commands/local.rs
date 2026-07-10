@@ -12,6 +12,7 @@ pub(crate) fn auth(provider: &str, remove: bool, list: bool, replace: bool) -> R
         known.extend(forge_config::known_search_providers());
         known.push("artificialanalysis");
         known.push("xai-oauth");
+        known.push("codex-oauth");
         anyhow::bail!(
             "unknown provider '{provider}' — known providers are: {}",
             known.join(", ")
@@ -249,6 +250,281 @@ pub(crate) async fn auth_xai_oauth(
     Ok(())
 }
 
+/// Sign in to ChatGPT via OAuth 2.0 PKCE (Plus/Pro subscription — no API key, billed against the
+/// subscription). Loopback callback on port 1455 (official Codex public client). Multiple accounts
+/// supported with the same `--list` / `--switch` / `--remove` surface as `xai-oauth`.
+pub(crate) async fn auth_codex_oauth(
+    remove: bool,
+    list: bool,
+    _replace: bool,
+    account: Option<String>,
+    switch: bool,
+) -> Result<()> {
+    use forge_config::provider_oauth::{
+        self, CODEX_OAUTH_AUTHORIZE_URL, CODEX_OAUTH_CALLBACK_PORT, CODEX_OAUTH_CLIENT_ID,
+        CODEX_OAUTH_KEYRING_PROVIDER, CODEX_OAUTH_REDIRECT_URI, CODEX_OAUTH_SCOPE,
+    };
+
+    if switch {
+        let id = account
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--switch requires --account <id> (see `--list`)"))?;
+        provider_oauth::switch_provider_oauth_account(CODEX_OAUTH_KEYRING_PROVIDER, id)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("✓ switched active codex-oauth account to '{id}'");
+        return Ok(());
+    }
+
+    if list {
+        let accounts = provider_oauth::list_provider_oauth_accounts(CODEX_OAUTH_KEYRING_PROVIDER);
+        if accounts.is_empty() {
+            println!("codex-oauth: not signed in — run `forge auth codex-oauth`");
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let describe = |tokens: &forge_config::OAuthTokens| -> String {
+            let expiry = if tokens.expires_at == 0 {
+                "no expiry reported".to_string()
+            } else {
+                let remaining = tokens.expires_at - now;
+                if remaining > 0 {
+                    format!("access token expires in {}", human_secs(remaining))
+                } else {
+                    "access token expired".to_string()
+                }
+            };
+            format!(
+                "{expiry}, refresh token {}",
+                if tokens.refresh_token.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                }
+            )
+        };
+        if accounts.len() == 1 {
+            let (_, tokens, _) = &accounts[0];
+            println!("codex-oauth: signed in ({})", describe(tokens));
+        } else {
+            println!(
+                "codex-oauth: {} account(s) · auto-rotation ON (round-robin)",
+                accounts.len()
+            );
+            for (id, tokens, is_active) in &accounts {
+                println!(
+                    "  {} {id} — {}",
+                    if *is_active { "*" } else { " " },
+                    describe(tokens)
+                );
+            }
+            println!(
+                "  (* = manual active / rotation seed; requests rotate across all)\n  \
+                 switch: `forge auth codex-oauth --switch --account <id>`"
+            );
+        }
+        return Ok(());
+    }
+
+    if remove {
+        match account.as_deref() {
+            Some(id) => {
+                let removed =
+                    provider_oauth::remove_provider_oauth_account(CODEX_OAUTH_KEYRING_PROVIDER, id)
+                        .context("removing Codex OAuth account from the OS keyring")?;
+                println!(
+                    "{}",
+                    if removed {
+                        format!("removed codex-oauth account '{id}' from the OS keyring")
+                    } else {
+                        format!("no codex-oauth account '{id}' stored — nothing to remove")
+                    }
+                );
+            }
+            None => {
+                let removed =
+                    provider_oauth::clear_provider_oauth_tokens(CODEX_OAUTH_KEYRING_PROVIDER)
+                        .context("removing Codex OAuth tokens from the OS keyring")?;
+                println!(
+                    "{}",
+                    if removed {
+                        "removed stored Codex OAuth tokens from the OS keyring"
+                    } else {
+                        "no Codex OAuth tokens stored — nothing to remove"
+                    }
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    // PKCE + loopback on the official Codex callback port.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", CODEX_OAUTH_CALLBACK_PORT))
+        .await
+        .with_context(|| {
+            format!(
+                "could not bind 127.0.0.1:{CODEX_OAUTH_CALLBACK_PORT} — free the port (another \
+                 Codex/Forge auth may be running) and retry"
+            )
+        })?;
+
+    let pkce = forge_config::Pkce::generate();
+    let state = forge_config::random_state();
+    let auth_url = forge_config::authorize_url(
+        CODEX_OAUTH_AUTHORIZE_URL,
+        CODEX_OAUTH_CLIENT_ID,
+        CODEX_OAUTH_REDIRECT_URI,
+        &CODEX_OAUTH_SCOPE
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        &state,
+        &pkce.challenge,
+    );
+
+    let no_browser = std::env::var("FORGE_NO_BROWSER").as_deref() == Ok("1") || {
+        use std::io::IsTerminal;
+        !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal()
+    };
+
+    println!("To sign in to ChatGPT (Plus/Pro) with OAuth, open:\n");
+    println!("    {auth_url}\n");
+    if no_browser {
+        println!(
+            "(headless / FORGE_NO_BROWSER=1 — open the URL on a machine that can reach this host's \
+             port {CODEX_OAUTH_CALLBACK_PORT})"
+        );
+    } else if let Err(e) = crate::cli::commands::mcp::open_browser(&auth_url) {
+        println!("(could not open browser automatically: {e} — open the URL manually)");
+    }
+    println!(
+        "Waiting for approval on 127.0.0.1:{CODEX_OAUTH_CALLBACK_PORT}… press Ctrl-C to cancel."
+    );
+
+    let (code, returned_state) = wait_for_oauth_callback(listener)
+        .await
+        .context("waiting for OAuth callback")?;
+    if returned_state != state {
+        anyhow::bail!("OAuth state mismatch — possible CSRF; try again");
+    }
+
+    let tokens = forge_provider::exchange_codex_oauth_code(&code, &pkce.verifier)
+        .await
+        .context("exchanging authorization code")?;
+
+    let chatgpt_id = provider_oauth::extract_chatgpt_account_id(&tokens.access_token);
+    let account_id = chatgpt_id
+        .clone()
+        .or_else(|| provider_oauth::extract_email_from_id_token(&tokens.access_token))
+        .unwrap_or_else(|| {
+            provider_oauth::next_provider_oauth_account_id(CODEX_OAUTH_KEYRING_PROVIDER)
+        });
+    provider_oauth::add_provider_oauth_account(CODEX_OAUTH_KEYRING_PROVIDER, &account_id, &tokens)
+        .context("storing Codex OAuth tokens")?;
+
+    let probe_id = chatgpt_id.as_deref().unwrap_or(&account_id);
+    match forge_provider::probe_codex_entitlement(&tokens.access_token, probe_id).await {
+        Ok(forge_provider::EntitlementStatus::Entitled) => println!(
+            "signed in to ChatGPT via OAuth as '{account_id}' — API access confirmed (tokens stored in the OS keyring)\n\
+             use models with the codex-oauth:: prefix, e.g.:  forge --model codex-oauth::gpt-5.5\n\
+             note: costs show as $0 — usage is billed to your ChatGPT subscription, not metered API credits\n\
+             multiple accounts: `forge auth codex-oauth --list` · switch with `--switch --account <id>`"
+        ),
+        Ok(forge_provider::EntitlementStatus::NotEntitled(msg)) => anyhow::bail!(
+            "OAuth sign-in succeeded, but ChatGPT returned 403 for API access: this account's \
+             plan may not allow Codex API access. ({msg})\n\n\
+             Tokens are stored. To use OpenAI with Forge now, create an API key and run:\n\n    forge auth openai"
+        ),
+        Ok(forge_provider::EntitlementStatus::AuthFailed(msg)) => anyhow::bail!(
+            "sign-in produced a token ChatGPT rejected (401) — try `forge auth codex-oauth` again, or \
+             use `forge auth openai` with an API key. ({msg})"
+        ),
+        Ok(forge_provider::EntitlementStatus::RateLimited) => println!(
+            "signed in as '{account_id}'; the entitlement check was rate-limited (429) — assuming access is OK."
+        ),
+        Ok(forge_provider::EntitlementStatus::Other(status, msg)) => println!(
+            "signed in as '{account_id}'; entitlement check returned unexpected status ({status}: {msg}) — \
+             tokens are stored, try using codex-oauth:: models directly."
+        ),
+        Err(e) => println!(
+            "signed in as '{account_id}', but the entitlement check itself failed ({e}) — tokens are stored, try \
+             using codex-oauth:: models directly."
+        ),
+    }
+    Ok(())
+}
+
+/// Accept one HTTP request on the OAuth loopback listener and extract `code` + `state` query params.
+async fn wait_for_oauth_callback(listener: tokio::net::TcpListener) -> Result<(String, String)> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut stream, _) = listener
+        .accept()
+        .await
+        .context("accepting OAuth callback connection")?;
+    let mut buf = vec![0u8; 4096];
+    let n = stream
+        .read(&mut buf)
+        .await
+        .context("reading OAuth callback request")?;
+    let req = String::from_utf8_lossy(&buf[..n]);
+    let first_line = req.lines().next().unwrap_or("");
+    // GET /auth/callback?code=...&state=... HTTP/1.1
+    let path = first_line.split_whitespace().nth(1).unwrap_or("");
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let mut code = None;
+    let mut state = None;
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            match k {
+                "code" => code = Some(urlencoding_decode(v)),
+                "state" => state = Some(urlencoding_decode(v)),
+                _ => {}
+            }
+        }
+    }
+    let body = if code.is_some() {
+        "signed in — you can close this tab and return to Forge."
+    } else {
+        "sign-in failed — no authorization code received."
+    };
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = stream.write_all(resp.as_bytes()).await;
+    let code = code.ok_or_else(|| anyhow::anyhow!("callback missing code parameter"))?;
+    let state = state.ok_or_else(|| anyhow::anyhow!("callback missing state parameter"))?;
+    Ok((code, state))
+}
+
+fn urlencoding_decode(s: &str) -> String {
+    // Minimal percent-decode for OAuth query values (code/state are URL-safe).
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push(char::from_u32(h * 16 + l).unwrap_or('?'));
+                i += 3;
+                continue;
+            }
+        }
+        if bytes[i] == b'+' {
+            out.push(' ');
+        } else {
+            out.push(bytes[i] as char);
+        }
+        i += 1;
+    }
+    out
+}
+
 /// Render a whole number of seconds as the coarsest useful unit (`"54m"`, `"3h"`, `"2d"`).
 fn human_secs(secs: i64) -> String {
     let secs = secs.max(0);
@@ -269,6 +545,7 @@ pub(crate) fn provider_label(provider: &str) -> &'static str {
         "gemini" => "Google Gemini — free tier + paid",
         "xai" => "xAI (Grok) — paid",
         "xai-oauth" => "xAI (Grok) — SuperGrok/X Premium subscription (OAuth, no API key)",
+        "codex-oauth" => "OpenAI ChatGPT — Plus/Pro subscription (OAuth, no API key)",
         "deepseek" => "DeepSeek — paid",
         "openrouter" => "OpenRouter (gateway, many models) — paid + some :free",
         "groq" => "Groq — free tier (fast)",

@@ -53,6 +53,7 @@ pub fn is_subscription(id: &str) -> bool {
         || id.starts_with("codex-cli::")
         || id.starts_with("agy-cli::")
         || id.starts_with("xai-oauth::")
+        || id.starts_with("codex-oauth::")
 }
 
 /// Whether a model is genuinely free to call. "Free" needs *positive* evidence, not just a missing
@@ -952,6 +953,8 @@ mod tests {
     fn xai_oauth_is_subscription_not_free() {
         assert!(is_subscription("xai-oauth::grok-4"));
         assert!(!is_free("xai-oauth::grok-4", 0.0, true));
+        assert!(is_subscription("codex-oauth::gpt-5.5"));
+        assert!(!is_free("codex-oauth::gpt-5.5", 0.0, true));
     }
 
     #[test]

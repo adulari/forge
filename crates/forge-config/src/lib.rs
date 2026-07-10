@@ -3715,7 +3715,10 @@ pub fn has_api_key(provider: &str) -> bool {
 /// a real provider from a typo instead of dispatching a doomed request.
 pub fn is_known_provider(provider: &str) -> bool {
     known_key_providers().any(|p| p == provider)
-        || matches!(provider, "ollama" | "claude-cli" | "codex-cli" | "agy-cli")
+        || matches!(
+            provider,
+            "ollama" | "claude-cli" | "codex-cli" | "agy-cli" | "xai-oauth" | "codex-oauth"
+        )
 }
 
 /// Resolve a single API key for a provider (the first usable one). Environment first, then the OS
