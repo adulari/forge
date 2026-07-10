@@ -28,6 +28,11 @@ pub const CODEX_OAUTH_NAMESPACE: &str = "codex-oauth";
 /// Hardcoded ChatGPT Codex backend — deliberately NOT read from config/env.
 const CODEX_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 
+/// Parameters the generic Responses builder emits that `chatgpt.com/backend-api/codex/responses`
+/// rejects outright (verified live: `max_output_tokens` → 400 "Unsupported parameter"). The real
+/// Codex CLI sends neither. Stripped codex-side so the shared builder stays correct for xAI.
+const CODEX_UNSUPPORTED_PARAMS: &[&str] = &["max_output_tokens", "temperature"];
+
 /// True iff `url` is `https` and its host is exactly `chatgpt.com` or a genuine `*.chatgpt.com`
 /// subdomain — rejects lookalikes and any non-HTTPS scheme.
 pub fn is_pinned_codex_url(url: &str) -> bool {
@@ -445,7 +450,6 @@ pub async fn probe_entitlement(
     let body = serde_json::json!({
         "model": "gpt-5.4-mini",
         "input": [{"role": "user", "content": "Reply with OK."}],
-        "max_output_tokens": 16,
         "stream": false,
         "store": false,
     });
@@ -502,6 +506,13 @@ impl Provider for CodexOauthProvider {
             build_responses_request(model, messages, tools, opts, self.max_output_tokens);
         // The ChatGPT codex backend rejects requests unless store=false (codex-only; xAI omits it).
         body["store"] = serde_json::json!(false);
+        // The ChatGPT codex backend 400s on params the generic Responses builder emits but the
+        // real Codex CLI never sends (see CODEX_UNSUPPORTED_PARAMS) — strip codex-side only.
+        if let Some(obj) = body.as_object_mut() {
+            for k in CODEX_UNSUPPORTED_PARAMS {
+                obj.remove(*k);
+            }
+        }
 
         let first = self
             .execute(&url, &token, &chatgpt_id, &body, on_event)
@@ -769,6 +780,44 @@ mod tests {
             )
             .await
             .expect("codex backend requires store=false");
+        assert_eq!(resp.content, "hi");
+        hit.assert();
+    }
+
+    #[tokio::test]
+    async fn complete_omits_params_chatgpt_backend_rejects() {
+        // Even with a non-zero max_output_tokens cap AND an explicit temperature requested,
+        // the outgoing body to the ChatGPT codex backend must not carry either param.
+        let server = httpmock::MockServer::start();
+        let hit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/responses")
+                .body_excludes("max_output_tokens")
+                .body_excludes("temperature");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(ok_sse());
+        });
+        let store = memory_store(&[("only", "only")], "only");
+        let provider = CodexOauthProvider::new()
+            .with_api_base(server.base_url())
+            .with_accounts(store)
+            .with_max_output_tokens(4096);
+        let mut sink = |_: StreamEvent| {};
+        let opts = CompletionOptions {
+            temperature: Some(0.2),
+            ..Default::default()
+        };
+        let resp = provider
+            .complete_with(
+                "codex-oauth::gpt-5.5",
+                &[Message::user("hi")],
+                &[],
+                &opts,
+                &mut sink,
+            )
+            .await
+            .expect("codex backend rejects max_output_tokens/temperature");
         assert_eq!(resp.content, "hi");
         hit.assert();
     }
