@@ -76,6 +76,11 @@ export function AppLock({ children }: { children: React.ReactNode }) {
         setPhase("locked");
         setAuthError(AUTH_ERROR_COPY[result.error] ?? "authentication failed — try again.");
       }
+    } catch {
+      // authenticateAsync rejected (rather than resolving with success:false) — surface the
+      // retry UI instead of leaving an unhandled rejection with the app stuck mid-prompt.
+      setPhase("locked");
+      setAuthError("authentication failed — try again.");
     } finally {
       setAuthenticating(false);
     }
@@ -89,22 +94,29 @@ export function AppLock({ children }: { children: React.ReactNode }) {
       setPhase("unlocked");
       return;
     }
-    const enabled = await readAppLockEnabled();
-    enabledRef.current = enabled;
-    if (!enabled) {
+    try {
+      const enabled = await readAppLockEnabled();
+      enabledRef.current = enabled;
+      if (!enabled) {
+        setPhase("unlocked");
+        return;
+      }
+      const [hasHardware, isEnrolled] = await Promise.all([
+        LocalAuthentication.hasHardwareAsync(),
+        LocalAuthentication.isEnrolledAsync(),
+      ]);
+      if (!hasHardware || !isEnrolled) {
+        setPhase("unlocked");
+        return;
+      }
+      setPhase("locked");
+      tryAuthenticate();
+    } catch {
+      // Fail open on an internal error (pref read or hardware check threw) — same
+      // reasoning as the missing-hardware case above: never lock the user out of their
+      // own app over a bug in this check.
       setPhase("unlocked");
-      return;
     }
-    const [hasHardware, isEnrolled] = await Promise.all([
-      LocalAuthentication.hasHardwareAsync(),
-      LocalAuthentication.isEnrolledAsync(),
-    ]);
-    if (!hasHardware || !isEnrolled) {
-      setPhase("unlocked");
-      return;
-    }
-    setPhase("locked");
-    tryAuthenticate();
   }, [tryAuthenticate]);
 
   // Cold start.

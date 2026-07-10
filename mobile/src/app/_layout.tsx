@@ -19,6 +19,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { AppLock } from "../components/AppLock";
+import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Screen } from "../components/ds/Screen";
 import { ToastHost } from "../components/ds/ToastHost";
 import { PaletteHost } from "../components/overlay/CommandPalette";
@@ -127,32 +128,37 @@ export default function RootLayout() {
   // that plugin has no effect on the web export, so web needs this runtime load too
   // (it registers a @font-face under the same family names — resolves near-instantly
   // since the ttf is bundled, and is a no-op check on native where it's already embedded).
-  const [monoFontsLoaded] = useFonts({
+  const [monoFontsLoaded, monoFontsError] = useFonts({
     [monoFamily.regular]: require("../../assets/JetBrainsMono-Regular.ttf"),
     [monoFamily.bold]: require("../../assets/JetBrainsMono-Bold.ttf"),
   });
 
-  if (!monoFontsLoaded) return null;
+  // Only block on the still-loading case — on error (e.g. the web runtime load failing)
+  // proceed anyway so the app boots with system-font fallback instead of hanging forever
+  // (AuthProvider never mounts, splash never hides).
+  if (!monoFontsLoaded && !monoFontsError) return null;
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
-        <ThemeProvider>
-          <AuthProvider>
-            <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
-              <ToastHost>
-                {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
-                    `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
-                <PaletteHost>
-                  <AppLock>
-                    <RootNavigator />
-                  </AppLock>
-                </PaletteHost>
-              </ToastHost>
-              <DesktopDragRegion />
-            </PersistQueryClientProvider>
-          </AuthProvider>
-        </ThemeProvider>
+        <ErrorBoundary>
+          <ThemeProvider>
+            <AuthProvider>
+              <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
+                <ToastHost>
+                  {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
+                      `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
+                  <PaletteHost>
+                    <AppLock>
+                      <RootNavigator />
+                    </AppLock>
+                  </PaletteHost>
+                </ToastHost>
+                <DesktopDragRegion />
+              </PersistQueryClientProvider>
+            </AuthProvider>
+          </ThemeProvider>
+        </ErrorBoundary>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
