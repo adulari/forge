@@ -84,7 +84,7 @@ const styles = StyleSheet.create({
   content: { paddingVertical: space.space12, gap: space.space12 },
   columnWrapper: { gap: space.space12 },
   gridCell: { flex: 1 },
-  skeletonWrap: { paddingVertical: space.space12, paddingHorizontal: space.space16, gap: space.space12 },
+  skeletonWrap: { paddingVertical: space.space12, gap: space.space12 },
   skeletonHeader: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   skeletonGap: { marginTop: space.space8 },
 });

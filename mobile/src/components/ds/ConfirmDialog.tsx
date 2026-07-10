@@ -122,7 +122,6 @@ export function ConfirmDialog({
 
             {destructive ? (
               <Pressable
-                onPress={complete}
                 onPressIn={onHoldIn}
                 onPressOut={onHoldOut}
                 accessibilityRole="button"

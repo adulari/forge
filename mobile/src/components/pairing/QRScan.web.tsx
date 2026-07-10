@@ -20,7 +20,7 @@ import Animated, {
 import { haptics } from "../../lib/haptics";
 import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
-import { radii, space } from "../../theme/tokens";
+import { radii, space, tapTarget } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 
 export interface QRScanProps {
@@ -93,6 +93,14 @@ export function QRScan({ onScanned, paused = false }: QRScanProps) {
   useEffect(() => {
     onScannedRef.current = onScanned;
   }, [onScanned]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    const stream = streamRef.current;
+    if (state.kind !== "scanning" || !video || !stream) return;
+    video.srcObject = stream;
+    void video.play().catch(() => {});
+  }, [state.kind]);
 
   useEffect(() => {
     // Re-arm once the parent resumes us (e.g. after a failed test on the last scan).
@@ -223,7 +231,7 @@ export function QRScan({ onScanned, paused = false }: QRScanProps) {
         <ScanLine size={24} strokeWidth={1.75} color={tokens.ink3} />
         <Text style={[typeScale.sub, styles.hint, { color: tokens.ink2 }]}>{text}</Text>
         {canRetry ? (
-          <Pressable onPress={retry} hitSlop={8} accessibilityRole="button" accessibilityLabel="Try camera again">
+          <Pressable onPress={retry} accessibilityRole="button" accessibilityLabel="Try camera again" style={styles.action}>
             <Text style={[typeScale.sub, { color: tokens.accent }]}>try again</Text>
           </Pressable>
         ) : null}
@@ -277,6 +285,7 @@ const styles = StyleSheet.create({
     gap: space.space12,
   },
   hint: { textAlign: "center", maxWidth: 300 },
+  action: { minHeight: tapTarget, justifyContent: "center" },
   reticleWrap: {
     position: "absolute",
     top: 0,

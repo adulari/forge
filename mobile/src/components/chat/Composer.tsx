@@ -254,7 +254,6 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
             icon={<Square size={16} strokeWidth={1.75} color={tokens.onAccent} fill={tokens.onAccent} />}
             onPress={() => {
               onInterrupt();
-              haptics.deny();
             }}
             accessibilityLabel="stop"
             style={[styles.sendCircle, { backgroundColor: tokens.danger }]}
