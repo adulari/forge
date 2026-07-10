@@ -1574,6 +1574,29 @@ mod tests {
             .with_conserve(true)
     }
 
+    /// [`conserve_quota`] plus a pace projection on `claude-cli` — quota-pace-routing.md. Lets a
+    /// test isolate the effect of a fast-burning-but-early window (low `frac`, high projection)
+    /// from the plain fraction-only spreading `conserve_quota` alone exercises.
+    fn conserve_quota_with_pace(
+        frac: f64,
+        plan_claude: &str,
+        plan_codex: &str,
+        projected_fraction_at_reset: f64,
+    ) -> SubscriptionQuota {
+        let mut pc = std::collections::HashMap::new();
+        pc.insert(
+            "claude-cli".to_string(),
+            forge_types::QuotaPace {
+                rate_per_hour: 0.0,
+                rate_per_day: 0.0,
+                projected_fraction_at_reset: Some(projected_fraction_at_reset),
+                time_to_exhaustion_secs: None,
+                exhaustion_warning: false,
+            },
+        );
+        conserve_quota(frac, plan_claude, plan_codex).with_paces(pc)
+    }
+
     /// Distinct complex prompts (varying the seed) for measuring routing spread.
     fn complex_workload(n: usize) -> Vec<String> {
         (0..n)
@@ -1630,6 +1653,36 @@ mod tests {
         assert!(
             full_free > fresh_free,
             "more tasks must spread off subscriptions as the window fills: fresh={fresh_free} full={full_free}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pace_projecting_near_exhaustion_ramps_conservation_like_a_full_window() {
+        // Both quotas report the same low point-in-time fraction (0.2) on both subscriptions. With
+        // no pace attached, that's fresh-window behaviour (a minority of complex tasks spread).
+        // With a pace on claude-cli projecting to ~1.0 at reset, it must be conserved as hard as an
+        // already-full window — spreading share should climb close to the at-cap level.
+        let r = mixed_router();
+        let prompts = complex_workload(80);
+
+        let fresh = conserve_quota(0.2, "plus", "plus");
+        let fresh_free = prompts.len() - subscription_share(&r, &fresh, &prompts).await;
+
+        let paced = conserve_quota_with_pace(0.2, "plus", "plus", 1.0);
+        let paced_free = prompts.len() - subscription_share(&r, &paced, &prompts).await;
+
+        let at_cap = conserve_quota(1.0, "plus", "plus");
+        let at_cap_free = prompts.len() - subscription_share(&r, &at_cap, &prompts).await;
+
+        assert!(
+            paced_free > fresh_free,
+            "a pace projecting to exhaustion must spread more than the same fraction with no pace: \
+             fresh={fresh_free} paced={paced_free}"
+        );
+        assert!(
+            paced_free >= at_cap_free,
+            "a pace projecting to ~1.0 must ramp conservation to (near) the at-cap level: \
+             paced={paced_free} at_cap={at_cap_free}"
         );
     }
 

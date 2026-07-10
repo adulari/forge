@@ -159,8 +159,14 @@ pub struct MeshQuotaRow {
     pub plan: String,
     /// "Ok" / "Warning" / "Exhausted".
     pub status: String,
-    /// Probability a complex task spreads off this subscription (0.0–1.0).
+    /// Probability a complex task spreads off this subscription (0.0–1.0). Pace-projected
+    /// (quota-pace-routing.md) — matches what real routing uses, not just `fraction` above.
     pub spread_complex: f64,
+    /// Fraction the window is projected to reach by its reset time, if derivable. `None` when
+    /// there isn't enough `quota_history` yet.
+    pub projected_fraction_at_reset: Option<f64>,
+    /// True when that projection would exceed the window before it resets.
+    pub exhaustion_warning: bool,
 }
 
 /// One scored candidate row in the `/mesh` inspector.
@@ -955,11 +961,12 @@ impl App {
             }
             for q in &m.quota {
                 body.push_str(&format!(
-                    "quota {}: {:.0}% used ({} · {})\n",
+                    "quota {}: {:.0}% used ({} · {}){}\n",
                     q.provider,
                     q.fraction * 100.0,
                     q.plan,
                     q.status,
+                    mesh_pace_suffix(q.projected_fraction_at_reset, q.exhaustion_warning),
                 ));
             }
         }
@@ -4752,6 +4759,19 @@ fn mesh_meter(frac: f64, ease: f32, status: &str) -> Vec<Span<'static>> {
     ]
 }
 
+/// A compact `→ 93% at reset ⚠` suffix for a quota line when a pace projection exists
+/// (quota-pace-routing.md) — `""` when there isn't enough history to project one yet.
+fn mesh_pace_suffix(projected_fraction_at_reset: Option<f64>, exhaustion_warning: bool) -> String {
+    match projected_fraction_at_reset {
+        Some(p) => format!(
+            " → {:.0}% at reset{}",
+            p * 100.0,
+            if exhaustion_warning { " ⚠" } else { "" }
+        ),
+        None => String::new(),
+    }
+}
+
 fn mesh_truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -4852,12 +4872,13 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
         let plan = if q.plan.is_empty() { "?" } else { &q.plan };
         spans.push(Span::styled(
             format!(
-                " {:>3.0}% · {plan} · {} · spread {:.0}%",
+                " {:>3.0}% · {plan} · {} · spread {:.0}%{}",
                 q.fraction * 100.0 * ease as f64,
                 q.status,
-                q.spread_complex * 100.0
+                q.spread_complex * 100.0,
+                mesh_pace_suffix(q.projected_fraction_at_reset, q.exhaustion_warning),
             ),
-            Style::default().fg(DIM),
+            Style::default().fg(if q.exhaustion_warning { WARNYEL } else { DIM }),
         ));
         top.push(Line::from(spans));
     }
@@ -7803,6 +7824,8 @@ mod tests {
                 plan: "max-20x".into(),
                 status: "Ok".into(),
                 spread_complex: 0.5,
+                projected_fraction_at_reset: Some(0.93),
+                exhaustion_warning: true,
             }],
             candidates: vec![
                 MeshCandRow {
