@@ -447,6 +447,7 @@ pub async fn probe_entitlement(
         "input": [{"role": "user", "content": "Reply with OK."}],
         "max_output_tokens": 16,
         "stream": false,
+        "store": false,
     });
     let resp = http
         .post(responses_url())
@@ -497,7 +498,10 @@ impl Provider for CodexOauthProvider {
         let (token, chatgpt_id) = self.pick_access_token(&pool).await?;
         let url = self.responses_url();
         self.ensure_pinned(&url);
-        let body = build_responses_request(model, messages, tools, opts, self.max_output_tokens);
+        let mut body =
+            build_responses_request(model, messages, tools, opts, self.max_output_tokens);
+        // The ChatGPT codex backend rejects requests unless store=false (codex-only; xAI omits it).
+        body["store"] = serde_json::json!(false);
 
         let first = self
             .execute(&url, &token, &chatgpt_id, &body, on_event)
@@ -738,6 +742,35 @@ mod tests {
         assert_eq!(resp.content, "hi");
         a_hit.assert();
         b_hit.assert();
+    }
+
+    #[tokio::test]
+    async fn complete_sends_store_false() {
+        let server = httpmock::MockServer::start();
+        let hit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/responses")
+                .body_includes("\"store\":false");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(ok_sse());
+        });
+        let store = memory_store(&[("only", "only")], "only");
+        let provider = CodexOauthProvider::new()
+            .with_api_base(server.base_url())
+            .with_accounts(store);
+        let mut sink = |_: StreamEvent| {};
+        let resp = provider
+            .complete(
+                "codex-oauth::gpt-5.5",
+                &[Message::user("hi")],
+                &[],
+                &mut sink,
+            )
+            .await
+            .expect("codex backend requires store=false");
+        assert_eq!(resp.content, "hi");
+        hit.assert();
     }
 
     #[test]
