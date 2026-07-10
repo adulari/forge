@@ -84,7 +84,7 @@ Host pin to `chatgpt.com` (mirror `is_pinned_xai_url`, `xai_oauth.rs:54–62`); 
 
 Namespace `codex-oauth::<model>` (normalize `codex_oauth::` like `xai_oauth::` at `lib.rs:46–48`).
 
-**Seed** (no public `/models` — same static table as codex CLI, `cli_provider.rs:101–107`): `gpt-5.5` (flagship), `gpt-5.4`, `gpt-5.3-codex` (coding), `gpt-5.2`, `gpt-5.4-mini` (fast).
+**Seed** (no public `/models` — same static table as codex CLI, `cli_provider.rs:101–110`): `gpt-5.6-sol` (flagship), `gpt-5.6-terra` (balanced), `gpt-5.6-luna` (fast/cheap), `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex` (coding), `gpt-5.2`, `gpt-5.4-mini` (fast).
 
 Discovery only if session stored (`models.rs:223–228` pattern). Extend `is_subscription` (`catalog.rs:50–55`) with `codex-oauth::`. **Not** `is_cli_bridge` (`lib.rs:56–63`) — normal tool loop. KEYLESS (`run.rs:765`). Cost $0.
 

@@ -388,6 +388,32 @@ mod tests {
     }
 
     #[test]
+    fn gpt_5_6_family_siblings_match_their_own_row() {
+        // Sol/Terra/Luna share "gpt"+"5"+"6" but each carries its own distinguishing family word,
+        // so the exact-canon fast path (not the overlap fallback) must pick the right sibling —
+        // never let a request for one tier silently inherit another tier's score.
+        let mut b = BenchmarkScores::new();
+        b.insert("GPT-5.6 Sol (high)", 68.0, 71.0);
+        b.insert("GPT-5.6 Terra (high)", 59.0, 61.0);
+        b.insert("GPT-5.6 Luna (max)", 45.0, 48.0);
+
+        let sol = b.score_for("codex-oauth::gpt-5.6-sol").unwrap();
+        assert_eq!(sol.intelligence, 68.0, "sol must not resolve to terra/luna");
+
+        let terra = b.score_for("codex-cli::gpt-5.6-terra").unwrap();
+        assert_eq!(
+            terra.intelligence, 59.0,
+            "terra must not resolve to sol/luna"
+        );
+
+        let luna = b.score_for("gpt-5.6-luna").unwrap();
+        assert_eq!(
+            luna.intelligence, 45.0,
+            "luna must not resolve to sol/terra"
+        );
+    }
+
+    #[test]
     fn effort_variants_collapse_to_best() {
         // Same model at several effort levels → one canonical row, the highest-intelligence one.
         let mut b = BenchmarkScores::new();
