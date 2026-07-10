@@ -3652,6 +3652,22 @@ pub(crate) async fn run_chat_tui(
                             app.note("⏹ remote interrupted — stopped responding");
                         }
                     }
+                    remote::RemoteInput::Dequeue { index, text } => {
+                        let idx = index as usize;
+                        if idx < queued_prompts.len() && queued_prompts[idx] == text {
+                            queued_prompts.remove(idx);
+                            app.set_queued(&queued_prompts);
+                            app.note(&format!(
+                                "✕ remote dequeued — {} pending",
+                                queued_prompts.len()
+                            ));
+                        } else {
+                            push_remote_note(
+                                &mut remote_notes,
+                                "⚠ stale dequeue ignored — the queue changed; review the current list",
+                            );
+                        }
+                    }
                     remote::RemoteInput::Key { key } => {
                         // The keystroke channel: inject through the SAME key path a local
                         // keystroke takes (queued here, drained at the head of the key loop).

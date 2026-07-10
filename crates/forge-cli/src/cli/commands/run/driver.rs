@@ -577,6 +577,22 @@ impl DriverState {
                     self.app.note("⏹ remote interrupted — stopped responding");
                 }
             }
+            remote::RemoteInput::Dequeue { index, text } => {
+                let idx = index as usize;
+                if idx < self.queued_prompts.len() && self.queued_prompts[idx] == text {
+                    self.queued_prompts.remove(idx);
+                    self.app.set_queued(&self.queued_prompts);
+                    self.app.note(&format!(
+                        "✕ remote dequeued — {} pending",
+                        self.queued_prompts.len()
+                    ));
+                } else {
+                    push_remote_note(
+                        &mut self.notes,
+                        "⚠ stale dequeue ignored — the queue changed; review the current list",
+                    );
+                }
+            }
             remote::RemoteInput::Key { key } => {
                 // Same guards as the TUI drain: prompts resolve ONLY via seq-checked
                 // Allow/Answer, and a bare idle Esc must never do anything drastic.
