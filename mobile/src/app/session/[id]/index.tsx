@@ -265,6 +265,15 @@ export default function SessionChat() {
     send({ kind: "interrupt" });
   }, [send]);
 
+  const handleDequeue = useCallback(
+    (index: number, text: string) => {
+      if (!online) return;
+      send({ kind: "dequeue", index, text });
+      haptics.select();
+    },
+    [online, send],
+  );
+
   const removeQueuedOffline = useCallback((index: number) => {
     setOfflineQueue((prev) => prev.filter((_, i) => i !== index));
     haptics.select();
@@ -583,12 +592,10 @@ export default function SessionChat() {
 
       {hasPending ? (
         <View style={[styles.pendingRow, { borderTopColor: tokens.border }]}>
-          {/* No onPress: unlike the offline queue (a client-local array this file owns), these
-           * are already server-side (`snapshot.queued`) and RemoteInput (ws.ts) has no
-           * dequeue/cancel-queued kind — only `interrupt`, which cancels the active turn, not a
-           * not-yet-started queued one. Nothing to wire up without a daemon protocol addition. */}
+          {/* Tapping a queued chip sends `dequeue` (index+text echoed) so the daemon can reject a
+           * stale tap after the queue shifted. */}
           {queued.map((text, i) => (
-            <Chip key={`q${i}`} label={text} />
+            <Chip key={`q${i}`} label={text} onPress={() => handleDequeue(i, text)} />
           ))}
           {offlineQueue.map((text, i) => (
             // Deliberately NOT `selected` (ember/accent) — this is a normal "will send on

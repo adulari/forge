@@ -5,6 +5,11 @@ const $ = (id) => document.getElementById(id);
 let ws = null, dead = false, notif = false, curSeq = 0, retries = 0, curOverlay = null;
 // The /copy payload stashed outside the DOM (it can be large / contain anything).
 let copyPayload = "";
+// The queued-prompts list rendered by renderActions, stashed outside the DOM so the ✕ button's
+// delegated click handler can echo back the exact text at the tapped index (same "prove what you
+// saw" pattern as curSeq for Allow/Answer) without round-tripping raw prompt text through a
+// data-* attribute (which would need HTML-attribute escaping on top of textContent escaping).
+let queuedList = [];
 let prev = { busy: false, prompt: false, question: false };
 // v6 multi-session daemon: when the server is `forge serve`, the page addresses ONE of its
 // sessions with `?session=<id>` and offers a session list (attach / create / archive). The
@@ -830,6 +835,7 @@ function renderDiff(s) {
 function renderActions(s) {
   const a = $("actions");
   const queued = s.queued || [];
+  queuedList = queued;
   const notes = s.notes || [];
   // When the plan card owns the pending question (Approve/Revise/Cancel above), the generic
   // question UI would duplicate it — suppress it, the card's buttons answer the same seq.
@@ -842,7 +848,9 @@ function renderActions(s) {
   if (a._sig === sig) return;
   a._sig = sig;
   let h = queued.length
-    ? '<div class="queued">' + queued.map(q => "⏳ queued: " + esc(q)).join("<br>") + '</div>'
+    ? '<div class="queued">' + queued.map((q, i) => "⏳ queued: " + esc(q) +
+        ' <button class="ox" data-act="dequeue" data-idx="' + i + '" title="cancel this prompt">✕</button>')
+        .join("<br>") + '</div>'
     : "";
   if (notes.length) {
     h += '<div class="queued">' + notes.map(esc).join("<br>") + '</div>';
@@ -1046,6 +1054,13 @@ $("actions").addEventListener("click", (e) => {
     if (v.trim()) send({ kind: "answer", text: v, seq: curSeq });
   } else if (b.dataset.act === "copy") {
     copyText(copyPayload);
+  } else if (b.dataset.act === "dequeue") {
+    // Echo back the text this button was rendered with — if the queue shifted under the tap
+    // (a turn finished and consumed the head) the index no longer matches and the driver drops
+    // the stale dequeue, same "prove what you saw" contract as seq-checked Allow/Answer.
+    const idx = Number(b.dataset.idx);
+    const text = queuedList[idx];
+    if (text !== undefined) send({ kind: "dequeue", index: idx, text: text });
   }
 });
 

@@ -133,6 +133,9 @@ export type RemoteInput =
   | { kind: "allow"; yes: boolean; seq: number }
   | { kind: "answer"; text: string; seq: number }
   | { kind: "interrupt" }
+  // Cancels one server-queued prompt; index+text echo Snapshot.queued so a shifted queue is
+  // detected server-side and dropped as stale.
+  | { kind: "dequeue"; index: number; text: string }
   | { kind: "key"; key: string }
   | { kind: "overlay_select"; id: string }
   | { kind: "overlay_nav"; delta: number }

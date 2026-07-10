@@ -830,6 +830,12 @@ pub enum RemoteInput {
     Answer { text: String, seq: u64 },
     /// Esc-while-busy: stop the current turn (ignored when idle).
     Interrupt,
+    /// Remove ONE not-yet-started queued prompt (added v7.2 — the mobile queued-chip tap).
+    /// `index` is the position in [`Snapshot::queued`] the client rendered; `text` echoes the
+    /// prompt at that position so a queue that shifted under the tap (a turn completed and
+    /// consumed the head) is detected and the stale dequeue is dropped — same philosophy as
+    /// the seq-checked [`RemoteInput::Allow`]/[`RemoteInput::Answer`].
+    Dequeue { index: u64, text: String },
     /// A named keystroke (see [`named_key`]) injected through the SAME key path a local
     /// keystroke takes — the parity primitive for driving pickers/overlays. Dropped (with a
     /// note) while a permission prompt / question is pending: those must be answered via the
@@ -2054,6 +2060,14 @@ mod tests {
             serde_json::from_str::<RemoteInput>(r#"{"kind":"interrupt"}"#).unwrap(),
             RemoteInput::Interrupt
         );
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"dequeue","index":1,"text":"hi"}"#)
+                .unwrap(),
+            RemoteInput::Dequeue {
+                index: 1,
+                text: "hi".into()
+            }
+        );
     }
 
     #[test]
@@ -2250,6 +2264,11 @@ mod tests {
         assert!(serde_json::from_str::<RemoteInput>(r#"{"kind":"answer","text":"2"}"#).is_err());
         // Prompt/Interrupt are seq-free (they don't resolve a pending prompt) and still parse.
         assert!(serde_json::from_str::<RemoteInput>(r#"{"kind":"interrupt"}"#).is_ok());
+        // Dequeue is seq-free too — it self-validates via the echoed index+text instead.
+        assert!(
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"dequeue","index":0,"text":"x"}"#)
+                .is_ok()
+        );
     }
 
     #[test]
