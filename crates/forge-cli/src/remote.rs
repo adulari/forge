@@ -687,6 +687,9 @@ pub struct Snapshot {
     pub done: bool,
     /// The active operating temper label (e.g. "Ask").
     pub temper: String,
+    /// The session's current reasoning effort (`low` through `whitehot`).
+    #[serde(default)]
+    pub effort: String,
     /// Mesh routing: tier + model, or "—" when unset.
     pub tier: Option<String>,
     pub model: String,
@@ -754,6 +757,7 @@ impl Default for Snapshot {
             busy: false,
             done: false,
             temper: String::new(),
+            effort: String::new(),
             tier: None,
             model: "—".to_string(),
             cost_usd: 0.0,
@@ -1813,6 +1817,7 @@ mod tests {
             exposure: "LAN".into(),
             busy: true,
             temper: "Ask".into(),
+            effort: "whitehot".into(),
             tier: Some("complex".into()),
             model: "groq::llama-3.3-70b".into(),
             cost_usd: 0.0123,
@@ -1897,6 +1902,7 @@ mod tests {
         assert_eq!(v["worktree"], "/home/u/proj/.forge/worktrees/abc12345");
         assert_eq!(v["exposure"], "LAN");
         assert_eq!(v["busy"], true);
+        assert_eq!(v["effort"], "whitehot");
         assert_eq!(v["tier"], "complex");
         assert_eq!(v["model"], "groq::llama-3.3-70b");
         assert_eq!(v["cost_usd"], 0.0123);

@@ -53,7 +53,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const toast = useToast();
   const pathname = usePathname();
   const { isCompact } = useBreakpoint();
-  const { snapshot, connectionState, setHeaderHeight, baseUrl } = useSessionCtx();
+  const { snapshot, connectionState, send, setHeaderHeight, baseUrl } = useSessionCtx();
 
   // ARCHITECTURE §4.1.4: on the `busy` true->false edge, invalidate this session's history
   // query so the finalized turn appears from the store. The shell only needs to call the
@@ -199,6 +199,8 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             tier={snapshot?.tier ?? null}
             model={snapshot?.model ?? "—"}
             temper={snapshot?.temper ?? "—"}
+            effort={snapshot?.effort}
+            send={send}
             costUsd={snapshot?.cost_usd ?? 0}
             contextTokens={snapshot?.context_tokens ?? 0}
             contextLimit={snapshot?.context_limit ?? null}

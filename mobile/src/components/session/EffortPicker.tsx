@@ -1,0 +1,101 @@
+import { Flame } from "lucide-react-native";
+import React, { useEffect, useState } from "react";
+import { Pressable, StyleSheet, Text, View } from "react-native";
+
+import type { RemoteInput } from "../../lib/ws";
+import { useTokens } from "../../theme/ThemeProvider";
+import { radii, space } from "../../theme/tokens";
+import { type as typeScale } from "../../theme/typography";
+import { Chip } from "../ds/Chip";
+import { Sheet } from "../ds/Sheet";
+
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "whitehot"] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+
+export interface EffortPickerProps {
+  effort?: string | null;
+  send: (input: RemoteInput) => void;
+}
+
+function isEffortLevel(value: string | null | undefined): value is EffortLevel {
+  return value != null && EFFORT_LEVELS.includes(value as EffortLevel);
+}
+
+export function EffortPicker({ effort, send }: EffortPickerProps) {
+  const tokens = useTokens();
+  const [visible, setVisible] = useState(false);
+  const [pending, setPending] = useState<EffortLevel | null>(null);
+  const current = pending ?? (isEffortLevel(effort) ? effort : "medium");
+
+  useEffect(() => {
+    if (pending != null && effort === pending) setPending(null);
+  }, [effort, pending]);
+
+  const select = (level: EffortLevel) => {
+    setPending(level);
+    setVisible(false);
+    send({ kind: "prompt", text: `/effort ${level}` });
+  };
+
+  const whitehot = current === "whitehot";
+  return (
+    <>
+      <Chip
+        label={`effort: ${current}`}
+        selected={whitehot}
+        icon={whitehot ? <Flame size={14} strokeWidth={1.75} color={tokens.accent} /> : undefined}
+        onPress={() => setVisible(true)}
+        testID="effort-picker"
+      />
+      <Sheet visible={visible} onClose={() => setVisible(false)} accessibilityLabel="Reasoning effort">
+        <View style={styles.content}>
+          <Text style={[typeScale.heading, { color: tokens.ink }]}>Reasoning effort</Text>
+          <Text style={[typeScale.sub, { color: tokens.ink2 }]}>Choose how intensely Forge reasons for this session.</Text>
+          <View style={styles.options}>
+            {EFFORT_LEVELS.map((level) => {
+              const selected = level === current;
+              const isWhitehot = level === "whitehot";
+              return (
+                <Pressable
+                  key={level}
+                  onPress={() => select(level)}
+                  accessibilityRole="radio"
+                  accessibilityState={{ selected }}
+                  accessibilityLabel={level}
+                  style={[
+                    styles.option,
+                    {
+                      backgroundColor: selected ? tokens.selection : tokens.bg2,
+                      borderColor: selected || isWhitehot ? tokens.accent : tokens.border,
+                    },
+                  ]}
+                >
+                  {isWhitehot ? <Flame size={16} strokeWidth={1.75} color={tokens.accent} /> : null}
+                  <Text style={[typeScale.bodyBold, styles.optionLabel, { color: isWhitehot ? tokens.accent : tokens.ink }]}>
+                    {level}
+                  </Text>
+                  {selected ? <Text style={[typeScale.meta, { color: tokens.ink3 }]}>current</Text> : null}
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      </Sheet>
+    </>
+  );
+}
+
+const styles = StyleSheet.create({
+  content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space8 },
+  options: { gap: space.space8, paddingTop: space.space8 },
+  option: {
+    minHeight: 44,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space8,
+    paddingHorizontal: space.space12,
+    borderRadius: radii.radius8,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  optionLabel: { flex: 1 },
+});

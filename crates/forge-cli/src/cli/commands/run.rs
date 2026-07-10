@@ -4442,6 +4442,11 @@ pub(crate) fn build_snapshot_frame(
         busy: view.busy,
         done: view.done,
         temper: view.temper,
+        effort: view
+            .effort
+            .map(forge_types::EffortLevel::as_str)
+            .unwrap_or("medium")
+            .to_string(),
         tier: view.tier,
         model: view.model,
         cost_usd: view.cost_usd,
