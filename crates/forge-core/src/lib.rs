@@ -859,6 +859,19 @@ fn completion_gate(
     }
 }
 
+fn completion_verification_empty_is_terminal(
+    verify_attempts: usize,
+    tasks: &[forge_types::TodoItem],
+    has_prior_final: bool,
+) -> bool {
+    verify_attempts > 0
+        && !tasks.is_empty()
+        && tasks
+            .iter()
+            .all(|task| matches!(task.status, forge_types::TodoStatus::Done))
+        && has_prior_final
+}
+
 /// Decision of the token-budget continuation guard (H8): when a code-change turn ends without a
 /// verified result, should Forge nudge the model to actually do the work, accept the turn as-is, or
 /// halt an unproductive spiral with an honest reason? Resolved once per continuation from signals
@@ -3498,6 +3511,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         let mut pinned_outage_warned_halfway = false;
 
         let mut final_text = String::new();
+        let mut has_prior_final = false;
         let mut context_tokens: u64 = 0;
         // Per-turn cumulative bridge input tokens (wave 5, fix 1). A CLI bridge runs its own tool
         // loop in a subprocess, so the direct-path cost guards never see it; this sums the input
@@ -4129,11 +4143,27 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             }
 
             if !resp.wants_tools() {
+                if !resp.content.trim().is_empty() {
+                    final_text = resp.content.clone();
+                    has_prior_final = true;
+                }
                 // A response with neither text nor a tool call is a silent dead-end (model glitch,
                 // narrate-then-stall, or a transient empty completion). Rather than just stopping,
                 // nudge it to continue a bounded number of times — this recovers the common case
                 // where the model would have made progress on a retry.
                 if resp.content.trim().is_empty() {
+                    if completion_verification_empty_is_terminal(
+                        verify_attempts,
+                        &self.tasks,
+                        has_prior_final,
+                    ) {
+                        self.presenter.emit(PresenterEvent::Warning(
+                            "verification continuation returned no additional text — keeping the completed answer"
+                                .to_string(),
+                        ));
+                        hit_step_cap = false;
+                        break;
+                    }
                     const MAX_EMPTY_NUDGES: usize = 2;
                     if empty_nudges < MAX_EMPTY_NUDGES {
                         empty_nudges += 1;
@@ -9149,6 +9179,23 @@ mod tests {
             warnings.iter().any(|w| w.contains("kept failing") && w.contains("after a nudge")),
             "the failure-loop guard should halt a model failing the same way; warnings: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn completion_verification_empty_only_accepts_completed_turn_with_prior_answer() {
+        let done = vec![forge_types::TodoItem {
+            title: "ship".into(),
+            status: forge_types::TodoStatus::Done,
+        }];
+        let open = vec![forge_types::TodoItem {
+            title: "ship".into(),
+            status: forge_types::TodoStatus::InProgress,
+        }];
+
+        assert!(completion_verification_empty_is_terminal(1, &done, true));
+        assert!(!completion_verification_empty_is_terminal(0, &done, true));
+        assert!(!completion_verification_empty_is_terminal(1, &done, false));
+        assert!(!completion_verification_empty_is_terminal(1, &open, true));
     }
 
     #[test]
