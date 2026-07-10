@@ -387,6 +387,14 @@ pub fn has_session() -> bool {
     provider_oauth::load_provider_oauth_tokens(CODEX_OAUTH_KEYRING_PROVIDER).is_some()
 }
 
+/// The ACTIVE codex-oauth account's ChatGPT plan (`chatgpt_plan_type` claim on its access token —
+/// see docs/design/subscription-efficiency-routing.md Fix 4). `None` when there's no session or
+/// the token carries no plan claim. Never logs the token.
+pub fn detected_plan() -> Option<String> {
+    let tokens = provider_oauth::load_provider_oauth_tokens(CODEX_OAUTH_KEYRING_PROVIDER)?;
+    provider_oauth::extract_chatgpt_plan_type(&tokens.access_token)
+}
+
 const CODEX_OAUTH_SEED_MODELS: &[&str] = &[
     "gpt-5.6-sol",
     "gpt-5.6-terra",

@@ -1177,6 +1177,97 @@ fn read_project_agents_md() -> Option<String> {
     None
 }
 
+/// Merge semantics for [`resolved_subscription_plans`], pulled out as a pure function so it's
+/// unit-testable without touching the keyring or `~/.codex/auth.json` (see the test module
+/// below): `detected` wins per key — it's read live from the account actually in use, so it
+/// cannot drift from it — and `config` fills any key `detected` didn't have (`agy-cli` /
+/// `xai-oauth`, or a codex surface with no live session).
+fn merge_subscription_plans(
+    mut config: std::collections::HashMap<String, String>,
+    detected: std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    config.extend(detected);
+    config
+}
+
+/// `config.mesh.subscriptions` merged with live per-account plan detection (Fix 4,
+/// docs/design/subscription-efficiency-routing.md). The single source every `SubscriptionQuota::
+/// with_plans` call site goes through, so they cannot drift from each other: `live_quota` here,
+/// `subagent::route_child`, `duel::run`, and the `forge mesh` / `forge models` inspector in
+/// `forge-cli`'s `commands::models` (hence `pub`, not `pub(crate)`).
+///
+/// If you add a `with_plans` call site, route it through here. A site that passes
+/// `config.mesh.subscriptions` directly renders `plan ?` for any surface whose plan is detected
+/// rather than configured — which is exactly the D4 defect this function exists to fix.
+pub fn resolved_subscription_plans(config: &Config) -> std::collections::HashMap<String, String> {
+    merge_subscription_plans(
+        config.mesh.subscriptions.clone(),
+        forge_provider::detect_subscription_plans(),
+    )
+}
+
+#[cfg(test)]
+mod subscription_plan_merge_tests {
+    use super::merge_subscription_plans;
+    use std::collections::HashMap;
+
+    #[test]
+    fn detected_overrides_config_but_config_only_keys_survive() {
+        let config: HashMap<String, String> = [
+            ("codex-cli".to_string(), "plus".to_string()),
+            ("agy-cli".to_string(), "free".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let detected: HashMap<String, String> = [
+            ("codex-cli".to_string(), "pro".to_string()),
+            ("codex-oauth".to_string(), "plus".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let merged = merge_subscription_plans(config, detected);
+
+        assert_eq!(
+            merged.get("codex-cli"),
+            Some(&"pro".to_string()),
+            "detected wins"
+        );
+        assert_eq!(
+            merged.get("agy-cli"),
+            Some(&"free".to_string()),
+            "config-only key survives"
+        );
+        assert_eq!(
+            merged.get("codex-oauth"),
+            Some(&"plus".to_string()),
+            "detected-only key is added"
+        );
+    }
+
+    #[test]
+    fn empty_detected_keeps_config_untouched() {
+        let config: HashMap<String, String> = [("claude-cli".to_string(), "max-20x".to_string())]
+            .into_iter()
+            .collect();
+
+        let merged = merge_subscription_plans(config.clone(), HashMap::new());
+
+        assert_eq!(merged, config);
+    }
+
+    #[test]
+    fn empty_config_keeps_detected_untouched() {
+        let detected: HashMap<String, String> = [("codex-oauth".to_string(), "plus".to_string())]
+            .into_iter()
+            .collect();
+
+        let merged = merge_subscription_plans(HashMap::new(), detected.clone());
+
+        assert_eq!(merged, detected);
+    }
+}
+
 impl Session {
     pub fn start(
         store: Arc<Store>,
@@ -2316,7 +2407,7 @@ impl Session {
         self.store
             .current_quota()
             .unwrap_or_default()
-            .with_plans(self.config.mesh.subscriptions.clone())
+            .with_plans(resolved_subscription_plans(&self.config))
             .with_conserve(self.config.mesh.subscription_conserve)
     }
 

@@ -545,7 +545,7 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
     let quota = store
         .current_quota()
         .unwrap_or_default()
-        .with_plans(config.mesh.subscriptions.clone())
+        .with_plans(forge_core::resolved_subscription_plans(&config))
         .with_conserve(config.mesh.subscription_conserve);
     let health = store.current_benched().unwrap_or_default();
     let budget = forge_mesh::BudgetState {

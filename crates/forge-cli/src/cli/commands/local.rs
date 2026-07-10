@@ -217,6 +217,8 @@ pub(crate) async fn auth_xai_oauth(
         .context("storing xAI OAuth tokens")?;
     // A new subscription login must surface its models without waiting for the 24h cache to age out.
     crate::cli::commands::models::invalidate_catalog_cache();
+    // Same for the detected-plan cache: don't serve a stale/absent plan for up to 60s.
+    forge_provider::invalidate_plan_cache();
 
     match forge_provider::probe_entitlement(&tokens.access_token).await {
         Ok(forge_provider::EntitlementStatus::Entitled) => println!(
@@ -328,17 +330,26 @@ pub(crate) async fn auth_codex_oauth(
                 }
             )
         };
+        // Detected live from the ACTIVE account's access-token JWT (Fix 4,
+        // docs/design/subscription-efficiency-routing.md) — never the token itself.
+        let plan_suffix = forge_provider::codex_oauth_detected_plan()
+            .map(|plan| format!(" — plan: {plan}"))
+            .unwrap_or_default();
         if accounts.len() == 1 {
             let (_, tokens, _) = &accounts[0];
-            println!("codex-oauth: signed in ({})", describe(tokens));
+            println!("codex-oauth: signed in ({}){plan_suffix}", describe(tokens));
         } else {
             println!(
                 "codex-oauth: {} account(s) · auto-rotation ON (round-robin)",
                 accounts.len()
             );
             for (id, tokens, is_active) in &accounts {
+                // The plan claim is only meaningful for the currently ACTIVE account — a
+                // rotation sibling's own plan isn't detected here (would need per-account JWT
+                // decoding, out of scope for Fix 4).
+                let suffix = if *is_active { plan_suffix.as_str() } else { "" };
                 println!(
-                    "  {} {id} — {}",
+                    "  {} {id} — {}{suffix}",
                     if *is_active { "*" } else { " " },
                     describe(tokens)
                 );
@@ -438,6 +449,8 @@ pub(crate) async fn auth_codex_oauth(
         .context("storing Codex OAuth tokens")?;
     // A new subscription login must surface its models without waiting for the 24h cache to age out.
     crate::cli::commands::models::invalidate_catalog_cache();
+    // Same for the detected-plan cache: don't serve a stale/absent plan for up to 60s.
+    forge_provider::invalidate_plan_cache();
 
     let probe_id = chatgpt_id.as_deref().unwrap_or(&account_id);
     match forge_provider::probe_codex_entitlement(&tokens.access_token, probe_id).await {

@@ -3,6 +3,8 @@
 //! ranking; the async *discovery* (querying each provider's model list) lives in the binary
 //! (forge-cli), which has the provider client — forge-mesh stays free of that dependency.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use forge_types::{EffortLevel, TaskTier};
@@ -32,6 +34,10 @@ pub struct ModelCatalog {
     /// Measured performance scores (ADR-0011), attached at discovery. When present the router ranks
     /// on real benchmark data; when absent it falls back to the family-name heuristic.
     bench: Option<BenchmarkScores>,
+    /// Config overrides for `subscription_burn_weight` (`mesh.burn_weights`), keyed by bare model
+    /// name. Empty by default — a no-op, `route_score` falls back to the bundled table.
+    #[serde(default)]
+    burn_weights: HashMap<String, f64>,
 }
 
 /// The provider prefix of a `provider::model` id (`"groq"` from `"groq::llama-3.1-8b"`).
@@ -235,10 +241,55 @@ fn code_prior(provider: &str, code_heavy: bool, tier: TaskTier) -> f64 {
     0.0
 }
 
+/// Per-tier scaling for the subscription burn-weight penalty (Fix 2,
+/// docs/design/subscription-efficiency-routing.md): cheap tiers avoid flagship burn hard, since a
+/// trivial/standard task rarely needs the expensive sibling's extra capability; Complex still
+/// wants the flagship but tie-breaks toward the cheaper sibling when capability is close.
+const BURN_K_TRIVIAL: f64 = 1.0;
+const BURN_K_STANDARD: f64 = 0.7;
+const BURN_K_COMPLEX: f64 = 0.15;
+
+fn burn_k(tier: TaskTier) -> f64 {
+    match tier {
+        TaskTier::Trivial => BURN_K_TRIVIAL,
+        TaskTier::Standard => BURN_K_STANDARD,
+        TaskTier::Complex => BURN_K_COMPLEX,
+    }
+}
+
+/// Linear map from a subscription's live consumed-window fraction (`SubscriptionQuota::
+/// effective_fraction_for`, pace-projected per #573) to a penalty multiplier: 0.5 when the window
+/// is fresh, 2.0 when it is nearly spent. This composes with — and does not duplicate —
+/// `conserve_decision`: that fires per-prompt to spread whole turns off the subscription onto a
+/// free-frontier alternative; this only scales how hard a same-subscription tie-break (e.g. Sol vs
+/// Luna) leans toward the cheaper sibling.
+fn pressure_multiplier(fraction: f64) -> f64 {
+    (0.5 + 1.5 * fraction).clamp(0.5, 2.0)
+}
+
+/// Fix 2: the subscription plan-burn penalty for a subscription model, scaled by tier urgency and
+/// live quota pressure. `ln(weight)` keeps a 5x burn from swamping a genuine capability gap (ln 5
+/// ≈ 1.61) and makes a weight of 1.0 (cheapest sibling, or any unknown model) contribute exactly
+/// zero — so behaviour is unchanged for every model with no burn-weight entry.
+fn subscription_burn_penalty(
+    id: &str,
+    tier: TaskTier,
+    quota: &forge_types::SubscriptionQuota,
+    overrides: &HashMap<String, f64>,
+) -> f64 {
+    let weight = crate::capability::subscription_burn_weight(id, overrides);
+    if weight <= 0.0 {
+        return 0.0;
+    }
+    let fraction = quota.effective_fraction_for(provider_of(id));
+    burn_k(tier) * weight.ln() * pressure_multiplier(fraction)
+}
+
 /// The full routing score for one model: capability fit + cost-class preference + the mild prior,
-/// minus a quota penalty so a near-limit subscription drops below its alternatives (L3). The
-/// penalty is applied in the SCORE (not just a post-sort) so non-subscription alternatives make it
-/// into the truncated shortlist — otherwise the top picks are all the (pressured) subscription.
+/// minus the subscription burn-weight penalty (Fix 2) and a quota status penalty so a near-limit
+/// subscription drops below its alternatives (L3). The penalties are applied in the SCORE (not
+/// just a post-sort) so non-subscription alternatives make it into the truncated shortlist —
+/// otherwise the top picks are all the (pressured) subscription.
 fn route_score(
     id: &str,
     tier: TaskTier,
@@ -246,12 +297,14 @@ fn route_score(
     code_heavy: bool,
     quota: &forge_types::SubscriptionQuota,
     bench: Option<&BenchmarkScores>,
+    burn_weight_overrides: &HashMap<String, f64>,
 ) -> f64 {
-    let base = capability_score_b(id, tier, code_heavy, bench)
+    let mut base = capability_score_b(id, tier, code_heavy, bench)
         + cost_pref(tier, cost_class(id, cost))
         + code_prior(provider_of(id), code_heavy, tier)
         - crate::capability::tool_reliability_penalty(id);
     if is_subscription(id) {
+        base -= subscription_burn_penalty(id, tier, quota, burn_weight_overrides);
         match quota.status_for(provider_of(id)) {
             forge_types::QuotaStatus::Exhausted => return base - 100.0, // effectively last
             forge_types::QuotaStatus::Warning => return base - 5.0,     // below any plausible alt
@@ -597,6 +650,7 @@ impl ModelCatalog {
         Self {
             models,
             bench: None,
+            burn_weights: HashMap::new(),
         }
     }
 
@@ -612,6 +666,14 @@ impl ModelCatalog {
     /// or empty set is a no-op — ranking stays on the family heuristic.
     pub fn with_benchmarks(mut self, bench: Option<BenchmarkScores>) -> Self {
         self.bench = bench.filter(|b| !b.is_empty());
+        self
+    }
+
+    /// Attach `mesh.burn_weights` config overrides (Fix 1,
+    /// docs/design/subscription-efficiency-routing.md), keyed by bare model name. An empty map is
+    /// a no-op — `route_score` falls back to the bundled `subscription_burn_weight` table.
+    pub fn with_burn_weights(mut self, overrides: HashMap<String, f64>) -> Self {
+        self.burn_weights = overrides;
         self
     }
 
@@ -691,7 +753,15 @@ impl ModelCatalog {
             .filter(|m| is_routable(m))
             .map(|m| {
                 let cost = pricing.estimated_cost(m);
-                let mut score = route_score(m, tier, cost, code_heavy, quota, self.bench.as_ref());
+                let mut score = route_score(
+                    m,
+                    tier,
+                    cost,
+                    code_heavy,
+                    quota,
+                    self.bench.as_ref(),
+                    &self.burn_weights,
+                );
                 if conserve && is_subscription(m) {
                     score -= CONSERVE_PENALTY;
                 }
@@ -794,7 +864,15 @@ impl ModelCatalog {
             .filter(|m| is_routable(m))
             .map(|m| {
                 let cost = pricing.estimated_cost(m);
-                let base = route_score(m, tier, cost, code_heavy, quota, self.bench.as_ref());
+                let base = route_score(
+                    m,
+                    tier,
+                    cost,
+                    code_heavy,
+                    quota,
+                    self.bench.as_ref(),
+                    &self.burn_weights,
+                );
                 let sub = is_subscription(m);
                 let penalty = if decision.fired && sub {
                     CONSERVE_PENALTY
@@ -1702,5 +1780,127 @@ mod tests {
                 "{id} should NOT be recognized as vision-capable"
             );
         }
+    }
+
+    // --- Fix 2: subscription burn-weight penalty in route_score ---------------------------
+
+    #[test]
+    fn gpt56_luna_outranks_sol_at_trivial_and_standard_with_a_fresh_quota() {
+        // No bench data: quality_class ties sol/luna at the same frontier class (both match
+        // "gpt-5"), so the outcome is driven entirely by the speed_class Luna now correctly gets
+        // credit for (Fix 3) plus its lower burn penalty (Fix 2, both effectively zero at weight
+        // 1.0). Same provider (codex-oauth) on both ids, so no rotation/tiebreak noise.
+        let cat = ModelCatalog::new(vec![
+            "codex-oauth::gpt-5.6-sol".into(),
+            "codex-oauth::gpt-5.6-luna".into(),
+        ]);
+        let fresh = forge_types::SubscriptionQuota::default();
+        for tier in [TaskTier::Trivial, TaskTier::Standard] {
+            let r = cat.ranked_seeded(tier, &Pricing::default(), 2, false, 0, &fresh, None);
+            assert_eq!(
+                r[0], "codex-oauth::gpt-5.6-luna",
+                "{tier:?}: luna should outrank sol with a fresh quota: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gpt56_sol_still_outranks_luna_at_complex_given_a_real_capability_gap() {
+        // At Complex, capability (q, weight 2.0) dominates speed (weight 0.25) — but only a real
+        // measured capability gap can express that in the score, since the name heuristic alone
+        // ties sol/luna's quality_class. This is what makes Sol worth its 5x burn: a genuinely
+        // higher intelligence index, exactly the real-world justification for the burn-weight
+        // table (Sol costs 5x because it measurably performs better, not merely by name).
+        use crate::bench::BenchmarkScores;
+        let cat = ModelCatalog::new(vec![
+            "codex-oauth::gpt-5.6-sol".into(),
+            "codex-oauth::gpt-5.6-luna".into(),
+        ]);
+        let mut b = BenchmarkScores::new();
+        b.insert("gpt-5.6-sol", 62.0, 60.0);
+        b.insert("gpt-5.6-luna", 38.0, 36.0);
+        let cat = cat.with_benchmarks(Some(b));
+        let fresh = forge_types::SubscriptionQuota::default();
+        let r = cat.ranked_seeded(
+            TaskTier::Complex,
+            &Pricing::default(),
+            2,
+            false,
+            0,
+            &fresh,
+            None,
+        );
+        assert_eq!(
+            r[0], "codex-oauth::gpt-5.6-sol",
+            "sol should still win complex given a real capability gap: {r:?}"
+        );
+    }
+
+    #[test]
+    fn near_exhausted_quota_penalizes_sol_more_than_a_fresh_one() {
+        let cat = ModelCatalog::new(vec!["codex-oauth::gpt-5.6-sol".into()]);
+        let fresh = forge_types::SubscriptionQuota::default();
+        let mut fr = HashMap::new();
+        fr.insert("codex-oauth".to_string(), 0.95);
+        let near_exhausted = forge_types::SubscriptionQuota::new(HashMap::new()).with_fractions(fr);
+
+        let (_, fresh_rows) = cat.ranked_rows(
+            TaskTier::Standard,
+            &Pricing::default(),
+            false,
+            0,
+            &fresh,
+            None,
+        );
+        let (_, pressured_rows) = cat.ranked_rows(
+            TaskTier::Standard,
+            &Pricing::default(),
+            false,
+            0,
+            &near_exhausted,
+            None,
+        );
+        let fresh_score = fresh_rows
+            .iter()
+            .find(|r| r.model == "codex-oauth::gpt-5.6-sol")
+            .unwrap()
+            .final_score;
+        let pressured_score = pressured_rows
+            .iter()
+            .find(|r| r.model == "codex-oauth::gpt-5.6-sol")
+            .unwrap()
+            .final_score;
+        assert!(
+            pressured_score < fresh_score,
+            "a near-exhausted quota must penalize sol more than a fresh one: fresh={fresh_score} pressured={pressured_score}"
+        );
+    }
+
+    #[test]
+    fn model_with_no_burn_weight_scores_exactly_as_before() {
+        // `codex-cli::gpt-5.4-mini` has no burn-weight table entry (not gpt-5.6-*), so both the
+        // burn penalty (weight defaults to 1.0 -> ln(1.0) = 0) and speed_class (falls through to
+        // the unaffected quality_class heuristic) must leave its score IDENTICAL to the pre-Fix
+        // formula. Hand-computed: quality_class("gpt-5.4-mini") = 1 (small, "-mini" marker),
+        // speed_class = 3 (unaffected fallback) -> capability_score_b(Standard) = q + s = 4.0;
+        // + cost_pref(Standard, cost_class=1 subscription) = 0.6; + code_prior = 0.0 (not
+        // code_heavy); - tool_reliability_penalty = 0.0; - burn_penalty = 0.0 (weight 1.0) = 4.6.
+        let id = "codex-cli::gpt-5.4-mini";
+        let quota = forge_types::SubscriptionQuota::default();
+        let cost = Pricing::default().estimated_cost(id);
+        let overrides = HashMap::new();
+        let score = route_score(
+            id,
+            TaskTier::Standard,
+            cost,
+            false,
+            &quota,
+            None,
+            &overrides,
+        );
+        assert!(
+            (score - 4.6).abs() < 1e-9,
+            "unaffected model's score must match the hand-computed pre-Fix constant exactly: {score}"
+        );
     }
 }

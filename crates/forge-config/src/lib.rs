@@ -1258,6 +1258,12 @@ pub struct MeshConfig {
     /// defaults so a price change needs no release (A-7). Keyed by model id.
     #[serde(default)]
     pub pricing: HashMap<String, PriceOverride>,
+    /// Per-model subscription plan-burn weight overrides (relative to the cheapest sibling of a
+    /// family = 1.0), applied on top of the bundled defaults in
+    /// `forge-mesh::capability::subscription_burn_weight`. Keyed by the BARE model name (no
+    /// `provider::` prefix), e.g. `"gpt-5.5" = 4.0`.
+    #[serde(default)]
+    pub burn_weights: HashMap<String, f64>,
     /// Subagent orchestration (RFC subagent-orchestration): the `spawn_agents` tool.
     #[serde(default)]
     pub subagents: SubagentsConfig,
@@ -1930,6 +1936,7 @@ impl Default for Config {
                 warn_threshold: default_warn_threshold(),
                 budget: BudgetBehavior::default(),
                 pricing: HashMap::new(),
+                burn_weights: HashMap::new(),
                 subagents: SubagentsConfig::default(),
                 workflows: WorkflowsConfig::default(),
                 auto_discover: default_auto_discover(),

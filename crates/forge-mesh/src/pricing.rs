@@ -33,7 +33,17 @@ pub struct Pricing {
 /// approximating mid-2026 list prices. Overridable via config (A-7).
 const DEFAULT_RATES: &[(&str, f64, f64)] = &[
     ("openai::gpt-4o-mini", 0.00015, 0.0006),
-    ("anthropic::claude-opus-4-8", 0.015, 0.075),
+    // Opus 4.8's actual list price is $5/$25 per 1M tokens (0.005/0.025 per 1k). The prior entry
+    // here (0.015/0.075, i.e. $15/$75) was a copied Opus 4.1 rate (4.1 genuinely is $15/$75) — ~3x
+    // too high for 4.8 — and inflated its estimated_cost enough to distort cost-tiered routing
+    // comparisons against other frontier models.
+    ("anthropic::claude-opus-4-8", 0.005, 0.025),
+    // Claude Fable 5 / Mythos 5 are $10/$50 per 1M (0.010/0.050 per 1k) — the fleet's priciest
+    // models. Without an entry they price as $0 (unknown = free), so cost-tiered routing would
+    // treat the most expensive metered models as the cheapest. Verified against Anthropic's
+    // pricing page (platform.claude.com/docs/en/about-claude/pricing), 2026-07-10.
+    ("anthropic::claude-fable-5", 0.010, 0.050),
+    ("anthropic::claude-mythos-5", 0.010, 0.050),
     // Additional BYOK providers (approx mid-2026 list prices, USD per 1k tokens).
     // Override via config [mesh.pricing] if a price changes (A-7).
     ("gemini::gemini-2.5-flash", 0.0003, 0.0025),
@@ -245,6 +255,27 @@ mod tests {
         let pricing = Pricing::default();
         assert!(pricing.cost_for("openai::gpt-4o-mini", 1000, 1000) > 0.0);
         assert!(pricing.cost_for("anthropic::claude-opus-4-8", 1000, 1000) > 0.0);
+    }
+
+    #[test]
+    fn fable_and_mythos_are_priced_above_opus_not_free() {
+        // The metered-path bug: with no DEFAULT_RATES entry, Fable/Mythos priced as $0 (unknown =
+        // free), so cost-tiered routing treated the fleet's most expensive models as the cheapest.
+        let p = Pricing::default();
+        let opus = p.cost_for("anthropic::claude-opus-4-8", 1000, 1000);
+        let fable = p.cost_for("anthropic::claude-fable-5", 1000, 1000);
+        let mythos = p.cost_for("anthropic::claude-mythos-5", 1000, 1000);
+        assert!(fable > 0.0 && mythos > 0.0, "must not price as free");
+        assert!(
+            fable > opus,
+            "fable ({fable}) must be pricier than opus ({opus})"
+        );
+        assert!(
+            (fable - mythos).abs() < 1e-12,
+            "fable and mythos price equally"
+        );
+        // 1000 in @ 0.010/1k + 1000 out @ 0.050/1k = 0.010 + 0.050 = 0.060.
+        assert!((fable - 0.060).abs() < 1e-9, "got {fable}");
     }
 
     #[test]
