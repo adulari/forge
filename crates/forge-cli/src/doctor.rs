@@ -436,6 +436,12 @@ async fn provider_reachability_checks() -> Vec<Check> {
 /// answers — exercising the real launch path (the Windows `cmd /S /C` shim, auth, the streamed
 /// handshake). "On PATH" is not "works": a bridge can resolve on PATH yet fail every turn at
 /// launch. $0 on a subscription bridge. Bounded by a timeout so a hung CLI can't wedge doctor.
+///
+/// A launch failure or timeout here is `Warn`, not `Fail`: CLI bridges are OPTIONAL providers
+/// (see `provider_checks()`, which reports a missing bridge as Info "optional"), and an
+/// installed-but-unresponsive bridge (e.g. one that needs an interactive login, or is just slow)
+/// is a perfectly normal state on an otherwise healthy install — it shouldn't flip doctor's exit
+/// code. The hard gate for "nothing usable at all" is the separate `has_usable_provider` check.
 async fn bridge_roundtrip_checks() -> Vec<Check> {
     const BRIDGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
     use forge_provider::Provider as _;
@@ -478,15 +484,15 @@ async fn bridge_roundtrip_checks() -> Vec<Check> {
                     Some(fix),
                 ),
                 Ok(Err(e)) => check(
-                    Status::Fail,
+                    Status::Warn,
                     &label,
                     format!("launch failed: {}", short(&e.to_string())),
                     Some(fix),
                 ),
                 Err(_) => check(
-                    Status::Fail,
+                    Status::Warn,
                     &label,
-                    "timed out — bridge did not respond",
+                    "timed out — bridge did not respond (needs login?)",
                     Some(fix),
                 ),
             }
