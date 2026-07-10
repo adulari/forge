@@ -625,6 +625,10 @@ pub struct CompletionOptions {
     /// Checkpoint context handed explicitly to a CLI-bridge child. `None` for non-bridge calls and
     /// the base `complete` path, which fall back to inherited process env for legacy compatibility.
     pub checkpoint: Option<CheckpointContext>,
+    /// Stable conversation identity for provider-side prompt caching. Main turns populate this via
+    /// [`CheckpointContext::session`]; auxiliary calls leave it unset and therefore cannot consume
+    /// a pinned session's subscription cache namespace.
+    pub prompt_cache_key: Option<String>,
     /// Structured-output request (OpenAI `response_format`). `None` = provider default (free text).
     pub response_format: Option<ResponseFormat>,
 }

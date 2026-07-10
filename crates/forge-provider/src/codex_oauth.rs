@@ -646,6 +646,10 @@ impl Provider for CodexOauthProvider {
             build_responses_request(model, messages, tools, opts, self.max_output_tokens);
         // The ChatGPT codex backend rejects requests unless store=false (codex-only; xAI omits it).
         body["store"] = serde_json::json!(false);
+        if let Some(key) = opts.prompt_cache_key.as_deref() {
+            body["prompt_cache_key"] = serde_json::json!(key);
+            body["prompt_cache_retention"] = serde_json::json!("24h");
+        }
         // The ChatGPT codex backend 400s on params the generic Responses builder emits but the
         // real Codex CLI never sends (see CODEX_UNSUPPORTED_PARAMS) — strip codex-side only.
         if let Some(obj) = body.as_object_mut() {
@@ -684,6 +688,69 @@ mod tests {
     use super::*;
     use crate::StreamEvent;
     use forge_types::Role;
+
+    #[tokio::test]
+    #[ignore = "uses the real ChatGPT subscription; run explicitly with network + codex-oauth auth"]
+    async fn live_repeated_prefix_reports_cached_tokens() {
+        let provider = CodexOauthProvider::new();
+        let prefix = "Stable prompt-cache probe context. ".repeat(300);
+        let messages = vec![Message::system(prefix), Message::user("Reply only with OK")];
+        let opts = CompletionOptions {
+            prompt_cache_key: Some(format!("forge-cache-probe-{}", std::process::id())),
+            ..Default::default()
+        };
+        let mut sink = |_: StreamEvent| {};
+        let first = provider
+            .complete_with(
+                "codex-oauth::gpt-5.4-mini",
+                &messages,
+                &[],
+                &opts,
+                &mut sink,
+            )
+            .await
+            .expect("first live completion");
+        let second = provider
+            .complete_with(
+                "codex-oauth::gpt-5.4-mini",
+                &messages,
+                &[],
+                &opts,
+                &mut sink,
+            )
+            .await
+            .expect("second live completion");
+        eprintln!(
+            "cache probe: first input={} cached={}; second input={} cached={}",
+            first.usage.input_tokens,
+            first.usage.cached_input_tokens,
+            second.usage.input_tokens,
+            second.usage.cached_input_tokens
+        );
+        assert!(
+            second.usage.cached_input_tokens > 0,
+            "second call did not report a cached prefix"
+        );
+    }
+
+    #[test]
+    fn codex_request_uses_session_cache_key_and_cli_parity_fields() {
+        let messages = vec![Message::user("hi")];
+        let opts = CompletionOptions {
+            prompt_cache_key: Some("forge-session-123".into()),
+            ..Default::default()
+        };
+        let mut body =
+            build_responses_request("codex-oauth::gpt-5.6-sol", &messages, &[], &opts, 4096);
+        body["store"] = serde_json::json!(false);
+        if let Some(key) = opts.prompt_cache_key.as_deref() {
+            body["prompt_cache_key"] = serde_json::json!(key);
+            body["prompt_cache_retention"] = serde_json::json!("24h");
+        }
+        assert_eq!(body["store"], false);
+        assert_eq!(body["prompt_cache_key"], "forge-session-123");
+        assert_eq!(body["prompt_cache_retention"], "24h");
+    }
 
     #[test]
     fn missing_backend_usage_estimates_request_context_at_zero_subscription_cost() {

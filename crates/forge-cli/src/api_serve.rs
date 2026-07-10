@@ -506,6 +506,7 @@ async fn chat_completions(
         effort,
         temperature: req.temperature,
         checkpoint: None,
+        prompt_cache_key: None,
         response_format: parse_response_format(&req.response_format),
     };
 

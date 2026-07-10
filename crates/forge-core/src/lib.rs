@@ -2727,6 +2727,7 @@ Rules:\n\
             temperature: Some(CODING_TEMPERATURE),
             // The planner runs with no tools (it can't edit files), so it needs no checkpoint context.
             checkpoint: None,
+            prompt_cache_key: None,
             response_format: None,
         };
 
@@ -3761,6 +3762,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         effort: self.pinned_effort,
                         temperature: Some(CODING_TEMPERATURE),
                         checkpoint: Some(checkpoint_ctx.clone()),
+                        prompt_cache_key: Some(checkpoint_ctx.session.clone()),
                         response_format: None,
                     };
                     let fut = provider.complete_with(
