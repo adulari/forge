@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 mod claude_bridge_home;
 mod cli_provider;
 mod codex_oauth;
+mod codex_websocket;
 mod embedder;
 mod genai_provider;
 mod mock;
