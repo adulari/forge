@@ -223,9 +223,8 @@ pub struct OAuthAccountStore {
 }
 
 impl OAuthAccountStore {
-    /// `pub(crate)`: an implementation detail of the load/migrate path, but also handy for
-    /// building a store directly in offline tests (incl. `provider_oauth`'s).
-    pub(crate) fn new_single(id: impl Into<String>, tokens: OAuthTokens) -> Self {
+    /// Build a single-account store (also used by tests injecting an in-memory account source).
+    pub fn new_single(id: impl Into<String>, tokens: OAuthTokens) -> Self {
         let id = id.into();
         let mut accounts = std::collections::BTreeMap::new();
         accounts.insert(id.clone(), tokens);
@@ -251,6 +250,27 @@ impl OAuthAccountStore {
     /// is left untouched.
     pub fn set_active_tokens(&mut self, tokens: OAuthTokens) {
         self.accounts.insert(self.active.clone(), tokens);
+    }
+
+    /// Overwrite one account's tokens by id (rotation refresh path). Errors if `id` isn't stored.
+    /// Unlike [`set_active_tokens`], this does **not** require `id` to be the active account — so a
+    /// rotated non-active account can refresh without clobbering the wrong slot.
+    pub fn set_tokens(&mut self, id: &str, tokens: OAuthTokens) -> Result<(), ConfigError> {
+        if !self.accounts.contains_key(id) {
+            return Err(ConfigError::Keyring(format!("no account '{id}' stored")));
+        }
+        self.accounts.insert(id.to_string(), tokens);
+        Ok(())
+    }
+
+    /// Tokens for a specific account id, if stored.
+    pub fn tokens_for(&self, id: &str) -> Option<&OAuthTokens> {
+        self.accounts.get(id)
+    }
+
+    /// Account ids in stable (`BTreeMap`) order — the rotation pool's round-robin sequence.
+    pub fn account_ids(&self) -> Vec<String> {
+        self.accounts.keys().cloned().collect()
     }
 
     /// `(id, tokens, is_active)` for every stored account, in id order.
@@ -334,6 +354,21 @@ pub fn store_active_tokens(key: &str, tokens: &OAuthTokens) -> Result<(), Config
     save_account_store(key, &store)
 }
 
+/// Load one account's tokens by id at `key`. `None` if nothing is stored or `id` is missing.
+pub fn load_account_tokens(key: &str, id: &str) -> Option<OAuthTokens> {
+    load_account_store(key).and_then(|s| s.tokens_for(id).cloned())
+}
+
+/// Overwrite one account's tokens by id at `key`. Errors if nothing is stored or `id` isn't one
+/// of the stored accounts. Used by the multi-account rotation refresh path so a non-active
+/// account can refresh without touching the active slot.
+pub fn store_account_tokens(key: &str, id: &str, tokens: &OAuthTokens) -> Result<(), ConfigError> {
+    let mut store = load_account_store(key)
+        .ok_or_else(|| ConfigError::Keyring("no accounts stored".to_string()))?;
+    store.set_tokens(id, tokens.clone())?;
+    save_account_store(key, &store)
+}
+
 /// Delete the whole entry (every account) at `key`. Idempotent: `Ok(false)` if none.
 pub fn clear_account_store(key: &str) -> Result<bool, ConfigError> {
     crate::secret_store::delete(key)
@@ -389,6 +424,99 @@ pub fn next_default_account_id(key: &str) -> String {
         .map(|s| s.accounts)
         .unwrap_or_default();
     next_default_id(&existing)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Multi-account OAuth rotation pool (docs/design/oauth-account-rotation.md)
+// ---------------------------------------------------------------------------------------------
+
+/// Round-robin pool of OAuth account ids for one keyring entry. Mirrors the API-key [`KeyPool`]
+/// pattern: engages only when ≥2 accounts are stored; `next` advances an atomic cursor. The pool
+/// holds **ids** (not live tokens) so a refresh of one account never races the pool snapshot —
+/// callers load/refresh tokens for the returned id on each pick.
+#[derive(Debug, Default)]
+pub struct OAuthAccountPool {
+    /// Stable-ordered account ids (BTreeMap key order at snapshot time).
+    ids: Vec<String>,
+    cursor: std::sync::atomic::AtomicUsize,
+    /// Manual-active account id at snapshot time (rotation seed / list UX); unused by `next`.
+    active: Option<String>,
+}
+
+impl OAuthAccountPool {
+    /// Snapshot the account store at `key`. With <2 accounts the pool is empty (`has_rotation`
+    /// is false) and callers fall through to the single-active path.
+    pub fn from_keyring(key: &str) -> Self {
+        let Some(store) = load_account_store(key) else {
+            return Self::default();
+        };
+        Self::from_store(&store)
+    }
+
+    /// Build a pool from an in-memory store (tests + callers that already loaded the store).
+    pub fn from_store(store: &OAuthAccountStore) -> Self {
+        let ids = store.account_ids();
+        if ids.len() < 2 {
+            return Self::default();
+        }
+        // Seed the cursor at the manual-active account so the first `next` after process start
+        // prefers the user's `--switch` choice, then round-robins from there.
+        let start = ids.iter().position(|id| id == &store.active).unwrap_or(0);
+        Self {
+            ids,
+            cursor: std::sync::atomic::AtomicUsize::new(start),
+            active: Some(store.active.clone()),
+        }
+    }
+
+    /// Construct a pool from an explicit id list (offline unit tests). ≥2 ids required for
+    /// rotation; fewer yields an empty pool.
+    pub fn from_ids(ids: Vec<String>) -> Self {
+        if ids.len() < 2 {
+            return Self::default();
+        }
+        Self {
+            ids,
+            cursor: std::sync::atomic::AtomicUsize::new(0),
+            active: None,
+        }
+    }
+
+    /// Whether this pool has ≥2 accounts and therefore supports intra-provider account rotation.
+    pub fn has_rotation(&self) -> bool {
+        self.ids.len() >= 2
+    }
+
+    /// Number of accounts in the pool (0 when rotation is off).
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    /// The next account id (round-robin), or `None` when the pool has <2 accounts.
+    pub fn next(&self) -> Option<String> {
+        if self.ids.len() < 2 {
+            return None;
+        }
+        let i = self
+            .cursor
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % self.ids.len();
+        Some(self.ids[i].clone())
+    }
+
+    /// Manual-active id at snapshot time, if any.
+    pub fn active(&self) -> Option<&str> {
+        self.active.as_deref()
+    }
+
+    /// Stable-ordered account ids in this pool.
+    pub fn ids(&self) -> &[String] {
+        &self.ids
+    }
 }
 
 #[cfg(test)]
@@ -583,6 +711,60 @@ mod tests {
             "the non-active account must be untouched by a refresh"
         );
         assert_eq!(store.active, "personal");
+    }
+
+    #[test]
+    fn set_tokens_updates_only_the_named_account() {
+        let mut store = OAuthAccountStore::new_single("personal", sample_tokens("p"));
+        store.add("work", sample_tokens("w"));
+        // Active is "work" after add; refresh the non-active "personal" account by id.
+        assert_eq!(store.active, "work");
+        let refreshed = OAuthTokens {
+            access_token: "refreshed-personal".into(),
+            ..sample_tokens("p")
+        };
+        store.set_tokens("personal", refreshed.clone()).unwrap();
+        assert_eq!(store.accounts.get("personal"), Some(&refreshed));
+        assert_eq!(
+            store.accounts.get("work"),
+            Some(&sample_tokens("w")),
+            "active account must be untouched when refreshing another by id"
+        );
+        assert_eq!(store.active, "work", "active pointer must not move");
+        assert!(store.set_tokens("nope", sample_tokens("x")).is_err());
+    }
+
+    #[test]
+    fn account_pool_round_robins_and_skips_single_account() {
+        let pool = OAuthAccountPool::from_ids(vec!["a".into(), "b".into(), "c".into()]);
+        assert!(pool.has_rotation());
+        assert_eq!(pool.next().as_deref(), Some("a"));
+        assert_eq!(pool.next().as_deref(), Some("b"));
+        assert_eq!(pool.next().as_deref(), Some("c"));
+        assert_eq!(pool.next().as_deref(), Some("a"), "wraps");
+
+        let single = OAuthAccountPool::from_ids(vec!["only".into()]);
+        assert!(!single.has_rotation());
+        assert_eq!(single.next(), None);
+
+        let empty = OAuthAccountPool::default();
+        assert!(!empty.has_rotation());
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn account_pool_from_store_seeds_cursor_at_active() {
+        let mut store = OAuthAccountStore::new_single("alice", sample_tokens("a"));
+        store.add("bob", sample_tokens("b"));
+        store.add("carol", sample_tokens("c"));
+        store.switch("bob").unwrap();
+        // BTreeMap order: alice, bob, carol — active bob is index 1.
+        let pool = OAuthAccountPool::from_store(&store);
+        assert!(pool.has_rotation());
+        assert_eq!(pool.active(), Some("bob"));
+        assert_eq!(pool.next().as_deref(), Some("bob"));
+        assert_eq!(pool.next().as_deref(), Some("carol"));
+        assert_eq!(pool.next().as_deref(), Some("alice"));
     }
 
     #[test]

@@ -136,7 +136,10 @@ pub(crate) async fn auth_xai_oauth(
             let (_, tokens, _) = &accounts[0];
             println!("xai-oauth: signed in ({})", describe(tokens));
         } else {
-            println!("xai-oauth: {} account(s) stored", accounts.len());
+            println!(
+                "xai-oauth: {} account(s) · auto-rotation ON (round-robin)",
+                accounts.len()
+            );
             for (id, tokens, is_active) in &accounts {
                 println!(
                     "  {} {id} — {}",
@@ -144,7 +147,10 @@ pub(crate) async fn auth_xai_oauth(
                     describe(tokens)
                 );
             }
-            println!("  (* = active; `forge auth xai-oauth --switch --account <id>` to change it)");
+            println!(
+                "  (* = manual active / rotation seed; requests rotate across all)\n  \
+                 switch: `forge auth xai-oauth --switch --account <id>`"
+            );
         }
         return Ok(());
     }

@@ -180,6 +180,28 @@ pub fn next_provider_oauth_account_id(provider: &str) -> String {
     crate::oauth::next_default_account_id(&provider_oauth_keyring_key(provider))
 }
 
+/// Load one OAuth account's tokens by id for `provider`.
+pub fn load_provider_oauth_account_tokens(
+    provider: &str,
+    id: &str,
+) -> Option<crate::oauth::OAuthTokens> {
+    crate::oauth::load_account_tokens(&provider_oauth_keyring_key(provider), id)
+}
+
+/// Persist tokens for one OAuth account by id (rotation refresh path — does not change active).
+pub fn store_provider_oauth_account_tokens(
+    provider: &str,
+    id: &str,
+    tokens: &crate::oauth::OAuthTokens,
+) -> Result<(), ConfigError> {
+    crate::oauth::store_account_tokens(&provider_oauth_keyring_key(provider), id, tokens)
+}
+
+/// Round-robin account pool for `provider` (≥2 accounts → rotation on).
+pub fn provider_oauth_account_pool(provider: &str) -> crate::oauth::OAuthAccountPool {
+    crate::oauth::OAuthAccountPool::from_keyring(&provider_oauth_keyring_key(provider))
+}
+
 /// Best-effort account label from a device-code response's `id_token` (a JWT): decode the
 /// payload (base64url — **no signature verification**, this is only a display label, the
 /// device-code grant itself already authenticated the account) and return its `email` claim.
