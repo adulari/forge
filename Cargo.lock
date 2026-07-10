@@ -1871,6 +1871,7 @@ dependencies = [
  "chacha20poly1305",
  "directories",
  "figment",
+ "forge-agent-config",
  "forge-agent-skills",
  "forge-agent-types",
  "keyring",

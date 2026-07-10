@@ -38,3 +38,5 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# In-memory secret_store for tests (resolver=2: does not leak into production builds).
+forge-config = { workspace = true, features = ["test-secrets"] }

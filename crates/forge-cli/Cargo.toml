@@ -77,3 +77,5 @@ tower-http = { version = "0.6", features = ["cors"] }
 portable-pty = "0.9"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+# In-memory secret_store for tests (resolver=2: does not leak into production builds).
+forge-config = { workspace = true, features = ["test-secrets"] }

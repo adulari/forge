@@ -32,3 +32,5 @@ libc.workspace = true
 tokio = { workspace = true }
 httpmock = "0.8"
 tempfile = "3"
+# In-memory secret_store for tests (resolver=2: does not leak into production builds).
+forge-config = { workspace = true, features = ["test-secrets"] }
