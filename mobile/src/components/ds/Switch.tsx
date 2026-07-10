@@ -5,6 +5,7 @@ import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTimin
 
 import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
+import { tapTarget } from "../../theme/tokens";
 
 export interface SwitchProps {
   value: boolean;
@@ -52,7 +53,6 @@ export function Switch({ value, onValueChange, disabled = false, accessibilityLa
       accessibilityRole="switch"
       accessibilityState={{ checked: value, disabled }}
       accessibilityLabel={accessibilityLabel}
-      hitSlop={8}
       style={[styles.hit, { opacity: disabled ? 0.4 : 1 }, style]}
     >
       <Animated.View
@@ -69,7 +69,8 @@ export function Switch({ value, onValueChange, disabled = false, accessibilityLa
 const styles = StyleSheet.create({
   hit: {
     width: TRACK_W,
-    height: TRACK_H,
+    height: tapTarget,
+    justifyContent: "center",
   },
   track: {
     width: TRACK_W,

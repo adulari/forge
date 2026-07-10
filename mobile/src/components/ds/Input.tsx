@@ -15,7 +15,7 @@ import {
 import { X } from "lucide-react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
-import { radii, space } from "../../theme/tokens";
+import { radii, space, tapTarget } from "../../theme/tokens";
 import { monoFamily, type, webInputTextStyle } from "../../theme/typography";
 
 export interface InputProps extends Omit<TextInputProps, "style"> {
@@ -100,10 +100,9 @@ export function Input({
         {showClear ? (
           <Pressable
             onPress={() => onChangeText?.("")}
-            hitSlop={8}
             accessibilityRole="button"
             accessibilityLabel="Clear"
-            style={styles.slot}
+            style={styles.clear}
           >
             <X size={16} strokeWidth={1.75} color={tokens.ink3} />
           </Pressable>
@@ -126,6 +125,13 @@ const styles = StyleSheet.create({
   },
   slot: {
     marginHorizontal: space.space4,
+  },
+  clear: {
+    width: tapTarget,
+    height: tapTarget,
+    marginRight: -space.space8,
+    alignItems: "center",
+    justifyContent: "center",
   },
   input: {
     flex: 1,

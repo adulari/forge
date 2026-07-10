@@ -44,7 +44,7 @@ export default function Root({ children }: { children: React.ReactNode }) {
             just the visual viewport) resizing when the iOS keyboard opens. */}
         <meta
           name="viewport"
-          content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content"
+          content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
         />
         <meta name="theme-color" content={THEME_COLOR} />
         {/* Apple PWA / "Add to Home Screen" chromeless launch. */}

@@ -7,7 +7,6 @@ import React from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 
 import type { HistoryRow } from "../../lib/api";
-import { haptics } from "../../lib/haptics";
 import { parseReasoning } from "../../lib/reasoning";
 import { useSessionCtx } from "../../lib/sessionContext";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -124,7 +123,6 @@ function MessageRowImpl({ row, attachments }: MessageRowProps) {
   const copyText = parsed ? parsed.answer : isUser ? userText : row.content;
   const onCopyRow = async () => {
     await Clipboard.setStringAsync(copyText);
-    haptics.select();
     toast.show("message copied");
   };
 
@@ -155,7 +153,7 @@ function MessageRowImpl({ row, attachments }: MessageRowProps) {
         )}
         {row.model || (IS_WEB && !isSystem) ? (
           <View style={styles.metaRow}>
-            {row.model ? <Text style={[type.meta, { color: tokens.ink3 }]}>{row.model}</Text> : null}
+            {row.model ? <Text style={[type.meta, styles.model, { color: tokens.ink3 }]} numberOfLines={1}>{row.model}</Text> : null}
             {IS_WEB && !isSystem ? (
               <IconButton
                 accessibilityLabel="copy message"
@@ -178,4 +176,5 @@ const styles = StyleSheet.create({
   bubble: { borderRadius: 12, paddingHorizontal: space.space12, paddingVertical: space.space8 },
   userBubble: { maxWidth: "92%" },
   metaRow: { flexDirection: "row", alignItems: "center", gap: space.space4, marginTop: space.space4 },
+  model: { flex: 1 },
 });

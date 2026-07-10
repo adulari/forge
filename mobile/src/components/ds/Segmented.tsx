@@ -35,7 +35,7 @@ export function Segmented<T extends string = string>({ options, value, onChange,
     0,
     options.findIndex((o) => o.value === value),
   );
-  const segmentWidth = options.length > 0 ? width / options.length : 0;
+  const segmentWidth = options.length > 0 ? (width - 4) / options.length : 0;
 
   useEffect(() => {
     if (segmentWidth <= 0) return;
@@ -136,7 +136,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     top: 2,
     bottom: 2,
-    left: 0,
+    left: 2,
   },
   thumbInset: {
     position: "absolute",

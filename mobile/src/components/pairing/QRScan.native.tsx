@@ -17,7 +17,7 @@ import Animated, {
 import { haptics } from "../../lib/haptics";
 import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
-import { radii, space } from "../../theme/tokens";
+import { radii, space, tapTarget } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 
 export interface QRScanProps {
@@ -81,9 +81,9 @@ export function QRScan({ onScanned, paused = false }: QRScanProps) {
         {permission && !canRetry ? (
           <Pressable
             onPress={() => Linking.openSettings()}
-            hitSlop={8}
             accessibilityRole="button"
             accessibilityLabel="Open Settings"
+            style={styles.action}
           >
             <Text style={[typeScale.sub, { color: tokens.accent }]}>open settings</Text>
           </Pressable>
@@ -130,6 +130,7 @@ const styles = StyleSheet.create({
   },
   center: { alignItems: "center", justifyContent: "center", padding: space.space16, gap: space.space8 },
   centerText: { textAlign: "center" },
+  action: { minHeight: tapTarget, justifyContent: "center" },
   reticleWrap: {
     position: "absolute",
     top: 0,

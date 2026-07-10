@@ -67,6 +67,5 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: space.space12,
-    paddingHorizontal: space.space16,
   },
 });

@@ -120,6 +120,7 @@ export default function FleetScreen() {
         <EmptyState
           icon={Flame}
           message={query.error instanceof ApiError ? query.error.message : "server unreachable"}
+          action={<Button label="Retry" variant="secondary" onPress={() => void query.refetch()} />}
         />
       );
     }

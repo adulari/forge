@@ -6,7 +6,7 @@ import Animated from "react-native-reanimated";
 
 import { useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
-import { radii, space } from "../../theme/tokens";
+import { radii, space, tapTarget } from "../../theme/tokens";
 import { type } from "../../theme/typography";
 
 export interface ChipProps {
@@ -68,7 +68,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: space.space12,
-    height: 32,
+    minHeight: tapTarget,
   },
   icon: {
     marginRight: space.space4,

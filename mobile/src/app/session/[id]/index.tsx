@@ -646,6 +646,8 @@ const styles = StyleSheet.create({
     gap: space.space4,
     paddingHorizontal: space.space12,
     paddingVertical: space.space8,
+    minWidth: 44,
+    minHeight: 44,
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
   },
