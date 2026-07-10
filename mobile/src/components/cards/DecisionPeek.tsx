@@ -8,7 +8,7 @@
 // cleanup, which tears the socket down — so closing the sheet (scrim tap, Esc,
 // swipe-down, or the header close button) detaches it with no separate
 // `.close()` call needed. There is no lingering connection once dismissed.
-import { CircleCheck, X } from "lucide-react-native";
+import { AlertTriangle, CircleCheck, X } from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -48,7 +48,12 @@ export function DecisionPeek({ sessionId, visible, onClose }: DecisionPeekProps)
 function DecisionPeekBody({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
   const tokens = useTokens();
   const { baseUrl } = useAuth();
-  const { snapshot, send } = useSessionSocket(baseUrl, sessionId);
+  const { snapshot, connectionState, send } = useSessionSocket(baseUrl, sessionId);
+  // ws.ts only escalates to "unreachable" after several failed reconnect attempts (~15s of
+  // backoff) — before that it's "connecting"/"reconnecting", which reads fine under the
+  // skeleton below. Only the escalated state needs to break out of the skeleton, otherwise
+  // a normal transient reconnect blip would flash the error message for no reason.
+  const unreachable = connectionState === "unreachable";
 
   return (
     <View style={styles.container}>
@@ -71,7 +76,13 @@ function DecisionPeekBody({ sessionId, onClose }: { sessionId: string; onClose: 
       </View>
 
       <View style={styles.body}>
-        {snapshot == null ? (
+        {snapshot == null && unreachable ? (
+          <EmptyState
+            icon={AlertTriangle}
+            message="server unreachable — can't reach the daemon to peek at this session."
+            action={<Button label="Close" variant="secondary" onPress={onClose} />}
+          />
+        ) : snapshot == null ? (
           <View style={styles.loading}>
             <Skeleton width="60%" height={17} />
             <Skeleton width="100%" height={64} style={styles.loadingGap} />

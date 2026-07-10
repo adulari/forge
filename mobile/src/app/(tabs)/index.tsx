@@ -21,6 +21,7 @@ import { useSessions } from "../../lib/queries";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, shadowStyle, space } from "../../theme/tokens";
 import { tabularNums, type as typeScale } from "../../theme/typography";
+import { useBreakpoint } from "../../theme/useBreakpoint";
 
 // DESIGN_ELEVATION.md Move 3 — the one identity moment: the ⚒ mark beside the Fleet title.
 function FleetTitle() {
@@ -89,6 +90,7 @@ export default function FleetScreen() {
   const tokens = useTokens();
   const { scheme } = useTheme();
   const depth = scheme === "dark" ? depthDark : depthLight;
+  const { isExpanded } = useBreakpoint();
   const query = useSessions();
 
   // `useSessions` polls every few seconds while focused (module doc above) — react-query's own
@@ -129,6 +131,19 @@ export default function FleetScreen() {
       />
     );
   }, [query.isError, query.error]);
+
+  // T5.1 (fixed): expanded's MasterDetail rail already renders the live session list —
+  // this screen fills the detail pane's `<Slot/>` in that layout (see (tabs)/_layout.tsx),
+  // so rendering the full Fleet list here too duplicated it side by side. Selecting a
+  // session pushes `session/[id]` over both panes (HANDOFF in _layout.tsx), so the detail
+  // pane never actually shows this screen's list content on expanded — just the placeholder.
+  if (isExpanded) {
+    return (
+      <Screen scroll={false}>
+        <EmptyState icon={Flame} message="select a session from the fleet to see it here." />
+      </Screen>
+    );
+  }
 
   return (
     <Screen scroll={false}>
