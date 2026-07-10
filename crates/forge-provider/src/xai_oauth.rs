@@ -273,6 +273,25 @@ fn classify_xai_status(
     }
 }
 
+/// Whether a completion failure should trigger the one-hop next-account retry in
+/// [`XaiOauthProvider::complete_with`]: rate limits (429) and `Unavailable` connection-level
+/// failures. A fresh account gets a fresh edge session/connection, which is often enough to
+/// route around a per-connection blip (stall, connect timeout, dropped stream).
+///
+/// Every `ProviderError::Unavailable` this provider produces is connection-level — there's no
+/// separate "server processed the request but something else went wrong" `Unavailable` variant
+/// to exclude: `execute_responses_request`'s connect-timeout, `send()` transport error, 5xx
+/// response, stream idle-timeout, mid-stream chunk-read error, and phantom-truncation
+/// (stream closed with no completion signal) paths are all connection/stream failures. So a
+/// blanket `is_unavailable` check is correct here without a finer split.
+///
+/// Permanent `Auth` (401/403) is deliberately excluded — never hop on it, see the module doc's
+/// "known gotcha" (a 403 is a server-side entitlement decision that a different account's
+/// session won't change, and a 401 means the bearer itself was rejected, not the connection).
+fn should_hop_account(e: &ProviderError) -> bool {
+    e.is_rate_limited() || matches!(e, ProviderError::Unavailable(_))
+}
+
 // ---------------------------------------------------------------------------------------------
 // Responses-API request/response mapping (pure, testable)
 // ---------------------------------------------------------------------------------------------
@@ -917,12 +936,15 @@ impl Provider for XaiOauthProvider {
         // First attempt with the picked account.
         let first = execute_responses_request(&self.http, &url, &token, &body, on_event).await;
 
-        // On 429: if ≥2 accounts, retry ONCE with the next account (cursor already advanced by
-        // the first pick's `next`, and we call `next` again here). Mirrors genai KeyPool: one
+        // On 429 or a connection-level Unavailable (connect timeout, stream stall/drop): if ≥2
+        // accounts, retry ONCE with the next account (cursor already advanced by the first
+        // pick's `next`, and we call `next` again here). Mirrors genai KeyPool: one
         // intra-provider hop, then surface the error so the mesh wait/failover chain runs once.
-        // 401/403 stay permanent Auth — never rotated as rate-limits.
+        // A stall is often per-connection/per-session, so a fresh account's fresh edge session
+        // can route around it. 401/403 stay permanent Auth — never rotated (see
+        // `should_hop_account`).
         match first {
-            Err(ref e) if e.is_rate_limited() && pool.has_rotation() => {
+            Err(ref e) if should_hop_account(e) && pool.has_rotation() => {
                 let token2 = self.pick_access_token(&pool).await?;
                 execute_responses_request(&self.http, &url, &token2, &body, on_event).await
             }
@@ -1034,6 +1056,29 @@ mod tests {
         let forbidden = classify_xai_status(403, r#"{"error":{"message":"nope"}}"#, None);
         assert!(!forbidden.is_rate_limited());
         assert!(forbidden.is_permanent());
+    }
+
+    #[test]
+    fn should_hop_account_covers_rate_limit_and_unavailable_not_auth() {
+        let rl = ProviderError::RateLimited {
+            message: "slow down".into(),
+            retry_after: None,
+        };
+        assert!(should_hop_account(&rl));
+
+        let connect_timeout = ProviderError::Unavailable(
+            "no response while connecting (no data for 60s)".to_string(),
+        );
+        assert!(should_hop_account(&connect_timeout));
+
+        let stall = ProviderError::Unavailable("stream stalled (no data for 90s)".to_string());
+        assert!(should_hop_account(&stall));
+
+        let auth = ProviderError::Auth("401".into());
+        assert!(!should_hop_account(&auth));
+
+        let forbidden = classify_xai_status(403, r#"{"error":{"message":"nope"}}"#, None);
+        assert!(!should_hop_account(&forbidden));
     }
 
     #[test]
@@ -1224,6 +1269,98 @@ mod tests {
             .expect_err("single account 429");
         assert!(err.is_rate_limited());
         assert_eq!(limited.calls(), 1, "no second request without rotation");
+    }
+
+    // Connection-level `Unavailable` rotation. httpmock can't easily simulate a genuine 90s
+    // idle-timeout stall or a hung TCP connect in a unit test, so these exercise the hop via
+    // the same `Unavailable` outcome a 5xx response produces (`classify_xai_status`'s
+    // `500..=599` arm — the same enum variant `execute_responses_request`'s connect-timeout and
+    // stream-stall branches construct directly). `should_hop_account_covers_rate_limit_and_
+    // unavailable_not_auth` above unit-tests the hop predicate directly against constructed
+    // connect-timeout/stall `Unavailable` error strings, covering the paths this mock can't
+    // reach end-to-end.
+
+    #[tokio::test]
+    async fn rotation_retries_next_account_on_unavailable() {
+        // A returns a connection-level failure (503 -> Unavailable), B succeeds.
+        let server = httpmock::MockServer::start();
+        let a_hit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/v1/responses")
+                .header("authorization", "Bearer at-a");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(r#"{"error":{"message":"upstream unavailable"}}"#);
+        });
+        let b_hit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/v1/responses")
+                .header("authorization", "Bearer at-b");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(ok_sse());
+        });
+
+        let store = memory_store(&[("acct-a", "a"), ("acct-b", "b")], "acct-a");
+        let provider = XaiOauthProvider::new()
+            .with_api_base(server.base_url() + "/v1")
+            .with_accounts(store);
+        let mut sink = |_: StreamEvent| {};
+        let resp = provider
+            .complete("xai-oauth::grok-4", &[Message::user("hi")], &[], &mut sink)
+            .await
+            .expect("B should succeed after A's Unavailable");
+        assert_eq!(resp.content, "hi");
+        a_hit.assert();
+        b_hit.assert();
+    }
+
+    #[tokio::test]
+    async fn both_accounts_unavailable_surfaces_single_unavailable() {
+        let server = httpmock::MockServer::start();
+        let down = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/v1/responses");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(r#"{"error":{"message":"upstream unavailable"}}"#);
+        });
+
+        let store = memory_store(&[("acct-a", "a"), ("acct-b", "b")], "acct-a");
+        let provider = XaiOauthProvider::new()
+            .with_api_base(server.base_url() + "/v1")
+            .with_accounts(store);
+        let mut sink = |_: StreamEvent| {};
+        let err = provider
+            .complete("xai-oauth::grok-4", &[Message::user("hi")], &[], &mut sink)
+            .await
+            .expect_err("both accounts unavailable");
+        assert!(matches!(err, ProviderError::Unavailable(_)), "got {err:?}");
+        // Exactly two attempts (A then B) — not N retries looping, and the single resulting
+        // error is what surfaces to the core loop, unchanged in shape.
+        assert_eq!(down.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn single_account_does_not_retry_on_unavailable() {
+        let server = httpmock::MockServer::start();
+        let down = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/v1/responses");
+            then.status(503)
+                .header("content-type", "application/json")
+                .body(r#"{"error":{"message":"upstream unavailable"}}"#);
+        });
+
+        let store = memory_store(&[("only", "only")], "only");
+        let provider = XaiOauthProvider::new()
+            .with_api_base(server.base_url() + "/v1")
+            .with_accounts(store);
+        let mut sink = |_: StreamEvent| {};
+        let err = provider
+            .complete("xai-oauth::grok-4", &[Message::user("hi")], &[], &mut sink)
+            .await
+            .expect_err("single account unavailable");
+        assert!(matches!(err, ProviderError::Unavailable(_)));
+        assert_eq!(down.calls(), 1, "no second request without rotation");
     }
 
     #[tokio::test]
