@@ -14,8 +14,10 @@ forge auth codex-oauth
 ```
 
 starts an OAuth 2.0 PKCE flow: opens a browser (or prints the URL) and listens on
-`http://127.0.0.1:1455/auth/callback` (the official Codex public client redirect). On success
-tokens are stored in the OS keyring under `provider-oauth:codex`.
+`http://localhost:1455/auth/callback` (the official Codex public client redirect — the redirect
+URI must be `localhost`, byte-exact, or OpenAI's Hydra authorize server rejects the request; the
+loopback listener itself still binds `127.0.0.1:1455`). On success tokens are stored in the OS
+keyring under `provider-oauth:codex`.
 
 Headless / no browser:
 
