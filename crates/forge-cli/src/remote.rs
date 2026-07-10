@@ -523,7 +523,7 @@ impl EventLog {
     pub fn replay_after(&self, since: u64) -> Option<Vec<Snapshot>> {
         let (front, _) = self.ring.front()?;
         let (back, _) = self.ring.back()?;
-        if since + 1 < *front || since > *back {
+        if since.checked_add(1).is_none_or(|next| next < *front) || since > *back {
             return None;
         }
         Some(
@@ -1645,8 +1645,12 @@ pub(crate) async fn pump_ws(
             // loop below would immediately re-deliver it — a duplicate of the replay's last
             // frame. Mark it seen here, and send it ourselves only when the replay didn't
             // already cover it (it was broadcast between the ring read and now).
-            let current = snap.borrow_and_update().clone();
+            let mut current = snap.borrow_and_update().clone();
             if current.revision > last_sent {
+                // `watch` coalesces. If multiple broadcasts landed after the replay-log read,
+                // this receiver only exposes the newest one; flag that jump as a full resync
+                // rather than pretending it extends the contiguous replay stream.
+                current.resync = current.revision > last_sent.saturating_add(1);
                 let json = serde_json::to_string(&current).unwrap_or_else(|_| "{}".into());
                 if tx.send(Message::Text(json.into())).await.is_err() {
                     return;
@@ -1668,10 +1672,24 @@ pub(crate) async fn pump_ws(
     }
 
     let mut forward = tokio::spawn(async move {
-        while let Ok(()) = snap.changed().await {
-            let json = serde_json::to_string(&*snap.borrow()).unwrap_or_else(|_| "{}".into());
-            if tx.send(Message::Text(json.into())).await.is_err() {
-                break; // client gone
+        let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(20));
+        keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                changed = snap.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    let json = serde_json::to_string(&*snap.borrow()).unwrap_or_else(|_| "{}".into());
+                    if tx.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+                _ = keepalive.tick() => {
+                    if tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -2005,6 +2023,10 @@ mod tests {
         // A future/foreign rev (e.g. from a previous server on the same page) must resync,
         // never silently pretend the client is current.
         assert!(log.replay_after(11).is_none(), "future rev must resync");
+        assert!(
+            log.replay_after(u64::MAX).is_none(),
+            "a maximal foreign rev must resync without overflowing"
+        );
         // An empty log can't fill anything.
         assert!(EventLog::new(4).replay_after(1).is_none());
     }
