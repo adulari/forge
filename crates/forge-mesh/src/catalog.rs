@@ -218,7 +218,9 @@ pub(crate) fn cost_class(id: &str, cost: f64) -> u8 {
 /// - Trivial: prefer genuinely-free, so easy tasks don't burn subscription quota.
 /// - Standard: subscription ≈ free, a slight subscription edge (use the good $0 models).
 /// - Complex: prefer the subscription flagship (strongest reliable, $0 marginal); free as backup.
-/// Documented in docs/features/mesh-routing.md; value asserted in sync by `doc_sync::mesh_routing_doc_matches_live_constants`.
+///
+/// Documented in docs/features/mesh-routing.md; value asserted in sync by
+/// `doc_sync::mesh_routing_doc_matches_live_constants`.
 pub(crate) fn cost_pref(tier: TaskTier, class: u8) -> f64 {
     match (tier, class) {
         (TaskTier::Trivial, 0) => 1.0,
@@ -237,6 +239,7 @@ pub(crate) fn cost_pref(tier: TaskTier, class: u8) -> f64 {
 /// - code-heavy task → the coding-tuned flagships (codex/claude bridges + their APIs) get a small
 ///   lift over general models;
 /// - trivial non-code → the fast cheap-bulk providers (groq/gemini) get a small lift.
+///
 /// Documented in docs/features/mesh-routing.md.
 fn code_prior(provider: &str, code_heavy: bool, tier: TaskTier) -> f64 {
     if code_heavy {
