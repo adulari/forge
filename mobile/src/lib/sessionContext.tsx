@@ -36,7 +36,7 @@ export interface SessionCtxValue {
    * switch. */
   snapshotTimedOut: boolean;
   connectionState: ConnectionState;
-  send: (input: RemoteInput) => void;
+  send: (input: RemoteInput) => boolean;
   /** Measured height of the shell's header block (SessionHeader + banners + StatusStrip +
    * Segmented) — segments below it use this as `Screen`'s `keyboardVerticalOffset` so
    * KeyboardAvoidingView knows how much real screen-top content sits above it (RN's own docs

@@ -56,6 +56,8 @@ export function useSessions() {
     queryFn: () => getSessions(baseUrl as string),
     enabled: baseUrl != null,
     refetchInterval: isFocused ? SESSIONS_POLL_MS : false,
+    refetchIntervalInBackground: false,
+    refetchOnMount: "always",
     refetchOnWindowFocus: true,
   });
   useEffect(() => {
