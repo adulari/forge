@@ -236,6 +236,19 @@ pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mes
             Err(_) => tracing::debug!("xai-oauth model discovery timed out"),
         }
     }
+    // ChatGPT subscription OAuth (`forge auth codex-oauth`): seed models when a session is stored.
+    if forge_provider::has_codex_oauth_session() {
+        match tokio::time::timeout(
+            Duration::from_secs(8),
+            forge_provider::list_codex_oauth_models(),
+        )
+        .await
+        {
+            Ok(Ok(list)) => models.extend(list),
+            Ok(Err(e)) => tracing::debug!("codex-oauth model discovery failed: {e}"),
+            Err(_) => tracing::debug!("codex-oauth model discovery timed out"),
+        }
+    }
     // Always-available subscription bridges (claude-cli/codex-cli) if their CLI is installed.
     // They don't rate-limit like the free API tiers, so the mesh can rely on them — and being
     // $0 subscriptions they rank first (prefer_subscription), so routing reaches a working model

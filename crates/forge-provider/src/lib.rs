@@ -9,13 +9,20 @@ use forge_types::{EffortLevel, Message, QuotaHint, ToolCall, Usage};
 
 mod claude_bridge_home;
 mod cli_provider;
+mod codex_oauth;
 mod embedder;
 mod genai_provider;
 mod mock;
+mod oauth_responses;
 mod tool_recovery;
 mod xai_oauth;
 
 pub use cli_provider::{CliKind, CliProvider, SUBAGENT_SINK_ENV};
+pub use codex_oauth::{
+    exchange_code as exchange_codex_oauth_code, has_session as has_codex_oauth_session,
+    is_pinned_codex_url, list_models as list_codex_oauth_models,
+    probe_entitlement as probe_codex_entitlement, CodexOauthProvider, CODEX_OAUTH_NAMESPACE,
+};
 pub use embedder::{select_embedder, GenaiEmbedder};
 pub use genai_provider::{
     bundled_http_client, is_discoverable, list_custom_models, list_models, GenAiProvider,
@@ -45,6 +52,9 @@ pub fn normalize_model_id(model: &str) -> std::borrow::Cow<'_, str> {
     }
     if let Some(rest) = model.strip_prefix("xai_oauth::") {
         return std::borrow::Cow::Owned(format!("xai-oauth::{rest}"));
+    }
+    if let Some(rest) = model.strip_prefix("codex_oauth::") {
+        return std::borrow::Cow::Owned(format!("codex-oauth::{rest}"));
     }
     std::borrow::Cow::Borrowed(model)
 }
@@ -205,6 +215,10 @@ mod error_tests {
     fn normalize_model_id_handles_xai_oauth_legacy_underscore() {
         assert_eq!(normalize_model_id("xai_oauth::grok-4"), "xai-oauth::grok-4");
         assert_eq!(normalize_model_id("xai-oauth::grok-4"), "xai-oauth::grok-4");
+        assert_eq!(
+            normalize_model_id("codex_oauth::gpt-5.5"),
+            "codex-oauth::gpt-5.5"
+        );
     }
 
     #[test]
@@ -422,6 +436,7 @@ pub struct DispatchProvider {
     /// Google Antigravity (`agy`) — text-mode only (no MCP), so always built `with_harness(false)`.
     agy_cli: CliProvider,
     xai_oauth: XaiOauthProvider,
+    codex_oauth: CodexOauthProvider,
     /// One-time CLI-bridge ToS/discretion notice (FR-Part-B AC-B8).
     notice: std::sync::Once,
 }
@@ -437,6 +452,7 @@ impl DispatchProvider {
             // agy has no MCP/`--tools` wiring → always text mode, never the Forge-MCP harness.
             agy_cli: CliProvider::antigravity().with_harness(false),
             xai_oauth: XaiOauthProvider::new(),
+            codex_oauth: CodexOauthProvider::new(),
             notice: std::sync::Once::new(),
         }
     }
@@ -446,6 +462,7 @@ impl DispatchProvider {
     pub fn with_max_output_tokens(mut self, cap: u32) -> Self {
         self.genai = self.genai.with_max_output_tokens(cap);
         self.xai_oauth = self.xai_oauth.with_max_output_tokens(cap);
+        self.codex_oauth = self.codex_oauth.with_max_output_tokens(cap);
         self
     }
 
@@ -497,6 +514,10 @@ impl Provider for DispatchProvider {
             self.xai_oauth
                 .complete(model, messages, tools, on_event)
                 .await
+        } else if model.starts_with("codex-oauth::") {
+            self.codex_oauth
+                .complete(model, messages, tools, on_event)
+                .await
         } else {
             self.genai.complete(model, messages, tools, on_event).await
         }
@@ -529,6 +550,10 @@ impl Provider for DispatchProvider {
                 .await
         } else if model.starts_with("xai-oauth::") {
             self.xai_oauth
+                .complete_with(model, messages, tools, opts, on_event)
+                .await
+        } else if model.starts_with("codex-oauth::") {
+            self.codex_oauth
                 .complete_with(model, messages, tools, opts, on_event)
                 .await
         } else {

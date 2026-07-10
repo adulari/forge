@@ -762,7 +762,13 @@ fn is_known_provider_prefix(prefix: &str) -> bool {
     // `xai-oauth` authenticates via a keyring OAuth session (`forge auth xai-oauth`), not an
     // env-var API key, so it's never in `known_key_providers()` — same reason the CLI bridges
     // are keyless here.
-    const KEYLESS: &[&str] = &["ollama", "claude-cli", "codex-cli", "xai-oauth"];
+    const KEYLESS: &[&str] = &[
+        "ollama",
+        "claude-cli",
+        "codex-cli",
+        "xai-oauth",
+        "codex-oauth",
+    ];
     KEYLESS.contains(&prefix) || forge_config::known_key_providers().any(|p| p == prefix)
 }
 

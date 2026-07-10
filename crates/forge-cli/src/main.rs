@@ -21,8 +21,8 @@ pub(crate) use cli::commands::git::{git_cmd, maybe_install_git_hook, write_activ
 pub(crate) use cli::commands::import::import_cmd;
 pub(crate) use cli::commands::lattice::lattice_cmd;
 pub(crate) use cli::commands::local::{
-    auth, auth_xai_oauth, local_cmd, maybe_autostart_local, needs_onboarding, prompt_line,
-    provider_label, setup,
+    auth, auth_codex_oauth, auth_xai_oauth, local_cmd, maybe_autostart_local, needs_onboarding,
+    prompt_line, provider_label, setup,
 };
 pub(crate) use cli::commands::mcp::{mcp_cmd, plugin_cmd};
 pub(crate) use cli::commands::memory::memory_cmd;
