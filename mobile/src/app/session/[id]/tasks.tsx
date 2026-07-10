@@ -1,7 +1,7 @@
 // T3.4 — Tasks segment: read-only `snapshot.tasks` rows (FEATURES.md §1.2 `tasks` -> Tasks
 // segment). Per T3.1 HANDOFF this segment owns its own Screen (edges omit "top" — the shell's
 // header/status-strip/Segmented already consumed the top inset).
-import { ListChecks } from "lucide-react-native";
+import { ListChecks, WifiOff } from "lucide-react-native";
 import React, { useCallback } from "react";
 import { StyleSheet, View } from "react-native";
 
@@ -31,7 +31,7 @@ function TasksSkeleton() {
 }
 
 export default function SessionTasks() {
-  const { snapshot } = useSessionCtx();
+  const { snapshot, snapshotTimedOut } = useSessionCtx();
   const tasks = snapshot?.tasks ?? [];
   const busy = snapshot?.busy ?? false;
 
@@ -45,7 +45,9 @@ export default function SessionTasks() {
 
   return (
     <Screen edges={["left", "right", "bottom"]} scroll={false}>
-      {snapshot == null ? (
+      {snapshot == null && snapshotTimedOut ? (
+        <EmptyState icon={WifiOff} message="can't reach this session — it may not exist, or the server is unreachable" />
+      ) : snapshot == null ? (
         <TasksSkeleton />
       ) : (
         <BoundedList

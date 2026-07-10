@@ -53,7 +53,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const toast = useToast();
   const pathname = usePathname();
   const { isCompact } = useBreakpoint();
-  const { snapshot, connectionState, setHeaderHeight } = useSessionCtx();
+  const { snapshot, connectionState, setHeaderHeight, baseUrl } = useSessionCtx();
 
   // ARCHITECTURE §4.1.4: on the `busy` true->false edge, invalidate this session's history
   // query so the finalized turn appears from the store. The shell only needs to call the
@@ -62,6 +62,32 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
   const lastCopyText = useRef<string | null>(null);
   const seenNoteCount = useRef(0);
+
+  // Settings' removeServer/setActive change `useAuth().baseUrl` reactively, which
+  // `SessionProvider` reconnects `useSessionSocket` against immediately — silently pointing
+  // this session id at a server it never belonged to. Latch the first server this session was
+  // opened against; if the live one ever diverges (including going null), the session is no
+  // longer valid here and we bail out instead of limping along against the wrong daemon.
+  const ownedBaseUrl = useRef<string | null>(null);
+  const leftRef = useRef(false);
+
+  useEffect(() => {
+    ownedBaseUrl.current = null;
+    leftRef.current = false;
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (leftRef.current) return;
+    if (ownedBaseUrl.current == null) {
+      if (baseUrl != null) ownedBaseUrl.current = baseUrl;
+      return;
+    }
+    if (baseUrl !== ownedBaseUrl.current) {
+      leftRef.current = true;
+      toast.show("server changed — leaving this session", { tone: "danger" });
+      router.replace("/(tabs)");
+    }
+  }, [baseUrl, toast]);
 
   // copy_text: on change to a new non-null value, set the device clipboard + toast.
   useEffect(() => {

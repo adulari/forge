@@ -2,7 +2,7 @@
 // `subagents` -> Agents segment). 1 column compact/medium, 2 columns expanded (desktop) —
 // `key={numColumns}` forces FlatList to remount on that rare breakpoint change, since
 // `numColumns` can't change on a live FlatList instance.
-import { Bot } from "lucide-react-native";
+import { Bot, WifiOff } from "lucide-react-native";
 import React, { useCallback } from "react";
 import { StyleSheet, View } from "react-native";
 
@@ -38,7 +38,7 @@ function AgentsSkeleton() {
 }
 
 export default function SessionAgents() {
-  const { snapshot } = useSessionCtx();
+  const { snapshot, snapshotTimedOut } = useSessionCtx();
   const { isExpanded } = useBreakpoint();
   const agents = snapshot?.subagents ?? [];
   const numColumns = isExpanded ? 2 : 1;
@@ -60,7 +60,9 @@ export default function SessionAgents() {
 
   return (
     <Screen edges={["left", "right", "bottom"]} scroll={false}>
-      {snapshot == null ? (
+      {snapshot == null && snapshotTimedOut ? (
+        <EmptyState icon={WifiOff} message="can't reach this session — it may not exist, or the server is unreachable" />
+      ) : snapshot == null ? (
         <AgentsSkeleton />
       ) : (
         <BoundedList

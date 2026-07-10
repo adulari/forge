@@ -3,7 +3,7 @@
 // layout (`src/app/session/[id]/_layout.tsx`) mounts `SessionProvider` exactly once; child
 // route segments consume it via `useSessionCtx()` and never create their own socket
 // (UI_RULES.md #3 — data via hooks only, and BUILD_PLAN §6 Session shell contract).
-import React, { createContext, useCallback, useContext, useMemo, useState } from "react";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 import type { Attachment } from "../components/chat/attach";
 import { useAuth } from "./auth";
@@ -21,10 +21,20 @@ interface Draft {
 
 const EMPTY_DRAFT: Draft = { text: "", attachments: [] };
 
+// A deep link into a nonexistent/foreign session id never gets a Snapshot over WS (the
+// daemon has nothing to send) — without a deadline every segment would wait forever and the
+// skeleton/empty states would never resolve to an honest "this session doesn't exist".
+const SNAPSHOT_TIMEOUT_MS = 10_000;
+
 export interface SessionCtxValue {
   sessionId: string;
   baseUrl: string | null;
   snapshot: Snapshot | null;
+  /** True once this session has been mounted for `SNAPSHOT_TIMEOUT_MS` with no Snapshot ever
+   * arriving over WS — segments use this to stop rendering "loading" skeletons/fillers and
+   * show an honest error state instead. Resets on every `snapshot != null` and on session
+   * switch. */
+  snapshotTimedOut: boolean;
   connectionState: ConnectionState;
   send: (input: RemoteInput) => void;
   /** Measured height of the shell's header block (SessionHeader + banners + StatusStrip +
@@ -55,6 +65,18 @@ export function SessionProvider({
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const draft = drafts[sessionId] ?? EMPTY_DRAFT;
 
+  const [snapshotTimedOut, setSnapshotTimedOut] = useState(false);
+  const hasSnapshot = snapshot != null;
+  useEffect(() => {
+    if (hasSnapshot) {
+      setSnapshotTimedOut(false);
+      return;
+    }
+    setSnapshotTimedOut(false);
+    const t = setTimeout(() => setSnapshotTimedOut(true), SNAPSHOT_TIMEOUT_MS);
+    return () => clearTimeout(t);
+  }, [sessionId, hasSnapshot]);
+
   const setDraftText = useCallback(
     (text: string) => {
       setDrafts((prev) => ({ ...prev, [sessionId]: { text, attachments: prev[sessionId]?.attachments ?? [] } }));
@@ -78,6 +100,7 @@ export function SessionProvider({
       sessionId,
       baseUrl,
       snapshot,
+      snapshotTimedOut,
       connectionState,
       send,
       headerHeight,
@@ -87,7 +110,18 @@ export function SessionProvider({
       setDraftText,
       setDraftAttachments,
     }),
-    [sessionId, baseUrl, snapshot, connectionState, send, headerHeight, draft, setDraftText, setDraftAttachments],
+    [
+      sessionId,
+      baseUrl,
+      snapshot,
+      snapshotTimedOut,
+      connectionState,
+      send,
+      headerHeight,
+      draft,
+      setDraftText,
+      setDraftAttachments,
+    ],
   );
 
   return <SessionCtx.Provider value={value}>{children}</SessionCtx.Provider>;
