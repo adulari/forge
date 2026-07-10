@@ -99,6 +99,9 @@ impl CliKind {
             // `codex --model` (codex 0.13x model picker). gpt-5.4-mini is the fast/cheap tier.
             // codex is ALWAYS on this table: it exposes no model enumeration (see detect_models).
             CliKind::Codex => &[
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
                 "gpt-5.5",
                 "gpt-5.3-codex",
                 "gpt-5.2",
@@ -2848,6 +2851,12 @@ mod tests {
         let codex = CliKind::Codex.default_models();
         assert!(
             codex.contains(&"gpt-5.5") && codex.contains(&"gpt-5.4-mini"),
+            "{codex:?}"
+        );
+        assert!(
+            codex.contains(&"gpt-5.6-sol")
+                && codex.contains(&"gpt-5.6-terra")
+                && codex.contains(&"gpt-5.6-luna"),
             "{codex:?}"
         );
         // A model alias namespaces into a full Forge id under the bridge prefix.

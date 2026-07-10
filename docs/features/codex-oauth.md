@@ -55,7 +55,7 @@ auto-rotates round-robin per completion and hops once on 429 or connection-level
 `forge models` only probes `codex-oauth` when a session is stored. There is no public `/models`
 list on the ChatGPT backend — Forge seeds:
 
-- `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.2`, `gpt-5.4-mini`
+- `gpt-5.6-sol` (flagship), `gpt-5.6-terra` (balanced), `gpt-5.6-luna` (fast/cheap), `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.2`, `gpt-5.4-mini`
 
 ## Cost & routing
 

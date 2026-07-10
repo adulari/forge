@@ -388,6 +388,9 @@ pub fn has_session() -> bool {
 }
 
 const CODEX_OAUTH_SEED_MODELS: &[&str] = &[
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.3-codex",
@@ -540,6 +543,17 @@ mod tests {
         for id in &seeds {
             assert!(id.starts_with("codex-oauth::"));
             assert!(!forge_config::is_non_chat_model(id), "{id}");
+        }
+    }
+
+    #[test]
+    fn seed_models_include_gpt_5_6_family() {
+        let seeds = seed_models();
+        for id in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
+            assert!(
+                seeds.contains(&format!("codex-oauth::{id}")),
+                "{id} missing from {seeds:?}"
+            );
         }
     }
 
