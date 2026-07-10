@@ -414,20 +414,31 @@ enum FailoverPolicy {
     /// Not pinned (or the `mesh.pin_failover` escape hatch is on): normal cross-model
     /// failover down the routed chain.
     SwitchModels,
-    /// Pinned + rate-limited: wait out the limit and retry the SAME model (fix 1's backoff).
+    /// Pinned + rate-limited, OR pinned + a transient outage that survived the same-model hot
+    /// retries: wait it out and retry the SAME model (fix 1's rate-limit backoff; the
+    /// pinned-outage-resilience extension covers the outage case with its own budget).
     BackoffSameModel,
-    /// Pinned + any other retryable failure (permanent capability/auth error, or an outage that
-    /// survived the same-model transient retries): fail the turn with the REAL error — an
-    /// explicitly pinned model is never silently switched.
+    /// Pinned + a PERMANENT error (capability/auth), or a transient outage with
+    /// `mesh.pin_outage_wait_secs = 0` (outage backoff disabled): fail the turn with the REAL
+    /// error — an explicitly pinned model is never silently switched.
     FailTurn,
 }
 
 /// The strict-pin failover chooser: an explicit pin forbids cross-model switching unless
-/// `mesh.pin_failover = true` restores the old behaviour.
-fn failover_policy(pinned: bool, pin_failover: bool, rate_limited: bool) -> FailoverPolicy {
+/// `mesh.pin_failover = true` restores the old behaviour. `transient_outage` is true for a
+/// retryable, non-permanent, non-rate-limited error (`Unavailable`, typically) once the hot
+/// same-model transient retries (`MAX_TRANSIENT_RETRIES`, above) are exhausted, AND
+/// `mesh.pin_outage_wait_secs > 0` — the caller folds the config gate into this bool so `0`
+/// restores the old FailTurn behaviour without a separate branch here.
+fn failover_policy(
+    pinned: bool,
+    pin_failover: bool,
+    rate_limited: bool,
+    transient_outage: bool,
+) -> FailoverPolicy {
     if !pinned || pin_failover {
         FailoverPolicy::SwitchModels
-    } else if rate_limited {
+    } else if rate_limited || transient_outage {
         FailoverPolicy::BackoffSameModel
     } else {
         FailoverPolicy::FailTurn
@@ -3359,6 +3370,15 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         let pinned_turn = self.pinned_model.is_some() || decision.is_some_and(|d| d.pinned);
         let mut pinned_rl_attempts = 0u32;
         let mut pinned_rl_waited = std::time::Duration::ZERO;
+        // Pinned outage backoff (pinned-outage-resilience §1): a SEPARATE attempt/budget pair so
+        // an outage retry never eats into (or is eaten by) the rate-limit budget above — the two
+        // failure modes can both occur in the same turn without starving each other. `warned` is
+        // the one-shot latch for the 50%-of-budget Warning (below); a per-attempt Warning would
+        // spam the scrollback the way the RL path's does, so outage retries only surface via the
+        // status-bar ModelSearch event until the halfway point.
+        let mut pinned_outage_attempts = 0u32;
+        let mut pinned_outage_waited = std::time::Duration::ZERO;
+        let mut pinned_outage_warned_halfway = false;
 
         let mut final_text = String::new();
         let mut context_tokens: u64 = 0;
@@ -3667,11 +3687,20 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         // Strict pin semantics (harness-robustness wave 2, fix 2): the single
                         // chooser for what this error may do given pin state. An explicit pin
                         // forbids cross-model failover — `mesh.pin_failover = true` is the escape
-                        // hatch that restores the old switch-away behaviour end to end.
+                        // hatch that restores the old switch-away behaviour end to end. The outage
+                        // gate (`mesh.pin_outage_wait_secs > 0`) is folded into `transient_outage`
+                        // here rather than inside the arm below, so `0` collapses straight to
+                        // `FailTurn` — no separate disabled-outage branch to keep in sync.
+                        // Context overflow is excluded even though it rides `Unavailable`: after
+                        // the compact retries above are spent, waiting can never shrink the input,
+                        // so backing off would burn the whole outage budget on a lost cause.
+                        let transient_outage =
+                            !e.is_permanent() && !e.is_rate_limited() && !e.is_context_overflow();
                         match failover_policy(
                             pinned_turn,
                             self.config.mesh.pin_failover,
                             e.is_rate_limited(),
+                            transient_outage && self.config.mesh.pin_outage_wait_secs > 0,
                         ) {
                             FailoverPolicy::SwitchModels => {} // fall through to wait/bench/chain
                             // Pinned rate-limit backoff (fix 1): a pin must pin. Retry the SAME
@@ -3683,7 +3712,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                             // retry for OAuth in xai_oauth.rs), so by the time the error reaches
                             // this loop every configured key/account is limited and waiting is the
                             // only same-model option left.
-                            FailoverPolicy::BackoffSameModel => {
+                            FailoverPolicy::BackoffSameModel if e.is_rate_limited() => {
                                 let retry_after = match &e {
                                     forge_provider::ProviderError::RateLimited {
                                         retry_after,
@@ -3729,10 +3758,74 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                                 )));
                                 return Err(e.into());
                             }
+                            // Transient outage (Unavailable, typically) that survived the hot
+                            // same-model retries above (pinned-outage-resilience §1): same
+                            // schedule as the RL backoff, but its OWN, longer budget
+                            // (`mesh.pin_outage_wait_secs`, default 600s) via separate counters —
+                            // an outage recovers in minutes, not on a signaled `Retry-After`, and
+                            // must not eat into (or be eaten by) the RL budget above. The match
+                            // above already gated `mesh.pin_outage_wait_secs > 0` into
+                            // `transient_outage`, so this arm never runs with the budget disabled.
+                            FailoverPolicy::BackoffSameModel => {
+                                let attempt = pinned_outage_attempts + 1;
+                                // Cheap jitter without a rand dependency: sub-second wall-clock
+                                // nanos.
+                                let jitter = f64::from(
+                                    std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .map(|d| d.subsec_nanos())
+                                        .unwrap_or(0),
+                                ) / 1e9;
+                                // No server Retry-After for an outage — always the blind schedule.
+                                let delay = pinned_backoff_delay(attempt, None, jitter);
+                                let budget = std::time::Duration::from_secs(
+                                    self.config.mesh.pin_outage_wait_secs,
+                                );
+                                if pinned_outage_waited + delay <= budget {
+                                    pinned_outage_attempts = attempt;
+                                    pinned_outage_waited += delay;
+                                    // One-shot warning the first time cumulative wait crosses 50%
+                                    // of the budget: frequent enough that the user knows this is
+                                    // still going, rare enough not to spam the scrollback across
+                                    // many 60s-capped retries. Every retry still surfaces via the
+                                    // status-bar ModelSearch event below, no scrollback spam.
+                                    if !pinned_outage_warned_halfway
+                                        && pinned_outage_waited.as_secs_f64()
+                                            >= budget.as_secs_f64() * 0.5
+                                    {
+                                        pinned_outage_warned_halfway = true;
+                                        let remaining = budget.saturating_sub(pinned_outage_waited);
+                                        self.presenter.emit(PresenterEvent::Warning(format!(
+                                            "{active_model}: provider unreachable — retrying \
+                                             pinned model for up to {}s more (a pin never \
+                                             switches models; `/model` to unpin, or set \
+                                             `mesh.pin_failover = true` to allow mesh fallback)",
+                                            remaining.as_secs().max(1)
+                                        )));
+                                    }
+                                    self.presenter.emit(PresenterEvent::ModelSearch {
+                                        model: active_model.clone(),
+                                        retrying: true,
+                                    });
+                                    tokio::time::sleep(delay).await;
+                                    continue;
+                                }
+                                // Outage budget exhausted: fail the turn with the REAL error,
+                                // mirroring the rate-limit exhaustion wording above.
+                                self.presenter.emit(PresenterEvent::Warning(format!(
+                                    "{active_model}: still unreachable after \
+                                     {pinned_outage_attempts} backoff retries — failing the turn \
+                                     (pinned model; cross-model failover disabled; `/model` to \
+                                     unpin, or set `mesh.pin_failover = true` to allow mesh \
+                                     fallback)"
+                                )));
+                                return Err(e.into());
+                            }
                             FailoverPolicy::FailTurn => {
-                                // A pinned model with a permanent incapability (or an outage that
-                                // survived the same-model transient retries) can't serve this
-                                // turn, and switching models is forbidden: surface the real error.
+                                // A pinned model with a permanent incapability, or a transient
+                                // outage with `mesh.pin_outage_wait_secs = 0` (outage backoff
+                                // disabled), can't serve this turn, and switching models is
+                                // forbidden: surface the real error.
                                 return Err(e.into());
                             }
                         }
@@ -11862,6 +11955,78 @@ mod tests {
         );
     }
 
+    /// Fails `Unavailable` (a transient outage, e.g. a stalled stream) `fail_first` times, then
+    /// answers. Unlike [`RateLimitThenOkProvider`], the first [`MAX_TRANSIENT_RETRIES`] failures
+    /// are absorbed by the hot same-model retry in the turn loop itself, before the pinned-outage
+    /// backoff (pinned-outage-resilience §1) ever engages — so `fail_first` must exceed that to
+    /// actually exercise the outage-backoff arm.
+    struct UnavailableThenOkProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        fail_first: usize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for UnavailableThenOkProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.fail_first {
+                return Err(forge_provider::ProviderError::Unavailable("502".into()));
+            }
+            on_event(StreamEvent::Text(model.into()));
+            Ok(forge_provider::ModelResponse {
+                content: model.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    /// Fails with a transient outage (`Unavailable`) for the first `outage_calls`, then a
+    /// rate-limit (`RateLimited`) for the next `rl_calls`, then answers — so a single turn drives
+    /// BOTH pinned backoff paths in sequence, proving the outage attempt/budget counters
+    /// (`pinned_outage_attempts`/`pinned_outage_waited`) and the rate-limit ones
+    /// (`pinned_rl_attempts`/`pinned_rl_waited`) are independent: neither path's attempts are
+    /// consumed by, or blocked by, the other having already run in the same turn.
+    struct OutageThenRateLimitThenOkProvider {
+        calls: std::sync::atomic::AtomicUsize,
+        outage_calls: usize,
+        rl_calls: usize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for OutageThenRateLimitThenOkProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n < self.outage_calls {
+                return Err(forge_provider::ProviderError::Unavailable("502".into()));
+            }
+            if n < self.outage_calls + self.rl_calls {
+                return Err(forge_provider::ProviderError::RateLimited {
+                    message: "429".into(),
+                    retry_after: Some(std::time::Duration::from_millis(10)),
+                });
+            }
+            on_event(StreamEvent::Text(model.into()));
+            Ok(forge_provider::ModelResponse {
+                content: model.into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
     #[tokio::test]
     async fn rate_limited_pinned_model_backs_off_and_retries_the_same_model() {
         // Baseline defect (harness-robustness wave 2): pinned SWE-bench turns aborted
@@ -11909,30 +12074,215 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn pinned_model_recovers_from_a_transient_outage_via_backoff() {
+        // The originating incident (pinned-outage-resilience §1): a pinned model stalls/drops
+        // (`Unavailable`) past the hot same-model retries and used to hard-fail the turn
+        // (`FailoverPolicy::FailTurn`). It must now back off and retry the SAME model instead —
+        // real time cost: 2 hot retries (500ms+1s) + one outage-backoff attempt (~4-6s jittered).
+        let provider = Arc::new(UnavailableThenOkProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            fail_first: 3, // 2 absorbed by hot retry, 1 by the outage backoff, then recovers.
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            answer, "pin::model",
+            "an outage that recovers within the budget must retry the SAME pinned model"
+        );
+        assert!(
+            store.current_benched().unwrap().is_empty(),
+            "a pinned model that recovered after outage backoff must not be benched"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_outage_backoff_warns_once_at_halfway_then_fails_on_exhaustion() {
+        // A small budget (6s) so the halfway warning and exhaustion are both reachable without a
+        // long real-time sleep: attempt 1's delay (jittered 4-6s off the 5s base) already exceeds
+        // 50% of a 6s budget regardless of jitter, and attempt 2's delay (jittered 12-18s off the
+        // 15s base) always exceeds whatever budget remains, so exhaustion follows without needing
+        // a second real sleep.
+        let provider = Arc::new(EchoProvider {
+            bad: ["pin::model".to_string()].into_iter().collect(),
+            err: unavailable,
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.mesh.pin_outage_wait_secs = 6;
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+        let err = session.run_turn("fix the bug").await.unwrap_err();
+        assert!(
+            err.to_string().contains("502"),
+            "the REAL provider error must surface, got: {err}"
+        );
+        let events = events.lock().unwrap();
+        let halfway = events
+            .iter()
+            .filter(|e| {
+                matches!(e, PresenterEvent::Warning(w) if w.contains("provider unreachable") && w.contains("retrying pinned model"))
+            })
+            .count();
+        assert_eq!(halfway, 1, "the 50%-budget warning must fire exactly once");
+        let exhausted = events
+            .iter()
+            .filter(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("still unreachable")))
+            .count();
+        assert_eq!(
+            exhausted, 1,
+            "exhaustion fails with one warning mirroring the rate-limit exhaustion wording"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("/model") && w.contains("pin_failover"))),
+            "the exhaustion warning must carry the unpin / pin_failover hint"
+        );
+    }
+
+    #[tokio::test]
+    async fn pinned_outage_and_rate_limit_backoffs_use_independent_budgets() {
+        // One turn drives BOTH pinned backoff paths in sequence (outage first, then rate-limit),
+        // proving their attempt/budget counters don't share state: if they did, the rate-limit
+        // attempts below (or their budget check) could be corrupted by the outage attempt that
+        // already ran earlier in the same turn.
+        let provider = Arc::new(OutageThenRateLimitThenOkProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            outage_calls: 3, // 2 hot-retry absorbed, 1 outage-backoff attempt (~4-6s real sleep).
+            rl_calls: 2,     // 2 rate-limit backoff attempts (10ms retry_after each, fast).
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+        let answer = session.run_turn("fix the bug").await.unwrap();
+        assert_eq!(
+            answer, "pin::model",
+            "both backoff paths must recover the SAME pinned model within one turn"
+        );
+        assert!(
+            store.current_benched().unwrap().is_empty(),
+            "a pinned model that recovered must not be benched"
+        );
+        let events = events.lock().unwrap();
+        assert!(
+            events.iter().any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("rate limited") && w.contains("attempt 1/"))),
+            "the rate-limit path must still run its own attempt 1, unaffected by the earlier outage attempt"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("rate limited") && w.contains("attempt 2/"))),
+            "the rate-limit path must reach attempt 2 — its budget wasn't pre-consumed by the outage attempt"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("still rate limited") || w.contains("still unreachable"))),
+            "the turn recovered — neither budget was exhausted"
+        );
+    }
+
+    #[tokio::test]
+    async fn pin_outage_wait_secs_zero_disables_outage_backoff_and_fails_immediately() {
+        // `mesh.pin_outage_wait_secs = 0` restores the pre-outage-resilience FailTurn behaviour:
+        // the hot same-model transient retries still run (2 quick sleeps, same as any transient
+        // failure), but the multi-attempt, multi-second outage BACKOFF is skipped entirely —
+        // `failover_policy` sees `transient_outage=false` and fails the turn right away.
+        let provider = Arc::new(EchoProvider {
+            bad: ["pin::model".to_string()].into_iter().collect(),
+            err: unavailable,
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["worse::model".into()],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.mesh.pin_outage_wait_secs = 0;
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+        let err = session.run_turn("fix the bug").await.unwrap_err();
+        assert!(
+            err.to_string().contains("502"),
+            "the REAL provider error must surface, got: {err}"
+        );
+        assert!(
+            !events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("unreachable"))),
+            "wait_secs=0 must skip the outage backoff entirely — no outage warning at all"
+        );
+    }
+
     #[test]
     fn failover_chooser_forbids_cross_model_switching_for_pins() {
-        // Table test on the single failover chooser (strict pin semantics, fix 2):
-        // (pinned, pin_failover escape hatch, rate_limited) → what the loop may do.
+        // Table test on the single failover chooser (strict pin semantics, fix 2; extended by
+        // pinned-outage-resilience §1 with `transient_outage`):
+        // (pinned, pin_failover escape hatch, rate_limited, transient_outage) → what the loop
+        // may do. The caller folds `mesh.pin_outage_wait_secs > 0` into `transient_outage`
+        // itself, so `transient_outage=false` also covers the "outage backoff disabled" case —
+        // no separate table row needed for that; it collapses to the same FailTurn as "permanent".
         use FailoverPolicy::*;
         let table = [
             // Unpinned turns: normal failover regardless of error kind or escape hatch.
-            (false, false, true, SwitchModels),
-            (false, false, false, SwitchModels),
-            (false, true, true, SwitchModels),
-            (false, true, false, SwitchModels),
-            // Pinned + strict (default): rate limit → same-model backoff; anything else →
-            // fail the turn with the real error. Never a silent switch.
-            (true, false, true, BackoffSameModel),
-            (true, false, false, FailTurn),
+            (false, false, true, false, SwitchModels),
+            (false, false, false, false, SwitchModels),
+            (false, false, false, true, SwitchModels),
+            (false, true, true, false, SwitchModels),
+            (false, true, false, false, SwitchModels),
+            // Pinned + strict (default): rate limit OR transient outage → same-model backoff
+            // (on their own separate budgets, enforced at the call site, not here); a permanent
+            // error (neither flag set) → fail the turn with the real error. Never a silent switch.
+            (true, false, true, false, BackoffSameModel),
+            (true, false, false, true, BackoffSameModel),
+            (true, false, false, false, FailTurn),
+            // Pinned + permanent error (capability/auth): `is_permanent()` forces
+            // `transient_outage=false` at the call site regardless of `pin_outage_wait_secs`, so
+            // this is FailTurn even with outage backoff enabled.
+            (true, false, false, false, FailTurn),
             // Pinned + escape hatch: the old switch-away behaviour, end to end.
-            (true, true, true, SwitchModels),
-            (true, true, false, SwitchModels),
+            (true, true, true, false, SwitchModels),
+            (true, true, false, true, SwitchModels),
+            (true, true, false, false, SwitchModels),
         ];
-        for (pinned, hatch, rl, want) in table {
+        for (pinned, hatch, rl, outage, want) in table {
             assert_eq!(
-                failover_policy(pinned, hatch, rl),
+                failover_policy(pinned, hatch, rl, outage),
                 want,
-                "pinned={pinned} pin_failover={hatch} rate_limited={rl}"
+                "pinned={pinned} pin_failover={hatch} rate_limited={rl} transient_outage={outage}"
+            );
+        }
+    }
+
+    #[test]
+    fn pin_outage_wait_secs_zero_gate_restores_fail_turn() {
+        // `mesh.pin_outage_wait_secs = 0` disables outage backoff (pinned-outage-resilience §3):
+        // the call site computes `transient_outage = !permanent && !rate_limited && wait_secs >
+        // 0`, so a `0` budget must fold straight into `FailTurn` — the exact wiring the turn loop
+        // uses, exercised here without needing a full `run_model_loop` provider fixture.
+        let permanent = false;
+        let rate_limited = false;
+        for wait_secs in [0u64, 600] {
+            let transient_outage = !permanent && !rate_limited && wait_secs > 0;
+            let want = if wait_secs == 0 {
+                FailoverPolicy::FailTurn
+            } else {
+                FailoverPolicy::BackoffSameModel
+            };
+            assert_eq!(
+                failover_policy(true, false, rate_limited, transient_outage),
+                want,
+                "pin_outage_wait_secs={wait_secs}"
             );
         }
     }

@@ -1284,6 +1284,15 @@ pub struct MeshConfig {
     /// behaviour for pinned turns.
     #[serde(default)]
     pub pin_failover: bool,
+    /// Wait budget (seconds) for a pinned model to recover from a TRANSIENT OUTAGE (provider
+    /// unavailable / stream dropped, after the hot same-model retries in the turn loop are
+    /// exhausted) — separate from the rate-limit backoff budget above, since an outage recovery
+    /// takes minutes rather than a signaled `Retry-After`. Same `pinned_backoff_delay` schedule
+    /// (5s/15s/45s, then 60s-capped, ±20% jitter), bounded by this total budget rather than a
+    /// fixed attempt count. `0` disables outage backoff: a pinned model's outage fails the turn
+    /// immediately with the real error, same as a permanent error (pinned-outage-resilience §1).
+    #[serde(default = "default_pin_outage_wait_secs")]
+    pub pin_outage_wait_secs: u64,
     /// Default bench duration (seconds) when a transient failure (rate-limit / 5xx) gives no
     /// server `Retry-After`. Kept short because free-tier rate limits typically reset per MINUTE
     /// (NVIDIA NIM, Groq, Gemini RPM) — a long bench would strand the best free models and push
@@ -1553,6 +1562,13 @@ fn default_rate_limit_wait_secs() -> u64 {
     // Covers the common per-minute free-tier reset (NIM/Groq/Gemini ~60s) plus slack; a longer
     // (hourly/daily) quota exceeds this and falls through to failover instead of blocking the turn.
     75
+}
+
+fn default_pin_outage_wait_secs() -> u64 {
+    // ~10 minutes: generous enough to ride out a real provider blip/redeploy without silently
+    // switching a pinned model, short enough that a genuinely dead provider still fails the turn
+    // rather than blocking indefinitely.
+    600
 }
 
 fn default_stream_idle_timeout_secs() -> u64 {
@@ -1919,6 +1935,7 @@ impl Default for Config {
                 auto_discover: default_auto_discover(),
                 failover: default_failover(),
                 pin_failover: false,
+                pin_outage_wait_secs: default_pin_outage_wait_secs(),
                 failover_cooldown_secs: default_failover_cooldown_secs(),
                 rate_limit_wait_secs: default_rate_limit_wait_secs(),
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
