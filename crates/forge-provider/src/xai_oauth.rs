@@ -187,7 +187,7 @@ pub async fn probe_entitlement(access_token: &str) -> anyhow::Result<Entitlement
     let http = bundled_http_client();
     let body = serde_json::json!({
         "model": "grok-4-fast",
-        "input": "Reply with OK.",
+        "input": [{"role": "user", "content": "Reply with OK."}],
         "max_output_tokens": 16,
         "stream": false,
     });

@@ -215,6 +215,8 @@ pub(crate) async fn auth_xai_oauth(
         });
     provider_oauth::add_provider_oauth_account(XAI_OAUTH_KEYRING_PROVIDER, &account_id, &tokens)
         .context("storing xAI OAuth tokens")?;
+    // A new subscription login must surface its models without waiting for the 24h cache to age out.
+    crate::cli::commands::models::invalidate_catalog_cache();
 
     match forge_provider::probe_entitlement(&tokens.access_token).await {
         Ok(forge_provider::EntitlementStatus::Entitled) => println!(
@@ -434,6 +436,8 @@ pub(crate) async fn auth_codex_oauth(
         });
     provider_oauth::add_provider_oauth_account(CODEX_OAUTH_KEYRING_PROVIDER, &account_id, &tokens)
         .context("storing Codex OAuth tokens")?;
+    // A new subscription login must surface its models without waiting for the 24h cache to age out.
+    crate::cli::commands::models::invalidate_catalog_cache();
 
     let probe_id = chatgpt_id.as_deref().unwrap_or(&account_id);
     match forge_provider::probe_codex_entitlement(&tokens.access_token, probe_id).await {

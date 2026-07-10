@@ -43,6 +43,15 @@ pub(crate) fn save_catalog(catalog: &ModelCatalog) {
     }
 }
 
+/// Delete the on-disk catalog cache so the next lookup re-discovers from scratch. A new
+/// subscription login must surface its models without waiting for the 24h cache to age out.
+pub(crate) fn invalidate_catalog_cache() {
+    let Some(path) = catalog_cache_path() else {
+        return;
+    };
+    let _ = std::fs::remove_file(path);
+}
+
 /// Construct the model backend + router from config. Shared by interactive sessions and the
 /// `mcp-serve` subagent path (RFC subagent-orchestration Phase 3), so both route identically.
 pub(crate) fn build_provider_and_router(
