@@ -1,10 +1,11 @@
-// Forge desktop shell (ARCHITECTURE.md §6.1). Deliberately thin: window + app icons +
-// native notifications + external-link opening + a basic app menu. NO custom Rust
-// commands in v1 — all daemon communication happens in the webview via the JS
-// transport seam (`mobile/src/lib/transport/index.ts`).
-#[cfg(debug_assertions)]
+// Forge desktop shell (ARCHITECTURE.md §6.1). The webview owns the integrated title bar:
+// macOS keeps its native menu for standard editing bindings, while Windows/Linux hide native
+// decorations and use the React Native Web chrome.
+#[cfg(all(debug_assertions, target_os = "macos"))]
 use tauri::menu::MenuItemBuilder;
+#[cfg(target_os = "macos")]
 use tauri::menu::{Menu, PredefinedMenuItem, SubmenuBuilder};
+#[cfg(debug_assertions)]
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -15,45 +16,18 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_websocket::init())
         .setup(|app| {
-            let handle = app.handle();
+            #[cfg(not(target_os = "macos"))]
+            app.get_webview_window("main")
+                .ok_or_else(|| std::io::Error::other("main window is missing"))?
+                .set_decorations(false)?;
 
-            let about = PredefinedMenuItem::about(handle, Some("About Forge"), None)?;
-            let quit = PredefinedMenuItem::quit(handle, Some("Quit Forge"))?;
-
-            let app_menu_builder = SubmenuBuilder::new(handle, "Forge").item(&about).separator();
-
-            // Reload (CmdOrCtrl+R) is dev-only: on a release build it's browser muscle-
-            // memory wired to a footgun that wipes drafts/UI state, with no corresponding
-            // benefit (there's no dev server to reconnect to). Keep it for debug builds
-            // where reloading after a frontend change is actually useful.
-            #[cfg(debug_assertions)]
-            let app_menu_builder = {
-                let reload = MenuItemBuilder::with_id("reload", "Reload")
-                    .accelerator("CmdOrCtrl+R")
-                    .build(handle)?;
-                app_menu_builder.item(&reload).separator()
-            };
-
-            let app_menu = app_menu_builder.item(&quit).build()?;
-
-            // Standard Edit menu — required on macOS for Cmd+C/V/X/A to work in the
-            // webview at all (there is no default Edit menu without one).
-            let edit_menu = SubmenuBuilder::new(handle, "Edit")
-                .undo()
-                .redo()
-                .separator()
-                .cut()
-                .copy()
-                .paste()
-                .select_all()
-                .build()?;
-
-            let menu = Menu::with_items(handle, &[&app_menu, &edit_menu])?;
-            app.set_menu(menu)?;
+            #[cfg(target_os = "macos")]
+            install_macos_menu(app)?;
 
             Ok(())
         })
         .on_menu_event(|app, event| {
+            #[cfg(debug_assertions)]
             if event.id() == "reload" {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.eval("window.location.reload()");
@@ -62,4 +36,35 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_menu(app: &mut tauri::App) -> tauri::Result<()> {
+    let handle = app.handle();
+    let about = PredefinedMenuItem::about(handle, Some("About Forge"), None)?;
+    let quit = PredefinedMenuItem::quit(handle, Some("Quit Forge"))?;
+    let app_menu_builder = SubmenuBuilder::new(handle, "Forge")
+        .item(&about)
+        .separator();
+
+    #[cfg(debug_assertions)]
+    let app_menu_builder = {
+        let reload = MenuItemBuilder::with_id("reload", "Reload")
+            .accelerator("CmdOrCtrl+R")
+            .build(handle)?;
+        app_menu_builder.item(&reload).separator()
+    };
+
+    let app_menu = app_menu_builder.item(&quit).build()?;
+    let edit_menu = SubmenuBuilder::new(handle, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+    let menu = Menu::with_items(handle, &[&app_menu, &edit_menu])?;
+    app.set_menu(menu)
 }

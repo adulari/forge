@@ -539,6 +539,7 @@ impl App {
             busy: self.busy,
             done: self.done,
             temper: self.temper.clone(),
+            effort: self.effort,
             tier: self.routing.as_ref().map(|r| r.tier.clone()),
             model: self
                 .routing
@@ -1082,6 +1083,7 @@ pub struct RemoteSnapshot {
     pub busy: bool,
     pub done: bool,
     pub temper: String,
+    pub effort: Option<forge_types::EffortLevel>,
     pub tier: Option<String>,
     pub model: String,
     pub cost_usd: f64,
