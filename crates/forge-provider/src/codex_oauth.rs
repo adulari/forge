@@ -13,6 +13,7 @@ use forge_config::provider_oauth::{
 };
 use forge_types::Message;
 
+use crate::codex_websocket;
 use crate::oauth_responses::{
     build_responses_request, classify_responses_status, error_message,
     execute_responses_request as shared_execute, now_unix, should_hop_account, REFRESH_SKEW_SECS,
@@ -31,7 +32,9 @@ const CODEX_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 /// Parameters the generic Responses builder emits that `chatgpt.com/backend-api/codex/responses`
 /// rejects outright (verified live: `max_output_tokens` → 400 "Unsupported parameter"). The real
 /// Codex CLI sends neither. Stripped codex-side so the shared builder stays correct for xAI.
-const CODEX_UNSUPPORTED_PARAMS: &[&str] = &["max_output_tokens", "temperature"];
+/// `pub(crate)` so `codex_websocket.rs` can shape a body identically for its unit tests instead of
+/// duplicating the list.
+pub(crate) const CODEX_UNSUPPORTED_PARAMS: &[&str] = &["max_output_tokens", "temperature"];
 
 /// True iff `url` is `https` and its host is exactly `chatgpt.com` or a genuine `*.chatgpt.com`
 /// subdomain — rejects lookalikes and any non-HTTPS scheme.
@@ -311,6 +314,46 @@ impl CodexOauthProvider {
         result
     }
 
+    /// WS counterpart of [`Self::execute`] for [`codex_websocket::CODEX_WEBSOCKET_MODELS`]
+    /// (Luna). Same 401-refresh-and-retry-once behavior as the HTTP path; cross-account rotation
+    /// (`should_hop_account`, tried on the HTTP path for 429/`Unavailable`) is NOT replicated here
+    /// yet — TODO: extend rotation to the WS transport once it's proven stable in the field. An
+    /// expired token is the common case and IS handled below.
+    async fn execute_ws(
+        &self,
+        ws_url: &str,
+        token: &str,
+        chatgpt_account_id: &str,
+        body: &serde_json::Value,
+        on_event: &mut EventSink<'_>,
+    ) -> Result<ModelResponse, ProviderError> {
+        let result = codex_websocket::run(
+            ws_url,
+            token,
+            chatgpt_account_id,
+            body,
+            on_event,
+            classify_codex_status,
+        )
+        .await;
+        if let Err(ProviderError::Auth(ref msg)) = result {
+            if msg.contains("(401)") {
+                if let Ok((token2, id2)) = self.force_refresh_active().await {
+                    return codex_websocket::run(
+                        ws_url,
+                        &token2,
+                        &id2,
+                        body,
+                        on_event,
+                        classify_codex_status,
+                    )
+                    .await;
+                }
+            }
+        }
+        result
+    }
+
     async fn force_refresh_active(&self) -> Result<(String, String), ProviderError> {
         let tokens = match &self.accounts {
             AccountSource::Keyring => {
@@ -523,6 +566,16 @@ impl Provider for CodexOauthProvider {
             for k in CODEX_UNSUPPORTED_PARAMS {
                 obj.remove(*k);
             }
+        }
+
+        // "v1"-tagged models (currently just Luna) 404 ("Model not found") over the plain HTTPS
+        // path above — the ChatGPT backend serves them ONLY over WebSocket. Everything else keeps
+        // using the battle-tested HTTP path below UNCHANGED.
+        if codex_websocket::is_websocket_model(model) {
+            let ws_url = codex_websocket::to_ws_url(&url)?;
+            return self
+                .execute_ws(&ws_url, &token, &chatgpt_id, &body, on_event)
+                .await;
         }
 
         let first = self
