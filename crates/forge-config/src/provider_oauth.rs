@@ -38,7 +38,7 @@ pub const CODEX_OAUTH_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oauth/toke
 pub const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// Loopback callback port registered for the public Codex client — must stay 1455.
 pub const CODEX_OAUTH_CALLBACK_PORT: u16 = 1455;
-pub const CODEX_OAUTH_REDIRECT_URI: &str = "http://127.0.0.1:1455/auth/callback";
+pub const CODEX_OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 /// Scopes requested for ChatGPT subscription access (Codex CLI parity).
 pub const CODEX_OAUTH_SCOPE: &str = "openid profile email offline_access";
 /// Keyring provider-key `codex-oauth` tokens are stored under (`provider-oauth:codex`).

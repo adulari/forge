@@ -250,6 +250,28 @@ pub(crate) async fn auth_xai_oauth(
     Ok(())
 }
 
+/// Build the Codex authorize URL (`forge_config::authorize_url` plus the two params OpenAI's
+/// Hydra authorize server requires from the registered Codex CLI client that aren't part of the
+/// generic RFC 6749 shape shared with the MCP OAuth path — see `forge_config::authorize_url`).
+fn codex_authorize_url(state: &str, code_challenge: &str) -> String {
+    use forge_config::provider_oauth::{
+        CODEX_OAUTH_AUTHORIZE_URL, CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_REDIRECT_URI,
+        CODEX_OAUTH_SCOPE,
+    };
+    let auth_url = forge_config::authorize_url(
+        CODEX_OAUTH_AUTHORIZE_URL,
+        CODEX_OAUTH_CLIENT_ID,
+        CODEX_OAUTH_REDIRECT_URI,
+        &CODEX_OAUTH_SCOPE
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        state,
+        code_challenge,
+    );
+    format!("{auth_url}&id_token_add_organizations=true&codex_cli_simplified_flow=true")
+}
+
 /// Sign in to ChatGPT via OAuth 2.0 PKCE (Plus/Pro subscription — no API key, billed against the
 /// subscription). Loopback callback on port 1455 (official Codex public client). Multiple accounts
 /// supported with the same `--list` / `--switch` / `--remove` surface as `xai-oauth`.
@@ -261,8 +283,7 @@ pub(crate) async fn auth_codex_oauth(
     switch: bool,
 ) -> Result<()> {
     use forge_config::provider_oauth::{
-        self, CODEX_OAUTH_AUTHORIZE_URL, CODEX_OAUTH_CALLBACK_PORT, CODEX_OAUTH_CLIENT_ID,
-        CODEX_OAUTH_KEYRING_PROVIDER, CODEX_OAUTH_REDIRECT_URI, CODEX_OAUTH_SCOPE,
+        self, CODEX_OAUTH_CALLBACK_PORT, CODEX_OAUTH_KEYRING_PROVIDER,
     };
 
     if switch {
@@ -372,17 +393,7 @@ pub(crate) async fn auth_codex_oauth(
 
     let pkce = forge_config::Pkce::generate();
     let state = forge_config::random_state();
-    let auth_url = forge_config::authorize_url(
-        CODEX_OAUTH_AUTHORIZE_URL,
-        CODEX_OAUTH_CLIENT_ID,
-        CODEX_OAUTH_REDIRECT_URI,
-        &CODEX_OAUTH_SCOPE
-            .split_whitespace()
-            .map(str::to_string)
-            .collect::<Vec<_>>(),
-        &state,
-        &pkce.challenge,
-    );
+    let auth_url = codex_authorize_url(&state, &pkce.challenge);
 
     let no_browser = std::env::var("FORGE_NO_BROWSER").as_deref() == Ok("1") || {
         use std::io::IsTerminal;
@@ -1106,4 +1117,30 @@ pub(crate) fn apply_wizard_outcome(
     forge_config::inject_provider_keys();
     forge_config::inject_search_keys();
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Codex authorize request must match OpenAI's registered public client
+    /// (`app_EMoamEEZ73f0CkXaXp7hrann`) byte-exact, or Hydra rejects it with
+    /// `authorize_hydra_invalid_request` before consent even renders: the `localhost` (not
+    /// `127.0.0.1`) redirect_uri, plus the two Codex-CLI-specific params.
+    #[test]
+    fn codex_authorize_url_matches_registered_client() {
+        let url = codex_authorize_url("test-state", "test-challenge");
+        assert!(
+            url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"),
+            "expected percent-encoded localhost redirect_uri in {url}"
+        );
+        assert!(
+            url.contains("id_token_add_organizations=true"),
+            "missing id_token_add_organizations param in {url}"
+        );
+        assert!(
+            url.contains("codex_cli_simplified_flow=true"),
+            "missing codex_cli_simplified_flow param in {url}"
+        );
+    }
 }
