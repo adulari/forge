@@ -11,7 +11,7 @@
 use forge_config::provider_oauth::{
     self, CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_KEYRING_PROVIDER, CODEX_OAUTH_TOKEN_ENDPOINT,
 };
-use forge_types::Message;
+use forge_types::{Message, Usage};
 
 use crate::codex_websocket;
 use crate::oauth_responses::{
@@ -598,6 +598,19 @@ pub async fn probe_entitlement(
     })
 }
 
+fn fill_subscription_usage(mut response: ModelResponse, body: &serde_json::Value) -> ModelResponse {
+    if response.usage.input_tokens == 0 {
+        let request_chars = serde_json::to_string(body).map_or(0, |json| json.chars().count());
+        response.usage = Usage {
+            input_tokens: (request_chars as u64).div_ceil(4),
+            output_tokens: response.usage.output_tokens,
+            cached_input_tokens: response.usage.cached_input_tokens,
+            cost_usd: 0.0,
+        };
+    }
+    response
+}
+
 #[async_trait::async_trait]
 impl Provider for CodexOauthProvider {
     async fn complete(
@@ -648,19 +661,21 @@ impl Provider for CodexOauthProvider {
             let ws_url = codex_websocket::to_ws_url(&url)?;
             return self
                 .execute_ws(&ws_url, &token, &chatgpt_id, &body, on_event)
-                .await;
+                .await
+                .map(|response| fill_subscription_usage(response, &body));
         }
 
         let first = self
             .execute(&url, &token, &chatgpt_id, &body, on_event)
             .await;
-        match first {
+        let response = match first {
             Err(ref e) if should_hop_account(e) && pool.has_rotation() => {
                 let (token2, id2) = self.pick_access_token(&pool).await?;
                 self.execute(&url, &token2, &id2, &body, on_event).await
             }
             other => other,
-        }
+        }?;
+        Ok(fill_subscription_usage(response, &body))
     }
 }
 
@@ -669,6 +684,30 @@ mod tests {
     use super::*;
     use crate::StreamEvent;
     use forge_types::Role;
+
+    #[test]
+    fn missing_backend_usage_estimates_request_context_at_zero_subscription_cost() {
+        let body = serde_json::json!({"input": "abcdefgh"});
+        let response = fill_subscription_usage(ModelResponse::default(), &body);
+        let serialized_chars = serde_json::to_string(&body).unwrap().chars().count() as u64;
+        assert_eq!(response.usage.input_tokens, serialized_chars.div_ceil(4));
+        assert_eq!(response.usage.output_tokens, 0);
+        assert_eq!(response.usage.cost_usd, 0.0);
+
+        let reported = ModelResponse {
+            usage: Usage {
+                input_tokens: 123,
+                output_tokens: 45,
+                cached_input_tokens: 6,
+                cost_usd: 0.0,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            fill_subscription_usage(reported, &body).usage.input_tokens,
+            123
+        );
+    }
 
     #[test]
     fn seed_models_are_namespaced() {
