@@ -948,7 +948,7 @@ impl ModelHealth {
 }
 
 /// How a subscription is sitting relative to its rolling usage window (quota-aware routing, L3,
-/// provider-cost-routing.md). Ordered so the stricter wins with `.max()`.
+/// mesh-routing.md). Ordered so the stricter wins with `.max()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum QuotaStatus {
     /// Comfortably within the window.
@@ -980,6 +980,7 @@ pub struct QuotaHint {
 /// `subscription_usage` table (rows whose window hasn't reset). Consulted by the mesh router to
 /// demote or skip a pressured subscription. Carries no clock/I/O (filtering happens at build).
 #[derive(Debug, Default, Clone)]
+/// Documented in docs/features/mesh-routing.md.
 pub struct SubscriptionQuota {
     by_provider: std::collections::HashMap<String, QuotaStatus>,
     /// Fraction (0.0–1.0) of the strictest active window consumed, per provider. Drives the
@@ -988,7 +989,7 @@ pub struct SubscriptionQuota {
     /// Subscription plan slug per provider (`claude-cli` → `max-20x`, `codex-cli` → `plus`), from
     /// config. A larger plan has more headroom, so it is spent more freely.
     plans: std::collections::HashMap<String, String>,
-    /// Pace projection per provider (quota-pace-routing.md), derived from `quota_history` — where
+    /// Pace projection per provider (mesh-routing.md), derived from `quota_history` — where
     /// the strictest active window is headed by its reset time, not just its current fraction.
     /// Absent when there isn't enough history to derive a rate (see `compute_quota_pace`).
     pace: std::collections::HashMap<String, QuotaPace>,
@@ -1011,24 +1012,27 @@ impl SubscriptionQuota {
     }
 
     /// Attach per-provider subscription plan slugs (from `config.mesh.subscriptions`).
+    /// Documented in docs/features/mesh-routing.md.
     pub fn with_plans(mut self, plans: std::collections::HashMap<String, String>) -> Self {
         self.plans = plans;
         self
     }
 
-    /// Attach per-provider quota-pace projections (quota-pace-routing.md).
+    /// Attach per-provider quota-pace projections (mesh-routing.md).
     pub fn with_paces(mut self, pace: std::collections::HashMap<String, QuotaPace>) -> Self {
         self.pace = pace;
         self
     }
 
     /// Enable/disable proactive conservation spreading (`config.mesh.subscription_conserve`).
+    /// Documented in docs/features/mesh-routing.md.
     pub fn with_conserve(mut self, on: bool) -> Self {
         self.conserve = on;
         self
     }
 
     /// The pressure for a provider prefix (defaults to `Ok` when unknown/unconstrained).
+    /// Documented in docs/features/mesh-routing.md.
     pub fn status_for(&self, provider: &str) -> QuotaStatus {
         self.by_provider
             .get(provider)
@@ -1047,7 +1051,7 @@ impl SubscriptionQuota {
         self.pace.get(provider).copied()
     }
 
-    /// The conservation input for a provider (quota-pace-routing.md): `fraction_for(provider)`
+    /// The conservation input for a provider (mesh-routing.md): `fraction_for(provider)`
     /// raised to the pace's `projected_fraction_at_reset` (clamped to 1.0) when a pace is present
     /// AND projects HIGHER than the current fraction — a window projected to hit 90% by reset is
     /// treated as if it's already at 90%, so spreading ramps up ahead of the overrun instead of
@@ -1055,6 +1059,7 @@ impl SubscriptionQuota {
     /// never lower, the fraction: a cooling-down window (rate has since dropped, so the projection
     /// now reads under the current fraction) still conserves on what's already spent, not on a
     /// stale lower number.
+    /// Documented in docs/features/mesh-routing.md.
     pub fn effective_fraction_for(&self, provider: &str) -> f64 {
         let frac = self.fraction_for(provider);
         let projected = self
@@ -1090,7 +1095,7 @@ impl SubscriptionQuota {
     }
 }
 
-/// One historical observation of a subscription window's usage (quota-pace-tracking.md),
+/// One historical observation of a subscription window's usage (mesh-routing.md),
 /// read back from the store's append-only `quota_history` table. Distinct from [`QuotaHint`]
 /// (the latest snapshot only) — a series of these is what lets [`compute_quota_pace`] derive a
 /// rate of consumption instead of just a point-in-time fraction.
@@ -1114,12 +1119,14 @@ pub const QUOTA_PACE_MIN_ELAPSED_SECS: i64 = 300;
 /// even at 8 days). Shared by the statusline's [`compute_quota_pace`] caller (forge-core's
 /// `emit_quota_pace`) and the store's [`SubscriptionQuota`] pace attachment (`quota_at`) so both
 /// project off the same history window.
+/// Documented in docs/features/mesh-routing.md.
 pub const QUOTA_PACE_LOOKBACK_SECS: i64 = 8 * 24 * 3600;
 
 /// A projection of where a subscription window's usage is headed, derived from a short history
 /// of `(observed_at, fraction_used)` points by [`compute_quota_pace`]. Pure/deterministic: no
 /// clock or I/O, so it's trivially unit-testable — the caller supplies "now".
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// Documented in docs/features/mesh-routing.md.
 pub struct QuotaPace {
     /// Fraction of the window consumed per hour, at the observed rate (>= 0.0).
     pub rate_per_hour: f64,

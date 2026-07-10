@@ -239,7 +239,7 @@ pub(crate) async fn build_session_with_self_mcp(
     let store = Arc::new(open_store()?);
     let store_for_lattice = Arc::clone(&store);
     // Startup hint: if models are benched from a prior run/probe, tell the user how to recheck
-    // (model-health-failover — we never auto-probe, so a stale bench is the user's to clear).
+    // (docs/features/mesh-routing.md — we never auto-probe, so a stale bench is the user's to clear).
     let mut presenter = presenter;
     if let Ok(report) = store.current_benched_report() {
         if !report.is_empty() {
@@ -255,7 +255,7 @@ pub(crate) async fn build_session_with_self_mcp(
     let pin = pin.map(|p| forge_provider::normalize_model_id(&p).into_owned());
 
     // Auto-discovery: build a live model catalog so the mesh routes to the best usable model
-    // (docs/features/auto-discovery-mesh.md). Skipped for the offline mock and when disabled.
+    // (docs/features/mesh-routing.md). Skipped for the offline mock and when disabled.
     //
     // Cache-first: if a catalog from the last 24 h exists on disk, use it instantly and kick off
     // a background refresh so the NEXT startup is also fast. On first run (or stale cache) we

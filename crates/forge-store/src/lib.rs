@@ -550,8 +550,8 @@ fn migration_0008(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-/// Migration #9: append-only quota usage history (quota-pace-tracking.md, extends L3 in
-/// docs/features/provider-cost-routing.md). `subscription_usage` only ever holds the LATEST
+/// Migration #9: append-only quota usage history (mesh-routing.md, extends L3 in
+/// docs/features/mesh-routing.md). `subscription_usage` only ever holds the LATEST
 /// snapshot per (provider, window) — there's no way to derive a rate of consumption from it. This
 /// table keeps every observation so [`forge_types::compute_quota_pace`] can project where a
 /// window is headed. Deliberately NOT touching `subscription_usage`'s schema or upsert behavior —
@@ -1474,7 +1474,7 @@ impl Store {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    // --- Model health / failover (docs/features/model-health-failover.md) ---
+    // --- Model health / failover (docs/features/mesh-routing.md) ---
 
     /// Bench a model until `cooldown_until` (epoch secs), recording why. Upsert: a fresh failure
     /// or probe overwrites any prior bench.
@@ -1754,7 +1754,7 @@ impl Store {
     /// Record the latest subscription quota observation (quota-aware routing, L3). One row per
     /// bridge provider, upserted — the most recent `rate_limit_event` wins.
     ///
-    /// Also appends the observation to the append-only `quota_history` table (quota-pace-tracking.md)
+    /// Also appends the observation to the append-only `quota_history` table (mesh-routing.md)
     /// when a `fraction_used` is reported, so [`quota_history_since`](Self::quota_history_since) can
     /// later derive a consumption rate. This does NOT change `subscription_usage`'s upsert
     /// (latest-snapshot-only) semantics — it's a pure addition alongside it.
@@ -1786,7 +1786,7 @@ impl Store {
         Ok(())
     }
 
-    /// Append one observation to the quota usage history (quota-pace-tracking.md). Called by
+    /// Append one observation to the quota usage history (mesh-routing.md). Called by
     /// [`record_quota`](Self::record_quota) for every hint that carries a `fraction_used`; exposed
     /// separately so callers/tests can seed history points directly (e.g. with a fixed
     /// `observed_at` via [`Self::record_quota_history_at`]).
@@ -1986,7 +1986,7 @@ impl Store {
 
         // Pace projection per provider, off that same strictest window's history — a subscription
         // burning fast early in its window (low fraction, high rate) is otherwise under-protected
-        // by `fractions` alone (quota-pace-routing.md).
+        // by `fractions` alone (mesh-routing.md).
         let since = now - forge_types::QUOTA_PACE_LOOKBACK_SECS;
         let mut paces = std::collections::HashMap::new();
         for (provider, window, _fraction, resets_at) in &strictest {

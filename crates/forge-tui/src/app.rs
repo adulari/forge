@@ -137,7 +137,7 @@ impl UsageOverlay {
 }
 
 /// The statusline's pace meter, one window at a time — whichever subscription window the latest
-/// `QuotaPace` events say is closest to exhaustion (quota-pace-tracking.md). Plain data pushed in
+/// `QuotaPace` events say is closest to exhaustion (mesh-routing.md). Plain data pushed in
 /// by the core (which owns the store + the pure `compute_quota_pace`); the TUI only renders it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuotaPaceInfo {
@@ -160,7 +160,7 @@ pub struct MeshQuotaRow {
     /// "Ok" / "Warning" / "Exhausted".
     pub status: String,
     /// Probability a complex task spreads off this subscription (0.0–1.0). Pace-projected
-    /// (quota-pace-routing.md) — matches what real routing uses, not just `fraction` above.
+    /// (mesh-routing.md) — matches what real routing uses, not just `fraction` above.
     pub spread_complex: f64,
     /// Fraction the window is projected to reach by its reset time, if derivable. `None` when
     /// there isn't enough `quota_history` yet.
@@ -4760,7 +4760,7 @@ fn mesh_meter(frac: f64, ease: f32, status: &str) -> Vec<Span<'static>> {
 }
 
 /// A compact `→ 93% at reset ⚠` suffix for a quota line when a pace projection exists
-/// (quota-pace-routing.md) — `""` when there isn't enough history to project one yet.
+/// (mesh-routing.md) — `""` when there isn't enough history to project one yet.
 fn mesh_pace_suffix(projected_fraction_at_reset: Option<f64>, exhaustion_warning: bool) -> String {
     match projected_fraction_at_reset {
         Some(p) => format!(

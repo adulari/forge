@@ -444,7 +444,7 @@ pub(crate) async fn models(probe: bool, probe_all: bool, clear: bool) -> Result<
     println!("\nmesh auto-pick per tier:");
     for tier in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
         // Mirror routing: skip benched models so the shown pick is the one the mesh would
-        // actually use right now (model-health-failover).
+        // actually use right now (docs/features/mesh-routing.md).
         let pick = cat
             .ranked_for(tier, &pricing, 5)
             .into_iter()
@@ -604,7 +604,7 @@ pub(crate) fn meter(frac: f64) -> String {
 }
 
 /// A compact `→ 93% at reset ⚠` suffix for a quota line when a pace projection exists
-/// (quota-pace-routing.md) — `""` when there isn't enough history to project one yet.
+/// (mesh-routing.md) — `""` when there isn't enough history to project one yet.
 pub(crate) fn pace_suffix(
     projected_fraction_at_reset: Option<f64>,
     exhaustion_warning: bool,

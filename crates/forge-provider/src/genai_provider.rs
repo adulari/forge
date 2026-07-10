@@ -99,7 +99,7 @@ async fn with_discovery_timeout<T>(
 
 /// List the models a provider currently offers, as Forge `provider::model` ids, by querying the
 /// provider's models endpoint via genai (`all_model_names`). Used by the auto-discovery mesh to
-/// build a live catalog of usable models (docs/features/auto-discovery-mesh.md). The provider's
+/// build a live catalog of usable models (docs/features/mesh-routing.md). The provider's
 /// key + endpoint are resolved by genai from the environment. Providers genai can't list (no
 /// native adapter, e.g. `cerebras`) return an error and are simply skipped by the caller.
 pub async fn list_models(namespace: &str) -> Result<Vec<String>, ProviderError> {
@@ -1030,7 +1030,7 @@ impl Provider for GenAiProvider {
 
         // Stall guards: a hung connection or a stream that goes silent must not freeze the
         // turn forever. A timeout surfaces as `Unavailable` (retryable), so the mesh fails over
-        // to the next model instead of spinning indefinitely (model-health-failover).
+        // to the next model instead of spinning indefinitely (docs/features/mesh-routing.md).
         let first = tokio::time::timeout(
             CONNECT_TIMEOUT,
             self.client
@@ -1535,7 +1535,7 @@ mod tests {
         assert_eq!(out.len(), 1, "no empty assistant text message");
     }
 
-    // --- Error classification + retry-after parsing (model-health-failover) ---
+    // --- Error classification + retry-after parsing (docs/features/mesh-routing.md) ---
 
     // The exact 429 body from the bug report (truncated to the parts that matter).
     const GEMINI_429: &str = r#"{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. Quota exceeded for metric: ... limit: 0, model: antigravity. Please retry in 37.047405996s.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"37s"}]}}"#;

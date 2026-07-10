@@ -1271,13 +1271,13 @@ pub struct MeshConfig {
     /// shared with `subagents.max_concurrency`/`max_per_provider` — one real budget for both.
     #[serde(default)]
     pub workflows: WorkflowsConfig,
-    /// Auto-discovery routing (docs/features/auto-discovery-mesh.md): when true (default), the
+    /// Auto-discovery routing (docs/features/mesh-routing.md): when true (default), the
     /// mesh discovers the models the user can actually use and ranks the best per tier itself,
     /// rather than relying on the `[mesh.models]` lists. Set false to route strictly from the
     /// configured `[mesh.models]` candidates.
     #[serde(default = "default_auto_discover")]
     pub auto_discover: bool,
-    /// Failover (docs/features/model-health-failover.md): when true (default), a model that
+    /// Failover (docs/features/mesh-routing.md): when true (default), a model that
     /// errors with a retryable failure (rate-limit / unavailable / auth) is benched and the
     /// turn transparently retries on the next-best healthy model. Set false for single-shot.
     #[serde(default = "default_failover")]
@@ -1762,7 +1762,7 @@ pub enum StatuslineWidget {
     QuotaClaude,
     /// Codex usage % "codex N%" (only when data is available)
     QuotaCodex,
-    /// Consumption-pace meter (quota-pace-tracking.md) for whichever subscription window is
+    /// Consumption-pace meter (mesh-routing.md) for whichever subscription window is
     /// projected closest to exhaustion, e.g. "⏱ claude 5h → 120%" — only renders once enough
     /// usage history has built up to derive a rate (silently absent otherwise, never a guess).
     QuotaPace,
@@ -1900,7 +1900,7 @@ impl Default for Config {
         // planner/editor fallback): those key-filter now, but we deliberately DON'T lead any tier
         // with `groq::…` — it needs a key many users don't have, and leading with it made groq the
         // face of every "first candidate" failure. Lead instead with a keyless/bridge option, groq
-        // last. Free model ids change over time; edit `[mesh.models]` to taste (free-models.md).
+        // last. Free model ids change over time; edit `[mesh.models]` to taste (mesh-routing.md).
         models.insert(
             TaskTier::Trivial.as_str().into(),
             many(&["ollama::llama3.2", "groq::llama-3.1-8b-instant"]),

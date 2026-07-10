@@ -78,6 +78,7 @@ pub fn is_cli_bridge(model: &str) -> bool {
 /// `forge auth codex-oauth` login, a plan upgrade) is visible within a bounded window even if a
 /// call site somehow misses [`invalidate_plan_cache`]; long enough to take the keyring/file-read
 /// cost off the hot per-turn routing path. Named so it's greppable rather than a magic `60`.
+/// Documented in docs/features/mesh-routing.md.
 const PLAN_CACHE_TTL: Duration = Duration::from_secs(60);
 
 type PlanMap = std::collections::HashMap<String, String>;
@@ -97,6 +98,7 @@ static PLAN_CACHE: Mutex<Option<(Instant, PlanMap)>> = Mutex::new(None);
 /// right after a fresh OAuth login. The empty map (no codex session at all — the common case for
 /// users who never used codex) is cached exactly like a non-empty result: it is a legitimate
 /// answer, not "no cache yet".
+/// Documented in docs/features/mesh-routing.md.
 pub fn detect_subscription_plans() -> std::collections::HashMap<String, String> {
     cached_or_fetch(
         &PLAN_CACHE,
@@ -109,6 +111,7 @@ pub fn detect_subscription_plans() -> std::collections::HashMap<String, String> 
 /// immediately instead of waiting up to [`PLAN_CACHE_TTL`]. Call this right after a successful
 /// subscription OAuth login — see `forge-cli`'s `invalidate_catalog_cache`, called from the same
 /// `forge auth codex-oauth` / `forge auth xai-oauth` sites in `commands/local.rs`.
+/// Documented in docs/features/mesh-routing.md.
 pub fn invalidate_plan_cache() {
     clear_cache(&PLAN_CACHE);
 }

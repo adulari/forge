@@ -24,7 +24,7 @@ Confirmed against both repos — do **not** re-port these:
 - **Post-edit auto-fix loop.** Forge has `run_autofix_stage` / `edits_this_turn`; openclaude's
   `autoFixRunner` is the same idea.
 - **Header-aware rate-limit waits, capability-error handling, per-model health bench.** Already in
-  Forge (`model-health-failover`, `capability-failover`).
+  Forge (`docs/features/mesh-routing.md`, `capability-failover`).
 
 ## Verified findings from the SWE-bench bring-up
 
