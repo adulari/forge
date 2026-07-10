@@ -1090,8 +1090,21 @@ pub(crate) async fn run_chat_tui(
             async move {
                 if let Ok(bstats) = tokio::task::spawn_blocking(bridge_stats::fetch).await {
                     let sess = s.lock().await;
-                    sess.seed_subscription_quota("codex-cli", "five_hour", bstats.codex_5h_pct);
-                    sess.seed_subscription_quota("codex-cli", "weekly", bstats.codex_weekly_pct);
+                    // Codex readings come from rollout files that can be hours old — seed with
+                    // their true observation time so a stale re-seed can't mask fresher
+                    // x-codex-header data in the shared codex quota bucket.
+                    sess.seed_subscription_quota_at(
+                        "codex-cli",
+                        "five_hour",
+                        bstats.codex_5h_pct,
+                        bstats.codex_5h_observed_at,
+                    );
+                    sess.seed_subscription_quota_at(
+                        "codex-cli",
+                        "weekly",
+                        bstats.codex_weekly_pct,
+                        bstats.codex_weekly_observed_at,
+                    );
                     sess.seed_subscription_quota("claude-cli", "five_hour", bstats.claude_5h_pct);
                     sess.seed_subscription_quota("claude-cli", "weekly", bstats.claude_weekly_pct);
                 }

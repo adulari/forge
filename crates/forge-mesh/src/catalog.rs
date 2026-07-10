@@ -243,8 +243,11 @@ pub(crate) fn cost_pref(tier: TaskTier, class: u8) -> f64 {
 /// Documented in docs/features/mesh-routing.md.
 fn code_prior(provider: &str, code_heavy: bool, tier: TaskTier) -> f64 {
     if code_heavy {
+        // `xai-oauth`/`xai` are deliberately excluded: there is no xai CLI bridge twin, so no
+        // surface asymmetry to correct for here, and granting grok the coding-flagship bonus is
+        // out of scope for the OAuth-supersedes-bridge work this arm was extended for (§ below).
         return match provider {
-            "codex-cli" | "claude-cli" | "anthropic" | "openai" => 0.3,
+            "codex-cli" | "claude-cli" | "anthropic" | "openai" | "codex-oauth" => 0.3,
             _ => 0.0,
         };
     }
@@ -302,12 +305,67 @@ fn subscription_burn_penalty(
     burn_k(tier) * weight.ln() * pressure_multiplier(fraction)
 }
 
+/// Provider pairs where a native OAuth surface dispatches the SAME model catalog as a CLI bridge:
+/// `(oauth, bridge)`. When the catalog contains `<oauth>::X`, the twin `<bridge>::X` is demoted by
+/// [`BRIDGE_SUPERSEDE_PENALTY`] — see [`superseded_bridge_ids`]. Native OAuth runs Forge's own
+/// harness instead of shelling out to the CLI's agent loop, so once it can dispatch a model it is
+/// structurally the better surface for that model; the bridge stays reachable as failover.
+/// Documented in docs/features/mesh-routing.md.
+pub(crate) const OAUTH_SUPERSEDES: &[(&str, &str)] = &[("codex-oauth", "codex-cli")];
+
+/// Fixed score penalty applied to a bridge model id when its OAuth twin is present in the catalog
+/// ([`OAUTH_SUPERSEDES`], via [`superseded_bridge_ids`]). The twins otherwise score identically —
+/// same bare model name → same capability, burn weight, and cost class, `code_prior` tied (Fix 2
+/// above), quota shared at the store layer — so a flat penalty this large guarantees the OAuth
+/// twin outranks the bridge twin at EVERY tier, while leaving the bridge in the ranked chain as a
+/// natural failover if OAuth errors at dispatch. This implements "prefer OAuth, bridge only when
+/// OAuth is unavailable" via failover ordering rather than removing the bridge outright.
+/// Documented in docs/features/mesh-routing.md; value asserted in sync by
+/// `doc_sync::mesh_routing_doc_matches_live_constants`.
+pub(crate) const BRIDGE_SUPERSEDE_PENALTY: f64 = 1.0;
+
+/// The set of full `bridge::model` ids in `models` whose OAuth twin (per [`OAUTH_SUPERSEDES`]) is
+/// ALSO present in `models` — computed once per ranking pass (`ranked_seeded`/`ranked_rows`) so
+/// the per-candidate demotion is an O(1) set lookup rather than an O(n²) per-candidate rescan of
+/// the catalog. Catalog presence of an oauth model implies a live OAuth session (discovery is
+/// gated on `has_codex_oauth_session()` in forge-cli), so no session-probing happens here.
+/// Documented in docs/features/mesh-routing.md.
+fn superseded_bridge_ids(models: &[String]) -> std::collections::HashSet<String> {
+    let mut oauth_bare_names: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+    for m in models {
+        let provider = provider_of(m);
+        if OAUTH_SUPERSEDES.iter().any(|(oauth, _)| *oauth == provider) {
+            if let Some((_, bare)) = m.split_once("::") {
+                oauth_bare_names.entry(provider).or_default().insert(bare);
+            }
+        }
+    }
+    let mut superseded = std::collections::HashSet::new();
+    for m in models {
+        let provider = provider_of(m);
+        let Some((oauth, _)) = OAUTH_SUPERSEDES.iter().find(|(_, b)| *b == provider) else {
+            continue;
+        };
+        if let Some((_, bare)) = m.split_once("::") {
+            if oauth_bare_names
+                .get(oauth)
+                .is_some_and(|s| s.contains(bare))
+            {
+                superseded.insert(m.clone());
+            }
+        }
+    }
+    superseded
+}
+
 /// The full routing score for one model: capability fit + cost-class preference + the mild prior,
-/// minus the subscription burn-weight penalty (Fix 2) and a quota status penalty so a near-limit
-/// subscription drops below its alternatives (L3). The penalties are applied in the SCORE (not
-/// just a post-sort) so non-subscription alternatives make it into the truncated shortlist —
+/// minus the subscription burn-weight penalty (Fix 2), a quota status penalty so a near-limit
+/// subscription drops below its alternatives (L3), and the OAuth-supersedes-bridge penalty
+/// ([`BRIDGE_SUPERSEDE_PENALTY`]) when `superseded` is set. The penalties are applied in the SCORE
+/// (not just a post-sort) so non-subscription alternatives make it into the truncated shortlist —
 /// otherwise the top picks are all the (pressured) subscription.
 /// Documented in docs/features/mesh-routing.md.
+#[allow(clippy::too_many_arguments)]
 fn route_score(
     id: &str,
     tier: TaskTier,
@@ -316,11 +374,15 @@ fn route_score(
     quota: &forge_types::SubscriptionQuota,
     bench: Option<&BenchmarkScores>,
     burn_weight_overrides: &HashMap<String, f64>,
+    superseded: bool,
 ) -> f64 {
     let mut base = capability_score_b(id, tier, code_heavy, bench)
         + cost_pref(tier, cost_class(id, cost))
         + code_prior(provider_of(id), code_heavy, tier)
         - crate::capability::tool_reliability_penalty(id);
+    if superseded {
+        base -= BRIDGE_SUPERSEDE_PENALTY;
+    }
     if is_subscription(id) {
         base -= subscription_burn_penalty(id, tier, quota, burn_weight_overrides);
         match quota.status_for(provider_of(id)) {
@@ -762,6 +824,7 @@ impl ModelCatalog {
             self.bench.as_ref(),
         )
         .fired;
+        let superseded = superseded_bridge_ids(&self.models);
 
         struct ScoredModel<'a> {
             id: &'a String,
@@ -789,6 +852,7 @@ impl ModelCatalog {
                     quota,
                     self.bench.as_ref(),
                     &self.burn_weights,
+                    superseded.contains(m),
                 );
                 if conserve && is_subscription(m) {
                     score -= CONSERVE_PENALTY;
@@ -886,6 +950,7 @@ impl ModelCatalog {
             quota,
             self.bench.as_ref(),
         );
+        let superseded = superseded_bridge_ids(&self.models);
         let mut rows: Vec<ScoreRow> = self
             .models
             .iter()
@@ -900,6 +965,7 @@ impl ModelCatalog {
                     quota,
                     self.bench.as_ref(),
                     &self.burn_weights,
+                    superseded.contains(m),
                 );
                 let sub = is_subscription(m);
                 let penalty = if decision.fired && sub {
@@ -1925,10 +1991,135 @@ mod tests {
             &quota,
             None,
             &overrides,
+            false,
         );
         assert!(
             (score - 4.6).abs() < 1e-9,
             "unaffected model's score must match the hand-computed pre-Fix constant exactly: {score}"
+        );
+    }
+
+    // --- OAuth-supersedes-bridge demotion (per-model, BRIDGE_SUPERSEDE_PENALTY) ------------
+
+    #[test]
+    fn superseded_bridge_ids_only_flags_a_bridge_with_a_live_oauth_twin() {
+        let with_twin = vec![
+            "codex-oauth::gpt-5.6-sol".to_string(),
+            "codex-cli::gpt-5.6-sol".to_string(),
+        ];
+        let s = superseded_bridge_ids(&with_twin);
+        assert!(s.contains("codex-cli::gpt-5.6-sol"), "bridge twin flagged");
+        assert!(
+            !s.contains("codex-oauth::gpt-5.6-sol"),
+            "the oauth id itself is never penalized"
+        );
+
+        let bridge_only = vec!["codex-cli::gpt-5.6-sol".to_string()];
+        assert!(
+            superseded_bridge_ids(&bridge_only).is_empty(),
+            "no oauth twin present → nothing flagged"
+        );
+
+        let unrelated_pair = vec![
+            "codex-oauth::gpt-5.6-sol".to_string(),
+            "claude-cli::opus".to_string(),
+        ];
+        assert!(
+            superseded_bridge_ids(&unrelated_pair).is_empty(),
+            "claude-cli has no entry in OAUTH_SUPERSEDES, so it is never flagged: {:?}",
+            superseded_bridge_ids(&unrelated_pair)
+        );
+    }
+
+    #[test]
+    fn oauth_twin_outranks_bridge_twin_at_every_tier_bridge_stays_in_the_chain() {
+        // With both surfaces present the twins otherwise score identically (same bare model →
+        // same capability/burn/cost class, tied code_prior, default/shared quota), so the flat
+        // BRIDGE_SUPERSEDE_PENALTY must make the oauth id win at EVERY tier — while the bridge
+        // stays in the ranked output as a failover, not removed.
+        let cat = ModelCatalog::new(vec![
+            "codex-oauth::gpt-5.6-sol".into(),
+            "codex-cli::gpt-5.6-sol".into(),
+        ]);
+        for tier in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
+            let r = cat.ranked_for(tier, &Pricing::default(), 2);
+            assert_eq!(
+                r[0], "codex-oauth::gpt-5.6-sol",
+                "{tier:?}: the oauth twin must outrank the bridge twin: {r:?}"
+            );
+            assert!(
+                r.contains(&"codex-cli::gpt-5.6-sol".to_string()),
+                "{tier:?}: the bridge twin must remain in the ranked output as a fallback: {r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_with_no_live_oauth_twin_is_not_demoted() {
+        // No `codex-oauth::` entry in the catalog at all → no penalty; the score matches the
+        // same pre-existing hand-computed baseline as `model_with_no_burn_weight_scores_exactly_as_before`.
+        let cat = ModelCatalog::new(vec!["codex-cli::gpt-5.4-mini".into()]);
+        let (_, rows) = cat.ranked_rows(
+            TaskTier::Standard,
+            &Pricing::default(),
+            false,
+            0,
+            &forge_types::SubscriptionQuota::default(),
+            None,
+        );
+        let row = rows
+            .iter()
+            .find(|r| r.model == "codex-cli::gpt-5.4-mini")
+            .unwrap();
+        assert!(
+            (row.final_score - 4.6).abs() < 1e-9,
+            "no oauth twin present anywhere in the catalog → score unchanged: {}",
+            row.final_score
+        );
+    }
+
+    #[test]
+    fn bridge_model_absent_from_the_pair_list_is_never_penalized() {
+        // `claude-cli` has no entry in `OAUTH_SUPERSEDES` (no xai bridge twin exists to
+        // supersede), so `claude-cli::opus` must never take the penalty even alongside an
+        // unrelated oauth surface in the same catalog.
+        let cat = ModelCatalog::new(vec![
+            "claude-cli::opus".into(),
+            "codex-oauth::gpt-5.6-sol".into(),
+        ]);
+        let (_, rows) = cat.ranked_rows(
+            TaskTier::Complex,
+            &Pricing::default(),
+            false,
+            0,
+            &forge_types::SubscriptionQuota::default(),
+            None,
+        );
+        let with_pair = rows
+            .iter()
+            .find(|r| r.model == "claude-cli::opus")
+            .unwrap()
+            .final_score;
+
+        let solo_cat = ModelCatalog::new(vec!["claude-cli::opus".into()]);
+        let (_, solo_rows) = solo_cat.ranked_rows(
+            TaskTier::Complex,
+            &Pricing::default(),
+            false,
+            0,
+            &forge_types::SubscriptionQuota::default(),
+            None,
+        );
+        let without_pair = solo_rows
+            .iter()
+            .find(|r| r.model == "claude-cli::opus")
+            .unwrap()
+            .final_score;
+
+        assert!(
+            (with_pair - without_pair).abs() < 1e-9,
+            "claude-cli::opus's score must be identical whether or not an unrelated oauth model \
+             is present: with={with_pair} without={without_pair}"
         );
     }
 }

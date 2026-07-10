@@ -668,6 +668,31 @@ pub struct LiveActivityToken {
     pub environment: String,
 }
 
+/// Provider aliases that bill the SAME underlying subscription account, so their
+/// `subscription_usage`/`quota_history` rows must be read as one shared bucket (never summed) —
+/// see [`Store::quota_at`]. `codex-cli` (the Codex CLI bridge) and `codex-oauth` (Forge's direct
+/// ChatGPT OAuth provider) both draw on one ChatGPT account's server-reported usage.
+const QUOTA_ALIAS_GROUPS: &[&[&str]] = &[&["codex-cli", "codex-oauth"]];
+
+/// Every provider `p` should be treated as equivalent to for quota purposes: the full alias group
+/// containing `p`, or just `[p]` when it isn't in any group (the common case — a no-op merge).
+fn quota_alias_members(provider: &str) -> Vec<&str> {
+    for group in QUOTA_ALIAS_GROUPS {
+        if group.contains(&provider) {
+            return group.to_vec();
+        }
+    }
+    vec![provider]
+}
+
+fn quota_status_from_str(status: &str) -> forge_types::QuotaStatus {
+    match status {
+        "exhausted" => forge_types::QuotaStatus::Exhausted,
+        "warning" => forge_types::QuotaStatus::Warning,
+        _ => forge_types::QuotaStatus::Ok,
+    }
+}
+
 impl Store {
     /// Open (creating if needed) a database file and run migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -1805,6 +1830,67 @@ impl Store {
         Ok(())
     }
 
+    /// [`record_quota`](Self::record_quota) with an explicit `updated_at` (epoch secs) — the
+    /// OBSERVATION time, not the recording time. The seeding paths (codex rollout files, `forge
+    /// mesh`) re-record old observations whenever their freshness gate reopens; stamping those
+    /// with `now()` would let hours-old rollout data continually mask fresher `x-codex-*` header
+    /// readings in the alias-group merge ([`quota_at`](Self::quota_at)'s latest-wins is only
+    /// correct when `updated_at` means observation time).
+    ///
+    /// Guard: an incoming observation OLDER than the row's existing `updated_at` is a complete
+    /// no-op (upsert rejected via the `ON CONFLICT ... WHERE`, history skipped) — a late-arriving
+    /// stale observation can never regress a fresher reading, regardless of caller discipline.
+    /// A duplicate history point (same provider/window/`observed_at`) is also skipped, so
+    /// re-seeding the same rollout observation every few minutes doesn't grow `quota_history`.
+    pub fn record_quota_at(&self, hint: &forge_types::QuotaHint, updated_at: i64) -> Result<()> {
+        let status = match hint.status {
+            forge_types::QuotaStatus::Ok => "ok",
+            forge_types::QuotaStatus::Warning => "warning",
+            forge_types::QuotaStatus::Exhausted => "exhausted",
+        };
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "INSERT INTO subscription_usage (provider, window_kind, status, resets_at, fraction, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(provider, window_kind) DO UPDATE SET
+               status = excluded.status,
+               resets_at = excluded.resets_at,
+               fraction = excluded.fraction,
+               updated_at = excluded.updated_at
+             WHERE excluded.updated_at >= subscription_usage.updated_at",
+            (
+                hint.provider.as_str(),
+                hint.window.as_str(),
+                status,
+                hint.resets_at,
+                hint.fraction_used,
+                updated_at,
+            ),
+        )?;
+        if changed == 0 {
+            // Stale: the existing row was observed more recently than this hint.
+            return Ok(());
+        }
+        if let Some(fraction_used) = hint.fraction_used {
+            conn.execute(
+                "INSERT INTO quota_history (provider, window_kind, fraction_used, resets_at, observed_at)
+                 SELECT ?1, ?2, ?3, ?4, ?5
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM quota_history
+                     WHERE provider = ?1 AND window_kind = ?2 AND observed_at = ?5
+                 )",
+                (
+                    hint.provider.as_str(),
+                    hint.window.as_str(),
+                    fraction_used,
+                    hint.resets_at,
+                    updated_at,
+                ),
+            )?;
+        }
+        Ok(())
+    }
+
     /// [`record_quota_history`](Self::record_quota_history) with an explicit `observed_at` (epoch
     /// secs) — a testable clock, mirroring [`quota_at`](Self::quota_at) for `current_quota`.
     pub fn record_quota_history_at(
@@ -1926,90 +2012,163 @@ impl Store {
     }
 
     /// [`current_quota`](Self::current_quota) at an explicit `now` (epoch secs) — testable clock.
+    ///
+    /// `codex-cli` and `codex-oauth` bill the SAME ChatGPT account (mesh-routing.md), so their
+    /// `subscription_usage`/`quota_history` rows are merged here at read time via
+    /// [`QUOTA_ALIAS_GROUPS`] before the status/fraction/pace rollups run — see
+    /// [`quota_alias_members`]. Non-grouped providers (e.g. `claude-cli`) are unaffected: a
+    /// provider outside any group only ever merges with itself, which is a no-op.
     pub fn quota_at(&self, now: i64) -> Result<forge_types::SubscriptionQuota> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT provider,
-                   CASE MAX(CASE status WHEN 'exhausted' THEN 2 WHEN 'warning' THEN 1 ELSE 0 END)
-                       WHEN 2 THEN 'exhausted'
-                       WHEN 1 THEN 'warning'
-                       ELSE 'ok'
-                   END
-             FROM subscription_usage
-             WHERE resets_at IS NULL OR resets_at > ?1
-             GROUP BY provider",
-        )?;
-        let map = stmt
-            .query_map([now], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .filter_map(std::result::Result::ok)
-            .filter_map(|(provider, status)| {
-                let st = match status.as_str() {
-                    "warning" => forge_types::QuotaStatus::Warning,
-                    "exhausted" => forge_types::QuotaStatus::Exhausted,
-                    _ => forge_types::QuotaStatus::Ok,
-                };
-                (st != forge_types::QuotaStatus::Ok).then_some((provider, st))
-            })
-            .collect::<std::collections::HashMap<_, _>>();
-        // Also carry the strictest fraction per provider (incl. still-Ok ones) so the router's
-        // graduated conservation can spread off a subscription before it crosses Warning. Track
-        // the (provider, window_kind, resets_at) of that strictest row too — the pace projection
-        // below must be derived for the SAME window `fractions` reflects, not just any window.
-        let mut frac_stmt = conn.prepare(
-            "SELECT provider, window_kind, fraction, resets_at FROM subscription_usage su
-             WHERE fraction IS NOT NULL AND (resets_at IS NULL OR resets_at > ?1)
-               AND fraction = (
-                   SELECT MAX(fraction) FROM subscription_usage su2
-                   WHERE su2.provider = su.provider
-                     AND su2.fraction IS NOT NULL
-                     AND (su2.resets_at IS NULL OR su2.resets_at > ?1)
-               )
-             GROUP BY provider",
-        )?;
-        let strictest = frac_stmt
-            .query_map([now], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                ))
-            })?
-            .filter_map(std::result::Result::ok)
-            .collect::<Vec<_>>();
-        let fractions = strictest
-            .iter()
-            .map(|(provider, _, fraction, _)| (provider.clone(), *fraction))
-            .collect::<std::collections::HashMap<_, _>>();
 
-        // Pace projection per provider, off that same strictest window's history — a subscription
-        // burning fast early in its window (low fraction, high rate) is otherwise under-protected
-        // by `fractions` alone (mesh-routing.md).
-        let since = now - forge_types::QUOTA_PACE_LOOKBACK_SECS;
-        let mut paces = std::collections::HashMap::new();
-        for (provider, window, _fraction, resets_at) in &strictest {
-            let mut hist_stmt = conn.prepare(
-                "SELECT observed_at, fraction_used FROM quota_history
-                 WHERE provider = ?1 AND window_kind = ?2 AND observed_at >= ?3
-                 ORDER BY observed_at ASC",
+        struct UsageRow {
+            provider: String,
+            window: String,
+            status: String,
+            fraction: Option<f64>,
+            resets_at: Option<i64>,
+            updated_at: i64,
+        }
+        let raw_rows: Vec<UsageRow> = {
+            let mut stmt = conn.prepare(
+                "SELECT provider, window_kind, status, fraction, resets_at, updated_at
+                 FROM subscription_usage
+                 WHERE resets_at IS NULL OR resets_at > ?1",
             )?;
-            let history = hist_stmt
-                .query_map((provider.as_str(), window.as_str(), since), |row| {
-                    Ok(forge_types::QuotaHistoryPoint {
-                        observed_at: row.get(0)?,
-                        fraction_used: row.get(1)?,
+            let rows = stmt
+                .query_map([now], |row| {
+                    Ok(UsageRow {
+                        provider: row.get(0)?,
+                        window: row.get(1)?,
+                        status: row.get(2)?,
+                        fraction: row.get(3)?,
+                        resets_at: row.get(4)?,
+                        updated_at: row.get(5)?,
                     })
                 })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            if let Some(pace) = forge_types::compute_quota_pace(&history, *resets_at, now) {
-                paces.insert(provider.clone(), pace);
+                .filter_map(std::result::Result::ok)
+                .collect();
+            rows
+        };
+
+        // Every distinct provider seen, expanded to its full alias-group membership — so a group
+        // member with zero rows of its own (e.g. codex-cli when only codex-oauth has reported
+        // usage) still surfaces the group's shared reading.
+        let mut output_providers: std::collections::BTreeSet<&str> =
+            std::collections::BTreeSet::new();
+        for row in &raw_rows {
+            for m in quota_alias_members(&row.provider) {
+                output_providers.insert(m);
             }
         }
+
+        let mut map = std::collections::HashMap::new();
+        let mut fractions = std::collections::HashMap::new();
+        let mut paces = std::collections::HashMap::new();
+        let since = now - forge_types::QUOTA_PACE_LOOKBACK_SECS;
+
+        for provider in output_providers {
+            let members = quota_alias_members(provider);
+
+            // Merge per-window rows across every group member — these are server-authoritative
+            // snapshots of the SAME account for a grouped provider, so the row with the latest
+            // `updated_at` wins per window. NEVER summed (that would double-count headroom).
+            let mut by_window: std::collections::HashMap<&str, &UsageRow> =
+                std::collections::HashMap::new();
+            for row in &raw_rows {
+                if !members.contains(&row.provider.as_str()) {
+                    continue;
+                }
+                by_window
+                    .entry(row.window.as_str())
+                    .and_modify(|existing| {
+                        if row.updated_at > existing.updated_at {
+                            *existing = row;
+                        }
+                    })
+                    .or_insert(row);
+            }
+            if by_window.is_empty() {
+                continue;
+            }
+
+            let worst_status = by_window
+                .values()
+                .map(|r| quota_status_from_str(&r.status))
+                .max()
+                .unwrap_or_default();
+            if worst_status != forge_types::QuotaStatus::Ok {
+                map.insert(provider.to_string(), worst_status);
+            }
+
+            // Strictest (max-fraction) window with a known fraction — also carried for still-Ok
+            // providers so the router's graduated conservation can spread ahead of Warning. The
+            // pace projection below must be derived for this SAME window, not just any window.
+            if let Some(strictest) =
+                by_window
+                    .values()
+                    .filter(|r| r.fraction.is_some())
+                    .max_by(|a, b| {
+                        a.fraction
+                            .partial_cmp(&b.fraction)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            {
+                let fraction = strictest.fraction.unwrap_or(0.0);
+                fractions.insert(provider.to_string(), fraction);
+
+                // Pace projection off that same strictest window's history, UNIONED across every
+                // alias-group member (both surfaces may have recorded points for the same shared
+                // account) — a subscription burning fast early in its window is otherwise
+                // under-protected by `fractions` alone (mesh-routing.md).
+                let history =
+                    self.quota_history_union(&conn, &members, &strictest.window, since)?;
+                if let Some(pace) =
+                    forge_types::compute_quota_pace(&history, strictest.resets_at, now)
+                {
+                    paces.insert(provider.to_string(), pace);
+                }
+            }
+        }
+
         Ok(forge_types::SubscriptionQuota::new(map)
             .with_fractions(fractions)
             .with_paces(paces))
+    }
+
+    /// History points for `window`, observed at or after `since`, unioned across every provider
+    /// in `members` (ascending `observed_at`) — the shared-account merge [`quota_at`] needs so a
+    /// grouped provider's pace reflects history recorded under either surface name.
+    fn quota_history_union(
+        &self,
+        conn: &Connection,
+        members: &[&str],
+        window: &str,
+        since: i64,
+    ) -> Result<Vec<forge_types::QuotaHistoryPoint>> {
+        let placeholders = (0..members.len())
+            .map(|i| format!("?{}", i + 3))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT observed_at, fraction_used FROM quota_history
+             WHERE window_kind = ?1 AND observed_at >= ?2 AND provider IN ({placeholders})
+             ORDER BY observed_at ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&window, &since];
+        for m in members {
+            params.push(m);
+        }
+        let rows = stmt
+            .query_map(params.as_slice(), |row| {
+                Ok(forge_types::QuotaHistoryPoint {
+                    observed_at: row.get(0)?,
+                    fraction_used: row.get(1)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Number of messages in a session.
@@ -4698,6 +4857,267 @@ mod tests {
         );
         assert!((quota.fraction_for("codex-cli") - 0.15).abs() < 1e-9);
         assert!((quota.effective_fraction_for("codex-cli") - 0.15).abs() < 1e-9);
+    }
+
+    // --- Shared codex quota bucket (codex-cli / codex-oauth alias group) ---
+
+    #[test]
+    fn codex_alias_group_surfaces_oauth_only_usage_under_both_providers() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .record_quota(&forge_types::QuotaHint {
+                provider: "codex-oauth".into(),
+                window: "five_hour".into(),
+                status: forge_types::QuotaStatus::Ok,
+                resets_at: Some(999_999),
+                fraction_used: Some(0.5),
+            })
+            .unwrap();
+
+        let quota = store.quota_at(0).unwrap();
+        assert!((quota.fraction_for("codex-cli") - 0.5).abs() < 1e-9);
+        assert!((quota.fraction_for("codex-oauth") - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn codex_alias_group_latest_updated_at_wins_never_sums() {
+        let store = Store::open_in_memory().unwrap();
+        let hint = |provider: &str, fraction| forge_types::QuotaHint {
+            provider: provider.into(),
+            window: "five_hour".into(),
+            status: forge_types::QuotaStatus::Ok,
+            resets_at: Some(999_999),
+            fraction_used: Some(fraction),
+        };
+        // codex-cli recorded at t=100, codex-oauth LATER at t=200, same window.
+        store
+            .record_quota_at(&hint("codex-cli", 0.30), 100)
+            .unwrap();
+        store
+            .record_quota_at(&hint("codex-oauth", 0.60), 200)
+            .unwrap();
+
+        let quota = store.quota_at(0).unwrap();
+        assert!(
+            (quota.fraction_for("codex-cli") - 0.6).abs() < 1e-9,
+            "latest wins, not summed to 0.9"
+        );
+        assert!((quota.fraction_for("codex-oauth") - 0.6).abs() < 1e-9);
+
+        // Reverse order: an OLDER codex-oauth write after a NEWER codex-cli write must not win.
+        store
+            .record_quota_at(&hint("codex-cli", 0.70), 500)
+            .unwrap();
+        store
+            .record_quota_at(&hint("codex-oauth", 0.20), 300)
+            .unwrap();
+        let quota = store.quota_at(0).unwrap();
+        assert!(
+            (quota.fraction_for("codex-cli") - 0.7).abs() < 1e-9,
+            "the stale (lower updated_at) write must not override the newer one"
+        );
+        assert!((quota.fraction_for("codex-oauth") - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn codex_alias_group_merges_per_window_across_providers() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .record_quota(&forge_types::QuotaHint {
+                provider: "codex-cli".into(),
+                window: "five_hour".into(),
+                status: forge_types::QuotaStatus::Warning,
+                resets_at: Some(999_999),
+                fraction_used: Some(0.85),
+            })
+            .unwrap();
+        store
+            .record_quota(&forge_types::QuotaHint {
+                provider: "codex-oauth".into(),
+                window: "weekly".into(),
+                status: forge_types::QuotaStatus::Ok,
+                resets_at: Some(999_999),
+                fraction_used: Some(0.40),
+            })
+            .unwrap();
+
+        // Both surfaces see both windows: the strictest (five_hour, 0.85) drives the fraction.
+        let quota = store.quota_at(0).unwrap();
+        assert!((quota.fraction_for("codex-cli") - 0.85).abs() < 1e-9);
+        assert!((quota.fraction_for("codex-oauth") - 0.85).abs() < 1e-9);
+        assert!(quota.is_pressured("codex-cli"));
+        assert!(quota.is_pressured("codex-oauth"), "merged status is shared");
+    }
+
+    #[test]
+    fn codex_alias_group_exhausted_threshold_shared_across_both_surfaces() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .record_quota(&forge_types::QuotaHint {
+                provider: "codex-oauth".into(),
+                window: "five_hour".into(),
+                status: forge_types::QuotaStatus::Exhausted,
+                resets_at: Some(999_999),
+                fraction_used: Some(0.99),
+            })
+            .unwrap();
+
+        let quota = store.quota_at(0).unwrap();
+        assert!(quota.is_exhausted("codex-cli"));
+        assert!(quota.is_exhausted("codex-oauth"));
+    }
+
+    #[test]
+    fn stale_seed_after_newer_header_reading_does_not_lower_merged_fraction() {
+        // The live failure this reproduces: codex-oauth records 1% from fresh x-codex headers;
+        // 30 seconds LATER a `forge mesh` run re-seeds codex-cli from an hours-old rollout file
+        // reading 0%. With the seed stamped at its OBSERVATION time (older), the merged bucket
+        // must keep the fresher 1% — not reset to the stale 0%.
+        let store = Store::open_in_memory().unwrap();
+        let hint = |provider: &str, fraction| forge_types::QuotaHint {
+            provider: provider.into(),
+            window: "five_hour".into(),
+            status: forge_types::QuotaStatus::Ok,
+            resets_at: Some(999_999),
+            fraction_used: Some(fraction),
+        };
+        store
+            .record_quota_at(&hint("codex-oauth", 0.01), 1000)
+            .unwrap();
+        // Rollout observation from long before the header reading, recorded after it.
+        store.record_quota_at(&hint("codex-cli", 0.0), 500).unwrap();
+
+        let quota = store.quota_at(0).unwrap();
+        assert!(
+            (quota.fraction_for("codex-oauth") - 0.01).abs() < 1e-9,
+            "stale rollout seed must not mask the fresher header reading"
+        );
+        assert!((quota.fraction_for("codex-cli") - 0.01).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reset_inference_stamped_at_reset_beats_prereset_loses_to_postreset() {
+        // The "window just reset → 0%" inference is stamped at the reset instant itself. Ordering
+        // consequences: it must overwrite a STALE pre-reset reading of the old window, but lose
+        // to any REAL observation made after the reset (e.g. a fresher x-codex header reading of
+        // the new window via codex-oauth).
+        let store = Store::open_in_memory().unwrap();
+        let hint = |provider: &str, fraction| forge_types::QuotaHint {
+            provider: provider.into(),
+            window: "five_hour".into(),
+            status: forge_types::QuotaStatus::Ok,
+            resets_at: None,
+            fraction_used: Some(fraction),
+        };
+        let reset_at = 1000;
+
+        // Old-window reading observed BEFORE the reset.
+        store
+            .record_quota_at(&hint("codex-cli", 0.80), 900)
+            .unwrap();
+        // The reset inference, stamped AT the reset instant — wins over the pre-reset reading.
+        store
+            .record_quota_at(&hint("codex-cli", 0.0), reset_at)
+            .unwrap();
+        let quota = store.quota_at(0).unwrap();
+        assert!(
+            quota.fraction_for("codex-cli").abs() < 1e-9,
+            "the window DID reset — the inference beats the pre-reset reading"
+        );
+
+        // A real post-reset observation (header reading on the oauth surface) — beats the
+        // inference in the merged bucket, on both surfaces.
+        store
+            .record_quota_at(&hint("codex-oauth", 0.01), 1100)
+            .unwrap();
+        let quota = store.quota_at(0).unwrap();
+        assert!(
+            (quota.fraction_for("codex-cli") - 0.01).abs() < 1e-9,
+            "newer real knowledge of the new window beats the reset inference"
+        );
+        assert!((quota.fraction_for("codex-oauth") - 0.01).abs() < 1e-9);
+
+        // And a re-seeded inference (same reset instant) can no longer clobber it.
+        store
+            .record_quota_at(&hint("codex-cli", 0.0), reset_at)
+            .unwrap();
+        let quota = store.quota_at(0).unwrap();
+        assert!(
+            (quota.fraction_for("codex-cli") - 0.01).abs() < 1e-9,
+            "re-seeding the inference is a no-op against fresher data"
+        );
+    }
+
+    #[test]
+    fn record_quota_at_older_timestamp_is_a_noop_newer_overwrites() {
+        let store = Store::open_in_memory().unwrap();
+        let hint = |fraction| forge_types::QuotaHint {
+            provider: "codex-cli".into(),
+            window: "five_hour".into(),
+            status: forge_types::QuotaStatus::Ok,
+            resets_at: Some(999_999),
+            fraction_used: Some(fraction),
+        };
+        store.record_quota_at(&hint(0.5), 1000).unwrap();
+        // Older observation arriving late: complete no-op — snapshot AND history untouched.
+        store.record_quota_at(&hint(0.3), 500).unwrap();
+        let quota = store.quota_at(0).unwrap();
+        assert!(
+            (quota.fraction_for("codex-cli") - 0.5).abs() < 1e-9,
+            "an older observation must not overwrite a newer row"
+        );
+        let history = store
+            .quota_history_since("codex-cli", "five_hour", 0)
+            .unwrap();
+        assert_eq!(history.len(), 1, "stale write appends no history");
+
+        // Newer observation overwrites.
+        store.record_quota_at(&hint(0.7), 1500).unwrap();
+        let quota = store.quota_at(0).unwrap();
+        assert!((quota.fraction_for("codex-cli") - 0.7).abs() < 1e-9);
+
+        // Re-seeding the SAME observation (same timestamp) doesn't duplicate history.
+        store.record_quota_at(&hint(0.7), 1500).unwrap();
+        let history = store
+            .quota_history_since("codex-cli", "five_hour", 0)
+            .unwrap();
+        assert_eq!(
+            history.len(),
+            2,
+            "one point per distinct observation, not per re-seed"
+        );
+    }
+
+    #[test]
+    fn non_grouped_provider_is_unaffected_by_alias_merge() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .record_quota(&forge_types::QuotaHint {
+                provider: "claude-cli".into(),
+                window: "five_hour".into(),
+                status: forge_types::QuotaStatus::Warning,
+                resets_at: Some(999_999),
+                fraction_used: Some(0.85),
+            })
+            .unwrap();
+        store
+            .record_quota(&forge_types::QuotaHint {
+                provider: "codex-oauth".into(),
+                window: "five_hour".into(),
+                status: forge_types::QuotaStatus::Ok,
+                resets_at: Some(999_999),
+                fraction_used: Some(0.10),
+            })
+            .unwrap();
+
+        let quota = store.quota_at(0).unwrap();
+        assert!(
+            (quota.fraction_for("claude-cli") - 0.85).abs() < 1e-9,
+            "claude-cli reads only its own row, untouched by the codex alias group"
+        );
+        assert!(quota.is_pressured("claude-cli"));
+        assert!(!quota.is_pressured("codex-oauth"));
+        assert!((quota.fraction_for("codex-cli") - 0.10).abs() < 1e-9);
     }
 
     #[test]

@@ -545,8 +545,17 @@ async fn execute_responses_request(
     body: &serde_json::Value,
     on_event: &mut EventSink<'_>,
 ) -> Result<ModelResponse, ProviderError> {
-    shared_execute_responses_request(http, url, token, body, &[], on_event, classify_xai_status)
-        .await
+    shared_execute_responses_request(
+        http,
+        url,
+        token,
+        body,
+        &[],
+        on_event,
+        classify_xai_status,
+        None,
+    )
+    .await
 }
 
 #[async_trait::async_trait]

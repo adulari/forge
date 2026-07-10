@@ -97,6 +97,13 @@ fn mesh_routing_doc_matches_live_constants() {
     // Conservation demotion (catalog.rs).
     assert_doc_states(&doc, "CONSERVE_PENALTY", catalog::CONSERVE_PENALTY);
 
+    // OAuth-supersedes-bridge demotion (catalog.rs).
+    assert_doc_states(
+        &doc,
+        "BRIDGE_SUPERSEDE_PENALTY",
+        catalog::BRIDGE_SUPERSEDE_PENALTY,
+    );
+
     // Nominal token mix behind `estimated_cost` (pricing.rs) — integers, rendered bare.
     for (name, value) in [
         ("NOMINAL_INPUT_TOKENS", pricing::NOMINAL_INPUT_TOKENS),

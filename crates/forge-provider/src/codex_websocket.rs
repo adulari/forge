@@ -117,8 +117,12 @@ fn classify_error_frame(
 /// Build [`QuotaHint`]s from a `{"type":"codex.rate_limits","rate_limits":{...},...}` frame. The
 /// `rate_limits` shape mirrors the HTTP path's `x-codex-*`/rollout `rate_limits` object (see
 /// `cli_provider::codex_quota_from_rollout`): primary/secondary each with `used_percent`,
-/// `window_minutes` (300→"five_hour", 10080→"weekly"), `resets_at`. Any window missing
-/// `used_percent` is skipped — no hint rather than a wrong one.
+/// `window_minutes` (300→"five_hour", 10080→"weekly"), and the window's absolute reset time.
+/// NOTE the field-name trap: the live WS frame spells it `reset_at` (singular — verified against
+/// codex's own event parser, `codex-rs/codex-api/src/rate_limits.rs::RateLimitEventWindow`, and
+/// its WS test fixtures), while the CLI-written rollout files spell it `resets_at`. Both are read
+/// here, `reset_at` first. Any window missing `used_percent` is skipped — no hint rather than a
+/// wrong one.
 fn parse_rate_limits_frame(value: &serde_json::Value) -> Vec<QuotaHint> {
     let Some(rl) = value.get("rate_limits").filter(|r| r.is_object()) else {
         return Vec::new();
@@ -135,7 +139,10 @@ fn parse_rate_limits_frame(value: &serde_json::Value) -> Vec<QuotaHint> {
         let Some(used) = w.get("used_percent").and_then(|v| v.as_f64()) else {
             continue;
         };
-        let resets = w.get("resets_at").and_then(|v| v.as_i64());
+        let resets = w
+            .get("reset_at")
+            .or_else(|| w.get("resets_at"))
+            .and_then(|v| v.as_i64());
         let mins = w
             .get("window_minutes")
             .and_then(|v| v.as_i64())
@@ -359,9 +366,11 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
+        // `reset_at` (singular) is the live WS frame's spelling — codex's own parser and test
+        // fixtures use it; `resets_at` only appears in CLI-written rollout files.
         let frame = rate_limits_frame(serde_json::json!({
-            "primary": {"used_percent": 42.0, "window_minutes": 300, "resets_at": now + 3600},
-            "secondary": {"used_percent": 10.0, "window_minutes": 10080, "resets_at": now + 86400},
+            "primary": {"used_percent": 42.0, "window_minutes": 300, "reset_at": now + 3600},
+            "secondary": {"used_percent": 10.0, "window_minutes": 10080, "reset_at": now + 86400},
         }));
         let hints = parse_rate_limits_frame(&frame);
         assert_eq!(hints.len(), 2);
@@ -369,9 +378,29 @@ mod tests {
         assert_eq!(five_hour.provider, "codex-oauth");
         assert_eq!(five_hour.fraction_used, Some(0.42));
         assert_eq!(five_hour.status, QuotaStatus::Ok);
+        assert_eq!(
+            five_hour.resets_at,
+            Some(now + 3600),
+            "the live frame's reset_at must land in the hint, not NULL"
+        );
         let weekly = hints.iter().find(|h| h.window == "weekly").unwrap();
         assert_eq!(weekly.fraction_used, Some(0.10));
         assert_eq!(weekly.status, QuotaStatus::Ok);
+        assert_eq!(weekly.resets_at, Some(now + 86400));
+    }
+
+    #[test]
+    fn rate_limits_frame_accepts_rollout_style_resets_at_spelling() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let frame = rate_limits_frame(serde_json::json!({
+            "primary": {"used_percent": 42.0, "window_minutes": 300, "resets_at": now + 3600},
+        }));
+        let hints = parse_rate_limits_frame(&frame);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].resets_at, Some(now + 3600), "fallback spelling");
     }
 
     #[test]

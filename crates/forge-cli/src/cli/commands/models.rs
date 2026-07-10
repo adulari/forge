@@ -529,8 +529,20 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
     let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
         .await
         .unwrap_or_default();
-    seed_store_quota(&store, "codex-cli", "five_hour", bstats.codex_5h_pct);
-    seed_store_quota(&store, "codex-cli", "weekly", bstats.codex_weekly_pct);
+    seed_store_quota(
+        &store,
+        "codex-cli",
+        "five_hour",
+        bstats.codex_5h_pct,
+        bstats.codex_5h_observed_at,
+    );
+    seed_store_quota(
+        &store,
+        "codex-cli",
+        "weekly",
+        bstats.codex_weekly_pct,
+        bstats.codex_weekly_observed_at,
+    );
     if store
         .subscription_age_secs("claude-cli")
         .is_none_or(|a| a > 300)
@@ -539,7 +551,8 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
             .await
             .unwrap_or_default();
         for (window, frac) in limits {
-            seed_store_quota(&store, "claude-cli", &window, Some(frac * 100.0));
+            // Live probe — its observation time genuinely is now.
+            seed_store_quota(&store, "claude-cli", &window, Some(frac * 100.0), None);
         }
     }
     let quota = store
@@ -578,7 +591,17 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
 
 /// Record a subscription window fraction (0–100 pct) into the store, mapping it to a status. Used
 /// to seed the mesh quota from the Claude/Codex rate-limit caches in the `forge mesh` CLI path.
-pub(crate) fn seed_store_quota(store: &Store, provider: &str, window: &str, pct: Option<f64>) {
+///
+/// `observed_at` is when the reading was actually OBSERVED (rollout line timestamp / file mtime)
+/// — pass it for cache-derived readings so a re-seeded old observation can't mask a fresher one
+/// (`Store::record_quota_at`'s stale guard). `None` means "observed now" (live probes).
+pub(crate) fn seed_store_quota(
+    store: &Store,
+    provider: &str,
+    window: &str,
+    pct: Option<f64>,
+    observed_at: Option<i64>,
+) {
     let Some(pct) = pct else { return };
     let frac = (pct / 100.0).clamp(0.0, 1.0);
     let status = if frac >= 0.98 {
@@ -588,13 +611,17 @@ pub(crate) fn seed_store_quota(store: &Store, provider: &str, window: &str, pct:
     } else {
         forge_types::QuotaStatus::Ok
     };
-    let _ = store.record_quota(&forge_types::QuotaHint {
+    let hint = forge_types::QuotaHint {
         provider: provider.to_string(),
         window: window.to_string(),
         status,
         resets_at: None,
         fraction_used: Some(frac),
-    });
+    };
+    let _ = match observed_at {
+        Some(ts) => store.record_quota_at(&hint, ts),
+        None => store.record_quota(&hint),
+    };
 }
 
 /// A 10-cell ASCII meter for a 0.0–1.0 fraction.
