@@ -17,6 +17,13 @@ use serde_json::Value;
 pub struct BridgeStats {
     pub codex_5h_pct: Option<f64>,
     pub codex_weekly_pct: Option<f64>,
+    /// When `codex_5h_pct` was actually OBSERVED (epoch secs): the rollout line's own `timestamp`
+    /// field, falling back to the file's mtime. Rollout files can be hours old, so seeding the
+    /// store with `now()` would let this stale reading mask fresher `x-codex-*` header data in
+    /// the shared codex quota bucket — seed with this instead (`Store::record_quota_at`).
+    pub codex_5h_observed_at: Option<i64>,
+    /// When `codex_weekly_pct` was actually observed (see `codex_5h_observed_at`).
+    pub codex_weekly_observed_at: Option<i64>,
     pub claude_5h_pct: Option<f64>,
     pub claude_weekly_pct: Option<f64>,
     pub claude_5h_in: u64,
@@ -139,18 +146,27 @@ fn fetch_codex(stats: &mut BridgeStats, home: &Path) {
             if v["type"] != "event_msg" || v["payload"]["type"] != "token_count" {
                 continue;
             }
+            let observed_at = codex_line_observed_at(&v, &path);
             let rl = &v["payload"]["rate_limits"];
             let p_resets = rl["primary"]["resets_at"].as_i64().unwrap_or(0);
             if p_resets > now {
                 // Window still open — use reported usage.
                 stats.codex_5h_pct = rl["primary"]["used_percent"].as_f64();
+                stats.codex_5h_observed_at = observed_at;
             } else if p_resets > 0 && now - p_resets < 5 * 3600 {
-                // Window just reset (within the prior 5h period) — usage restarted at 0.
+                // Window just reset (within the prior 5h period) — usage restarted at 0. The ONLY
+                // moment "0% used" is actually known true is the reset instant itself: the account
+                // may genuinely have burned usage into the new window since (e.g. codex-oauth
+                // turns whose x-codex headers recorded a real fraction). Stamp the inference at
+                // `resets_at`, so it beats pre-reset readings of the old window but loses to any
+                // real post-reset observation.
                 stats.codex_5h_pct = Some(0.0);
+                stats.codex_5h_observed_at = Some(p_resets);
             }
             let s_resets = rl["secondary"]["resets_at"].as_i64().unwrap_or(0);
             if s_resets > now {
                 stats.codex_weekly_pct = rl["secondary"]["used_percent"].as_f64();
+                stats.codex_weekly_observed_at = observed_at;
             }
             // Stop as soon as we have at least weekly (most durable) data.
             if stats.codex_weekly_pct.is_some() {
@@ -159,6 +175,23 @@ fn fetch_codex(stats: &mut BridgeStats, home: &Path) {
             break; // No valid data in this file; try the next one.
         }
     }
+}
+
+/// When a rollout line's reading was actually observed: the line's own top-level `timestamp`
+/// (ISO-8601, written by codex on every event), falling back to the file's mtime — codex wrote
+/// the file at observation time, so mtime is a faithful (if slightly late) stand-in.
+fn codex_line_observed_at(v: &Value, path: &Path) -> Option<i64> {
+    if let Some(ts) = v["timestamp"].as_str().map(parse_ts).filter(|&t| t > 0) {
+        return Some(ts);
+    }
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(|t| {
+            t.duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_secs() as i64
+        })
 }
 
 /// All Codex session `.jsonl` files from the last `look_back` days, sorted newest-first.
@@ -285,4 +318,102 @@ fn parse_ts(s: &str) -> i64 {
     s.parse::<chrono::DateTime<chrono::Utc>>()
         .map(|d| d.timestamp())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a rollout file under `<home>/.codex/sessions/<today>/` and return its path.
+    fn write_rollout(home: &Path, lines: &str) -> PathBuf {
+        let now = Local::now();
+        let dir = home
+            .join(".codex/sessions")
+            .join(now.year().to_string())
+            .join(format!("{:02}", now.month()))
+            .join(format!("{:02}", now.day()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("rollout-test.jsonl");
+        std::fs::write(&path, lines).unwrap();
+        path
+    }
+
+    fn token_count_line(timestamp: Option<&str>, p_resets: i64, s_resets: i64) -> String {
+        let mut v = serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "rate_limits": {
+                    "primary": {"used_percent": 12.0, "window_minutes": 300, "resets_at": p_resets},
+                    "secondary": {"used_percent": 3.0, "window_minutes": 10080, "resets_at": s_resets},
+                }
+            }
+        });
+        if let Some(ts) = timestamp {
+            v["timestamp"] = serde_json::json!(ts);
+        }
+        v.to_string()
+    }
+
+    #[test]
+    fn fetch_codex_observed_at_comes_from_the_line_timestamp() {
+        let home = tempfile::tempdir().unwrap();
+        let now = now_epoch();
+        // A line whose event timestamp is 2 hours old — observed_at must reflect THAT, not now.
+        let two_hours_ago = chrono::DateTime::from_timestamp(now - 7200, 0)
+            .unwrap()
+            .to_rfc3339();
+        write_rollout(
+            home.path(),
+            &token_count_line(Some(&two_hours_ago), now + 3600, now + 86400),
+        );
+
+        let mut stats = BridgeStats::default();
+        fetch_codex(&mut stats, home.path());
+        assert_eq!(stats.codex_5h_pct, Some(12.0));
+        assert_eq!(stats.codex_weekly_pct, Some(3.0));
+        assert_eq!(stats.codex_5h_observed_at, Some(now - 7200));
+        assert_eq!(stats.codex_weekly_observed_at, Some(now - 7200));
+    }
+
+    #[test]
+    fn fetch_codex_reset_inference_is_stamped_at_the_reset_instant() {
+        let home = tempfile::tempdir().unwrap();
+        let now = now_epoch();
+        // Primary window reset 30 minutes ago; secondary still open. The inferred 0% is only
+        // known true AT the reset instant — stamping it later would let it clobber real
+        // post-reset readings (the 21:50-beats-21:37 live failure).
+        let reset_at = now - 1800;
+        write_rollout(home.path(), &token_count_line(None, reset_at, now + 86400));
+
+        let mut stats = BridgeStats::default();
+        fetch_codex(&mut stats, home.path());
+        assert_eq!(stats.codex_5h_pct, Some(0.0), "reset window infers 0%");
+        assert_eq!(
+            stats.codex_5h_observed_at,
+            Some(reset_at),
+            "the inference is knowledge as of the reset instant, not now"
+        );
+    }
+
+    #[test]
+    fn fetch_codex_observed_at_falls_back_to_file_mtime() {
+        let home = tempfile::tempdir().unwrap();
+        let now = now_epoch();
+        // No timestamp field on the line — mtime (the write above, ~now) stands in.
+        write_rollout(
+            home.path(),
+            &token_count_line(None, now + 3600, now + 86400),
+        );
+
+        let mut stats = BridgeStats::default();
+        fetch_codex(&mut stats, home.path());
+        let observed = stats
+            .codex_5h_observed_at
+            .expect("mtime fallback must supply an observation time");
+        assert!(
+            (observed - now).abs() <= 5,
+            "mtime of a just-written file should be ~now (got {observed}, now {now})"
+        );
+    }
 }

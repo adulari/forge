@@ -368,14 +368,6 @@ pub fn pin_is_dispatchable(model: &str) -> bool {
     default_model_available(model)
 }
 
-/// A model billed to an already-paid subscription (the CLI bridges) — $0 marginal cost.
-fn is_subscription(model: &str) -> bool {
-    matches!(
-        forge_config::provider_of(model),
-        "claude-cli" | "codex-cli" | "agy-cli"
-    )
-}
-
 /// Tier classification with the human-readable signals that drove it.
 struct Classification {
     tier: TaskTier,
@@ -749,7 +741,7 @@ impl HeuristicRouter {
         (self.model_available)(m)
             && !health.is_benched(m)
             // An exhausted subscription is routed around entirely (L3), like a benched model.
-            && !(is_subscription(m) && quota.is_exhausted(forge_config::provider_of(m)))
+            && !(catalog::is_subscription(m) && quota.is_exhausted(forge_config::provider_of(m)))
     }
 
     /// Whether `m` may be auto-routed / failed-over to under the active credit mode. `Strict` means
@@ -762,7 +754,7 @@ impl HeuristicRouter {
         if self.config.mesh.credit_mode != forge_types::CreditMode::Strict {
             return true;
         }
-        is_subscription(m) || catalog::is_free(m, self.pricing.estimated_cost(m), false)
+        catalog::is_subscription(m) || catalog::is_free(m, self.pricing.estimated_cost(m), false)
     }
 
     /// Pick the cheapest *usable* model from `candidates` (L1). Ranking key:
@@ -786,7 +778,7 @@ impl HeuristicRouter {
     fn cost_rank(&self, m: &str) -> (u8, CostKey) {
         let prefer = self.config.mesh.prefer_subscription;
         (
-            u8::from(!(prefer && is_subscription(m))),
+            u8::from(!(prefer && catalog::is_subscription(m))),
             CostKey(self.pricing.estimated_cost(m)),
         )
     }
@@ -1054,7 +1046,7 @@ impl HeuristicRouter {
                         " — fell back to {model} ({reason} for {original})"
                     ));
                 }
-                if self.config.mesh.prefer_subscription && is_subscription(&model) {
+                if self.config.mesh.prefer_subscription && catalog::is_subscription(&model) {
                     why.push_str(" (paid subscription)");
                 }
                 chain.retain(|m| m != &model);
@@ -1628,7 +1620,7 @@ mod tests {
     ) -> usize {
         let mut sub = 0;
         for p in prompts {
-            if is_subscription(&route_model_q(r, p, q).await) {
+            if catalog::is_subscription(&route_model_q(r, p, q).await) {
                 sub += 1;
             }
         }
@@ -1794,7 +1786,7 @@ mod tests {
         ] {
             let m = route_model(&r, p).await;
             assert!(
-                !is_subscription(&m),
+                !catalog::is_subscription(&m),
                 "trivial '{p}' should route to a free model, not burn subscription: got {m}"
             );
         }
@@ -1820,7 +1812,7 @@ mod tests {
                 .await;
             assert_eq!(d.tier, TaskTier::Complex, "{p}");
             assert!(
-                is_subscription(&d.model),
+                catalog::is_subscription(&d.model),
                 "complex '{p}' should use the subscription flagship: got {}",
                 d.model
             );
@@ -1904,12 +1896,12 @@ mod tests {
             )
             .await;
         assert!(
-            !is_subscription(&d.model),
+            !catalog::is_subscription(&d.model),
             "both subs exhausted → {}",
             d.model
         );
         assert!(
-            !d.fallbacks.iter().any(|m| is_subscription(m)),
+            !d.fallbacks.iter().any(|m| catalog::is_subscription(m)),
             "exhausted subs absent from the chain too: {:?}",
             d.fallbacks
         );
@@ -1937,7 +1929,7 @@ mod tests {
         // Complex normally picks the subscription flagship; under quota pressure a non-subscription
         // model leads instead, with the subscription kept only as a later fallback.
         assert!(
-            !is_subscription(&d.model),
+            !catalog::is_subscription(&d.model),
             "near-limit subs demoted below alternatives: got {}",
             d.model
         );
@@ -1965,7 +1957,7 @@ mod tests {
             .await;
         assert_eq!(d.tier, TaskTier::Complex);
         assert!(
-            !is_subscription(&d.model),
+            !catalog::is_subscription(&d.model),
             "demoted off subscription: {}",
             d.model
         );
@@ -2005,13 +1997,13 @@ mod tests {
                 )
                 .await;
             assert!(
-                !is_subscription(&d.model),
+                !catalog::is_subscription(&d.model),
                 "'{p}' ({:?}) must route around exhausted subs: got {}",
                 d.tier,
                 d.model
             );
             assert!(
-                !d.fallbacks.iter().any(|m| is_subscription(m)),
+                !d.fallbacks.iter().any(|m| catalog::is_subscription(m)),
                 "'{p}': exhausted subs must be absent from the failover chain too: {:?}",
                 d.fallbacks
             );
@@ -2711,6 +2703,36 @@ mod tests {
             .await;
         assert_eq!(d.model, "claude-cli::");
         assert!(!d.rationale.contains("paid subscription"));
+    }
+
+    #[test]
+    fn cost_rank_treats_codex_oauth_and_xai_oauth_as_subscription() {
+        // Fix 1: `cost_rank` used to build its ranking key from forge-mesh's private
+        // `is_subscription`, which only knew the three CLI bridges. Every call site (incl.
+        // `cost_rank`) now delegates to the public `catalog::is_subscription`, which covers all
+        // five surfaces — so with `prefer_subscription` on, codex-oauth and xai-oauth must sort
+        // rank 0 (preferred), same as the CLI bridges, not rank 1 (behind) as before.
+        let mut c = Config::default();
+        c.mesh.prefer_subscription = true;
+        let r = HeuristicRouter::new(c).with_availability(|_| true);
+        for id in [
+            "claude-cli::opus",
+            "codex-cli::gpt-5.5",
+            "agy-cli::gemini-pro",
+            "codex-oauth::gpt-5.6-sol",
+            "xai-oauth::grok-4",
+        ] {
+            assert_eq!(
+                r.cost_rank(id).0,
+                0,
+                "{id} must rank as preferred-subscription (tier 0) under prefer_subscription"
+            );
+        }
+        assert_eq!(
+            r.cost_rank("openai::gpt-4o-mini").0,
+            1,
+            "a metered API model must not rank as preferred-subscription"
+        );
     }
 
     // --- Model health / failover ---

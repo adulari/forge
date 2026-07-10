@@ -3,7 +3,7 @@
 //! with optional extra headers (e.g. ChatGPT-Account-Id). Provider-specific host pins, auth, and
 //! status classification stay in each provider module.
 
-use forge_types::{Message, Role, ToolCall, Usage};
+use forge_types::{Message, QuotaHint, Role, ToolCall, Usage};
 use futures::StreamExt;
 
 use crate::{CompletionOptions, EventSink, ModelResponse, ProviderError, StreamEvent, ToolSpec};
@@ -280,6 +280,13 @@ pub fn classify_responses_status(
 
 /// One HTTP+SSE completion against a Responses endpoint with a fixed bearer token and optional
 /// extra headers (e.g. `ChatGPT-Account-Id`).
+///
+/// `quota_from_headers` is an optional vendor-specific hook that inspects the raw response headers
+/// (captured before the SSE body is consumed) and returns [`QuotaHint`]s — e.g. codex-oauth's
+/// `x-codex-*` account-wide quota headers. This module stays transport/vendor-neutral: callers
+/// that have nothing to extract (xai-oauth) pass `None`.
+#[allow(clippy::too_many_arguments)] // shared low-level transport; grouping into a struct would
+                                     // just move the same 8 knobs one level of indirection out.
 pub async fn execute_responses_request(
     http: &reqwest::Client,
     url: &str,
@@ -288,6 +295,7 @@ pub async fn execute_responses_request(
     extra_headers: &[(&str, &str)],
     on_event: &mut EventSink<'_>,
     classify: impl Fn(u16, &str, Option<std::time::Duration>) -> ProviderError,
+    quota_from_headers: Option<fn(&reqwest::header::HeaderMap) -> Vec<QuotaHint>>,
 ) -> Result<ModelResponse, ProviderError> {
     let mut req = http
         .post(url)
@@ -318,6 +326,10 @@ pub async fn execute_responses_request(
         let text = resp.text().await.unwrap_or_default();
         return Err(classify(status.as_u16(), &text, retry_after));
     }
+
+    let quotas = quota_from_headers
+        .map(|f| f(resp.headers()))
+        .unwrap_or_default();
 
     let mut acc = ResponseAccumulator::default();
     let mut buf = String::new();
@@ -365,7 +377,7 @@ pub async fn execute_responses_request(
         content: acc.content,
         tool_calls: acc.tool_calls,
         usage: acc.usage,
-        quotas: Vec::new(),
+        quotas,
     })
 }
 

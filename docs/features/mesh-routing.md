@@ -165,13 +165,14 @@ vision-capable candidates and fails open to the unfiltered list if none is usabl
 
 ## 4. Scoring a candidate: `route_score`
 
-`route_score` (`crates/forge-mesh/src/catalog.rs:308`) is the full per-model score:
+`route_score` (`crates/forge-mesh/src/catalog.rs:369`) is the full per-model score:
 
 ```
 route_score(id) = capability_score_b(id, tier, code_heavy, bench)        §4.1
                 + cost_pref(tier, cost_class(id, cost))                  §4.3
                 + code_prior(provider, code_heavy, tier)                 §4.4
                 − tool_reliability_penalty(id)                           §4.5
+                − BRIDGE_SUPERSEDE_PENALTY                               §4.8 (superseded bridges only)
                 − subscription_burn_penalty(id, tier, quota, overrides)  §4.6 (subscriptions only)
                 − quota-status penalty                                   §4.7 (subscriptions only)
 ```
@@ -245,9 +246,15 @@ subscription ≈ free with a slight subscription edge; Complex prefers the subsc
 
 ### 4.4 The coding/provider prior
 
-`code_prior` (`crates/forge-mesh/src/catalog.rs:241`): a mild tiebreak nudge, never a hard rule.
-Code-heavy → +0.3 for `codex-cli` / `claude-cli` / `anthropic` / `openai`. Trivial non-code →
-+0.2 for `groq` / `gemini` (fast cheap bulk).
+`code_prior` (`crates/forge-mesh/src/catalog.rs:244`): a mild tiebreak nudge, never a hard rule.
+Code-heavy → +0.3 for `codex-cli` / `claude-cli` / `anthropic` / `openai` / **`codex-oauth`**.
+Trivial non-code → +0.2 for `groq` / `gemini` (fast cheap bulk).
+
+`codex-oauth` was added to the code-heavy arm for parity with `codex-cli` — as of #586 it
+dispatches the same coding-flagship models the bridge does, so it deserves the same lift.
+**`xai-oauth`/`xai` are deliberately excluded**: there is no xai CLI bridge twin, so there is no
+surface asymmetry to correct for, and granting grok the coding-flagship bonus here was out of
+scope for the OAuth-supersedes-bridge work (§4.8) that motivated the `codex-oauth` addition.
 
 ### 4.5 Tool-reliability penalty
 
@@ -315,10 +322,51 @@ which moves whole prompts off the subscription.
 
 ### 4.7 Quota-status penalties
 
-Still inside `route_score` (`catalog.rs:323-328`): a subscription whose provider is at
+Still inside `route_score` (`catalog.rs:386-391`): a subscription whose provider is at
 `QuotaStatus::Warning` takes −5.0 (below any plausible alternative); `Exhausted` takes −100.0
 (effectively last). Applied in the *score*, not as a post-sort, so non-subscription alternatives
 make it into any truncated shortlist.
+
+### 4.8 OAuth supersedes bridge: per-model demotion
+
+Native OAuth (`codex-oauth::`) runs Forge's own harness against the provider directly; the CLI
+bridge (`codex-cli::`) shells out to the vendor CLI's own agent loop instead. Once an OAuth
+surface can dispatch a given model, it is structurally the better surface for that model — so the
+mesh prefers it, per model, without dropping the bridge as a fallback.
+
+**The pair list** — `OAUTH_SUPERSEDES` (`crates/forge-mesh/src/catalog.rs:314`):
+`&[("codex-oauth", "codex-cli")]`, `(oauth, bridge)`. As of #586, `codex-oauth` dispatches every
+seeded codex model (including `gpt-5.6-luna` over the WS transport), so this pair rule already
+covers every codex model — there is no per-model allowlist beyond the provider pairing itself.
+
+**The penalty** — `BRIDGE_SUPERSEDE_PENALTY` (`catalog.rs:325`) = **1.0**. Applied inside
+`route_score` (`catalog.rs:369-395`) when the caller marks a candidate `superseded`.
+
+**Which ids get marked** — `superseded_bridge_ids` (`catalog.rs:333`) takes the FULL catalog model
+list and returns the set of `bridge::model` ids whose OAuth twin (same bare model name, under the
+paired OAuth provider) is also present in the catalog. It runs once per ranking pass
+(`ranked_seeded`/`ranked_rows`, `catalog.rs:827` and `:953`) rather than per candidate, so the
+demotion is O(n) over the catalog, not an O(n²) rescan. Catalog presence of a `codex-oauth::`
+model already implies a live OAuth session — discovery is gated on `has_codex_oauth_session()` in
+forge-cli — so `superseded_bridge_ids` does no session-probing of its own; it is a pure function
+of the catalog's model ids.
+
+**Why a flat penalty, not removal.** With both twins present they otherwise score identically:
+same bare model name → same `capability_score_b` (§4.1), same `cost_class`/`cost_pref` (§4.2–4.3,
+both class 1 subscription), same `code_prior` (§4.4, now tied by the `codex-oauth` addition
+above), the same burn weight (`bench::tokens` matches both ids to the same family, §4.6), and the
+same account-wide quota reading (store layer — §5.3). A flat 1.0 penalty is large enough to
+guarantee the OAuth twin outranks the bridge twin at every tier (Trivial/Standard/Complex all
+compare on the same `route_score`, so a fixed additive penalty wins regardless of tier weighting)
+while small enough that the bridge stays in the ranked chain immediately behind — it is never
+excluded, only demoted. This is what makes it a *failover* rule rather than a removal: if OAuth
+errors mid-dispatch, the bridge is the very next candidate the mesh tries, implementing "prefer
+OAuth, use the bridge only when OAuth is unavailable" through ranking order rather than by hiding
+the bridge from the catalog.
+
+**Pins bypass this entirely.** An explicit `--model codex-cli::gpt-5.6-sol` pin (§9) never goes
+through `route_score` — `decide`'s pin branch dispatches the pinned id directly if it's usable. The
+supersede penalty only affects *auto-routed* ranking, never a deliberate pin.
 
 ## 5. Two currencies: dollars and quota
 
@@ -435,6 +483,13 @@ resets_at, fraction_used }`. Hints are produced by:
   `rate_limits.{primary,secondary}.{used_percent,window_minutes,resets_at}`; Forge reads that
   file after the turn and emits one hint per non-stale window
   (`cli_provider.rs:1000-1027` — 300 min → "five_hour", 10080 min → "weekly").
+- **Codex OAuth (provider layer)** — two independent paths, both mapping to the same window
+  labels/status thresholds as the bridge above: the WS transport (#586, gated to `gpt-5.6-luna`)
+  parses an in-band `codex.rate_limits` frame (`parse_rate_limits_frame`, function in
+  `crates/forge-provider/src/codex_websocket.rs`); the HTTP path parses the `x-codex-*` response
+  headers ChatGPT's backend sends on every `POST /responses` call (`parse_codex_quota_headers`,
+  function in `crates/forge-provider/src/codex_oauth.rs`) — previously this path hardcoded
+  `quotas: Vec::new()` and reported no usage at all.
 - **Seeding from outside-Forge usage** — usage racked up in the raw CLIs would read as 0%
   otherwise. `Session::seed_subscription_quota` (`crates/forge-core/src/lib.rs:2060`) and the
   `forge mesh` path (`seed_store_quota`, `crates/forge-cli/src/cli/commands/models.rs:581`)
@@ -461,15 +516,28 @@ enriched by `Session::live_quota` (`crates/forge-core/src/lib.rs:2410`) with the
 (`with_plans`, `forge-types:1016`) and the conservation opt-out (`with_conserve`,
 `forge-types:1029` ← `mesh.subscription_conserve`, default `true`).
 
+**Shared-account merge (store layer).** `codex-cli` and `codex-oauth` bill the SAME underlying
+ChatGPT account, so their `subscription_usage`/`quota_history` rows must be read as one bucket,
+never summed — otherwise dispatching a turn through each surface would double-count against a
+single account's window. `Store::quota_at` resolves this via a provider-alias group
+(`QUOTA_ALIAS_GROUPS`, const, and `quota_alias_members`, function — both in
+`crates/forge-store/src/lib.rs`): every window row from either provider is folded into one
+reading, and the merged result is surfaced back under BOTH provider keys — the latest observation
+across either surface wins per window, they are never added together. This means `route_score`'s
+burn-penalty pressure (§4.6) and quota-status penalty (§4.7) already see the same account-wide
+picture for `codex-cli::*` and `codex-oauth::*` candidates, which is part of why the OAuth-
+supersedes-bridge twins (§4.8) tie on everything except the flat supersede penalty.
+
 Accessors the mesh uses: `status_for` (`forge-types:1036`, default Ok), `fraction_for`
 (`:1044`, default 0.0), `plan_for` (`:1074`, default ""), `pace_for` (`:1050`),
 `is_exhausted` / `is_pressured` (`:1084` / `:1089`).
 
-**Observation gap (documented behaviour, not aspiration):** only `claude-cli` and `codex-cli`
-windows are actually observed today (bridge streams, rollout files, the claude probe).
-`codex-oauth`, `xai-oauth` and `agy-cli` emit no quota hints, so their fraction reads 0.0 and
-their status Ok unless something seeds them — their conservation pull comes from the tier base
-probability and plan factor alone (§6).
+**Observation gap (documented behaviour, not aspiration):** `claude-cli` and the merged
+`codex-cli`/`codex-oauth` account (§5.3 above) are actually observed today (bridge streams,
+rollout files, the WS `codex.rate_limits` frame, the HTTP `x-codex-*` headers, the claude probe).
+`xai-oauth` and `agy-cli` still emit no quota hints, so their fraction reads 0.0 and their status
+Ok unless something seeds them — their conservation pull comes from the tier base probability and
+plan factor alone (§6).
 
 ### 5.4 Pace projection: `QuotaPace`
 
@@ -595,16 +663,14 @@ pressure, then candidate filtering and chain building.
 
 `ordered_usable_for_tier` (`lib.rs:798`) filters the ranked candidates through three predicates:
 
-- `is_usable` (`lib.rs:748`): the provider has a usable key (or is keyless), the model is not
+- `is_usable` (`lib.rs:740`): the provider has a usable key (or is keyless), the model is not
   currently **benched** (`ModelHealth`, built from the store's `model_health` table — a model
   that failed with a retryable error is benched for the server's `Retry-After` when given, else
   `mesh.failover_cooldown_secs`, default 60 s, kept short because free-tier limits typically
   reset per minute), and it is not an exhausted-quota subscription (routed around entirely,
-  like a benched model). **Caveat:** this exhausted-subscription check uses forge-mesh's
-  *private* `is_subscription` (`lib.rs:372`), which covers only the three CLI bridges — see
-  §13.6.
-- `allowed_under_credit_mode` (`lib.rs:761`): under `credit_mode = "strict"`, only free +
-  subscription models pass (§5.1). Same §13.6 caveat applies.
+  like a benched model), via `catalog::is_subscription` — all five surfaces (§13.6).
+- `allowed_under_credit_mode` (`lib.rs:753`): under `credit_mode = "strict"`, only free +
+  subscription models pass (§5.1), same `catalog::is_subscription` predicate.
 - `context_fits` (`lib.rs:651`): the model's known context window must exceed the required
   minimum; models with no recorded window are assumed to fit (fail-open). The requirement is
   `effective_min_context` (`lib.rs:411`): the caller's `min_context_tokens` scaled ×1.5 at High
@@ -864,28 +930,38 @@ See §5.1. `estimated_cost` = 0.0 for any model without a rate. `is_free` refuse
 free, but on the cost axis they still tie with genuinely-free models. The invariant stands: give
 every metered catalog model a `DEFAULT_RATES` entry.
 
-### 13.6 Two `is_subscription` predicates disagree
+### 13.6 Two `is_subscription` predicates — FIXED (was: disagreed)
 
-`catalog::is_subscription` (`crates/forge-mesh/src/catalog.rs:61`) covers all five subscription
-surfaces (incl. `codex-oauth::`, `xai-oauth::`). forge-mesh's private `is_subscription`
-(`crates/forge-mesh/src/lib.rs:372`) covers only the three CLI bridges. Consequences, as the
-code behaves today:
+Forge-mesh used to carry two separate `is_subscription` predicates: `catalog::is_subscription`
+(public, all five surfaces incl. `codex-oauth::`/`xai-oauth::`) and a *private* copy in
+`crates/forge-mesh/src/lib.rs` that only recognized the three CLI bridges. The private copy has
+been deleted; every call site in `lib.rs` (`is_usable`, `allowed_under_credit_mode`, `cost_rank`,
+the `decide` "(paid subscription)" rationale label, and the tests) now calls the single public
+`catalog::is_subscription` (`crates/forge-mesh/src/catalog.rs:61`) directly. Live consequences of
+the fix:
 
-- An `Exhausted` `codex-oauth`/`xai-oauth` quota is **not** hard-excluded by `is_usable` — it
-  is only demoted by the −100.0 score penalty (§4.7), which in practice puts it last anyway.
-- Under `credit_mode = "strict"`, `codex-oauth::`/`xai-oauth::` models are **excluded** from
-  auto-routing (they are neither bridge-subscription nor free by `allowed_under_credit_mode`'s
-  predicates) even though they are $0-marginal subscription surfaces.
-- `prefer_subscription` (configured path) likewise doesn't prefer them.
+- An `Exhausted` `codex-oauth`/`xai-oauth` quota is now hard-excluded by `is_usable`, same as an
+  exhausted bridge — previously it was only demoted by the −100.0 score penalty (§4.7).
+- Under `credit_mode = "strict"`, `codex-oauth::`/`xai-oauth::` models are now **included** in
+  auto-routing (`allowed_under_credit_mode` recognizes them as $0-marginal subscription surfaces,
+  same as the bridges) — previously they were wrongly excluded (neither bridge-subscription nor
+  free by the old predicate's categories).
+- `cost_rank`'s `prefer_subscription` ordering (configured path, §12) now sorts them rank 0
+  (preferred) alongside the CLI bridges, not rank 1 (behind).
 
-This asymmetry is documented as a *known discrepancy*, not a design intent.
+There is no longer an asymmetry to track here — this section is kept only as the historical
+record of the fix (regression-tested by `cost_rank_treats_codex_oauth_and_xai_oauth_as_subscription`,
+`crates/forge-mesh/src/lib.rs`, and the `is_usable`/strict-credit-mode assertions folded into the
+existing test suite).
 
-### 13.7 Quota observation is bridge-only today
+### 13.7 Quota observation: still a real gap for `xai-oauth`/`agy-cli`
 
-§5.3: `codex-oauth`, `xai-oauth` and `agy-cli` produce no `QuotaHint`s, so their windows read
+§5.3: `claude-cli` and the merged `codex-cli`/`codex-oauth` account are now actually observed
+(bridge streams, rollout files, the WS `codex.rate_limits` frame, the HTTP `x-codex-*` headers,
+the claude probe). `xai-oauth` and `agy-cli` still produce no `QuotaHint`s, so their windows read
 0% / Ok unless externally seeded. Their burn penalty runs at minimum pressure (×0.5) and their
-conservation pull is the tier base × plan factor only. `agy-cli` and `xai-oauth` additionally
-show `plan ?` unless `[mesh.subscriptions]` names their plan (no detection exists for them).
+conservation pull is the tier base × plan factor only. They additionally show `plan ?` unless
+`[mesh.subscriptions]` names their plan (no detection exists for either).
 
 ### 13.8 Other deliberate approximations
 
@@ -901,9 +977,9 @@ show `plan ?` unless `[mesh.subscriptions]` names their plan (no detection exist
 
 - `crates/forge-mesh/src/doc_sync.rs::mesh_routing_doc_matches_live_constants` asserts every
   constant above against the live symbols (BURN_K_*, BENCH_INDEX_DIVISOR, CONSERVE_PENALTY,
-  the full cost_pref table, every bundled burn weight, the nominal token mix, and the
-  bare-name override semantics of §13.1). It fails naming the constant, its new value, and
-  this file's path.
+  BRIDGE_SUPERSEDE_PENALTY, the full cost_pref table, every bundled burn weight, the nominal
+  token mix, and the bare-name override semantics of §13.1). It fails naming the constant, its
+  new value, and this file's path.
 - The documented functions carry `Documented in docs/features/mesh-routing.md.` comments at
   their definitions. If you touch one, update the relevant section here in the same PR.
 - The worked example in §11.1 uses live benchmark indices and quota fractions as captured on

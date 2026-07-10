@@ -772,8 +772,18 @@ and keep going."
                 }
                 let exp = {
                     let s = session_c.lock().await;
-                    s.seed_subscription_quota("codex-cli", "five_hour", bstats.codex_5h_pct);
-                    s.seed_subscription_quota("codex-cli", "weekly", bstats.codex_weekly_pct);
+                    s.seed_subscription_quota_at(
+                        "codex-cli",
+                        "five_hour",
+                        bstats.codex_5h_pct,
+                        bstats.codex_5h_observed_at,
+                    );
+                    s.seed_subscription_quota_at(
+                        "codex-cli",
+                        "weekly",
+                        bstats.codex_weekly_pct,
+                        bstats.codex_weekly_observed_at,
+                    );
                     s.explain_routing(&to_explain)
                 };
                 let _ = tx.send(exp.map(|e| build_mesh_overlay(e, &prompt_str)));

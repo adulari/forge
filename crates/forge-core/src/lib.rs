@@ -2057,7 +2057,25 @@ impl Session {
     /// usage when it runs a turn on that bridge — usage racked up *outside* Forge would read as 0%,
     /// making the mesh think the plan is fresh. `pct` is 0–100; `None` is skipped. The recorded row
     /// has no reset time, so it stays live until a real in-turn QuotaUpdate replaces it.
+    ///
+    /// Only for LIVE readings (observation time = now). Cache-derived readings (codex rollout
+    /// files) must use [`Self::seed_subscription_quota_at`] with their true observation time, or a
+    /// re-seeded hours-old reading would mask fresher data in the shared codex quota bucket.
     pub fn seed_subscription_quota(&self, provider: &str, window: &str, pct: Option<f64>) {
+        self.seed_subscription_quota_at(provider, window, pct, None);
+    }
+
+    /// [`Self::seed_subscription_quota`] with the reading's true OBSERVATION time (epoch secs) —
+    /// e.g. the codex rollout line's `timestamp` / file mtime. `Store::record_quota_at` drops the
+    /// write entirely when the store already holds a newer observation for that window, so stale
+    /// re-seeds can never regress a fresher reading. `observed_at: None` means "observed now".
+    pub fn seed_subscription_quota_at(
+        &self,
+        provider: &str,
+        window: &str,
+        pct: Option<f64>,
+        observed_at: Option<i64>,
+    ) {
         let Some(pct) = pct else { return };
         let frac = (pct / 100.0).clamp(0.0, 1.0);
         let status = if frac >= 0.98 {
@@ -2067,13 +2085,17 @@ impl Session {
         } else {
             forge_types::QuotaStatus::Ok
         };
-        let _ = self.store.record_quota(&forge_types::QuotaHint {
+        let hint = forge_types::QuotaHint {
             provider: provider.to_string(),
             window: window.to_string(),
             status,
             resets_at: None,
             fraction_used: Some(frac),
-        });
+        };
+        let _ = match observed_at {
+            Some(ts) => self.store.record_quota_at(&hint, ts),
+            None => self.store.record_quota(&hint),
+        };
     }
 
     /// After a fresh [`forge_types::QuotaHint`] is recorded, look back at that window's history

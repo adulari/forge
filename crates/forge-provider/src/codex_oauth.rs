@@ -55,6 +55,77 @@ fn responses_url() -> String {
     format!("{CODEX_API_BASE}/responses")
 }
 
+/// Parse account-wide ChatGPT quota from the `x-codex-*` response headers the backend sends on
+/// EVERY `POST {CODEX_API_BASE}/responses` (verified live 2026-07-10):
+/// `x-codex-{primary,secondary}-used-percent`, `-window-minutes` (300→"five_hour",
+/// 10080→"weekly"), `-reset-at` (unix seconds), plus `x-codex-plan-type` (ignored here — plan
+/// detection is the separate, already-shipped [`detected_plan`]). Mirrors
+/// [`codex_websocket::parse_rate_limits_frame`]'s in-band `codex.rate_limits` mapping exactly:
+/// same window labels, same status thresholds, skip a window whose reset has already passed, skip
+/// a window missing `used-percent` (no hint over a wrong hint).
+pub(crate) fn parse_codex_quota_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> Vec<forge_types::QuotaHint> {
+    let now_secs = now_unix();
+    let mut hints = Vec::new();
+    for (used_key, mins_key, reset_key, fallback_label) in [
+        (
+            "x-codex-primary-used-percent",
+            "x-codex-primary-window-minutes",
+            "x-codex-primary-reset-at",
+            "primary",
+        ),
+        (
+            "x-codex-secondary-used-percent",
+            "x-codex-secondary-window-minutes",
+            "x-codex-secondary-reset-at",
+            "secondary",
+        ),
+    ] {
+        let Some(used) = header_f64(headers, used_key) else {
+            continue;
+        };
+        let resets = header_i64(headers, reset_key);
+        // Skip a window whose period has already reset — same rule as the WS path.
+        if let Some(r) = resets {
+            if r <= now_secs {
+                continue;
+            }
+        }
+        let mins = header_i64(headers, mins_key).unwrap_or(0);
+        let fraction = used / 100.0;
+        let status = if fraction >= 0.98 {
+            forge_types::QuotaStatus::Exhausted
+        } else if fraction >= 0.80 {
+            forge_types::QuotaStatus::Warning
+        } else {
+            forge_types::QuotaStatus::Ok
+        };
+        let label = match mins {
+            300 => "five_hour".to_string(),
+            10080 => "weekly".to_string(),
+            m if m > 0 => format!("{m}m"),
+            _ => fallback_label.to_string(),
+        };
+        hints.push(forge_types::QuotaHint {
+            provider: CODEX_OAUTH_NAMESPACE.to_string(),
+            window: label,
+            status,
+            resets_at: resets,
+            fraction_used: Some(fraction),
+        });
+    }
+    hints
+}
+
+fn header_f64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<f64> {
+    headers.get(name)?.to_str().ok()?.trim().parse::<f64>().ok()
+}
+
+fn header_i64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<i64> {
+    headers.get(name)?.to_str().ok()?.trim().parse::<i64>().ok()
+}
+
 fn classify_codex_status(
     status: u16,
     body: &str,
@@ -287,6 +358,7 @@ impl CodexOauthProvider {
             &headers,
             on_event,
             classify_codex_status,
+            Some(parse_codex_quota_headers),
         )
         .await;
         // On 401: refresh once and retry the same account once (design §2).
@@ -306,6 +378,7 @@ impl CodexOauthProvider {
                         &[("ChatGPT-Account-Id", id2.as_str())],
                         on_event,
                         classify_codex_status,
+                        Some(parse_codex_quota_headers),
                     )
                     .await;
                 }
@@ -909,5 +982,135 @@ mod tests {
         );
         assert_eq!(body["model"], "gpt-5.5");
         assert_eq!(body["instructions"], "be terse");
+    }
+
+    fn header_map(pairs: &[(&str, &str)]) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (k, v) in pairs {
+            headers.insert(
+                reqwest::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                reqwest::header::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn quota_headers_parses_both_windows() {
+        let now = now_unix();
+        let headers = header_map(&[
+            ("x-codex-primary-used-percent", "1"),
+            ("x-codex-secondary-used-percent", "0"),
+            ("x-codex-primary-window-minutes", "300"),
+            ("x-codex-secondary-window-minutes", "10080"),
+            ("x-codex-primary-reset-at", &(now + 3600).to_string()),
+            ("x-codex-secondary-reset-at", &(now + 86400).to_string()),
+            ("x-codex-plan-type", "plus"),
+        ]);
+        let hints = parse_codex_quota_headers(&headers);
+        assert_eq!(hints.len(), 2);
+        let five_hour = hints.iter().find(|h| h.window == "five_hour").unwrap();
+        assert_eq!(five_hour.provider, CODEX_OAUTH_NAMESPACE);
+        assert_eq!(five_hour.fraction_used, Some(0.01));
+        assert_eq!(five_hour.status, forge_types::QuotaStatus::Ok);
+        let weekly = hints.iter().find(|h| h.window == "weekly").unwrap();
+        assert_eq!(weekly.fraction_used, Some(0.0));
+        assert_eq!(weekly.status, forge_types::QuotaStatus::Ok);
+    }
+
+    #[test]
+    fn quota_headers_skips_window_missing_used_percent() {
+        let now = now_unix();
+        let headers = header_map(&[
+            ("x-codex-primary-window-minutes", "300"),
+            ("x-codex-primary-reset-at", &(now + 3600).to_string()),
+            ("x-codex-secondary-used-percent", "55"),
+            ("x-codex-secondary-window-minutes", "10080"),
+            ("x-codex-secondary-reset-at", &(now + 86400).to_string()),
+        ]);
+        let hints = parse_codex_quota_headers(&headers);
+        assert_eq!(hints.len(), 1, "no hint for primary — missing used-percent");
+        assert_eq!(hints[0].window, "weekly");
+    }
+
+    #[test]
+    fn quota_headers_skips_stale_reset() {
+        let now = now_unix();
+        let headers = header_map(&[
+            ("x-codex-primary-used-percent", "42"),
+            ("x-codex-primary-window-minutes", "300"),
+            ("x-codex-primary-reset-at", &(now - 60).to_string()),
+        ]);
+        let hints = parse_codex_quota_headers(&headers);
+        assert!(hints.is_empty(), "already-reset window must be skipped");
+    }
+
+    #[test]
+    fn quota_headers_exhausted_threshold() {
+        let now = now_unix();
+        let headers = header_map(&[
+            ("x-codex-primary-used-percent", "99"),
+            ("x-codex-primary-window-minutes", "300"),
+            ("x-codex-primary-reset-at", &(now + 3600).to_string()),
+        ]);
+        let hints = parse_codex_quota_headers(&headers);
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].status, forge_types::QuotaStatus::Exhausted);
+    }
+
+    #[test]
+    fn quota_headers_plan_type_ignored_for_hints() {
+        let headers = header_map(&[("x-codex-plan-type", "plus")]);
+        let hints = parse_codex_quota_headers(&headers);
+        assert!(hints.is_empty(), "plan header alone yields no quota hint");
+    }
+
+    #[test]
+    fn quota_headers_empty_without_any_codex_headers() {
+        let headers = header_map(&[]);
+        assert!(parse_codex_quota_headers(&headers).is_empty());
+    }
+
+    #[tokio::test]
+    async fn complete_attaches_quota_hints_from_response_headers() {
+        let server = httpmock::MockServer::start();
+        let now = now_unix();
+        let hit = server.mock(|when, then| {
+            when.method(httpmock::Method::POST).path("/responses");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .header("x-codex-primary-used-percent", "1")
+                .header("x-codex-secondary-used-percent", "0")
+                .header("x-codex-primary-window-minutes", "300")
+                .header("x-codex-secondary-window-minutes", "10080")
+                .header("x-codex-primary-reset-at", (now + 3600).to_string())
+                .header("x-codex-secondary-reset-at", (now + 86400).to_string())
+                .header("x-codex-plan-type", "plus")
+                .body(ok_sse());
+        });
+        let store = memory_store(&[("only", "only")], "only");
+        let provider = CodexOauthProvider::new()
+            .with_api_base(server.base_url())
+            .with_accounts(store);
+        let mut sink = |_: StreamEvent| {};
+        let resp = provider
+            .complete(
+                "codex-oauth::gpt-5.5",
+                &[Message::user("hi")],
+                &[],
+                &mut sink,
+            )
+            .await
+            .expect("quota headers must not break a normal completion");
+        assert_eq!(resp.quotas.len(), 2);
+        assert!(resp
+            .quotas
+            .iter()
+            .any(|h| h.window == "five_hour" && h.fraction_used == Some(0.01)));
+        assert!(resp
+            .quotas
+            .iter()
+            .any(|h| h.window == "weekly" && h.fraction_used == Some(0.0)));
+        hit.assert();
     }
 }
