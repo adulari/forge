@@ -444,7 +444,7 @@ pub async fn probe_entitlement(
     let http = bundled_http_client();
     let body = serde_json::json!({
         "model": "gpt-5.4-mini",
-        "input": "Reply with OK.",
+        "input": [{"role": "user", "content": "Reply with OK."}],
         "max_output_tokens": 16,
         "stream": false,
     });
