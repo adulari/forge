@@ -344,7 +344,7 @@ pub async fn route_child(
             // An agent-type tier default, not an explicit user pin — normal failover rules.
             pinned: false,
         },
-        // Route around benched models too (model-health-failover): a child still avoids a
+        // Route around benched models too (docs/features/mesh-routing.md): a child still avoids a
         // model the parent just rate-limited.
         None => {
             let health = ctx.store.current_benched().unwrap_or_default();
@@ -482,7 +482,7 @@ async fn run_agent_loop(
     let mut final_text = String::new();
     let mut ok = true;
 
-    // Failover (model-health-failover): subagents fail over down the routed chain too, so a
+    // Failover (docs/features/mesh-routing.md): subagents fail over down the routed chain too, so a
     // child whose model rate-limits/stalls doesn't kill the whole spawn.
     let failover_enabled = ctx.config.mesh.failover;
     let default_cooldown = std::time::Duration::from_secs(ctx.config.mesh.failover_cooldown_secs);
@@ -1149,7 +1149,7 @@ mod tests {
         assert_eq!(SUBAGENT_TOOLS, &["read_file", "list_dir", "search"]);
     }
 
-    // --- Subagent failover (model-health-failover): a child whose model rate-limits must
+    // --- Subagent failover (docs/features/mesh-routing.md): a child whose model rate-limits must
     // fail over down its chain, not die — the bug the user hit ("run a testing task" → the
     // spawned child 429'd). ---
 

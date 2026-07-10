@@ -430,6 +430,7 @@ enum FailoverPolicy {
 /// same-model transient retries (`MAX_TRANSIENT_RETRIES`, above) are exhausted, AND
 /// `mesh.pin_outage_wait_secs > 0` — the caller folds the config gate into this bool so `0`
 /// restores the old FailTurn behaviour without a separate branch here.
+/// Documented in docs/features/mesh-routing.md.
 fn failover_policy(
     pinned: bool,
     pin_failover: bool,
@@ -1182,6 +1183,7 @@ fn read_project_agents_md() -> Option<String> {
 /// below): `detected` wins per key — it's read live from the account actually in use, so it
 /// cannot drift from it — and `config` fills any key `detected` didn't have (`agy-cli` /
 /// `xai-oauth`, or a codex surface with no live session).
+/// Documented in docs/features/mesh-routing.md.
 fn merge_subscription_plans(
     mut config: std::collections::HashMap<String, String>,
     detected: std::collections::HashMap<String, String>,
@@ -1199,6 +1201,7 @@ fn merge_subscription_plans(
 /// If you add a `with_plans` call site, route it through here. A site that passes
 /// `config.mesh.subscriptions` directly renders `plan ?` for any surface whose plan is detected
 /// rather than configured — which is exactly the D4 defect this function exists to fix.
+/// Documented in docs/features/mesh-routing.md.
 pub fn resolved_subscription_plans(config: &Config) -> std::collections::HashMap<String, String> {
     merge_subscription_plans(
         config.mesh.subscriptions.clone(),
@@ -2075,7 +2078,7 @@ impl Session {
 
     /// After a fresh [`forge_types::QuotaHint`] is recorded, look back at that window's history
     /// and — if there's enough of it — derive a [`forge_types::QuotaPace`] projection and push it
-    /// to the presenter for the statusline meter (quota-pace-tracking.md). A no-op (no event) when
+    /// to the presenter for the statusline meter (mesh-routing.md). A no-op (no event) when
     /// the hint carries no fraction, or when there isn't yet enough history to project from
     /// (single sample, or samples too close together — see `compute_quota_pace`'s guard).
     fn emit_quota_pace(&mut self, hint: &forge_types::QuotaHint) {
@@ -2403,6 +2406,7 @@ impl Session {
     /// Current subscription quota, enriched with the configured plan slugs and the conservation
     /// opt-out, so the router can spread complex/standard load off a subscription proactively
     /// (not just react at the hard limit). Defaults to an empty quota when the store read fails.
+    /// Documented in docs/features/mesh-routing.md.
     fn live_quota(&self) -> forge_types::SubscriptionQuota {
         self.store
             .current_quota()
@@ -4742,7 +4746,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         }
 
         // Route around any currently-benched models (failover): the snapshot excludes models
-        // whose cooldown hasn't elapsed, even across restarts (model-health-failover).
+        // whose cooldown hasn't elapsed, even across restarts (docs/features/mesh-routing.md).
         let health = self.store.current_benched().unwrap_or_default();
         // Quota-aware routing (L3): demote/skip a subscription that the bridge reported is near or
         // over its plan limit (recorded after earlier turns from the CLI's rate-limit events).
@@ -11642,7 +11646,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // --- Model health / failover (model-health-failover) ---
+    // --- Model health / failover (docs/features/mesh-routing.md) ---
 
     /// A router that returns a fixed model + fallback chain, so the failover loop is testable
     /// without depending on discovery/availability.

@@ -13,6 +13,7 @@ use crate::{score_prompt, BudgetState, HeuristicRouter, RouteHints};
 
 /// One model in the ranked candidate table, with the router's usability overlay.
 #[derive(Debug, Clone)]
+/// Documented in docs/features/mesh-routing.md.
 pub struct CandidateRow {
     pub rank: usize,
     pub row: ScoreRow,
@@ -24,13 +25,14 @@ pub struct CandidateRow {
 
 /// A subscription provider's quota pressure + the spread probability for the explained tier.
 #[derive(Debug, Clone)]
+/// Documented in docs/features/mesh-routing.md.
 pub struct ProviderQuotaView {
     pub provider: String,
     pub status: QuotaStatus,
     pub fraction: f64,
     pub plan: String,
     /// Probability a task of this tier spreads OFF this subscription (the conservation pull).
-    /// Pace-projected (quota-pace-routing.md) — fed `effective_fraction_for`, matching what real
+    /// Pace-projected (mesh-routing.md) — fed `effective_fraction_for`, matching what real
     /// routing (`conserve_decision`) actually uses, not just the plain `fraction` above.
     pub spread_probability: f64,
     /// Fraction the window is projected to reach by its reset time, if a pace could be derived
@@ -43,6 +45,7 @@ pub struct ProviderQuotaView {
 
 /// The full explanation of one routing decision.
 #[derive(Debug, Clone)]
+/// Documented in docs/features/mesh-routing.md.
 pub struct RoutingExplanation {
     pub prompt: String,
     /// Tier from prompt classification.
@@ -67,6 +70,7 @@ pub struct RoutingExplanation {
 impl HeuristicRouter {
     /// Produce a full [`RoutingExplanation`] for `prompt` — the same decision [`route`](Self::route)
     /// would make, with every intermediate step exposed.
+    /// Documented in docs/features/mesh-routing.md.
     pub fn explain(
         &self,
         prompt: &str,

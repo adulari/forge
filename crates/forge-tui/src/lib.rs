@@ -247,7 +247,7 @@ pub enum PresenterEvent {
         fraction: f64,
     },
     /// A pace/projection was derived for one subscription window from its usage history
-    /// (quota-pace-tracking.md, `forge_types::compute_quota_pace`). Drives the statusline pace
+    /// (mesh-routing.md, `forge_types::compute_quota_pace`). Drives the statusline pace
     /// meter; only emitted once there's enough history to project (never a guess from one point).
     QuotaPace {
         provider: String,

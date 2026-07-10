@@ -397,5 +397,5 @@ Built on branch `feat/checkpoints-undo-and-pickers`. **PR2 + PR3 + interactive p
 ## References
 
 - PR #45 — TUI freeze fix (the `block_in_place` invariant this design must respect).
-- `docs/features/auto-discovery-mesh.md`, `docs/features/ask-user-question.md`.
+- `docs/features/mesh-routing.md`, `docs/features/ask-user-question.md`.
 </content>

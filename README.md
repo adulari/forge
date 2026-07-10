@@ -230,7 +230,7 @@ forge auth groq --replace  # overwrite all with one key
 You can also stack keys via env: `GROQ_API_KEY="k1,k2"` or numbered `GROQ_API_KEY_2`, `GROQ_API_KEY_3`.
 
 > Rate limits and free model lists shift month-to-month — these are mid-2026 figures; check each
-> provider's page for current terms. See [docs/features/free-models.md](docs/features/free-models.md)
+> provider's page for current terms. See [docs/features/mesh-routing.md](docs/features/mesh-routing.md)
 > for tier config and how to add any other OpenAI-compatible provider in one line.
 
 ---

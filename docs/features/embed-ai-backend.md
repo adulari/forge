@@ -111,16 +111,15 @@ Standard OpenAI `chat.completion` (or `chat.completion.chunk` when streaming), p
 ## What you get from the mesh (for free, via the base URL)
 
 - **Multi-model routing** — the request's difficulty tier decides the model; cheap work goes to
-  cheap models, hard work to strong ones (`docs/features/mesh-classifier.md`,
-  `docs/features/provider-cost-routing.md`).
+  cheap models, hard work to strong ones (`docs/features/mesh-routing.md`).
 - **Cross-provider failover** — a rate-limited or down model transparently falls over to the next
   ranked candidate; for streaming this is transparent as long as no tokens were emitted yet
-  (`docs/features/model-health-failover.md`).
+  (`docs/features/mesh-routing.md`).
 - **Subscription quota-spread** — near-exhausted subscription plans are demoted so you don't
-  overrun a window (`docs/features/provider-cost-routing.md`).
+  overrun a window (`docs/features/mesh-routing.md`).
 - **Auto-discovery** — with `[mesh] auto_discover` on, the mesh routes across every usable model it
   can enumerate from your configured providers, not just built-in defaults
-  (`docs/features/auto-discovery-mesh.md`).
+  (`docs/features/mesh-routing.md`).
 - **Cost tracking** — every response carries `x_forge.cost_usd`, priced from token counts.
 
 ## Auth & exposure

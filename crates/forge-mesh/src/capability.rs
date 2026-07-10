@@ -1,5 +1,5 @@
 //! Transparent capability priors for ranking *discovered* models per task tier (auto-discovery
-//! mesh, docs/features/auto-discovery-mesh.md). The "not hardcoded in config" requirement means
+//! mesh, docs/features/mesh-routing.md). The "not hardcoded in config" requirement means
 //! these priors live here in code (generic model-family heuristics), never as specific ids in a
 //! user's config. A model id maps to a coarse (quality, speed) class by family substring; the
 //! per-tier score weights those + cost so the router can pick the best *available* model.
@@ -13,9 +13,11 @@ use crate::bench::BenchmarkScores;
 /// Divisor that maps an Artificial Analysis index (~0–70, frontier ≈ 60) onto the same 0–3-ish
 /// "quality" scale the family heuristic produced, so cost/conservation terms layered on top in the
 /// catalog keep working unchanged (a ~60 index ≈ quality 3.0).
-const BENCH_INDEX_DIVISOR: f64 = 20.0;
+/// Documented in docs/features/mesh-routing.md; value asserted in sync by `doc_sync::mesh_routing_doc_matches_live_constants`.
+pub(crate) const BENCH_INDEX_DIVISOR: f64 = 20.0;
 
 /// Coarse quality class inferred from a model id's family (0 = unknown/small … 3 = frontier).
+/// Documented in docs/features/mesh-routing.md.
 pub(crate) fn quality_class(id: &str) -> u8 {
     let m = id.to_lowercase();
     // Domain-specialized fine-tunes and stale-generation models slip through the size-only
@@ -148,6 +150,7 @@ const TOOL_UNRELIABLE_PENALTY: f64 = 3.0;
 /// observed both via genai's native adapter and through OpenRouter, despite a top intelligence
 /// score. Matched by name so it spans providers (`gemini::…`, `openrouter::google/gemini-…-flash`).
 /// Reversible: drop the entry once the upstream tool-call parsing is fixed.
+/// Documented in docs/features/mesh-routing.md.
 pub(crate) fn tool_reliability_penalty(id: &str) -> f64 {
     let l = id.to_lowercase();
     if l.contains("gemini") && l.contains("flash") {
@@ -178,6 +181,7 @@ pub fn is_frontier(id: &str) -> bool {
 /// Bare model name after the `provider::` prefix (`"opus"` from `"claude-cli::opus"`,
 /// `"gpt-5.6-sol"` from `"codex-oauth::gpt-5.6-sol"`). Mirrors the split-once idiom used elsewhere
 /// in this crate (`bench.rs`, `pricing.rs::context_limit`) for stripping the provider prefix.
+/// Documented in docs/features/mesh-routing.md.
 fn bare_model(id: &str) -> &str {
     id.split_once("::").map(|(_, m)| m).unwrap_or(id)
 }
@@ -201,7 +205,8 @@ fn bare_model(id: &str) -> &str {
 /// for every entry here. `speed_class` (Fix 3) only consults the narrower
 /// [`gpt56_family_speed_weight`] — see its doc comment for why the Claude entries are excluded from
 /// that specific substitution.
-fn known_burn_weight(id: &str) -> Option<f64> {
+/// Documented in docs/features/mesh-routing.md; value asserted in sync by `doc_sync::mesh_routing_doc_matches_live_constants`.
+pub(crate) fn known_burn_weight(id: &str) -> Option<f64> {
     let toks = crate::bench::tokens(bare_model(id));
     let has = |w: &str| toks.iter().any(|t| t == w);
     // GPT-5.6 family: the sub-name (sol/terra/luna) is the family identifier.
@@ -235,6 +240,7 @@ fn known_burn_weight(id: &str) -> Option<f64> {
 /// overrides (`mesh.burn_weights`, keyed by the BARE model name) take precedence over the bundled
 /// table. Unknown models default to 1.0 (neutral, no penalty) — load-bearing: an unpriced/unknown
 /// model must get zero penalty in `route_score` so nothing regresses.
+/// Documented in docs/features/mesh-routing.md.
 pub(crate) fn subscription_burn_weight(id: &str, overrides: &HashMap<String, f64>) -> f64 {
     let bare = bare_model(id);
     if let Some(&w) = overrides.get(bare) {
@@ -258,6 +264,7 @@ pub(crate) fn subscription_burn_weight(id: &str, overrides: &HashMap<String, f64
 /// exists to prevent. `subscription_burn_weight`'s route-score penalty already penalizes Claude's
 /// heavier siblings correctly; this file scopes speed_class narrowly to the one case it was asked
 /// to fix.
+/// Documented in docs/features/mesh-routing.md.
 fn gpt56_family_speed_weight(id: &str) -> Option<f64> {
     match bare_model(id).to_lowercase().as_str() {
         "gpt-5.6-sol" => Some(5.0),
@@ -274,6 +281,7 @@ fn gpt56_family_speed_weight(id: &str) -> Option<f64> {
 /// name carries no size/speed marker (Fix 3; luna/terra/sol all landed in the same slowest class
 /// under the old heuristic). Falls back to the size/quality-class heuristic, UNCHANGED, for every
 /// other id (`mini`, `-30b`, `opus`/`sonnet`/`haiku`, unfamiliar ids, …).
+/// Documented in docs/features/mesh-routing.md.
 pub(crate) fn speed_class(id: &str) -> u8 {
     if let Some(w) = gpt56_family_speed_weight(id) {
         return if w <= 1.0 {
@@ -306,6 +314,7 @@ pub(crate) fn capability_score(id: &str, tier: TaskTier) -> f64 {
 /// scaled onto the heuristic's 0–3 range; speed stays a size-derived heuristic (benchmarks don't
 /// rank "fast for a trivial edit"). Falls back to the family `quality_class` when the model has no
 /// score, so a missing/disabled benchmark layer changes nothing.
+/// Documented in docs/features/mesh-routing.md.
 pub(crate) fn capability_score_b(
     id: &str,
     tier: TaskTier,

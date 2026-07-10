@@ -39,7 +39,7 @@ Re-running `forge auth xai-oauth` **adds** another account (labeled from the id_
 present, else `account-N`) and makes it active. With **≥2** stored accounts Forge **auto-rotates**
 round-robin across them on every completion request, and on a 429/quota error retries **once** with
 the next account before the mesh wait/failover chain runs — same shape as multi-key API rotation
-(`docs/features/free-models.md`). A single account is unchanged (no second request on 429).
+(`docs/features/mesh-routing.md`). A single account is unchanged (no second request on 429).
 
 `forge auth xai-oauth --list` shows `auto-rotation ON (round-robin)` when multiple accounts are
 stored; `*` marks the manual active / rotation seed (`--switch --account <id>`).

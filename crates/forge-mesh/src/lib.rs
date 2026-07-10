@@ -10,6 +10,8 @@ use forge_types::{EffortLevel, ModelHealth, ProjectContext, SubscriptionQuota, T
 pub mod bench;
 pub mod capability;
 pub mod catalog;
+#[cfg(test)]
+mod doc_sync;
 pub mod explain;
 pub mod pricing;
 
@@ -76,6 +78,7 @@ impl BudgetState {
     }
 
     /// Classify current spending: the stricter of all configured axes wins.
+    /// Documented in docs/features/mesh-routing.md.
     pub fn status(&self) -> BudgetStatus {
         Self::axis(self.spent_today_usd, self.daily_cap_usd, self.warn_fraction)
             .max(Self::axis(
@@ -360,6 +363,7 @@ fn default_model_available(model: &str) -> bool {
 /// caller that honors a hard pin — `forge run --model <id>` and the OpenAI-compatible `forge api`
 /// endpoint alike — agrees on what "a dispatchable pin" is and the two paths cannot silently
 /// diverge (the gap that let #509's API fix miss valid, un-advertised models).
+/// Documented in docs/features/mesh-routing.md.
 pub fn pin_is_dispatchable(model: &str) -> bool {
     default_model_available(model)
 }
@@ -393,6 +397,7 @@ pub struct RouteHints {
 }
 
 impl RouteHints {
+    /// Documented in docs/features/mesh-routing.md.
     pub fn from_prompt(prompt: &str) -> Self {
         Self {
             code_heavy: is_code_heavy(prompt),
@@ -598,6 +603,7 @@ fn is_multistep(lower: &str) -> bool {
 }
 
 impl HeuristicRouter {
+    /// Documented in docs/features/mesh-routing.md.
     pub fn new(config: Config) -> Self {
         let pricing = pricing::Pricing::from_config(&config);
         Self {
@@ -612,12 +618,14 @@ impl HeuristicRouter {
     }
 
     /// Pin a model (`--model`); empty/`None` clears it.
+    /// Documented in docs/features/mesh-routing.md.
     pub fn with_pin(mut self, pin: Option<String>) -> Self {
         self.pin = pin.filter(|s| !s.is_empty());
         self
     }
 
     /// Attach a discovered model catalog for auto-discovery routing (no-op when empty).
+    /// Documented in docs/features/mesh-routing.md.
     pub fn with_catalog(mut self, catalog: ModelCatalog) -> Self {
         self.catalog = Some(catalog);
         self
@@ -625,12 +633,14 @@ impl HeuristicRouter {
 
     /// Attach known context-window sizes so the router can skip models that can't fit the
     /// current transcript.
+    /// Documented in docs/features/mesh-routing.md.
     pub fn with_context_windows(mut self, windows: std::collections::HashMap<String, u32>) -> Self {
         self.context_windows = windows;
         self
     }
 
     /// Attach per-repo routing boosts learned from past `/duel` outcomes (empty = no-op).
+    /// Documented in docs/features/mesh-routing.md.
     pub fn with_repo_boosts(mut self, boosts: std::collections::HashMap<String, f64>) -> Self {
         self.repo_boosts = boosts;
         self
@@ -723,6 +733,7 @@ impl HeuristicRouter {
     /// fired. A near-boundary score (−3…7) is "uncertain" — hybrid classifiers should call an
     /// LLM to decide. This is the hook that makes [`ClassifierKind::Hybrid`] cheap: obvious
     /// Trivial / strongly-signalled Complex skip the extra model call entirely.
+    /// Documented in docs/features/mesh-routing.md.
     pub fn classify_confident(prompt: &str, project: &ProjectContext) -> (TaskTier, bool, String) {
         let c = score_prompt(prompt, project);
         // score == i32::MAX → COMPLEX_HINTS hard override (always confident).
@@ -900,6 +911,7 @@ impl HeuristicRouter {
     /// Pure + sync, so any [`Router`] (incl. the LLM one) can reuse the whole selection path.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
+    /// Documented in docs/features/mesh-routing.md.
     pub fn decide(
         &self,
         classified_tier: TaskTier,
@@ -1574,7 +1586,7 @@ mod tests {
             .with_conserve(true)
     }
 
-    /// [`conserve_quota`] plus a pace projection on `claude-cli` — quota-pace-routing.md. Lets a
+    /// [`conserve_quota`] plus a pace projection on `claude-cli` — mesh-routing.md. Lets a
     /// test isolate the effect of a fast-burning-but-early window (low `frac`, high projection)
     /// from the plain fraction-only spreading `conserve_quota` alone exercises.
     fn conserve_quota_with_pace(

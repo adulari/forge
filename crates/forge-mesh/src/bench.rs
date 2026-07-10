@@ -88,6 +88,7 @@ impl BenchmarkScores {
     }
 
     /// The score for a Forge `provider::model` id, or `None` if no confident match exists.
+    /// Documented in docs/features/mesh-routing.md.
     pub fn score_for(&self, id: &str) -> Option<BenchScore> {
         if self.entries.is_empty() {
             return None;
@@ -175,6 +176,7 @@ fn id_tokens(id: &str) -> Vec<String> {
 /// trailing junk would otherwise pollute the token set and cross-match unrelated models.
 /// Public because the context-window derivation matches bridge aliases to canonical fetched
 /// models with the same token vocabulary this module uses for benchmark rows.
+/// Documented in docs/features/mesh-routing.md.
 pub fn tokens(s: &str) -> Vec<String> {
     let s = strip_parens(s);
     let s = s.rsplit('/').next().unwrap_or(&s).to_lowercase();
@@ -218,6 +220,7 @@ pub fn tokens(s: &str) -> Vec<String> {
 }
 
 /// Remove parenthetical segments (and any trailing dangling open paren) from a source name.
+/// Documented in docs/features/mesh-routing.md.
 fn strip_parens(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut depth = 0u32;

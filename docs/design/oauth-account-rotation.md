@@ -38,7 +38,7 @@
 | 429 retry | `complete_with` (`genai_provider.rs:1049–1066`) | **one** next-key retry if `has_rotation` |
 | Mesh contract | `forge-core/src/lib.rs:371–374`, `3680–3682` | multi-key rotation already ran; then wait / failover |
 
-Docs: `docs/features/free-models.md` (“Multiple keys per provider”).
+Docs: `docs/features/mesh-routing.md` (“Multiple keys per provider”).
 
 **Reusable:** in-process pool + atomic cursor; ≥2 only; one intra-provider 429 retry before mesh.  
 **Not reusable as-is:** keys are static strings; OAuth needs per-account tokens + independent refresh.

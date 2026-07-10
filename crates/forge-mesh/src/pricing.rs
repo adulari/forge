@@ -31,6 +31,9 @@ pub struct Pricing {
 
 /// Bundled default rates (USD per 1k tokens) for the models Forge ships in its defaults,
 /// approximating mid-2026 list prices. Overridable via config (A-7).
+/// Documented in docs/features/mesh-routing.md. INVARIANT: any METERED model added to the
+/// catalog defaults MUST get an entry here (or a fetched/config price) — an absent entry prices
+/// as $0.0 and cost-tiered routing then treats the most expensive model as the cheapest.
 const DEFAULT_RATES: &[(&str, f64, f64)] = &[
     ("openai::gpt-4o-mini", 0.00015, 0.0006),
     // Opus 4.8's actual list price is $5/$25 per 1M tokens (0.005/0.025 per 1k). The prior entry
@@ -132,6 +135,7 @@ impl Pricing {
     /// Compute the USD cost of a call given token counts. Unknown models cost nothing. Charges all
     /// input at the full rate — use [`cost_for_usage`](Self::cost_for_usage) when cache-read counts
     /// are known so cached tokens get their discounted rate.
+    /// Documented in docs/features/mesh-routing.md.
     pub fn cost_for(&self, model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
         match self.rates.get(model) {
             Some(rate) => {
@@ -146,6 +150,7 @@ impl Pricing {
     /// discounted cache rate (the provider bills them well below the full input rate). Fresh input
     /// = `input_tokens - cached_input_tokens`. With no cache rate or no cached tokens this equals
     /// [`cost_for`](Self::cost_for). Unknown models cost nothing.
+    /// Documented in docs/features/mesh-routing.md.
     pub fn cost_for_usage(&self, model: &str, usage: &forge_types::Usage) -> f64 {
         let Some(rate) = self.rates.get(model) else {
             return 0.0;
@@ -161,14 +166,16 @@ impl Pricing {
     /// A *relative* cost comparator for routing: the price of a nominal turn (1000 in / 500
     /// out). Not a forecast — only used to rank candidate models against each other. Unpriced
     /// models (local, gateways) compare as 0.0 (cheapest).
+    /// Documented in docs/features/mesh-routing.md.
     pub fn estimated_cost(&self, model: &str) -> f64 {
         self.cost_for(model, NOMINAL_INPUT_TOKENS, NOMINAL_OUTPUT_TOKENS)
     }
 }
 
 /// Nominal token mix used only to rank candidate models by relative cost.
-const NOMINAL_INPUT_TOKENS: u64 = 1000;
-const NOMINAL_OUTPUT_TOKENS: u64 = 500;
+/// Documented in docs/features/mesh-routing.md; value asserted in sync by `doc_sync::mesh_routing_doc_matches_live_constants`.
+pub(crate) const NOMINAL_INPUT_TOKENS: u64 = 1000;
+pub(crate) const NOMINAL_OUTPUT_TOKENS: u64 = 500;
 
 /// A conservative context window (tokens) assumed for a model we have NO better figure for —
 /// neither a fetched window (provider API) nor a hardcoded bridge value in [`context_limit`]. 32k
@@ -183,6 +190,7 @@ pub const CONSERVATIVE_CONTEXT_WINDOW: u32 = 32_000;
 /// `None` for non-bridge models so the statusline omits a fabricated denominator; the core falls
 /// back to
 /// [`CONSERVATIVE_CONTEXT_WINDOW`] only when it must actually bound a request.
+/// Documented in docs/features/mesh-routing.md.
 pub fn context_limit(model: &str) -> Option<u32> {
     // Subscription CLI bridges carry no queryable API — their windows are hardcoded here.
     // All other providers must have their windows fetched from the provider's model endpoint

@@ -1,5 +1,5 @@
 //! A live catalog of usable models, discovered from the providers the user has keys for
-//! (auto-discovery mesh, docs/features/auto-discovery-mesh.md). This is a plain data holder +
+//! (auto-discovery mesh, docs/features/mesh-routing.md). This is a plain data holder +
 //! ranking; the async *discovery* (querying each provider's model list) lives in the binary
 //! (forge-cli), which has the provider client — forge-mesh stays free of that dependency.
 
@@ -16,6 +16,7 @@ use forge_types::{EffortLevel, TaskTier};
 /// "user-provided comparison function does not correctly implement a total order" the first time
 /// a white-hot turn ranked a full multi-hundred-model catalog. Unbenched models (`None`) band to
 /// `i64::MIN`, sorting below every benched model at high effort — proven quality was the ask.
+/// Documented in docs/features/mesh-routing.md.
 fn bench_band(score: Option<f64>) -> i64 {
     score.map(|v| v.floor() as i64).unwrap_or(i64::MIN)
 }
@@ -26,6 +27,7 @@ use crate::pricing::Pricing;
 
 /// Discovered `provider::model` ids the user can actually use right now.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Documented in docs/features/mesh-routing.md.
 pub struct ModelCatalog {
     /// Deserialization applies the same bare-id guard as [`ModelCatalog::new`], so a catalog
     /// cache written before the guard existed can't re-introduce empty-named bridge rows.
@@ -41,6 +43,7 @@ pub struct ModelCatalog {
 }
 
 /// The provider prefix of a `provider::model` id (`"groq"` from `"groq::llama-3.1-8b"`).
+/// Documented in docs/features/mesh-routing.md.
 pub fn provider_of(id: &str) -> &str {
     id.split("::").next().unwrap_or(id)
 }
@@ -54,6 +57,7 @@ fn de_named_models<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>
 /// A $0-marginal subscription bridge (the locally-installed claude/codex CLI) or subscription
 /// OAuth provider (`xai-oauth::`), as opposed to a metered or genuinely-free API. Kept separate
 /// from "free" in the overview counts.
+/// Documented in docs/features/mesh-routing.md.
 pub fn is_subscription(id: &str) -> bool {
     id.starts_with("claude-cli::")
         || id.starts_with("codex-cli::")
@@ -72,6 +76,7 @@ pub fn is_subscription(id: &str) -> bool {
 /// (the bug the user hit), so it's paid-by-default too; mark a known-free one via a `:free` suffix
 /// or a config price of `0`. Other unpriced providers (local `ollama::`, free-tier
 /// `groq`/`cerebras`) are genuinely free.
+/// Documented in docs/features/mesh-routing.md.
 pub fn is_free(id: &str, cost: f64, subscription: bool) -> bool {
     if subscription || cost > f64::EPSILON {
         return false;
@@ -112,6 +117,7 @@ pub fn is_free(id: &str, cost: f64, subscription: bool) -> bool {
 /// prompt to one of these produces garbage (the translation-model bug), so they are excluded from
 /// the general routing ranking. They stay visible in `forge models`; a caller that specifically
 /// wants one still pins it explicitly (which bypasses this general-pool filter).
+/// Documented in docs/features/mesh-routing.md.
 pub fn is_routable(id: &str) -> bool {
     let m = id.to_lowercase();
     const BLOCK: &[&str] = &[
@@ -153,6 +159,7 @@ pub fn is_routable(id: &str) -> bool {
 /// image attachments landing on a text-only model: that produces an immediate provider 404
 /// ("No endpoints found that support image input"), not a slow/garbled reply like the
 /// `is_routable` mismatches, so this is a positive allowlist rather than a block-list.
+/// Documented in docs/features/mesh-routing.md.
 pub fn supports_vision(id: &str) -> bool {
     let m = id.to_lowercase();
     const VISION_PATTERNS: &[&str] = &[
@@ -196,6 +203,7 @@ pub fn supports_vision(id: &str) -> bool {
 /// A model's cost class for routing: `0` genuinely free (local/free-tier), `1` subscription
 /// ($0 marginal but burns the user's plan quota), `2` metered/paid. The mesh prefers low classes
 /// for cheap tiers (preserve quota) and the subscription flagship for complex work.
+/// Documented in docs/features/mesh-routing.md.
 pub(crate) fn cost_class(id: &str, cost: f64) -> u8 {
     if is_subscription(id) {
         1
@@ -210,7 +218,10 @@ pub(crate) fn cost_class(id: &str, cost: f64) -> u8 {
 /// - Trivial: prefer genuinely-free, so easy tasks don't burn subscription quota.
 /// - Standard: subscription ≈ free, a slight subscription edge (use the good $0 models).
 /// - Complex: prefer the subscription flagship (strongest reliable, $0 marginal); free as backup.
-fn cost_pref(tier: TaskTier, class: u8) -> f64 {
+///
+/// Documented in docs/features/mesh-routing.md; value asserted in sync by
+/// `doc_sync::mesh_routing_doc_matches_live_constants`.
+pub(crate) fn cost_pref(tier: TaskTier, class: u8) -> f64 {
     match (tier, class) {
         (TaskTier::Trivial, 0) => 1.0,
         (TaskTier::Trivial, 1) => 0.3,
@@ -228,6 +239,8 @@ fn cost_pref(tier: TaskTier, class: u8) -> f64 {
 /// - code-heavy task → the coding-tuned flagships (codex/claude bridges + their APIs) get a small
 ///   lift over general models;
 /// - trivial non-code → the fast cheap-bulk providers (groq/gemini) get a small lift.
+///
+/// Documented in docs/features/mesh-routing.md.
 fn code_prior(provider: &str, code_heavy: bool, tier: TaskTier) -> f64 {
     if code_heavy {
         return match provider {
@@ -245,10 +258,12 @@ fn code_prior(provider: &str, code_heavy: bool, tier: TaskTier) -> f64 {
 /// docs/design/subscription-efficiency-routing.md): cheap tiers avoid flagship burn hard, since a
 /// trivial/standard task rarely needs the expensive sibling's extra capability; Complex still
 /// wants the flagship but tie-breaks toward the cheaper sibling when capability is close.
-const BURN_K_TRIVIAL: f64 = 1.0;
-const BURN_K_STANDARD: f64 = 0.7;
-const BURN_K_COMPLEX: f64 = 0.15;
+/// Documented in docs/features/mesh-routing.md; value asserted in sync by `doc_sync::mesh_routing_doc_matches_live_constants`.
+pub(crate) const BURN_K_TRIVIAL: f64 = 1.0;
+pub(crate) const BURN_K_STANDARD: f64 = 0.7;
+pub(crate) const BURN_K_COMPLEX: f64 = 0.15;
 
+/// Documented in docs/features/mesh-routing.md.
 fn burn_k(tier: TaskTier) -> f64 {
     match tier {
         TaskTier::Trivial => BURN_K_TRIVIAL,
@@ -263,6 +278,7 @@ fn burn_k(tier: TaskTier) -> f64 {
 /// `conserve_decision`: that fires per-prompt to spread whole turns off the subscription onto a
 /// free-frontier alternative; this only scales how hard a same-subscription tie-break (e.g. Sol vs
 /// Luna) leans toward the cheaper sibling.
+/// Documented in docs/features/mesh-routing.md.
 fn pressure_multiplier(fraction: f64) -> f64 {
     (0.5 + 1.5 * fraction).clamp(0.5, 2.0)
 }
@@ -271,6 +287,7 @@ fn pressure_multiplier(fraction: f64) -> f64 {
 /// live quota pressure. `ln(weight)` keeps a 5x burn from swamping a genuine capability gap (ln 5
 /// ≈ 1.61) and makes a weight of 1.0 (cheapest sibling, or any unknown model) contribute exactly
 /// zero — so behaviour is unchanged for every model with no burn-weight entry.
+/// Documented in docs/features/mesh-routing.md.
 fn subscription_burn_penalty(
     id: &str,
     tier: TaskTier,
@@ -290,6 +307,7 @@ fn subscription_burn_penalty(
 /// subscription drops below its alternatives (L3). The penalties are applied in the SCORE (not
 /// just a post-sort) so non-subscription alternatives make it into the truncated shortlist —
 /// otherwise the top picks are all the (pressured) subscription.
+/// Documented in docs/features/mesh-routing.md.
 fn route_score(
     id: &str,
     tier: TaskTier,
@@ -317,11 +335,13 @@ fn route_score(
 /// Soft demotion applied to subscription models when this prompt is chosen for conservation.
 /// Large enough to drop an `Ok` subscription below the best free-frontier alternative, small
 /// enough that the subscription stays in the shortlist as a fallback if every alternative fails.
-const CONSERVE_PENALTY: f64 = 4.0;
+/// Documented in docs/features/mesh-routing.md; value asserted in sync by `doc_sync::mesh_routing_doc_matches_live_constants`.
+pub(crate) const CONSERVE_PENALTY: f64 = 4.0;
 
 /// How freely a plan may be spent: a bigger plan has more headroom, so it is conserved *less*
 /// (lower factor → lower spread probability). Unknown/unset plans stay neutral (1.0) — we don't
 /// over-conserve a plan the user never told us about.
+/// Documented in docs/features/mesh-routing.md.
 fn plan_factor(slug: &str) -> f64 {
     let s = slug.to_lowercase();
     if s.contains("20x") {
@@ -343,6 +363,7 @@ fn plan_factor(slug: &str) -> f64 {
 /// both pass `SubscriptionQuota::effective_fraction_for`, which is pace-projected: a window
 /// burning fast early on is passed in as if it were already at its projected reset-time usage,
 /// so the ramp above starts ahead of the overrun instead of reacting to one already at Warning.
+/// Documented in docs/features/mesh-routing.md.
 fn conserve_probability(tier: TaskTier, fraction: f64, plan: &str, code_heavy: bool) -> f64 {
     let base = match tier {
         TaskTier::Trivial => 1.0,
@@ -359,6 +380,7 @@ fn conserve_probability(tier: TaskTier, fraction: f64, plan: &str, code_heavy: b
 /// Standard it's capable mid (bench ≥ `CAPABLE_BENCH_THRESHOLD`, else class 2). This prevents
 /// conservation from firing based on a nominally-large but measurably-weak old model (e.g. a
 /// Hermes 405B at score 9.0 would pass the old name check but fails the bench threshold).
+/// Documented in docs/features/mesh-routing.md.
 fn is_capable_alternative(id: &str, tier: TaskTier, bench: Option<&BenchmarkScores>) -> bool {
     match tier {
         TaskTier::Complex => is_frontier_b(id, bench),
@@ -373,6 +395,7 @@ fn is_capable_alternative(id: &str, tier: TaskTier, bench: Option<&BenchmarkScor
 /// Whether a genuine non-subscription alternative of the right calibre exists for `tier` — a
 /// guard so conservation never drops a hard task onto a weak model when the only capable option
 /// IS the subscription. Complex needs a frontier alternative; Standard a capable (mid+) one.
+/// Documented in docs/features/mesh-routing.md.
 fn has_nonsub_alternative(
     models: &[String],
     tier: TaskTier,
@@ -478,6 +501,7 @@ pub(crate) fn conserve_decision(
 /// which provider wins a genuine score tie, so a workload spreads across equally-good providers
 /// (claude ↔ codex) instead of always picking the alphabetically-first one — while staying fully
 /// deterministic for a given prompt.
+/// Documented in docs/features/mesh-routing.md.
 fn provider_rotation(provider: &str, seed: u64) -> u64 {
     stable_hash(&format!("{seed}:{provider}"))
 }
@@ -488,6 +512,7 @@ fn provider_rotation(provider: &str, seed: u64) -> u64 {
 /// siblings the capability prior treats as equal (opus and sonnet are both "frontier"). It only
 /// matters as a tiebreak: a genuinely weaker model (mini/haiku) already scores lower and never
 /// enters the tie. Family-agnostic via name markers, so new bridges order sensibly too.
+/// Documented in docs/features/mesh-routing.md.
 fn model_weight(id: &str) -> u8 {
     let m = id.to_lowercase();
     if m.contains("opus") || m.contains("-pro") || m.contains("-max") || m.contains("ultra") {
@@ -510,6 +535,7 @@ fn model_weight(id: &str) -> u8 {
 /// rotation — so it only orders models of the *same* provider/class: never pick `gpt-5.2` over
 /// `gpt-5.5` when both are the same $0 subscription. It never competes across providers (the
 /// rotation already separated those), so a higher raw number can't make one provider always win.
+/// Documented in docs/features/mesh-routing.md.
 fn fine_capability(id: &str) -> f64 {
     let bytes = id.as_bytes();
     let mut i = 0;
@@ -551,6 +577,7 @@ fn fine_capability(id: &str) -> f64 {
 }
 
 /// A small deterministic FNV-1a hash (no external deps); used for the seed and provider rotation.
+/// Documented in docs/features/mesh-routing.md.
 pub fn stable_hash(s: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in s.bytes() {
@@ -672,6 +699,7 @@ impl ModelCatalog {
     /// Attach `mesh.burn_weights` config overrides (Fix 1,
     /// docs/design/subscription-efficiency-routing.md), keyed by bare model name. An empty map is
     /// a no-op — `route_score` falls back to the bundled `subscription_burn_weight` table.
+    /// Documented in docs/features/mesh-routing.md.
     pub fn with_burn_weights(mut self, overrides: HashMap<String, f64>) -> Self {
         self.burn_weights = overrides;
         self

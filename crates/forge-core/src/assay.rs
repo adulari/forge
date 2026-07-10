@@ -373,7 +373,7 @@ pub async fn run_assay(
 
 /// Try each model in `chain` (best-first) until one answers; returns text + priced cost + model name.
 /// A retryable failure (rate-limit / unavailable / auth) benches that model in `store` and falls
-/// over to the next — the same model-health failover the agent loop uses (model-health-failover).
+/// over to the next — the same model-health failover the agent loop uses (docs/features/mesh-routing.md).
 /// `Err` only when the whole chain is exhausted (carries the last failure reason).
 async fn complete_with_failover(
     provider: &Arc<dyn Provider>,
