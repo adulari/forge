@@ -1,19 +1,27 @@
 // DESIGN_SYSTEM.md §6 — timeline rows for user/assistant/tool (system) content: Markdown +
 // CodeBlock body for user/assistant; system rows (tool/diff-ish output) render compact mono
 // per the same materials CodeBlock uses, without a full Markdown pass over structured text.
+import * as Clipboard from "expo-clipboard";
+import { Copy } from "lucide-react-native";
 import React from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 
 import type { HistoryRow } from "../../lib/api";
+import { haptics } from "../../lib/haptics";
 import { parseReasoning } from "../../lib/reasoning";
 import { useSessionCtx } from "../../lib/sessionContext";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
-import { monoFamily, type } from "../../theme/typography";
+import { type } from "../../theme/typography";
+import { IconButton } from "../ds/IconButton";
+import { useToast } from "../ds/ToastHost";
 import { AttachmentRow } from "./Attachments";
 import type { SentAttachment } from "./attach";
 import { Markdown } from "./Markdown";
 import { ReasoningDisclosure } from "./ReasoningDisclosure";
+import { SystemOutput } from "./SystemOutput";
+
+const IS_WEB = Platform.OS === "web";
 
 export interface MessageRowProps {
   row: HistoryRow;
@@ -79,6 +87,7 @@ function mentionsFromContent(content: string): {
 
 function MessageRowImpl({ row, attachments }: MessageRowProps) {
   const tokens = useTokens();
+  const toast = useToast();
   const { baseUrl, sessionId } = useSessionCtx();
   const isUser = row.role === "user";
   const isSystem = row.role === "system";
@@ -109,9 +118,20 @@ function MessageRowImpl({ row, attachments }: MessageRowProps) {
     })),
   ];
 
+  // Per-block `selectable` Text (Markdown.tsx) can't drag-select across paragraphs, and there
+  // was no way to grab a whole reply at once — one tap/long-press now copies the full row:
+  // the parsed answer (no `<think>` block) for assistant turns, else the plain row text.
+  const copyText = parsed ? parsed.answer : isUser ? userText : row.content;
+  const onCopyRow = async () => {
+    await Clipboard.setStringAsync(copyText);
+    haptics.select();
+    toast.show("message copied");
+  };
+
   return (
     <View style={[styles.row, isUser && styles.userRow]}>
-      <View
+      <Pressable
+        onLongPress={isSystem || IS_WEB ? undefined : onCopyRow}
         style={[
           styles.bubble,
           isUser
@@ -124,12 +144,7 @@ function MessageRowImpl({ row, attachments }: MessageRowProps) {
           <AttachmentRow attachments={historyFileAttachments} />
         ) : null}
         {isSystem ? (
-          <Text
-            style={[type.codeSmall, { color: tokens.ink3, fontFamily: monoFamily.regular }]}
-            selectable
-          >
-            {row.content}
-          </Text>
+          <SystemOutput content={row.content} />
         ) : parsed ? (
           <>
             {parsed.reasoning ? <ReasoningDisclosure reasoning={parsed.reasoning} /> : null}
@@ -138,10 +153,19 @@ function MessageRowImpl({ row, attachments }: MessageRowProps) {
         ) : (
           <Markdown content={userText} />
         )}
-        {row.model ? (
-          <Text style={[type.meta, styles.meta, { color: tokens.ink3 }]}>{row.model}</Text>
+        {row.model || (IS_WEB && !isSystem) ? (
+          <View style={styles.metaRow}>
+            {row.model ? <Text style={[type.meta, { color: tokens.ink3 }]}>{row.model}</Text> : null}
+            {IS_WEB && !isSystem ? (
+              <IconButton
+                accessibilityLabel="copy message"
+                onPress={onCopyRow}
+                icon={<Copy size={16} strokeWidth={1.75} color={tokens.ink3} />}
+              />
+            ) : null}
+          </View>
         ) : null}
-      </View>
+      </Pressable>
     </View>
   );
 }
@@ -153,5 +177,5 @@ const styles = StyleSheet.create({
   userRow: { alignItems: "flex-end" },
   bubble: { borderRadius: 12, paddingHorizontal: space.space12, paddingVertical: space.space8 },
   userBubble: { maxWidth: "92%" },
-  meta: { marginTop: space.space4 },
+  metaRow: { flexDirection: "row", alignItems: "center", gap: space.space4, marginTop: space.space4 },
 });

@@ -6,18 +6,22 @@
 // `QRScan.native`/`.web` Metro split); a mono URL field covers paste + manual
 // entry; `?url=` deep links prefill the field.
 import { router, useLocalSearchParams } from "expo-router";
+import { X } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { Banner } from "../components/ds/Banner";
 import { Button } from "../components/ds/Button";
 import { Card } from "../components/ds/Card";
+import { IconButton } from "../components/ds/IconButton";
 import { Input } from "../components/ds/Input";
 import { Screen } from "../components/ds/Screen";
 import { SectionHeader } from "../components/ds/SectionHeader";
+import { useToast } from "../components/ds/ToastHost";
 import { QRScan } from "../components/pairing/QRScan";
 import { haptics } from "../lib/haptics";
 import { type ConnectTestState, parseConnectUrl, useAuth } from "../lib/auth";
+import { goBackOr } from "../lib/nav";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { type } from "../theme/typography";
@@ -43,23 +47,34 @@ function decodeParam(raw: string): string {
 export default function ConnectScreen() {
   const tokens = useTokens();
   const { addServer, testConnection } = useAuth();
+  const toast = useToast();
   const params = useLocalSearchParams<{ url?: string }>();
-  const prefilled = useRef(false);
+  // Tracks the last `?url=` value we already applied (not just "did we ever apply one") so a
+  // second deep link while this screen is still mounted re-prefills instead of being dropped.
+  const lastAppliedUrl = useRef<string | null>(null);
+  // Reached either as the first-run pairing screen (no back stack) or pushed from Settings'
+  // "Add server" (has a back stack) — the latter gets a close affordance and must not steal
+  // the active connection out from under the user (see attemptConnect below).
+  const canClose = router.canGoBack();
 
   const [url, setUrl] = useState("");
   const [testState, setTestState] = useState<ConnectTestState>("idle");
   const [formatError, setFormatError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (prefilled.current) return;
     const raw = params.url;
-    if (typeof raw === "string" && raw.length > 0) {
-      prefilled.current = true;
-      setUrl(decodeParam(raw));
-    }
+    if (typeof raw !== "string" || raw.length === 0) return;
+    if (lastAppliedUrl.current === raw) return;
+    lastAppliedUrl.current = raw;
+    setUrl(decodeParam(raw));
+    // A fresh deep link supersedes whatever the previous attempt on this screen left behind.
+    setTestState("idle");
+    setFormatError(null);
   }, [params.url]);
 
   const busy = testState === "testing";
+
+  const onClose = useCallback(() => goBackOr("/(tabs)/settings"), []);
 
   const attemptConnect = useCallback(
     async (candidate: string) => {
@@ -76,12 +91,21 @@ export default function ConnectScreen() {
       const result = await testConnection(parsed.baseUrl);
       setTestState(result);
       if (result === "ok") {
-        await addServer(candidate);
+        // Pushed from Settings ("Add server") — add it alongside the existing servers without
+        // switching the active connection out from under the user; first-run (no back stack)
+        // keeps the original behavior of activating the only server it just added.
+        const additional = canClose;
+        const added = await addServer(candidate, { setActive: !additional });
         haptics.pairSuccess();
-        router.replace("/(tabs)");
+        if (additional) {
+          toast.show(`added ${added.name}`, { tone: "success" });
+          goBackOr("/(tabs)/settings");
+        } else {
+          router.replace("/(tabs)");
+        }
       }
     },
-    [addServer, testConnection],
+    [addServer, testConnection, canClose, toast],
   );
 
   const onScanned = useCallback(
@@ -96,6 +120,17 @@ export default function ConnectScreen() {
 
   return (
     <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
+      {/* Only the pushed "Add server" flow (Settings) has anywhere to go back to — first-run
+          pairing has no back stack, and Tauri has no browser chrome to fall back on either. */}
+      {canClose ? (
+        <View style={styles.closeRow}>
+          <IconButton
+            icon={<X size={20} strokeWidth={1.75} color={tokens.ink} />}
+            onPress={onClose}
+            accessibilityLabel="Close"
+          />
+        </View>
+      ) : null}
       <View style={styles.hero}>
         <Text style={[type.display, styles.heroTitle, { color: tokens.ink }]}>Forge</Text>
         <Text style={[type.body, { color: tokens.ink2 }]}>
@@ -135,6 +170,7 @@ export default function ConnectScreen() {
           onChangeText={(t) => {
             setUrl(t);
             setFormatError(null);
+            setTestState("idle");
           }}
           placeholder="connect://host:7420/<token>"
           autoCapitalize="none"
@@ -168,6 +204,7 @@ export default function ConnectScreen() {
 
 const styles = StyleSheet.create({
   content: { paddingTop: space.space24, paddingBottom: space.space32, gap: space.space16 },
+  closeRow: { flexDirection: "row", justifyContent: "flex-end" },
   hero: { gap: space.space8 },
   heroTitle: { letterSpacing: -0.4 },
   gapCard: { gap: space.space12 },

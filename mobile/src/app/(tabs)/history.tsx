@@ -10,6 +10,7 @@ import Animated from "react-native-reanimated";
 import { stripLeadingAttachMentions } from "../../components/chat/MessageRow";
 import { Badge } from "../../components/ds/Badge";
 import { BoundedList } from "../../components/ds/BoundedList";
+import { Button } from "../../components/ds/Button";
 import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { RelativeTime } from "../../components/ds/RelativeTime";
@@ -116,6 +117,8 @@ export default function HistoryScreen() {
   const {
     data,
     isLoading,
+    isError,
+    error,
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
@@ -193,10 +196,18 @@ export default function HistoryScreen() {
           keyExtractor={keyExtractor}
           renderItem={renderItem}
           ListEmptyComponent={
-            <EmptyState
-              icon={HistoryIcon}
-              message={normalizedQuery ? "no past sessions match your search." : "no past sessions yet."}
-            />
+            isError ? (
+              <EmptyState
+                icon={HistoryIcon}
+                message={error instanceof ApiError ? error.message : "something's wrong — couldn't load history."}
+                action={<Button label="Retry" variant="secondary" onPress={() => refetch()} />}
+              />
+            ) : (
+              <EmptyState
+                icon={HistoryIcon}
+                message={normalizedQuery ? "no past sessions match your search." : "no past sessions yet."}
+              />
+            )
           }
           refreshing={isRefetching}
           onRefresh={refetch}

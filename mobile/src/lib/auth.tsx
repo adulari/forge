@@ -96,7 +96,9 @@ interface AuthContextValue {
   isPaired: boolean;
   servers: StoredServer[];
   activeServerId: string | null;
-  addServer: (connectUrl: string) => Promise<StoredServer>;
+  /** `setActive` defaults to true — pass false to add a server (e.g. from Settings)
+   * without hijacking whatever server the user is currently connected to. */
+  addServer: (connectUrl: string, options?: { setActive?: boolean }) => Promise<StoredServer>;
   removeServer: (id: string) => Promise<void>;
   setActive: (id: string) => void;
   /** @deprecated legacy single-server alias for `addServer` — kept for the old Connect screen. */
@@ -155,7 +157,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const addServer = useCallback(
-    async (connectUrl: string): Promise<StoredServer> => {
+    async (connectUrl: string, options?: { setActive?: boolean }): Promise<StoredServer> => {
       const parsed = parseConnectUrl(connectUrl);
       if (!parsed) {
         throw new Error("Not a valid Forge connect URL");
@@ -171,9 +173,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Replace an existing entry for the same baseUrl instead of duplicating it.
       const next = [...servers.filter((s) => s.baseUrl !== server.baseUrl), server];
       await saveServers(next);
-      await setSecureItem(ACTIVE_SERVER_KEY, server.id);
+      const shouldActivate = options?.setActive ?? true;
+      if (shouldActivate) {
+        await setSecureItem(ACTIVE_SERVER_KEY, server.id);
+      }
       setServers(next);
-      setActiveServerId(server.id);
+      if (shouldActivate) {
+        setActiveServerId(server.id);
+      }
       return server;
     },
     [servers],

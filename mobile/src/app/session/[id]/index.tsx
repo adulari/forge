@@ -23,13 +23,21 @@ import {
   Text,
   View,
 } from "react-native";
+import Animated, {
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withRepeat,
+  withSequence,
+  withTiming,
+} from "react-native-reanimated";
 
 import type { SentAttachment } from "../../../components/chat/attach";
 import CardSlot from "../../../components/chat/CardSlot";
 import { Composer } from "../../../components/chat/Composer";
+import { Markdown } from "../../../components/chat/Markdown";
 import { MessageRow } from "../../../components/chat/MessageRow";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
-import { StreamingText } from "../../../components/chat/StreamingText";
 import { BoundedList } from "../../../components/ds/BoundedList";
 import { Chip } from "../../../components/ds/Chip";
 import { EmptyState } from "../../../components/ds/EmptyState";
@@ -40,6 +48,7 @@ import { haptics } from "../../../lib/haptics";
 import { useHistory } from "../../../lib/queries";
 import { parseReasoning } from "../../../lib/reasoning";
 import { useSessionCtx } from "../../../lib/sessionContext";
+import { easings } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { space } from "../../../theme/tokens";
 import { type as typeScale } from "../../../theme/typography";
@@ -73,6 +82,83 @@ interface PendingSent {
   /** Attachments that rode this prompt (already uploaded — Composer only ever hands over
    * `state === "done"` ones), rendered on the bubble since the daemon never persists them. */
   attachments: SentAttachment[];
+}
+
+// Kindle streaming (DESIGN_SYSTEM.md §5.2), rendered through Markdown instead of a plain <Text>
+// so finalize (swap to MessageRow, which also goes through Markdown) is a visual no-op instead
+// of a "pop" from raw markdown to formatted. A local equivalent of StreamingText.tsx's
+// coalescing+caret shell rather than an edit to that shared component. Markdown.tsx's block/
+// inline parsers already degrade safely on partial input (verified by inspection): an unclosed
+// ``` fence collects lines to EOF and still renders as an in-progress code block, an unmatched
+// ** or _ just falls through to literal text — nothing here needs extra guarding against a
+// mid-token markdown string.
+const CARET_SIZE = 7;
+const CARET_PULSE_MS = 1000;
+const CARET_MIN_OPACITY = 0.4;
+
+function StreamingAnswer({ text, streaming }: { text: string; streaming: boolean }) {
+  const tokens = useTokens();
+  const reduced = useReducedMotion();
+
+  // Same rAF coalescing as StreamingText.tsx: at most one committed render per frame while
+  // streaming; reduce-motion commits every update instantly instead.
+  const [displayText, setDisplayText] = useState(text);
+  const latestRef = useRef(text);
+  const rafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    latestRef.current = text;
+    if (reduced) {
+      setDisplayText(text);
+      return;
+    }
+    if (rafRef.current == null) {
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null;
+        setDisplayText(latestRef.current);
+      });
+    }
+  }, [text, reduced]);
+
+  useEffect(
+    () => () => {
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+    },
+    [],
+  );
+
+  // Caret pulse while streaming — same timing as StreamingText.tsx's Kindle caret.
+  const caretOpacity = useSharedValue(1);
+  useEffect(() => {
+    if (reduced || !streaming) {
+      caretOpacity.value = 1;
+      return;
+    }
+    caretOpacity.value = withRepeat(
+      withSequence(
+        withTiming(CARET_MIN_OPACITY, { duration: CARET_PULSE_MS / 2, easing: easings.standard }),
+        withTiming(1, { duration: CARET_PULSE_MS / 2, easing: easings.standard }),
+      ),
+      -1,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streaming, reduced]);
+  const caretStyle = useAnimatedStyle(() => ({ opacity: caretOpacity.value }));
+
+  return (
+    <View style={styles.streamingAnswerRow}>
+      <View style={styles.streamingAnswerText}>
+        <Markdown content={displayText} />
+      </View>
+      {streaming ? (
+        <Animated.View
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          style={[styles.caret, { backgroundColor: tokens.accent }, caretStyle]}
+        />
+      ) : null}
+    </View>
+  );
 }
 
 export default function SessionChat() {
@@ -208,16 +294,20 @@ export default function SessionChat() {
   }, [historyRows, pendingSent.length]);
 
   // Safety net: never let a pendingSent bubble linger forever if history never advances for it
-  // (session closed mid-turn, connection never came back, ...).
+  // (session closed mid-turn, connection never came back, ...). A normal successful send clears
+  // its timer here too (the effect above already removed it from `pendingSent`, which reruns
+  // this effect and cancels the stale timer before it can fire) — so the toast only ever fires
+  // for the genuine stuck case, not on every ordinary turn.
   useEffect(() => {
     if (pendingSent.length === 0) return;
     const timers = pendingSent.map((p) =>
       setTimeout(() => {
         setPendingSent((prev) => prev.filter((x) => x.id !== p.id));
+        toast.show("message didn't confirm — check connection", { tone: "danger" });
       }, PENDING_SENT_TIMEOUT_MS),
     );
     return () => timers.forEach(clearTimeout);
-  }, [pendingSent]);
+  }, [pendingSent, toast]);
 
   // Once `data` has resolved once (cache or network) for this session, the filler is gone for
   // good — never re-armed by a later refetch/invalidation.
@@ -341,7 +431,7 @@ export default function SessionChat() {
   }, [displayText, streamingText, busy, pendingSent, historySettled, historyRows, snapshot?.transcript]);
 
   // Pin to the latest item when a NEW item lands at the newest slot — not on every streaming
-  // text tick (same item id, StreamingText owns its own rAF coalescing), and not when an older
+  // text tick (same item id, StreamingAnswer owns its own rAF coalescing), and not when an older
   // page is appended at the far end (that only changes the last item, not the first).
   const newestKeyRef = useRef<string | null>(null);
   useEffect(() => {
@@ -410,7 +500,7 @@ export default function SessionChat() {
                 />
               ) : null}
               {parsed.answer ? (
-                <StreamingText text={parsed.answer} streaming={item.streaming} />
+                <StreamingAnswer text={parsed.answer} streaming={item.streaming} />
               ) : null}
             </View>
           );
@@ -475,6 +565,10 @@ export default function SessionChat() {
 
       {hasPending ? (
         <View style={[styles.pendingRow, { borderTopColor: tokens.border }]}>
+          {/* No onPress: unlike the offline queue (a client-local array this file owns), these
+           * are already server-side (`snapshot.queued`) and RemoteInput (ws.ts) has no
+           * dequeue/cancel-queued kind — only `interrupt`, which cancels the active turn, not a
+           * not-yet-started queued one. Nothing to wire up without a daemon protocol addition. */}
           {queued.map((text, i) => (
             <Chip key={`q${i}`} label={text} />
           ))}
@@ -509,6 +603,15 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   streamingRow: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
   thinkingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  streamingAnswerRow: { flexDirection: "row", alignItems: "flex-end", flexWrap: "wrap" },
+  streamingAnswerText: { flexShrink: 1 },
+  caret: {
+    width: CARET_SIZE,
+    height: CARET_SIZE,
+    borderRadius: CARET_SIZE / 2,
+    marginLeft: 4,
+    marginBottom: 4,
+  },
   jumpPill: {
     position: "absolute",
     bottom: space.space16,

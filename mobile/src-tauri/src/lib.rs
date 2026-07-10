@@ -2,7 +2,9 @@
 // native notifications + external-link opening + a basic app menu. NO custom Rust
 // commands in v1 — all daemon communication happens in the webview via the JS
 // transport seam (`mobile/src/lib/transport/index.ts`).
-use tauri::menu::{Menu, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+#[cfg(debug_assertions)]
+use tauri::menu::MenuItemBuilder;
+use tauri::menu::{Menu, PredefinedMenuItem, SubmenuBuilder};
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -17,17 +19,22 @@ pub fn run() {
 
             let about = PredefinedMenuItem::about(handle, Some("About Forge"), None)?;
             let quit = PredefinedMenuItem::quit(handle, Some("Quit Forge"))?;
-            let reload = MenuItemBuilder::with_id("reload", "Reload")
-                .accelerator("CmdOrCtrl+R")
-                .build(handle)?;
 
-            let app_menu = SubmenuBuilder::new(handle, "Forge")
-                .item(&about)
-                .separator()
-                .item(&reload)
-                .separator()
-                .item(&quit)
-                .build()?;
+            let app_menu_builder = SubmenuBuilder::new(handle, "Forge").item(&about).separator();
+
+            // Reload (CmdOrCtrl+R) is dev-only: on a release build it's browser muscle-
+            // memory wired to a footgun that wipes drafts/UI state, with no corresponding
+            // benefit (there's no dev server to reconnect to). Keep it for debug builds
+            // where reloading after a frontend change is actually useful.
+            #[cfg(debug_assertions)]
+            let app_menu_builder = {
+                let reload = MenuItemBuilder::with_id("reload", "Reload")
+                    .accelerator("CmdOrCtrl+R")
+                    .build(handle)?;
+                app_menu_builder.item(&reload).separator()
+            };
+
+            let app_menu = app_menu_builder.item(&quit).build()?;
 
             // Standard Edit menu — required on macOS for Cmd+C/V/X/A to work in the
             // webview at all (there is no default Edit menu without one).

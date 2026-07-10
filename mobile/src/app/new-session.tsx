@@ -111,6 +111,7 @@ export default function NewSessionScreen() {
               onChangeText={(t) => {
                 setCwd(t);
                 if (validationError) setValidationError(null);
+                if (create.isError) create.reset();
               }}
               placeholder="/path/to/project"
               autoCapitalize="none"

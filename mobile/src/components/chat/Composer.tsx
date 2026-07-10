@@ -15,14 +15,15 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
 import { useUpload } from "../../lib/queries";
+import { useSessionCtx } from "../../lib/sessionContext";
 import { useTokens } from "../../theme/ThemeProvider";
 import { gutter, radii, space, tapTarget } from "../../theme/tokens";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 import { type, webInputTextStyle } from "../../theme/typography";
 import { Chip } from "../ds/Chip";
 import { IconButton } from "../ds/IconButton";
+import { useToast } from "../ds/ToastHost";
 import {
-  type Attachment,
   formDataFromPicked,
   formDataFromWebFiles,
   imagesFromClipboardEvent,
@@ -61,9 +62,15 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
   // paddingHorizontal keeps the icons/input/send button reasonably inset from that edge.
   const screenGutter = isCompact ? gutter.compact : gutter.medium;
 
-  const [text, setText] = useState("");
+  // Draft (text + attachments) lives in SessionContext, not local state: the session shell
+  // (`session/[id]/_layout.tsx`) mounts one SessionProvider per session and `router.replace`s
+  // between Chat/Tasks/Agents/Review segments underneath it, which unmounts this component on
+  // every tab switch — plain useState here would wipe a half-typed message. Keyed per session
+  // (not per-component-instance) so it can't bleed across a session change either.
+  const { draftText: text, setDraftText: setText, draftAttachments: attachments, setDraftAttachments: setAttachments } =
+    useSessionCtx();
+  const toast = useToast();
   const [height, setHeight] = useState(MIN_HEIGHT);
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const inputRef = useRef<TextInput>(null);
   const textRef = useRef(text);
   useEffect(() => {
@@ -75,6 +82,16 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
   const commit = (value: string) => {
     const trimmed = value.trim();
     if (!trimmed) return;
+    // An attachment still in flight (or failed) must never be silently dropped from the send —
+    // block it with a toast instead so the user notices and can wait/remove/retry.
+    if (attachments.some((a) => a.state === "uploading")) {
+      toast.show("still uploading — wait a moment", { tone: "warn" });
+      return;
+    }
+    if (attachments.some((a) => a.state === "error")) {
+      toast.show("an attachment failed — remove it or retry", { tone: "danger" });
+      return;
+    }
     // Only fully-uploaded attachments actually ride the daemon's next prompt (remote.rs
     // `RemoteInput::Attach`) — a failed upload never reached the session's pending queue, so it
     // must not be claimed on the sent bubble either.

@@ -91,7 +91,14 @@ const config: ExpoConfig = {
     [
       "expo-splash-screen",
       {
-        backgroundColor: "#16161c",
+        // Default (light) variant uses the light theme's bg1 (theme/tokens.ts
+        // lightTokens.bg1) instead of the dark bg — this was hardcoded to the dark
+        // color for both variants, so light-theme users got a dark flash on every cold
+        // start. NOTE: splash-icon.png is a light-gray mark drawn for the dark bg; on
+        // this light bg it's low-contrast (near-invisible) rather than wrong-colored —
+        // a barely-visible glyph for ~1 frame beats an incongruous dark flash, but a
+        // proper light-variant asset (dark-on-transparent) would fix this fully.
+        backgroundColor: "#FAF8F4",
         image: "./assets/splash-icon.png",
         imageWidth: 200,
         dark: { backgroundColor: "#16161c", image: "./assets/splash-icon.png" },

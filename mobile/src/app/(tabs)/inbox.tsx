@@ -12,6 +12,7 @@ import Animated from "react-native-reanimated";
 import { DecisionPeek } from "../../components/cards/DecisionPeek";
 import { Badge } from "../../components/ds/Badge";
 import { BoundedList } from "../../components/ds/BoundedList";
+import { Button } from "../../components/ds/Button";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { HeatEdge } from "../../components/ds/HeatEdge";
 import { IconButton } from "../../components/ds/IconButton";
@@ -19,12 +20,13 @@ import { RelativeTime } from "../../components/ds/RelativeTime";
 import { Screen } from "../../components/ds/Screen";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { StatusDot } from "../../components/ds/StatusDot";
-import type { SessionRow } from "../../lib/api";
+import { ApiError, type SessionRow } from "../../lib/api";
 import { useSessions } from "../../lib/queries";
 import { useForgeline, useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
+import { useBreakpoint } from "../../theme/useBreakpoint";
 
 interface InboxRowProps {
   row: SessionRow;
@@ -125,6 +127,7 @@ const InboxRow = React.memo(InboxRowBase, (prev, next) => {
 });
 
 export default function InboxScreen() {
+  const { isExpanded } = useBreakpoint();
   const query = useSessions();
   const rows = useMemo(() => (query.data ?? []).filter((s) => s.waiting), [query.data]);
   const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
@@ -145,6 +148,17 @@ export default function InboxScreen() {
   );
   const keyExtractor = useCallback((item: SessionRow) => item.id, []);
 
+  // T5.1 (fixed): expanded's MasterDetail rail (ExpandedRail in (tabs)/_layout.tsx) already
+  // renders this same waiting-filtered list via its "Waiting" pill — this screen just fills
+  // the detail pane's `<Slot/>` there, so rendering the full Inbox list here too duplicated it.
+  if (isExpanded) {
+    return (
+      <Screen scroll={false}>
+        <EmptyState icon={CircleCheck} message="select a waiting session to see it here." />
+      </Screen>
+    );
+  }
+
   if (query.isLoading) {
     return (
       <Screen scroll={false} contentContainerStyle={styles.listPad}>
@@ -159,13 +173,23 @@ export default function InboxScreen() {
     );
   }
 
+  const emptyComponent = query.isError ? (
+    <EmptyState
+      icon={CircleCheck}
+      message={query.error instanceof ApiError ? query.error.message : "something's wrong — couldn't load the inbox."}
+      action={<Button label="Retry" variant="secondary" onPress={() => query.refetch()} />}
+    />
+  ) : (
+    <EmptyState icon={CircleCheck} message="nothing needs you right now." />
+  );
+
   return (
     <Screen scroll={false}>
       <BoundedList
         data={rows}
         keyExtractor={keyExtractor}
         renderItem={renderItem}
-        ListEmptyComponent={<EmptyState icon={CircleCheck} message="nothing needs you right now." />}
+        ListEmptyComponent={emptyComponent}
         refreshing={query.isRefetching}
         onRefresh={query.refetch}
         contentContainerStyle={styles.listPad}

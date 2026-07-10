@@ -12,11 +12,11 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import { router } from "expo-router";
-import { Plus, Trash2 } from "lucide-react-native";
+import { Bell, Plus, Trash2 } from "lucide-react-native";
 import React, { useCallback, useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
-import { Badge } from "../../components/ds/Badge";
+import { Badge, type BadgeTone } from "../../components/ds/Badge";
 import { Card } from "../../components/ds/Card";
 import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
 import { IconButton } from "../../components/ds/IconButton";
@@ -28,6 +28,7 @@ import { Segmented } from "../../components/ds/Segmented";
 import { Switch } from "../../components/ds/Switch";
 import { useToast } from "../../components/ds/ToastHost";
 import { type StoredServer, useAuth } from "../../lib/auth";
+import { checkNotifyPermission, getNotifyPermission, notify, type NotifyPermission } from "../../lib/notify";
 import {
   enablePush,
   disablePush,
@@ -43,6 +44,37 @@ import { space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
 
 const NOTIFICATIONS_SUPPORTED = (isWeb && !isTauri) || isIOS;
+
+// Tauri gets its own row instead of folding into NOTIFICATIONS_SUPPORTED above: desktop
+// notifications go through notify.ts's OS-native path (tauri-plugin-notification), not
+// the web-push subscription flow the rest of this section drives.
+function notifyPermissionTone(permission: NotifyPermission): BadgeTone {
+  switch (permission) {
+    case "granted":
+      return "success";
+    case "denied":
+      return "danger";
+    case "unsupported":
+      return "neutral";
+    case "default":
+    default:
+      return "warn";
+  }
+}
+
+function notifyPermissionLabel(permission: NotifyPermission): string {
+  switch (permission) {
+    case "granted":
+      return "allowed";
+    case "denied":
+      return "blocked";
+    case "unsupported":
+      return "unsupported";
+    case "default":
+    default:
+      return "not requested";
+  }
+}
 
 const APP_LOCK_KEY = "forge.appLock";
 
@@ -66,6 +98,9 @@ export default function SettingsScreen() {
   const [pushBusy, setPushBusy] = useState(false);
   const pushSupported = NOTIFICATIONS_SUPPORTED && isPushSupported();
 
+  const [notifyPermission, setNotifyPermission] = useState<NotifyPermission>("default");
+  const [notifyBusy, setNotifyBusy] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     AsyncStorage.getItem(APP_LOCK_KEY).then((raw) => {
@@ -86,6 +121,18 @@ export default function SettingsScreen() {
       if (cancelled) return;
       setPushStatus(status);
       setPushLoaded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let cancelled = false;
+    checkNotifyPermission().then((permission) => {
+      if (cancelled) return;
+      setNotifyPermission(permission);
     });
     return () => {
       cancelled = true;
@@ -125,6 +172,23 @@ export default function SettingsScreen() {
     },
     [baseUrl, pushBusy, toast],
   );
+
+  const onSendTestNotification = useCallback(async () => {
+    if (notifyBusy) return;
+    setNotifyBusy(true);
+    try {
+      await notify("Forge", "Test notification — this is what a session alert looks like.");
+      const permission = getNotifyPermission();
+      setNotifyPermission(permission);
+      if (permission !== "granted") {
+        toast.show("couldn't send — notifications are blocked for Forge in System Settings.", {
+          tone: "danger",
+        });
+      }
+    } finally {
+      setNotifyBusy(false);
+    }
+  }, [notifyBusy, toast]);
 
   const appVersion = Constants.expoConfig?.version ?? "—";
 
@@ -222,6 +286,24 @@ export default function SettingsScreen() {
                   />
                 ) : undefined
               }
+            />
+          </Card>
+        </View>
+      ) : isTauri ? (
+        <View>
+          <SectionHeader>Notifications</SectionHeader>
+          <Card padded={false}>
+            <ListRow
+              title="Desktop notifications"
+              subtitle="Forge sends a native notification when a session needs you and the window isn't focused."
+              trailing={<Badge label={notifyPermissionLabel(notifyPermission)} tone={notifyPermissionTone(notifyPermission)} />}
+            />
+            <ListRow
+              title="Send test notification"
+              leading={<Bell size={20} strokeWidth={1.75} color={tokens.accent} />}
+              onPress={onSendTestNotification}
+              disabled={notifyBusy}
+              showSeparator={false}
             />
           </Card>
         </View>
