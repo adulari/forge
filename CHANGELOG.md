@@ -6,6 +6,37 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.5.7] - 2026-07-10
+
+### Added
+- **Quota-pace-aware subscription conservation** (#573, `crates/forge-mesh`, `crates/forge-types`,
+  `crates/forge-store`): `SubscriptionQuota` now carries a per-provider `QuotaPace`;
+  `effective_fraction_for` raises (never lowers) the consumed fraction to the projected
+  fraction-at-reset, so the mesh starts spreading work off a subscription that is on pace to run
+  out *before* it actually does. Both `conserve_decision` and the `/mesh` inspector's
+  `spread_probability` use it; `forge mesh` (text + JSON) and the `/mesh` TUI overlay show a
+  `→ N% at reset ⚠` projection suffix on pacing providers.
+- **Remote cancel for server-queued prompts** (#574, `crates/forge-cli/src/remote.rs`, mobile,
+  web PWA): new `RemoteInput::Dequeue { index, text }` WS message removes ONE prompt queued while
+  a turn was running, without interrupting the active turn. The echoed text validates the tap
+  against a queue that shifted underneath it (stale dequeues are dropped, same philosophy as the
+  seq-checked Allow/Answer). Mobile queued chips are now tappable; the web UI gained a per-row ✕.
+
+### Fixed
+- **Mobile boot resilience** (#570, `mobile/`): top-level `ErrorBoundary` above the theme provider
+  (hardcoded colors, hides the splash on catch, reset button) plus fail-open try/catch around the
+  auth boot IIFE, AppLock evaluation, and font loading — a thrown boot-path error now renders a
+  recoverable error screen instead of hanging on the splash forever.
+- **Mobile dead/foreign session links** (#571, `mobile/`): a 10s snapshot timeout surfaces error
+  empty-states in chat/tasks/agents ("session not found on this server" on 404) instead of an
+  infinite spinner, gated so transient errors on live sessions never flash it; a session screen
+  latches its owning server per session id and bails out (toast + back to the fleet) when the
+  active server diverges mid-view.
+- **`forge doctor` bridge probes** (#572, `crates/forge-cli`): live-probe failures on optional
+  CLI-bridge providers are now ⚠ warnings, not ✗ failures — a healthy install exits 0 again.
+- **Log noise on retries** (#572, `crates/forge-cli`): default tracing filter is `warn,genai=off`,
+  killing raw HTTP body spew from provider retries; an explicit `RUST_LOG` is still fully respected.
+
 ## [2.5.6] - 2026-07-06
 
 ### Changed
@@ -2376,7 +2407,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.6...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.7...HEAD
+[2.5.7]: https://github.com/Adulari/forge/compare/v2.5.6...v2.5.7
 [2.5.6]: https://github.com/Adulari/forge/compare/v2.5.5...v2.5.6
 [2.5.5]: https://github.com/Adulari/forge/compare/v2.5.4...v2.5.5
 [2.5.4]: https://github.com/Adulari/forge/compare/v2.5.3...v2.5.4
