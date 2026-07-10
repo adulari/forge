@@ -118,38 +118,49 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      let list = await loadServers();
-      let active = await getSecureItem(ACTIVE_SERVER_KEY);
+      try {
+        let list = await loadServers();
+        let active = await getSecureItem(ACTIVE_SERVER_KEY);
 
-      // One-time migration: fold the old single-server value into the list.
-      if (list.length === 0) {
-        const legacy = await getSecureItem(LEGACY_STORAGE_KEY);
-        if (legacy) {
-          const parsed = parseConnectUrl(legacy);
-          if (parsed) {
-            const server: StoredServer = {
-              id: makeServerId(),
-              name: parsed.host,
-              baseUrl: parsed.baseUrl,
-              token: parsed.token,
-              host: parsed.host,
-              addedAt: Date.now(),
-            };
-            list = [server];
-            active = server.id;
-            await saveServers(list);
-            await setSecureItem(ACTIVE_SERVER_KEY, active);
+        // One-time migration: fold the old single-server value into the list.
+        if (list.length === 0) {
+          const legacy = await getSecureItem(LEGACY_STORAGE_KEY);
+          if (legacy) {
+            const parsed = parseConnectUrl(legacy);
+            if (parsed) {
+              const server: StoredServer = {
+                id: makeServerId(),
+                name: parsed.host,
+                baseUrl: parsed.baseUrl,
+                token: parsed.token,
+                host: parsed.host,
+                addedAt: Date.now(),
+              };
+              list = [server];
+              active = server.id;
+              await saveServers(list);
+              await setSecureItem(ACTIVE_SERVER_KEY, active);
+            }
           }
+          await deleteSecureItem(LEGACY_STORAGE_KEY);
         }
-        await deleteSecureItem(LEGACY_STORAGE_KEY);
-      }
 
-      if (cancelled) return;
-      const resolvedActive =
-        active && list.some((s) => s.id === active) ? active : (list[0]?.id ?? null);
-      setServers(list);
-      setActiveServerId(resolvedActive);
-      setIsLoading(false);
+        if (cancelled) return;
+        const resolvedActive =
+          active && list.some((s) => s.id === active) ? active : (list[0]?.id ?? null);
+        setServers(list);
+        setActiveServerId(resolvedActive);
+      } catch (err) {
+        // Fail open: treat a broken read/migration as "no servers" rather than hanging
+        // RootNavigator's loading spinner (and the native splash) forever.
+        console.warn("[auth] boot load failed, treating as unpaired:", err);
+        if (!cancelled) {
+          setServers([]);
+          setActiveServerId(null);
+        }
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
     })();
     return () => {
       cancelled = true;
