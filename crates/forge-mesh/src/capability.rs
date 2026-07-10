@@ -4,6 +4,8 @@
 //! user's config. A model id maps to a coarse (quality, speed) class by family substring; the
 //! per-tier score weights those + cost so the router can pick the best *available* model.
 
+use std::collections::HashMap;
+
 use forge_types::TaskTier;
 
 use crate::bench::BenchmarkScores;
@@ -173,8 +175,115 @@ pub fn is_frontier(id: &str) -> bool {
     is_frontier_b(id, None)
 }
 
-/// Coarse speed class — roughly the inverse of size (3 = fastest small model).
+/// Bare model name after the `provider::` prefix (`"opus"` from `"claude-cli::opus"`,
+/// `"gpt-5.6-sol"` from `"codex-oauth::gpt-5.6-sol"`). Mirrors the split-once idiom used elsewhere
+/// in this crate (`bench.rs`, `pricing.rs::context_limit`) for stripping the provider prefix.
+fn bare_model(id: &str) -> &str {
+    id.split_once("::").map(|(_, m)| m).unwrap_or(id)
+}
+
+/// Bundled relative subscription plan-burn weights (docs/design/subscription-efficiency-routing.md,
+/// Fix 1), normalized so the cheapest sibling of a family = 1.0. Derived from Anthropic's + OpenAI's
+/// published list prices on a nominal 1000-in/500-out mix (`in + 0.5·out`, Haiku 4.5 = the 1.0
+/// baseline) — do NOT add entries beyond this table without the same derivation; an absent entry
+/// correctly defaults to neutral (1.0) rather than a guess. Weights, per verified list prices:
+///   - GPT-5.6 Sol $5/$30 → 5.0, Terra $2.50/$15 → 2.5, Luna $1/$6 → 1.0
+///   - Claude Fable 5 / Mythos 5 $10/$50 → 10.0 (the fleet's most expensive models; a neutral
+///     default here would leave the single most expensive model with ZERO burn penalty)
+///   - Claude Opus 4.8 $5/$25 → 5.0, Sonnet 5 $3/$15 (steady-state) → 3.0, Haiku 4.5 $1/$5 → 1.0
+///
+/// Family words are matched via [`crate::bench::tokens`] — the SAME tokenizer `bench::score_for`
+/// uses — so a family resolves identically under every id form the catalog produces (the API id
+/// `anthropic::claude-fable-5`, the `claude-cli::fable` bridge alias, `codex-oauth::gpt-5.6-sol`,
+/// etc.) rather than a single hardcoded literal. Returns `Some` only for a KNOWN id, so
+/// `subscription_burn_weight` can tell a known weight of 1.0 (Luna/Haiku, genuinely cheapest) apart
+/// from an unknown model that merely defaults to 1.0. Backs the `route_score` burn penalty (Fix 2)
+/// for every entry here. `speed_class` (Fix 3) only consults the narrower
+/// [`gpt56_family_speed_weight`] — see its doc comment for why the Claude entries are excluded from
+/// that specific substitution.
+fn known_burn_weight(id: &str) -> Option<f64> {
+    let toks = crate::bench::tokens(bare_model(id));
+    let has = |w: &str| toks.iter().any(|t| t == w);
+    // GPT-5.6 family: the sub-name (sol/terra/luna) is the family identifier.
+    if has("sol") {
+        Some(5.0)
+    } else if has("terra") {
+        Some(2.5)
+    } else if has("luna") {
+        Some(1.0)
+    // Claude families, matched on the family word. Fable/Mythos checked before Opus: their real AA
+    // source name carries an "(… Opus 4.8 Fallback)" tail, but Forge ids never do — this ordering
+    // is just belt-and-suspenders so a stray "opus" token can never outrank the fable/mythos match.
+    } else if has("fable") || has("mythos") {
+        Some(10.0)
+    } else if has("opus") {
+        Some(5.0)
+    } else if has("sonnet") {
+        // Steady-state $3/$15 per 1M. Sonnet 5 is on introductory pricing ($2/$10 per 1M) through
+        // 2026-08-31, reverting to $3/$15 on 2026-09-01; the steady-state value is encoded
+        // deliberately so this constant doesn't silently go stale the day the intro price expires.
+        Some(3.0)
+    } else if has("haiku") {
+        Some(1.0)
+    } else {
+        None
+    }
+}
+
+/// Relative subscription plan-burn weight for `id` (Fix 1): how much of the plan quota one
+/// equivalent request costs relative to the cheapest sibling of its family (weight 1.0). Config
+/// overrides (`mesh.burn_weights`, keyed by the BARE model name) take precedence over the bundled
+/// table. Unknown models default to 1.0 (neutral, no penalty) — load-bearing: an unpriced/unknown
+/// model must get zero penalty in `route_score` so nothing regresses.
+pub(crate) fn subscription_burn_weight(id: &str, overrides: &HashMap<String, f64>) -> f64 {
+    let bare = bare_model(id);
+    if let Some(&w) = overrides.get(bare) {
+        return w;
+    }
+    known_burn_weight(id).unwrap_or(1.0)
+}
+
+/// The subset of `known_burn_weight`'s table that `speed_class` is allowed to derive its class
+/// from: the GPT-5.6 family (`sol`/`terra`/`luna`), where all three siblings have a dedicated,
+/// distinctly-valued entry — the exact case D2 diagnosed (all three tied at the slowest class by
+/// name alone). The Claude entries (`opus`/`sonnet`/`haiku`) are intentionally EXCLUDED here even
+/// though they're valid `known_burn_weight` lookups for `subscription_burn_weight`'s route-score
+/// penalty: `speed_class` feeds a shared 1–3 scale compared directly against every OTHER model
+/// family, most of which (including today's `gpt-5.4`/`gpt-5.5`, not yet renamed to the 5.6 line)
+/// have no burn-weight entry and stay pinned at the coarse quality_class-derived speed. Deriving
+/// Claude's speed from burn weight would give `sonnet` a `speed_class` bump vs. those still-coarse
+/// peers with no matching upgrade — verified live: it let `claude-cli::sonnet` outscore
+/// `codex-cli::gpt-5.4`/`gpt-5.5` on every Standard AND Complex prompt in a mixed catalog, silently
+/// re-introducing the single-provider monopoly `routing_spreads_across_providers_not_only_claude`
+/// exists to prevent. `subscription_burn_weight`'s route-score penalty already penalizes Claude's
+/// heavier siblings correctly; this file scopes speed_class narrowly to the one case it was asked
+/// to fix.
+fn gpt56_family_speed_weight(id: &str) -> Option<f64> {
+    match bare_model(id).to_lowercase().as_str() {
+        "gpt-5.6-sol" => Some(5.0),
+        "gpt-5.6-terra" => Some(2.5),
+        "gpt-5.6-luna" => Some(1.0),
+        _ => None,
+    }
+}
+
+/// Coarse speed class — roughly the inverse of size (3 = fastest small model). When the id is a
+/// KNOWN member of the GPT-5.6 family (see [`gpt56_family_speed_weight`]), the class is derived
+/// from relative burn (cheapest sibling → fast/3, mid → 2, flagship → 1) instead of the name
+/// heuristic — this is what lets `gpt-5.6-luna` score as fast as it actually is even though its
+/// name carries no size/speed marker (Fix 3; luna/terra/sol all landed in the same slowest class
+/// under the old heuristic). Falls back to the size/quality-class heuristic, UNCHANGED, for every
+/// other id (`mini`, `-30b`, `opus`/`sonnet`/`haiku`, unfamiliar ids, …).
 pub(crate) fn speed_class(id: &str) -> u8 {
+    if let Some(w) = gpt56_family_speed_weight(id) {
+        return if w <= 1.0 {
+            3
+        } else if w <= 3.0 {
+            2
+        } else {
+            1
+        };
+    }
     match quality_class(id) {
         3 => 1,
         2 => 2,
@@ -439,6 +548,166 @@ mod tests {
         assert!(
             fast >= minimax,
             "trivial: a genuinely fast small model ({fast}) should beat minimax-m3 ({minimax})"
+        );
+    }
+
+    #[test]
+    fn subscription_burn_weight_matches_the_bundled_table() {
+        let no_overrides = HashMap::new();
+        for prefix in ["codex-oauth::", "codex-cli::"] {
+            assert_eq!(
+                subscription_burn_weight(&format!("{prefix}gpt-5.6-sol"), &no_overrides),
+                5.0
+            );
+            assert_eq!(
+                subscription_burn_weight(&format!("{prefix}gpt-5.6-terra"), &no_overrides),
+                2.5
+            );
+            assert_eq!(
+                subscription_burn_weight(&format!("{prefix}gpt-5.6-luna"), &no_overrides),
+                1.0
+            );
+        }
+        assert_eq!(
+            subscription_burn_weight("claude-cli::opus", &no_overrides),
+            5.0
+        );
+        assert_eq!(
+            subscription_burn_weight("claude-cli::sonnet", &no_overrides),
+            3.0
+        );
+        assert_eq!(
+            subscription_burn_weight("claude-cli::haiku", &no_overrides),
+            1.0
+        );
+        // Fable 5 / Mythos 5 — the fleet's most expensive models ($10/$50 per 1M) → weight 10.0.
+        assert_eq!(
+            subscription_burn_weight("claude-cli::fable", &no_overrides),
+            10.0
+        );
+        assert_eq!(
+            subscription_burn_weight("anthropic::claude-mythos-5", &no_overrides),
+            10.0
+        );
+    }
+
+    #[test]
+    fn fable_and_mythos_resolve_to_10_under_every_catalog_id_form() {
+        let no_overrides = HashMap::new();
+        // Both the API id and the claude-cli bridge alias must resolve — bench.rs proves both are
+        // live, catalog-produced id forms (see `bare_bridge_alias`/`claude-cli::fable` coverage).
+        for id in ["anthropic::claude-fable-5", "claude-cli::fable"] {
+            assert_eq!(
+                subscription_burn_weight(id, &no_overrides),
+                10.0,
+                "fable must resolve to 10.0 under id form {id}"
+            );
+        }
+        // Mythos has no bridge alias today (the claude-cli list is fable/opus/sonnet/haiku), but
+        // its API id must resolve; a future bare alias would too (token match on "mythos").
+        for id in ["anthropic::claude-mythos-5", "claude-cli::mythos"] {
+            assert_eq!(
+                subscription_burn_weight(id, &no_overrides),
+                10.0,
+                "mythos must resolve to 10.0 under id form {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn fable_does_not_collide_with_the_opus_arm() {
+        // Regression guard for the known "Opus 4.8 Fallback" cross-match trap (bench.rs:304-321):
+        // Fable's benchmark row NAME contains "Opus", but its Forge id does not — so `claude-fable-5`
+        // must resolve via the fable arm (10.0), NEVER the opus arm (5.0). Opus itself stays 5.0.
+        let no_overrides = HashMap::new();
+        assert_eq!(
+            subscription_burn_weight("anthropic::claude-fable-5", &no_overrides),
+            10.0,
+            "fable must not fall through to the opus (5.0) arm"
+        );
+        assert_eq!(
+            subscription_burn_weight("anthropic::claude-opus-4-8", &no_overrides),
+            5.0,
+            "opus regression guard: still 5.0"
+        );
+    }
+
+    #[test]
+    fn speed_class_for_fable_is_unchanged_and_never_leaks_into_the_speed_path() {
+        // Fable is a known burn-weight entry (10.0) for the route-score penalty, but it must NOT be
+        // in `gpt56_family_speed_weight` — else it would re-trigger the provider-monopoly regression.
+        // Its speed_class must equal the plain quality_class fallback (2 → speed 2), unchanged.
+        assert_eq!(speed_class("claude-cli::fable"), 2);
+        assert_eq!(speed_class("anthropic::claude-fable-5"), 2);
+    }
+
+    #[test]
+    fn subscription_burn_weight_defaults_unknown_models_to_neutral() {
+        let no_overrides = HashMap::new();
+        for id in [
+            "groq::llama-3.1-8b-instant",
+            "openai::gpt-5.5",
+            "codex-cli::gpt-5.4-mini",
+            "ollama::llama3.2",
+        ] {
+            assert_eq!(
+                subscription_burn_weight(id, &no_overrides),
+                1.0,
+                "unknown model must default to neutral: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn subscription_burn_weight_config_override_wins_over_table() {
+        let mut overrides = HashMap::new();
+        overrides.insert("gpt-5.6-sol".to_string(), 9.0);
+        assert_eq!(
+            subscription_burn_weight("codex-oauth::gpt-5.6-sol", &overrides),
+            9.0,
+            "config override must win over the bundled table"
+        );
+        // An override keyed by the bare name applies across both codex bridge prefixes.
+        assert_eq!(
+            subscription_burn_weight("codex-cli::gpt-5.6-sol", &overrides),
+            9.0
+        );
+        // Unrelated ids are unaffected by an override for a different model.
+        assert_eq!(
+            subscription_burn_weight("codex-oauth::gpt-5.6-terra", &overrides),
+            2.5
+        );
+    }
+
+    #[test]
+    fn speed_class_derives_from_burn_weight_for_the_gpt56_family() {
+        // The bug this fixes: sol/terra/luna carry no size/speed marker in their name, so the old
+        // heuristic landed all three in quality_class 3 → speed_class 1 (slowest), scoring Luna
+        // (the cheapest, fastest sibling) exactly as slow as Sol.
+        let sol = speed_class("codex-oauth::gpt-5.6-sol");
+        let terra = speed_class("codex-oauth::gpt-5.6-terra");
+        let luna = speed_class("codex-oauth::gpt-5.6-luna");
+        assert!(
+            luna > terra && terra > sol,
+            "expected luna({luna}) > terra({terra}) > sol({sol})"
+        );
+        assert_eq!((sol, terra, luna), (1, 2, 3));
+    }
+
+    #[test]
+    fn speed_class_name_heuristic_unchanged_for_ids_with_no_burn_weight_entry() {
+        // Ids with no burn-weight table entry must keep EXACTLY today's name-heuristic behaviour.
+        assert_eq!(speed_class("codex-cli::gpt-5.4-mini"), 3);
+        assert_eq!(speed_class("something::model-30b"), 2);
+        assert_eq!(
+            speed_class("groq::llama-3.1-8b-instant"),
+            3,
+            "small fast model unaffected"
+        );
+        assert_eq!(
+            speed_class("nvidia::minimaxai/minimax-m3"),
+            2,
+            "unfamiliar frontier-ish family unaffected"
         );
     }
 }

@@ -6,6 +6,8 @@
 
 use async_trait::async_trait;
 use forge_types::{EffortLevel, Message, QuotaHint, ToolCall, Usage};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 mod claude_bridge_home;
 mod cli_provider;
@@ -17,11 +19,12 @@ mod oauth_responses;
 mod tool_recovery;
 mod xai_oauth;
 
-pub use cli_provider::{CliKind, CliProvider, SUBAGENT_SINK_ENV};
+pub use cli_provider::{codex_cli_detected_plan, CliKind, CliProvider, SUBAGENT_SINK_ENV};
 pub use codex_oauth::{
-    exchange_code as exchange_codex_oauth_code, has_session as has_codex_oauth_session,
-    is_pinned_codex_url, list_models as list_codex_oauth_models,
-    probe_entitlement as probe_codex_entitlement, CodexOauthProvider, CODEX_OAUTH_NAMESPACE,
+    detected_plan as codex_oauth_detected_plan, exchange_code as exchange_codex_oauth_code,
+    has_session as has_codex_oauth_session, is_pinned_codex_url,
+    list_models as list_codex_oauth_models, probe_entitlement as probe_codex_entitlement,
+    CodexOauthProvider, CODEX_OAUTH_NAMESPACE,
 };
 pub use embedder::{select_embedder, GenaiEmbedder};
 pub use genai_provider::{
@@ -69,6 +72,232 @@ pub fn normalize_model_id(model: &str) -> std::borrow::Cow<'_, str> {
 pub fn is_cli_bridge(model: &str) -> bool {
     let m = normalize_model_id(model);
     m.starts_with("claude-cli::") || m.starts_with("codex-cli::") || m.starts_with("agy-cli::")
+}
+
+/// TTL for [`detect_subscription_plans`]'s memoization. Short enough that a plan change (a fresh
+/// `forge auth codex-oauth` login, a plan upgrade) is visible within a bounded window even if a
+/// call site somehow misses [`invalidate_plan_cache`]; long enough to take the keyring/file-read
+/// cost off the hot per-turn routing path. Named so it's greppable rather than a magic `60`.
+const PLAN_CACHE_TTL: Duration = Duration::from_secs(60);
+
+type PlanMap = std::collections::HashMap<String, String>;
+
+/// Process-wide memoization for [`detect_subscription_plans`]. Deliberately NOT a process-lifetime
+/// (`OnceLock`) cache: `forge mcp agent` / `forge mcp-serve` are long-lived daemons, so a
+/// permanent cache would keep serving a stale plan forever after the user switches ChatGPT plans
+/// or accounts. The `Instant` timestamp makes it self-healing on a short TTL instead.
+static PLAN_CACHE: Mutex<Option<(Instant, PlanMap)>> = Mutex::new(None);
+
+/// Per-account ChatGPT plan, detected live from OAuth state and memoized for [`PLAN_CACHE_TTL`].
+/// The uncached lookup (see [`detect_subscription_plans_uncached`]) does an OS keyring read (a
+/// D-Bus roundtrip on Linux) plus an `auth.json` file read; `Session::live_quota` calls this from
+/// 7 sites in forge-core, several per turn, on the hot routing path, so doing both on every call
+/// is wasteful. A plain process-lifetime cache would be wrong here (see [`PLAN_CACHE`]'s doc) — a
+/// 60s TTL self-heals without a restart, and [`invalidate_plan_cache`] forces an immediate refresh
+/// right after a fresh OAuth login. The empty map (no codex session at all — the common case for
+/// users who never used codex) is cached exactly like a non-empty result: it is a legitimate
+/// answer, not "no cache yet".
+pub fn detect_subscription_plans() -> std::collections::HashMap<String, String> {
+    cached_or_fetch(
+        &PLAN_CACHE,
+        PLAN_CACHE_TTL,
+        detect_subscription_plans_uncached,
+    )
+}
+
+/// Clear the memoized plan cache so the next [`detect_subscription_plans`] call re-fetches
+/// immediately instead of waiting up to [`PLAN_CACHE_TTL`]. Call this right after a successful
+/// subscription OAuth login — see `forge-cli`'s `invalidate_catalog_cache`, called from the same
+/// `forge auth codex-oauth` / `forge auth xai-oauth` sites in `commands/local.rs`.
+pub fn invalidate_plan_cache() {
+    clear_cache(&PLAN_CACHE);
+}
+
+fn clear_cache(cache: &Mutex<Option<(Instant, PlanMap)>>) {
+    // A poisoned lock means some earlier fetch panicked mid-update; either way an absent cache
+    // is safe (the next call just re-fetches), so there's nothing to propagate here.
+    if let Ok(mut guard) = cache.lock() {
+        *guard = None;
+    }
+}
+
+/// Generic TTL-cache-or-fetch over a `Mutex<Option<(Instant, PlanMap)>>`. The lock is held across
+/// the `fetch()` call itself (not just the read/write of the cached value): a cold or
+/// just-expired cache under concurrent callers must serialize onto a SINGLE fetch rather than each
+/// caller independently hitting the keyring/disk. That's a deliberate trade of a slightly longer
+/// lock hold (one keyring/file read, on a call gated by a 60s cooldown) for "never double-fetch".
+fn cached_or_fetch(
+    cache: &Mutex<Option<(Instant, PlanMap)>>,
+    ttl: Duration,
+    fetch: impl FnOnce() -> PlanMap,
+) -> PlanMap {
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((fetched_at, plans)) = guard.as_ref() {
+        if fetched_at.elapsed() < ttl {
+            return plans.clone();
+        }
+    }
+    let plans = fetch();
+    *guard = Some((Instant::now(), plans.clone()));
+    plans
+}
+
+/// Uncached body of [`detect_subscription_plans`] (Fix 4, docs/design/subscription-efficiency-routing.md):
+/// `codex-oauth` from the active provider-oauth account's access-token JWT, `codex-cli` from the
+/// official CLI's own `~/.codex/auth.json`. Both surfaces bill the SAME ChatGPT account, so a
+/// detected plan cannot disagree between them by construction. No entry for `claude-cli` /
+/// `agy-cli` / `xai-oauth`: none of their tokens carry a plan claim, so they keep whatever
+/// `[mesh.subscriptions]` says — never fabricated. Each half degrades independently to no entry
+/// (missing session / missing file / no claim), never a panic or an error.
+fn detect_subscription_plans_uncached() -> std::collections::HashMap<String, String> {
+    let mut plans = std::collections::HashMap::new();
+    if let Some(plan) = codex_oauth::detected_plan() {
+        plans.insert("codex-oauth".to_string(), plan);
+    }
+    if let Some(plan) = cli_provider::codex_cli_detected_plan() {
+        plans.insert("codex-cli".to_string(), plan);
+    }
+    plans
+}
+
+#[cfg(test)]
+mod plan_cache_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn second_call_within_ttl_does_not_refetch() {
+        let cache: Mutex<Option<(Instant, PlanMap)>> = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+        let fetch = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let mut m = HashMap::new();
+            m.insert("codex-cli".to_string(), "plus".to_string());
+            m
+        };
+
+        let first = cached_or_fetch(&cache, Duration::from_secs(60), fetch);
+        let second = cached_or_fetch(&cache, Duration::from_secs(60), fetch);
+
+        assert_eq!(first, second);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "second call must hit the cache"
+        );
+    }
+
+    #[test]
+    fn call_after_ttl_elapsed_refetches() {
+        let mut stale = HashMap::new();
+        stale.insert("codex-oauth".to_string(), "stale-plan".to_string());
+        // Seed with a timestamp already past the TTL instead of sleeping 60s in a test.
+        let expired_at = Instant::now() - Duration::from_secs(61);
+        let cache: Mutex<Option<(Instant, PlanMap)>> = Mutex::new(Some((expired_at, stale)));
+        let calls = AtomicUsize::new(0);
+        let fetch = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let mut m = HashMap::new();
+            m.insert("codex-oauth".to_string(), "fresh-plan".to_string());
+            m
+        };
+
+        let plans = cached_or_fetch(&cache, Duration::from_secs(60), fetch);
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "expired entry must be re-fetched"
+        );
+        assert_eq!(
+            plans.get("codex-oauth").map(String::as_str),
+            Some("fresh-plan"),
+            "must return the fresh fetch, not the stale seeded value"
+        );
+    }
+
+    #[test]
+    fn empty_map_result_is_cached() {
+        let cache: Mutex<Option<(Instant, PlanMap)>> = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+        let fetch = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            HashMap::new()
+        };
+
+        let first = cached_or_fetch(&cache, Duration::from_secs(60), fetch);
+        let second = cached_or_fetch(&cache, Duration::from_secs(60), fetch);
+
+        assert!(first.is_empty());
+        assert!(second.is_empty());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "an empty result is still a cache hit on the second call"
+        );
+    }
+
+    #[test]
+    fn invalidate_forces_refetch() {
+        // Exercises the same `clear_cache` helper `invalidate_plan_cache()` calls on the real
+        // static, but on a local cache so this test never touches the real keyring/auth.json.
+        let cache: Mutex<Option<(Instant, PlanMap)>> = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+        let fetch = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            HashMap::new()
+        };
+
+        let _ = cached_or_fetch(&cache, Duration::from_secs(60), fetch);
+        let _ = cached_or_fetch(&cache, Duration::from_secs(60), fetch);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        clear_cache(&cache);
+
+        let _ = cached_or_fetch(&cache, Duration::from_secs(60), fetch);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "invalidation must force the next call to re-fetch"
+        );
+    }
+
+    #[test]
+    fn concurrent_calls_do_not_deadlock_or_double_fetch() {
+        let cache = Arc::new(Mutex::<Option<(Instant, PlanMap)>>::new(None));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let calls = Arc::clone(&calls);
+                std::thread::spawn(move || {
+                    let plans = cached_or_fetch(&cache, Duration::from_secs(60), || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(20));
+                        let mut m = HashMap::new();
+                        m.insert("codex-oauth".to_string(), "pro".to_string());
+                        m
+                    });
+                    assert_eq!(plans.get("codex-oauth").map(String::as_str), Some("pro"));
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("worker thread must not panic");
+        }
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "concurrent cold-cache callers must serialize onto a single fetch"
+        );
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

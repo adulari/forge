@@ -1041,6 +1041,33 @@ fn codex_sessions_dir() -> Option<std::path::PathBuf> {
     )
 }
 
+/// `${CODEX_HOME:-~/.codex}/auth.json`, where the official `codex` CLI stores its own OAuth
+/// tokens (same directory scheme as [`codex_sessions_dir`]).
+fn codex_auth_json_path() -> Option<std::path::PathBuf> {
+    if let Some(h) = std::env::var_os("CODEX_HOME") {
+        return Some(std::path::PathBuf::from(h).join("auth.json"));
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".codex")
+            .join("auth.json"),
+    )
+}
+
+/// The `codex` CLI's own ChatGPT plan: `tokens.access_token`'s `chatgpt_plan_type` claim from
+/// `~/.codex/auth.json` (see docs/design/subscription-efficiency-routing.md Fix 4). Since
+/// `codex-cli` and `codex-oauth` share the same ChatGPT account, the two surfaces cannot
+/// disagree by construction. `None` when the file is missing, unreadable, malformed, or the
+/// token carries no plan claim — tolerant by design, never logs token material.
+pub fn codex_cli_detected_plan() -> Option<String> {
+    let path = codex_auth_json_path()?;
+    let body = std::fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&body).ok()?;
+    let access_token = v.get("tokens")?.get("access_token")?.as_str()?;
+    forge_config::provider_oauth::extract_chatgpt_plan_type(access_token)
+}
+
 /// Find the rollout file for a codex thread (`rollout-<ts>-<thread_id>.jsonl`) under the sessions
 /// dir (organised `YYYY/MM/DD/`). Bounded recursion; returns the first match.
 fn find_codex_rollout(thread_id: &str) -> Option<std::path::PathBuf> {
@@ -3733,6 +3760,65 @@ mod tests {
         for h in &hints {
             assert_eq!(h.status, QuotaStatus::Ok);
         }
+    }
+
+    /// Serializes tests that mutate the process-global `CODEX_HOME` env var (`cargo test` runs
+    /// this file's tests concurrently within one process).
+    static CODEX_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `body` with `CODEX_HOME` pointed at a fresh temp dir, optionally seeded with
+    /// `auth.json` (`None` → no file, exercising the missing-file path), restoring the prior env
+    /// value afterward. Never touches a real `~/.codex/auth.json`.
+    fn with_fake_codex_home(auth_json: Option<&str>, body: impl FnOnce()) {
+        let _guard = CODEX_HOME_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        if let Some(json) = auth_json {
+            std::fs::write(dir.path().join("auth.json"), json).expect("write fake auth.json");
+        }
+        let saved = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", dir.path());
+        body();
+        match saved {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+    }
+
+    #[test]
+    fn codex_cli_detected_plan_reads_the_claim_from_auth_json() {
+        // Payload `{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-1","chatgpt_plan_type":"plus"}}`,
+        // base64url-encoded (no signature verification, matching production decoding).
+        let fake_jwt = "hdr.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0xIiwiY2hhdGdwdF9wbGFuX3R5cGUiOiJwbHVzIn19.sig";
+        let auth_json = format!(r#"{{"tokens":{{"access_token":"{fake_jwt}"}}}}"#);
+        with_fake_codex_home(Some(&auth_json), || {
+            assert_eq!(codex_cli_detected_plan(), Some("plus".to_string()));
+        });
+    }
+
+    #[test]
+    fn codex_cli_detected_plan_missing_file_is_none() {
+        with_fake_codex_home(None, || {
+            assert_eq!(codex_cli_detected_plan(), None);
+        });
+    }
+
+    #[test]
+    fn codex_cli_detected_plan_malformed_json_is_none() {
+        with_fake_codex_home(Some("not json"), || {
+            assert_eq!(codex_cli_detected_plan(), None);
+        });
+    }
+
+    #[test]
+    fn codex_cli_detected_plan_no_plan_claim_is_none() {
+        // A real-shaped access token with no plan claim at all — malformed as a JWT, so the
+        // shared decoder simply returns None (never panics).
+        let auth_json = r#"{"tokens":{"access_token":"not-a-jwt"}}"#;
+        with_fake_codex_home(Some(auth_json), || {
+            assert_eq!(codex_cli_detected_plan(), None);
+        });
     }
 
     #[test]

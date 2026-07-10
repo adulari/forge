@@ -352,7 +352,7 @@ pub async fn route_child(
                 .store
                 .current_quota()
                 .unwrap_or_default()
-                .with_plans(ctx.config.mesh.subscriptions.clone())
+                .with_plans(crate::resolved_subscription_plans(&ctx.config))
                 .with_conserve(ctx.config.mesh.subscription_conserve);
             let project = crate::project_context::compute(&ctx.repo_root);
             ctx.router

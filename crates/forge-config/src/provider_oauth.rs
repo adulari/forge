@@ -228,17 +228,22 @@ pub fn extract_email_from_id_token(id_token: &str) -> Option<String> {
     jwt_claim(id_token, "email")
 }
 
-/// Decode a JWT payload (base64url, **no signature verification**) and return the named claim as
-/// a string. Used for display labels and the ChatGPT account id (`chatgpt_account_id`) — the
-/// OAuth grant already authenticated the token; we only read claims for routing/storage keys.
-pub fn jwt_claim(jwt: &str, claim: &str) -> Option<String> {
+/// Decode a JWT's payload (base64url, **no signature verification** — the OAuth grant already
+/// authenticated the token; we only read claims for routing/storage/display) into JSON. Shared
+/// by every claim extractor below so there is exactly one decoder in this module.
+fn decode_jwt_payload(jwt: &str) -> Option<serde_json::Value> {
     let payload_b64 = jwt.split('.').nth(1)?;
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload_b64)
         .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload_b64))
         .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    claims
+    serde_json::from_slice(&payload).ok()
+}
+
+/// Decode a JWT payload and return the named top-level claim as a string. Used for display
+/// labels and the ChatGPT account id (`chatgpt_account_id`).
+pub fn jwt_claim(jwt: &str, claim: &str) -> Option<String> {
+    decode_jwt_payload(jwt)?
         .get(claim)
         .and_then(|v| v.as_str())
         .map(str::to_string)
@@ -258,15 +263,21 @@ pub fn extract_chatgpt_account_id(access_token: &str) -> Option<String> {
         }
     }
     // Nested shape some tokens use: `https://api.openai.com/auth` → object with `chatgpt_account_id`.
-    let payload_b64 = access_token.split('.').nth(1)?;
-    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload_b64))
-        .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    claims
+    decode_jwt_payload(access_token)?
         .get("https://api.openai.com/auth")
         .and_then(|v| v.get("chatgpt_account_id"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// ChatGPT plan type from an access-token JWT's nested `https://api.openai.com/auth` claim
+/// (`chatgpt_plan_type`, e.g. `"plus"`) — see docs/design/subscription-efficiency-routing.md
+/// Fix 4. `None` if the token isn't a JWT, the payload doesn't decode, or there's no plan claim.
+pub fn extract_chatgpt_plan_type(access_token: &str) -> Option<String> {
+    decode_jwt_payload(access_token)?
+        .get("https://api.openai.com/auth")
+        .and_then(|v| v.get("chatgpt_plan_type"))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string)
@@ -458,6 +469,30 @@ mod tests {
             Some("nested-id".to_string())
         );
         assert_eq!(extract_chatgpt_account_id("not-a-jwt"), None);
+    }
+
+    #[test]
+    fn extracts_chatgpt_plan_type_from_access_token() {
+        let jwt = fake_id_token(
+            r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-1","chatgpt_plan_type":"plus"}}"#,
+        );
+        assert_eq!(extract_chatgpt_plan_type(&jwt), Some("plus".to_string()));
+    }
+
+    #[test]
+    fn missing_plan_claim_returns_none() {
+        let jwt =
+            fake_id_token(r#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct-1"}}"#);
+        assert_eq!(extract_chatgpt_plan_type(&jwt), None);
+        let no_nested_claim_at_all = fake_id_token(r#"{"sub":"u1"}"#);
+        assert_eq!(extract_chatgpt_plan_type(&no_nested_claim_at_all), None);
+    }
+
+    #[test]
+    fn malformed_token_returns_none_for_plan_type() {
+        assert_eq!(extract_chatgpt_plan_type("not-a-jwt"), None);
+        assert_eq!(extract_chatgpt_plan_type("a.b"), None);
+        assert_eq!(extract_chatgpt_plan_type("a.!!!notb64!!!.c"), None);
     }
 
     #[test]
