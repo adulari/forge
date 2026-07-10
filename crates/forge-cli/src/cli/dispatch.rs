@@ -150,9 +150,16 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             remove,
             list,
             replace,
+            account,
+            switch,
         } => {
             if provider == "xai-oauth" || provider == "xai_oauth" {
-                auth_xai_oauth(remove, list, replace).await
+                auth_xai_oauth(remove, list, replace, account, switch).await
+            } else if account.is_some() || switch {
+                anyhow::bail!(
+                    "--account/--switch are only meaningful for `forge auth xai-oauth` \
+                     (multi-account OAuth) — '{provider}' is a plain API-key provider"
+                )
             } else {
                 auth(&provider, remove, list, replace)
             }

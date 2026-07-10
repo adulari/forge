@@ -73,57 +73,111 @@ pub(crate) fn auth(provider: &str, remove: bool, list: bool, replace: bool) -> R
 }
 
 /// Sign in to xAI/Grok via device-code OAuth (SuperGrok / X Premium subscription — no API key,
-/// billed against the subscription instead of metered credits). `--list` shows session status,
-/// `--remove` signs out; the default (and `--replace`, kept only for CLI-shape symmetry with the
-/// key-based `auth` command) starts a fresh login. Experimental (Phase 1): xAI enforces OAuth API
-/// entitlement server-side per account/tier, so a successful login does NOT guarantee inference
-/// works — the post-login probe below says so plainly instead of silently retrying.
-pub(crate) async fn auth_xai_oauth(remove: bool, list: bool, _replace: bool) -> Result<()> {
+/// billed against the subscription instead of metered credits). Multiple accounts can be signed
+/// in at once (e.g. a personal account and a SuperGrok trial); one is "active" at a time.
+/// `--list` shows every signed-in account, `--switch --account <id>` changes which is active,
+/// `--remove` (bare) signs every account out, `--remove --account <id>` signs out just one; the
+/// default (and `--replace`, kept only for CLI-shape symmetry with the key-based `auth` command)
+/// starts a fresh login and adds it as a new account. Experimental (Phase 1): xAI enforces OAuth
+/// API entitlement server-side per account/tier, so a successful login does NOT guarantee
+/// inference works — the post-login probe below says so plainly instead of silently retrying.
+pub(crate) async fn auth_xai_oauth(
+    remove: bool,
+    list: bool,
+    _replace: bool,
+    account: Option<String>,
+    switch: bool,
+) -> Result<()> {
     use forge_config::provider_oauth::{self, XAI_OAUTH_KEYRING_PROVIDER};
 
+    if switch {
+        let id = account
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--switch requires --account <id> (see `--list`)"))?;
+        provider_oauth::switch_provider_oauth_account(XAI_OAUTH_KEYRING_PROVIDER, id)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!("✓ switched active xai-oauth account to '{id}'");
+        return Ok(());
+    }
+
     if list {
-        match provider_oauth::load_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER) {
-            Some(tokens) => {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let expiry = if tokens.expires_at == 0 {
-                    "no expiry reported".to_string()
+        let accounts = provider_oauth::list_provider_oauth_accounts(XAI_OAUTH_KEYRING_PROVIDER);
+        if accounts.is_empty() {
+            println!("xai-oauth: not signed in — run `forge auth xai-oauth`");
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let describe = |tokens: &forge_config::OAuthTokens| -> String {
+            let expiry = if tokens.expires_at == 0 {
+                "no expiry reported".to_string()
+            } else {
+                let remaining = tokens.expires_at - now;
+                if remaining > 0 {
+                    format!("access token expires in {}", human_secs(remaining))
                 } else {
-                    let remaining = tokens.expires_at - now;
-                    if remaining > 0 {
-                        format!("access token expires in {}", human_secs(remaining))
-                    } else {
-                        "access token expired".to_string()
-                    }
-                };
+                    "access token expired".to_string()
+                }
+            };
+            format!(
+                "{expiry}, refresh token {}, scopes: {}",
+                if tokens.refresh_token.is_some() {
+                    "present"
+                } else {
+                    "absent"
+                },
+                tokens.scopes.join(" ")
+            )
+        };
+        if accounts.len() == 1 {
+            // Keep the single-account case readable — unchanged from before multi-account support.
+            let (_, tokens, _) = &accounts[0];
+            println!("xai-oauth: signed in ({})", describe(tokens));
+        } else {
+            println!("xai-oauth: {} account(s) stored", accounts.len());
+            for (id, tokens, is_active) in &accounts {
                 println!(
-                    "xai-oauth: signed in ({expiry}, refresh token {}, scopes: {})",
-                    if tokens.refresh_token.is_some() {
-                        "present"
-                    } else {
-                        "absent"
-                    },
-                    tokens.scopes.join(" ")
+                    "  {} {id} — {}",
+                    if *is_active { "*" } else { " " },
+                    describe(tokens)
                 );
             }
-            None => println!("xai-oauth: not signed in — run `forge auth xai-oauth`"),
+            println!("  (* = active; `forge auth xai-oauth --switch --account <id>` to change it)");
         }
         return Ok(());
     }
 
     if remove {
-        let removed = provider_oauth::clear_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER)
-            .context("removing xAI OAuth tokens from the OS keyring")?;
-        println!(
-            "{}",
-            if removed {
-                "removed stored xAI OAuth tokens from the OS keyring"
-            } else {
-                "no xAI OAuth tokens stored — nothing to remove"
+        match account.as_deref() {
+            Some(id) => {
+                let removed =
+                    provider_oauth::remove_provider_oauth_account(XAI_OAUTH_KEYRING_PROVIDER, id)
+                        .context("removing xAI OAuth account from the OS keyring")?;
+                println!(
+                    "{}",
+                    if removed {
+                        format!("removed xai-oauth account '{id}' from the OS keyring")
+                    } else {
+                        format!("no xai-oauth account '{id}' stored — nothing to remove")
+                    }
+                );
             }
-        );
+            None => {
+                let removed =
+                    provider_oauth::clear_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER)
+                        .context("removing xAI OAuth tokens from the OS keyring")?;
+                println!(
+                    "{}",
+                    if removed {
+                        "removed stored xAI OAuth tokens from the OS keyring"
+                    } else {
+                        "no xAI OAuth tokens stored — nothing to remove"
+                    }
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -140,17 +194,27 @@ pub(crate) async fn auth_xai_oauth(remove: bool, list: bool, _replace: bool) -> 
     }
     println!("Waiting for approval… press Ctrl-C to cancel.");
 
-    let tokens = forge_provider::poll_for_tokens(&dc)
+    let (tokens, id_token) = forge_provider::poll_for_tokens(&dc)
         .await
         .context("waiting for xAI sign-in")?;
-    provider_oauth::store_provider_oauth_tokens(XAI_OAUTH_KEYRING_PROVIDER, &tokens)
+    // Label the account from the id_token's `email` claim when present; otherwise fall back to
+    // account-1/account-2/… . Either way this ADDS an account and makes it active — re-running
+    // the same account's login overwrites just that one (matched by the same derived id).
+    let account_id = id_token
+        .as_deref()
+        .and_then(provider_oauth::extract_email_from_id_token)
+        .unwrap_or_else(|| {
+            provider_oauth::next_provider_oauth_account_id(XAI_OAUTH_KEYRING_PROVIDER)
+        });
+    provider_oauth::add_provider_oauth_account(XAI_OAUTH_KEYRING_PROVIDER, &account_id, &tokens)
         .context("storing xAI OAuth tokens")?;
 
     match forge_provider::probe_entitlement(&tokens.access_token).await {
         Ok(forge_provider::EntitlementStatus::Entitled) => println!(
-            "signed in to xAI via OAuth — API access confirmed (tokens stored in the OS keyring)\n\
+            "signed in to xAI via OAuth as '{account_id}' — API access confirmed (tokens stored in the OS keyring)\n\
              use models with the xai-oauth:: prefix, e.g.:  forge --model xai-oauth::grok-4\n\
-             note: costs show as $0 — usage is billed to your xAI subscription, not metered API credits"
+             note: costs show as $0 — usage is billed to your xAI subscription, not metered API credits\n\
+             multiple accounts: `forge auth xai-oauth --list` · switch with `--switch --account <id>`"
         ),
         Ok(forge_provider::EntitlementStatus::NotEntitled(msg)) => anyhow::bail!(
             "OAuth sign-in succeeded, but xAI returned 403 for API access: this account's \
@@ -164,15 +228,15 @@ pub(crate) async fn auth_xai_oauth(remove: bool, list: bool, _replace: bool) -> 
              use `forge auth xai` with an API key. ({msg})"
         ),
         Ok(forge_provider::EntitlementStatus::RateLimited) => println!(
-            "signed in; the entitlement check was rate-limited (429) — assuming access is OK. \
+            "signed in as '{account_id}'; the entitlement check was rate-limited (429) — assuming access is OK. \
              If inference fails with 403, run `forge auth xai` instead."
         ),
         Ok(forge_provider::EntitlementStatus::Other(status, msg)) => println!(
-            "signed in; the entitlement check returned an unexpected status ({status}: {msg}) — \
+            "signed in as '{account_id}'; the entitlement check returned an unexpected status ({status}: {msg}) — \
              tokens are stored, try using xai-oauth:: models directly."
         ),
         Err(e) => println!(
-            "signed in, but the entitlement check itself failed ({e}) — tokens are stored, try \
+            "signed in as '{account_id}', but the entitlement check itself failed ({e}) — tokens are stored, try \
              using xai-oauth:: models directly."
         ),
     }
