@@ -30,7 +30,15 @@ pub struct ProviderQuotaView {
     pub fraction: f64,
     pub plan: String,
     /// Probability a task of this tier spreads OFF this subscription (the conservation pull).
+    /// Pace-projected (quota-pace-routing.md) — fed `effective_fraction_for`, matching what real
+    /// routing (`conserve_decision`) actually uses, not just the plain `fraction` above.
     pub spread_probability: f64,
+    /// Fraction the window is projected to reach by its reset time, if a pace could be derived
+    /// (enough `quota_history` and a known reset). `None` when there isn't enough history yet.
+    pub projected_fraction_at_reset: Option<f64>,
+    /// True when that projection would exceed the window before it resets — mirrors
+    /// [`forge_types::QuotaPace::exhaustion_warning`].
+    pub exhaustion_warning: bool,
 }
 
 /// The full explanation of one routing decision.
@@ -149,16 +157,22 @@ impl HeuristicRouter {
             .map(|p| {
                 let fraction = quota.fraction_for(&p);
                 let plan = quota.plan_for(&p).to_string();
+                let pace = quota.pace_for(&p);
                 ProviderQuotaView {
+                    // Feed the inspector the same pace-projected fraction real routing uses, so
+                    // `spread_probability` here matches what `conserve_decision` actually computes
+                    // instead of describing a fresher-looking window than routing sees.
                     spread_probability: crate::ModelCatalog::spread_probability(
                         routed_tier,
-                        fraction,
+                        quota.effective_fraction_for(&p),
                         &plan,
                         hints.code_heavy,
                     ),
                     status: quota.status_for(&p),
                     fraction,
                     plan,
+                    projected_fraction_at_reset: pace.and_then(|p| p.projected_fraction_at_reset),
+                    exhaustion_warning: pace.is_some_and(|p| p.exhaustion_warning),
                     provider: p,
                 }
             })

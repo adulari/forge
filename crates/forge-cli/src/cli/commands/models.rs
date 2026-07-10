@@ -581,6 +581,22 @@ pub(crate) fn meter(frac: f64) -> String {
     format!("[{}{}]", "█".repeat(filled), "░".repeat(10 - filled))
 }
 
+/// A compact `→ 93% at reset ⚠` suffix for a quota line when a pace projection exists
+/// (quota-pace-routing.md) — `""` when there isn't enough history to project one yet.
+pub(crate) fn pace_suffix(
+    projected_fraction_at_reset: Option<f64>,
+    exhaustion_warning: bool,
+) -> String {
+    match projected_fraction_at_reset {
+        Some(p) => format!(
+            " → {:.0}% at reset{}",
+            p * 100.0,
+            if exhaustion_warning { " ⚠" } else { "" }
+        ),
+        None => String::new(),
+    }
+}
+
 /// The no-prompt overview: subscription quota gauges + per-tier ranked picks.
 pub(crate) fn mesh_overview(
     cat: &forge_mesh::ModelCatalog,
@@ -666,12 +682,13 @@ pub(crate) fn print_mesh_explanation(e: &forge_mesh::RoutingExplanation) {
         for q in &e.quota {
             let plan = if q.plan.is_empty() { "?" } else { &q.plan };
             println!(
-                "  {:<11} {} {:>3.0}% · plan {plan} · {:?} · spread P={:.0}%",
+                "  {:<11} {} {:>3.0}% · plan {plan} · {:?} · spread P={:.0}%{}",
                 q.provider,
                 meter(q.fraction),
                 q.fraction * 100.0,
                 q.status,
                 q.spread_probability * 100.0,
+                pace_suffix(q.projected_fraction_at_reset, q.exhaustion_warning),
             );
         }
     }
@@ -765,6 +782,8 @@ pub(crate) fn mesh_explanation_json(e: &forge_mesh::RoutingExplanation) -> Strin
                 "fraction": q.fraction,
                 "plan": q.plan,
                 "spread_probability": q.spread_probability,
+                "projected_fraction_at_reset": q.projected_fraction_at_reset,
+                "exhaustion_warning": q.exhaustion_warning,
             })
         })
         .collect();

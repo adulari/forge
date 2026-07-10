@@ -1954,19 +1954,62 @@ impl Store {
             })
             .collect::<std::collections::HashMap<_, _>>();
         // Also carry the strictest fraction per provider (incl. still-Ok ones) so the router's
-        // graduated conservation can spread off a subscription before it crosses Warning.
+        // graduated conservation can spread off a subscription before it crosses Warning. Track
+        // the (provider, window_kind, resets_at) of that strictest row too — the pace projection
+        // below must be derived for the SAME window `fractions` reflects, not just any window.
         let mut frac_stmt = conn.prepare(
-            "SELECT provider, MAX(fraction) FROM subscription_usage
+            "SELECT provider, window_kind, fraction, resets_at FROM subscription_usage su
              WHERE fraction IS NOT NULL AND (resets_at IS NULL OR resets_at > ?1)
+               AND fraction = (
+                   SELECT MAX(fraction) FROM subscription_usage su2
+                   WHERE su2.provider = su.provider
+                     AND su2.fraction IS NOT NULL
+                     AND (su2.resets_at IS NULL OR su2.resets_at > ?1)
+               )
              GROUP BY provider",
         )?;
-        let fractions = frac_stmt
+        let strictest = frac_stmt
             .query_map([now], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                ))
             })?
             .filter_map(std::result::Result::ok)
+            .collect::<Vec<_>>();
+        let fractions = strictest
+            .iter()
+            .map(|(provider, _, fraction, _)| (provider.clone(), *fraction))
             .collect::<std::collections::HashMap<_, _>>();
-        Ok(forge_types::SubscriptionQuota::new(map).with_fractions(fractions))
+
+        // Pace projection per provider, off that same strictest window's history — a subscription
+        // burning fast early in its window (low fraction, high rate) is otherwise under-protected
+        // by `fractions` alone (quota-pace-routing.md).
+        let since = now - forge_types::QUOTA_PACE_LOOKBACK_SECS;
+        let mut paces = std::collections::HashMap::new();
+        for (provider, window, _fraction, resets_at) in &strictest {
+            let mut hist_stmt = conn.prepare(
+                "SELECT observed_at, fraction_used FROM quota_history
+                 WHERE provider = ?1 AND window_kind = ?2 AND observed_at >= ?3
+                 ORDER BY observed_at ASC",
+            )?;
+            let history = hist_stmt
+                .query_map((provider.as_str(), window.as_str(), since), |row| {
+                    Ok(forge_types::QuotaHistoryPoint {
+                        observed_at: row.get(0)?,
+                        fraction_used: row.get(1)?,
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            if let Some(pace) = forge_types::compute_quota_pace(&history, *resets_at, now) {
+                paces.insert(provider.clone(), pace);
+            }
+        }
+        Ok(forge_types::SubscriptionQuota::new(map)
+            .with_fractions(fractions)
+            .with_paces(paces))
     }
 
     /// Number of messages in a session.
@@ -4584,6 +4627,77 @@ mod tests {
             .quota_history_since("codex-cli", "five_hour", 0)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn quota_at_attaches_a_pace_projection_from_history() {
+        // Fast-climbing history (>5min apart, per QUOTA_PACE_MIN_ELAPSED_SECS) plus a
+        // subscription_usage row carrying resets_at → quota_at must attach a pace whose
+        // projected_fraction_at_reset is higher than the current (low) fraction, so a
+        // fast-burning-but-early window isn't under-protected by the plain fraction alone.
+        //
+        // `record_quota` stamps its own quota_history row with the real wall clock (it has no
+        // testable-clock variant), so this seeds the earlier point at `now - 1200` and lets
+        // `record_quota` supply the latest point at (approximately) `now` — unlike
+        // `record_quota_history_at`, which would need a fully synthetic `now` that the real
+        // wall-clock row would then fall outside of.
+        let store = Store::open_in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let resets_at = now + 3600; // 1 hour left in the window
+        store
+            .record_quota_history_at("claude-cli", "five_hour", 0.10, Some(resets_at), now - 1200)
+            .unwrap();
+        store
+            .record_quota(&forge_types::QuotaHint {
+                provider: "claude-cli".into(),
+                window: "five_hour".into(),
+                status: forge_types::QuotaStatus::Ok,
+                resets_at: Some(resets_at),
+                fraction_used: Some(0.30),
+            })
+            .unwrap();
+
+        let quota = store.quota_at(now).unwrap();
+        let current = quota.fraction_for("claude-cli");
+        let pace = quota
+            .pace_for("claude-cli")
+            .expect("enough history to derive a pace");
+        let projected = pace
+            .projected_fraction_at_reset
+            .expect("resets_at is known");
+        assert!(
+            projected > current,
+            "fast pace should project above the current fraction: current={current} projected={projected}"
+        );
+        assert!(
+            quota.effective_fraction_for("claude-cli") > current,
+            "the conservation input must reflect the pace, not just the point-in-time fraction"
+        );
+    }
+
+    #[test]
+    fn quota_at_has_no_pace_without_history() {
+        // A subscription_usage row with a fraction but no quota_history rows at all (e.g. a
+        // single record_quota call) must not attach a pace — everything else about quota_at
+        // stays as before.
+        let store = Store::open_in_memory().unwrap();
+        store
+            .record_quota(&forge_types::QuotaHint {
+                provider: "codex-cli".into(),
+                window: "weekly".into(),
+                status: forge_types::QuotaStatus::Ok,
+                resets_at: Some(999_999),
+                fraction_used: Some(0.15),
+            })
+            .unwrap();
+
+        let quota = store.quota_at(0).unwrap();
+        assert!(
+            quota.pace_for("codex-cli").is_none(),
+            "a single sample is not enough history for a pace"
+        );
+        assert!((quota.fraction_for("codex-cli") - 0.15).abs() < 1e-9);
+        assert!((quota.effective_fraction_for("codex-cli") - 0.15).abs() < 1e-9);
     }
 
     #[test]

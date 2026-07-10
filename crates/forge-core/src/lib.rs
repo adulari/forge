@@ -1970,11 +1970,6 @@ impl Session {
         });
     }
 
-    /// A lookback window wide enough to cover a `weekly` subscription window's history without
-    /// pulling the whole table (quota_history rows are one per turn's quota hint, so this is
-    /// small even at 8 days).
-    const QUOTA_PACE_LOOKBACK_SECS: i64 = 8 * 24 * 3600;
-
     /// After a fresh [`forge_types::QuotaHint`] is recorded, look back at that window's history
     /// and — if there's enough of it — derive a [`forge_types::QuotaPace`] projection and push it
     /// to the presenter for the statusline meter (quota-pace-tracking.md). A no-op (no event) when
@@ -1988,7 +1983,7 @@ impl Session {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let since = now - Self::QUOTA_PACE_LOOKBACK_SECS;
+        let since = now - forge_types::QUOTA_PACE_LOOKBACK_SECS;
         let Ok(history) = self
             .store
             .quota_history_since(&hint.provider, &hint.window, since)

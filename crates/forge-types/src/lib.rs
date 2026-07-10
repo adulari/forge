@@ -988,6 +988,10 @@ pub struct SubscriptionQuota {
     /// Subscription plan slug per provider (`claude-cli` → `max-20x`, `codex-cli` → `plus`), from
     /// config. A larger plan has more headroom, so it is spent more freely.
     plans: std::collections::HashMap<String, String>,
+    /// Pace projection per provider (quota-pace-routing.md), derived from `quota_history` — where
+    /// the strictest active window is headed by its reset time, not just its current fraction.
+    /// Absent when there isn't enough history to derive a rate (see `compute_quota_pace`).
+    pace: std::collections::HashMap<String, QuotaPace>,
     /// Whether proactive subscription-conservation spreading is enabled (config opt-out).
     conserve: bool,
 }
@@ -1012,6 +1016,12 @@ impl SubscriptionQuota {
         self
     }
 
+    /// Attach per-provider quota-pace projections (quota-pace-routing.md).
+    pub fn with_paces(mut self, pace: std::collections::HashMap<String, QuotaPace>) -> Self {
+        self.pace = pace;
+        self
+    }
+
     /// Enable/disable proactive conservation spreading (`config.mesh.subscription_conserve`).
     pub fn with_conserve(mut self, on: bool) -> Self {
         self.conserve = on;
@@ -1029,6 +1039,30 @@ impl SubscriptionQuota {
     /// Fraction of the strictest window consumed for a provider (0.0 when unknown).
     pub fn fraction_for(&self, provider: &str) -> f64 {
         self.fraction.get(provider).copied().unwrap_or(0.0)
+    }
+
+    /// The pace projection for a provider, if one was attached and there was enough quota
+    /// history to derive it (see [`compute_quota_pace`]).
+    pub fn pace_for(&self, provider: &str) -> Option<QuotaPace> {
+        self.pace.get(provider).copied()
+    }
+
+    /// The conservation input for a provider (quota-pace-routing.md): `fraction_for(provider)`
+    /// raised to the pace's `projected_fraction_at_reset` (clamped to 1.0) when a pace is present
+    /// AND projects HIGHER than the current fraction — a window projected to hit 90% by reset is
+    /// treated as if it's already at 90%, so spreading ramps up ahead of the overrun instead of
+    /// reacting to it only once it actually crosses a threshold. The projection can only raise,
+    /// never lower, the fraction: a cooling-down window (rate has since dropped, so the projection
+    /// now reads under the current fraction) still conserves on what's already spent, not on a
+    /// stale lower number.
+    pub fn effective_fraction_for(&self, provider: &str) -> f64 {
+        let frac = self.fraction_for(provider);
+        let projected = self
+            .pace_for(provider)
+            .and_then(|p| p.projected_fraction_at_reset)
+            .unwrap_or(0.0)
+            .min(1.0);
+        frac.max(projected)
     }
 
     /// The configured plan slug for a provider (`""` when unset).
@@ -1074,6 +1108,13 @@ pub struct QuotaHistoryPoint {
 /// nonsensical rate/projection — this floor makes "not enough data yet" an explicit `None`
 /// instead of a false reading.
 pub const QUOTA_PACE_MIN_ELAPSED_SECS: i64 = 300;
+
+/// A lookback window wide enough to cover a `weekly` subscription window's history without
+/// pulling the whole `quota_history` table (rows are one per turn's quota hint, so this is small
+/// even at 8 days). Shared by the statusline's [`compute_quota_pace`] caller (forge-core's
+/// `emit_quota_pace`) and the store's [`SubscriptionQuota`] pace attachment (`quota_at`) so both
+/// project off the same history window.
+pub const QUOTA_PACE_LOOKBACK_SECS: i64 = 8 * 24 * 3600;
 
 /// A projection of where a subscription window's usage is headed, derived from a short history
 /// of `(observed_at, fraction_used)` points by [`compute_quota_pace`]. Pure/deterministic: no
@@ -1529,5 +1570,64 @@ mod tests {
         assert!((pace.rate_per_hour - 0.10).abs() < 1e-9, "{pace:?}");
         assert!(pace.projected_fraction_at_reset.is_none());
         assert!(!pace.exhaustion_warning);
+    }
+
+    fn pace(projected_fraction_at_reset: Option<f64>) -> QuotaPace {
+        QuotaPace {
+            rate_per_hour: 0.0,
+            rate_per_day: 0.0,
+            projected_fraction_at_reset,
+            time_to_exhaustion_secs: None,
+            exhaustion_warning: false,
+        }
+    }
+
+    #[test]
+    fn effective_fraction_without_pace_is_the_plain_fraction() {
+        let mut fr = std::collections::HashMap::new();
+        fr.insert("claude-cli".to_string(), 0.42);
+        let q = SubscriptionQuota::new(std::collections::HashMap::new()).with_fractions(fr);
+        assert!((q.effective_fraction_for("claude-cli") - 0.42).abs() < 1e-9);
+    }
+
+    #[test]
+    fn effective_fraction_uses_projection_when_it_is_higher() {
+        let mut fr = std::collections::HashMap::new();
+        fr.insert("claude-cli".to_string(), 0.2);
+        let mut pc = std::collections::HashMap::new();
+        pc.insert("claude-cli".to_string(), pace(Some(1.3)));
+        let q = SubscriptionQuota::new(std::collections::HashMap::new())
+            .with_fractions(fr)
+            .with_paces(pc);
+        // Projection over 100% clamps to 1.0.
+        assert!((q.effective_fraction_for("claude-cli") - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn effective_fraction_keeps_current_when_projection_is_lower() {
+        let mut fr = std::collections::HashMap::new();
+        fr.insert("claude-cli".to_string(), 0.6);
+        let mut pc = std::collections::HashMap::new();
+        pc.insert("claude-cli".to_string(), pace(Some(0.3)));
+        let q = SubscriptionQuota::new(std::collections::HashMap::new())
+            .with_fractions(fr)
+            .with_paces(pc);
+        assert!(
+            (q.effective_fraction_for("claude-cli") - 0.6).abs() < 1e-9,
+            "a cooling-down projection must not lower the fraction below what's already spent"
+        );
+    }
+
+    #[test]
+    fn effective_fraction_with_no_projection_falls_back_to_plain_fraction() {
+        // A pace can exist (enough history) but have no resets_at, so no projection.
+        let mut fr = std::collections::HashMap::new();
+        fr.insert("claude-cli".to_string(), 0.35);
+        let mut pc = std::collections::HashMap::new();
+        pc.insert("claude-cli".to_string(), pace(None));
+        let q = SubscriptionQuota::new(std::collections::HashMap::new())
+            .with_fractions(fr)
+            .with_paces(pc);
+        assert!((q.effective_fraction_for("claude-cli") - 0.35).abs() < 1e-9);
     }
 }

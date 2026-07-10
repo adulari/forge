@@ -133,6 +133,8 @@ pub(crate) fn build_mesh_overlay(
                 plan: q.plan.clone(),
                 status: format!("{:?}", q.status),
                 spread_complex: q.spread_probability,
+                projected_fraction_at_reset: q.projected_fraction_at_reset,
+                exhaustion_warning: q.exhaustion_warning,
             })
             .collect(),
         candidates: candidates.clone(),

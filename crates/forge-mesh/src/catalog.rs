@@ -283,6 +283,12 @@ fn plan_factor(slug: &str) -> f64 {
 /// tier, how full the strictest window is (`fraction`), the plan headroom, and code-heaviness.
 /// Trivial always spreads (subs are never worth spending on it); Standard mostly spreads; Complex
 /// spreads a minority while fresh and ramps to ~1.0 as the window approaches the 80% Warning line.
+///
+/// `fraction` is a plain 0.0–1.0 input to this pure function — it doesn't know where the number
+/// came from. Real routing (`conserve_decision`) and the `/mesh` inspector (`spread_probability`)
+/// both pass `SubscriptionQuota::effective_fraction_for`, which is pace-projected: a window
+/// burning fast early on is passed in as if it were already at its projected reset-time usage,
+/// so the ramp above starts ahead of the overrun instead of reacting to one already at Warning.
 fn conserve_probability(tier: TaskTier, fraction: f64, plan: &str, code_heavy: bool) -> f64 {
     let base = match tier {
         TaskTier::Trivial => 1.0,
@@ -368,6 +374,10 @@ pub struct ConserveDecision {
 /// strongest conservation pull across the present subscription providers (protect whichever is most
 /// pressured / smallest-plan), then draws a stable per-prompt value against it. Does not fire when
 /// disabled, when there are no subscriptions, or when no capable alternative exists.
+///
+/// The fraction driving that pull is pace-projected (`SubscriptionQuota::effective_fraction_for`),
+/// not just the point-in-time fraction — a window burning fast early on is treated as if it's
+/// already at its projected reset-time usage, so spreading ramps up ahead of the overrun.
 pub(crate) fn conserve_decision(
     models: &[String],
     tier: TaskTier,
@@ -399,7 +409,7 @@ pub(crate) fn conserve_decision(
         .map(|prov| {
             conserve_probability(
                 tier,
-                quota.fraction_for(prov),
+                quota.effective_fraction_for(prov),
                 quota.plan_for(prov),
                 code_heavy,
             )
