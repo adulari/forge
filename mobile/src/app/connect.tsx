@@ -168,7 +168,7 @@ export default function ConnectScreen() {
           mono
           value={url}
           onChangeText={(t) => {
-            setUrl(t);
+            setUrl(t.trimStart());
             setFormatError(null);
             setTestState("idle");
           }}

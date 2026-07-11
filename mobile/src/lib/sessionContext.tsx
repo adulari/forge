@@ -50,6 +50,11 @@ export interface SessionCtxValue {
   setDraftAttachments: (next: Attachment[] | ((prev: Attachment[]) => Attachment[])) => void;
   lastPrompt: string | null;
   setLastPrompt: (text: string) => void;
+  /** Incremented by the session shell to request that the Composer focus its input
+   * (e.g. the ⌘E web shortcut). The Composer watches this counter and focuses on
+   * change — a counter (not a boolean) so repeated requests always re-fire. */
+  composerFocusSignal: number;
+  focusComposer: () => void;
 }
 
 const SessionCtx = createContext<SessionCtxValue | null>(null);
@@ -67,6 +72,7 @@ export function SessionProvider({
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const draft = drafts[sessionId] ?? EMPTY_DRAFT;
   const [lastPrompts, setLastPrompts] = useState<Record<string, string>>({});
+  const [composerFocusSignal, setComposerFocusSignal] = useState(0);
 
   const [snapshotTimedOut, setSnapshotTimedOut] = useState(false);
   const hasSnapshot = snapshot != null;
@@ -103,6 +109,11 @@ export function SessionProvider({
     [sessionId],
   );
 
+  const focusComposer = useCallback(
+    () => setComposerFocusSignal((n) => n + 1),
+    [],
+  );
+
   const value = useMemo<SessionCtxValue>(
     () => ({
       sessionId,
@@ -119,6 +130,8 @@ export function SessionProvider({
       setDraftAttachments,
       lastPrompt: lastPrompts[sessionId] ?? null,
       setLastPrompt,
+      composerFocusSignal,
+      focusComposer,
     }),
     [
       sessionId,
@@ -133,6 +146,8 @@ export function SessionProvider({
       setDraftAttachments,
       lastPrompts,
       setLastPrompt,
+      composerFocusSignal,
+      focusComposer,
     ],
   );
 

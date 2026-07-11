@@ -13,7 +13,7 @@
 import * as Clipboard from "expo-clipboard";
 import { router, Slot, useLocalSearchParams, usePathname } from "expo-router";
 import { ArrowLeft } from "lucide-react-native";
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import { StyleSheet, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -25,6 +25,7 @@ import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { SessionHeader } from "../../../components/session/SessionHeader";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
+import { useHotkey } from "../../../lib/shortcuts";
 import { useTurnCompleted } from "../../../lib/queries";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
@@ -53,7 +54,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const toast = useToast();
   const pathname = usePathname();
   const { isCompact } = useBreakpoint();
-  const { snapshot, connectionState, send, setHeaderHeight, baseUrl } = useSessionCtx();
+  const { snapshot, connectionState, send, setHeaderHeight, baseUrl, focusComposer } = useSessionCtx();
 
   // ARCHITECTURE §4.1.4: on the `busy` true->false edge, invalidate this session's history
   // query so the finalized turn appears from the store. The shell only needs to call the
@@ -121,11 +122,29 @@ function SessionShell({ sessionId }: { sessionId: string }) {
     ];
   }, [snapshot?.tasks.length, snapshot?.subagents.length, snapshot?.plan, snapshot?.diff]);
 
-  const onSegmentChange = (value: SegmentValue) => {
-    if (value === activeSegment) return;
-    const suffix = SEGMENT_SUFFIX[value];
-    router.replace(`/session/${sessionId}${suffix ? `/${suffix}` : ""}` as never);
-  };
+  const onSegmentChange = useCallback(
+    (value: SegmentValue) => {
+      if (value === activeSegment) return;
+      const suffix = SEGMENT_SUFFIX[value];
+      router.replace(`/session/${sessionId}${suffix ? `/${suffix}` : ""}` as never);
+    },
+    [activeSegment, sessionId],
+  );
+
+  // Web/desktop in-session keyboard shortcuts (native `useHotkey` is a no-op). Alt+C/T/A/R
+  // switch the Chat/Tasks/Agents/Review segment (Alt+1..4 is already tab-level navigation in
+  // useGlobalShortcuts; ⌘1..9 is a browser-chrome tab switcher that never reaches page JS, so
+  // letter keys with Alt are used instead); ⌘E focuses the composer; ⌘. interrupts a busy
+  // turn. All use the existing `useHotkey` registry (T4.2/T5.1) — no new listener.
+  const interrupt = useCallback(() => {
+    if (snapshot?.busy) send({ kind: "interrupt" });
+  }, [snapshot?.busy, send]);
+  useHotkey("c", () => onSegmentChange("chat"), { alt: true });
+  useHotkey("t", () => onSegmentChange("tasks"), { alt: true });
+  useHotkey("a", () => onSegmentChange("agents"), { alt: true });
+  useHotkey("r", () => onSegmentChange("review"), { alt: true });
+  useHotkey("e", focusComposer, { meta: true });
+  useHotkey(".", interrupt, { meta: true });
 
   const closed = snapshot?.closed ?? false;
   const protocolMismatch = snapshot != null && snapshot.protocol !== PROTOCOL_VERSION;
