@@ -28,7 +28,7 @@ const SELECT_BG: Color = Color::Rgb(40, 70, 132);
 const ORANGE: Color = Color::Rgb(255, 138, 48);
 
 /// Description for each action.
-fn action_desc(action: &str) -> &'static str {
+pub(crate) fn action_desc(action: &str) -> &'static str {
     match action {
         "interrupt" => "Stop current turn",
         "command_palette" => "Open slash-command palette",
@@ -59,7 +59,7 @@ fn is_mid_turn_only(action: &str) -> bool {
 }
 
 /// All actions in display order.
-fn all_actions() -> Vec<&'static str> {
+pub(crate) fn all_actions() -> Vec<&'static str> {
     vec![
         "interrupt",
         "command_palette",

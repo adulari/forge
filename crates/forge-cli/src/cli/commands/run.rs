@@ -1837,9 +1837,8 @@ pub(crate) async fn run_chat_tui(
                 }
 
                 if matches!(key, KeyKind::ShowHelp) {
-                    // Show help by opening the keybind configurator in read-only mode (clone, discard).
-                    let mut tmp = app.keybinds.clone();
-                    let _ = tui.run_fullscreen(|| forge_tui::run_keybind_configurator(&mut tmp));
+                    let bindings = app.keybinds.clone();
+                    let _ = tui.run_fullscreen(|| forge_tui::run_help(&bindings));
                     dirty = true;
                     continue;
                 }
@@ -1851,8 +1850,8 @@ pub(crate) async fn run_chat_tui(
                     && !busy
                     && !app.palette.open
                 {
-                    let mut tmp = app.keybinds.clone();
-                    let _ = tui.run_fullscreen(|| forge_tui::run_keybind_configurator(&mut tmp));
+                    let bindings = app.keybinds.clone();
+                    let _ = tui.run_fullscreen(|| forge_tui::run_help(&bindings));
                     dirty = true;
                     continue;
                 }

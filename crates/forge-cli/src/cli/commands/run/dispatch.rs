@@ -191,19 +191,13 @@ pub(crate) async fn dispatch_command(
         return Ok(DispatchOutcome::Handled);
     }
     match action {
-        CommandAction::Help => app.palette.open_with(""),
-        CommandAction::Keys => {
-            // Reuse the #362 keybind help overlay (read-only: edit a clone, discard) so `/keys`
-            // doesn't duplicate the F1/ShowHelp surface. Host-terminal-only by design — a
-            // headless (`forge serve`) session has no terminal to run the configurator on.
-            match tui.as_mut() {
-                Some(tui) => {
-                    let mut tmp = app.keybinds.clone();
-                    let _ = tui.run_fullscreen(|| forge_tui::run_keybind_configurator(&mut tmp));
-                }
-                None => app.note("⌨ /keys is host-only (a fullscreen keybind configurator)"),
+        CommandAction::Help | CommandAction::Keys => match tui.as_mut() {
+            Some(tui) => {
+                let bindings = app.keybinds.clone();
+                let _ = tui.run_fullscreen(|| forge_tui::run_help(&bindings));
             }
-        }
+            None => app.note("⌨ /help is host-only (a fullscreen reference viewer)"),
+        },
         CommandAction::Quit => return Ok(DispatchOutcome::Quit),
         CommandAction::ClearScreen => {
             if let Some(tui) = tui.as_mut() {
