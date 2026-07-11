@@ -1697,7 +1697,7 @@ pub(crate) async fn pump_ws(
                     }
                 }
                 _ = keepalive.tick() => {
-                    if tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    if tx.send(Message::Text(r#"{"keepalive":true}"#.into())).await.is_err() {
                         break;
                     }
                 }
