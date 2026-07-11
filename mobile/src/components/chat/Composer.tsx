@@ -67,7 +67,7 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
   // between Chat/Tasks/Agents/Review segments underneath it, which unmounts this component on
   // every tab switch — plain useState here would wipe a half-typed message. Keyed per session
   // (not per-component-instance) so it can't bleed across a session change either.
-  const { draftText: text, setDraftText: setText, draftAttachments: attachments, setDraftAttachments: setAttachments, lastPrompt, setLastPrompt } =
+  const { draftText: text, setDraftText: setText, draftAttachments: attachments, setDraftAttachments: setAttachments, lastPrompt, setLastPrompt, composerFocusSignal } =
     useSessionCtx();
   const toast = useToast();
   const [height, setHeight] = useState(MIN_HEIGHT);
@@ -76,6 +76,14 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
   useEffect(() => {
     textRef.current = text;
   }, [text]);
+
+  // Shell→Composer focus bridge: the session shell increments `composerFocusSignal` (e.g.
+  // the ⌘E web shortcut) to request that this input take focus. A counter so repeated
+  // requests always re-fire. Native `useHotkey` is a no-op, so this never fires there.
+  useEffect(() => {
+    if (composerFocusSignal === 0) return;
+    inputRef.current?.focus();
+  }, [composerFocusSignal]);
 
   const canSend = text.trim().length > 0 && !attachments.some((a) => a.state === "uploading");
 
