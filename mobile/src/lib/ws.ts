@@ -94,6 +94,7 @@ export interface Snapshot {
   busy: boolean;
   done: boolean;
   temper: string;
+  effort?: string | null;
   tier: string | null;
   model: string;
   cost_usd: number;

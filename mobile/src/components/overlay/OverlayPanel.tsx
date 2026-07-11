@@ -37,6 +37,7 @@ import { Input } from "../ds/Input";
 import { ListRow } from "../ds/ListRow";
 import { SearchField } from "../ds/SearchField";
 import { SectionHeader } from "../ds/SectionHeader";
+import { isNativeOverlayKind, NativeOverlayContent } from "./NativeOverlayContent";
 import { Sheet } from "../ds/Sheet";
 import { haptics } from "../../lib/haptics";
 import type { Overlay, OverlayRow, RemoteInput } from "../../lib/ws";
@@ -125,6 +126,7 @@ export function OverlayPanel({ overlay, visible, send, onClose }: OverlayPanelPr
   };
 
   const showEmpty = overlay.rows.length === 0 && overlay.body == null && !overlay.free_text;
+  const hasNativeContent = isNativeOverlayKind(overlay.kind) && (overlay.kind !== "overlay:usage" || overlay.body != null);
 
   const content = (
     <View style={styles.container}>
@@ -151,29 +153,33 @@ export function OverlayPanel({ overlay, visible, send, onClose }: OverlayPanelPr
         </View>
       ) : null}
 
-      <ScrollView style={styles.rows} keyboardShouldPersistTaps="handled">
-        {groups.map((g, gi) => (
-          <View key={g.group ?? `_row_group_${gi}`}>
-            {g.group ? <SectionHeader>{g.group}</SectionHeader> : null}
-            {g.rows.map((row) => (
-              <View key={row.id} style={row.selected ? { backgroundColor: tokens.selection } : undefined}>
-                <ListRow
-                  title={row.label}
-                  subtitle={row.detail || undefined}
-                  onPress={() => selectRow(row.id)}
-                  accessibilityRole="menuitem"
-                  accessibilityLabel={row.detail ? `${row.label} — ${row.detail}` : row.label}
-                />
-              </View>
-            ))}
-          </View>
-        ))}
-        {showEmpty ? (
-          <Text style={[typeScale.sub, styles.emptyText, { color: tokens.ink3 }]}>no matches</Text>
-        ) : null}
-      </ScrollView>
+      {hasNativeContent ? (
+        <NativeOverlayContent overlay={overlay} onSelect={selectRow} />
+      ) : (
+        <ScrollView style={styles.rows} keyboardShouldPersistTaps="handled">
+          {groups.map((g, gi) => (
+            <View key={g.group ?? `_row_group_${gi}`}>
+              {g.group ? <SectionHeader>{g.group}</SectionHeader> : null}
+              {g.rows.map((row) => (
+                <View key={row.id} style={row.selected ? { backgroundColor: tokens.selection } : undefined}>
+                  <ListRow
+                    title={row.label}
+                    subtitle={row.detail || undefined}
+                    onPress={() => selectRow(row.id)}
+                    accessibilityRole="menuitem"
+                    accessibilityLabel={row.detail ? `${row.label} — ${row.detail}` : row.label}
+                  />
+                </View>
+              ))}
+            </View>
+          ))}
+          {showEmpty ? (
+            <Text style={[typeScale.sub, styles.emptyText, { color: tokens.ink3 }]}>no matches</Text>
+          ) : null}
+        </ScrollView>
+      )}
 
-      {overlay.body != null ? (
+      {overlay.body != null && overlay.kind !== "overlay:usage" ? (
         <ScrollView style={[styles.bodyWell, { backgroundColor: tokens.bg0, borderRadius: radii.radius12 }]}>
           <Text style={[typeScale.codeSmall, { color: tokens.ink2 }]} selectable>
             {overlay.body}

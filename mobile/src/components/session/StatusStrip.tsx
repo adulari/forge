@@ -3,12 +3,14 @@
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
+import type { RemoteInput } from "../../lib/ws";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 import { Chip } from "../ds/Chip";
 import { ContextGauge } from "../ds/ContextGauge";
 import { CostMetric } from "../ds/CostMetric";
+import { EffortPicker } from "./EffortPicker";
 import { StatusDot } from "../ds/StatusDot";
 
 export interface StatusStripProps {
@@ -16,6 +18,8 @@ export interface StatusStripProps {
   tier: string | null;
   model: string;
   temper: string;
+  effort?: string | null;
+  send: (input: RemoteInput) => void;
   costUsd: number;
   contextTokens: number;
   contextLimit: number | null;
@@ -26,6 +30,8 @@ export function StatusStrip({
   tier,
   model,
   temper,
+  effort,
+  send,
   costUsd,
   contextTokens,
   contextLimit,
@@ -40,6 +46,7 @@ export function StatusStrip({
         {tierModel}
       </Text>
       <Chip label={temper} />
+      <EffortPicker effort={effort} send={send} />
       <CostMetric valueUsd={costUsd} />
       {contextLimit != null ? (
         <View style={styles.gauge}>
