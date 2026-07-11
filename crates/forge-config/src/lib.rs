@@ -1383,6 +1383,13 @@ pub struct MeshConfig {
     /// affected, so interactive use never sees it. Set false to disable even for bench.
     #[serde(default = "default_bridge_require_tools")]
     pub bridge_require_tools: bool,
+    /// Per-result token budget for older tool output in model requests. The newest tool results
+    /// stay verbatim; full output remains persisted for replay. `0` disables request elision.
+    #[serde(default = "default_tool_result_context_token_budget")]
+    pub tool_result_context_token_budget: usize,
+    /// Number of newest tool results kept verbatim before older oversized results are elided.
+    #[serde(default = "default_tool_result_context_keep_recent")]
+    pub tool_result_context_keep_recent: usize,
     /// Per-turn cumulative input-token ceiling for a CLI bridge turn (wave 5). A bridge runs its
     /// own tool loop inside a subprocess, so the direct-path cost guards (which only see
     /// `resp.tool_calls`) never fire on it — an unbounded bridge turn is the dominant tail-cost
@@ -1527,6 +1534,14 @@ fn default_env_fight_nudge() -> bool {
 
 fn default_bridge_require_tools() -> bool {
     true
+}
+
+fn default_tool_result_context_token_budget() -> usize {
+    4_096
+}
+
+fn default_tool_result_context_keep_recent() -> usize {
+    2
 }
 
 fn default_bridge_turn_token_cap() -> u64 {
@@ -1955,6 +1970,8 @@ impl Default for Config {
                 deadline_reconcile: default_deadline_reconcile(),
                 env_fight_nudge: default_env_fight_nudge(),
                 bridge_require_tools: default_bridge_require_tools(),
+                tool_result_context_token_budget: default_tool_result_context_token_budget(),
+                tool_result_context_keep_recent: default_tool_result_context_keep_recent(),
                 bridge_turn_token_cap: default_bridge_turn_token_cap(),
                 bridge_models: HashMap::new(),
                 subscriptions: HashMap::new(),

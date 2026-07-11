@@ -25,6 +25,11 @@ const PRUNE_HEAD_KEEP: usize = 1500;
 pub(crate) const PRUNE_MARKER: &str =
     "\n…[older tool output pruned to save context; full text in replay]…";
 
+/// Marker used for older tool results in a provider request. Unlike [`PRUNE_MARKER`], this is a
+/// pure request-view transform: persistence and the newest tool batch remain intact.
+const TOOL_RESULT_ELISION_MARKER: &str =
+    "\n…[{} chars (~{} tokens) elided — re-run the tool to see full output]…\n";
+
 /// Conservative chars-per-token bound used ONLY when slicing a single oversized message's content
 /// down to a token budget (real token offsets aren't worth the cost there). Counting elsewhere uses
 /// the real BPE tokenizer ([`tokens`]); this 3 under-estimates so the sliced text stays within
@@ -39,15 +44,89 @@ pub(crate) fn prune_and_inject(messages: &mut [Message], keep_recent: usize) -> 
     prune_tool_results(messages, keep_recent)
 }
 
-/// Phase 2: the model-facing view of a transcript for ONE provider call. Strips `UiOnly`
-/// messages, then trims what remains to `budget_tokens`. Pure — the transcript is untouched.
-pub(crate) fn to_llm(messages: &[Message], budget_tokens: usize) -> Vec<Message> {
+/// messages, then elides bulky older tool results while retaining a balanced head and tail. The
+/// newest `keep_recent_tool_results` tool messages remain verbatim so an in-progress tool loop
+/// keeps all of the data it just produced. Pure — persistence and the in-memory transcript are
+/// untouched.
+pub(crate) fn to_llm(
+    messages: &[Message],
+    budget_tokens: usize,
+    tool_result_token_budget: usize,
+    keep_recent_tool_results: usize,
+) -> Vec<Message> {
     let llm_only: Vec<Message> = messages
         .iter()
         .filter(|m| m.visibility.is_llm())
         .cloned()
         .collect();
-    fit_messages(&llm_only, budget_tokens)
+    let elided = elide_old_tool_results(
+        &llm_only,
+        tool_result_token_budget,
+        keep_recent_tool_results,
+    );
+    fit_messages(&elided, budget_tokens)
+}
+
+fn elide_old_tool_results(
+    messages: &[Message],
+    token_budget: usize,
+    keep_recent_tool_results: usize,
+) -> Vec<Message> {
+    if token_budget == 0 {
+        return messages.to_vec();
+    }
+    let protected_from = if keep_recent_tool_results == 0 {
+        messages.len()
+    } else {
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.role == Role::Tool)
+            .rev()
+            .nth(keep_recent_tool_results - 1)
+            .map(|(index, _)| index)
+            .unwrap_or(messages.len())
+    };
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            if message.role != Role::Tool || index >= protected_from {
+                return message.clone();
+            }
+            elide_tool_result(message, token_budget)
+        })
+        .collect()
+}
+
+fn elide_tool_result(message: &Message, token_budget: usize) -> Message {
+    if tokens::count_text(&message.content) <= token_budget {
+        return message.clone();
+    }
+    let chars: Vec<char> = message.content.chars().collect();
+    let marker = TOOL_RESULT_ELISION_MARKER.replace("{}", &format!("{}", chars.len()));
+    let marker_tokens = tokens::count_text(&marker);
+    let keep_chars = token_budget
+        .saturating_sub(marker_tokens)
+        .saturating_mul(CHARS_PER_TOKEN);
+    let head_chars = keep_chars / 2;
+    let tail_chars = keep_chars.saturating_sub(head_chars);
+    let omitted = chars.len().saturating_sub(head_chars + tail_chars);
+    let marker = TOOL_RESULT_ELISION_MARKER
+        .replacen("{}", &omitted.to_string(), 1)
+        .replacen("{}", &(omitted / CHARS_PER_TOKEN).to_string(), 1);
+    let mut elided = message.clone();
+    elided.content = format!(
+        "{}{}{}",
+        chars[..head_chars.min(chars.len())]
+            .iter()
+            .collect::<String>(),
+        marker,
+        chars[chars.len().saturating_sub(tail_chars)..]
+            .iter()
+            .collect::<String>()
+    );
+    elided
 }
 
 /// Real token cost of one message: its content (BPE-counted, cached) + the chat framing overhead +
@@ -188,7 +267,7 @@ mod tests {
             Message::system("⚠ budget cap reached — routing stopped").ui_only(),
             Message::assistant("done"),
         ];
-        let out = to_llm(&msgs, 10_000);
+        let out = to_llm(&msgs, 10_000, 4_096, 2);
         assert_eq!(out.len(), 3);
         assert!(out.iter().all(|m| m.visibility.is_llm()));
         assert!(!out.iter().any(|m| m.content.contains("budget cap")));
@@ -202,10 +281,43 @@ mod tests {
             Message::system("x".repeat(100_000)).ui_only(),
             Message::user("and me"),
         ];
-        let out = to_llm(&msgs, 200);
+        let out = to_llm(&msgs, 200, 4_096, 2);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].content, "keep me");
         assert_eq!(out[1].content, "and me");
+    }
+
+    #[test]
+    fn to_llm_elides_old_tool_output_and_keeps_recent_results_verbatim() {
+        let old = format!("head-{}-tail", "x".repeat(30_000));
+        let recent = "recent tool evidence".to_string();
+        let msgs = vec![
+            Message::assistant("calling tools"),
+            Message::tool_result("old", old.clone()),
+            Message::assistant("next call"),
+            Message::tool_result("recent", recent.clone()),
+        ];
+
+        let out = to_llm(&msgs, 100_000, 200, 1);
+        assert!(out[1].content.starts_with("head-"));
+        assert!(out[1].content.ends_with("-tail"));
+        assert!(out[1]
+            .content
+            .contains("elided — re-run the tool to see full output"));
+        assert!(out[1].content.len() < old.len() / 10);
+        assert_eq!(out[3].content, recent);
+        assert_eq!(
+            msgs[1].content, old,
+            "request transform must not mutate persistence"
+        );
+    }
+
+    #[test]
+    fn to_llm_zero_tool_budget_disables_elision() {
+        let result = "x".repeat(30_000);
+        let msgs = vec![Message::tool_result("c1", result.clone())];
+        let out = to_llm(&msgs, 100_000, 0, 0);
+        assert_eq!(out[0].content, result);
     }
 
     #[test]

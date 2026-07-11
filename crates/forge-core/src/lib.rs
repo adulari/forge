@@ -2553,7 +2553,12 @@ impl Session {
         // Real-token budget: window minus the reply reservation, with 5% headroom for the small
         // magnitude difference between our o200k counter and the target model's own tokenizer.
         let budget_tokens = window.saturating_sub(reserve) * 95 / 100;
-        to_llm(&self.transcript, budget_tokens.max(256))
+        to_llm(
+            &self.transcript,
+            budget_tokens.max(256),
+            self.config.mesh.tool_result_context_token_budget,
+            self.config.mesh.tool_result_context_keep_recent,
+        )
     }
 
     /// The base harness preamble prepended (fresh, never persisted) to every main-loop request:
@@ -2599,7 +2604,12 @@ impl Session {
             * 95
             / 100;
         let mut out = preamble;
-        out.extend(to_llm(&self.transcript, budget_tokens.max(256)));
+        out.extend(to_llm(
+            &self.transcript,
+            budget_tokens.max(256),
+            self.config.mesh.tool_result_context_token_budget,
+            self.config.mesh.tool_result_context_keep_recent,
+        ));
         out
     }
 
