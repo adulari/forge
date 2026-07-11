@@ -5,13 +5,11 @@
 // §4.1.4 dedupe rule, implemented literally (not content-matched): the timeline's source of
 // truth is `useHistory` rows. The snapshot contributes ONLY (a) the live `streaming` edge while
 // `busy`, always rendered, and (b) `transcript` tail lines as instant warm-start filler — used
-// ONLY until `historyQuery.data` resolves for the first time for this session (from persisted
-// cache or network), then dropped for good. The two sources (history vs. filler) are mutually
-// exclusive per render, so there is nothing to de-duplicate by content — they simply never
-// co-exist. Turn-completion history invalidation (busy true->false) is already wired by the
+// until history has actual rows. The two sources remain mutually exclusive, so there is nothing
+// to de-duplicate by content. Turn-completion history invalidation (busy true->false) is already wired by the
 // T3.1 session shell's `useTurnCompleted(snapshot)` call in `_layout.tsx` — not repeated here.
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { ChevronDown, Clock, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
+import { ChevronDown, Clock, Hammer, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -48,9 +46,9 @@ import { haptics } from "../../../lib/haptics";
 import { useHistory } from "../../../lib/queries";
 import { parseReasoning } from "../../../lib/reasoning";
 import { useSessionCtx } from "../../../lib/sessionContext";
-import { easings } from "../../../theme/motion";
+import { easings, useEmberdot } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
-import { space } from "../../../theme/tokens";
+import { radii, space } from "../../../theme/tokens";
 import { type as typeScale } from "../../../theme/typography";
 
 // T3.3's CardSlot.tsx landed during this task (was a HANDOFF stub) — wired in directly above.
@@ -67,6 +65,7 @@ type TimelineItem =
   | { kind: "streaming"; id: string; text: string; streaming: boolean }
   | { kind: "history"; id: string; row: HistoryRow }
   | { kind: "filler"; id: string; text: string }
+  | { kind: "note"; id: string; text: string }
   | { kind: "pendingSent"; id: string; text: string; attachments: SentAttachment[] };
 
 // How long an optimistic "pendingSent" bubble is allowed to linger without a real history row
@@ -95,6 +94,36 @@ interface PendingSent {
 const CARET_SIZE = 7;
 const CARET_PULSE_MS = 1000;
 const CARET_MIN_OPACITY = 0.4;
+
+function formatElapsed(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds.toString().padStart(2, "0")}s` : `${seconds}s`;
+}
+
+function LiveToolActivity({ line, startedAt }: { line: string; startedAt: number }) {
+  const tokens = useTokens();
+  const { dotStyle } = useEmberdot("busy");
+  const [elapsedMs, setElapsedMs] = useState(() => Date.now() - startedAt);
+
+  useEffect(() => {
+    setElapsedMs(Date.now() - startedAt);
+    const timer = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
+    return () => clearInterval(timer);
+  }, [startedAt]);
+
+  return (
+    <View style={[styles.activityRow, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
+      <Animated.View style={[styles.activityDot, { backgroundColor: tokens.accent }, dotStyle]} />
+      <Hammer size={14} strokeWidth={1.75} color={tokens.accent} />
+      <Text style={[typeScale.meta, styles.activityLine, { color: tokens.ink2 }]} numberOfLines={1}>
+        {line}
+      </Text>
+      <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatElapsed(elapsedMs)}</Text>
+    </View>
+  );
+}
 
 function StreamingAnswer({ text, streaming }: { text: string; streaming: boolean }) {
   const tokens = useTokens();
@@ -164,7 +193,7 @@ function StreamingAnswer({ text, streaming }: { text: string; streaming: boolean
 export default function SessionChat() {
   const tokens = useTokens();
   const toast = useToast();
-  const { sessionId, baseUrl, snapshot, connectionState, send, headerHeight } = useSessionCtx();
+  const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight } = useSessionCtx();
 
   const historyQuery = useHistory(sessionId);
 
@@ -318,9 +347,11 @@ export default function SessionChat() {
     return () => timers.forEach(clearTimeout);
   }, [pendingSent, toast]);
 
-  // Once `data` has resolved once (cache or network) for this session, the filler is gone for
-  // good — never re-armed by a later refetch/invalidation.
+  // REST history is authoritative once populated. A successful-but-empty page is not evidence
+  // that the daemon transcript is empty, so retain the snapshot tail until history has rows.
   const historySettled = historyQuery.data !== undefined;
+  const useTranscriptFiller = !historySettled || historyRows.length === 0;
+  const historyEmpty = historySettled && historyRows.length === 0 && (snapshot?.transcript.length ?? 0) === 0;
 
   // A deep link into a nonexistent/foreign session: `useHistory` 404s and no Snapshot ever
   // arrives over WS. All three conditions matter — `!historySettled` and `snapshot == null`
@@ -415,6 +446,24 @@ export default function SessionChat() {
   const displayText =
     streamingText || (busy ? track.retainedText : "") || (finalizingActive ? finalizing!.text : "");
 
+  const latestToolLine = useMemo(
+    () =>
+      [...(snapshot?.transcript ?? [])]
+        .reverse()
+        .find((line) => line.trimStart().startsWith("↳ ")) ?? null,
+    [snapshot?.transcript],
+  );
+  const [toolActivity, setToolActivity] = useState<{ line: string; startedAt: number } | null>(null);
+  useEffect(() => {
+    if (!busy || !latestToolLine) {
+      setToolActivity(null);
+      return;
+    }
+    setToolActivity((current) =>
+      current?.line === latestToolLine ? current : { line: latestToolLine, startedAt: Date.now() },
+    );
+  }, [busy, latestToolLine]);
+
   const items = useMemo<TimelineItem[]>(() => {
     const list: TimelineItem[] = [];
     // `busy` alone (before any tokens arrive) still gets a "streaming" slot — rendered with
@@ -431,20 +480,25 @@ export default function SessionChat() {
       const p = pendingSent[i];
       list.push({ kind: "pendingSent", id: p.id, text: p.text, attachments: p.attachments });
     }
-    if (historySettled) {
+    if (!useTranscriptFiller) {
       for (const row of historyRows) {
         list.push({ kind: "history", id: `h${row.seq}`, row });
       }
     } else {
-      // Warm-start filler only: `transcript` is a chronological (oldest->newest) scrollback
-      // tail, so walk it back-to-front to match the inverted list's newest-first data order.
+      // Snapshot transcript is chronological (oldest->newest); walk it back-to-front for the
+      // inverted list. It remains visible after an empty history response because that response
+      // cannot prove the server transcript is empty.
       const filler = snapshot?.transcript ?? [];
       for (let i = filler.length - 1; i >= 0; i--) {
         list.push({ kind: "filler", id: `f${i}`, text: filler[i] });
       }
     }
+    const notes = snapshot?.notes ?? [];
+    for (let i = notes.length - 1; i >= 0; i--) {
+      list.push({ kind: "note", id: `n${i}`, text: notes[i] });
+    }
     return list;
-  }, [displayText, streamingText, busy, pendingSent, historySettled, historyRows, snapshot?.transcript]);
+  }, [displayText, streamingText, busy, pendingSent, useTranscriptFiller, historyRows, snapshot?.transcript, snapshot?.notes]);
 
   // Pin to the latest item when a NEW item lands at the newest slot — not on every streaming
   // text tick (same item id, StreamingAnswer owns its own rAF coalescing), and not when an older
@@ -501,10 +555,16 @@ export default function SessionChat() {
             // ActivityIndicator+accent pairing BoundedList's loadingMore footer uses) so this
             // phase never reads as stuck.
             return item.streaming ? (
-              <View style={[styles.streamingRow, styles.thinkingRow]}>
-                <ActivityIndicator size="small" color={tokens.accent} />
-                <Text style={[typeScale.meta, { color: tokens.ink3 }]}>thinking…</Text>
-              </View>
+              toolActivity ? (
+                <View style={styles.streamingRow}>
+                  <LiveToolActivity line={toolActivity.line} startedAt={toolActivity.startedAt} />
+                </View>
+              ) : (
+                <View style={[styles.streamingRow, styles.thinkingRow]}>
+                  <ActivityIndicator size="small" color={tokens.accent} />
+                  <Text style={[typeScale.meta, { color: tokens.ink3 }]}>thinking…</Text>
+                </View>
+              )
             ) : null;
           }
           return (
@@ -521,6 +581,12 @@ export default function SessionChat() {
             </View>
           );
         }
+        case "note":
+          return (
+            <View style={styles.noteRow}>
+              <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{item.text}</Text>
+            </View>
+          );
         case "filler":
         default:
           return (
@@ -530,7 +596,7 @@ export default function SessionChat() {
           );
       }
     },
-    [tokens.ink2, tokens.ink3, tokens.accent],
+    [tokens.ink2, tokens.ink3, tokens.accent, toolActivity],
   );
 
   const keyExtractor = useCallback((item: TimelineItem) => item.id, []);
@@ -562,7 +628,14 @@ export default function SessionChat() {
           onEndReached={onEndReached}
           loadingMore={historyQuery.isFetchingNextPage}
           ListEmptyComponent={
-            historyDead ? (
+            (snapshot == null && !snapshotTimedOut) || (!historySettled && !historyQuery.isError) ? (
+              <View style={styles.connectingRow}>
+                <ActivityIndicator size="small" color={tokens.accent} />
+                <Text style={[typeScale.meta, { color: tokens.ink3 }]}>
+                  {snapshot == null ? "connecting to session…" : "loading messages…"}
+                </Text>
+              </View>
+            ) : historyDead ? (
               <EmptyState
                 icon={historyErrorStatus === 404 ? SearchX : WifiOff}
                 message={
@@ -571,8 +644,10 @@ export default function SessionChat() {
                     : "couldn't load this session — check the server connection"
                 }
               />
-            ) : (
+            ) : historyEmpty ? (
               <EmptyState icon={MessageSquare} message="no messages yet — say something to get started" />
+            ) : (
+              <EmptyState icon={WifiOff} message="couldn't load this session's messages" />
             )
           }
         />
@@ -628,6 +703,18 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   streamingRow: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
   thinkingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  activityRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space8,
+    paddingHorizontal: space.space12,
+    borderRadius: radii.radius8,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  activityDot: { width: 8, height: 8, borderRadius: 4 },
+  activityLine: { flex: 1 },
+  noteRow: { paddingHorizontal: space.space16, paddingVertical: space.space4 },
+  connectingRow: { flex: 1, alignItems: "center", justifyContent: "center", gap: space.space8 },
   streamingAnswerRow: { flexDirection: "row", alignItems: "flex-end", flexWrap: "wrap" },
   streamingAnswerText: { flexShrink: 1 },
   caret: {

@@ -61,7 +61,6 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   useTurnCompleted(snapshot);
 
   const lastCopyText = useRef<string | null>(null);
-  const seenNoteCount = useRef(0);
 
   // Settings' removeServer/setActive change `useAuth().baseUrl` reactively, which
   // `SessionProvider` reconnects `useSessionSocket` against immediately — silently pointing
@@ -103,20 +102,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
     }
   }, [snapshot?.copy_text, toast]);
 
-  // notes: render each newly-appended note as a toast (Signal). Snapshot.notes only grows
-  // within a connection, so a length-based watermark is enough to avoid replaying old ones.
-  useEffect(() => {
-    const notes = snapshot?.notes ?? [];
-    for (let i = seenNoteCount.current; i < notes.length; i++) {
-      toast.show(notes[i]);
-    }
-    seenNoteCount.current = notes.length;
-  }, [snapshot?.notes, toast]);
-
-  // Reset watermarks when the session id changes (new socket, fresh snapshot history).
+  // Reset copy watermark when the session id changes (new socket, fresh snapshot history).
   useEffect(() => {
     lastCopyText.current = null;
-    seenNoteCount.current = 0;
   }, [sessionId]);
 
   const activeSegment = segmentFromPathname(pathname);
