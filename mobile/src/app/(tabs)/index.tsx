@@ -6,7 +6,7 @@
 import { router } from "expo-router";
 import { Flame, Plus } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { SearchField } from "../../components/ds/SearchField";
 import { SessionCard } from "../../components/fleet/SessionCard";
@@ -16,6 +16,7 @@ import { CostMetric } from "../../components/ds/CostMetric";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { IconButton } from "../../components/ds/IconButton";
 import { Screen } from "../../components/ds/Screen";
+import { StatusDot } from "../../components/ds/StatusDot";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { ApiError, type SessionRow } from "../../lib/api";
 import { useSessions } from "../../lib/queries";
@@ -43,7 +44,7 @@ function FleetTitle() {
 
 // DESIGN_ELEVATION.md Move 2 — airy 3-up of *type* (big tabular number + tiny uppercase
 // label), hairline-separated, NOT three bordered tiles.
-function FleetHeader({ sessions }: { sessions: SessionRow[] }) {
+function FleetHeader({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: SessionRow[]; needsYouOnly: boolean; onToggleNeedsYou: () => void }) {
   const tokens = useTokens();
   const totalCost = useMemo(() => sessions.reduce((sum, s) => sum + s.cost_usd, 0), [sessions]);
   const waitingCount = useMemo(() => sessions.filter((s) => s.waiting).length, [sessions]);
@@ -55,15 +56,18 @@ function FleetHeader({ sessions }: { sessions: SessionRow[] }) {
         <Text style={[typeScale.section, { color: tokens.ink3 }]}>spend</Text>
         <CostMetric valueUsd={totalCost} variant="bodyBold" />
       </View>
-      <View style={[styles.headerStat, styles.headerDivider, { borderColor: tokens.border }]}>
+      <Pressable
+        onPress={onToggleNeedsYou}
+        style={[styles.headerStat, styles.headerDivider, { borderColor: tokens.border, backgroundColor: needsYouOnly ? tokens.selection : "transparent" }]}
+        accessibilityRole="button"
+        accessibilityLabel="Filter sessions needing a response"
+      >
         <Text style={[typeScale.section, { color: tokens.ink3 }]}>waiting</Text>
-        <Text
-          style={[typeScale.bodyBold, tabularNums, { color: waitingCount > 0 ? tokens.danger : tokens.ink }]}
-          numberOfLines={1}
-        >
-          {waitingCount}
-        </Text>
-      </View>
+        <View style={styles.waitingCount}>
+          {waitingCount > 0 ? <StatusDot state="waiting" /> : null}
+          <Text style={[typeScale.bodyBold, tabularNums, { color: waitingCount > 0 ? tokens.danger : tokens.ink }]}>{waitingCount}</Text>
+        </View>
+      </Pressable>
       <View style={[styles.headerStat, styles.headerDivider, { borderColor: tokens.border }]}>
         <Text style={[typeScale.section, { color: tokens.ink3 }]}>busy</Text>
         <Text style={[typeScale.bodyBold, tabularNums, { color: tokens.ink }]} numberOfLines={1}>
@@ -100,6 +104,7 @@ export default function FleetScreen() {
   // Track only the pull-triggered refetch instead.
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [search, setSearch] = useState("");
+  const [needsYouOnly, setNeedsYouOnly] = useState(false);
   const { refetch } = query;
   const onRefresh = useCallback(() => {
     setManualRefreshing(true);
@@ -109,12 +114,13 @@ export default function FleetScreen() {
   const data = useMemo(() => query.data ?? [], [query.data]);
   const filteredData = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    if (!needle) return data;
     return data.filter((row) => {
+      if (needsYouOnly && !row.waiting) return false;
+      if (!needle) return true;
       const status = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
       return [row.title, row.cwd, status].some((value) => value.toLowerCase().includes(needle));
     });
-  }, [data, search]);
+  }, [data, search, needsYouOnly]);
   const hasData = data.length > 0;
   const isFirstLoad = query.isLoading && !hasData;
 
@@ -141,7 +147,7 @@ export default function FleetScreen() {
           action={search.trim() ? <Button label="Clear search" variant="secondary" onPress={() => setSearch("")} /> : <Button label="New session" variant="secondary" onPress={() => router.push("/new-session")} />}
       />
     );
-  }, [query.isError, query.error]);
+  }, [query.isError, query.error, search]);
 
   // T5.1 (fixed): expanded's MasterDetail rail already renders the live session list —
   // this screen fills the detail pane's `<Slot/>` in that layout (see (tabs)/_layout.tsx),
@@ -167,6 +173,7 @@ export default function FleetScreen() {
         autoCorrect={false}
         containerStyle={styles.search}
       />
+      {hasData ? <FleetHeader sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /> : null}
       {isFirstLoad ? (
         <View style={styles.list}>
           {[0, 1, 2, 3].map((i) => (
@@ -178,7 +185,6 @@ export default function FleetScreen() {
           data={filteredData}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
-          ListHeaderComponent={hasData ? <FleetHeader sessions={filteredData} /> : undefined}
           ListEmptyComponent={emptyComponent}
           refreshing={manualRefreshing}
           onRefresh={onRefresh}
@@ -216,6 +222,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   headerStat: { flex: 1, gap: space.space4, alignItems: "flex-start" },
+  waitingCount: { flexDirection: "row", alignItems: "center", gap: space.space4 },
   headerDivider: { borderLeftWidth: StyleSheet.hairlineWidth, paddingLeft: space.space12 },
   skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonRow1: { flexDirection: "row", alignItems: "center", gap: space.space8 },
