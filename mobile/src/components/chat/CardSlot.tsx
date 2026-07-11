@@ -11,7 +11,7 @@ import { QuestionCard } from "../cards/QuestionCard";
 import { useSessionCtx } from "../../lib/sessionContext";
 
 export default function CardSlot() {
-  const { snapshot, send } = useSessionCtx();
+  const { snapshot, send, setPendingAnswer } = useSessionCtx();
 
   if (!snapshot) return null;
 
@@ -22,6 +22,7 @@ export default function CardSlot() {
         diff={snapshot.diff}
         promptSeq={snapshot.prompt_seq}
         send={send}
+        onQueueAnswer={setPendingAnswer}
       />
     );
   }
@@ -34,6 +35,7 @@ export default function CardSlot() {
         allowOther={snapshot.question_allow_other}
         promptSeq={snapshot.prompt_seq}
         send={send}
+        onQueueAnswer={setPendingAnswer}
       />
     );
   }

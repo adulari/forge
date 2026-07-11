@@ -194,7 +194,7 @@ function StreamingAnswer({ text, streaming }: { text: string; streaming: boolean
 export default function SessionChat() {
   const tokens = useTokens();
   const toast = useToast();
-  const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight } = useSessionCtx();
+  const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight, pendingAnswer, clearPendingAnswer } = useSessionCtx();
 
   const historyQuery = useHistory(sessionId);
 
@@ -257,6 +257,13 @@ export default function SessionChat() {
     const was = prevConnRef.current;
     prevConnRef.current = connectionState;
     if (connectionState !== "open" || !offlineLoadedRef.current) return;
+    if (pendingAnswer) {
+      if (snapshot?.prompt_seq === pendingAnswer.seq && (snapshot.permission_prompt != null || snapshot.question != null)) {
+        if (send(pendingAnswer)) clearPendingAnswer();
+      } else {
+        clearPendingAnswer();
+      }
+    }
     if (offlineQueue.length > 0) {
       for (const text of offlineQueue) send({ kind: "prompt", text });
       setOfflineQueue([]);
@@ -267,7 +274,7 @@ export default function SessionChat() {
       send({ kind: "interrupt" });
       setPendingInterrupt(false);
     }
-  }, [connectionState, offlineQueue, pendingInterrupt, send]);
+  }, [connectionState, offlineQueue, pendingInterrupt, pendingAnswer, snapshot?.prompt_seq, snapshot?.permission_prompt, snapshot?.question, send, clearPendingAnswer]);
 
   const online = connectionState === "open";
 
@@ -302,7 +309,7 @@ export default function SessionChat() {
         return [...prev, text];
       });
     },
-    [online, send, toast],
+    [send, toast],
   );
 
   const handleInterrupt = useCallback(() => {

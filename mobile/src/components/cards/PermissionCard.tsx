@@ -33,6 +33,7 @@ export interface PermissionCardProps {
   diff: Diff | null;
   promptSeq: number;
   send: (input: RemoteInput) => boolean;
+  onQueueAnswer?: (input: Extract<RemoteInput, { kind: "allow" | "answer" }>) => void;
 }
 
 // A large embedded diff must never push Allow/Deny off-screen (this card sits in a
@@ -44,13 +45,14 @@ const DIFF_MAX_HEIGHT_RATIO = 0.4;
 // up and re-enabling them.
 const ACK_TIMEOUT_MS = 5_000;
 
-export function PermissionCard({ prompt, diff, promptSeq, send }: PermissionCardProps) {
+export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }: PermissionCardProps) {
   const tokens = useTokens();
   const reduced = useReducedMotion();
   const toast = useToast();
   const { height: windowHeight } = useWindowDimensions();
   const [lockedSeq, setLockedSeq] = useState<number | null>(null);
   const [committed, setCommitted] = useState<"allow" | "deny" | null>(null);
+  const [queued, setQueued] = useState(false);
   const ackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // A new snapshot with a different prompt_seq means the previous decision was
@@ -58,6 +60,7 @@ export function PermissionCard({ prompt, diff, promptSeq, send }: PermissionCard
   useEffect(() => {
     setLockedSeq(null);
     setCommitted(null);
+    setQueued(false);
     if (ackTimerRef.current != null) {
       clearTimeout(ackTimerRef.current);
       ackTimerRef.current = null;
@@ -88,9 +91,15 @@ export function PermissionCard({ prompt, diff, promptSeq, send }: PermissionCard
     if (yes) haptics.allow();
     else haptics.deny();
     if (!send({ kind: "allow", yes, seq: promptSeq })) {
-      setLockedSeq(null);
-      setCommitted(null);
-      toast.show("not sent — reconnect and try again", { tone: "danger" });
+      if (onQueueAnswer) {
+        onQueueAnswer({ kind: "allow", yes, seq: promptSeq });
+        setQueued(true);
+        return;
+      } else {
+        setLockedSeq(null);
+        setCommitted(null);
+        toast.show("not sent — reconnect and try again", { tone: "danger" });
+      }
       haptics.mergeConflict();
       return;
     }
@@ -105,6 +114,7 @@ export function PermissionCard({ prompt, diff, promptSeq, send }: PermissionCard
       ackTimerRef.current = null;
       setLockedSeq(null);
       setCommitted(null);
+    setQueued(false);
       toast.show("didn't confirm — check connection and try again", { tone: "danger" });
       haptics.mergeConflict();
     }, ACK_TIMEOUT_MS);
@@ -128,6 +138,7 @@ export function PermissionCard({ prompt, diff, promptSeq, send }: PermissionCard
             </View>
           ) : null}
 
+          {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
           <View style={styles.actions}>
             <Button
               label="Deny"
