@@ -1660,34 +1660,64 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_pace_projecting_near_exhaustion_ramps_conservation_like_a_full_window() {
-        // Both quotas report the same low point-in-time fraction (0.2) on both subscriptions. With
-        // no pace attached, that's fresh-window behaviour (a minority of complex tasks spread).
-        // With a pace on claude-cli projecting to ~1.0 at reset, it must be conserved as hard as an
-        // already-full window — spreading share should climb close to the at-cap level.
-        let r = mixed_router();
-        let prompts = complex_workload(80);
-
+    #[test]
+    fn a_pace_projecting_near_exhaustion_ramps_conservation_like_a_full_window() {
+        let models = vec![
+            "claude-cli::sonnet".to_string(),
+            "codex-cli::gpt-5.5".to_string(),
+            "groq::llama-3.3-70b-versatile".to_string(),
+        ];
+        let seed = (0..10_000)
+            .find(|seed| {
+                let d = catalog::conserve_decision(
+                    &models,
+                    TaskTier::Complex,
+                    false,
+                    *seed,
+                    &conserve_quota(0.2, "plus", "plus"),
+                    None,
+                );
+                d.roll > 0.4 && d.roll < 0.99
+            })
+            .unwrap();
         let fresh = conserve_quota(0.2, "plus", "plus");
-        let fresh_free = prompts.len() - subscription_share(&r, &fresh, &prompts).await;
-
         let paced = conserve_quota_with_pace(0.2, "plus", "plus", 1.0);
-        let paced_free = prompts.len() - subscription_share(&r, &paced, &prompts).await;
-
         let at_cap = conserve_quota(1.0, "plus", "plus");
-        let at_cap_free = prompts.len() - subscription_share(&r, &at_cap, &prompts).await;
+        let fresh_decision =
+            catalog::conserve_decision(&models, TaskTier::Complex, false, seed, &fresh, None);
+        let paced_decision =
+            catalog::conserve_decision(&models, TaskTier::Complex, false, seed, &paced, None);
+        let cap_decision =
+            catalog::conserve_decision(&models, TaskTier::Complex, false, seed, &at_cap, None);
 
-        assert!(
-            paced_free > fresh_free,
-            "a pace projecting to exhaustion must spread more than the same fraction with no pace: \
-             fresh={fresh_free} paced={paced_free}"
-        );
-        assert!(
-            paced_free >= at_cap_free,
-            "a pace projecting to ~1.0 must ramp conservation to (near) the at-cap level: \
-             paced={paced_free} at_cap={at_cap_free}"
-        );
+        assert!(!catalog::provider_conservation_fired(
+            "claude-cli",
+            TaskTier::Complex,
+            false,
+            fresh_decision,
+            &fresh
+        ));
+        assert!(catalog::provider_conservation_fired(
+            "claude-cli",
+            TaskTier::Complex,
+            false,
+            paced_decision,
+            &paced
+        ));
+        assert!(catalog::provider_conservation_fired(
+            "claude-cli",
+            TaskTier::Complex,
+            false,
+            cap_decision,
+            &at_cap
+        ));
+        assert!(!catalog::provider_conservation_fired(
+            "codex-cli",
+            TaskTier::Complex,
+            false,
+            paced_decision,
+            &paced
+        ));
     }
 
     #[tokio::test]

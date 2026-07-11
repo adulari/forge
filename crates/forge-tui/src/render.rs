@@ -52,6 +52,30 @@ fn highlighter() -> &'static (SyntaxSet, Theme) {
     })
 }
 
+fn highlighted_spans(
+    highlighter: &mut HighlightLines<'_>,
+    ss: &SyntaxSet,
+    line: &str,
+) -> Vec<Span<'static>> {
+    match highlighter.highlight_line(line, ss) {
+        Ok(ranges) => ranges
+            .into_iter()
+            .map(|(st, text)| {
+                let fg = st.foreground;
+                let mut style = Style::default().fg(Color::Rgb(fg.r, fg.g, fg.b));
+                if st.font_style.contains(FontStyle::BOLD) {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                if st.font_style.contains(FontStyle::ITALIC) {
+                    style = style.add_modifier(Modifier::ITALIC);
+                }
+                Span::styled(text.to_string(), style)
+            })
+            .collect(),
+        Err(_) => vec![Span::styled(line.to_string(), Style::default().fg(CODEFG))],
+    }
+}
+
 /// Syntax-highlight `lines` of source in `lang` into per-line span vectors. Unknown/empty
 /// language falls back to plain (single dim span per line); never panics.
 pub fn highlight_code(lang: &str, lines: &[String]) -> Vec<Vec<Span<'static>>> {
@@ -63,23 +87,7 @@ pub fn highlight_code(lang: &str, lines: &[String]) -> Vec<Vec<Span<'static>>> {
     let mut h = HighlightLines::new(syntax, theme);
     lines
         .iter()
-        .map(|line| match h.highlight_line(line, ss) {
-            Ok(ranges) => ranges
-                .into_iter()
-                .map(|(st, text)| {
-                    let fg = st.foreground;
-                    let mut style = Style::default().fg(Color::Rgb(fg.r, fg.g, fg.b));
-                    if st.font_style.contains(FontStyle::BOLD) {
-                        style = style.add_modifier(Modifier::BOLD);
-                    }
-                    if st.font_style.contains(FontStyle::ITALIC) {
-                        style = style.add_modifier(Modifier::ITALIC);
-                    }
-                    Span::styled(text.to_string(), style)
-                })
-                .collect(),
-            Err(_) => vec![Span::styled(line.clone(), Style::default().fg(CODEFG))],
-        })
+        .map(|line| highlighted_spans(&mut h, ss, line))
         .collect()
 }
 
@@ -113,6 +121,12 @@ pub fn diff_to_lines(diff: &FileDiff) -> Vec<Line<'static>> {
     let old = diff.old.as_deref().unwrap_or("");
     let new = diff.new.as_deref().unwrap_or("");
     let lang = diff.lang.as_deref().unwrap_or("");
+    let (ss, theme) = highlighter();
+    let syntax = (!lang.is_empty())
+        .then(|| ss.find_syntax_by_token(lang))
+        .flatten()
+        .unwrap_or_else(|| ss.find_syntax_plain_text());
+    let mut highlighter = HighlightLines::new(syntax, theme);
     let td = TextDiff::from_lines(old, new);
     let gutter =
         |sym: &str, c: Color| Span::styled(format!("{INDENT}{sym} "), Style::default().fg(c));
@@ -154,16 +168,12 @@ pub fn diff_to_lines(diff: &FileDiff) -> Vec<Line<'static>> {
                 };
                 let mut line = vec![gutter(sym, color)];
                 // highlight the body; context/added stay readable, deletions tinted red.
-                let body = highlight_code(lang, &[text]);
+                let body = highlighted_spans(&mut highlighter, ss, &text);
                 if change.tag() == ChangeTag::Delete {
-                    let joined: String = body
-                        .into_iter()
-                        .flatten()
-                        .map(|s| s.content.into_owned())
-                        .collect();
+                    let joined: String = body.into_iter().map(|s| s.content.into_owned()).collect();
                     line.push(Span::styled(joined, Style::default().fg(ERRRED)));
                 } else {
-                    line.extend(body.into_iter().flatten());
+                    line.extend(body);
                 }
                 out.push(Line::from(line));
             }

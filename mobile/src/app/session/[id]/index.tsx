@@ -194,7 +194,7 @@ function StreamingAnswer({ text, streaming }: { text: string; streaming: boolean
 export default function SessionChat() {
   const tokens = useTokens();
   const toast = useToast();
-  const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight } = useSessionCtx();
+  const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight, pendingAnswer, clearPendingAnswer } = useSessionCtx();
 
   const historyQuery = useHistory(sessionId);
 
@@ -257,6 +257,13 @@ export default function SessionChat() {
     const was = prevConnRef.current;
     prevConnRef.current = connectionState;
     if (connectionState !== "open" || !offlineLoadedRef.current) return;
+    if (pendingAnswer) {
+      if (snapshot?.prompt_seq === pendingAnswer.seq && (snapshot.permission_prompt != null || snapshot.question != null)) {
+        if (send(pendingAnswer)) clearPendingAnswer();
+      } else {
+        clearPendingAnswer();
+      }
+    }
     if (offlineQueue.length > 0) {
       for (const text of offlineQueue) send({ kind: "prompt", text });
       setOfflineQueue([]);
@@ -267,7 +274,7 @@ export default function SessionChat() {
       send({ kind: "interrupt" });
       setPendingInterrupt(false);
     }
-  }, [connectionState, offlineQueue, pendingInterrupt, send]);
+  }, [connectionState, offlineQueue, pendingInterrupt, pendingAnswer, snapshot?.prompt_seq, snapshot?.permission_prompt, snapshot?.question, send, clearPendingAnswer]);
 
   const online = connectionState === "open";
 
@@ -302,7 +309,7 @@ export default function SessionChat() {
         return [...prev, text];
       });
     },
-    [online, send, toast],
+    [send, toast],
   );
 
   const handleInterrupt = useCallback(() => {
@@ -493,7 +500,10 @@ export default function SessionChat() {
     // Notes (turn-end notices, e.g. "compacting", "turn failed") are the NEWEST events — they must
     // sit at the newest slot (just under the streaming reply / above the composer in the inverted
     // list), not be pushed to the far/oldest end where they'd float above all history with no cue.
-    const notes = snapshot?.notes ?? [];
+    const historyNoteTexts = new Set(
+      historyRows.filter((row) => row.visibility === "ui").map((row) => row.content),
+    );
+    const notes = (snapshot?.notes ?? []).filter((note) => !historyNoteTexts.has(note));
     for (let i = notes.length - 1; i >= 0; i--) {
       list.push({ kind: "note", id: `n${i}`, text: notes[i] });
     }

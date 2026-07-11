@@ -48,6 +48,7 @@ fn browse<F: FnMut() -> Vec<TranscriptView>>(
     // Start at the tail so the user immediately sees the most recent activity.
     let mut scroll = usize::MAX / 2;
     let mut follow = true; // auto-scroll to tail while content grows
+    let mut wrapped_cache: Option<(usize, u16, u64, Vec<TextLine<'static>>)> = None;
     loop {
         let views = refresh();
         let n = views.len().max(1);
@@ -58,10 +59,20 @@ fn browse<F: FnMut() -> Vec<TranscriptView>>(
         // reserves. The max usable scroll is `wrapped_len - body_h` (one full page from the tail);
         // scrolling past that only reveals blank rows the render already clamps away.
         let body_h = (size.height as usize).saturating_sub(3).max(1);
-        let wrapped_len = views
-            .get(selected)
-            .map(|v| wrap_lines(&v.lines, width.saturating_sub(1) as usize).len())
-            .unwrap_or(0);
+        let wrapped = views.get(selected).map(|view| {
+            let key = (selected, width.saturating_sub(1), view.revision);
+            let stale = wrapped_cache
+                .as_ref()
+                .is_none_or(|(index, cached_width, revision, _)| {
+                    (*index, *cached_width, *revision) != key
+                });
+            if stale {
+                wrapped_cache =
+                    Some((key.0, key.1, key.2, wrap_lines(&view.lines, key.1 as usize)));
+            }
+            &wrapped_cache.as_ref().expect("cache initialized").3
+        });
+        let wrapped_len = wrapped.map_or(0, Vec::len);
         if follow {
             scroll = usize::MAX / 2;
         }
@@ -70,8 +81,13 @@ fn browse<F: FnMut() -> Vec<TranscriptView>>(
             let a = f.area();
             f.render_widget(Clear, a);
             f.render_widget(
-                Paragraph::new(transcript_lines(
-                    &views, selected, scroll, a.height, a.width,
+                Paragraph::new(transcript_lines_from_wrapped(
+                    &views,
+                    selected,
+                    scroll,
+                    a.height,
+                    a.width,
+                    wrapped.expect("selected view has wrapped rows"),
                 )),
                 a,
             );
@@ -214,6 +230,21 @@ pub fn transcript_lines(
     height: u16,
     width: u16,
 ) -> Vec<TextLine<'static>> {
+    let wrapped = views
+        .get(selected.min(views.len().saturating_sub(1)))
+        .map(|view| wrap_lines(&view.lines, width.saturating_sub(1) as usize))
+        .unwrap_or_default();
+    transcript_lines_from_wrapped(views, selected, scroll, height, width, &wrapped)
+}
+
+fn transcript_lines_from_wrapped(
+    views: &[TranscriptView],
+    selected: usize,
+    scroll: usize,
+    height: u16,
+    width: u16,
+    wrapped: &[TextLine<'static>],
+) -> Vec<TextLine<'static>> {
     let h = height as usize;
     let w = width as usize;
     if views.is_empty() {
@@ -282,7 +313,6 @@ pub fn transcript_lines(
 
     // Body: the wrapped log window. Reserve 2 header + 1 footer rows.
     let body_h = h.saturating_sub(3).max(1);
-    let wrapped = wrap_lines(&view.lines, w.saturating_sub(1));
     let total = wrapped.len();
     let max_scroll = total.saturating_sub(body_h);
     let scroll = scroll.min(max_scroll);
@@ -292,7 +322,7 @@ pub fn transcript_lines(
             Style::default().fg(DIM),
         )));
     }
-    for line in wrapped.into_iter().skip(scroll).take(body_h) {
+    for line in wrapped.iter().skip(scroll).take(body_h).cloned() {
         lines.push(line);
     }
     // Pad so the footer sits at the bottom of the region.
@@ -328,6 +358,7 @@ mod tests {
                 .map(|i| TextLine::from(Span::raw(format!("line {i}"))))
                 .collect(),
             line_count: n,
+            revision: 0,
         }
     }
 
@@ -403,6 +434,7 @@ mod tests {
             cost: 0.0,
             lines: vec![TextLine::from(Span::raw(long))],
             line_count: 1,
+            revision: 0,
         };
         // One 200-char logical line wraps into several visual rows at width 40.
         let wrapped = wrap_lines(&view.lines, 39);
