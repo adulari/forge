@@ -179,7 +179,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
               borderTopRightRadius: radii.radius16,
             },
             depth.sheet,
-            Platform.OS === "web" && styles.webTransition,
+            Platform.OS === "web" && !reduced && styles.webTransition,
             sheetStyle,
           ]}
           accessibilityViewIsModal

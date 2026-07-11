@@ -35,8 +35,12 @@ export function EmptyState({ icon: Icon, message, action }: EmptyStateProps) {
   const tokens = useTokens();
   const entrance = useForgeline(0);
   return (
-    <Animated.View style={[styles.container, entrance]} accessibilityRole="text" accessibilityLabel={message}>
-      <Icon size={24} color={tokens.ink4} strokeWidth={1.75} />
+    <Animated.View
+      style={[styles.container, { flexGrow: 1 }, entrance]}
+      accessibilityRole="text"
+      accessibilityLabel={message}
+    >
+      <Icon size={32} color={tokens.ink3} strokeWidth={1.75} />
       <Text style={[type.sub, styles.message, { color: tokens.ink2 }]}>{message}</Text>
       {action ? <View style={styles.action}>{action}</View> : null}
     </Animated.View>

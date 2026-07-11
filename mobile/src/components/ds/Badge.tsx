@@ -16,7 +16,7 @@ export type BadgeShape = "small" | "pill";
 export interface BadgeProps {
   label: string;
   tone?: BadgeTone;
-  shape?: BadgeShape;
+  shape?: BadgeShape; // optional: defaults to pill for status tones, small for descriptive
 }
 
 interface ToneStyle {
@@ -43,9 +43,16 @@ function toneStyle(tone: BadgeTone, tokens: ColorTokens): ToneStyle {
   }
 }
 
-export function Badge({ label, tone = "neutral", shape = "small" }: BadgeProps) {
+export function Badge({ label, tone = "neutral", shape: shapeProp }: BadgeProps) {
   const tokens = useTokens();
   const { background, ink, borderColor } = toneStyle(tone, tokens);
+
+  // Drive casing and shape from tone/role per DESIGN_SYSTEM.md §6
+  // Status badges (danger/accent/success/warn) → uppercase + pill
+  // Descriptive badges (neutral/outline) → sentence-case + small
+  const isStatusTone = tone === "danger" || tone === "accent" || tone === "success" || tone === "warn";
+  const shape = shapeProp ?? (isStatusTone ? "pill" : "small");
+  const textTransform = isStatusTone ? "uppercase" : "none";
 
   return (
     <View
@@ -58,7 +65,7 @@ export function Badge({ label, tone = "neutral", shape = "small" }: BadgeProps) 
       accessibilityRole="text"
       accessibilityLabel={label}
     >
-      <Text style={[typeScale.meta, { color: ink }]} numberOfLines={1}>
+      <Text style={[typeScale.meta, { color: ink, textTransform }]} numberOfLines={1}>
         {label}
       </Text>
     </View>
