@@ -1398,6 +1398,23 @@ fn next_word_end(s: &str, mut pos: usize) -> usize {
     pos
 }
 
+fn sanitize_terminal_text(text: &str) -> String {
+    text.chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect()
+}
+
+fn sanitize_paste(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| match c {
+            '\r' => Some('\n'),
+            '\n' | '\t' => Some(c),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
 /// Apply one keystroke to the input buffer (pure; no terminal I/O). `cursor` is the byte
 /// offset of the text cursor within `input`; updated in place, always kept on a char boundary.
 pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> InputOutcome {
@@ -1538,6 +1555,7 @@ impl App {
             }
             // A complete (non-streamed) assistant message: render markdown into scrollback.
             PresenterEvent::AssistantText(text) => {
+                let text = sanitize_terminal_text(&text);
                 self.model_search = None;
                 self.flush.push(header_line("⚒ forge", ORANGE));
                 self.flush.extend(crate::render::markdown_to_lines(&text));
@@ -1545,10 +1563,10 @@ impl App {
             }
             PresenterEvent::Reasoning(delta) => {
                 self.model_search = None;
-                self.reasoning.push_str(&delta)
+                self.reasoning.push_str(&sanitize_terminal_text(&delta))
             }
             PresenterEvent::AssistantDelta(delta) => {
-                self.model_search = None;
+                let delta = sanitize_terminal_text(&delta);
                 if !self.streaming_active {
                     self.flush_reasoning();
                     self.flush.push(header_line("⚒ forge", ORANGE));
@@ -2350,6 +2368,7 @@ impl App {
     /// line and won't accidentally auto-submit when the pasted text contains newlines.
     pub fn handle_paste(&mut self, content: String) {
         self.sanitize_cursor();
+        let content = sanitize_paste(&content);
         if !content.contains('\n') {
             // Single-line: insert directly as if the user typed it.
             self.input.insert_str(self.input_cursor, &content);
@@ -3187,6 +3206,7 @@ pub enum ReplayItem {
 }
 
 fn warning_line(msg: &str) -> TextLine<'static> {
+    let msg = sanitize_terminal_text(msg);
     TextLine::from(Span::styled(
         format!("  ⚠ {msg}"),
         Style::default().fg(WARNYEL),
@@ -3194,6 +3214,7 @@ fn warning_line(msg: &str) -> TextLine<'static> {
 }
 
 fn error_line(msg: &str) -> TextLine<'static> {
+    let msg = sanitize_terminal_text(msg);
     TextLine::from(Span::styled(
         format!("  ✖ {msg}"),
         Style::default().fg(ERRRED).bold(),
@@ -6023,6 +6044,34 @@ mod tests {
         app.submit_user("next");
         let again = flush_text(&mut app);
         assert!(!again.contains("🖼"));
+    }
+
+    #[test]
+    fn paste_strips_terminal_controls_and_normalizes_carriage_returns() {
+        let mut app = App::default();
+        app.handle_paste("safe\x1b[31m\rnext\x07".into());
+        assert_eq!(app.input, "[pasted text (2 lines)]");
+        let placeholder = app.input.clone();
+        let (resolved, _) = app.resolve_paste_blocks(placeholder);
+        assert_eq!(resolved, "safe[31m\nnext");
+        assert!(app.input.is_char_boundary(app.input_cursor));
+    }
+
+    #[test]
+    fn streamed_text_cannot_inject_terminal_controls() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::AssistantDelta(
+            "hello\x1b[2J\x07world".into(),
+        ));
+        assert_eq!(app.streaming, "hello[2Jworld");
+        app.apply(PresenterEvent::Warning("warn\x1b[31m".into()));
+        let rendered: String = app
+            .drain_flush()
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(!rendered.contains('\x1b'));
     }
 
     #[test]
