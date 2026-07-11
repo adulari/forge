@@ -46,7 +46,7 @@ import { haptics } from "../../../lib/haptics";
 import { useHistory } from "../../../lib/queries";
 import { parseReasoning } from "../../../lib/reasoning";
 import { useSessionCtx } from "../../../lib/sessionContext";
-import { easings, useEmberdot } from "../../../theme/motion";
+import { easings, useEmberdot, useForgeline } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { radii, space } from "../../../theme/tokens";
 import { type as typeScale } from "../../../theme/typography";
@@ -105,6 +105,7 @@ function formatElapsed(elapsedMs: number): string {
 function LiveToolActivity({ line, startedAt }: { line: string; startedAt: number }) {
   const tokens = useTokens();
   const { dotStyle } = useEmberdot("busy");
+  const entrance = useForgeline(0);
   const [elapsedMs, setElapsedMs] = useState(() => Date.now() - startedAt);
 
   useEffect(() => {
@@ -114,14 +115,14 @@ function LiveToolActivity({ line, startedAt }: { line: string; startedAt: number
   }, [startedAt]);
 
   return (
-    <View style={[styles.activityRow, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
+    <Animated.View style={[styles.activityRow, { backgroundColor: tokens.bg2, borderColor: tokens.border }, entrance]}>
       <Animated.View style={[styles.activityDot, { backgroundColor: tokens.accent }, dotStyle]} />
       <Hammer size={14} strokeWidth={1.75} color={tokens.accent} />
       <Text style={[typeScale.meta, styles.activityLine, { color: tokens.ink2 }]} numberOfLines={1}>
         {line}
       </Text>
       <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatElapsed(elapsedMs)}</Text>
-    </View>
+    </Animated.View>
   );
 }
 

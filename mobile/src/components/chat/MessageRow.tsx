@@ -5,10 +5,12 @@ import * as Clipboard from "expo-clipboard";
 import { Copy } from "lucide-react-native";
 import React from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import Animated from "react-native-reanimated";
 
 import type { HistoryRow } from "../../lib/api";
 import { parseReasoning } from "../../lib/reasoning";
 import { useSessionCtx } from "../../lib/sessionContext";
+import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
@@ -86,6 +88,7 @@ function mentionsFromContent(content: string): {
 
 function MessageRowImpl({ row, attachments }: MessageRowProps) {
   const tokens = useTokens();
+  const entrance = useForgeline(Math.max(0, row.seq));
   const toast = useToast();
   const { baseUrl, sessionId } = useSessionCtx();
   const isUser = row.role === "user";
@@ -127,7 +130,7 @@ function MessageRowImpl({ row, attachments }: MessageRowProps) {
   };
 
   return (
-    <View style={[styles.row, isUser && styles.userRow]}>
+    <Animated.View style={[styles.row, isUser && styles.userRow, entrance]}>
       <Pressable
         onLongPress={isSystem || IS_WEB ? undefined : onCopyRow}
         style={[
@@ -164,7 +167,7 @@ function MessageRowImpl({ row, attachments }: MessageRowProps) {
           </View>
         ) : null}
       </Pressable>
-    </View>
+    </Animated.View>
   );
 }
 
