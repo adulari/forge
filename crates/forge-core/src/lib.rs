@@ -2542,15 +2542,21 @@ impl Session {
     /// The context window (tokens) to assume for `model`: a fetched per-model window (provider API,
     /// persisted in the store) first, then the family heuristic, then a conservative floor. Always
     /// returns a usable number so a turn can be bounded even for a model we've never seen.
-    fn effective_context_window(&self, model: &str) -> u32 {
-        let window = self
-            .store
+    /// The model's REAL context window (fetched per-model window → family heuristic → conservative
+    /// floor), ignoring any transient overflow self-heal cap. This is the honest denominator for the
+    /// context gauge — the cap only shrinks what we SEND, not the model's actual limit.
+    fn base_context_window(&self, model: &str) -> u32 {
+        self.store
             .model_context(model)
             .ok()
             .flatten()
             .filter(|w| *w > 0)
             .or_else(|| forge_mesh::pricing::context_limit(model))
-            .unwrap_or(forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW);
+            .unwrap_or(forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW)
+    }
+
+    fn effective_context_window(&self, model: &str) -> u32 {
+        let window = self.base_context_window(model);
         // A context-overflow self-heal (see `overflow_window_cap`) lowers the usable window for the
         // rest of the turn so `transcript_with_preamble` trims the sent view below the model's real
         // limit — needed when our o200k estimate diverges from the model's own tokenizer.
@@ -2941,7 +2947,8 @@ Rules:\n\
             session_in,
             session_out,
             context_tokens: self.estimated_transcript_tokens(),
-            context_limit: Some(self.effective_context_window(model)),
+            // The gauge denominator is the model's REAL window, not the transient overflow cap.
+            context_limit: Some(self.base_context_window(model)),
         });
     }
 
@@ -5135,6 +5142,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 model: editor.clone(),
                 rationale: "architect edit phase".to_string(),
             });
+            // Keep the gauge's model + limit in lockstep: emit the edit model's window now, else the
+            // limit stays stuck on the plan-phase model (the "1050k under a glm editor" bug) because
+            // a short edit-phase transcript that fits never triggers auto_compact's gauge emit.
+            self.emit_context_gauge(&editor);
             editor
         } else {
             routed_model.clone()
