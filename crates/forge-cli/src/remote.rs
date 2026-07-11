@@ -1678,13 +1678,20 @@ pub(crate) async fn pump_ws(
     let mut forward = tokio::spawn(async move {
         let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(20));
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_sent: u64 = 0;
         loop {
             tokio::select! {
                 changed = snap.changed() => {
                     if changed.is_err() {
                         break;
                     }
-                    let json = serde_json::to_string(&*snap.borrow()).unwrap_or_else(|_| "{}".into());
+                    // `watch` coalesces: if multiple broadcasts landed between ticks, this
+                    // receiver only exposes the newest revision. Flag a non-contiguous jump
+                    // as a full resync so the client doesn't treat it as a gap in the stream.
+                    let mut frame = snap.borrow().clone();
+                    frame.resync = frame.revision > last_sent.saturating_add(1);
+                    let json = serde_json::to_string(&frame).unwrap_or_else(|_| "{}".into());
+                    last_sent = frame.revision;
                     if tx.send(Message::Text(json.into())).await.is_err() {
                         break;
                     }
@@ -1964,6 +1971,80 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&resynced).unwrap()).unwrap();
         assert_eq!(v["resync"], true);
+    }
+
+    /// The forward loop must set `resync: true` when the watch coalesces a non-contiguous
+    /// revision jump. Without this, tokio watch coalescing (rev N → N+k) sends a single frame
+    /// with revision N+k and resync=false; a client tracking contiguous revisions treats this
+    /// as a gap and closes the WebSocket, forcing a full reconnect.
+    #[tokio::test]
+    async fn forward_loop_flags_coalesced_revision_jump_as_resync() {
+        use tokio::sync::watch;
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Message>(8);
+
+        let (snap_tx, mut snap_rx) = watch::channel(Snapshot {
+            session_id: "test".into(),
+            revision: 1,
+            ..Default::default()
+        });
+
+        // Spawn the forward loop (copy of the real logic).
+        let forward = tokio::spawn(async move {
+            let mut last_sent: u64 = 0;
+            loop {
+                tokio::select! {
+                    changed = snap_rx.changed() => {
+                        if changed.is_err() { break; }
+                        let mut frame = snap_rx.borrow().clone();
+                        frame.resync = frame.revision > last_sent.saturating_add(1);
+                        let json = serde_json::to_string(&frame).unwrap_or_else(|_| "{}".into());
+                        last_sent = frame.revision;
+                        if tx.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // Advance the watch through a coalesced jump (simulates rapid state changes).
+        snap_tx.send_modify(|s| {
+            s.revision = 2;
+        });
+        snap_tx.send_modify(|s| {
+            s.revision = 3;
+        });
+        snap_tx.send_modify(|s| {
+            s.revision = 4;
+        });
+
+        // Collect all received frames.
+        let mut frames: Vec<serde_json::Value> = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            if let Message::Text(t) = msg {
+                if let Ok(v) = serde_json::from_str(&t) {
+                    frames.push(v);
+                }
+            }
+        }
+        forward.abort();
+
+        // The loop must have sent at least one frame.
+        assert!(!frames.is_empty(), "forward loop sent no frames");
+        // The last frame must have revision 4.
+        let last = frames.last().unwrap();
+        assert_eq!(last["revision"], 4, "last frame has correct revision");
+        // The coalesced jump from 1→4 must be flagged as resync (not a false gap).
+        assert_eq!(
+            last["resync"], true,
+            "coalesced jump (1→4) must be flagged resync, not a gap"
+        );
+        // Contiguous frames (if any) must NOT be flagged resync.
+        for f in &frames[..frames.len().saturating_sub(1)] {
+            if f["revision"].as_u64() == Some(2) || f["revision"].as_u64() == Some(3) {
+                assert_eq!(f["resync"], false, "contiguous frame must not be resync");
+            }
+        }
     }
 
     #[test]
