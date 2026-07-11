@@ -334,6 +334,11 @@ pub async fn execute_responses_request(
     let mut acc = ResponseAccumulator::default();
     let mut buf = String::new();
     let mut stream = resp.bytes_stream();
+    // Raw bytes of an incomplete UTF-8 codepoint that straddled the previous chunk boundary.
+    // reqwest yields chunks at arbitrary TCP/H2 boundaries, so decoding each chunk independently
+    // with from_utf8_lossy would corrupt any multi-byte codepoint (emoji/CJK/em-dash/curly quote)
+    // split across chunks into U+FFFD in both the live stream and the persisted answer.
+    let mut pending: Vec<u8> = Vec::new();
     loop {
         let chunk = tokio::time::timeout(IDLE_TIMEOUT, stream.next())
             .await
@@ -345,11 +350,20 @@ pub async fn execute_responses_request(
             })?;
         let Some(chunk) = chunk else { break };
         let bytes = chunk.map_err(|e| ProviderError::Unavailable(e.to_string()))?;
+        pending.extend_from_slice(&bytes);
+        // Decode only the longest valid UTF-8 prefix; keep any incomplete trailing codepoint's
+        // bytes in `pending` for the next chunk. `from_utf8_lossy` on the valid prefix never
+        // substitutes.
+        let valid_up_to = match std::str::from_utf8(&pending) {
+            Ok(_) => pending.len(),
+            Err(e) => e.valid_up_to(),
+        };
         buf.extend(
-            String::from_utf8_lossy(&bytes)
+            String::from_utf8_lossy(&pending[..valid_up_to])
                 .chars()
                 .filter(|&c| c != '\r'),
         );
+        pending.drain(..valid_up_to);
         while let Some(raw) = take_event(&mut buf) {
             let (event, data) = parse_sse_frame(&raw);
             let Some(event) = event else { continue };

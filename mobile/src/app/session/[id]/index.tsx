@@ -248,18 +248,24 @@ export default function SessionChat() {
   // the first rather than duplicating it).
   const [pendingInterrupt, setPendingInterrupt] = useState(false);
 
-  // Flush in order on the exact `!open -> open` edge (not on every offlineQueue change).
+  // Flush queued prompts in order whenever the socket is open and a queue exists — on the reconnect
+  // edge AND when a queue was restored from storage while ALREADY open (e.g. remounting Chat after a
+  // segment switch during which the persistent socket reconnected). Gating purely on the `!open→open`
+  // transition left such a restored queue stuck as a permanent "(offline)" chip while actually online.
   const prevConnRef = useRef(connectionState);
   useEffect(() => {
     const was = prevConnRef.current;
     prevConnRef.current = connectionState;
-    if (was !== "open" && connectionState === "open") {
+    if (connectionState !== "open" || !offlineLoadedRef.current) return;
+    if (offlineQueue.length > 0) {
       for (const text of offlineQueue) send({ kind: "prompt", text });
       setOfflineQueue([]);
-      if (pendingInterrupt) {
-        send({ kind: "interrupt" });
-        setPendingInterrupt(false);
-      }
+    }
+    // The pending interrupt is edge-only: it means "Stop pressed while offline", so it fires on the
+    // reconnect edge, not on a plain remount-while-online.
+    if (pendingInterrupt && was !== "open") {
+      send({ kind: "interrupt" });
+      setPendingInterrupt(false);
     }
   }, [connectionState, offlineQueue, pendingInterrupt, send]);
 

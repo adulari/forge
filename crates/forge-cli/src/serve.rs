@@ -913,8 +913,18 @@ async fn merge_session(
             .into_response();
     }
 
+    // Atomically claim ownership: `remove` is the only serialization point, so a concurrent
+    // merge/discard for the same id (a double-tapped button, two clients) gets `None` here and
+    // bails — instead of two git sequences contending on the base repo index, which can
+    // half-apply/duplicate a merge or `reset --hard` away another request's staged changes (base-
+    // repo data loss). The dirty precondition above already ran on the pre-remove handle.
+    let Some(handle) = state.registry.remove(&id).await else {
+        return err_response(
+            axum::http::StatusCode::CONFLICT,
+            "session is already being merged or discarded",
+        );
+    };
     // Stop the driver so the worktree is quiescent, then run the git sequence off-thread.
-    state.registry.remove(&id).await;
     stop_and_join(handle).await;
     let outcome = {
         let (root, br, wt) = (repo_root.clone(), branch.clone(), worktree.clone());
@@ -973,7 +983,15 @@ async fn discard_session(
             "worktree path is not a recognised forge worktree",
         );
     };
-    state.registry.remove(&id).await;
+    // Atomically claim ownership (see merge_session): a concurrent discard/merge for the same id
+    // gets `None` and bails, so the worktree-remove + branch-delete git sequence never races a
+    // merge's apply against the same base repo.
+    let Some(handle) = state.registry.remove(&id).await else {
+        return err_response(
+            axum::http::StatusCode::CONFLICT,
+            "session is already being merged or discarded",
+        );
+    };
     stop_and_join(handle).await;
     let _ = state.store.archive_session(&id);
     let errs = {
