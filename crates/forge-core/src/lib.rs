@@ -4591,6 +4591,17 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 recent_sigs.pop_front();
             }
             let osc_count = recent_sigs.iter().filter(|&&s| s == sig).count();
+            // Break-out reset: `osc_count == 1` means this batch is new to the recent window — it
+            // neither repeats the previous step nor recurs in an A→B→A oscillation — so the model
+            // changed course. Clear the one-shot `doom_nudged` latch and the now-stale window so a
+            // *later* genuine loop in the same turn earns its own nudge-before-halt cycle instead of
+            // being hard-halted off a latch left set by an earlier, already-broken loop. A true
+            // spiral keeps recurring (osc_count stays >= 2), so this never fires mid-loop.
+            if osc_count == 1 {
+                doom_nudged = false;
+                recent_sigs.clear();
+                recent_sigs.push_back(sig);
+            }
             // Distinguish the two loop shapes so the warning isn't misleading: a true A,A,A repeat
             // vs an A,B,A,B oscillation (where the model did NOT repeat the *same* call back-to-back).
             let is_oscillation =
@@ -4671,7 +4682,13 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 for (name, kind) in classified {
                     match kind {
                         Some(k) => *failure_counts.entry((name, k)).or_insert(0) += 1,
-                        None => failure_counts.retain(|(nm, _), _| nm != &name),
+                        None => {
+                            failure_counts.retain(|(nm, _), _| nm != &name);
+                            // A genuine tool success = the model recovered; clear the one-shot
+                            // failure-loop latch so a *later* distinct failure loop earns its own
+                            // nudge-before-halt instead of an immediate halt off a stale latch.
+                            failure_nudged = false;
+                        }
                     }
                 }
                 // Deliver any queued system hints (e.g. the doom-loop "change approach" nudge) — the
@@ -4695,7 +4712,13 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         }
                         // A success on this tool means progress — clear its failure streaks so an
                         // earlier rough patch doesn't later trip the guard after the model recovered.
-                        None => failure_counts.retain(|(nm, _), _| nm != &call.name),
+                        None => {
+                            failure_counts.retain(|(nm, _), _| nm != &call.name);
+                            // Also clear the one-shot failure-loop latch: a genuine success means
+                            // the model recovered, so a *later* distinct failure loop in the same
+                            // turn should get its own nudge-before-halt, not an immediate halt.
+                            failure_nudged = false;
+                        }
                     }
                     // Env-fight spend cap (quality guards wave 4, fix 4): shell commands that look
                     // like environment provisioning and keep failing are venv archaeology — the

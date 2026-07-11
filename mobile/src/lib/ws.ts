@@ -203,6 +203,10 @@ export function useSessionSocket(
   const wsRef = useRef<WebSocket | null>(null);
   const revRef = useRef(0);
   const attemptRef = useRef(0);
+  // Set when a revision gap forced the current socket closed (see onmessage). A gap is a replay
+  // artifact, not a connection failure, so onclose reconnects immediately at attempt 0 without
+  // escalating backoff or the unreachable counter.
+  const resyncPendingRef = useRef(false);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const socketGenerationRef = useRef(0);
   const closedRef = useRef(false);
@@ -298,6 +302,9 @@ export function useSessionSocket(
         ) {
           // A non-contiguous frame means replay/watch coalescing skipped state. Reconnect
           // from the last known-good revision so the server can replay or explicitly resync.
+          // This is a transient gap, not a failed connection — flag it so onclose reconnects
+          // at once without counting toward the backoff/unreachable escalation.
+          resyncPendingRef.current = true;
           ws.close();
           return;
         }
@@ -323,6 +330,16 @@ export function useSessionSocket(
       if (generation !== socketGenerationRef.current) return;
       wsRef.current = null;
       if (closedRef.current || !shouldRunRef.current) return;
+      if (resyncPendingRef.current) {
+        // A revision gap forced this close, not a real outage. Reconnect immediately from the
+        // last good revision without incrementing attemptRef, so a transient replay gap never
+        // imposes backoff or falsely escalates to "unreachable".
+        resyncPendingRef.current = false;
+        setConnectionState("reconnecting");
+        clearReconnectTimer();
+        reconnectTimerRef.current = setTimeout(connect, 0);
+        return;
+      }
       setConnectionState(attemptRef.current >= UNREACHABLE_AFTER_ATTEMPTS ? "unreachable" : "reconnecting");
       const delay =
         BACKOFF_MS[Math.min(attemptRef.current, BACKOFF_MS.length - 1)];

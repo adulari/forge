@@ -28,6 +28,11 @@ fn cache() -> &'static Mutex<HashMap<u64, usize>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn args_cache() -> &'static Mutex<HashMap<u64, usize>> {
+    static CACHE: OnceLock<Mutex<HashMap<u64, usize>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Per-message framing overhead (role marker + delimiters) the model also pays, mirrored so the
 /// transcript estimate tracks the real request size. ~4 tokens is the standard chat-format budget.
 pub const PER_MESSAGE_OVERHEAD: usize = 4;
@@ -59,6 +64,32 @@ pub fn count_message(content: &str) -> usize {
     count_text(content) + PER_MESSAGE_OVERHEAD
 }
 
+/// Token count of a tool call's JSON arguments, memoized by the call's stable `id`. A tool call's
+/// args are immutable once recorded, so the (relatively expensive) `args.to_string()` serialization
+/// runs at most once per call rather than on every transcript-estimation pass. Falls back to a
+/// direct, uncached count when the call has no id.
+pub fn count_tool_args(call_id: &str, args: &serde_json::Value) -> usize {
+    if call_id.is_empty() {
+        return count_text(&args.to_string());
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    call_id.hash(&mut h);
+    let key = h.finish();
+    if let Some(&n) = args_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+    {
+        return n;
+    }
+    let n = count_text(&args.to_string());
+    args_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key, n);
+    n
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +115,16 @@ mod tests {
     #[test]
     fn message_adds_framing_overhead() {
         assert_eq!(count_message("x"), count_text("x") + PER_MESSAGE_OVERHEAD);
+    }
+
+    #[test]
+    fn tool_args_memo_matches_direct_count_and_is_stable() {
+        let args = serde_json::json!({ "path": "src/lib.rs", "start": 1, "end": 200 });
+        let direct = count_text(&args.to_string());
+        // Cache miss then hit — both agree with the un-memoized count.
+        assert_eq!(count_tool_args("call_abc", &args), direct);
+        assert_eq!(count_tool_args("call_abc", &args), direct);
+        // Empty id falls back to a direct count rather than caching under a shared key.
+        assert_eq!(count_tool_args("", &args), direct);
     }
 }

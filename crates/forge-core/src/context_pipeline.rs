@@ -137,7 +137,7 @@ fn elide_tool_result(message: &Message, token_budget: usize) -> Message {
 pub(crate) fn message_tokens(m: &Message) -> usize {
     let mut n = tokens::count_message(&m.content);
     for tc in &m.tool_calls {
-        n += tokens::count_text(&tc.name) + tokens::count_text(&tc.args.to_string());
+        n += tokens::count_text(&tc.name) + tokens::count_tool_args(&tc.id, &tc.args);
     }
     n
 }

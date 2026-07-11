@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS push_subscription (
     auth       TEXT NOT NULL,
     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
+-- UNIQUE(endpoint) (idx_push_subscription_endpoint) is built in migration_0013 after de-duping,
+-- NOT here: schema runs before migrations, so a legacy DB with duplicate endpoints would fail to
+-- build it in this batch. See the module doc comment above.
 
 CREATE TABLE IF NOT EXISTS message (
     id              TEXT PRIMARY KEY,
@@ -40,7 +43,8 @@ CREATE TABLE IF NOT EXISTS message (
     tool_calls_json TEXT,
     tool_call_id    TEXT,
     visibility      TEXT NOT NULL DEFAULT 'llm',  -- 'ui' = user-facing note, stripped from provider calls (also migration_0007)
-    active          INTEGER NOT NULL DEFAULT 1,   -- 0 = soft-deleted by /undo (kept for audit/redo)
+    active          INTEGER NOT NULL DEFAULT 1,   -- 0 = soft-deleted by /undo or /compact (kept for audit/redo)
+    compacted       INTEGER NOT NULL DEFAULT 0,   -- 1 = soft-deleted by /compact (uncompact reactivates only these; also migration_0012)
     created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_message_session ON message(session_id, seq);
