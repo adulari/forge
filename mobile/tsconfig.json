@@ -5,6 +5,7 @@
   },
   "exclude": [
     "${configDir}/node_modules",
+    "${configDir}/src-tauri",
     "${configDir}/babel.config.js",
     "${configDir}/metro.config.js",
     "${configDir}/jest.config.js",
