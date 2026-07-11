@@ -6,7 +6,7 @@
 import { router } from "expo-router";
 import { Flame, Plus } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { SearchField } from "../../components/ds/SearchField";
 import { SessionCard } from "../../components/fleet/SessionCard";
@@ -24,6 +24,8 @@ import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, shadowStyle, space } from "../../theme/tokens";
 import { tabularNums, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
+
+type FleetDeckItem = { type: "session"; row: SessionRow } | { type: "label"; label: string };
 
 // DESIGN_ELEVATION.md Move 3 — the one identity moment: the ⚒ mark beside the Fleet title.
 function FleetTitle() {
@@ -78,6 +80,15 @@ function FleetHeader({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: S
   );
 }
 
+function CoalStrip({ sessions, onPress }: { sessions: SessionRow[]; onPress: (index: number) => void }) {
+  const tokens = useTokens();
+  const visible = sessions.slice(0, 14);
+  return <View style={styles.coalStrip}>{visible.map((session, index) => {
+    const state = session.waiting ? "waiting" : session.busy ? "busy" : "idle";
+    return <Pressable key={session.id} onPress={() => onPress(index)} accessibilityLabel={`Jump to ${session.title || session.id}`} style={styles.coal}><StatusDot state={state} size={6} /></Pressable>;
+  })}{sessions.length > visible.length ? <Text style={[typeScale.meta, { color: tokens.ink3 }]}>+{sessions.length - visible.length}</Text> : null}</View>;
+}
+
 function FleetRowSkeleton() {
   return (
     <View style={styles.skeletonRow}>
@@ -97,6 +108,7 @@ export default function FleetScreen() {
   const depth = scheme === "dark" ? depthDark : depthLight;
   const { isExpanded } = useBreakpoint();
   const query = useSessions();
+  const listRef = React.useRef<FlatList<FleetDeckItem>>(null);
 
   // `useSessions` polls every few seconds while focused (module doc above) — react-query's own
   // `isRefetching` flips true on THAT background poll too, not just a manual pull, so wiring it
@@ -121,14 +133,25 @@ export default function FleetScreen() {
       return [row.title, row.cwd, status].some((value) => value.toLowerCase().includes(needle));
     });
   }, [data, search, needsYouOnly]);
+  const deckRows = useMemo(() => {
+    const rows: FleetDeckItem[] = [];
+    let previous: string | null = null;
+    for (const row of filteredData) {
+      const group = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
+      if (group !== previous) rows.push({ type: "label", label: group === "waiting" ? "NEEDS YOU" : group === "busy" ? "FORGING" : "COOL" });
+      rows.push({ type: "session", row });
+      previous = group;
+    }
+    return rows;
+  }, [filteredData]);
   const hasData = data.length > 0;
   const isFirstLoad = query.isLoading && !hasData;
 
   const renderItem = useCallback(
-    ({ item, index }: { item: SessionRow; index: number }) => <SessionCard row={item} index={index} />,
-    [],
+    ({ item }: { item: (typeof deckRows)[number] }) => item.type === "label" ? <Text style={[typeScale.section, styles.groupLabel, { color: item.label === "NEEDS YOU" ? tokens.danger : tokens.ink3 }]}>{item.label}</Text> : <SessionCard row={item.row} index={data.indexOf(item.row)} />,
+    [data, tokens.danger, tokens.ink3],
   );
-  const keyExtractor = useCallback((item: SessionRow) => item.id, []);
+  const keyExtractor = useCallback((item: (typeof deckRows)[number]) => item.type === "label" ? `label:${item.label}` : item.row.id, []);
 
   const emptyComponent = useMemo(() => {
     if (query.isError) {
@@ -173,7 +196,7 @@ export default function FleetScreen() {
         autoCorrect={false}
         containerStyle={styles.search}
       />
-      {hasData ? <FleetHeader sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /> : null}
+      {hasData ? <><FleetHeader sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /><CoalStrip sessions={data} onPress={(index) => listRef.current?.scrollToIndex({ index: deckRows.findIndex((item) => item.type === "session" && item.row === data[index]), animated: true })} /></> : null}
       {isFirstLoad ? (
         <View style={styles.list}>
           {[0, 1, 2, 3].map((i) => (
@@ -182,7 +205,8 @@ export default function FleetScreen() {
         </View>
       ) : (
         <BoundedList
-          data={filteredData}
+          ref={listRef}
+          data={deckRows}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
           ListEmptyComponent={emptyComponent}
@@ -222,7 +246,9 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   headerStat: { flex: 1, gap: space.space4, alignItems: "flex-start" },
-  waitingCount: { flexDirection: "row", alignItems: "center", gap: space.space4 },
+  coalStrip: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: space.space8, paddingVertical: space.space8 },
+  coal: { minWidth: 12, minHeight: 12, alignItems: "center", justifyContent: "center" },
+  groupLabel: { paddingTop: space.space16, paddingHorizontal: space.space16 },
   headerDivider: { borderLeftWidth: StyleSheet.hairlineWidth, paddingLeft: space.space12 },
   skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonRow1: { flexDirection: "row", alignItems: "center", gap: space.space8 },
