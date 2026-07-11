@@ -590,14 +590,16 @@ exhaust the plan even while every window is still green. `conserve_decision`
    scores 9.0 — fails the frontier bar).
 3. **Probability.** For each subscription provider present, `conserve_probability`
    (`catalog.rs:364`) computes a spread probability; the decision takes the **max** across
-   providers (protect whichever is most pressured / smallest-plan):
+    provider. Each provider compares that same deterministic roll against its own probability, so a
+    pressured subscription is demoted without abandoning a fresh sibling.
 
    ```
    base(tier) = 1.0  Trivial          (subscriptions are never worth spending on it)
                 0.65 Standard
                 0.30 Complex          (0.15 when code_heavy — subs earn their keep on code)
    ramp       = (fraction / 0.80).clamp(0, 1) * (1 - base)      # fraction is pace-projected
-   P          = ((base + ramp) * plan_factor(plan)).clamp(0, 1)
+    P          = 1.0                                                 # Trivial
+                 ((base + ramp) * plan_factor(plan)).clamp(0, 1)     # Standard / Complex
    ```
 
    `plan_factor` (`catalog.rs:342`): slug containing "20x" → 0.8; "max" or "pro" → 0.85;

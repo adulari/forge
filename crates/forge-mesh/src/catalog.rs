@@ -78,25 +78,23 @@ pub fn is_subscription(id: &str) -> bool {
 /// `groq`/`cerebras`) are genuinely free.
 /// Documented in docs/features/mesh-routing.md.
 pub fn is_free(id: &str, cost: f64, subscription: bool) -> bool {
-    if subscription || cost > f64::EPSILON {
+    if subscription {
         return false;
     }
     let provider = provider_of(id);
+    // Standing free tiers remain free even when the bundled rate table records their avoided cost.
+    if matches!(provider, "ollama" | "groq") || (provider == "gemini" && !id.contains("pro")) {
+        return true;
+    }
     // Custom OpenAI-compatible providers (NVIDIA NIM, SambaNova, Mistral, Cerebras, …) carry their
     // own free/paid flag in the registry — a standing free tier counts as genuinely free.
-    if let Some(cp) = forge_config::custom_provider(provider) {
-        if cp.free {
-            return true;
-        }
+    if forge_config::custom_provider(provider).is_some_and(|cp| cp.free) {
+        return true;
+    }
+    if cost > f64::EPSILON {
+        return false;
     }
     match provider {
-        // Genuinely free: local inference, and free-tier API providers we know charge nothing.
-        "ollama" | "groq" => true,
-        // Gemini has a standing free tier (Google AI Studio, no card) — but only Flash / Flash-Lite
-        // (and the open Gemma models); the Pro models were pulled from the free tier (Apr 2026) and
-        // are paid-only. So an unpriced Gemini model is free UNLESS it's a Pro model. (Per Google's
-        // Gemini API pricing + rate-limit docs.)
-        "gemini" => !id.contains("pro"),
         // Paid gateways: only their explicit `:free`-suffixed variants are free.
         "openrouter" | "opencode_go" => id.contains(":free"),
         // Every other metered API provider (openai, xai, deepseek, anthropic, minimax, mimo, …) has
@@ -298,7 +296,7 @@ fn subscription_burn_penalty(
     overrides: &HashMap<String, f64>,
 ) -> f64 {
     let weight = crate::capability::subscription_burn_weight(id, overrides);
-    if weight <= 0.0 {
+    if weight <= 1.0 {
         return 0.0;
     }
     let fraction = quota.effective_fraction_for(provider_of(id));
@@ -427,8 +425,11 @@ fn plan_factor(slug: &str) -> f64 {
 /// so the ramp above starts ahead of the overrun instead of reacting to one already at Warning.
 /// Documented in docs/features/mesh-routing.md.
 fn conserve_probability(tier: TaskTier, fraction: f64, plan: &str, code_heavy: bool) -> f64 {
+    if tier == TaskTier::Trivial {
+        return 1.0;
+    }
     let base = match tier {
-        TaskTier::Trivial => 1.0,
+        TaskTier::Trivial => unreachable!(),
         TaskTier::Standard => 0.65,
         TaskTier::Complex if code_heavy => 0.15, // code-heavy complex: subscriptions earn their keep
         TaskTier::Complex => 0.30,
@@ -557,6 +558,23 @@ pub(crate) fn conserve_decision(
     d.roll = (stable_hash(&format!("{seed}:conserve")) % 10_000) as f64 / 10_000.0;
     d.fired = d.roll < d.probability;
     d
+}
+
+pub(crate) fn provider_conservation_fired(
+    provider: &str,
+    tier: TaskTier,
+    code_heavy: bool,
+    decision: ConserveDecision,
+    quota: &forge_types::SubscriptionQuota,
+) -> bool {
+    decision.eligible
+        && decision.roll
+            < conserve_probability(
+                tier,
+                quota.effective_fraction_for(provider),
+                quota.plan_for(provider),
+                code_heavy,
+            )
 }
 
 /// A per-prompt provider ordering key: hashing `seed:provider` means different prompts rotate
@@ -815,15 +833,14 @@ impl ModelCatalog {
         // subscription bridges onto a free-frontier model (so a complex/standard-heavy workload
         // doesn't exhaust the plan). When it fires, subscriptions take a soft penalty so the best
         // alternative leads while the subscription stays available as a fallback.
-        let conserve = conserve_decision(
+        let conservation = conserve_decision(
             &self.models,
             tier,
             code_heavy,
             seed,
             quota,
             self.bench.as_ref(),
-        )
-        .fired;
+        );
         let superseded = superseded_bridge_ids(&self.models);
 
         struct ScoredModel<'a> {
@@ -836,6 +853,7 @@ impl ModelCatalog {
             bench_score: Option<f64>,
             cost: f64,
             speed: u8,
+            conserved: bool,
         }
 
         let mut scored: Vec<ScoredModel> = self
@@ -854,7 +872,15 @@ impl ModelCatalog {
                     &self.burn_weights,
                     superseded.contains(m),
                 );
-                if conserve && is_subscription(m) {
+                let conserved = is_subscription(m)
+                    && provider_conservation_fired(
+                        provider_of(m),
+                        tier,
+                        code_heavy,
+                        conservation,
+                        quota,
+                    );
+                if conserved {
                     score -= CONSERVE_PENALTY;
                 }
                 let bench_score = self.bench.as_ref().and_then(|b| b.score_for(m)).map(|s| {
@@ -874,6 +900,7 @@ impl ModelCatalog {
                     bench_score,
                     cost,
                     speed: crate::capability::speed_class(m),
+                    conserved,
                 }
             })
             .collect();
@@ -888,8 +915,9 @@ impl ModelCatalog {
                 // order" the first time a white-hot turn ranked a full catalog. Unbenched
                 // models (no band) sort below benched ones — at high effort you asked for
                 // proven quality.
-                bench_band(b.bench_score)
-                    .cmp(&bench_band(a.bench_score))
+                a.conserved
+                    .cmp(&b.conserved)
+                    .then_with(|| bench_band(b.bench_score).cmp(&bench_band(a.bench_score)))
                     .then_with(|| b.route_score.total_cmp(&a.route_score))
                     .then_with(|| a.cost_class.cmp(&b.cost_class))
                     .then_with(|| a.provider_rotation.cmp(&b.provider_rotation))
@@ -968,7 +996,14 @@ impl ModelCatalog {
                     superseded.contains(m),
                 );
                 let sub = is_subscription(m);
-                let penalty = if decision.fired && sub {
+                let penalty = if sub
+                    && provider_conservation_fired(
+                        provider_of(m),
+                        tier,
+                        code_heavy,
+                        decision,
+                        quota,
+                    ) {
                     CONSERVE_PENALTY
                 } else {
                     0.0
@@ -1004,8 +1039,9 @@ impl ModelCatalog {
             EffortLevel::High | EffortLevel::XHigh | EffortLevel::WhiteHot => {
                 // Banded, not pairwise — same total-order fix as `ranked_seeded` (see the
                 // comment there; the pairwise gap rule panicked the sort on real catalogs).
-                bench_band(b.bench_score)
-                    .cmp(&bench_band(a.bench_score))
+                (a.conserve_penalty > 0.0)
+                    .cmp(&(b.conserve_penalty > 0.0))
+                    .then_with(|| bench_band(b.bench_score).cmp(&bench_band(a.bench_score)))
                     .then_with(|| b.final_score.total_cmp(&a.final_score))
                     .then_with(|| a.cost_class.cmp(&b.cost_class))
                     .then_with(|| a.rotation.cmp(&b.rotation))
@@ -2121,5 +2157,72 @@ mod tests {
             "claude-cli::opus's score must be identical whether or not an unrelated oauth model \
              is present: with={with_pair} without={without_pair}"
         );
+    }
+
+    #[test]
+    fn conservation_is_per_provider_and_overrides_high_effort_bench_bands() {
+        let mut bench = BenchmarkScores::new();
+        bench.insert("sonnet", 60.0, 60.0);
+        bench.insert("gpt-5.5", 60.0, 60.0);
+        bench.insert("llama-3.3-70b-versatile", 20.0, 20.0);
+        let cat = ModelCatalog::new(vec![
+            "claude-cli::sonnet".into(),
+            "codex-cli::gpt-5.5".into(),
+            "groq::llama-3.3-70b-versatile".into(),
+        ])
+        .with_benchmarks(Some(bench));
+        let quota = forge_types::SubscriptionQuota::default()
+            .with_conserve(true)
+            .with_fractions(HashMap::from([
+                ("claude-cli".into(), 1.0),
+                ("codex-cli".into(), 0.0),
+            ]));
+        let (_, rows) = cat.ranked_rows(
+            TaskTier::Complex,
+            &Pricing::default(),
+            false,
+            0,
+            &quota,
+            Some(EffortLevel::High),
+        );
+        let claude = rows.iter().find(|r| r.provider == "claude-cli").unwrap();
+        let codex = rows.iter().find(|r| r.provider == "codex-cli").unwrap();
+        assert_eq!(claude.conserve_penalty, CONSERVE_PENALTY);
+        assert_eq!(codex.conserve_penalty, 0.0);
+        assert_ne!(
+            rows[0].provider, "claude-cli",
+            "conservation must override bench band: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn standing_free_tiers_ignore_reference_prices() {
+        assert!(is_free("gemini::gemini-2.5-flash", 1.0, false));
+        assert!(is_free("groq::llama-3.3-70b-versatile", 1.0, false));
+        assert!(!is_free("gemini::gemini-2.5-pro", 1.0, false));
+    }
+
+    #[test]
+    fn subunit_burn_weight_is_neutral() {
+        let overrides = HashMap::from([("sonnet".into(), 0.5)]);
+        assert_eq!(
+            subscription_burn_penalty(
+                "claude-cli::sonnet",
+                TaskTier::Complex,
+                &forge_types::SubscriptionQuota::default(),
+                &overrides
+            ),
+            0.0
+        );
+    }
+
+    #[test]
+    fn trivial_conservation_is_unconditional_across_plans() {
+        for plan in ["", "plus", "pro", "max-20x"] {
+            assert_eq!(
+                conserve_probability(TaskTier::Trivial, 0.0, plan, false),
+                1.0
+            );
+        }
     }
 }
