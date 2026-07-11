@@ -4257,7 +4257,10 @@ pub fn input_box_height(input: &str, box_width: u16) -> u16 {
 /// boundary), or `None` when the cursor is on the first row — in which case the caller recalls
 /// prompt history instead of clobbering a multiline draft.
 pub fn input_cursor_up(input: &str, cursor: usize) -> Option<usize> {
-    let cursor = cursor.min(input.len());
+    let mut cursor = cursor.min(input.len());
+    while !input.is_char_boundary(cursor) {
+        cursor = cursor.saturating_sub(1);
+    }
     if cursor == 0 || !input[..cursor].contains('\n') {
         return None;
     }
@@ -4293,7 +4296,10 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     // Build one ratatui Line per explicit input line so pasted newlines render as separate rows;
     // long lines are then soft-wrapped by `Wrap`. Slash-command highlighting + block cursor apply
     // to the line that contains the cursor; later lines render plain.
-    let cursor = app.input_cursor.min(app.input.len());
+    let mut cursor = app.input_cursor.min(app.input.len());
+    while !app.input.is_char_boundary(cursor) {
+        cursor = cursor.saturating_sub(1);
+    }
     // Cursor appearance: a solid orange block when focused, suppressed on the blink "off" frame,
     // and a dim hollow (underline) when the terminal window has lost focus.
     let cursor_style = if app.unfocused {
@@ -5831,6 +5837,16 @@ mod tests {
     }
 
     #[test]
+    fn stale_multibyte_cursor_does_not_panic_during_render() {
+        let app = App {
+            input: "é你".into(),
+            input_cursor: 1,
+            ..Default::default()
+        };
+        let _ = screen_wh(&app, 20, 5);
+    }
+
+    #[test]
     fn input_cursor_up_recalls_on_first_row_moves_otherwise() {
         // Single-line / first-row cursor → None (caller recalls history).
         assert_eq!(input_cursor_up("hello", 3), None);
@@ -5841,6 +5857,8 @@ mod tests {
         // Column clamped when the previous line is shorter.
         // "ab\nlongline|" cursor at end (col 8) → clamp to line-1 len (2) = byte 2.
         assert_eq!(input_cursor_up("ab\nlongline", 11), Some(2));
+        // A stale cursor inside a multibyte scalar is sanitized before slicing.
+        assert_eq!(input_cursor_up("é\n你", 4), Some(0));
     }
 
     #[test]
