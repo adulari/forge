@@ -200,6 +200,15 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
   const activityIdRef = useRef<string | null>(null);
   const [completed, setCompleted] = useState(false);
 
+  useEffect(
+    () => () => {
+      const id = activityIdRef.current;
+      activityIdRef.current = null;
+      if (id) endLiveActivity(id).catch(() => {});
+    },
+    [],
+  );
+
   const busy = snapshot?.busy ?? false;
   const waiting = snapshot != null && (snapshot.permission_prompt != null || snapshot.question != null);
   const sessionId = snapshot?.session_id ?? null;

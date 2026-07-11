@@ -493,7 +493,10 @@ export default function SessionChat() {
     // Notes (turn-end notices, e.g. "compacting", "turn failed") are the NEWEST events — they must
     // sit at the newest slot (just under the streaming reply / above the composer in the inverted
     // list), not be pushed to the far/oldest end where they'd float above all history with no cue.
-    const notes = snapshot?.notes ?? [];
+    const historyNoteTexts = new Set(
+      historyRows.filter((row) => row.visibility === "ui").map((row) => row.content),
+    );
+    const notes = (snapshot?.notes ?? []).filter((note) => !historyNoteTexts.has(note));
     for (let i = notes.length - 1; i >= 0; i--) {
       list.push({ kind: "note", id: `n${i}`, text: notes[i] });
     }
