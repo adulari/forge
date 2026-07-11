@@ -102,7 +102,7 @@ function FleetServerSwitcher() {
         {servers.map((server, index) => {
           const fleet = fleets[index];
           const reachable = fleet.isSuccess;
-          const rows = fleet.data ?? [];
+          const rows: SessionRow[] = fleet.data ?? [];
           const count = rows.filter((row) => row.waiting).length;
           return (
             <Pressable
