@@ -6,6 +6,7 @@ import {
   useMutation,
   useQuery,
   useQueryClient,
+  useQueries,
 } from "@tanstack/react-query";
 import { useIsFocused } from "expo-router";
 import { useEffect, useRef, useState } from "react";
@@ -64,6 +65,19 @@ export function useSessions() {
     if (query.data) syncWidgetSessions(query.data);
   }, [query.data]);
   return query;
+}
+
+/** Per-server fleet probes for the Settings server switcher. */
+export function useServerFleets(servers: { id: string; baseUrl: string }[]) {
+  return useQueries({
+    queries: servers.map((server) => ({
+      queryKey: ["sessions", "server", server.id] as const,
+      queryFn: () => getSessions(server.baseUrl),
+      refetchInterval: 10_000,
+      refetchIntervalInBackground: false,
+      retry: false,
+    })),
+  });
 }
 
 /** Past (archived/finished) sessions, infinite by `before` = last row's last_activity. */

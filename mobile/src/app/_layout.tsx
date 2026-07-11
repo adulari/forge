@@ -14,10 +14,11 @@ import { useFonts } from "expo-font";
 import { Redirect, Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import React, { useEffect, useMemo } from "react";
-import { ActivityIndicator, StyleSheet } from "react-native";
+import { ActivityIndicator } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
+import { FleetWatcher } from "../components/fleet/FleetWatcher";
 import { AppLock } from "../components/AppLock";
 import { DesktopWindowChrome } from "../components/DesktopWindowChrome";
 import { ErrorBoundary } from "../components/ErrorBoundary";
@@ -122,6 +123,7 @@ export default function RootLayout() {
             <AuthProvider>
               <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
                 <ToastHost>
+                  <FleetWatcher />
                   {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
                       `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
                   <PaletteHost>
