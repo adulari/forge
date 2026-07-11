@@ -1,0 +1,39 @@
+name: mobile-typecheck
+
+# Type-checks the unified app (mobile/) on every PR that touches it. The Rust `CI`
+# workflow never compiles the TypeScript, so without this a mobile type error ships
+# entirely unverified (which it did — see the useQueries import fix). Fast + no secrets.
+on:
+  pull_request:
+    paths:
+      - "mobile/**"
+  workflow_dispatch:
+
+concurrency:
+  group: mobile-typecheck-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tsc:
+    name: tsc --noEmit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check (tsc --noEmit)
+        run: npx tsc --noEmit

@@ -310,6 +310,7 @@ impl WorkflowView {
                     model: r.model.clone(),
                     status: row_status(r),
                     cost: r.cost,
+                    revision: r.log.len() as u64,
                     lines,
                     line_count: r.log.len(),
                 }

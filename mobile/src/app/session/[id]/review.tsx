@@ -16,7 +16,7 @@ import { useSessionCtx } from "../../../lib/sessionContext";
 import { space } from "../../../theme/tokens";
 
 export default function Review() {
-  const { snapshot, send } = useSessionCtx();
+  const { snapshot, send, setPendingAnswer } = useSessionCtx();
 
   const plan = snapshot?.plan ?? null;
   const diff = snapshot?.diff ?? null;
@@ -34,6 +34,7 @@ export default function Review() {
               questionOptions={snapshot?.question_options ?? []}
               promptSeq={snapshot?.prompt_seq ?? 0}
               send={send}
+              onQueueAnswer={setPendingAnswer}
             />
           ) : null}
           {diff ? <DiffCard diff={diff} /> : null}

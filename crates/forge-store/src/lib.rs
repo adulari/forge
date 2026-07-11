@@ -1123,18 +1123,20 @@ impl Store {
             loop {
                 let r = tx.execute(
                     "INSERT INTO message (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id, visibility)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                     ON CONFLICT(session_id, seq) DO NOTHING",
                     (&id, session_id, s, role.as_str(), content, model, &tool_calls_json, tool_call_id, visibility.as_str()),
                 );
                 match r {
-                    Ok(_) => break,
-                    Err(ref e) if is_unique_violation(e) => {
+                    Ok(1) => break,
+                    Ok(0) => {
                         s = tx.query_row(
                             "SELECT COALESCE(MAX(seq), -1) + 1 FROM message WHERE session_id = ?1",
                             [session_id],
                             |row| row.get(0),
                         )?;
                     }
+                    Ok(_) => unreachable!("INSERT can affect at most one row"),
                     Err(e) => return Err(StoreError::Sqlite(e)),
                 }
             }
@@ -1789,26 +1791,35 @@ impl Store {
             forge_types::QuotaStatus::Warning => "warning",
             forge_types::QuotaStatus::Exhausted => "exhausted",
         };
-        self.lock()?.execute(
-            "INSERT INTO subscription_usage (provider, window_kind, status, resets_at, fraction, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'))
-             ON CONFLICT(provider, window_kind) DO UPDATE SET
-               status = excluded.status,
-               resets_at = excluded.resets_at,
-               fraction = excluded.fraction,
-               updated_at = excluded.updated_at",
-            (
-                hint.provider.as_str(),
-                hint.window.as_str(),
-                status,
-                hint.resets_at,
-                hint.fraction_used,
-            ),
-        )?;
-        if let Some(fraction_used) = hint.fraction_used {
-            self.record_quota_history(&hint.provider, &hint.window, fraction_used, hint.resets_at)?;
-        }
-        Ok(())
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                "INSERT INTO subscription_usage (provider, window_kind, status, resets_at, fraction, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'))
+                 ON CONFLICT(provider, window_kind) DO UPDATE SET
+                   status = excluded.status,
+                   resets_at = excluded.resets_at,
+                   fraction = excluded.fraction,
+                   updated_at = excluded.updated_at",
+                (
+                    hint.provider.as_str(),
+                    hint.window.as_str(),
+                    status,
+                    hint.resets_at,
+                    hint.fraction_used,
+                ),
+            )?;
+            if let Some(fraction_used) = hint.fraction_used {
+                tx.execute(
+                    "INSERT INTO quota_history (provider, window_kind, fraction_used, resets_at, observed_at)
+                     VALUES (?1, ?2, ?3, ?4, strftime('%s','now'))",
+                    (hint.provider.as_str(), hint.window.as_str(), fraction_used, hint.resets_at),
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Append one observation to the quota usage history (mesh-routing.md). Called by
@@ -6180,8 +6191,18 @@ mod tests {
             .collect();
         assert!(!ids.contains(&a), "archived session hidden: {ids:?}");
         assert!(ids.contains(&b), "live session still listed");
-        // History is intact — archive hides, never deletes.
         assert_eq!(store.load_messages(&a).unwrap().len(), 1);
+
+        let archived = store.list_sessions_for_resume().unwrap();
+        assert!(
+            archived.iter().any(|s| s.id == a && s.archived),
+            "archived session remains resumable"
+        );
+        store.unarchive_session(&a).unwrap();
+        assert!(
+            store.list_sessions().unwrap().iter().any(|s| s.id == a),
+            "unarchived session returns to normal list"
+        );
     }
 
     #[test]

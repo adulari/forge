@@ -3852,7 +3852,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         self.emit_context_gauge(&active_model);
                         continue;
                     }
-                    Err(e) if failover_enabled && e.is_retryable() => {
+                    Err(e) if failover_enabled && (e.is_retryable() || e.is_context_overflow()) => {
                         // Same-model retry for a TRANSIENT failure (a 5xx / dropped stream / network
                         // blip) before benching + failing over: these often succeed on a second
                         // attempt, so switching models immediately needlessly degrades the turn. We
@@ -3862,6 +3862,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         if transient_retries < MAX_TRANSIENT_RETRIES
                             && !e.is_permanent()
                             && !e.is_rate_limited()
+                            && !e.is_context_overflow()
                         {
                             transient_retries += 1;
                             let backoff =
@@ -4202,8 +4203,13 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 bridge_input_accum = bridge_input_accum.saturating_add(resp.usage.input_tokens);
             }
 
+            if resp.wants_tools() {
+                empty_nudges = 0;
+            }
+
             if !resp.wants_tools() {
                 if !resp.content.trim().is_empty() {
+                    empty_nudges = 0;
                     final_text = resp.content.clone();
                     has_prior_final = true;
                 }

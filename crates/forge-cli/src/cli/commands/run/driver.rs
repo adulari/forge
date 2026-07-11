@@ -58,7 +58,7 @@ pub(crate) struct SessionDriverHandle {
     pub worktree: Option<String>,
     pub created_at: i64,
     /// Latest broadcast snapshot (busy/cost/model ride in it — the session list reads these).
-    pub snapshot_rx: tokio::sync::watch::Receiver<remote::Snapshot>,
+    pub snapshot_rx: tokio::sync::watch::Receiver<std::sync::Arc<remote::SnapshotFrame>>,
     /// Reconnect replay log (`?rev=` handshake), same shape as the in-TUI server's.
     pub events: std::sync::Arc<std::sync::Mutex<remote::EventLog>>,
     /// Feed remote inputs to the driver (the WS receive half pushes here).
@@ -69,7 +69,7 @@ pub(crate) struct SessionDriverHandle {
     /// per connection). The push debounce: any client connected ⇒ no push.
     pub ws_clients: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
-    task: tokio::task::JoinHandle<()>,
+    task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl SessionDriverHandle {
@@ -80,8 +80,11 @@ impl SessionDriverHandle {
     }
 
     /// Wait (bounded) for the driver task to finish after [`Self::shutdown`].
-    pub async fn join(self, timeout: std::time::Duration) {
-        let _ = tokio::time::timeout(timeout, self.task).await;
+    pub async fn join(&self, timeout: std::time::Duration) {
+        let task = self.task.lock().await.take();
+        if let Some(task) = task {
+            let _ = tokio::time::timeout(timeout, task).await;
+        }
     }
 }
 
@@ -129,7 +132,9 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     }
 
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
-    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(remote::Snapshot::default());
+    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(std::sync::Arc::new(
+        remote::SnapshotFrame::new(remote::Snapshot::default()),
+    ));
     let (input_tx, input_rx) = tokio::sync::mpsc::channel::<remote::RemoteInput>(64);
     let events = std::sync::Arc::new(std::sync::Mutex::new(remote::EventLog::new(
         remote::EVENT_LOG_CAP,
@@ -167,7 +172,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         last_activity,
         ws_clients,
         shutdown_tx,
-        task,
+        task: tokio::sync::Mutex::new(Some(task)),
     })
 }
 
@@ -224,7 +229,7 @@ async fn drive_session(
     worktree: Option<String>,
     ui_rx: std::sync::mpsc::Receiver<UiMsg>,
     mut input_rx: tokio::sync::mpsc::Receiver<remote::RemoteInput>,
-    snapshot_tx: tokio::sync::watch::Sender<remote::Snapshot>,
+    snapshot_tx: tokio::sync::watch::Sender<std::sync::Arc<remote::SnapshotFrame>>,
     events: std::sync::Arc<std::sync::Mutex<remote::EventLog>>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     last_activity: std::sync::Arc<AtomicI64>,
@@ -446,10 +451,11 @@ async fn drive_session(
                     }
                 }
                 last_snap = Some(snap.clone());
+                let frame = std::sync::Arc::new(remote::SnapshotFrame::new(snap));
                 if let Ok(mut log) = events.lock() {
-                    log.push(revision, snap.clone());
+                    log.push(revision, frame.clone());
                 }
-                let _ = snapshot_tx.send(snap);
+                let _ = snapshot_tx.send(frame);
                 last_activity.store(now_secs(), Ordering::Relaxed);
             }
             dirty = false;
@@ -481,6 +487,10 @@ async fn drive_session(
     let mut closed = last_snap.unwrap_or_default();
     closed.closed = true;
     closed.revision += 1;
+    let closed = std::sync::Arc::new(remote::SnapshotFrame::new(closed));
+    if let Ok(mut log) = events.lock() {
+        log.push(closed.snapshot.revision, closed.clone());
+    }
     let _ = snapshot_tx.send(closed);
 }
 
@@ -1112,6 +1122,27 @@ impl DriverState {
                 }
                 KeyKind::Up => self.app.picker.move_up(),
                 KeyKind::Down => self.app.picker.move_down(),
+                KeyKind::Tab if self.app.picker.kind == Some(forge_tui::PickerKind::Sessions) => {
+                    let query = self.app.picker.query.clone();
+                    self.app.show_archived = !self.app.show_archived;
+                    open_sessions_picker(&mut self.app, &query)?;
+                }
+                KeyKind::DeleteForward
+                    if self.app.picker.kind == Some(forge_tui::PickerKind::Sessions) =>
+                {
+                    if let Some(row) = self.app.picker.selected_row() {
+                        if !row.id.starts_with("observe:") {
+                            let store = crate::open_store()?;
+                            if self.app.show_archived {
+                                store.unarchive_session(&row.id)?;
+                            } else {
+                                store.archive_session(&row.id)?;
+                            }
+                            let query = self.app.picker.query.clone();
+                            open_sessions_picker(&mut self.app, &query)?;
+                        }
+                    }
+                }
                 KeyKind::Enter => {
                     self.picker_enter().await?;
                 }

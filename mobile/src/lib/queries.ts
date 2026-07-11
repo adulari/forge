@@ -4,6 +4,7 @@
 import {
   useInfiniteQuery,
   useMutation,
+  useQueries,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -36,6 +37,8 @@ import {
 } from "../../modules/live-activity";
 
 const SESSIONS_POLL_MS = 3000;
+const SERVER_FLEET_POLL_MS = 5000;
+const SERVER_FLEET_BACKOFF_MS = 15000;
 const PAST_PAGE_SIZE = 50;
 const HISTORY_PAGE_SIZE = 60;
 
@@ -66,6 +69,19 @@ export function useSessions() {
   return query;
 }
 
+/** Per-server fleet probes for the Settings server switcher. */
+export function useServerFleets(servers: { id: string; baseUrl: string }[]) {
+  return useQueries({
+    queries: servers.map((server) => ({
+      queryKey: ["sessions", "server", server.id] as const,
+      queryFn: () => getSessions(server.baseUrl),
+      refetchInterval: (query: { state: { error: unknown } }) =>
+        query.state.error ? SERVER_FLEET_BACKOFF_MS : SERVER_FLEET_POLL_MS,
+      refetchIntervalInBackground: false,
+      retry: false,
+    })),
+  });
+}
 /** Past (archived/finished) sessions, infinite by `before` = last row's last_activity. */
 export function usePastSessions() {
   const { baseUrl } = useAuth();
@@ -185,6 +201,15 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
   const prevBusyRef = useRef<boolean | undefined>(undefined);
   const activityIdRef = useRef<string | null>(null);
   const [completed, setCompleted] = useState(false);
+
+  useEffect(
+    () => () => {
+      const id = activityIdRef.current;
+      activityIdRef.current = null;
+      if (id) endLiveActivity(id).catch(() => {});
+    },
+    [],
+  );
 
   const busy = snapshot?.busy ?? false;
   const waiting = snapshot != null && (snapshot.permission_prompt != null || snapshot.question != null);
