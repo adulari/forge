@@ -16,7 +16,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 13;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -601,6 +601,37 @@ fn migration_0011(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Migration #12: distinguish compaction soft-deletes from `/undo` soft-deletes. Both set
+/// `message.active = 0`, so the old "reactivate every inactive row" uncompact resurrected rows
+/// `/undo` had removed. `compacted = 1` marks the rows a `/compact` deactivated; uncompact now
+/// reactivates only those, leaving `/undo` rows untouched.
+fn migration_0012(conn: &Connection) -> rusqlite::Result<()> {
+    // Idempotent: on a fresh DB the base schema already carries this column.
+    add_column_if_missing(
+        conn,
+        "ALTER TABLE message ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
+/// Migration #13: enforce one `push_subscription` row per `endpoint`. `upsert_push_subscription`
+/// deduped application-side with a non-atomic SELECT-then-INSERT, so concurrent callers could
+/// still pile up duplicate rows. De-dupe any existing duplicates (keep the earliest rowid) before
+/// building the UNIQUE index the upsert's `ON CONFLICT(endpoint)` now resolves against. Kept out
+/// of the base schema (like `idx_message_session_seq_unique`) because schema runs before this
+/// de-dupe, so a legacy DB with duplicates would fail to build the index there.
+fn migration_0013(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM push_subscription WHERE rowid NOT IN (
+             SELECT MIN(rowid) FROM push_subscription GROUP BY endpoint
+         )",
+        [],
+    )?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_push_subscription_endpoint \
+         ON push_subscription(endpoint)",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -615,6 +646,8 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0009,
     migration_0010,
     migration_0011,
+    migration_0012,
+    migration_0013,
 ];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
@@ -2348,9 +2381,9 @@ impl Store {
     /// Store (or refresh) a Web Push subscription, deduplicating by `endpoint` — a browser
     /// re-subscribing after a permission round-trip must update its keys in place, never pile
     /// up duplicate rows that would each receive (and each decrypt-fail or double-notify) every
-    /// push. Dedupe is application-level: the shipped `push_subscription` table (migration #8)
-    /// has no UNIQUE index on `endpoint`, and shipped migrations are never rewritten.
-    /// Returns the row id (existing or new).
+    /// push. Atomic: a single `INSERT … ON CONFLICT(endpoint) DO UPDATE` against the UNIQUE index
+    /// `idx_push_subscription_endpoint` (migration #13), so concurrent callers can't race a
+    /// duplicate in between a SELECT and an INSERT. Returns the row id (existing or new).
     pub fn upsert_push_subscription(
         &self,
         endpoint: &str,
@@ -2358,26 +2391,15 @@ impl Store {
         auth: &str,
     ) -> Result<String> {
         let conn = self.lock()?;
-        if let Some(id) = conn
-            .query_row(
-                "SELECT id FROM push_subscription WHERE endpoint = ?1",
-                [endpoint],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-        {
-            conn.execute(
-                "UPDATE push_subscription SET p256dh = ?2, auth = ?3 WHERE id = ?1",
-                (&id, p256dh, auth),
-            )?;
-            return Ok(id);
-        }
         let id = forge_types::new_id();
-        conn.execute(
-            "INSERT INTO push_subscription (id, endpoint, p256dh, auth) VALUES (?1, ?2, ?3, ?4)",
+        let row_id = conn.query_row(
+            "INSERT INTO push_subscription (id, endpoint, p256dh, auth) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth
+             RETURNING id",
             (&id, endpoint, p256dh, auth),
+            |row| row.get::<_, String>(0),
         )?;
-        Ok(id)
+        Ok(row_id)
     }
 
     /// Remove a Web Push subscription by its endpoint (unsubscribe, or a push service answering
@@ -2709,14 +2731,14 @@ impl Store {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if keep_count == 0 {
             tx.execute(
-                "UPDATE message SET active = 0 WHERE session_id = ?1 AND active = 1",
+                "UPDATE message SET active = 0, compacted = 1 WHERE session_id = ?1 AND active = 1",
                 [session_id],
             )?;
         } else {
             // Soft-delete every active message whose seq is below the (keep_count)-th newest.
             // LIMIT 1 OFFSET (keep_count-1) on DESC order gives the oldest row to KEEP.
             tx.execute(
-                "UPDATE message SET active = 0
+                "UPDATE message SET active = 0, compacted = 1
                  WHERE session_id = ?1 AND active = 1
                  AND seq < (
                      SELECT seq FROM message
@@ -2738,8 +2760,10 @@ impl Store {
         Ok(())
     }
 
-    /// Undo a compaction: reactivate every soft-deleted message and drop the stored summary row.
-    /// Returns `false` (no-op) if the session was never compacted (no `session_compaction` row).
+    /// Undo a compaction: reactivate the messages THIS compaction soft-deleted (`compacted = 1`)
+    /// and drop the stored summary row. Rows `/undo` soft-deleted (`active = 0`, `compacted = 0`)
+    /// stay removed — resurrecting them was a bug. Returns `false` (no-op) if the session was never
+    /// compacted (no `session_compaction` row).
     pub fn uncompact_session_store(&self, session_id: &str) -> Result<bool> {
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2753,7 +2777,7 @@ impl Store {
             return Ok(false);
         }
         tx.execute(
-            "UPDATE message SET active = 1 WHERE session_id = ?1",
+            "UPDATE message SET active = 1, compacted = 0 WHERE session_id = ?1 AND compacted = 1",
             [session_id],
         )?;
         tx.execute(
@@ -4386,6 +4410,43 @@ mod tests {
             store.load_messages(&sid).unwrap().len(),
             10,
             "every message reactivated, no summary marker"
+        );
+    }
+
+    #[test]
+    fn uncompact_session_store_does_not_resurrect_undone_messages() {
+        // Both /undo and /compact soft-delete (active = 0). Uncompact must reactivate only the
+        // rows /compact removed, never the ones /undo removed.
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        for i in 0..10 {
+            let role = if i % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            };
+            store
+                .add_message(&sid, i, role, &format!("message {i}"), None)
+                .unwrap();
+        }
+        // /undo the last two turns (seq 8, 9) — they must stay gone across a compact/uncompact.
+        assert_eq!(store.deactivate_messages_from(&sid, 8).unwrap(), 2);
+        // Compact the remaining active messages, keeping the 3 most recent (seq 5,6,7).
+        store.compact_session_store(&sid, "SUMMARY", 3).unwrap();
+
+        assert!(store.uncompact_session_store(&sid).unwrap());
+        assert!(!store.session_has_compaction(&sid).unwrap());
+        let restored = store.load_messages(&sid).unwrap();
+        assert_eq!(
+            restored.len(),
+            8,
+            "compaction undone (seq 0..7 back) but the two /undo'd rows stay removed"
+        );
+        assert!(
+            restored
+                .iter()
+                .all(|m| m.content != "message 8" && m.content != "message 9"),
+            "the /undo'd messages were not resurrected"
         );
     }
 
@@ -6084,6 +6145,26 @@ mod tests {
         let left = store.list_push_subscriptions().unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].endpoint, "https://push.example/b");
+    }
+
+    #[test]
+    fn push_subscription_endpoint_has_a_unique_index() {
+        // migration_0013 builds a UNIQUE index on endpoint, so a raw duplicate INSERT is rejected
+        // at the DB level — the atomic upsert can rely on ON CONFLICT(endpoint) resolving it.
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.lock().unwrap();
+        conn.execute(
+            "INSERT INTO push_subscription (id, endpoint, p256dh, auth)
+             VALUES ('p1', 'https://push.example/dup', 'k', 'a')",
+            [],
+        )
+        .unwrap();
+        let dup = conn.execute(
+            "INSERT INTO push_subscription (id, endpoint, p256dh, auth)
+             VALUES ('p2', 'https://push.example/dup', 'k', 'a')",
+            [],
+        );
+        assert!(dup.is_err(), "duplicate endpoint rejected by UNIQUE index");
     }
 
     #[test]

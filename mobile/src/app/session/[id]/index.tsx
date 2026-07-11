@@ -61,6 +61,33 @@ function offlineQueueKey(baseUrl: string | null, sessionId: string): string {
   return `${OFFLINE_QUEUE_PREFIX}:${baseUrl ?? "unknown"}:${sessionId}`;
 }
 
+// A prompt held for the offline queue, carrying the wire-form (path-bearing) attachments that
+// rode it so the flush can replay them instead of silently dropping them to text-only.
+interface QueuedPrompt {
+  text: string;
+  attachments: { path: string; image: boolean }[];
+}
+
+// Older builds persisted the queue as a bare `string[]`. Coerce both that legacy shape and the
+// current object shape into `QueuedPrompt[]`, tolerating anything malformed.
+function parseOfflineQueue(raw: string | null): QueuedPrompt[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((entry) => {
+      if (typeof entry === "string") return { text: entry, attachments: [] };
+      const e = entry as Partial<QueuedPrompt>;
+      return {
+        text: typeof e.text === "string" ? e.text : "",
+        attachments: Array.isArray(e.attachments) ? e.attachments : [],
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
 type TimelineItem =
   | { kind: "streaming"; id: string; text: string; streaming: boolean }
   | { kind: "history"; id: string; row: HistoryRow }
@@ -210,7 +237,7 @@ export default function SessionChat() {
   // flushed in order on the exact reconnect edge, rendered as "queued (offline)" chips above
   // the composer. Loud drop past the cap (toast + haptic, never a silent no-op).
   // ---------------------------------------------------------------------
-  const [offlineQueue, setOfflineQueue] = useState<string[]>([]);
+  const [offlineQueue, setOfflineQueue] = useState<QueuedPrompt[]>([]);
   const offlineLoadedRef = useRef(false);
 
   useEffect(() => {
@@ -218,16 +245,7 @@ export default function SessionChat() {
     let cancelled = false;
     AsyncStorage.getItem(offlineQueueKey(baseUrl, sessionId)).then((raw) => {
       if (cancelled) return;
-      if (raw) {
-        try {
-          const parsed: unknown = JSON.parse(raw);
-          setOfflineQueue(Array.isArray(parsed) ? (parsed as string[]) : []);
-        } catch {
-          setOfflineQueue([]);
-        }
-      } else {
-        setOfflineQueue([]);
-      }
+      setOfflineQueue(parseOfflineQueue(raw));
       offlineLoadedRef.current = true;
     });
     return () => {
@@ -258,7 +276,7 @@ export default function SessionChat() {
     prevConnRef.current = connectionState;
     if (connectionState !== "open" || !offlineLoadedRef.current) return;
     if (offlineQueue.length > 0) {
-      for (const text of offlineQueue) send({ kind: "prompt", text });
+      for (const q of offlineQueue) send({ kind: "prompt", text: q.text, attachments: q.attachments });
       setOfflineQueue([]);
     }
     // The pending interrupt is edge-only: it means "Stop pressed while offline", so it fires on the
@@ -299,7 +317,7 @@ export default function SessionChat() {
           setPendingSent((p) => p.filter((x) => x.id !== id));
           return prev;
         }
-        return [...prev, text];
+        return [...prev, { text, attachments: withPath }];
       });
     },
     [online, send, toast],
@@ -340,13 +358,21 @@ export default function SessionChat() {
     latestSeqRef.current = historyRows[0]?.seq ?? -1;
   }, [historyRows]);
 
-  // Clear pendingSent bubbles once a real history row has landed since they were sent (turn
-  // completed, ARCHITECTURE §4.1.4 invalidation) — same baselineSeq idea as `finalizing` below.
+  // Clear a pendingSent bubble only once ITS OWN user row has landed in history — a `role:"user"`
+  // row newer than the send's baseline whose content matches the bubble's text (ARCHITECTURE
+  // §4.1.4 invalidation). Clearing on ANY history advance (an unrelated note row, a concurrent
+  // turn) would drop the optimistic bubble before its real row exists, flashing the message out.
   useEffect(() => {
     if (pendingSent.length === 0) return;
-    const newestSeq = historyRows[0]?.seq ?? -1;
-    setPendingSent((prev) => prev.filter((p) => p.baselineSeq === newestSeq));
-  }, [historyRows, pendingSent.length]);
+    setPendingSent((prev) =>
+      prev.filter(
+        (p) =>
+          !historyRows.some(
+            (row) => row.seq > p.baselineSeq && row.role === "user" && row.content === p.text,
+          ),
+      ),
+    );
+  }, [historyRows]);
 
   // Safety net: never let a pendingSent bubble linger forever if history never advances for it
   // (session closed mid-turn, connection never came back, ...). A normal successful send clears
@@ -692,13 +718,13 @@ export default function SessionChat() {
           {queued.map((text, i) => (
             <Chip key={`q${i}`} label={text} onPress={() => handleDequeue(i, text)} />
           ))}
-          {offlineQueue.map((text, i) => (
+          {offlineQueue.map((q, i) => (
             // Deliberately NOT `selected` (ember/accent) — this is a normal "will send on
             // reconnect" queue state, not an error, and the message itself already rendered as
             // a normal sent bubble via `pendingSent` above. Calm ink3 + a clock glyph instead.
             <Chip
               key={`o${i}`}
-              label={`${text} (offline)`}
+              label={`${q.text} (offline)`}
               icon={<Clock size={13} strokeWidth={1.75} color={tokens.ink3} />}
               onPress={() => removeQueuedOffline(i)}
             />

@@ -161,6 +161,12 @@ pub struct CodexOauthProvider {
     accounts: AccountSource,
     /// Optional override for ChatGPT-Account-Id in tests (when JWT has no claim).
     test_account_header: Option<String>,
+    /// Single-flight refresh latches keyed by store account id (`None` → "default"). Concurrent
+    /// completions that all see the same expired token await ONE in-flight refresh and reuse its
+    /// result, so the IdP's rotating refresh_token isn't spent twice (the losers would get
+    /// `invalid_grant`).
+    refresh_locks:
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Default for CodexOauthProvider {
@@ -178,6 +184,7 @@ impl CodexOauthProvider {
             skip_host_pin: false,
             accounts: AccountSource::Keyring,
             test_account_header: None,
+            refresh_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -229,34 +236,47 @@ impl CodexOauthProvider {
         }
     }
 
-    async fn access_token_for(
+    /// Per-account single-flight refresh latch (`None` → the "default" active session).
+    fn refresh_lock(&self, account_id: Option<&str>) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let key = account_id.unwrap_or("default").to_string();
+        let mut guard = self.refresh_locks.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .entry(key)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    /// Load the current stored tokens for `account_id` (named account or the active session).
+    fn load_tokens(
         &self,
         account_id: Option<&str>,
-    ) -> Result<(String, String), ProviderError> {
-        let tokens = match (&self.accounts, account_id) {
+    ) -> Result<forge_config::oauth::OAuthTokens, ProviderError> {
+        match (&self.accounts, account_id) {
             (AccountSource::Keyring, Some(id)) => {
                 provider_oauth::load_provider_oauth_account_tokens(CODEX_OAUTH_KEYRING_PROVIDER, id)
                     .ok_or_else(|| {
                         ProviderError::Auth(format!(
                             "no Codex OAuth account '{id}' — run `forge auth codex-oauth` to sign in"
                         ))
-                    })?
+                    })
             }
-            (AccountSource::Keyring, None) => provider_oauth::load_provider_oauth_tokens(
-                CODEX_OAUTH_KEYRING_PROVIDER,
-            )
-            .ok_or_else(|| {
-                ProviderError::Auth(
-                    "no Codex OAuth session — run `forge auth codex-oauth` to sign in".to_string(),
+            (AccountSource::Keyring, None) => {
+                provider_oauth::load_provider_oauth_tokens(CODEX_OAUTH_KEYRING_PROVIDER).ok_or_else(
+                    || {
+                        ProviderError::Auth(
+                            "no Codex OAuth session — run `forge auth codex-oauth` to sign in"
+                                .to_string(),
+                        )
+                    },
                 )
-            })?,
+            }
             (AccountSource::Memory(store), Some(id)) => {
                 let guard = store.lock().unwrap_or_else(|e| e.into_inner());
                 guard.tokens_for(id).cloned().ok_or_else(|| {
                     ProviderError::Auth(format!(
                         "no Codex OAuth account '{id}' — run `forge auth codex-oauth` to sign in"
                     ))
-                })?
+                })
             }
             (AccountSource::Memory(store), None) => {
                 let guard = store.lock().unwrap_or_else(|e| e.into_inner());
@@ -265,51 +285,28 @@ impl CodexOauthProvider {
                         "no Codex OAuth session — run `forge auth codex-oauth` to sign in"
                             .to_string(),
                     )
-                })?
+                })
             }
-        };
-        let access = self.refresh_if_needed(account_id, tokens).await?;
-        let chatgpt_id = self
-            .test_account_header
-            .clone()
-            .or_else(|| provider_oauth::extract_chatgpt_account_id(&access))
-            .unwrap_or_else(|| account_id.unwrap_or("default").to_string());
-        Ok((access, chatgpt_id))
+        }
     }
 
-    async fn refresh_if_needed(
+    /// Persist a refreshed token for `account_id` (named account or the active session).
+    fn store_refreshed(
         &self,
         account_id: Option<&str>,
-        tokens: forge_config::oauth::OAuthTokens,
-    ) -> Result<String, ProviderError> {
-        if !tokens.is_expired(now_unix(), REFRESH_SKEW_SECS) {
-            return Ok(tokens.access_token);
-        }
-        let Some(refresh_token) = tokens.refresh_token.clone() else {
-            return Err(ProviderError::Auth(
-                "Codex OAuth session expired and has no refresh token — run `forge auth codex-oauth` \
-                 to sign in again"
-                    .to_string(),
-            ));
-        };
-        let refreshed = refresh_tokens(&self.http, &refresh_token)
-            .await
-            .map_err(|e| {
-                ProviderError::Auth(format!(
-                    "Codex OAuth token refresh failed: {e} — run `forge auth codex-oauth` to sign in again"
-                ))
-            })?;
+        refreshed: &forge_config::oauth::OAuthTokens,
+    ) {
         match &self.accounts {
             AccountSource::Keyring => {
                 let store_result = match account_id {
                     Some(id) => provider_oauth::store_provider_oauth_account_tokens(
                         CODEX_OAUTH_KEYRING_PROVIDER,
                         id,
-                        &refreshed,
+                        refreshed,
                     ),
                     None => provider_oauth::store_provider_oauth_tokens(
                         CODEX_OAUTH_KEYRING_PROVIDER,
-                        &refreshed,
+                        refreshed,
                     ),
                 };
                 if let Err(e) = store_result {
@@ -327,23 +324,76 @@ impl CodexOauthProvider {
                 }
             }
         }
+    }
+
+    fn chatgpt_id_for(&self, access_token: &str, account_id: Option<&str>) -> String {
+        self.test_account_header
+            .clone()
+            .or_else(|| provider_oauth::extract_chatgpt_account_id(access_token))
+            .unwrap_or_else(|| account_id.unwrap_or("default").to_string())
+    }
+
+    async fn access_token_for(
+        &self,
+        account_id: Option<&str>,
+    ) -> Result<(String, String), ProviderError> {
+        let tokens = self.load_tokens(account_id)?;
+        let access = self.refresh_if_needed(account_id, tokens).await?;
+        let chatgpt_id = self.chatgpt_id_for(&access, account_id);
+        Ok((access, chatgpt_id))
+    }
+
+    async fn refresh_if_needed(
+        &self,
+        account_id: Option<&str>,
+        tokens: forge_config::oauth::OAuthTokens,
+    ) -> Result<String, ProviderError> {
+        if !tokens.is_expired(now_unix(), REFRESH_SKEW_SECS) {
+            return Ok(tokens.access_token);
+        }
+        // Single-flight: only one concurrent completion per account performs the network refresh;
+        // the rest await here, then re-load below and reuse the token the winner just stored.
+        let lock = self.refresh_lock(account_id);
+        let _guard = lock.lock().await;
+        // Re-check under the latch — a peer may have refreshed while we waited.
+        let current = self.load_tokens(account_id)?;
+        if !current.is_expired(now_unix(), REFRESH_SKEW_SECS) {
+            return Ok(current.access_token);
+        }
+        let Some(refresh_token) = current.refresh_token.clone() else {
+            return Err(ProviderError::Auth(
+                "Codex OAuth session expired and has no refresh token — run `forge auth codex-oauth` \
+                 to sign in again"
+                    .to_string(),
+            ));
+        };
+        let refreshed = refresh_tokens(&self.http, &refresh_token)
+            .await
+            .map_err(|e| {
+                ProviderError::Auth(format!(
+                    "Codex OAuth token refresh failed: {e} — run `forge auth codex-oauth` to sign in again"
+                ))
+            })?;
+        self.store_refreshed(account_id, &refreshed);
         Ok(refreshed.access_token)
     }
 
+    /// Pick the next account from the pool and resolve its token. Returns the store account id
+    /// (`None` → the single active session) alongside `(access_token, chatgpt_account_id)` so the
+    /// caller can force-refresh THAT account on a 401 instead of the active one.
     async fn pick_access_token(
         &self,
         pool: &forge_config::oauth::OAuthAccountPool,
-    ) -> Result<(String, String), ProviderError> {
-        if let Some(id) = pool.next() {
-            self.access_token_for(Some(&id)).await
-        } else {
-            self.access_token_for(None).await
-        }
+    ) -> Result<(Option<String>, String, String), ProviderError> {
+        let account_id = pool.next();
+        let (token, chatgpt_id) = self.access_token_for(account_id.as_deref()).await?;
+        Ok((account_id, token, chatgpt_id))
     }
 
     async fn execute(
         &self,
         url: &str,
+        account_id: Option<&str>,
         token: &str,
         chatgpt_account_id: &str,
         body: &serde_json::Value,
@@ -361,15 +411,12 @@ impl CodexOauthProvider {
             Some(parse_codex_quota_headers),
         )
         .await;
-        // On 401: refresh once and retry the same account once (design §2).
+        // On 401: force-refresh THIS account's token (not necessarily the active one) and retry the
+        // same account once (design §2). A 401 means the token was rejected even though it may not
+        // be clock-expired, so we bypass the expiry check via `force_refresh_account`.
         if let Err(ProviderError::Auth(ref msg)) = result {
             if msg.contains("(401)") {
-                // Force refresh by treating tokens as expired: re-load and refresh path.
-                // Pick again with the same pool cursor position is hard; just re-fetch active/named.
-                // Simpler: call refresh path via access_token_for after clearing skew by reloading.
-                // We re-run access_token_for(None) which refreshes if expired; for a 401 the token
-                // may not be expired by clock — force refresh via refresh_tokens directly.
-                if let Ok((token2, id2)) = self.force_refresh_active().await {
+                if let Ok((token2, id2)) = self.force_refresh_account(account_id, token).await {
                     return shared_execute(
                         &self.http,
                         url,
@@ -388,13 +435,13 @@ impl CodexOauthProvider {
     }
 
     /// WS counterpart of [`Self::execute`] for [`codex_websocket::CODEX_WEBSOCKET_MODELS`]
-    /// (Luna). Same 401-refresh-and-retry-once behavior as the HTTP path; cross-account rotation
-    /// (`should_hop_account`, tried on the HTTP path for 429/`Unavailable`) is NOT replicated here
-    /// yet — TODO: extend rotation to the WS transport once it's proven stable in the field. An
-    /// expired token is the common case and IS handled below.
+    /// (Luna). Same 401-force-refresh-and-retry-once behavior as the HTTP path, refreshing THIS
+    /// account's token. Cross-account rotation (`should_hop_account` for 429/`Unavailable`) is
+    /// driven by the caller [`Self::complete_with`], same as the HTTP path.
     async fn execute_ws(
         &self,
         ws_url: &str,
+        account_id: Option<&str>,
         token: &str,
         chatgpt_account_id: &str,
         body: &serde_json::Value,
@@ -411,7 +458,7 @@ impl CodexOauthProvider {
         .await;
         if let Err(ProviderError::Auth(ref msg)) = result {
             if msg.contains("(401)") {
-                if let Ok((token2, id2)) = self.force_refresh_active().await {
+                if let Ok((token2, id2)) = self.force_refresh_account(account_id, token).await {
                     return codex_websocket::run(
                         ws_url,
                         &token2,
@@ -427,28 +474,25 @@ impl CodexOauthProvider {
         result
     }
 
-    async fn force_refresh_active(&self) -> Result<(String, String), ProviderError> {
-        let tokens = match &self.accounts {
-            AccountSource::Keyring => {
-                provider_oauth::load_provider_oauth_tokens(CODEX_OAUTH_KEYRING_PROVIDER)
-                    .ok_or_else(|| {
-                        ProviderError::Auth(
-                            "no Codex OAuth session — run `forge auth codex-oauth` to sign in"
-                                .to_string(),
-                        )
-                    })?
-            }
-            AccountSource::Memory(store) => {
-                let guard = store.lock().unwrap_or_else(|e| e.into_inner());
-                guard.active_tokens().cloned().ok_or_else(|| {
-                    ProviderError::Auth(
-                        "no Codex OAuth session — run `forge auth codex-oauth` to sign in"
-                            .to_string(),
-                    )
-                })?
-            }
-        };
-        let Some(rt) = tokens.refresh_token.clone() else {
+    /// Force-refresh the token for `account_id` (named account or the active session) after a 401 —
+    /// the token was rejected even though it may not be clock-expired. Serialized by the same
+    /// per-account single-flight latch as [`Self::refresh_if_needed`]: if a peer already refreshed
+    /// while we waited (the stored token no longer equals `stale_token` and is unexpired), reuse it
+    /// instead of spending the rotating refresh_token again.
+    async fn force_refresh_account(
+        &self,
+        account_id: Option<&str>,
+        stale_token: &str,
+    ) -> Result<(String, String), ProviderError> {
+        let lock = self.refresh_lock(account_id);
+        let _guard = lock.lock().await;
+        let current = self.load_tokens(account_id)?;
+        if current.access_token != stale_token && !current.is_expired(now_unix(), REFRESH_SKEW_SECS)
+        {
+            let chatgpt_id = self.chatgpt_id_for(&current.access_token, account_id);
+            return Ok((current.access_token, chatgpt_id));
+        }
+        let Some(rt) = current.refresh_token.clone() else {
             return Err(ProviderError::Auth(
                 "Codex OAuth 401 and no refresh token — run `forge auth codex-oauth`".to_string(),
             ));
@@ -456,23 +500,8 @@ impl CodexOauthProvider {
         let refreshed = refresh_tokens(&self.http, &rt)
             .await
             .map_err(|e| ProviderError::Auth(format!("Codex OAuth token refresh failed: {e}")))?;
-        match &self.accounts {
-            AccountSource::Keyring => {
-                let _ = provider_oauth::store_provider_oauth_tokens(
-                    CODEX_OAUTH_KEYRING_PROVIDER,
-                    &refreshed,
-                );
-            }
-            AccountSource::Memory(store) => {
-                let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
-                guard.set_active_tokens(refreshed.clone());
-            }
-        }
-        let chatgpt_id = self
-            .test_account_header
-            .clone()
-            .or_else(|| provider_oauth::extract_chatgpt_account_id(&refreshed.access_token))
-            .unwrap_or_else(|| "default".to_string());
+        self.store_refreshed(account_id, &refreshed);
+        let chatgpt_id = self.chatgpt_id_for(&refreshed.access_token, account_id);
         Ok((refreshed.access_token, chatgpt_id))
     }
 }
@@ -657,7 +686,7 @@ impl Provider for CodexOauthProvider {
         on_event: &mut EventSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
         let pool = self.account_pool();
-        let (token, chatgpt_id) = self.pick_access_token(&pool).await?;
+        let (account_id, token, chatgpt_id) = self.pick_access_token(&pool).await?;
         let url = self.responses_url();
         self.ensure_pinned(&url);
         let mut body =
@@ -669,19 +698,49 @@ impl Provider for CodexOauthProvider {
         // using the battle-tested HTTP path below UNCHANGED.
         if codex_websocket::is_websocket_model(model) {
             let ws_url = codex_websocket::to_ws_url(&url)?;
-            return self
-                .execute_ws(&ws_url, &token, &chatgpt_id, &body, on_event)
-                .await
-                .map(|response| fill_subscription_usage(response, &body));
+            let first = self
+                .execute_ws(
+                    &ws_url,
+                    account_id.as_deref(),
+                    &token,
+                    &chatgpt_id,
+                    &body,
+                    on_event,
+                )
+                .await;
+            let response = match first {
+                Err(ref e) if should_hop_account(e) && pool.has_rotation() => {
+                    let (account_id2, token2, id2) = self.pick_access_token(&pool).await?;
+                    self.execute_ws(
+                        &ws_url,
+                        account_id2.as_deref(),
+                        &token2,
+                        &id2,
+                        &body,
+                        on_event,
+                    )
+                    .await
+                }
+                other => other,
+            }?;
+            return Ok(fill_subscription_usage(response, &body));
         }
 
         let first = self
-            .execute(&url, &token, &chatgpt_id, &body, on_event)
+            .execute(
+                &url,
+                account_id.as_deref(),
+                &token,
+                &chatgpt_id,
+                &body,
+                on_event,
+            )
             .await;
         let response = match first {
             Err(ref e) if should_hop_account(e) && pool.has_rotation() => {
-                let (token2, id2) = self.pick_access_token(&pool).await?;
-                self.execute(&url, &token2, &id2, &body, on_event).await
+                let (account_id2, token2, id2) = self.pick_access_token(&pool).await?;
+                self.execute(&url, account_id2.as_deref(), &token2, &id2, &body, on_event)
+                    .await
             }
             other => other,
         }?;
@@ -893,6 +952,27 @@ mod tests {
         }
         store.switch(active).unwrap();
         store
+    }
+
+    #[tokio::test]
+    async fn force_refresh_reuses_peer_refreshed_token_without_network() {
+        // Single-flight (Fix 4) + account-scoped force-refresh (Fix 2): a 401 handler that raced in
+        // with an older `stale_token` must REUSE the token a peer already stored for THIS account
+        // instead of spending the rotating refresh_token again (which would 401/invalid_grant).
+        // The stored token is fresh (expires_at:0 = never expires), so no network refresh happens.
+        let store = memory_store(&[("acct-a", "a"), ("acct-b", "b")], "acct-a");
+        let provider = CodexOauthProvider::new()
+            .with_accounts(store)
+            .with_test_account_header("acct-a");
+        let (token, id) = provider
+            .force_refresh_account(Some("acct-a"), "at-stale-from-401")
+            .await
+            .expect("reuse the stored token for this account without a network refresh");
+        assert_eq!(
+            token, "at-a",
+            "must reuse acct-a's stored token, not acct-b's"
+        );
+        assert_eq!(id, "acct-a");
     }
 
     #[tokio::test]

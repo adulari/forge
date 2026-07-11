@@ -51,6 +51,42 @@ pub fn should_hop_account(e: &ProviderError) -> bool {
     e.is_rate_limited() || matches!(e, ProviderError::Unavailable(_))
 }
 
+/// Classify an error surfaced INSIDE the SSE stream (an `error`/`response.failed` event has no HTTP
+/// status). A transient in-stream 429/quota or 5xx/overload must map to the same variant the
+/// non-streamed [`classify_responses_status`] path would produce, so it triggers the next-account
+/// hop instead of being buried as a hard [`ProviderError::Request`]. Text-only heuristic — the
+/// backend echoes the status class in the message.
+pub fn classify_stream_error(message: String) -> ProviderError {
+    let lower = message.to_ascii_lowercase();
+    let rate_limited = lower.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("too many requests")
+        || lower.contains("quota")
+        || lower.contains("insufficient_quota");
+    if rate_limited {
+        return ProviderError::RateLimited {
+            message,
+            retry_after: None,
+        };
+    }
+    let unavailable = lower.contains("overload")
+        || lower.contains("unavailable")
+        || lower.contains("temporarily")
+        || lower.contains(" 500")
+        || lower.contains("500 ")
+        || lower.contains(" 502")
+        || lower.contains(" 503")
+        || lower.contains(" 504")
+        || lower.contains("internal server error")
+        || lower.contains("bad gateway")
+        || lower.contains("gateway timeout");
+    if unavailable {
+        return ProviderError::Unavailable(message);
+    }
+    ProviderError::Request(message)
+}
+
 /// Strip a `provider::` namespace: `"xai-oauth::grok-4"` → `"grok-4"`.
 pub fn bare_model(model: &str) -> &str {
     model
@@ -159,7 +195,7 @@ pub fn apply_sse_event(
             .and_then(|e| e.get("message").and_then(|m| m.as_str()).or(e.as_str()))
             .unwrap_or("provider returned a stream error")
             .to_string();
-        return Err(ProviderError::Request(msg));
+        return Err(classify_stream_error(msg));
     }
     if event.ends_with("output_text.delta") {
         if let Some(delta) = data.get("delta").and_then(|d| d.as_str()) {
@@ -417,6 +453,45 @@ mod tests {
             "stalled".into()
         )));
         assert!(!should_hop_account(&ProviderError::Auth("401".into())));
+    }
+
+    #[test]
+    fn stream_error_maps_to_hoppable_variants() {
+        assert!(matches!(
+            classify_stream_error("Error 429: rate limit exceeded".into()),
+            ProviderError::RateLimited { .. }
+        ));
+        assert!(matches!(
+            classify_stream_error("You have exceeded your quota".into()),
+            ProviderError::RateLimited { .. }
+        ));
+        assert!(matches!(
+            classify_stream_error("upstream is overloaded, try again".into()),
+            ProviderError::Unavailable(_)
+        ));
+        assert!(matches!(
+            classify_stream_error("internal server error".into()),
+            ProviderError::Unavailable(_)
+        ));
+        // A genuine non-transient stream error stays a hard Request failure.
+        assert!(matches!(
+            classify_stream_error("invalid tool schema".into()),
+            ProviderError::Request(_)
+        ));
+    }
+
+    #[test]
+    fn stream_error_event_is_classified() {
+        let mut acc = ResponseAccumulator::default();
+        let sink: &mut EventSink<'_> = &mut |_| {};
+        let err = apply_sse_event(
+            &mut acc,
+            "response.failed",
+            &serde_json::json!({"response": {"error": {"message": "429 Too Many Requests"}}}),
+            sink,
+        )
+        .expect_err("failed event must error");
+        assert!(should_hop_account(&err), "in-stream 429 must be hoppable");
     }
 
     #[test]
