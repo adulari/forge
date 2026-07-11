@@ -100,3 +100,22 @@ export function formatRelativeTime(fromMs: number, nowMs: number = Date.now()): 
   const deltaDay = Math.round(deltaHour / 24);
   return `${deltaDay}d`;
 }
+
+/**
+ * Friendly cwd label for fleet cards / session header. Detects the Forge worktree
+ * pattern `<repo>/.forge/worktrees/<hash>` and collapses it to `repo · wt <short>`
+ * (first 8 chars of the hash). Otherwise returns the basename of the path.
+ * The full path stays available via the `accessibilityLabel` / `title` prop at
+ * the call site.
+ */
+export function formatCwd(cwd: string): string {
+  const wtMatch = cwd.match(/^(.+?)\/\.forge\/worktrees\/([a-f0-9-]+)/i);
+  if (wtMatch) {
+    const repo = wtMatch[1].replace(/\/+$/, "").split("/").pop() ?? wtMatch[1];
+    const shortHash = wtMatch[2].slice(0, 8);
+    return `${repo} · wt ${shortHash}`;
+  }
+  // Fall back to basename for non-worktree paths.
+  const parts = cwd.replace(/\/+$/, "").split("/");
+  return parts[parts.length - 1] || cwd;
+}
