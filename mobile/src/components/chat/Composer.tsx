@@ -9,6 +9,7 @@
 // seam (web Speech API now, native mic deferred) that BUILD_ORDER's T3.2 bullet does not list —
 // a non-functional mic button would be worse than none.
 import { ArrowUp, Clock, FileText, Image as ImageIcon, RotateCcw, Square } from "lucide-react-native";
+import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from "react-native-reanimated";
 import React, { useEffect, useRef, useState } from "react";
 import { Image, Platform, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -16,6 +17,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { haptics } from "../../lib/haptics";
 import { useUpload } from "../../lib/queries";
 import { useSessionCtx } from "../../lib/sessionContext";
+import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { gutter, radii, space, tapTarget } from "../../theme/tokens";
 import { useBreakpoint } from "../../theme/useBreakpoint";
@@ -87,6 +89,15 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
   }, [composerFocusSignal]);
 
   const canSend = text.trim().length > 0 && !attachments.some((a) => a.state === "uploading");
+  const action = busy ? "stop" : online ? "send" : "queue";
+  const reduced = useReducedMotion();
+  const actionProgress = useSharedValue(action === "stop" ? 1 : 0);
+  useEffect(() => {
+    const target = action === "stop" ? 1 : 0;
+    actionProgress.value = reduced ? target : withTiming(target, { duration: durations.fast, easing: easings.standard });
+  }, [action, reduced, actionProgress]);
+  const stopIconStyle = useAnimatedStyle(() => ({ opacity: actionProgress.value, transform: [{ scale: 0.8 + actionProgress.value * 0.2 }] }));
+  const sendIconStyle = useAnimatedStyle(() => ({ opacity: 1 - actionProgress.value, transform: [{ scale: 1 - actionProgress.value * 0.2 }] }));
 
   const commandHints = COMMAND_CHIPS.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase()));
 
@@ -274,30 +285,13 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
           accessibilityLabel="message"
           testID="composer-input"
         />
-        {busy ? (
-          <IconButton
-            icon={<Square size={16} strokeWidth={1.75} color={tokens.onAccent} fill={tokens.onAccent} />}
-            onPress={() => {
-              onInterrupt();
-            }}
-            accessibilityLabel="stop"
-            style={[styles.sendCircle, { backgroundColor: tokens.danger }]}
-          />
-        ) : (
-          <IconButton
-            icon={
-              online ? (
-                <ArrowUp size={20} strokeWidth={2} color={canSend ? tokens.onAccent : tokens.ink4} />
-              ) : (
-                <Clock size={18} strokeWidth={1.75} color={canSend ? tokens.onAccent : tokens.ink4} />
-              )
-            }
-            onPress={() => commit(text)}
-            disabled={!canSend}
-            accessibilityLabel={online ? "send" : "queue — will send on reconnect"}
-            style={[styles.sendCircle, { backgroundColor: canSend ? tokens.accent : tokens.bg3 }]}
-          />
-        )}
+        <IconButton
+          icon={<View style={styles.actionIcon}><Animated.View style={sendIconStyle}>{online ? <ArrowUp size={20} strokeWidth={2} color={canSend ? tokens.onAccent : tokens.ink4} /> : <Clock size={18} strokeWidth={1.75} color={canSend ? tokens.onAccent : tokens.ink4} />}</Animated.View><Animated.View style={[styles.actionLayer, stopIconStyle]}><Square size={16} strokeWidth={1.75} color={tokens.onAccent} fill={tokens.onAccent} /></Animated.View></View>}
+          onPress={busy ? onInterrupt : () => commit(text)}
+          disabled={!busy && !canSend}
+          accessibilityLabel={busy ? "stop" : online ? "send" : "queue — will send on reconnect"}
+          style={[styles.sendCircle, { backgroundColor: busy ? tokens.danger : canSend ? tokens.accent : tokens.bg3 }]}
+        />
       </View>
       {!online ? (
         <Text style={[type.meta, styles.offlineHint, { color: tokens.ink3 }]}>will send on reconnect</Text>
@@ -320,5 +314,7 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "flex-end", gap: space.space4 },
   input: { flex: 1, paddingHorizontal: space.space8, paddingVertical: space.space8 },
   sendCircle: { borderRadius: radii.radiusPill, width: tapTarget, height: tapTarget },
+  actionIcon: { width: 20, height: 20, alignItems: "center", justifyContent: "center" },
+  actionLayer: { position: "absolute" },
   offlineHint: { paddingLeft: space.space4 },
 });

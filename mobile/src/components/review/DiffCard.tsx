@@ -11,6 +11,7 @@ import { Check, ChevronDown, ChevronRight, Copy } from "lucide-react-native";
 import React, { useEffect, useRef, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
+import { DiffLines } from "./DiffLines";
 import { Badge, type BadgeTone } from "../ds/Badge";
 import { Banner } from "../ds/Banner";
 import { IconButton } from "../ds/IconButton";
@@ -154,17 +155,7 @@ function DiffFileSection({ file, isLast }: { file: DiffFile; isLast: boolean }) 
             {file.hunks.map((hunk, hIdx) => (
               <View key={hIdx} style={styles.hunk}>
                 <Text selectable style={[typeScale.codeSmall, { color: tokens.info }, styles.hunkHeader]}>{hunk.header}</Text>
-                {hunk.lines.map((line, lIdx) => {
-                  const gutter = line[0] ?? " ";
-                  const bg =
-                    gutter === "+" ? tokens.successBg : gutter === "-" ? tokens.dangerBg : "transparent";
-                  const ink = gutter === "+" ? tokens.success : gutter === "-" ? tokens.danger : tokens.ink2;
-                  return (
-                    <View key={lIdx} style={[styles.lineRow, { backgroundColor: bg }]}>
-                      <Text selectable style={[typeScale.codeSmall, { color: ink }]}>{line || " "}</Text>
-                    </View>
-                  );
-                })}
+                <DiffLines lines={hunk.lines} />}
               </View>
             ))}
             {file.skipped_lines > 0 ? (
@@ -199,6 +190,5 @@ const styles = StyleSheet.create({
   hunkScroll: { marginBottom: space.space4 },
   hunk: { paddingBottom: space.space8 },
   hunkHeader: { paddingHorizontal: space.space12, paddingVertical: space.space4 },
-  lineRow: { paddingHorizontal: space.space12, minWidth: "100%" },
   footer: { paddingHorizontal: space.space12, paddingVertical: space.space8 },
 });
