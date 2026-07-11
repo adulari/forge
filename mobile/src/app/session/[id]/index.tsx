@@ -242,16 +242,26 @@ export default function SessionChat() {
     });
   }, [offlineQueue, baseUrl, sessionId]);
 
+  // One-shot interrupt latched while the socket was closed — flushed on the exact !open→open
+  // edge (below) so it reaches the daemon the moment the connection is restored. Cleared by the
+  // flush effect (not by the interrupt itself, so a second interrupt before reconnect replaces
+  // the first rather than duplicating it).
+  const [pendingInterrupt, setPendingInterrupt] = useState(false);
+
   // Flush in order on the exact `!open -> open` edge (not on every offlineQueue change).
   const prevConnRef = useRef(connectionState);
   useEffect(() => {
     const was = prevConnRef.current;
     prevConnRef.current = connectionState;
-    if (was !== "open" && connectionState === "open" && offlineQueue.length > 0) {
+    if (was !== "open" && connectionState === "open") {
       for (const text of offlineQueue) send({ kind: "prompt", text });
       setOfflineQueue([]);
+      if (pendingInterrupt) {
+        send({ kind: "interrupt" });
+        setPendingInterrupt(false);
+      }
     }
-  }, [connectionState, offlineQueue, send]);
+  }, [connectionState, offlineQueue, pendingInterrupt, send]);
 
   const online = connectionState === "open";
 
@@ -268,16 +278,14 @@ export default function SessionChat() {
       const id = `p${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current, attachments }]);
 
-      if (online) {
-        // Only uploaded (path-bearing) attachments can ride the wire — correlates this exact
-        // send's attachments to this exact prompt, instead of the daemon guessing from whatever
-        // upload happens to be ambiently pending (ARCHITECTURE §4.1.4 note / mobile upload race).
-        const withPath = attachments
-          .filter((a): a is SentAttachment & { path: string } => a.path != null)
-          .map((a) => ({ path: a.path, image: a.image }));
-        send({ kind: "prompt", text, attachments: withPath });
-        return;
-      }
+      // Only uploaded (path-bearing) attachments can ride the wire — correlate this exact send's
+      // attachments to this exact prompt (ARCHITECTURE §4.1.4 / mobile upload race).
+      const withPath = attachments
+        .filter((a): a is SentAttachment & { path: string } => a.path != null)
+        .map((a) => ({ path: a.path, image: a.image }));
+      if (send({ kind: "prompt", text, attachments: withPath })) return;
+      // Socket closed between the `online` render and here (race window). Fall through to
+      // the offline queue — it will be flushed in order on the next !open→open edge.
       setOfflineQueue((prev) => {
         if (prev.length >= OFFLINE_QUEUE_CAP) {
           toast.show("offline queue full (20) — prompt dropped", { tone: "danger" });
@@ -292,7 +300,9 @@ export default function SessionChat() {
   );
 
   const handleInterrupt = useCallback(() => {
-    send({ kind: "interrupt" });
+    // Try to send immediately; if the socket is closed, latch a pending interrupt that the
+    // !open→open flush effect will deliver the moment the connection is restored.
+    if (!send({ kind: "interrupt" })) setPendingInterrupt(true);
   }, [send]);
 
   const handleDequeue = useCallback(

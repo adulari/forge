@@ -148,7 +148,8 @@ export default function SettingsScreen() {
     }
     setHealth("checking");
     testConnection().then((result) => {
-      if (!cancelled) setHealth(result);
+      // testConnection's in-flight state is "testing"; this screen models that as "checking".
+      if (!cancelled) setHealth(result === "testing" ? "checking" : result);
     });
     return () => {
       cancelled = true;
