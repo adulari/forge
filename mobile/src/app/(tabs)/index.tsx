@@ -164,11 +164,16 @@ export default function FleetScreen() {
       );
     }
     return (
-      <EmptyState
-        icon={Flame}
+      <View style={styles.emptyWrap}>
+        <View style={styles.emptyAsh} accessibilityElementsHidden>
+          {[0, 1, 2, 3, 4].map((index) => <View key={index} style={[styles.ashCoal, { backgroundColor: tokens.ink4 }]} />)}
+        </View>
+        <EmptyState
+          icon={Flame}
           message={search.trim() ? "no sessions match that search" : "no live sessions — start one"}
           action={search.trim() ? <Button label="Clear search" variant="secondary" onPress={() => setSearch("")} /> : <Button label="New session" variant="secondary" onPress={() => router.push("/new-session")} />}
-      />
+        />
+      </View>
     );
   }, [query.isError, query.error, search]);
 
@@ -246,6 +251,10 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   headerStat: { flex: 1, gap: space.space4, alignItems: "flex-start" },
+  waitingCount: { flexDirection: "row", alignItems: "center", gap: space.space4 },
+  emptyWrap: { flex: 1 },
+  emptyAsh: { flexDirection: "row", justifyContent: "center", gap: space.space8, paddingTop: space.space24 },
+  ashCoal: { width: 6, height: 6, borderRadius: 3 },
   coalStrip: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: space.space8, paddingVertical: space.space8 },
   coal: { minWidth: 12, minHeight: 12, alignItems: "center", justifyContent: "center" },
   groupLabel: { paddingTop: space.space16, paddingHorizontal: space.space16 },
