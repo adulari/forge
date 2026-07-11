@@ -5639,6 +5639,27 @@ fn render_statusline_widget<'a>(
     }
 }
 
+/// Context-aware right-hint for the statusline. Highest-priority state first, so the most
+/// actionable keybind for the current mode is what the user sees. Returns a `&'static str` so
+/// the render path never allocates per frame.
+fn statusline_hint(app: &App) -> &'static str {
+    if app.palette.open {
+        "↑↓ move · ⏎ run · esc close"
+    } else if app.picker.open {
+        "↑↓ move · ⏎ select · esc close"
+    } else if app.pending_shell_fix.is_some() {
+        "F apply fix · esc"
+    } else if app.busy {
+        "esc stop · Ctrl↑ escalate"
+    } else if app.done {
+        "done · esc quit"
+    } else if app.input.is_empty() {
+        "/ cmds · ? help · esc quit"
+    } else {
+        "⏎ send · ⇧⇥ temper"
+    }
+}
+
 fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     let bg = Style::default().bg(STATUSBG);
     let w = area.width;
@@ -5710,13 +5731,7 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     let _ = first_widget; // suppress unused warning
 
     let version = concat!("v", env!("CARGO_PKG_VERSION"));
-    let hint = if app.busy {
-        "esc stop "
-    } else if app.done {
-        "done · esc quit "
-    } else {
-        "⇧⇥ temper · esc quit "
-    };
+    let hint = statusline_hint(app);
     let row1 = Rect { height: 1, ..area };
     if w >= 70 {
         let right_text = format!("{version}  {hint}");
@@ -5739,7 +5754,31 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
             .style(bg),
             cols[1],
         );
+    } else if w >= 40 {
+        // Narrow: a short hint so the longer idle hint never overruns the version string.
+        let short_hint = "/ · ? help";
+        let right_text = format!("{version}  {short_hint}");
+        let right_len = right_text.chars().count() as u16;
+        let cols =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(right_len)]).split(row1);
+        frame.render_widget(
+            Paragraph::new(TextLine::from(left_spans)).style(bg),
+            cols[0],
+        );
+        frame.render_widget(
+            Paragraph::new(TextLine::from(vec![
+                Span::styled(
+                    format!("{version}  "),
+                    Style::default().fg(DIM).bg(STATUSBG),
+                ),
+                Span::styled(short_hint, Style::default().fg(DIM).bg(STATUSBG)),
+            ]))
+            .alignment(Alignment::Right)
+            .style(bg),
+            cols[1],
+        );
     } else {
+        // Too narrow: left-only, no hint (never overrun the version string).
         frame.render_widget(Paragraph::new(TextLine::from(left_spans)).style(bg), row1);
     }
 
@@ -6960,6 +6999,83 @@ mod tests {
             "heading rendered: {text:?}"
         );
         assert!(text.contains("• do it"), "bullet + stripped bold: {text:?}");
+    }
+
+    #[test]
+    fn statusline_hint_idle_empty_shows_cmds_and_help() {
+        let app = App::default();
+        let hint = statusline_hint(&app);
+        assert!(hint.contains("? help"), "idle-empty hint has help: {hint}");
+        assert!(hint.contains("/ cmds"), "idle-empty hint has cmds: {hint}");
+    }
+
+    #[test]
+    fn statusline_hint_pending_shell_fix_shows_apply_fix() {
+        let app = App {
+            pending_shell_fix: Some("cargo fix".into()),
+            ..Default::default()
+        };
+        let hint = statusline_hint(&app);
+        assert!(
+            hint.contains("F apply fix"),
+            "pending_shell_fix hint: {hint}"
+        );
+    }
+
+    #[test]
+    fn statusline_hint_busy_shows_esc_stop() {
+        let app = App {
+            busy: true,
+            ..Default::default()
+        };
+        let hint = statusline_hint(&app);
+        assert!(hint.contains("esc stop"), "busy hint: {hint}");
+    }
+
+    #[test]
+    fn statusline_hint_palette_open_shows_run() {
+        let mut app = App::default();
+        app.palette.open_with("");
+        let hint = statusline_hint(&app);
+        assert!(hint.contains("⏎ run"), "palette hint: {hint}");
+    }
+
+    #[test]
+    fn statusline_hint_picker_open_shows_select() {
+        use crate::commands::{PickerKind, PickerRow};
+        let mut app = App::default();
+        app.picker.open_with(
+            PickerKind::Sessions,
+            "resume",
+            vec![PickerRow {
+                id: "s1".into(),
+                title: "session one".into(),
+                subtitle: String::new(),
+            }],
+        );
+        let hint = statusline_hint(&app);
+        assert!(hint.contains("⏎ select"), "picker hint: {hint}");
+    }
+
+    #[test]
+    fn statusline_hint_done_shows_quit() {
+        let app = App {
+            done: true,
+            ..Default::default()
+        };
+        let hint = statusline_hint(&app);
+        assert!(hint.contains("esc quit"), "done hint: {hint}");
+    }
+
+    #[test]
+    fn statusline_hint_typing_shows_send_and_temper() {
+        let app = App {
+            input: "hello".into(),
+            ..Default::default()
+        };
+        let hint = statusline_hint(&app);
+        assert!(hint.contains("⏎ send"), "typing hint: {hint}");
+        assert!(hint.contains("⇧⇥ temper"), "typing hint: {hint}");
     }
 
     #[test]
