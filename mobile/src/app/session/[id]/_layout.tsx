@@ -14,6 +14,7 @@ import * as Clipboard from "expo-clipboard";
 import { router, Slot, useLocalSearchParams, usePathname } from "expo-router";
 import { ArrowLeft } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef } from "react";
+import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from "react-native-reanimated";
 import { StyleSheet, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -29,6 +30,7 @@ import { useHotkey } from "../../../lib/shortcuts";
 import { useTurnCompleted } from "../../../lib/queries";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
+import { durations, easings } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../../theme/tokens";
 import { useBreakpoint } from "../../../theme/useBreakpoint";
@@ -116,11 +118,23 @@ function SessionShell({ sessionId }: { sessionId: string }) {
     const reviewPending = snapshot?.plan != null || snapshot?.diff != null;
     return [
       { value: "chat", label: "Chat" },
-      { value: "tasks", label: taskCount > 0 ? `Tasks ${taskCount}` : "Tasks" },
-      { value: "agents", label: agentCount > 0 ? `Agents ${agentCount}` : "Agents" },
-      { value: "review", label: reviewPending ? "Review •" : "Review" },
+      { value: "tasks", label: "Tasks", badge: taskCount || undefined },
+      { value: "agents", label: "Agents", badge: agentCount || undefined },
+      { value: "review", label: "Review", dot: reviewPending },
     ];
   }, [snapshot?.tasks.length, snapshot?.subagents.length, snapshot?.plan, snapshot?.diff]);
+
+  const reduced = useReducedMotion();
+  const segmentOpacity = useSharedValue(1);
+  const segmentY = useSharedValue(0);
+  useEffect(() => {
+    if (reduced) { segmentOpacity.value = 1; segmentY.value = 0; return; }
+    segmentOpacity.value = 0;
+    segmentY.value = 6;
+    segmentOpacity.value = withTiming(1, { duration: durations.base, easing: easings.standard });
+    segmentY.value = withTiming(0, { duration: durations.base, easing: easings.standard });
+  }, [activeSegment, reduced, segmentOpacity, segmentY]);
+  const segmentStyle = useAnimatedStyle(() => ({ opacity: segmentOpacity.value, transform: [{ translateY: segmentY.value }] }));
 
   const onSegmentChange = useCallback(
     (value: SegmentValue) => {
@@ -239,9 +253,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         </View>
       </SafeAreaView>
 
-      <View style={styles.flex}>
+      <Animated.View key={activeSegment} style={[styles.flex, segmentStyle]}>
         <Slot />
-      </View>
+      </Animated.View>
       {/* HANDOFF(T4.1): overlay mirror — reads snapshot.overlay itself, no props. */}
       <OverlayHost />
     </View>
