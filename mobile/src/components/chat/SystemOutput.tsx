@@ -10,9 +10,10 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
+import { DiffLines } from "../review/DiffLines";
 import { IconButton } from "../ds/IconButton";
 
-const COLLAPSE_LINES = 12;
+const COLLAPSE_LINES = 4;
 const COPY_RESET_MS = 1200;
 
 export interface SystemOutputProps {
@@ -35,6 +36,10 @@ export function SystemOutput({ content }: SystemOutputProps) {
 
   const visible = expanded ? content : lines.slice(0, COLLAPSE_LINES).join("\n");
   const hiddenCount = lines.length - COLLAPSE_LINES;
+  const first = lines.find((line) => line.trim()) ?? "output";
+  const label = first.match(/↳\s*([^\s]+)/)?.[1] ?? first.split(/\s+/)[0] ?? "output";
+  const diffLike = lines.filter((line) => line.startsWith("+") || line.startsWith("-")).length / Math.max(lines.length, 1) > 0.3;
+  const visibleLines = expanded ? lines : lines.slice(0, COLLAPSE_LINES);
 
   const onCopy = async () => {
     await Clipboard.setStringAsync(content);
@@ -46,7 +51,7 @@ export function SystemOutput({ content }: SystemOutputProps) {
   return (
     <View style={[styles.container, { backgroundColor: tokens.bg0, borderColor: tokens.border }]}>
       <View style={[styles.header, { borderBottomColor: tokens.border }]}>
-        <Text style={[type.meta, { color: tokens.ink3 }]}>OUTPUT</Text>
+        <Text style={[type.meta, { color: tokens.ink3 }]}>{label} · {lines.length} lines</Text>
         <IconButton
           accessibilityLabel={copied ? "copied" : "copy output"}
           onPress={onCopy}
@@ -60,9 +65,7 @@ export function SystemOutput({ content }: SystemOutputProps) {
         />
       </View>
       <View style={styles.body}>
-        <Text style={[type.codeSmall, { color: tokens.ink3, fontFamily: monoFamily.regular }]} selectable>
-          {visible}
-        </Text>
+        {diffLike ? <DiffLines lines={visibleLines} /> : <Text style={[type.codeSmall, { color: tokens.ink3, fontFamily: monoFamily.regular }]} selectable>{visibleLines.join("\n")}</Text>}
         {collapsible ? (
           <Pressable
             onPress={() => setExpanded((e) => !e)}
@@ -107,6 +110,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: space.space4,
     paddingTop: space.space8,
-    minHeight: 28,
+    minHeight: 44,
   },
 });

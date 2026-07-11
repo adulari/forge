@@ -1,17 +1,17 @@
-// Session shell status strip (T3.1, DESIGN_SYSTEM.md §6/§1.4): StatusDot(idle|busy|
-// waiting|done), tier·model, temper Chip, CostMetric, ContextGauge — sits under the header.
-import React from "react";
-import { StyleSheet, Text, View } from "react-native";
+import React, { useState } from "react";
+import { ChevronRight } from "lucide-react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
+import Animated from "react-native-reanimated";
 
 import type { RemoteInput } from "../../lib/ws";
+import { useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
-import { Chip } from "../ds/Chip";
 import { ContextGauge } from "../ds/ContextGauge";
 import { CostMetric } from "../ds/CostMetric";
-import { EffortPicker } from "./EffortPicker";
 import { StatusDot } from "../ds/StatusDot";
+import { TelemetrySheet } from "./TelemetrySheet";
 
 export interface StatusStripProps {
   state: StatusDotState;
@@ -25,41 +25,43 @@ export interface StatusStripProps {
   contextLimit: number | null;
 }
 
-export function StatusStrip({
-  state,
-  tier,
-  model,
-  temper,
-  effort,
-  send,
-  costUsd,
-  contextTokens,
-  contextLimit,
-}: StatusStripProps) {
+export function StatusStrip(props: StatusStripProps) {
   const tokens = useTokens();
-  const tierModel = tier ? `${tier} · ${model}` : model;
+  const strike = useStrike();
+  const [visible, setVisible] = useState(false);
+  const tierModel = props.tier ? `${props.tier} · ${props.model}` : props.model;
 
   return (
-    <View style={styles.container}>
-      <View style={styles.row}>
-        <StatusDot state={state} />
-        <Text style={[typeScale.meta, styles.tierModel, { color: tokens.ink2 }]} numberOfLines={1}>
-          {tierModel}
-        </Text>
-        <Chip label={temper} />
-        <EffortPicker effort={effort} send={send} />
-        <CostMetric valueUsd={costUsd} />
-      </View>
-      {/* Gauge on its own full-width row: the metadata row above could squeeze it until the
-          "used / total" budget (the most important number) was truncated to "…". Full width
-          keeps both numbers legible AND lets the meter bar span the strip. */}
-      {contextLimit != null ? <ContextGauge used={contextTokens} total={contextLimit} /> : null}
-    </View>
+    <>
+      <Animated.View style={strike.style}>
+        <Pressable
+          onPress={() => setVisible(true)}
+          onPressIn={strike.onPressIn}
+          onPressOut={strike.onPressOut}
+          accessibilityRole="button"
+          accessibilityLabel="Open session telemetry"
+          style={styles.row}
+        >
+          <StatusDot state={props.state} />
+          <Text style={[typeScale.meta, styles.tierModel, { color: tokens.ink2 }]} numberOfLines={1}>
+            {tierModel}
+          </Text>
+          <CostMetric valueUsd={props.costUsd} />
+          {props.contextLimit != null ? (
+            <View style={styles.gauge}>
+              <ContextGauge used={props.contextTokens} total={props.contextLimit} compact />
+            </View>
+          ) : null}
+          <ChevronRight size={16} strokeWidth={1.75} color={tokens.ink3} />
+        </Pressable>
+      </Animated.View>
+      <TelemetrySheet {...props} visible={visible} onClose={() => setVisible(false)} />
+    </>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { gap: space.space4, paddingVertical: space.space8 },
-  row: { flexDirection: "row", alignItems: "center", gap: space.space8 },
-  tierModel: { flexShrink: 1 },
+  row: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 44, paddingVertical: space.space8 },
+  tierModel: { flex: 1, flexShrink: 1, minWidth: 0 },
+  gauge: { width: 96, flexShrink: 0 },
 });

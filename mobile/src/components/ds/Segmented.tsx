@@ -13,6 +13,8 @@ import { type } from "../../theme/typography";
 export interface SegmentedOption<T extends string = string> {
   value: T;
   label: string;
+  badge?: number;
+  dot?: boolean;
 }
 
 export interface SegmentedProps<T extends string = string> {
@@ -81,6 +83,8 @@ export function Segmented<T extends string = string>({ options, value, onChange,
           <SegmentOption
             key={opt.value}
             label={opt.label}
+            badge={opt.badge}
+            dot={opt.dot}
             selected={selected}
             onPress={() => onChange(opt.value)}
           />
@@ -93,7 +97,7 @@ export function Segmented<T extends string = string>({ options, value, onChange,
 // Own component (not inline in the `.map`) so each segment can carry its own
 // hover/focus-visible state — hooks can't run conditionally/per-iteration
 // inside a parent's render body.
-function SegmentOption({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+function SegmentOption({ label, badge, dot, selected, onPress }: { label: string; badge?: number; dot?: boolean; selected: boolean; onPress: () => void }) {
   const tokens = useTokens();
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -118,9 +122,11 @@ function SegmentOption({ label, selected, onPress }: { label: string; selected: 
         },
       ]}
     >
-      <Text style={[type.section, { color: selected ? tokens.ink : tokens.ink3 }]} numberOfLines={1}>
-        {label}
-      </Text>
+      <View style={styles.labelRow}>
+        <Text style={[type.section, { color: selected ? tokens.ink : tokens.ink3 }]} numberOfLines={1}>{label}</Text>
+        {badge != null && badge > 0 ? <View style={[styles.badge, { backgroundColor: selected ? tokens.selection : tokens.bg3 }]}><Text style={[type.meta, { color: selected ? tokens.accent : tokens.ink2 }]}>{badge}</Text></View> : null}
+        {dot ? <View style={[styles.dot, { backgroundColor: tokens.accent }]} /> : null}
+      </View>
     </Pressable>
   );
 }
@@ -146,6 +152,9 @@ const styles = StyleSheet.create({
     bottom: 1,
     borderWidth: StyleSheet.hairlineWidth,
   },
+  labelRow: { flexDirection: "row", alignItems: "center", gap: 4 },
+  badge: { minWidth: 16, height: 16, paddingHorizontal: 4, borderRadius: 8, alignItems: "center", justifyContent: "center" },
+  dot: { width: 6, height: 6, borderRadius: 3 },
   segment: {
     flex: 1,
     alignItems: "center",

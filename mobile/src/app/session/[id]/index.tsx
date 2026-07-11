@@ -36,6 +36,7 @@ import { Composer } from "../../../components/chat/Composer";
 import { Markdown } from "../../../components/chat/Markdown";
 import { MessageRow } from "../../../components/chat/MessageRow";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
+import { BellowsSpinner } from "../../../components/ds/BellowsSpinner";
 import { BoundedList } from "../../../components/ds/BoundedList";
 import { Chip } from "../../../components/ds/Chip";
 import { EmptyState } from "../../../components/ds/EmptyState";
@@ -102,7 +103,7 @@ function formatElapsed(elapsedMs: number): string {
   return minutes > 0 ? `${minutes}m ${seconds.toString().padStart(2, "0")}s` : `${seconds}s`;
 }
 
-function LiveToolActivity({ line, startedAt }: { line: string; startedAt: number }) {
+function LiveToolActivity({ entries, startedAt }: { entries: string[]; startedAt: number }) {
   const tokens = useTokens();
   const { dotStyle } = useEmberdot("busy");
   const entrance = useForgeline(0);
@@ -115,19 +116,23 @@ function LiveToolActivity({ line, startedAt }: { line: string; startedAt: number
   }, [startedAt]);
 
   return (
-    <Animated.View style={[styles.activityRow, { backgroundColor: tokens.bg2, borderColor: tokens.border }, entrance]}>
-      <Animated.View style={[styles.activityDot, { backgroundColor: tokens.accent }, dotStyle]} />
-      <Hammer size={14} strokeWidth={1.75} color={tokens.accent} />
-      <Text style={[typeScale.meta, styles.activityLine, { color: tokens.ink2 }]} numberOfLines={1}>
-        {line}
-      </Text>
-      <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatElapsed(elapsedMs)}</Text>
+    <Animated.View style={[styles.activityLedger, entrance]}>
+      <View style={[styles.activityRow, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
+        <Animated.View style={[styles.activityDot, { backgroundColor: tokens.accent }, dotStyle]} />
+        <Hammer size={14} strokeWidth={1.75} color={tokens.accent} />
+        <Text style={[typeScale.meta, styles.activityLine, { color: tokens.ink2 }]} numberOfLines={1}>
+          {entries[entries.length - 1]}
+        </Text>
+        <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatElapsed(elapsedMs)}</Text>
+      </View>
+      {entries.slice(0, -1).map((line, index) => <Text key={`${index}:${line}`} style={[typeScale.meta, styles.activitySettled, { color: tokens.ink3 }]} numberOfLines={1}>{line}</Text>)}
     </Animated.View>
   );
 }
 
 function StreamingAnswer({ text, streaming }: { text: string; streaming: boolean }) {
   const tokens = useTokens();
+  const { dotStyle: railStyle } = useEmberdot(streaming ? "busy" : "idle");
   const reduced = useReducedMotion();
 
   // Same rAF coalescing as StreamingText.tsx: at most one committed render per frame while
@@ -177,6 +182,7 @@ function StreamingAnswer({ text, streaming }: { text: string; streaming: boolean
 
   return (
     <View style={styles.streamingAnswerRow}>
+      {streaming ? <Animated.View style={[styles.streamingRail, { backgroundColor: tokens.accent }, railStyle]} /> : null}
       <View style={styles.streamingAnswerText}>
         <Markdown content={displayText} />
       </View>
@@ -200,6 +206,7 @@ export default function SessionChat() {
 
   const listRef = useRef<FlatList<TimelineItem>>(null);
   const [showJump, setShowJump] = useState(false);
+  const [newWhileAway, setNewWhileAway] = useState(0);
   const showJumpRef = useRef(false);
   useEffect(() => {
     showJumpRef.current = showJump;
@@ -470,21 +477,20 @@ export default function SessionChat() {
   const displayText =
     streamingText || (busy ? track.retainedText : "") || (finalizingActive ? finalizing!.text : "");
 
-  const latestToolLine = useMemo(
-    () =>
-      [...(snapshot?.transcript ?? [])]
-        .reverse()
-        .find((line) => line.trimStart().startsWith("↳ ")) ?? null,
+  const toolLedger = useMemo(
+    () => (snapshot?.transcript ?? []).map((line, index) => ({ line: line.trim(), index })).filter(({ line }) => line.startsWith("↳ ")).slice(-3),
     [snapshot?.transcript],
   );
+  const latestToolLine = toolLedger.at(-1) ?? null;
   const [toolActivity, setToolActivity] = useState<{ line: string; startedAt: number } | null>(null);
   useEffect(() => {
     if (!busy || !latestToolLine) {
       setToolActivity(null);
       return;
     }
+    const key = `${latestToolLine.index}:${latestToolLine.line}`;
     setToolActivity((current) =>
-      current?.line === latestToolLine ? current : { line: latestToolLine, startedAt: Date.now() },
+      current?.line === key ? current : { line: key, startedAt: Date.now() },
     );
   }, [busy, latestToolLine]);
 
@@ -540,6 +546,8 @@ export default function SessionChat() {
       newestKeyRef.current = newestKey;
       if (!showJumpRef.current) {
         listRef.current?.scrollToOffset({ offset: 0, animated: false });
+      } else {
+        setNewWhileAway((count) => count + 1);
       }
     }
   }, [items]);
@@ -549,6 +557,8 @@ export default function SessionChat() {
   }, []);
 
   const jumpToLatest = useCallback(() => {
+    setShowJump(false);
+    setNewWhileAway(0);
     listRef.current?.scrollToOffset({ offset: 0, animated: true });
   }, []);
 
@@ -587,11 +597,11 @@ export default function SessionChat() {
             return item.streaming ? (
               toolActivity ? (
                 <View style={styles.streamingRow}>
-                  <LiveToolActivity line={toolActivity.line} startedAt={toolActivity.startedAt} />
+                  <LiveToolActivity entries={toolLedger.map(({ line }) => line)} startedAt={toolActivity.startedAt} />
                 </View>
               ) : (
                 <View style={[styles.streamingRow, styles.thinkingRow]}>
-                  <ActivityIndicator size="small" color={tokens.accent} />
+                  <BellowsSpinner active />
                   <Text style={[typeScale.meta, { color: tokens.ink3 }]}>thinking…</Text>
                 </View>
               )
@@ -686,11 +696,11 @@ export default function SessionChat() {
           <Pressable
             onPress={jumpToLatest}
             accessibilityRole="button"
-            accessibilityLabel="jump to latest"
-            style={[styles.jumpPill, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}
+            accessibilityLabel="Return to latest"
+            style={[styles.jumpPill, { backgroundColor: busy ? tokens.selection : tokens.bg3, borderColor: busy ? tokens.accent : tokens.border }]}
           >
             <ChevronDown size={16} strokeWidth={1.75} color={tokens.ink2} />
-            <Text style={[typeScale.meta, { color: tokens.ink2 }]}>latest</Text>
+            <Text style={[typeScale.meta, { color: tokens.ink2 }]}>{busy ? (newWhileAway > 0 ? `${newWhileAway} new ↓` : "live") : "latest"}</Text>
           </Pressable>
         ) : null}
       </View>
@@ -733,6 +743,13 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   streamingRow: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
   thinkingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  connectingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: space.space8,
+    paddingVertical: space.space24,
+  },
   activityRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -741,11 +758,13 @@ const styles = StyleSheet.create({
     borderRadius: radii.radius8,
     borderWidth: StyleSheet.hairlineWidth,
   },
+  activityLedger: { gap: space.space4 },
+  activitySettled: { opacity: 0.6, paddingLeft: space.space24 },
   activityDot: { width: 8, height: 8, borderRadius: 4 },
   activityLine: { flex: 1 },
   noteRow: { paddingHorizontal: space.space16, paddingVertical: space.space4 },
-  connectingRow: { flex: 1, alignItems: "center", justifyContent: "center", gap: space.space8 },
-  streamingAnswerRow: { flexDirection: "row", alignItems: "flex-end", flexWrap: "wrap" },
+  streamingAnswerRow: { flexDirection: "row", alignItems: "flex-end", flexWrap: "wrap", position: "relative", paddingLeft: space.space8 },
+  streamingRail: { position: "absolute", left: 0, top: 0, bottom: 0, width: 2 },
   streamingAnswerText: { flexShrink: 1 },
   caret: {
     width: CARET_SIZE,

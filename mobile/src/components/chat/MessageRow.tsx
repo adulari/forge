@@ -12,7 +12,7 @@ import { parseReasoning } from "../../lib/reasoning";
 import { useSessionCtx } from "../../lib/sessionContext";
 import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
-import { space } from "../../theme/tokens";
+import { radii, space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
 import { IconButton } from "../ds/IconButton";
 import { useToast } from "../ds/ToastHost";
@@ -130,7 +130,8 @@ function MessageRowImpl({ row, attachments }: MessageRowProps) {
   };
 
   return (
-    <Animated.View style={[styles.row, isUser && styles.userRow, entrance]}>
+    <Animated.View style={[styles.row, !isUser && !isSystem && styles.assistantRow, isUser && styles.userRow, entrance]}>
+      {!isUser && !isSystem ? <View style={[styles.spine, { backgroundColor: tokens.border }]} /> : null}
       <Pressable
         onLongPress={isSystem || IS_WEB ? undefined : onCopyRow}
         style={[
@@ -175,9 +176,11 @@ export const MessageRow = React.memo(MessageRowImpl);
 
 const styles = StyleSheet.create({
   row: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
+  assistantRow: { paddingLeft: space.space24, position: "relative" },
+  spine: { position: "absolute", left: space.space16, top: space.space8, bottom: space.space8, width: 2, borderRadius: radii.radiusPill },
   userRow: { alignItems: "flex-end" },
   bubble: { borderRadius: 12, paddingHorizontal: space.space12, paddingVertical: space.space8 },
-  userBubble: { maxWidth: "92%" },
+  userBubble: { maxWidth: "85%", borderRadius: radii.radius16 },
   metaRow: { flexDirection: "row", alignItems: "center", gap: space.space4, marginTop: space.space4 },
   model: { flex: 1 },
 });

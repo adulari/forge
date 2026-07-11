@@ -13,14 +13,15 @@ import { formatTokenPair, tabularNums, type as typeScale } from "../../theme/typ
 export interface ContextGaugeProps {
   used: number;
   total: number;
+  compact?: boolean;
 }
 
 const TRACK_HEIGHT = 3;
 
-export function ContextGauge({ used, total }: ContextGaugeProps) {
+export function ContextGauge({ used, total, compact = false }: ContextGaugeProps) {
   const tokens = useTokens();
-  const pct = total > 0 ? (used / total) * 100 : 0;
-  const clampedPct = Math.max(0, Math.min(100, pct));
+  const rawPct = total > 0 && Number.isFinite(used) ? (used / total) * 100 : 0;
+  const pct = Math.max(0, Math.min(100, rawPct));
   const { style: fillStyle } = useGaugeflow(pct);
   const fillColor = gaugeColor(pct, tokens);
   const overheat = pct > 70;
@@ -30,7 +31,7 @@ export function ContextGauge({ used, total }: ContextGaugeProps) {
     <View
       style={styles.row}
       accessibilityRole="progressbar"
-      accessibilityValue={{ min: 0, max: 100, now: Math.round(clampedPct) }}
+      accessibilityValue={{ min: 0, max: 100, now: Math.round(pct) }}
       accessibilityLabel={`context used ${formatTokenPair(used, total)}`}
     >
       <View style={[styles.track, { backgroundColor: tokens.border }]}>
@@ -53,7 +54,7 @@ export function ContextGauge({ used, total }: ContextGaugeProps) {
         </Animated.View>
       </View>
       <Text style={[typeScale.meta, tabularNums, { color: pct > 70 ? fillColor : tokens.ink3 }]} numberOfLines={1}>
-        {formatTokenPair(used, total)}
+        {compact ? `${Math.round(pct)}%` : formatTokenPair(used, total)}
       </Text>
     </View>
   );
