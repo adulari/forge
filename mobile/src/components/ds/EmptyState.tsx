@@ -8,7 +8,9 @@
 // variant="secondary" .../> (or any Pressable) into the slot.
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
+import Animated from "react-native-reanimated";
 
+import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
@@ -31,12 +33,13 @@ export interface EmptyStateProps {
 
 export function EmptyState({ icon: Icon, message, action }: EmptyStateProps) {
   const tokens = useTokens();
+  const entrance = useForgeline(0);
   return (
-    <View style={styles.container} accessibilityRole="text" accessibilityLabel={message}>
+    <Animated.View style={[styles.container, entrance]} accessibilityRole="text" accessibilityLabel={message}>
       <Icon size={24} color={tokens.ink4} strokeWidth={1.75} />
       <Text style={[type.sub, styles.message, { color: tokens.ink2 }]}>{message}</Text>
       {action ? <View style={styles.action}>{action}</View> : null}
-    </View>
+    </Animated.View>
   );
 }
 
