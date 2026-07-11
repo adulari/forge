@@ -537,6 +537,24 @@ async fn create_session(
 
     let session_cwd = worktree.clone().unwrap_or_else(|| cwd.clone());
     let is_resume = req.resume.is_some();
+    // Idempotent resume: if a driver for this id is ALREADY live — a double-tapped Resume, two
+    // phones, or a resume racing an archive's tail flush — return the existing handle instead of
+    // spawning a SECOND driver for the same id. Two drivers for one session both call
+    // `store.add_message` with independent `next_seq`, colliding seqs and interleaving the
+    // transcript. Checking before the spawn closes the reported double-tap window (the first
+    // request has already registered by the time the second arrives). A vanishingly small
+    // check-then-insert residual remains; the registry's last-writer-wins insert bounds it to one
+    // extra short-lived driver rather than unbounded duplication.
+    if let Some(rid) = req.resume.as_deref() {
+        if let Some(existing) = state.registry.get(rid).await {
+            return json_response(&serde_json::json!({
+                "id": existing.session_id,
+                "title": existing.title,
+                "cwd": existing.cwd,
+                "worktree": existing.worktree,
+            }));
+        }
+    }
     let spec = DriverSpec {
         cwd: session_cwd,
         worktree: worktree.clone(),
