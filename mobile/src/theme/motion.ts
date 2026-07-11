@@ -132,6 +132,40 @@ export function useForgeline(index: number) {
 }
 
 // ---------------------------------------------------------------------------
+// Thermal pulse (busy card) — a gentle opacity breathe on the HeatEdge glow
+// so a working session card reads as "alive" at a glance. Opacity 1.0 ↔ 0.6,
+// 1.6s loop, standard easing. Reduced-motion: static at 1.0. Transform/opacity
+// only — 60fps on the UI thread.
+// ---------------------------------------------------------------------------
+
+const THERMAL_PULSE_MS = 1600;
+const THERMAL_PULSE_MIN = 0.6;
+
+export function useThermalPulse(active: boolean) {
+  const reduced = useReducedMotion();
+  const opacity = useSharedValue(1);
+
+  useEffect(() => {
+    cancelAnimation(opacity);
+    if (reduced || !active) {
+      opacity.value = 1;
+      return;
+    }
+    opacity.value = withRepeat(
+      withSequence(
+        withTiming(THERMAL_PULSE_MIN, { duration: THERMAL_PULSE_MS / 2, easing: easings.standard }),
+        withTiming(1, { duration: THERMAL_PULSE_MS / 2, easing: easings.standard }),
+      ),
+      -1,
+    );
+    return () => cancelAnimation(opacity);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, reduced]);
+
+  return useAnimatedStyle(() => ({ opacity: opacity.value }));
+}
+
+// ---------------------------------------------------------------------------
 // Emberdot (status) — busy: opacity 1<->0.35 @1s; waiting: @0.7s + a 1.5px
 // danger ring that scales 1->1.6 and fades, every 2.8s. Idle/done: static.
 // ---------------------------------------------------------------------------
