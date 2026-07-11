@@ -484,6 +484,13 @@ export default function SessionChat() {
     if (displayText || busy) {
       list.push({ kind: "streaming", id: "streaming", text: displayText, streaming: busy || Boolean(streamingText) });
     }
+    // Notes (turn-end notices, e.g. "compacting", "turn failed") are the NEWEST events — they must
+    // sit at the newest slot (just under the streaming reply / above the composer in the inverted
+    // list), not be pushed to the far/oldest end where they'd float above all history with no cue.
+    const notes = snapshot?.notes ?? [];
+    for (let i = notes.length - 1; i >= 0; i--) {
+      list.push({ kind: "note", id: `n${i}`, text: notes[i] });
+    }
     // Newest-first (inverted list): the user's own just-sent message is more recent than any
     // settled history row but older than the in-progress reply above, and later sends are newer
     // than earlier ones — walk pendingSent back-to-front.
@@ -503,10 +510,6 @@ export default function SessionChat() {
       for (let i = filler.length - 1; i >= 0; i--) {
         list.push({ kind: "filler", id: `f${i}`, text: filler[i] });
       }
-    }
-    const notes = snapshot?.notes ?? [];
-    for (let i = notes.length - 1; i >= 0; i--) {
-      list.push({ kind: "note", id: `n${i}`, text: notes[i] });
     }
     return list;
   }, [displayText, streamingText, busy, pendingSent, useTranscriptFiller, historyRows, snapshot?.transcript, snapshot?.notes]);

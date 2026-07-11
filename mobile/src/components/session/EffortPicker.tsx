@@ -8,13 +8,14 @@ import { radii, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 import { Chip } from "../ds/Chip";
 import { Sheet } from "../ds/Sheet";
+import { useToast } from "../ds/ToastHost";
 
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "whitehot"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
 export interface EffortPickerProps {
   effort?: string | null;
-  send: (input: RemoteInput) => void;
+  send: (input: RemoteInput) => boolean;
 }
 
 function isEffortLevel(value: string | null | undefined): value is EffortLevel {
@@ -23,6 +24,7 @@ function isEffortLevel(value: string | null | undefined): value is EffortLevel {
 
 export function EffortPicker({ effort, send }: EffortPickerProps) {
   const tokens = useTokens();
+  const toast = useToast();
   const [visible, setVisible] = useState(false);
   const [pending, setPending] = useState<EffortLevel | null>(null);
   const current = pending ?? (isEffortLevel(effort) ? effort : "medium");
@@ -32,9 +34,14 @@ export function EffortPicker({ effort, send }: EffortPickerProps) {
   }, [effort, pending]);
 
   const select = (level: EffortLevel) => {
-    setPending(level);
     setVisible(false);
-    send({ kind: "prompt", text: `/effort ${level}` });
+    setPending(level);
+    // If the socket is down the command is dropped (not queued), so don't leave the chip stuck on
+    // an optimistic value the daemon never applied — revert and tell the user.
+    if (!send({ kind: "prompt", text: `/effort ${level}` })) {
+      setPending(null);
+      toast.show("not sent — reconnect and try again", { tone: "danger" });
+    }
   };
 
   const whitehot = current === "whitehot";

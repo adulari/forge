@@ -85,7 +85,10 @@ fn elide_old_tool_results(
             .rev()
             .nth(keep_recent_tool_results - 1)
             .map(|(index, _)| index)
-            .unwrap_or(messages.len())
+            // Fewer tool results than we want to keep verbatim → protect ALL of them (elide none):
+            // `messages.len()` here would protect nothing and elide the single newest result,
+            // contradicting the "newest N stay verbatim" contract.
+            .unwrap_or(0)
     };
     messages
         .iter()
