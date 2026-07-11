@@ -22,9 +22,9 @@ import { ApiError, type MergeDirtyConflictResponse, type SessionRow } from "../.
 import { haptics } from "../../lib/haptics";
 import { useArchiveSession, useDiscardSession, useMergeSession } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
-import { springs, useForgeline } from "../../theme/motion";
+import { springs, useForgeline, useThermalPulse } from "../../theme/motion";
 import { space, type StatusDotState } from "../../theme/tokens";
-import { monoFamily, type as typeScale } from "../../theme/typography";
+import { formatCwd, monoFamily, type as typeScale } from "../../theme/typography";
 import { Badge } from "../ds/Badge";
 import { ConfirmDialog } from "../ds/ConfirmDialog";
 import { ContextGauge } from "../ds/ContextGauge";
@@ -72,6 +72,8 @@ function SessionCardBase({ row, index }: SessionCardProps) {
   const actionsWidth = ACTION_WIDTH * actionCount;
 
   const translateX = useSharedValue(0);
+  const thermalPulse = useThermalPulse(row.busy);
+  const cwdLabel = formatCwd(row.cwd);
 
   const closeSwipe = useCallback(() => {
     translateX.value = reduced ? 0 : withSpring(0, springs.press);
@@ -211,19 +213,25 @@ function SessionCardBase({ row, index }: SessionCardProps) {
                 onPress={goToSession}
                 onLongPress={openActions}
                 accessibilityRole={Platform.OS === "web" ? undefined : "button"}
-                accessibilityLabel={`${title}, ${state}`}
+                accessibilityLabel={`${title}, ${state}, ${row.cwd}`}
               >
                 <View
                   style={[styles.rowBg, { backgroundColor: row.waiting ? tokens.selection : tokens.bg1 }]}
                 >
-                  <HeatEdge active={isLive} />
+                  <Animated.View style={[styles.heatEdgeWrap, thermalPulse]}>
+                    <HeatEdge active={isLive} />
+                  </Animated.View>
                   <View style={styles.inner}>
                     <View style={styles.row1}>
                       <StatusDot state={state} />
                       <Text style={[typeScale.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
                         {title}
                       </Text>
-                      {row.waiting ? <Badge label="NEEDS YOU" tone="danger" /> : null}
+                      {row.waiting ? (
+                        <Pressable onPress={goToSession} accessibilityRole="button" accessibilityLabel="Open session to answer">
+                          <Badge label="NEEDS YOU" tone="danger" />
+                        </Pressable>
+                      ) : null}
                       {hasWorktree ? <Badge label="worktree" tone="outline" /> : null}
                       <IconButton
                         icon={<Ellipsis size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink3} />}
@@ -241,8 +249,9 @@ function SessionCardBase({ row, index }: SessionCardProps) {
                         ]}
                         numberOfLines={1}
                         ellipsizeMode="head"
+                        accessibilityLabel={`path: ${row.cwd}`}
                       >
-                        {row.cwd}
+                        {cwdLabel}
                       </Text>
                       <Text style={[typeScale.sub, { color: tokens.ink3 }]} numberOfLines={1}>
                         {row.model}
@@ -378,6 +387,7 @@ const styles = StyleSheet.create({
   // De-boxed row (DESIGN_ELEVATION.md Move 2): no border/fill/radius — the row's own
   // hairline separator (below) is the only division between sessions.
   rowBg: { position: "relative" },
+  heatEdgeWrap: { position: "absolute", left: 0, top: 0, bottom: 0 },
   inner: {
     minHeight: 72,
     justifyContent: "center",
