@@ -73,6 +73,11 @@ function SessionCardBase({ row, index }: SessionCardProps) {
 
   const translateX = useSharedValue(0);
   const settleStyle = useSettle(state);
+  const previousState = useRef(state);
+  useEffect(() => {
+    if (state === "waiting" && previousState.current !== "waiting") haptics.select();
+    previousState.current = state;
+  }, [state]);
   const cwdLabel = formatCwd(row.cwd);
 
   const closeSwipe = useCallback(() => {
