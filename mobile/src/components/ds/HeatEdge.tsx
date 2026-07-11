@@ -13,12 +13,16 @@ const GLOW_RADIUS = 16;
 
 export interface HeatEdgeProps {
   state?: "busy" | "waiting" | false;
+  /** @deprecated legacy boolean API — `active` maps to `state="busy"`. Kept so existing
+   *  call sites (composer heat edge, floor tiles) compile against the new state API. */
+  active?: boolean;
 }
 
-export function HeatEdge({ state = false }: HeatEdgeProps) {
+export function HeatEdge({ state, active }: HeatEdgeProps) {
   const tokens = useTokens();
-  const thermalStyle = useThermal(state || "off");
-  if (!state) return null;
+  const resolved: "busy" | "waiting" | false = state ?? (active ? "busy" : false);
+  const thermalStyle = useThermal(resolved || "off");
+  if (!resolved) return null;
 
   return (
     <Animated.View style={[styles.wrap, thermalStyle]} pointerEvents="none">
