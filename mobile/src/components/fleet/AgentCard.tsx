@@ -31,7 +31,7 @@ function AgentCardBase({ agent }: AgentCardProps) {
 
   return (
     <Card variant="feature" style={agent.done ? styles.done : undefined}>
-      <HeatEdge active={running} />
+      <HeatEdge state={running ? "busy" : false} />
       <View style={styles.header}>
         <Bot size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.accent} />
         <Text style={[typeScale.heading, styles.name, { color: tokens.accent }]} numberOfLines={1}>

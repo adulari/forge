@@ -241,6 +241,50 @@ export function useEmberdot(kind: EmberdotKind) {
   return { dotStyle, ringStyle };
 }
 
+export function useThermal(kind: "busy" | "waiting" | "off") {
+  const reduced = useReducedMotion();
+  const opacity = useSharedValue(1);
+
+  useEffect(() => {
+    cancelAnimation(opacity);
+    if (reduced || kind === "off") {
+      opacity.value = 1;
+      return;
+    }
+    const [minimum, duration] = kind === "busy" ? [0.55, 2400] : [0.45, 1400];
+    opacity.value = withRepeat(
+      withSequence(
+        withTiming(minimum, { duration: duration / 2, easing: easings.standard }),
+        withTiming(1, { duration: duration / 2, easing: easings.standard }),
+      ),
+      -1,
+    );
+    return () => cancelAnimation(opacity);
+  }, [kind, reduced, opacity]);
+
+  return useAnimatedStyle(() => ({ opacity: opacity.value }));
+}
+
+export function useSettle(key: string) {
+  const reduced = useReducedMotion();
+  const scale = useSharedValue(1);
+  const previous = useRef<string | null>(null);
+
+  useEffect(() => {
+    const changed = previous.current != null && previous.current !== key;
+    previous.current = key;
+    cancelAnimation(scale);
+    if (reduced || !changed) {
+      scale.value = 1;
+      return;
+    }
+    scale.value = withSequence(withSpring(1.015, springs.emphasis), withSpring(1, springs.emphasis));
+    return () => cancelAnimation(scale);
+  }, [key, reduced, scale]);
+
+  return useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+}
+
 // ---------------------------------------------------------------------------
 // Gaugeflow (context/cost) — gauge width animates over `gentle`.
 // Color is a threshold step (accent/warn/danger via tokens.gaugeColor), not
