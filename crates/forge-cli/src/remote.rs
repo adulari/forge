@@ -37,7 +37,7 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -494,8 +494,42 @@ pub const EVENT_LOG_CAP: usize = 512;
 /// missed instead of flickering through a from-scratch rebuild. Revisions are consecutive (one
 /// bump per actually-broadcast frame), so "everything after rev N" is answerable precisely — or
 /// not at all (evicted / unknown / foreign counter), which forces a full-snapshot resync.
+pub struct SnapshotFrame {
+    pub snapshot: Snapshot,
+    json: Arc<str>,
+    resync_json: OnceLock<Arc<str>>,
+}
+
+impl SnapshotFrame {
+    pub fn new(snapshot: Snapshot) -> Self {
+        let json = serde_json::to_string(&snapshot)
+            .unwrap_or_else(|_| "{}".into())
+            .into();
+        Self {
+            snapshot,
+            json,
+            resync_json: OnceLock::new(),
+        }
+    }
+
+    fn text(&self, resync: bool) -> Arc<str> {
+        if !resync {
+            return self.json.clone();
+        }
+        self.resync_json
+            .get_or_init(|| {
+                let mut snapshot = self.snapshot.clone();
+                snapshot.resync = true;
+                serde_json::to_string(&snapshot)
+                    .unwrap_or_else(|_| "{}".into())
+                    .into()
+            })
+            .clone()
+    }
+}
+
 pub struct EventLog {
-    ring: std::collections::VecDeque<(u64, Snapshot)>,
+    ring: std::collections::VecDeque<(u64, Arc<SnapshotFrame>)>,
     cap: usize,
 }
 
@@ -509,7 +543,7 @@ impl EventLog {
 
     /// Record a broadcast frame, evicting the oldest beyond the cap (memory stays bounded no
     /// matter how long the session runs).
-    pub fn push(&mut self, rev: u64, snap: Snapshot) {
+    pub fn push(&mut self, rev: u64, snap: Arc<SnapshotFrame>) {
         self.ring.push_back((rev, snap));
         while self.ring.len() > self.cap {
             self.ring.pop_front();
@@ -520,7 +554,7 @@ impl EventLog {
     /// client is already current. `None` when the gap can't be filled faithfully (the log is
     /// empty, `since` predates the oldest retained entry, or `since` is from a future/foreign
     /// counter): the caller must then resync with one full snapshot instead of replaying a hole.
-    pub fn replay_after(&self, since: u64) -> Option<Vec<Snapshot>> {
+    pub fn replay_after(&self, since: u64) -> Option<Vec<Arc<SnapshotFrame>>> {
         let (front, _) = self.ring.front()?;
         let (back, _) = self.ring.back()?;
         if since.checked_add(1).is_none_or(|next| next < *front) || since > *back {
@@ -932,7 +966,7 @@ pub fn exposure_label(tunnel: Option<&str>, lan_tls: bool, tls_failed: bool) -> 
 pub struct RemoteControl {
     /// Publish the latest visible state; the WS task forwards it to every browser.
     /// Use [`Self::broadcast`] (never `send` directly) so the frame also lands in the replay log.
-    pub snapshot_tx: watch::Sender<Snapshot>,
+    pub snapshot_tx: watch::Sender<Arc<SnapshotFrame>>,
     /// Every broadcast frame, retained (bounded) for reconnect replay — shared with the WS
     /// handler, which answers `?rev=<n>` handshakes from it.
     events: Arc<std::sync::Mutex<EventLog>>,
@@ -968,10 +1002,11 @@ impl RemoteControl {
     /// would be unreplayable, so a reconnecting client would resync (full rebuild) instead of
     /// receiving exactly what it missed. `snap.revision` must already be bumped by the caller.
     pub fn broadcast(&self, snap: Snapshot) {
+        let frame = Arc::new(SnapshotFrame::new(snap));
         if let Ok(mut log) = self.events.lock() {
-            log.push(snap.revision, snap.clone());
+            log.push(frame.snapshot.revision, frame.clone());
         }
-        let _ = self.snapshot_tx.send(snap);
+        let _ = self.snapshot_tx.send(frame);
     }
 }
 
@@ -980,12 +1015,12 @@ impl Drop for RemoteControl {
         // Mark closed so connected browsers stop reconnecting, then tear the server down. The
         // revision bump matters: the page drops frames at or below the revision it already saw
         // (reconnect-replay dedup), and `closed` rides on otherwise-unchanged state.
-        let last = self.snapshot_tx.borrow().clone();
-        let _ = self.snapshot_tx.send(Snapshot {
+        let last = self.snapshot_tx.borrow().snapshot.clone();
+        let _ = self.snapshot_tx.send(Arc::new(SnapshotFrame::new(Snapshot {
             closed: true,
             revision: last.revision + 1,
             ..last
-        });
+        })));
         self._server.abort();
     }
 }
@@ -1070,7 +1105,8 @@ pub fn start(
         Exposure::Local | Exposure::Anywhere => lan_host(addr),
     };
 
-    let (snapshot_tx, snapshot_rx) = watch::channel(Snapshot::default());
+    let (snapshot_tx, snapshot_rx) =
+        watch::channel(Arc::new(SnapshotFrame::new(Snapshot::default())));
     let (input_tx, input_rx) = mpsc::channel::<RemoteInput>(64);
     // The replay log (v5 reconnect): every broadcast frame lands here (see
     // `RemoteControl::broadcast`), and the WS handler answers `?rev=` handshakes from it.
@@ -1248,7 +1284,7 @@ pub async fn start_anywhere(history: Option<HistoryProvider>) -> std::io::Result
 
 #[derive(Clone)]
 struct ServerState {
-    snapshot_rx: watch::Receiver<Snapshot>,
+    snapshot_rx: watch::Receiver<Arc<SnapshotFrame>>,
     input_tx: mpsc::Sender<RemoteInput>,
     /// The bounded replay log shared with [`RemoteControl::broadcast`] — answers `?rev=` WS
     /// handshakes with exactly the frames a reconnecting client missed.
@@ -1372,7 +1408,7 @@ async fn history_page(
     axum::extract::Query(params): axum::extract::Query<HistoryParams>,
 ) -> Response {
     let (before, limit) = (params.before, history_page_limit(params.limit));
-    let sid = state.snapshot_rx.borrow().session_id.clone();
+    let sid = state.snapshot_rx.borrow().snapshot.session_id.clone();
     let rows: Vec<HistoryRow> = match (state.history.clone(), sid.is_empty()) {
         (Some(provider), false) => {
             tokio::task::spawn_blocking(move || provider(&sid, before, limit))
@@ -1484,7 +1520,7 @@ async fn upload_handler(
             "uploads are unavailable (no working directory)",
         );
     };
-    let sid = state.snapshot_rx.borrow().session_id.clone();
+    let sid = state.snapshot_rx.borrow().snapshot.session_id.clone();
     if sid.is_empty() {
         return upload_error(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -1616,7 +1652,7 @@ async fn ws_session(socket: WebSocket, state: Arc<ServerState>, since: u64) {
 /// come from (a single server state vs. a session registry lookup).
 pub(crate) async fn pump_ws(
     socket: WebSocket,
-    snapshot_rx: watch::Receiver<Snapshot>,
+    snapshot_rx: watch::Receiver<Arc<SnapshotFrame>>,
     events: Arc<std::sync::Mutex<EventLog>>,
     input_tx: mpsc::Sender<RemoteInput>,
     since: u64,
@@ -1635,50 +1671,58 @@ pub(crate) async fn pump_ws(
     } else {
         events.lock().ok().and_then(|log| log.replay_after(since))
     };
-    match replay {
+    let last_sent = match replay {
         Some(missed) => {
             let mut last_sent = since;
-            for s in &missed {
-                let json = serde_json::to_string(s).unwrap_or_else(|_| "{}".into());
-                if tx.send(Message::Text(json.into())).await.is_err() {
+            for frame in &missed {
+                if tx
+                    .send(Message::Text(frame.text(false).to_string().into()))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
-                last_sent = s.revision;
+                last_sent = frame.snapshot.revision;
             }
             // A cloned receiver has NOT seen the value currently in the watch, so the forward
             // loop below would immediately re-deliver it — a duplicate of the replay's last
             // frame. Mark it seen here, and send it ourselves only when the replay didn't
             // already cover it (it was broadcast between the ring read and now).
-            let mut current = snap.borrow_and_update().clone();
-            if current.revision > last_sent {
-                // `watch` coalesces. If multiple broadcasts landed after the replay-log read,
-                // this receiver only exposes the newest one; flag that jump as a full resync
-                // rather than pretending it extends the contiguous replay stream.
-                current.resync = current.revision > last_sent.saturating_add(1);
-                let json = serde_json::to_string(&current).unwrap_or_else(|_| "{}".into());
-                if tx.send(Message::Text(json.into())).await.is_err() {
+            let current = snap.borrow_and_update().clone();
+            if current.snapshot.revision > last_sent {
+                let resync = current.snapshot.revision > last_sent.saturating_add(1);
+                if tx
+                    .send(Message::Text(current.text(resync).to_string().into()))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
+                last_sent = current.snapshot.revision;
             }
+            last_sent
         }
         None => {
             // Send the current snapshot immediately so the page isn't blank until the next
             // change, flagged as a resync (its revision doesn't extend the client's stream).
             // `borrow_and_update` (not `borrow`): mark it seen so the forward loop doesn't
             // deliver the same frame again right away.
-            let mut current = snap.borrow_and_update().clone();
-            current.resync = true;
-            let initial = serde_json::to_string(&current).unwrap_or_else(|_| "{}".into());
-            if tx.send(Message::Text(initial.into())).await.is_err() {
+            let current = snap.borrow_and_update().clone();
+            if tx
+                .send(Message::Text(current.text(true).to_string().into()))
+                .await
+                .is_err()
+            {
                 return;
             }
+            current.snapshot.revision
         }
-    }
+    };
 
     let mut forward = tokio::spawn(async move {
         let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(20));
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut last_sent: u64 = 0;
+        let mut last_sent = last_sent;
         loop {
             tokio::select! {
                 changed = snap.changed() => {
@@ -1688,16 +1732,15 @@ pub(crate) async fn pump_ws(
                     // `watch` coalesces: if multiple broadcasts landed between ticks, this
                     // receiver only exposes the newest revision. Flag a non-contiguous jump
                     // as a full resync so the client doesn't treat it as a gap in the stream.
-                    let mut frame = snap.borrow().clone();
-                    frame.resync = frame.revision > last_sent.saturating_add(1);
-                    let json = serde_json::to_string(&frame).unwrap_or_else(|_| "{}".into());
-                    last_sent = frame.revision;
-                    if tx.send(Message::Text(json.into())).await.is_err() {
+                    let frame = snap.borrow().clone();
+                    let resync = frame.snapshot.revision > last_sent.saturating_add(1);
+                    last_sent = frame.snapshot.revision;
+                    if tx.send(Message::Text(frame.text(resync).to_string().into())).await.is_err() {
                         break;
                     }
                 }
                 _ = keepalive.tick() => {
-                    if tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    if tx.send(Message::Text(r#"{"keepalive":true}"#.into())).await.is_err() {
                         break;
                     }
                 }
@@ -2018,9 +2061,11 @@ mod tests {
             s.revision = 4;
         });
 
-        // Collect all received frames.
+        // Collect all frames available without waiting for the forward loop's sender to drop.
         let mut frames: Vec<serde_json::Value> = Vec::new();
-        while let Some(msg) = rx.recv().await {
+        while let Ok(Some(msg)) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await
+        {
             if let Message::Text(t) = msg {
                 if let Ok(v) = serde_json::from_str(&t) {
                     frames.push(v);
@@ -2079,12 +2124,15 @@ mod tests {
     fn event_log_replays_exactly_the_frames_after_rev() {
         let mut log = EventLog::new(EVENT_LOG_CAP);
         for rev in 1..=10 {
-            log.push(rev, rev_snap(rev));
+            log.push(rev, Arc::new(SnapshotFrame::new(rev_snap(rev))));
         }
         // Everything after rev 6 — exactly 7, 8, 9, 10, oldest first.
         let missed = log.replay_after(6).expect("gap is fillable");
         assert_eq!(
-            missed.iter().map(|s| s.revision).collect::<Vec<_>>(),
+            missed
+                .iter()
+                .map(|s| s.snapshot.revision)
+                .collect::<Vec<_>>(),
             vec![7, 8, 9, 10]
         );
         // Already current → an empty replay (NOT a resync): the client missed nothing.
@@ -2097,7 +2145,7 @@ mod tests {
     fn event_log_eviction_and_unknown_revs_force_resync() {
         let mut log = EventLog::new(4);
         for rev in 1..=10 {
-            log.push(rev, rev_snap(rev));
+            log.push(rev, Arc::new(SnapshotFrame::new(rev_snap(rev))));
         }
         // Ring holds 7..=10 now; a client at rev 2 needs 3..=10 — 3..=6 are gone: resync.
         assert!(log.replay_after(2).is_none(), "evicted gap must resync");
@@ -2122,7 +2170,7 @@ mod tests {
     fn event_log_is_bounded_by_its_cap() {
         let mut log = EventLog::new(8);
         for rev in 1..=10_000 {
-            log.push(rev, rev_snap(rev));
+            log.push(rev, Arc::new(SnapshotFrame::new(rev_snap(rev))));
             assert!(log.len() <= 8, "ring must never exceed its cap");
         }
         assert_eq!(log.len(), 8);

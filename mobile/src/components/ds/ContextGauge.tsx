@@ -6,7 +6,7 @@ import { StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import { useTokens } from "../../theme/ThemeProvider";
-import { useGaugeflow } from "../../theme/motion";
+import { useGaugeflow, useThermal } from "../../theme/motion";
 import { gaugeColor, radii, shadowStyle, space } from "../../theme/tokens";
 import { formatTokenPair, tabularNums, type as typeScale } from "../../theme/typography";
 
@@ -24,7 +24,8 @@ export function ContextGauge({ used, total, compact = false }: ContextGaugeProps
   const pct = Math.max(0, Math.min(100, rawPct));
   const { style: fillStyle } = useGaugeflow(pct);
   const fillColor = gaugeColor(pct, tokens);
-  const overheat = pct >= 70;
+  const overheat = pct > 70;
+  const thermalStyle = useThermal(pct > 90 ? "busy" : "off");
 
   return (
     <View
@@ -34,23 +35,25 @@ export function ContextGauge({ used, total, compact = false }: ContextGaugeProps
       accessibilityLabel={`context used ${formatTokenPair(used, total)}`}
     >
       <View style={[styles.track, { backgroundColor: tokens.border }]}>
-        <Animated.View
-          style={[
-            styles.fill,
-            { backgroundColor: fillColor },
-            overheat &&
-              shadowStyle({
-                shadowColor: fillColor,
-                shadowOpacity: 0.6,
-                shadowRadius: 4,
-                shadowOffset: { width: 0, height: 0 },
-                elevation: 0,
-              }),
-            fillStyle,
-          ]}
-        />
+        <Animated.View style={thermalStyle}>
+          <Animated.View
+            style={[
+              styles.fill,
+              { backgroundColor: fillColor },
+              overheat &&
+                shadowStyle({
+                  shadowColor: fillColor,
+                  shadowOpacity: 0.6,
+                  shadowRadius: 4,
+                  shadowOffset: { width: 0, height: 0 },
+                  elevation: 0,
+                }),
+              fillStyle,
+            ]}
+          />
+        </Animated.View>
       </View>
-      <Text style={[typeScale.meta, tabularNums, { color: tokens.ink3 }]} numberOfLines={1}>
+      <Text style={[typeScale.meta, tabularNums, { color: pct > 70 ? fillColor : tokens.ink3 }]} numberOfLines={1}>
         {compact ? `${Math.round(pct)}%` : formatTokenPair(used, total)}
       </Text>
     </View>

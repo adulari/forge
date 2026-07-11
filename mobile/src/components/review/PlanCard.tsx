@@ -39,6 +39,7 @@ export interface PlanCardProps {
   questionOptions: QuestionOption[];
   promptSeq: number;
   send: (input: RemoteInput) => boolean;
+  onQueueAnswer?: (input: Extract<RemoteInput, { kind: "allow" | "answer" }>) => void;
 }
 
 function findOptionNumber(options: QuestionOption[], pattern: RegExp, fallback: string): string {
@@ -46,7 +47,7 @@ function findOptionNumber(options: QuestionOption[], pattern: RegExp, fallback: 
   return idx >= 0 ? String(idx + 1) : fallback;
 }
 
-export function PlanCard({ plan, questionOptions, promptSeq, send }: PlanCardProps) {
+export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer }: PlanCardProps) {
   const tokens = useTokens();
   const toast = useToast();
   const reduced = useReducedMotion();
@@ -57,12 +58,14 @@ export function PlanCard({ plan, questionOptions, promptSeq, send }: PlanCardPro
   // check/x CommitIcon — only Approve/Cancel are binary commits; Revise opens a
   // free-text row instead of resolving the prompt, so it never sets this.
   const [committed, setCommitted] = useState<"approve" | "cancel" | null>(null);
+  const [queued, setQueued] = useState(false);
 
   useEffect(() => {
     setLockedSeq(null);
     setRevising(false);
     setReviseText("");
     setCommitted(null);
+    setQueued(false);
   }, [promptSeq]);
 
   const locked = lockedSeq === promptSeq;
@@ -78,9 +81,14 @@ export function PlanCard({ plan, questionOptions, promptSeq, send }: PlanCardPro
     if (which) setCommitted(which);
     haptic();
     if (!send({ kind: "answer", text, seq: promptSeq })) {
-      setLockedSeq(null);
-      setCommitted(null);
-      toast.show("not sent — reconnect and try again", { tone: "danger" });
+      if (onQueueAnswer) {
+        onQueueAnswer({ kind: "answer", text, seq: promptSeq });
+        setQueued(true);
+      } else {
+        setLockedSeq(null);
+        setCommitted(null);
+        toast.show("not sent — reconnect and try again", { tone: "danger" });
+      }
       haptics.mergeConflict();
     }
   };
@@ -115,6 +123,7 @@ export function PlanCard({ plan, questionOptions, promptSeq, send }: PlanCardPro
             </View>
           ) : null}
 
+          {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
           <View style={styles.actions}>
             <Button
               label="Cancel"

@@ -22,9 +22,10 @@ import { ApiError, type MergeDirtyConflictResponse, type SessionRow } from "../.
 import { haptics } from "../../lib/haptics";
 import { useArchiveSession, useDiscardSession, useMergeSession } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
-import { springs, useForgeline, useThermalPulse } from "../../theme/motion";
+import { springs, useForgeline, useSettle } from "../../theme/motion";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { formatCwd, monoFamily, type as typeScale } from "../../theme/typography";
+import { Chip } from "../ds/Chip";
 import { Badge } from "../ds/Badge";
 import { ConfirmDialog } from "../ds/ConfirmDialog";
 import { ContextGauge } from "../ds/ContextGauge";
@@ -67,12 +68,16 @@ function SessionCardBase({ row, index }: SessionCardProps) {
   const hasWorktree = !!row.worktree;
   const title = row.title || `session ${row.id.slice(0, 8)}`;
   const state: StatusDotState = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
-  const isLive = row.busy || row.waiting;
   const actionCount = hasWorktree ? 3 : 1;
   const actionsWidth = ACTION_WIDTH * actionCount;
 
   const translateX = useSharedValue(0);
-  const thermalPulse = useThermalPulse(row.busy);
+  const settleStyle = useSettle(state);
+  const previousState = useRef(state);
+  useEffect(() => {
+    if (state === "waiting" && previousState.current !== "waiting") haptics.select();
+    previousState.current = state;
+  }, [state]);
   const cwdLabel = formatCwd(row.cwd);
 
   const closeSwipe = useCallback(() => {
@@ -177,7 +182,7 @@ function SessionCardBase({ row, index }: SessionCardProps) {
 
   return (
     <>
-      <Animated.View style={entranceStyle}>
+      <Animated.View style={[entranceStyle, settleStyle]}>
         <View style={styles.wrap}>
           {Platform.OS !== "web" ? (
             <View style={[styles.actionsRow, { width: actionsWidth }]} pointerEvents="box-none">
@@ -218,9 +223,7 @@ function SessionCardBase({ row, index }: SessionCardProps) {
                 <View
                   style={[styles.rowBg, { backgroundColor: row.waiting ? tokens.selection : tokens.bg1 }]}
                 >
-                  <Animated.View style={[styles.heatEdgeWrap, thermalPulse]}>
-                    <HeatEdge active={isLive} />
-                  </Animated.View>
+                  <HeatEdge state={row.waiting ? "waiting" : row.busy ? "busy" : false} />
                   <View style={styles.inner}>
                     <View style={styles.row1}>
                       <StatusDot state={state} />
@@ -228,11 +231,10 @@ function SessionCardBase({ row, index }: SessionCardProps) {
                         {title}
                       </Text>
                       {row.waiting ? (
-                        <Pressable onPress={goToSession} accessibilityRole="button" accessibilityLabel="Open session to answer">
-                          <Badge label="NEEDS YOU" tone="danger" />
-                        </Pressable>
+                        <Chip label="Respond" selected onPress={goToSession} />
                       ) : null}
                       {hasWorktree ? <Badge label="worktree" tone="outline" /> : null}
+                      <CostMetric valueUsd={row.cost_usd} />
                       <IconButton
                         icon={<Ellipsis size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink3} />}
                         onPress={openActions}
@@ -260,12 +262,9 @@ function SessionCardBase({ row, index }: SessionCardProps) {
                     </View>
 
                     <View style={styles.row3}>
-                      <View style={styles.gauge}>
-                        {row.context_limit != null ? (
-                          <ContextGauge used={row.context_tokens} total={row.context_limit} />
-                        ) : null}
-                      </View>
-                      <CostMetric valueUsd={row.cost_usd} />
+                      {row.context_limit != null ? (
+                        <ContextGauge used={row.context_tokens} total={row.context_limit} />
+                      ) : null}
                     </View>
                   </View>
                 </View>
@@ -399,8 +398,7 @@ const styles = StyleSheet.create({
   title: { flex: 1 },
   row2: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   cwd: { flex: 1 },
-  row3: { flexDirection: "row", alignItems: "center", gap: space.space12 },
-  gauge: { flex: 1 },
+  row3: { width: "100%" },
   separator: { height: StyleSheet.hairlineWidth, marginLeft: space.space16 },
   sheetBody: { paddingHorizontal: space.space4, paddingBottom: space.space16, gap: space.space4 },
   fileRow: { paddingHorizontal: space.space16 },

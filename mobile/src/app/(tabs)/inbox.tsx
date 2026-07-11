@@ -77,7 +77,7 @@ function InboxRowBase({ row, index, onPress, onPeek }: InboxRowProps) {
           {/* DESIGN_ELEVATION.md Move 2 — de-boxed row: every Inbox row is waiting, so
               every row carries the selection wash + heat edge (no per-row card). */}
           <View style={[styles.rowBg, { backgroundColor: tokens.selection }]}>
-            <HeatEdge active />
+            <HeatEdge state="waiting" />
             <View style={styles.inner}>
               <View style={styles.headerRow}>
                 <StatusDot state="waiting" />

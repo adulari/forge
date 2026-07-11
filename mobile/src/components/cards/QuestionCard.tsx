@@ -31,17 +31,20 @@ export interface QuestionCardProps {
   allowOther: boolean;
   promptSeq: number;
   send: (input: RemoteInput) => boolean;
+  onQueueAnswer?: (input: Extract<RemoteInput, { kind: "allow" | "answer" }>) => void;
 }
 
-export function QuestionCard({ question, options, allowOther, promptSeq, send }: QuestionCardProps) {
+export function QuestionCard({ question, options, allowOther, promptSeq, send, onQueueAnswer }: QuestionCardProps) {
   const tokens = useTokens();
   const toast = useToast();
   const [lockedSeq, setLockedSeq] = useState<number | null>(null);
   const [freeText, setFreeText] = useState("");
+  const [queued, setQueued] = useState(false);
 
   useEffect(() => {
     setLockedSeq(null);
     setFreeText("");
+    setQueued(false);
   }, [promptSeq]);
 
   const locked = lockedSeq === promptSeq;
@@ -51,8 +54,8 @@ export function QuestionCard({ question, options, allowOther, promptSeq, send }:
     setLockedSeq(promptSeq);
     haptics.select();
     if (!send({ kind: "answer", text, seq: promptSeq })) {
-      setLockedSeq(null);
-      toast.show("not sent — reconnect and try again", { tone: "danger" });
+      if (onQueueAnswer) { onQueueAnswer({ kind: "answer", text, seq: promptSeq }); setQueued(true); }
+      else { setLockedSeq(null); toast.show("not sent — reconnect and try again", { tone: "danger" }); }
       haptics.mergeConflict();
     }
   };
@@ -62,6 +65,7 @@ export function QuestionCard({ question, options, allowOther, promptSeq, send }:
   return (
     <View style={styles.container}>
       <Text style={[typeScale.body, { color: tokens.ink }, styles.question]}>{question}</Text>
+      {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
 
       {options.map((opt, idx) => (
         <OptionRow key={idx} option={opt} disabled={locked} onPress={() => answer(String(idx + 1))} />

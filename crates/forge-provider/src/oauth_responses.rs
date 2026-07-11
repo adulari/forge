@@ -377,6 +377,33 @@ pub async fn execute_responses_request(
         }
     }
 
+    if !pending.is_empty() {
+        buf.extend(
+            String::from_utf8_lossy(&pending)
+                .chars()
+                .filter(|&c| c != '\r'),
+        );
+        let raw = std::mem::take(&mut buf);
+        let (event, data) = parse_sse_frame(&raw);
+        if let Some(event) = event {
+            if !data.is_empty() {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+                    apply_sse_event(&mut acc, &event, &value, on_event)?;
+                }
+            }
+        }
+    } else if !buf.trim().is_empty() {
+        let raw = std::mem::take(&mut buf);
+        let (event, data) = parse_sse_frame(&raw);
+        if let Some(event) = event {
+            if !data.is_empty() {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+                    apply_sse_event(&mut acc, &event, &value, on_event)?;
+                }
+            }
+        }
+    }
+
     if !acc.saw_terminal
         && acc.tool_calls.is_empty()
         && acc.usage.input_tokens == 0

@@ -15,9 +15,9 @@ import { CodeBlock } from "./CodeBlock";
 // ---------------------------------------------------------------------------
 
 type Block =
-  | { kind: "heading"; level: number; text: string }
-  | { kind: "paragraph"; text: string }
-  | { kind: "list"; ordered: boolean; items: string[] }
+  | { kind: "heading"; level: number; text: string; inline: InlineNode[] }
+  | { kind: "paragraph"; text: string; inline: InlineNode[] }
+  | { kind: "list"; ordered: boolean; items: string[]; inlineItems: InlineNode[][] }
   | { kind: "code"; language: string; code: string };
 
 function parseBlocks(content: string): Block[] {
@@ -29,13 +29,14 @@ function parseBlocks(content: string): Block[] {
 
   const flushParagraph = () => {
     if (paragraphLines.length) {
-      blocks.push({ kind: "paragraph", text: paragraphLines.join("\n") });
+      const text = paragraphLines.join("\n");
+      blocks.push({ kind: "paragraph", text, inline: parseInline(text) });
       paragraphLines = [];
     }
   };
   const flushList = () => {
     if (listItems.length) {
-      blocks.push({ kind: "list", ordered: listOrdered, items: listItems });
+      blocks.push({ kind: "list", ordered: listOrdered, items: listItems, inlineItems: listItems.map(parseInline) });
       listItems = [];
     }
   };
@@ -64,7 +65,8 @@ function parseBlocks(content: string): Block[] {
     if (heading) {
       flushParagraph();
       flushList();
-      blocks.push({ kind: "heading", level: heading[1].length, text: heading[2].trim() });
+      const text = heading[2].trim();
+      blocks.push({ kind: "heading", level: heading[1].length, text, inline: parseInline(text) });
       i++;
       continue;
     }
@@ -216,7 +218,7 @@ export function Markdown({ content, style }: MarkdownProps) {
                 selectable
                 style={[type.heading, styles.heading, { color: tokens.ink }]}
               >
-                {renderInline(parseInline(block.text), key, tokens)}
+                {renderInline(block.inline, key, tokens)}
               </Text>
             );
           case "code":
@@ -234,7 +236,7 @@ export function Markdown({ content, style }: MarkdownProps) {
                       {block.ordered ? `${itemIdx + 1}.` : "•"}
                     </Text>
                     <Text selectable style={[type.body, styles.listText, { color: tokens.ink }, style]}>
-                      {renderInline(parseInline(item), `${key}-${itemIdx}`, tokens)}
+                      {renderInline(block.inlineItems[itemIdx], `${key}-${itemIdx}`, tokens)}
                     </Text>
                   </View>
                 ))}
@@ -244,7 +246,7 @@ export function Markdown({ content, style }: MarkdownProps) {
           default:
             return (
               <Text key={key} selectable style={[type.body, styles.paragraph, { color: tokens.ink }, style]}>
-                {renderInline(parseInline(block.text), key, tokens)}
+                {renderInline(block.inline, key, tokens)}
               </Text>
             );
         }

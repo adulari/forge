@@ -23,6 +23,7 @@ import { IconButton } from "../../../components/ds/IconButton";
 import { Segmented, type SegmentedOption } from "../../../components/ds/Segmented";
 import { useToast } from "../../../components/ds/ToastHost";
 import { OverlayHost } from "../../../components/overlay/OverlayHost";
+import { usePalette } from "../../../components/overlay/CommandPalette";
 import { SessionHeader } from "../../../components/session/SessionHeader";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
@@ -57,6 +58,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const pathname = usePathname();
   const { isCompact } = useBreakpoint();
   const { snapshot, connectionState, send, setHeaderHeight, baseUrl, focusComposer } = useSessionCtx();
+  const { open: openPalette } = usePalette();
 
   // ARCHITECTURE §4.1.4: on the `busy` true->false edge, invalidate this session's history
   // query so the finalized turn appears from the store. The shell only needs to call the
@@ -206,6 +208,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             worktree={snapshot?.worktree ?? null}
             exposure={snapshot?.exposure ?? "loopback"}
             onBack={() => goBackOr("/(tabs)")}
+            onPalette={openPalette}
           />
         </View>
 
