@@ -1091,8 +1091,10 @@ pub struct Session {
     /// context-overflow error and reset at the start of each turn. Each overflow retry lowers it so
     /// the SENT transcript view trims harder — a non-destructive self-heal (the stored transcript is
     /// untouched) that converges under the model's real window even when our token estimate diverges
-    /// from the model's own tokenizer. `None` = no cap (use the model's full window).
-    overflow_window_cap: Option<u32>,
+    /// from the model's own tokenizer. `None` = no cap (use the model's full window). Keyed to the
+    /// model that armed it, so a mid-turn failover to a DIFFERENT (e.g. larger-window) model ignores
+    /// a cap derived from the overflowing model's window instead of needlessly over-trimming it.
+    overflow_window_cap: Option<(String, u32)>,
     /// Whether white-hot effort's standing orchestration guidance has been injected this session
     /// (docs/features/whitehot-effort.md). One-shot per pin: re-armed by `set_effort` on any
     /// change, so toggling away and back re-injects for the new stretch of the transcript.
@@ -2552,9 +2554,9 @@ impl Session {
         // A context-overflow self-heal (see `overflow_window_cap`) lowers the usable window for the
         // rest of the turn so `transcript_with_preamble` trims the sent view below the model's real
         // limit — needed when our o200k estimate diverges from the model's own tokenizer.
-        match self.overflow_window_cap {
-            Some(cap) => window.min(cap),
-            None => window,
+        match &self.overflow_window_cap {
+            Some((capped_model, cap)) if capped_model == model => window.min(*cap),
+            _ => window,
         }
     }
 
@@ -3832,7 +3834,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         let shrunk = (self.effective_context_window(&active_model) as u64 * 55
                             / 100)
                             .max(1) as u32;
-                        self.overflow_window_cap = Some(shrunk);
+                        self.overflow_window_cap = Some((active_model.clone(), shrunk));
                         self.presenter.emit(PresenterEvent::Warning(format!(
                             "{active_model}: input exceeded the context window — trimming context and retrying"
                         )));
@@ -10661,10 +10663,13 @@ mod tests {
         let base = forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW;
         assert_eq!(session.effective_context_window(model), base);
         // A cap below the window shrinks the usable window (the retry path).
-        session.overflow_window_cap = Some(base / 4);
+        session.overflow_window_cap = Some((model.to_string(), base / 4));
         assert_eq!(session.effective_context_window(model), base / 4);
         // A cap above the window never inflates it.
-        session.overflow_window_cap = Some(base.saturating_mul(10));
+        session.overflow_window_cap = Some((model.to_string(), base.saturating_mul(10)));
+        assert_eq!(session.effective_context_window(model), base);
+        // A cap armed for a DIFFERENT model is ignored (failover to a larger-window model).
+        session.overflow_window_cap = Some(("some::other-model".to_string(), base / 8));
         assert_eq!(session.effective_context_window(model), base);
     }
 

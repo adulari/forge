@@ -137,8 +137,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   // letter keys with Alt are used instead); ⌘E focuses the composer; ⌘. interrupts a busy
   // turn. All use the existing `useHotkey` registry (T4.2/T5.1) — no new listener.
   const interrupt = useCallback(() => {
-    if (snapshot?.busy) send({ kind: "interrupt" });
-  }, [snapshot?.busy, send]);
+    // Mirror the Composer Stop button: don't silently drop a Stop sent while the socket is down.
+    if (snapshot?.busy && !send({ kind: "interrupt" })) {
+      toast.show("not sent — reconnect and try again", { tone: "danger" });
+    }
+  }, [snapshot?.busy, send, toast]);
   useHotkey("c", () => onSegmentChange("chat"), { alt: true });
   useHotkey("t", () => onSegmentChange("tasks"), { alt: true });
   useHotkey("a", () => onSegmentChange("agents"), { alt: true });

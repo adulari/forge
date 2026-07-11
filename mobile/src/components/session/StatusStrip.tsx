@@ -19,7 +19,7 @@ export interface StatusStripProps {
   model: string;
   temper: string;
   effort?: string | null;
-  send: (input: RemoteInput) => void;
+  send: (input: RemoteInput) => boolean;
   costUsd: number;
   contextTokens: number;
   contextLimit: number | null;

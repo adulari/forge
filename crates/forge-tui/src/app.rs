@@ -1407,7 +1407,11 @@ fn sanitize_terminal_text(text: &str) -> String {
 }
 
 fn sanitize_paste(text: &str) -> String {
-    text.chars()
+    // Collapse CRLF to a single LF FIRST: mapping '\r' and '\n' independently would turn a
+    // Windows-origin "\r\n" into "\n\n", inserting a blank line between every pasted line. Then
+    // map any lone CR to LF and drop other control chars.
+    text.replace("\r\n", "\n")
+        .chars()
         .filter_map(|c| match c {
             '\r' => Some('\n'),
             '\n' | '\t' => Some(c),
@@ -6058,6 +6062,16 @@ mod tests {
         let (resolved, _) = app.resolve_paste_blocks(placeholder);
         assert_eq!(resolved, "safe[31m\nnext");
         assert!(app.input.is_char_boundary(app.input_cursor));
+    }
+
+    #[test]
+    fn paste_collapses_crlf_instead_of_doubling_newlines() {
+        // A Windows-origin "\r\n" must become a single "\n", not "\n\n" (a spurious blank line).
+        let mut app = App::default();
+        app.handle_paste("foo\r\nbar".into());
+        assert_eq!(app.input, "[pasted text (2 lines)]");
+        let (resolved, _) = app.resolve_paste_blocks(app.input.clone());
+        assert_eq!(resolved, "foo\nbar");
     }
 
     #[test]
