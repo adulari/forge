@@ -1398,6 +1398,23 @@ fn next_word_end(s: &str, mut pos: usize) -> usize {
     pos
 }
 
+fn sanitize_terminal_text(text: &str) -> String {
+    text.chars()
+        .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
+        .collect()
+}
+
+fn sanitize_paste(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| match c {
+            '\r' => Some('\n'),
+            '\n' | '\t' => Some(c),
+            c if c.is_control() => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
 /// Apply one keystroke to the input buffer (pure; no terminal I/O). `cursor` is the byte
 /// offset of the text cursor within `input`; updated in place, always kept on a char boundary.
 pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> InputOutcome {
@@ -1538,6 +1555,7 @@ impl App {
             }
             // A complete (non-streamed) assistant message: render markdown into scrollback.
             PresenterEvent::AssistantText(text) => {
+                let text = sanitize_terminal_text(&text);
                 self.model_search = None;
                 self.flush.push(header_line("⚒ forge", ORANGE));
                 self.flush.extend(crate::render::markdown_to_lines(&text));
@@ -1545,9 +1563,10 @@ impl App {
             }
             PresenterEvent::Reasoning(delta) => {
                 self.model_search = None;
-                self.reasoning.push_str(&delta)
+                self.reasoning.push_str(&sanitize_terminal_text(&delta))
             }
             PresenterEvent::AssistantDelta(delta) => {
+                let delta = sanitize_terminal_text(&delta);
                 self.model_search = None;
                 if !self.streaming_active {
                     self.flush_reasoning();
@@ -2350,6 +2369,7 @@ impl App {
     /// line and won't accidentally auto-submit when the pasted text contains newlines.
     pub fn handle_paste(&mut self, content: String) {
         self.sanitize_cursor();
+        let content = sanitize_paste(&content);
         if !content.contains('\n') {
             // Single-line: insert directly as if the user typed it.
             self.input.insert_str(self.input_cursor, &content);
@@ -3187,6 +3207,7 @@ pub enum ReplayItem {
 }
 
 fn warning_line(msg: &str) -> TextLine<'static> {
+    let msg = sanitize_terminal_text(msg);
     TextLine::from(Span::styled(
         format!("  ⚠ {msg}"),
         Style::default().fg(WARNYEL),
@@ -3194,6 +3215,7 @@ fn warning_line(msg: &str) -> TextLine<'static> {
 }
 
 fn error_line(msg: &str) -> TextLine<'static> {
+    let msg = sanitize_terminal_text(msg);
     TextLine::from(Span::styled(
         format!("  ✖ {msg}"),
         Style::default().fg(ERRRED).bold(),
@@ -4257,7 +4279,10 @@ pub fn input_box_height(input: &str, box_width: u16) -> u16 {
 /// boundary), or `None` when the cursor is on the first row — in which case the caller recalls
 /// prompt history instead of clobbering a multiline draft.
 pub fn input_cursor_up(input: &str, cursor: usize) -> Option<usize> {
-    let cursor = cursor.min(input.len());
+    let mut cursor = cursor.min(input.len());
+    while !input.is_char_boundary(cursor) {
+        cursor = cursor.saturating_sub(1);
+    }
     if cursor == 0 || !input[..cursor].contains('\n') {
         return None;
     }
@@ -4293,7 +4318,10 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     // Build one ratatui Line per explicit input line so pasted newlines render as separate rows;
     // long lines are then soft-wrapped by `Wrap`. Slash-command highlighting + block cursor apply
     // to the line that contains the cursor; later lines render plain.
-    let cursor = app.input_cursor.min(app.input.len());
+    let mut cursor = app.input_cursor.min(app.input.len());
+    while !app.input.is_char_boundary(cursor) {
+        cursor = cursor.saturating_sub(1);
+    }
     // Cursor appearance: a solid orange block when focused, suppressed on the blink "off" frame,
     // and a dim hollow (underline) when the terminal window has lost focus.
     let cursor_style = if app.unfocused {
@@ -5831,6 +5859,16 @@ mod tests {
     }
 
     #[test]
+    fn stale_multibyte_cursor_does_not_panic_during_render() {
+        let app = App {
+            input: "é你".into(),
+            input_cursor: 1,
+            ..Default::default()
+        };
+        let _ = screen_wh(&app, 20, 5);
+    }
+
+    #[test]
     fn input_cursor_up_recalls_on_first_row_moves_otherwise() {
         // Single-line / first-row cursor → None (caller recalls history).
         assert_eq!(input_cursor_up("hello", 3), None);
@@ -5841,6 +5879,8 @@ mod tests {
         // Column clamped when the previous line is shorter.
         // "ab\nlongline|" cursor at end (col 8) → clamp to line-1 len (2) = byte 2.
         assert_eq!(input_cursor_up("ab\nlongline", 11), Some(2));
+        // A stale cursor inside a multibyte scalar is sanitized before slicing.
+        assert_eq!(input_cursor_up("é\n你", 4), Some(0));
     }
 
     #[test]
@@ -6005,6 +6045,34 @@ mod tests {
         app.submit_user("next");
         let again = flush_text(&mut app);
         assert!(!again.contains("🖼"));
+    }
+
+    #[test]
+    fn paste_strips_terminal_controls_and_normalizes_carriage_returns() {
+        let mut app = App::default();
+        app.handle_paste("safe\x1b[31m\rnext\x07".into());
+        assert_eq!(app.input, "[pasted text (2 lines)]");
+        let placeholder = app.input.clone();
+        let (resolved, _) = app.resolve_paste_blocks(placeholder);
+        assert_eq!(resolved, "safe[31m\nnext");
+        assert!(app.input.is_char_boundary(app.input_cursor));
+    }
+
+    #[test]
+    fn streamed_text_cannot_inject_terminal_controls() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::AssistantDelta(
+            "hello\x1b[2J\x07world".into(),
+        ));
+        assert_eq!(app.streaming, "hello[2Jworld");
+        app.apply(PresenterEvent::Warning("warn\x1b[31m".into()));
+        let rendered: String = app
+            .drain_flush()
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(!rendered.contains('\x1b'));
     }
 
     #[test]
