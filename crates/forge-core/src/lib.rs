@@ -2680,6 +2680,15 @@ Rules:\n\
             .unwrap_or_else(|| "anthropic::claude-opus-4-8".to_string())
     }
 
+    fn auxiliary_model(&self, routed: &forge_mesh::RoutingDecision) -> String {
+        if routed.pinned {
+            self.first_usable_for_tier(TaskTier::Trivial)
+                .unwrap_or_else(|| routed.model.clone())
+        } else {
+            routed.model.clone()
+        }
+    }
+
     /// Run the PLAN phase of the architect pipeline.
     ///
     /// Calls the planner model with the current transcript and NO tools advertised, streams its
@@ -2727,6 +2736,7 @@ Rules:\n\
             temperature: Some(CODING_TEMPERATURE),
             // The planner runs with no tools (it can't edit files), so it needs no checkpoint context.
             checkpoint: None,
+            prompt_cache_key: None,
             response_format: None,
         };
 
@@ -3011,7 +3021,7 @@ Rules:\n\
         // model here would otherwise abort an otherwise-recoverable turn.
         let failover = self.config.mesh.failover;
         let mut chain = decision.fallbacks.clone().into_iter();
-        let mut model = decision.model.clone();
+        let mut model = self.auxiliary_model(&decision);
         let resp = loop {
             let mut sink = |_: StreamEvent| {};
             match self
@@ -3234,6 +3244,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 &self.project,
             )
             .await;
+        let model = self.auxiliary_model(&decision);
         let user_snippet: String = prompt.chars().take(400).collect();
         let assistant_snippet: String = final_text.chars().take(800).collect();
         let messages = vec![
@@ -3250,7 +3261,6 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         let provider = self.provider.clone();
         let store = self.store.clone();
         let id = self.id.clone();
-        let model = decision.model.clone();
         match self.presenter.recap_sink() {
             Some(mut sink) => {
                 tokio::spawn(async move {
@@ -3325,6 +3335,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 &self.project,
             )
             .await;
+        let model = self.auxiliary_model(&decision);
         let messages = [
             Message::system(SHELL_DIAGNOSE_SYSTEM),
             Message::user(format!("Command:\n{command}\n\nResult:\n{result}")),
@@ -3332,7 +3343,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         let mut sink = |_: StreamEvent| {};
         if let Ok(r) = self
             .provider
-            .complete(&decision.model, &messages, &[], &mut sink)
+            .complete(&model, &messages, &[], &mut sink)
             .await
         {
             let _ = self
@@ -3761,6 +3772,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         effort: self.pinned_effort,
                         temperature: Some(CODING_TEMPERATURE),
                         checkpoint: Some(checkpoint_ctx.clone()),
+                        prompt_cache_key: Some(checkpoint_ctx.session.clone()),
                         response_format: None,
                     };
                     let fut = provider.complete_with(
@@ -9179,6 +9191,39 @@ mod tests {
             warnings.iter().any(|w| w.contains("kept failing") && w.contains("after a nudge")),
             "the failure-loop guard should halt a model failing the same way; warnings: {warnings:?}"
         );
+    }
+
+    #[test]
+    fn auxiliary_calls_escape_explicit_subscription_pin() {
+        let mut config = Config::default();
+        config.mesh.models.insert(
+            TaskTier::Trivial.as_str().to_string(),
+            forge_config::OneOrMany::Many(vec!["ollama::qwen3:4b".into()]),
+        );
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let session = Session::start(
+            store,
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools(),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            ".",
+        )
+        .unwrap();
+        let pinned = forge_mesh::RoutingDecision {
+            tier: TaskTier::Trivial,
+            model: "codex-oauth::gpt-5.6-sol".into(),
+            rationale: "explicit pin".into(),
+            fallbacks: vec![],
+            pinned: true,
+        };
+        let routed = forge_mesh::RoutingDecision {
+            pinned: false,
+            ..pinned.clone()
+        };
+        assert_eq!(session.auxiliary_model(&pinned), "ollama::qwen3:4b");
+        assert_eq!(session.auxiliary_model(&routed), "codex-oauth::gpt-5.6-sol");
     }
 
     #[test]
