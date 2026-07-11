@@ -38,11 +38,11 @@ function FloorTileBase({ row, active }: FloorTileProps) {
 
   return <>
     <Pressable onPress={open} onLongPress={() => setActionsVisible(true)} style={[styles.tile, { backgroundColor: waiting ? tokens.selection : tokens.bg2, borderColor: tokens.border }]} accessibilityRole="button" accessibilityLabel={`Open ${title}`}>
-      <HeatEdge state={waiting ? "waiting" : busy ? "busy" : false} />
+      <HeatEdge active={waiting || busy} />
       <View style={styles.header}><StatusDot state={state} /><Text style={[typeScale.bodyBold, styles.title, { color: tokens.ink }]} numberOfLines={1}>{title}</Text><Text style={[typeScale.meta, { color: connectionState === "unreachable" ? tokens.danger : tokens.ink3 }]}>{connectionLabel(connectionState)}</Text><IconButton icon={<Ellipsis size={18} strokeWidth={1.75} color={tokens.ink3} />} onPress={() => setActionsVisible(true)} accessibilityLabel={`Actions for ${title}`} /></View>
       <Text style={[typeScale.sub, { color: tokens.ink2 }]} numberOfLines={3}>{tail}</Text>
       {taskCount > 0 ? <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{tasksDone}/{taskCount} tasks</Text> : null}
-      {snapshot?.context_limit != null ? <ContextGauge used={snapshot.context_tokens} total={snapshot.context_limit} compact /> : null}
+      {snapshot?.context_limit != null ? <ContextGauge used={snapshot.context_tokens} total={snapshot.context_limit} /> : null}
       <View style={styles.metrics}><CostMetric valueUsd={snapshot?.cost_usd ?? row.cost_usd} />{snapshot?.queued.length ? <Text style={[typeScale.meta, { color: tokens.warn }]}>{snapshot.queued.length} queued</Text> : null}</View>
       {snapshot?.subagents.length ? <View style={styles.subagents}>{snapshot.subagents.slice(0, 3).map((agent) => <Text key={agent.agent} style={[typeScale.meta, styles.subagent, { color: tokens.ink3 }]} numberOfLines={1}>{agent.agent} · {agent.model ?? "—"} · {agent.last}</Text>)}</View> : null}
       {snapshot?.permission_prompt != null ? <PermissionCard prompt={snapshot.permission_prompt} diff={snapshot.diff} promptSeq={snapshot.prompt_seq} send={send} /> : null}
