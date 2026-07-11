@@ -37,6 +37,7 @@ pub mod app;
 mod commands;
 pub mod config_editor;
 mod driver;
+mod help;
 pub mod init_wizard;
 mod keybind_configurator;
 pub mod keybinds;
@@ -59,6 +60,7 @@ pub use commands::{
 };
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
 pub use driver::{ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg};
+pub use help::run_help;
 pub use init_wizard::{BridgeItem, ProviderItem, WizardInput, WizardOutcome};
 pub use keybind_configurator::run_keybind_configurator;
 /// A styled scrollback line, re-exported so binaries can route out-of-band output to the right

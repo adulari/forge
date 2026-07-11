@@ -34,7 +34,12 @@ pub(crate) fn open_resume_choice_picker(app: &mut forge_tui::App) {
 
 pub(crate) fn open_sessions_picker(app: &mut forge_tui::App, query: &str) -> Result<()> {
     let store = open_store()?;
-    let list = store.list_sessions().context("listing sessions")?;
+    let list = if app.show_archived {
+        store.list_sessions_for_resume()
+    } else {
+        store.list_sessions()
+    }
+    .context("listing sessions")?;
     if list.is_empty() {
         app.note("no past sessions yet");
         return Ok(());
@@ -46,12 +51,18 @@ pub(crate) fn open_sessions_picker(app: &mut forge_tui::App, query: &str) -> Res
         .map(|s| {
             let is_active = active_ids.contains(&s.id);
             let id8: String = s.id.chars().take(8).collect();
-            // Title = a clean one-line snippet of the first user prompt (newlines/extra spaces
-            // collapsed), so each row reads as a recognizable conversation rather than a hash.
-            let mut title = session_title(s.preview.as_deref());
+            // A saved title takes precedence over the first-prompt fallback.
+            let mut title = s
+                .title
+                .clone()
+                .unwrap_or_else(|| session_title(s.preview.as_deref()));
+            if s.archived {
+                title = format!("▣ {title}");
+            }
             if is_active {
                 title = format!("⚡ {}", title);
             }
+            let archived = if s.archived { " · [ARCHIVED]" } else { "" };
             let subtitle = if is_active {
                 format!(
                     "[LIVE] {id8} · {} · {} msgs · ${:.4}",
@@ -61,7 +72,7 @@ pub(crate) fn open_sessions_picker(app: &mut forge_tui::App, query: &str) -> Res
                 )
             } else {
                 format!(
-                    "{id8} · {} · {} msgs · ${:.4}",
+                    "{id8} · {} · {} msgs · ${:.4}{archived}",
                     fmt_age(s.last_activity),
                     s.message_count,
                     s.total_cost_usd,
@@ -79,8 +90,15 @@ pub(crate) fn open_sessions_picker(app: &mut forge_tui::App, query: &str) -> Res
             }
         })
         .collect();
-    app.picker
-        .open_with(forge_tui::PickerKind::Sessions, "resume a session", rows);
+    app.picker.open_with(
+        forge_tui::PickerKind::Sessions,
+        if app.show_archived {
+            "resume a session · Tab active · Del archive/unarchive"
+        } else {
+            "resume a session · Tab archived · Del archive"
+        },
+        rows,
+    );
     app.picker.query = query.to_string();
     app.picker.clamp();
     Ok(())
@@ -428,6 +446,11 @@ pub(crate) async fn picker_accept(
 ) -> Result<()> {
     match kind {
         forge_tui::PickerKind::Sessions => {
+            if app.show_archived {
+                open_store()?
+                    .unarchive_session(&row.id)
+                    .context("unarchiving resumed session")?;
+            }
             let (items, compacted, view) = {
                 let mut s = session.lock().await;
                 s.reset_resumed(&row.id)
