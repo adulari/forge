@@ -26,13 +26,15 @@ export default function FloorScreen() {
   const burning = sessions.filter((row) => row.waiting || row.busy);
   const cooled = sessions.filter((row) => !row.waiting && !row.busy);
   const items = useMemo<FloorItem[]>(() => [
-    ...burning.map((row, index) => ({ kind: "tile" as const, row, active: visibleIds.has(row.id) && index < SOCKET_CAP })),
+    ...burning.map((row) => ({ kind: "tile" as const, row, active: visibleIds.has(row.id) })),
     ...cooled.map((row, index) => ({ kind: "row" as const, row, index })),
   ], [burning, cooled, visibleIds]);
   const columns = width >= 1024 ? 3 : width >= 768 ? 2 : 1;
   const renderItem = useCallback(({ item }: { item: FloorItem }) => item.kind === "tile" ? <View style={[styles.tileWrap, { width: `${100 / columns}%` }]}><FloorTile row={item.row} active={item.active} /></View> : <SessionCard row={item.row} index={item.index} />, [columns]);
   const keyExtractor = useCallback((item: FloorItem) => item.row.id, []);
-  const onViewableItemsChanged = useCallback(({ viewableItems }: { viewableItems: Array<{ item: FloorItem }> }) => setVisibleIds(new Set(viewableItems.filter(({ item }) => item.kind === "tile").map(({ item }) => item.row.id))), []);
+  const onViewableItemsChanged = useCallback(({ viewableItems }: { viewableItems: Array<{ item: FloorItem }> }) => {
+    setVisibleIds(new Set(viewableItems.filter(({ item }) => item.kind === "tile").slice(0, SOCKET_CAP).map(({ item }) => item.row.id)));
+  }, []);
 
   return <Screen scroll={false}>
     <View style={styles.header}><Flame size={20} strokeWidth={1.75} color={tokens.accent} /><Text style={[typeScale.title, { color: tokens.ink }]}>The Floor</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{burning.length} burning</Text></View>
