@@ -733,6 +733,13 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   streamingRow: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
   thinkingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  connectingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: space.space8,
+    paddingVertical: space.space24,
+  },
   activityRow: {
     flexDirection: "row",
     alignItems: "center",
