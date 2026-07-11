@@ -478,7 +478,10 @@ pub struct App {
     /// Active text selection in transcript coords: (wrapped_row, col) anchor + cursor. `None` when
     /// nothing is selected. Highlighted in the transcript and copied to the clipboard on release.
     selection: Option<(TextPos, TextPos)>,
-    /// Memoized markdown render of the in-flight streaming reply, keyed on `(len, width)`. The live
+    /// Monotonic revision of the in-flight assistant reply. Unlike a byte length, this also
+    /// invalidates the preview when text is replaced at an equal length.
+    streaming_rev: u64,
+    /// Memoized markdown render of the in-flight streaming reply. keyed on `(len, width)`. The live
     /// preview renders the partial reply as markdown (so it matches the finalized block instead of a
     /// raw unwrapped blob); re-parsing every frame would be O(reply) lag, so it's only rebuilt when
     /// new tokens arrive or the width changes.
@@ -514,12 +517,14 @@ struct WrapCache {
     rows: Vec<TextLine<'static>>,
 }
 
-/// Cached markdown render of the streaming reply edge. Valid while `(len, width)` are unchanged;
-/// `len` is the byte length of [`App::streaming`], which only grows as tokens arrive.
+/// Cached markdown render of the streaming reply edge. The rendered revision trails the source
+/// revision until enough bytes arrive or the short refresh interval elapses.
 #[derive(Debug, Clone, Default)]
 struct StreamCache {
+    rev: u64,
     len: usize,
     width: u16,
+    rendered_at: Option<std::time::Instant>,
     rows: Vec<TextLine<'static>>,
 }
 
@@ -1181,6 +1186,8 @@ pub struct TranscriptView {
     pub model: Option<String>,
     pub status: ActivityStatus,
     pub cost: f64,
+    /// Monotonic source-content revision used to memoize standalone viewer wrapping.
+    pub revision: u64,
     /// The full transcript, pre-styled and ready to wrap+render in the viewer.
     pub lines: Vec<TextLine<'static>>,
     /// Plain-text count of source entries (for the panel's "N lines" hint).
@@ -1583,10 +1590,12 @@ impl App {
                 // multi-line blocks (lists, code fences) stay whole. The growing tail shows
                 // live (plain) in the preview. (Per-block streaming finalize is a follow-up.)
                 self.streaming.push_str(&delta);
+                self.streaming_rev = self.streaming_rev.wrapping_add(1);
             }
             PresenterEvent::AssistantDone => {
                 if self.streaming_active {
                     let rest = std::mem::take(&mut self.streaming);
+                    self.streaming_rev = self.streaming_rev.wrapping_add(1);
                     if !rest.is_empty() {
                         self.flush.extend(crate::render::markdown_to_lines(&rest));
                     }
@@ -2165,6 +2174,7 @@ impl App {
                 ActivityStatus::Done
             },
             cost: self.cost_usd,
+            revision: self.main_log_rev,
             lines: main_lines,
             line_count: main_count,
         });
@@ -2201,6 +2211,7 @@ impl App {
                     ActivityStatus::Running
                 },
                 cost: r.cost,
+                revision: r.log.len() as u64,
                 lines,
                 line_count: r.log.len(),
             });
@@ -2235,6 +2246,7 @@ impl App {
                 model: c.model.clone(),
                 status,
                 cost: c.cost_usd,
+                revision: c.output.len() as u64,
                 lines,
                 line_count,
             });
@@ -2833,37 +2845,71 @@ impl App {
         }
     }
 
-    /// Rebuild the memoized markdown render of the in-flight reply if the content or width changed.
-    /// Rendering the partial reply as markdown (rather than dumping `self.streaming` as one raw,
-    /// unwrapped span) makes the live preview match the finalized block; memoizing on `(len, width)`
-    /// keeps it from re-parsing O(reply) every frame.
+    /// Rebuild the memoized markdown render of the in-flight reply at a bounded cadence. The
+    /// source revision catches same-length changes; a short interval/byte threshold avoids
+    /// re-parsing the entire growing reply for every token delta.
     fn ensure_stream_cache(&self, width: u16) {
+        const STREAM_REPARSE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
+        const STREAM_REPARSE_BYTES: usize = 256;
+
         let mut c = self.stream_cache.borrow_mut();
-        if c.len != self.streaming.len() || c.width != width {
+        let changed = c.rev != self.streaming_rev;
+        let due = c
+            .rendered_at
+            .is_none_or(|at| at.elapsed() >= STREAM_REPARSE_INTERVAL)
+            || self.streaming.len().saturating_sub(c.len) >= STREAM_REPARSE_BYTES;
+        if c.width != width || (changed && due) {
             let lines = if self.streaming.is_empty() {
                 Vec::new()
             } else {
                 crate::render::markdown_to_lines(&self.streaming)
             };
             c.rows = crate::transcript::wrap_lines(&lines, width.saturating_sub(1) as usize);
+            c.rev = self.streaming_rev;
             c.len = self.streaming.len();
             c.width = width;
+            c.rendered_at = Some(std::time::Instant::now());
         }
     }
 
-    /// The in-flight reply edge, markdown-rendered and wrapped to `width` (empty when not streaming),
-    /// with the orange cursor block appended to the last row. The markdown parse is memoized; only
-    /// the cheap cursor append + clone happens per frame.
-    fn streaming_edge(&self, width: u16) -> Vec<TextLine<'static>> {
+    /// The in-flight reply edge, markdown-rendered and wrapped to `width`, with the orange cursor
+    /// block appended to the final visible row. Only the requested window is cloned.
+    fn streaming_tail_rows(&self, width: u16, cached_len: usize) -> Vec<TextLine<'static>> {
+        let tail = &self.streaming[cached_len.min(self.streaming.len())..];
+        if tail.is_empty() {
+            Vec::new()
+        } else {
+            crate::transcript::wrap_lines(
+                &[TextLine::raw(tail.to_string())],
+                width.saturating_sub(1) as usize,
+            )
+        }
+    }
+
+    fn streaming_edge(&self, width: u16, start: usize, len: usize) -> Vec<TextLine<'static>> {
         if !self.streaming_active {
             return Vec::new();
         }
         self.ensure_stream_cache(width);
-        let mut rows = self.stream_cache.borrow().rows.clone();
-        let cursor = Span::styled("▌", Style::default().fg(ACCENT));
-        match rows.last_mut() {
-            Some(l) => l.spans.push(cursor),
-            None => rows.push(TextLine::from(cursor)),
+        let cache = self.stream_cache.borrow();
+        let tail = self.streaming_tail_rows(width, cache.len);
+        let total = (cache.rows.len() + tail.len()).max(1);
+        let end = start.saturating_add(len).min(total);
+        let cached_end = end.min(cache.rows.len());
+        let mut rows: Vec<_> = cache.rows[start.min(cache.rows.len())..cached_end].to_vec();
+        if end > cache.rows.len() {
+            rows.extend(
+                tail.into_iter()
+                    .skip(start.saturating_sub(cache.rows.len()))
+                    .take(end - cache.rows.len()),
+            );
+        }
+        if end == total {
+            let cursor = Span::styled("▌", Style::default().fg(ACCENT));
+            match rows.last_mut() {
+                Some(line) => line.spans.push(cursor),
+                None => rows.push(TextLine::from(cursor)),
+            }
         }
         rows
     }
@@ -2874,7 +2920,8 @@ impl App {
             return 0;
         }
         self.ensure_stream_cache(width);
-        self.stream_cache.borrow().rows.len().max(1)
+        let cache = self.stream_cache.borrow();
+        (cache.rows.len() + self.streaming_tail_rows(width, cache.len).len()).max(1)
     }
 
     /// Total wrapped rows of the full-screen transcript (memoized log + the streaming edge).
@@ -3933,8 +3980,9 @@ fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
     // Memoized: only re-wraps the bulk log when it changed; the streaming edge is the cheap part.
     app.ensure_wrapped_main(area.width);
     let cache = app.wrap_cache.borrow();
-    let edge = app.streaming_edge(area.width);
-    let total = cache.rows.len() + edge.len();
+    let committed = cache.rows.len();
+    let edge_len = app.streaming_edge_len(area.width);
+    let total = committed + edge_len;
     let max_scroll = total.saturating_sub(body_h);
     let scroll = if app.transcript_follow {
         max_scroll
@@ -3943,14 +3991,15 @@ fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
     };
     // Clone only the visible window (~body_h rows), not the whole transcript, each frame.
     let mut lines: Vec<TextLine> = Vec::with_capacity(body_h.min(total.saturating_sub(scroll)));
-    for i in scroll..(scroll + body_h).min(total) {
-        if i < cache.rows.len() {
-            lines.push(cache.rows[i].clone());
-        } else {
-            lines.push(edge[i - cache.rows.len()].clone());
-        }
+    for i in scroll..(scroll + body_h).min(committed) {
+        lines.push(cache.rows[i].clone());
     }
     drop(cache);
+    lines.extend(app.streaming_edge(
+        area.width,
+        scroll.saturating_sub(committed),
+        body_h.saturating_sub(lines.len()),
+    ));
     frame.render_widget(Paragraph::new(lines), area);
 
     // Record geometry so mouse events can map a cell → a wrapped-row/col in the log.
@@ -4005,10 +4054,10 @@ fn render_preview(frame: &mut Frame, area: Rect, app: &App) {
     if app.streaming_active {
         // Reuse the full-screen streaming edge so the inline reply reflows + markdown-highlights
         // exactly like the transcript, instead of a raw newline-collapsed blob.
-        let rows = app.streaming_edge(area.width);
         let body_h = area.height as usize;
-        let start = rows.len().saturating_sub(body_h);
-        let visible: Vec<TextLine> = rows.into_iter().skip(start).collect();
+        let edge_len = app.streaming_edge_len(area.width);
+        let start = edge_len.saturating_sub(body_h);
+        let visible = app.streaming_edge(area.width, start, body_h);
         frame.render_widget(Paragraph::new(visible), area);
     }
 }
@@ -4276,6 +4325,25 @@ fn input_text_rows(input: &str, box_width: u16) -> u16 {
     rows.max(1) as u16
 }
 
+fn input_cursor_row(input: &str, cursor: usize, box_width: u16) -> u16 {
+    let inner = input_inner_width(box_width);
+    let mut row = 0usize;
+    let mut offset = 0usize;
+    for (index, line) in input.split('\n').enumerate() {
+        let end = offset + line.len();
+        let cursor_in_line = cursor.clamp(offset, end) - offset;
+        if cursor <= end {
+            let cols = unicode_width::UnicodeWidthStr::width(&line[..cursor_in_line])
+                + if index == 0 { 2 } else { 0 };
+            return (row + cols / inner) as u16;
+        }
+        let cols = unicode_width::UnicodeWidthStr::width(line) + if index == 0 { 2 } else { 0 };
+        row += cols.saturating_sub(1) / inner + 1;
+        offset = end + 1;
+    }
+    row as u16
+}
+
 /// Dynamic input-box height: grows from [`INPUT_H`] to [`INPUT_MAX_H`] with the wrapped content.
 pub fn input_box_height(input: &str, box_width: u16) -> u16 {
     (input_text_rows(input, box_width) + 2).clamp(INPUT_H, INPUT_MAX_H)
@@ -4374,10 +4442,15 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
-    // Scroll so the cursor row (bottom) stays visible once content exceeds the visible rows.
-    let visible_rows = area.height.saturating_sub(2).max(1);
+    let inner = block.inner(area);
+    let visible_rows = inner.height.max(1);
     let total_rows = input_text_rows(&app.input, area.width);
-    let scroll = total_rows.saturating_sub(visible_rows);
+    let cursor_row = input_cursor_row(&app.input, cursor, area.width);
+    let max_scroll = total_rows.saturating_sub(visible_rows);
+    let scroll = cursor_row
+        .saturating_add(1)
+        .saturating_sub(visible_rows)
+        .min(max_scroll);
     frame.render_widget(
         Paragraph::new(ratatui::text::Text::from(text_lines))
             .block(block)
@@ -7655,7 +7728,7 @@ mod tests {
             streaming: "# Heading\n\n- first point\n- second point\n\nA closing paragraph.".into(),
             ..Default::default()
         };
-        let rows = app.streaming_edge(80);
+        let rows = app.streaming_edge(80, 0, usize::MAX);
         let text: Vec<String> = rows
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
