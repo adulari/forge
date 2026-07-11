@@ -38,6 +38,7 @@ import {
   type PushSubscriptionState,
 } from "../../lib/push";
 import { ApiError } from "../../lib/api";
+import { useServerFleets } from "../../lib/queries";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
@@ -89,6 +90,7 @@ export default function SettingsScreen() {
   const { preference, setScheme } = useTheme();
   const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer, testConnection } = useAuth();
 
+  const serverQueries = useServerFleets(servers);
   const [appLock, setAppLock] = useState(false);
   const [appLockLoaded, setAppLockLoaded] = useState(false);
   const [pendingRemove, setPendingRemove] = useState<StoredServer | null>(null);
@@ -219,15 +221,17 @@ export default function SettingsScreen() {
       <View>
         <SectionHeader>Servers</SectionHeader>
         <Card padded={false}>
-          {servers.map((server) => (
+          {servers.map((server, index) => {
+            const fleet = serverQueries[index];
+            const rows = fleet.data ?? [];
+            const reachable = fleet.isSuccess;
+            const status = fleet.isLoading ? "checking" : reachable ? "online" : "offline";
+            return (
             <ListRow
               key={server.id}
               title={server.name}
-              subtitle={maskToken(server.token)}
+              subtitle={`${maskToken(server.token)} · ${status} · ${rows.filter((row) => row.waiting).length} waiting`}
               onPress={() => setActive(server.id)}
-              leading={
-                server.id === activeServerId ? <Badge label="active" tone="accent" /> : undefined
-              }
               trailing={
                 <IconButton
                   icon={<Trash2 size={20} strokeWidth={1.75} color={tokens.ink3} />}
@@ -236,8 +240,15 @@ export default function SettingsScreen() {
                 />
               }
               hasInteractiveTrailing
+              leading={
+                <View style={styles.serverLeading}>
+                  <View style={[styles.reachabilityDot, { backgroundColor: fleet.isLoading ? tokens.warn : reachable ? tokens.success : tokens.danger }]} />
+                  {server.id === activeServerId ? <Badge label="active" tone="accent" /> : null}
+                </View>
+              }
             />
-          ))}
+            );
+          })}
           <ListRow
             title="Add server"
             leading={<Plus size={20} strokeWidth={1.75} color={tokens.accent} />}
@@ -367,6 +378,8 @@ export default function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
+  serverLeading: { flexDirection: "row", alignItems: "center", gap: space.space4 },
+  reachabilityDot: { width: 8, height: 8, borderRadius: 4 },
   content: { paddingTop: space.space16, paddingBottom: space.space32, gap: space.space20 },
   pageTitle: { paddingHorizontal: space.space4 },
   appearanceCard: { gap: space.space8 },
