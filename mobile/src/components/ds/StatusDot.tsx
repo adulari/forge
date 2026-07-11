@@ -16,29 +16,30 @@ const GLOW_SIZE = 12;
 
 export interface StatusDotProps {
   state: StatusDotState;
+  size?: number;
   accessibilityLabel?: string;
 }
 
-export function StatusDot({ state, accessibilityLabel }: StatusDotProps) {
+export function StatusDot({ state, size = DOT_SIZE, accessibilityLabel }: StatusDotProps) {
   const tokens = useTokens();
   const { dotStyle, ringStyle } = useEmberdot(state);
   const color = statusDotColor(state, tokens);
 
   return (
     <View
-      style={styles.wrap}
+      style={[styles.wrap, { width: size, height: size }]}
       accessibilityRole="image"
       accessibilityLabel={accessibilityLabel ?? `status: ${state}`}
     >
       {state === "waiting" ? (
         <Animated.View
-          style={[styles.ring, { borderColor: tokens.danger, pointerEvents: "none" }, ringStyle]}
+          style={[styles.ring, { width: size, height: size, borderRadius: size / 2, borderColor: tokens.danger, pointerEvents: "none" }, ringStyle]}
         />
       ) : null}
       {state === "busy" ? (
-        <View style={[styles.glow, { backgroundColor: tokens.dotGlow, pointerEvents: "none" }]} />
+        <View style={[styles.glow, { width: size + 4, height: size + 4, borderRadius: (size + 4) / 2, top: -2, left: -2, backgroundColor: tokens.dotGlow, pointerEvents: "none" }]} />
       ) : null}
-      <Animated.View style={[styles.dot, { backgroundColor: color }, dotStyle]} />
+      <Animated.View style={[styles.dot, { width: size, height: size, borderRadius: size / 2, backgroundColor: color }, dotStyle]} />
     </View>
   );
 }

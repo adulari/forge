@@ -122,7 +122,7 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
 
   return (
     <Animated.View style={styles.wrap} exiting={reduced ? undefined : FadeOut.duration(durations.gentle)}>
-      <HeatEdge active />
+      <HeatEdge state="waiting" />
       <Card variant="feature" style={[styles.card, { borderColor: tokens.danger }]}>
         <Animated.View style={dim}>
           <View style={styles.header}>
