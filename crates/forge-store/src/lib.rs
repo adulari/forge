@@ -6180,8 +6180,18 @@ mod tests {
             .collect();
         assert!(!ids.contains(&a), "archived session hidden: {ids:?}");
         assert!(ids.contains(&b), "live session still listed");
-        // History is intact — archive hides, never deletes.
         assert_eq!(store.load_messages(&a).unwrap().len(), 1);
+
+        let archived = store.list_sessions_for_resume().unwrap();
+        assert!(
+            archived.iter().any(|s| s.id == a && s.archived),
+            "archived session remains resumable"
+        );
+        store.unarchive_session(&a).unwrap();
+        assert!(
+            store.list_sessions().unwrap().iter().any(|s| s.id == a),
+            "unarchived session returns to normal list"
+        );
     }
 
     #[test]

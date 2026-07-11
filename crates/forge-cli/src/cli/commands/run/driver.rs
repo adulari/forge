@@ -1112,6 +1112,27 @@ impl DriverState {
                 }
                 KeyKind::Up => self.app.picker.move_up(),
                 KeyKind::Down => self.app.picker.move_down(),
+                KeyKind::Tab if self.app.picker.kind == Some(forge_tui::PickerKind::Sessions) => {
+                    let query = self.app.picker.query.clone();
+                    self.app.show_archived = !self.app.show_archived;
+                    open_sessions_picker(&mut self.app, &query)?;
+                }
+                KeyKind::DeleteForward
+                    if self.app.picker.kind == Some(forge_tui::PickerKind::Sessions) =>
+                {
+                    if let Some(row) = self.app.picker.selected_row() {
+                        if !row.id.starts_with("observe:") {
+                            let store = crate::open_store()?;
+                            if self.app.show_archived {
+                                store.unarchive_session(&row.id)?;
+                            } else {
+                                store.archive_session(&row.id)?;
+                            }
+                            let query = self.app.picker.query.clone();
+                            open_sessions_picker(&mut self.app, &query)?;
+                        }
+                    }
+                }
                 KeyKind::Enter => {
                     self.picker_enter().await?;
                 }

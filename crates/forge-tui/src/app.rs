@@ -346,6 +346,8 @@ pub struct App {
     /// The interactive session/checkpoint picker (RFC session-management-and-commands). Modal
     /// while open; reused for `/sessions`, `/resume`, and `/checkpoints`.
     pub picker: crate::commands::Picker,
+    /// Whether the sessions picker is showing archived sessions as well as active history.
+    pub show_archived: bool,
     /// Candidates for the `/copy` block picker (`PickerKind::CopyBlocks`) as `(lang, text)`: index 0
     /// is the full response (lang `""`), 1.. are the fenced code blocks (lang = the fence info). A
     /// picker row's `id` is the index here; Enter copies the text to the clipboard, `w` writes it to

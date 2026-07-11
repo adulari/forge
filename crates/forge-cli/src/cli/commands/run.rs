@@ -2444,6 +2444,27 @@ pub(crate) async fn run_chat_tui(
                     }
                     KeyKind::Up => app.picker.move_up(),
                     KeyKind::Down => app.picker.move_down(),
+                    KeyKind::Tab if app.picker.kind == Some(forge_tui::PickerKind::Sessions) => {
+                        let query = app.picker.query.clone();
+                        app.show_archived = !app.show_archived;
+                        open_sessions_picker(&mut app, &query)?;
+                    }
+                    KeyKind::DeleteForward
+                        if app.picker.kind == Some(forge_tui::PickerKind::Sessions) =>
+                    {
+                        if let Some(row) = app.picker.selected_row() {
+                            if !row.id.starts_with("observe:") {
+                                let store = crate::open_store()?;
+                                if app.show_archived {
+                                    store.unarchive_session(&row.id)?;
+                                } else {
+                                    store.archive_session(&row.id)?;
+                                }
+                                let query = app.picker.query.clone();
+                                open_sessions_picker(&mut app, &query)?;
+                            }
+                        }
+                    }
                     KeyKind::Enter => {
                         let chosen = app.picker.selected_row().cloned();
                         let kind = app.picker.kind;
