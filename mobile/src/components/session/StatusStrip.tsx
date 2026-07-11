@@ -40,25 +40,26 @@ export function StatusStrip({
   const tierModel = tier ? `${tier} · ${model}` : model;
 
   return (
-    <View style={styles.row}>
-      <StatusDot state={state} />
-      <Text style={[typeScale.meta, styles.tierModel, { color: tokens.ink2 }]} numberOfLines={1}>
-        {tierModel}
-      </Text>
-      <Chip label={temper} />
-      <EffortPicker effort={effort} send={send} />
-      <CostMetric valueUsd={costUsd} />
-      {contextLimit != null ? (
-        <View style={styles.gauge}>
-          <ContextGauge used={contextTokens} total={contextLimit} />
-        </View>
-      ) : null}
+    <View style={styles.container}>
+      <View style={styles.row}>
+        <StatusDot state={state} />
+        <Text style={[typeScale.meta, styles.tierModel, { color: tokens.ink2 }]} numberOfLines={1}>
+          {tierModel}
+        </Text>
+        <Chip label={temper} />
+        <EffortPicker effort={effort} send={send} />
+        <CostMetric valueUsd={costUsd} />
+      </View>
+      {/* Gauge on its own full-width row: the metadata row above could squeeze it until the
+          "used / total" budget (the most important number) was truncated to "…". Full width
+          keeps both numbers legible AND lets the meter bar span the strip. */}
+      {contextLimit != null ? <ContextGauge used={contextTokens} total={contextLimit} /> : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  row: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingVertical: space.space8 },
+  container: { gap: space.space4, paddingVertical: space.space8 },
+  row: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   tierModel: { flexShrink: 1 },
-  gauge: { flex: 1, minWidth: 80 },
 });
