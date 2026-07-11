@@ -21,6 +21,8 @@ interface Draft {
 
 const EMPTY_DRAFT: Draft = { text: "", attachments: [] };
 
+export type PendingAnswer = Extract<RemoteInput, { kind: "allow" | "answer" }>;
+
 // A deep link into a nonexistent/foreign session id never gets a Snapshot over WS (the
 // daemon has nothing to send) — without a deadline every segment would wait forever and the
 // skeleton/empty states would never resolve to an honest "this session doesn't exist".
@@ -37,6 +39,9 @@ export interface SessionCtxValue {
   snapshotTimedOut: boolean;
   connectionState: ConnectionState;
   send: (input: RemoteInput) => boolean;
+  pendingAnswer: PendingAnswer | null;
+  setPendingAnswer: (answer: PendingAnswer) => void;
+  clearPendingAnswer: () => void;
   /** Measured height of the shell's header block (SessionHeader + banners + StatusStrip +
    * Segmented) — segments below it use this as `Screen`'s `keyboardVerticalOffset` so
    * KeyboardAvoidingView knows how much real screen-top content sits above it (RN's own docs
@@ -69,6 +74,7 @@ export function SessionProvider({
   const { baseUrl } = useAuth();
   const { snapshot, connectionState, send } = useSessionSocket(baseUrl, sessionId);
   const [headerHeight, setHeaderHeight] = useState(0);
+  const [pendingAnswer, setPendingAnswer] = useState<PendingAnswer | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const draft = drafts[sessionId] ?? EMPTY_DRAFT;
   const [lastPrompts, setLastPrompts] = useState<Record<string, string>>({});
@@ -109,6 +115,8 @@ export function SessionProvider({
     [sessionId],
   );
 
+  const clearPendingAnswer = useCallback(() => setPendingAnswer(null), []);
+
   const focusComposer = useCallback(
     () => setComposerFocusSignal((n) => n + 1),
     [],
@@ -122,6 +130,9 @@ export function SessionProvider({
       snapshotTimedOut,
       connectionState,
       send,
+      pendingAnswer,
+      setPendingAnswer,
+      clearPendingAnswer,
       headerHeight,
       setHeaderHeight,
       draftText: draft.text,
@@ -140,6 +151,9 @@ export function SessionProvider({
       snapshotTimedOut,
       connectionState,
       send,
+      pendingAnswer,
+      setPendingAnswer,
+      clearPendingAnswer,
       headerHeight,
       draft,
       setDraftText,
