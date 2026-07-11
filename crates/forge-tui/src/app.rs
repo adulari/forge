@@ -1567,6 +1567,7 @@ impl App {
             }
             PresenterEvent::AssistantDelta(delta) => {
                 let delta = sanitize_terminal_text(&delta);
+                self.model_search = None;
                 if !self.streaming_active {
                     self.flush_reasoning();
                     self.flush.push(header_line("⚒ forge", ORANGE));
