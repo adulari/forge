@@ -59,6 +59,7 @@ function connect() {
   ws.onopen = () => { retries = 0; $("conn").textContent = "● connected"; flushOfflineQueue(); };
   ws.onmessage = (e) => {
     let s; try { s = JSON.parse(e.data); } catch { return; }
+    if (typeof s !== "object" || s === null || typeof s.revision !== "number" || typeof s.session_id !== "string") return;
     // Dedupe on revision: a frame can arrive both in the reconnect replay and via the live
     // stream (the server guarantees no GAP by overlapping the two, and we drop the overlap
     // here). A resync frame always applies — its revision doesn't extend our stream.

@@ -157,6 +157,22 @@ const BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 15000];
 // state — retries keep running in the background, but the UI should say so plainly
 // instead of leaving the user staring at a soft, indefinite "reconnecting…" forever.
 const UNREACHABLE_AFTER_ATTEMPTS = 5;
+const LIVENESS_TIMEOUT_MS = 35_000;
+
+/** Minimal structural guard for untrusted WebSocket frames. Protocol mismatches remain valid
+ * snapshots so the session shell can render its existing mismatch banner. */
+export function isValidSnapshotFrame(value: unknown): value is Snapshot {
+  if (value == null || typeof value !== "object") return false;
+  const frame = value as Record<string, unknown>;
+  return (
+    typeof frame.protocol === "number" &&
+    typeof frame.session_id === "string" &&
+    typeof frame.revision === "number" &&
+    Number.isFinite(frame.revision) &&
+    typeof frame.resync === "boolean" &&
+    typeof frame.closed === "boolean"
+  );
+}
 
 function wsUrl(baseUrl: string, sessionId: string, rev: number): string {
   const u = new URL(`${baseUrl}/ws`);
@@ -192,6 +208,7 @@ export function useSessionSocket(
   const closedRef = useRef(false);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const shouldRunRef = useRef(true);
+  const livenessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const clearReconnectTimer = useCallback(() => {
     if (reconnectTimerRef.current != null) {
@@ -200,8 +217,16 @@ export function useSessionSocket(
     }
   }, []);
 
+  const clearLivenessTimer = useCallback(() => {
+    if (livenessTimerRef.current != null) {
+      clearTimeout(livenessTimerRef.current);
+      livenessTimerRef.current = null;
+    }
+  }, []);
+
   const teardown = useCallback(() => {
     clearReconnectTimer();
+    clearLivenessTimer();
     if (wsRef.current) {
       const ws = wsRef.current;
       wsRef.current = null;
@@ -215,7 +240,7 @@ export function useSessionSocket(
         // already closed
       }
     }
-  }, [clearReconnectTimer]);
+  }, [clearReconnectTimer, clearLivenessTimer]);
 
   const connect = useCallback(() => {
     if (!baseUrl || !sessionId || closedRef.current || !shouldRunRef.current) return;
@@ -228,18 +253,41 @@ export function useSessionSocket(
     const ws = new TWebSocket(wsUrl(baseUrl, sessionId, revRef.current));
     wsRef.current = ws;
 
+    const armLivenessWatchdog = () => {
+      clearLivenessTimer();
+      if (appStateRef.current.match(/background|inactive/)) return;
+      livenessTimerRef.current = setTimeout(() => {
+        livenessTimerRef.current = null;
+        if (generation !== socketGenerationRef.current || !shouldRunRef.current) return;
+        // A half-open socket never emits close/error, so closing it enters the normal
+        // generation-guarded onclose/backoff path below.
+        try {
+          ws.close();
+        } catch {
+          // already closed
+        }
+      }, LIVENESS_TIMEOUT_MS);
+    };
+
     ws.onopen = () => {
       if (generation !== socketGenerationRef.current) return;
       attemptRef.current = 0;
       setConnectionState("open");
+      armLivenessWatchdog();
     };
 
     ws.onmessage = (event) => {
       if (generation !== socketGenerationRef.current) return;
-      let data: Snapshot;
+      armLivenessWatchdog();
+      let data: unknown;
       try {
         data = JSON.parse(String(event.data));
       } catch {
+        console.warn("[ws] dropped malformed snapshot frame");
+        return;
+      }
+      if (!isValidSnapshotFrame(data)) {
+        console.warn("[ws] dropped invalid snapshot frame");
         return;
       }
       if (data.revision != null) {
@@ -282,7 +330,7 @@ export function useSessionSocket(
       clearReconnectTimer();
       reconnectTimerRef.current = setTimeout(connect, delay);
     };
-  }, [baseUrl, sessionId, teardown, clearReconnectTimer]);
+  }, [baseUrl, sessionId, teardown, clearReconnectTimer, clearLivenessTimer]);
 
   useEffect(() => {
     closedRef.current = false;
