@@ -48,6 +48,8 @@ export interface SessionCtxValue {
   draftAttachments: Attachment[];
   setDraftText: (text: string) => void;
   setDraftAttachments: (next: Attachment[] | ((prev: Attachment[]) => Attachment[])) => void;
+  lastPrompt: string | null;
+  setLastPrompt: (text: string) => void;
 }
 
 const SessionCtx = createContext<SessionCtxValue | null>(null);
@@ -64,6 +66,7 @@ export function SessionProvider({
   const [headerHeight, setHeaderHeight] = useState(0);
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const draft = drafts[sessionId] ?? EMPTY_DRAFT;
+  const [lastPrompts, setLastPrompts] = useState<Record<string, string>>({});
 
   const [snapshotTimedOut, setSnapshotTimedOut] = useState(false);
   const hasSnapshot = snapshot != null;
@@ -95,6 +98,11 @@ export function SessionProvider({
     [sessionId],
   );
 
+  const setLastPrompt = useCallback(
+    (text: string) => setLastPrompts((prev) => ({ ...prev, [sessionId]: text })),
+    [sessionId],
+  );
+
   const value = useMemo<SessionCtxValue>(
     () => ({
       sessionId,
@@ -109,6 +117,8 @@ export function SessionProvider({
       draftAttachments: draft.attachments,
       setDraftText,
       setDraftAttachments,
+      lastPrompt: lastPrompts[sessionId] ?? null,
+      setLastPrompt,
     }),
     [
       sessionId,
@@ -121,6 +131,8 @@ export function SessionProvider({
       draft,
       setDraftText,
       setDraftAttachments,
+      lastPrompts,
+      setLastPrompt,
     ],
   );
 

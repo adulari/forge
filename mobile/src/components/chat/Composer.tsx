@@ -8,7 +8,7 @@
 // Mic input is intentionally NOT built here: FEATURES.md §5 flags it as a separate `lib/voice/`
 // seam (web Speech API now, native mic deferred) that BUILD_ORDER's T3.2 bullet does not list —
 // a non-functional mic button would be worse than none.
-import { ArrowUp, Clock, FileText, Image as ImageIcon, Square } from "lucide-react-native";
+import { ArrowUp, Clock, FileText, Image as ImageIcon, RotateCcw, Square } from "lucide-react-native";
 import React, { useEffect, useRef, useState } from "react";
 import { Image, Platform, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -38,7 +38,7 @@ const MAX_LINES = 6;
 const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
 const MIN_HEIGHT = LINE_HEIGHT;
 const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES;
-const COMMAND_CHIPS = ["/plan", "/compact", "/models", "/mode", "/help"] as const;
+const COMMAND_CHIPS = ["/plan", "/compact", "/model", "/mode", "/help"] as const;
 
 export interface ComposerProps {
   sessionId: string;
@@ -67,7 +67,7 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
   // between Chat/Tasks/Agents/Review segments underneath it, which unmounts this component on
   // every tab switch — plain useState here would wipe a half-typed message. Keyed per session
   // (not per-component-instance) so it can't bleed across a session change either.
-  const { draftText: text, setDraftText: setText, draftAttachments: attachments, setDraftAttachments: setAttachments } =
+  const { draftText: text, setDraftText: setText, draftAttachments: attachments, setDraftAttachments: setAttachments, lastPrompt, setLastPrompt } =
     useSessionCtx();
   const toast = useToast();
   const [height, setHeight] = useState(MIN_HEIGHT);
@@ -78,6 +78,8 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
   }, [text]);
 
   const canSend = text.trim().length > 0 && !attachments.some((a) => a.state === "uploading");
+
+  const commandHints = COMMAND_CHIPS.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase()));
 
   const commit = (value: string) => {
     const trimmed = value.trim();
@@ -99,6 +101,7 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
       .filter((a) => a.state === "done")
       .map((a) => ({ id: a.id, name: a.name, image: a.image, uri: a.uri, path: a.path }));
     onSend(trimmed, sent);
+    setLastPrompt(trimmed);
     haptics.sendPrompt();
     setText("");
     setAttachments([]);
@@ -219,9 +222,17 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
       ) : null}
 
       <View style={styles.chipsRow}>
-        {COMMAND_CHIPS.map((cmd) => (
+        {commandHints.map((cmd) => (
           <Chip key={cmd} label={cmd} onPress={() => commit(cmd)} testID={`chip-${cmd}`} />
         ))}
+        {lastPrompt ? (
+          <Chip
+            label="resend last"
+            icon={<RotateCcw size={14} strokeWidth={1.75} color={tokens.ink3} />}
+            onPress={() => commit(lastPrompt)}
+            testID="resend-last-prompt"
+          />
+        ) : null}
       </View>
 
       <View style={styles.row}>

@@ -8,6 +8,7 @@ import { Flame, Plus } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
+import { SearchField } from "../../components/ds/SearchField";
 import { SessionCard } from "../../components/fleet/SessionCard";
 import { BoundedList } from "../../components/ds/BoundedList";
 import { Button } from "../../components/ds/Button";
@@ -98,6 +99,7 @@ export default function FleetScreen() {
   // straight into `refreshing` made the pull-to-refresh spinner fire on its own every poll tick.
   // Track only the pull-triggered refetch instead.
   const [manualRefreshing, setManualRefreshing] = useState(false);
+  const [search, setSearch] = useState("");
   const { refetch } = query;
   const onRefresh = useCallback(() => {
     setManualRefreshing(true);
@@ -105,6 +107,14 @@ export default function FleetScreen() {
   }, [refetch]);
 
   const data = useMemo(() => query.data ?? [], [query.data]);
+  const filteredData = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return data;
+    return data.filter((row) => {
+      const status = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
+      return [row.title, row.cwd, status].some((value) => value.toLowerCase().includes(needle));
+    });
+  }, [data, search]);
   const hasData = data.length > 0;
   const isFirstLoad = query.isLoading && !hasData;
 
@@ -127,8 +137,8 @@ export default function FleetScreen() {
     return (
       <EmptyState
         icon={Flame}
-        message="no live sessions — start one"
-        action={<Button label="New session" variant="secondary" onPress={() => router.push("/new-session")} />}
+          message={search.trim() ? "no sessions match that search" : "no live sessions — start one"}
+          action={search.trim() ? <Button label="Clear search" variant="secondary" onPress={() => setSearch("")} /> : <Button label="New session" variant="secondary" onPress={() => router.push("/new-session")} />}
       />
     );
   }, [query.isError, query.error]);
@@ -149,6 +159,14 @@ export default function FleetScreen() {
   return (
     <Screen scroll={false}>
       <FleetTitle />
+      <SearchField
+        value={search}
+        onChangeText={setSearch}
+        placeholder="Search sessions, paths, status"
+        autoCapitalize="none"
+        autoCorrect={false}
+        containerStyle={styles.search}
+      />
       {isFirstLoad ? (
         <View style={styles.list}>
           {[0, 1, 2, 3].map((i) => (
@@ -157,10 +175,10 @@ export default function FleetScreen() {
         </View>
       ) : (
         <BoundedList
-          data={data}
+          data={filteredData}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
-          ListHeaderComponent={hasData ? <FleetHeader sessions={data} /> : undefined}
+          ListHeaderComponent={hasData ? <FleetHeader sessions={filteredData} /> : undefined}
           ListEmptyComponent={emptyComponent}
           refreshing={manualRefreshing}
           onRefresh={onRefresh}
@@ -189,6 +207,7 @@ const styles = StyleSheet.create({
   titleText: { letterSpacing: -0.4 },
   mark: { fontSize: 14, marginLeft: space.space8 },
   list: { paddingTop: space.space12 },
+  search: { paddingTop: space.space12 },
   listContent: { paddingTop: space.space12, paddingBottom: 96 },
   header: {
     flexDirection: "row",
