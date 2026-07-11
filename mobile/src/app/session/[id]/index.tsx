@@ -36,6 +36,7 @@ import { Composer } from "../../../components/chat/Composer";
 import { Markdown } from "../../../components/chat/Markdown";
 import { MessageRow } from "../../../components/chat/MessageRow";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
+import { BellowsSpinner } from "../../../components/ds/BellowsSpinner";
 import { BoundedList } from "../../../components/ds/BoundedList";
 import { Chip } from "../../../components/ds/Chip";
 import { EmptyState } from "../../../components/ds/EmptyState";
@@ -200,6 +201,7 @@ export default function SessionChat() {
 
   const listRef = useRef<FlatList<TimelineItem>>(null);
   const [showJump, setShowJump] = useState(false);
+  const [newWhileAway, setNewWhileAway] = useState(0);
   const showJumpRef = useRef(false);
   useEffect(() => {
     showJumpRef.current = showJump;
@@ -530,6 +532,8 @@ export default function SessionChat() {
       newestKeyRef.current = newestKey;
       if (!showJumpRef.current) {
         listRef.current?.scrollToOffset({ offset: 0, animated: false });
+      } else {
+        setNewWhileAway((count) => count + 1);
       }
     }
   }, [items]);
@@ -539,6 +543,8 @@ export default function SessionChat() {
   }, []);
 
   const jumpToLatest = useCallback(() => {
+    setShowJump(false);
+    setNewWhileAway(0);
     listRef.current?.scrollToOffset({ offset: 0, animated: true });
   }, []);
 
@@ -581,7 +587,7 @@ export default function SessionChat() {
                 </View>
               ) : (
                 <View style={[styles.streamingRow, styles.thinkingRow]}>
-                  <ActivityIndicator size="small" color={tokens.accent} />
+                  <BellowsSpinner active />
                   <Text style={[typeScale.meta, { color: tokens.ink3 }]}>thinking…</Text>
                 </View>
               )
@@ -676,11 +682,11 @@ export default function SessionChat() {
           <Pressable
             onPress={jumpToLatest}
             accessibilityRole="button"
-            accessibilityLabel="jump to latest"
-            style={[styles.jumpPill, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}
+            accessibilityLabel="Return to latest"
+            style={[styles.jumpPill, { backgroundColor: busy ? tokens.selection : tokens.bg3, borderColor: busy ? tokens.accent : tokens.border }]}
           >
             <ChevronDown size={16} strokeWidth={1.75} color={tokens.ink2} />
-            <Text style={[typeScale.meta, { color: tokens.ink2 }]}>latest</Text>
+            <Text style={[typeScale.meta, { color: tokens.ink2 }]}>{busy ? (newWhileAway > 0 ? `${newWhileAway} new ↓` : "live") : "latest"}</Text>
           </Pressable>
         ) : null}
       </View>

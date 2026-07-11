@@ -21,6 +21,7 @@ import { gutter, radii, space, tapTarget } from "../../theme/tokens";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 import { type, webInputTextStyle } from "../../theme/typography";
 import { Chip } from "../ds/Chip";
+import { HeatEdge } from "../ds/HeatEdge";
 import { IconButton } from "../ds/IconButton";
 import { useToast } from "../ds/ToastHost";
 import {
@@ -38,7 +39,7 @@ const MAX_LINES = 6;
 const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
 const MIN_HEIGHT = LINE_HEIGHT;
 const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES;
-const COMMAND_CHIPS = ["/plan", "/compact", "/model", "/mode", "/help"] as const;
+const COMMAND_CHIPS = ["/plan", "/compact", "/models", "/mode", "/help"] as const;
 
 export interface ComposerProps {
   sessionId: string;
@@ -209,6 +210,7 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
         },
       ]}
     >
+      <HeatEdge active={busy} />
       {attachments.length > 0 ? (
         <View style={styles.chipsRow}>
           {attachments.map((a) => (
@@ -230,9 +232,9 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
       ) : null}
 
       <View style={styles.chipsRow}>
-        {commandHints.map((cmd) => (
+        {text.length === 0 || text.startsWith("/") ? commandHints.map((cmd) => (
           <Chip key={cmd} label={cmd} onPress={() => commit(cmd)} testID={`chip-${cmd}`} />
-        ))}
+        )) : null}
         {lastPrompt ? (
           <Chip
             label="resend last"
@@ -258,6 +260,10 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
           ref={inputRef}
           value={text}
           onChangeText={setText}
+          returnKeyType="send"
+          autoCapitalize="none"
+          autoCorrect={false}
+          spellCheck={false}
           onContentSizeChange={(e) =>
             setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
           }
@@ -302,6 +308,7 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
 
 const styles = StyleSheet.create({
   wrap: {
+    position: "relative",
     borderTopWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: space.space12,
     paddingTop: space.space8,
