@@ -87,11 +87,12 @@ export default function SettingsScreen() {
   const tokens = useTokens();
   const toast = useToast();
   const { preference, setScheme } = useTheme();
-  const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer } = useAuth();
+  const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer, testConnection } = useAuth();
 
   const [appLock, setAppLock] = useState(false);
   const [appLockLoaded, setAppLockLoaded] = useState(false);
   const [pendingRemove, setPendingRemove] = useState<StoredServer | null>(null);
+  const [health, setHealth] = useState<"idle" | "checking" | "ok" | "bad-token" | "unreachable" | "server-error">("idle");
 
   const [pushStatus, setPushStatus] = useState<PushSubscriptionState>("unsupported");
   const [pushLoaded, setPushLoaded] = useState(false);
@@ -138,6 +139,24 @@ export default function SettingsScreen() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!baseUrl) {
+      setHealth("idle");
+      return;
+    }
+    setHealth("checking");
+    testConnection().then((result) => {
+      if (!cancelled) setHealth(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeServerId, baseUrl, testConnection]);
+
+  const healthCopy = health === "ok" ? "online" : health === "checking" ? "checking connection…" : health === "bad-token" ? "pairing invalid — re-scan or remove this server" : health === "unreachable" ? "offline — check that forge serve is running" : health === "server-error" ? "server error — check forge serve logs" : "not connected";
+  const healthTone: BadgeTone = health === "ok" ? "success" : health === "idle" ? "neutral" : health === "checking" ? "warn" : "danger";
 
   const onAppLockChange = (value: boolean) => {
     setAppLock(value);
@@ -222,6 +241,18 @@ export default function SettingsScreen() {
             title="Add server"
             leading={<Plus size={20} strokeWidth={1.75} color={tokens.accent} />}
             onPress={() => router.push("/connect")}
+            showSeparator={false}
+          />
+        </Card>
+      </View>
+
+      <View>
+        <SectionHeader>Connection</SectionHeader>
+        <Card padded={false}>
+          <ListRow
+            title="Connection health"
+            subtitle={healthCopy}
+            leading={<Badge label={health === "checking" ? "checking" : health === "ok" ? "online" : "attention"} tone={healthTone} />}
             showSeparator={false}
           />
         </Card>
