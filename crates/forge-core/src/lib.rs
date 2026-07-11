@@ -1087,6 +1087,12 @@ pub struct Session {
     /// In-session reasoning-effort pin (`/effort <level>`). When set, forwarded to the provider
     /// as a `ReasoningEffort` hint each turn. `None` = provider default (no hint sent).
     pinned_effort: Option<EffortLevel>,
+    /// Per-turn shrinking cap on the usable context window (tokens), armed only after a provider
+    /// context-overflow error and reset at the start of each turn. Each overflow retry lowers it so
+    /// the SENT transcript view trims harder — a non-destructive self-heal (the stored transcript is
+    /// untouched) that converges under the model's real window even when our token estimate diverges
+    /// from the model's own tokenizer. `None` = no cap (use the model's full window).
+    overflow_window_cap: Option<u32>,
     /// Whether white-hot effort's standing orchestration guidance has been injected this session
     /// (docs/features/whitehot-effort.md). One-shot per pin: re-armed by `set_effort` on any
     /// change, so toggling away and back re-injects for the new stretch of the transcript.
@@ -1414,6 +1420,7 @@ impl Session {
             skills: None,
             pinned_model: None,
             pinned_effort: None,
+            overflow_window_cap: None,
             whitehot_guidance_injected: false,
             pinned_tier: None,
             work_root: None,
@@ -2534,13 +2541,21 @@ impl Session {
     /// persisted in the store) first, then the family heuristic, then a conservative floor. Always
     /// returns a usable number so a turn can be bounded even for a model we've never seen.
     fn effective_context_window(&self, model: &str) -> u32 {
-        self.store
+        let window = self
+            .store
             .model_context(model)
             .ok()
             .flatten()
             .filter(|w| *w > 0)
             .or_else(|| forge_mesh::pricing::context_limit(model))
-            .unwrap_or(forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW)
+            .unwrap_or(forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW);
+        // A context-overflow self-heal (see `overflow_window_cap`) lowers the usable window for the
+        // rest of the turn so `transcript_with_preamble` trims the sent view below the model's real
+        // limit — needed when our o200k estimate diverges from the model's own tokenizer.
+        match self.overflow_window_cap {
+            Some(cap) => window.min(cap),
+            None => window,
+        }
     }
 
     /// The transcript trimmed to fit `model`'s context window, reserving room for the reply. Keeps
@@ -3504,9 +3519,12 @@ Output ONLY that sentence — no preamble, no quotation marks.";
         let fallbacks: Vec<String> = decision.map(|d| d.fallbacks.clone()).unwrap_or_default();
         let mut chain = fallbacks.into_iter();
         let mut last_resort_used = false;
-        // Bounds the overflow self-heal (compact + retry the SAME model) so a transcript that can't
+        // Bounds the overflow self-heal (shrink + retry the SAME model) so a transcript that can't
         // be shrunk enough eventually falls through to normal failover instead of looping.
         let mut compact_retries = 0usize;
+        // Fresh turn: drop any window cap left armed by a previous turn's overflow self-heal, so a
+        // short new turn isn't stuck sending a needlessly-trimmed view.
+        self.overflow_window_cap = None;
         // Bounds the same-model retry for transient errors (a 5xx / dropped connection that often
         // succeeds on a second attempt). Reset to 0 whenever we switch to a different model, so the
         // budget is per-model, not per-turn — "don't give up instantly" before failing over.
@@ -3801,20 +3819,31 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                         }
                         break r;
                     }
+                    // Context-overflow self-heal — a SEPARATE arm, NOT nested in the `is_retryable`
+                    // arm below where it used to sit DEAD: an over-window input is a non-retryable
+                    // `Request` error (is_retryable() == false), so that guard never admitted it and
+                    // the turn failed hard instead of recovering. Overflow IS recoverable: lower the
+                    // usable window and retry the SAME healthy model so `transcript_with_preamble`
+                    // trims the sent view harder. Non-destructive (the stored transcript is untouched)
+                    // and convergent even when our o200k estimate diverges from the model's own
+                    // tokenizer — each retry multiplies the cap down. Bounded by `compact_retries`.
+                    Err(e) if compact_retries < 3 && e.is_context_overflow() => {
+                        compact_retries += 1;
+                        let shrunk = (self.effective_context_window(&active_model) as u64 * 55
+                            / 100)
+                            .max(1) as u32;
+                        self.overflow_window_cap = Some(shrunk);
+                        self.presenter.emit(PresenterEvent::Warning(format!(
+                            "{active_model}: input exceeded the context window — trimming context and retrying"
+                        )));
+                        // Best-effort LLM compaction too: a cleaner summary when the summarize call
+                        // itself fits. The window cap above is the guarantee that the retry shrinks
+                        // regardless of whether compaction runs.
+                        let _ = self.compact(true).await;
+                        self.emit_context_gauge(&active_model);
+                        continue;
+                    }
                     Err(e) if failover_enabled && e.is_retryable() => {
-                        // Context-overflow self-heal: the input exceeded THIS model's window, so the
-                        // fix is to shrink the conversation and retry the SAME (healthy) model —
-                        // NOT to bench it and burn the whole failover chain (the "every model
-                        // unavailable" churn that left the turn stuck). Bounded by `compact_retries`.
-                        if compact_retries < 2 && e.is_context_overflow() {
-                            compact_retries += 1;
-                            self.presenter.emit(PresenterEvent::Warning(format!(
-                                "{active_model}: input exceeded the context window — compacting and retrying"
-                            )));
-                            let _ = self.compact(true).await;
-                            self.emit_context_gauge(&active_model);
-                            continue;
-                        }
                         // Same-model retry for a TRANSIENT failure (a 5xx / dropped stream / network
                         // blip) before benching + failing over: these often succeed on a second
                         // attempt, so switching models immediately needlessly degrades the turn. We
@@ -10619,6 +10648,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(answer, "NO_INJECTION");
+    }
+
+    #[test]
+    fn overflow_window_cap_only_shrinks_never_inflates() {
+        // The context-overflow self-heal arms `overflow_window_cap` so the sent transcript trims
+        // below a model's real window even when our token estimate diverges from its tokenizer.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = probe_session(store, Config::default());
+        let model = "nvidia::z-ai/glm-5.2";
+        // No fetched window + not a CLI bridge → the conservative default.
+        let base = forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW;
+        assert_eq!(session.effective_context_window(model), base);
+        // A cap below the window shrinks the usable window (the retry path).
+        session.overflow_window_cap = Some(base / 4);
+        assert_eq!(session.effective_context_window(model), base / 4);
+        // A cap above the window never inflates it.
+        session.overflow_window_cap = Some(base.saturating_mul(10));
+        assert_eq!(session.effective_context_window(model), base);
     }
 
     #[tokio::test]
