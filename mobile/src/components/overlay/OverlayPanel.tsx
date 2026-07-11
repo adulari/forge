@@ -126,6 +126,7 @@ export function OverlayPanel({ overlay, visible, send, onClose }: OverlayPanelPr
   };
 
   const showEmpty = overlay.rows.length === 0 && overlay.body == null && !overlay.free_text;
+  const hasNativeContent = isNativeOverlayKind(overlay.kind) && (overlay.kind !== "overlay:usage" || overlay.body != null);
 
   const content = (
     <View style={styles.container}>
@@ -152,7 +153,7 @@ export function OverlayPanel({ overlay, visible, send, onClose }: OverlayPanelPr
         </View>
       ) : null}
 
-      {isNativeOverlayKind(overlay.kind) ? (
+      {hasNativeContent ? (
         <NativeOverlayContent overlay={overlay} onSelect={selectRow} />
       ) : (
         <ScrollView style={styles.rows} keyboardShouldPersistTaps="handled">
@@ -178,7 +179,7 @@ export function OverlayPanel({ overlay, visible, send, onClose }: OverlayPanelPr
         </ScrollView>
       )}
 
-      {overlay.body != null && !isNativeOverlayKind(overlay.kind) ? (
+      {overlay.body != null && overlay.kind !== "overlay:usage" ? (
         <ScrollView style={[styles.bodyWell, { backgroundColor: tokens.bg0, borderRadius: radii.radius12 }]}>
           <Text style={[typeScale.codeSmall, { color: tokens.ink2 }]} selectable>
             {overlay.body}
