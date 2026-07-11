@@ -155,7 +155,7 @@ function DiffFileSection({ file, isLast }: { file: DiffFile; isLast: boolean }) 
             {file.hunks.map((hunk, hIdx) => (
               <View key={hIdx} style={styles.hunk}>
                 <Text selectable style={[typeScale.codeSmall, { color: tokens.info }, styles.hunkHeader]}>{hunk.header}</Text>
-                <DiffLines lines={hunk.lines} />}
+                <DiffLines lines={hunk.lines} />
               </View>
             ))}
             {file.skipped_lines > 0 ? (
