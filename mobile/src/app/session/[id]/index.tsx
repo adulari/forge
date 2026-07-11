@@ -36,7 +36,6 @@ import { Composer } from "../../../components/chat/Composer";
 import { Markdown } from "../../../components/chat/Markdown";
 import { MessageRow } from "../../../components/chat/MessageRow";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
-import { HeatEdge } from "../../../components/ds/HeatEdge";
 import { BellowsSpinner } from "../../../components/ds/BellowsSpinner";
 import { BoundedList } from "../../../components/ds/BoundedList";
 import { Chip } from "../../../components/ds/Chip";
@@ -48,7 +47,7 @@ import { haptics } from "../../../lib/haptics";
 import { useHistory } from "../../../lib/queries";
 import { parseReasoning } from "../../../lib/reasoning";
 import { useSessionCtx } from "../../../lib/sessionContext";
-import { easings, useEmberdot, useForgeline, useThermalPulse } from "../../../theme/motion";
+import { easings, useEmberdot, useForgeline } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { radii, space } from "../../../theme/tokens";
 import { type as typeScale } from "../../../theme/typography";
@@ -133,7 +132,7 @@ function LiveToolActivity({ entries, startedAt }: { entries: string[]; startedAt
 
 function StreamingAnswer({ text, streaming }: { text: string; streaming: boolean }) {
   const tokens = useTokens();
-  const railStyle = useThermalPulse(streaming);
+  const { dotStyle: railStyle } = useEmberdot(streaming ? "busy" : "idle");
   const reduced = useReducedMotion();
 
   // Same rAF coalescing as StreamingText.tsx: at most one committed render per frame while
@@ -183,7 +182,7 @@ function StreamingAnswer({ text, streaming }: { text: string; streaming: boolean
 
   return (
     <View style={styles.streamingAnswerRow}>
-      {streaming ? <Animated.View style={[styles.streamingRail, railStyle]}><HeatEdge active /></Animated.View> : null}
+      {streaming ? <Animated.View style={[styles.streamingRail, { backgroundColor: tokens.accent }, railStyle]} /> : null}
       <View style={styles.streamingAnswerText}>
         <Markdown content={displayText} />
       </View>
