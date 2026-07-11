@@ -12,7 +12,7 @@ import { space } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
 import { IconButton } from "../ds/IconButton";
 
-const COLLAPSE_LINES = 12;
+const COLLAPSE_LINES = 4;
 const COPY_RESET_MS = 1200;
 
 export interface SystemOutputProps {
@@ -34,6 +34,8 @@ export function SystemOutput({ content }: SystemOutputProps) {
   );
 
   const visible = expanded ? content : lines.slice(0, COLLAPSE_LINES).join("\n");
+  const first = lines.find((line) => line.trim()) ?? "output";
+  const label = first.match(/↳\s*([^\s]+)/)?.[1] ?? first.split(/\s+/)[0] ?? "output";
   const hiddenCount = lines.length - COLLAPSE_LINES;
 
   const onCopy = async () => {
@@ -46,7 +48,7 @@ export function SystemOutput({ content }: SystemOutputProps) {
   return (
     <View style={[styles.container, { backgroundColor: tokens.bg0, borderColor: tokens.border }]}>
       <View style={[styles.header, { borderBottomColor: tokens.border }]}>
-        <Text style={[type.meta, { color: tokens.ink3 }]}>OUTPUT</Text>
+        <Text style={[type.meta, { color: tokens.ink3 }]}>{label} · {lines.length} lines</Text>
         <IconButton
           accessibilityLabel={copied ? "copied" : "copy output"}
           onPress={onCopy}
@@ -107,6 +109,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: space.space4,
     paddingTop: space.space8,
-    minHeight: 28,
+    minHeight: 44,
   },
 });
