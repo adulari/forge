@@ -7,7 +7,7 @@
 // dependency surface, so this stays inside expo-router's public Tabs API
 // (tabBarIcon/tabBarBadge/tabBarStyle).
 import { router, Slot, Tabs, usePathname } from "expo-router";
-import { BellDot, Flame, History, Plus, Settings2, type LucideIcon } from "lucide-react-native";
+import { BellDot, Flame, History, PanelsTopLeft, Plus, Settings2, type LucideIcon } from "lucide-react-native";
 import React, { useEffect, useMemo } from "react";
 import { Platform, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -76,6 +76,7 @@ function makeTabIcon(Icon: LucideIcon) {
 }
 
 const FleetTabIcon = makeTabIcon(Flame);
+const FloorTabIcon = makeTabIcon(PanelsTopLeft);
 const InboxTabIcon = makeTabIcon(BellDot);
 const HistoryTabIcon = makeTabIcon(History);
 const SettingsTabIcon = makeTabIcon(Settings2);
@@ -113,6 +114,16 @@ function TabsNavigator() {
           title: "Fleet",
           tabBarIcon: FleetTabIcon,
           tabBarAccessibilityLabel: "Fleet",
+        }}
+      />
+      <Tabs.Screen
+        name="floor"
+        options={{
+          title: "Floor",
+          tabBarIcon: FloorTabIcon,
+          tabBarAccessibilityLabel: "Floor",
+          tabBarBadge: sessions?.filter((s) => s.busy).length || undefined,
+          tabBarBadgeStyle: { backgroundColor: tokens.accent, color: tokens.onAccent },
         }}
       />
       <Tabs.Screen
@@ -155,7 +166,7 @@ function TabsNavigator() {
 // identical; expo-router renders the same screens into either layout").
 // ---------------------------------------------------------------------------
 
-function RailPill({ href, label, count }: { href: "/" | "/inbox"; label: string; count?: number }) {
+function RailPill({ href, label, count }: { href: "/" | "/floor" | "/inbox"; label: string; count?: number }) {
   const pathname = usePathname();
   const selected = pathname === href;
   return (
@@ -212,6 +223,7 @@ function ExpandedRail() {
 
       <View style={styles.pillsRow}>
         <RailPill href="/" label="All" />
+        <RailPill href="/floor" label="Floor" count={rows.filter((row) => row.busy).length} />
         <RailPill href="/inbox" label="Waiting" count={waitingCount} />
       </View>
 
