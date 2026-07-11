@@ -470,7 +470,7 @@ async fn icon() -> Response {
 async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
     let mut rows: Vec<SessionRow> = Vec::new();
     for h in state.registry.all().await {
-        let snap = h.snapshot_rx.borrow().clone();
+        let snap = h.snapshot_rx.borrow().snapshot.clone();
         rows.push(SessionRow {
             id: h.session_id.clone(),
             title: h.title.clone(),
@@ -507,13 +507,10 @@ async fn create_session(
         );
     }
 
-    // Worktree isolation: branch from HEAD of `cwd` into .forge/worktrees/<id> — the audited
-    // WorktreeGuard creation, WITHOUT its drop-side removal: a daemon session's worktree must
-    // outlive the handle (and the daemon), so the guard is intentionally leaked and the path
-    // persisted on the session row instead. Archiving snapshots uncommitted edits onto the
-    // branch and leaves both in place for a manual merge.
+    // Keep the guard alive through driver startup so an early error removes its new worktree.
+    // Once live, the worktree intentionally outlives the handle for manual review or merge.
     let mut worktree: Option<String> = None;
-    if req.worktree {
+    let worktree_guard = if req.worktree {
         if !forge_core::worktree::is_git_repo(cwd_path) {
             return err_response(
                 axum::http::StatusCode::BAD_REQUEST,
@@ -524,7 +521,7 @@ async fn create_session(
         match forge_core::worktree::WorktreeGuard::create(cwd_path, &wt_id) {
             Ok(guard) => {
                 worktree = Some(guard.path().display().to_string());
-                std::mem::forget(guard); // persistence over RAII — see comment above
+                Some(guard)
             }
             Err(e) => {
                 return err_response(
@@ -533,7 +530,9 @@ async fn create_session(
                 );
             }
         }
-    }
+    } else {
+        None
+    };
 
     let session_cwd = worktree.clone().unwrap_or_else(|| cwd.clone());
     let is_resume = req.resume.is_some();
@@ -567,6 +566,9 @@ async fn create_session(
     };
     match spawn_session_driver(spec).await {
         Ok(handle) => {
+            if let Some(guard) = worktree_guard {
+                std::mem::forget(guard);
+            }
             // Resuming is an explicit "bring this back" — an archived session (from the
             // past-sessions browser) should stop being hidden once it's live again, the same
             // way the archive button hid it.
@@ -598,15 +600,13 @@ async fn archive_session(
         return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
     };
     handle.shutdown();
+    handle.join(ARCHIVE_JOIN_TIMEOUT).await;
     if let Some(wt) = &handle.worktree {
         // Best-effort snapshot: uncommitted edits land on the session's branch so nothing is
         // lost; the worktree + branch stay in place for a manual review/merge.
         let _ = forge_core::worktree::commit_worktree(std::path::Path::new(wt));
     }
     let _ = state.store.archive_session(&id);
-    if let Ok(h) = Arc::try_unwrap(handle) {
-        h.join(ARCHIVE_JOIN_TIMEOUT).await;
-    }
     json_response(&serde_json::json!({ "ok": true }))
 }
 
@@ -876,9 +876,7 @@ fn run_merge(repo_root: &std::path::Path, worktree: &str, branch: &str) -> Merge
 /// Stop a driver and wait for it to wind down, so its worktree is quiescent before git touches it.
 async fn stop_and_join(handle: Arc<SessionDriverHandle>) {
     handle.shutdown();
-    if let Ok(h) = Arc::try_unwrap(handle) {
-        h.join(ARCHIVE_JOIN_TIMEOUT).await;
-    }
+    handle.join(ARCHIVE_JOIN_TIMEOUT).await;
 }
 
 /// `POST /api/sessions/{id}/merge` — stop the session, snapshot its worktree onto the branch, and
@@ -942,7 +940,16 @@ async fn merge_session(
             "session is already being merged or discarded",
         );
     };
-    // Stop the driver so the worktree is quiescent, then run the git sequence off-thread.
+    let resume_spec = DriverSpec {
+        cwd: handle.cwd.clone(),
+        worktree: handle.worktree.clone(),
+        title: handle.title.clone(),
+        mock: state.mock,
+        model: None,
+        resume: Some(id.clone()),
+        push: state.push.clone(),
+        apns: state.apns.clone(),
+    };
     stop_and_join(handle).await;
     let outcome = {
         let (root, br, wt) = (repo_root.clone(), branch.clone(), worktree.clone());
@@ -950,27 +957,40 @@ async fn merge_session(
             .await
             .unwrap_or_else(|e| MergeOutcome::Error(format!("merge task failed: {e}")))
     };
-    // The driver is stopped either way — hide the session from the live list.
+    if let MergeOutcome::Conflicts(files) = outcome {
+        match spawn_session_driver(resume_spec).await {
+            Ok(handle) => {
+                state.registry.insert(handle).await;
+                return (
+                    axum::http::StatusCode::CONFLICT,
+                    [
+                        (axum::http::header::CONTENT_TYPE, "application/json"),
+                        (axum::http::header::CACHE_CONTROL, "no-store"),
+                    ],
+                    serde_json::json!({
+                        "error": "merge conflicts — resolve them by hand in the worktree; the session remains resumable",
+                        "conflicts": files,
+                        "branch": branch,
+                        "worktree": worktree,
+                    })
+                    .to_string(),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("merge conflicts, but session restart failed: {e}"),
+                )
+            }
+        }
+    }
     let _ = state.store.archive_session(&id);
     match outcome {
         MergeOutcome::Clean => json_response(&serde_json::json!({
             "ok": true, "merged": true, "branch": branch,
         })),
-        MergeOutcome::Conflicts(files) => (
-            axum::http::StatusCode::CONFLICT,
-            [
-                (axum::http::header::CONTENT_TYPE, "application/json"),
-                (axum::http::header::CACHE_CONTROL, "no-store"),
-            ],
-            serde_json::json!({
-                "error": "merge conflicts — resolve them by hand in the worktree; nothing was changed",
-                "conflicts": files,
-                "branch": branch,
-                "worktree": worktree,
-            })
-            .to_string(),
-        )
-            .into_response(),
+        MergeOutcome::Conflicts(_) => unreachable!("conflicts restore a resumable driver"),
         MergeOutcome::Error(msg) => err_response(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             &format!("merge failed: {msg}"),
@@ -1295,7 +1315,7 @@ async fn answer(
     let Some(handle) = state.registry.get(&req.session).await else {
         return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
     };
-    let snap = handle.snapshot_rx.borrow().clone();
+    let snap = handle.snapshot_rx.borrow().snapshot.clone();
     if snap.permission_prompt.is_none() {
         return err_response(
             axum::http::StatusCode::CONFLICT,
@@ -1650,7 +1670,7 @@ mod tests {
         async fn wait_done(h: &SessionDriverHandle, needle: &str) -> remote::Snapshot {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
             loop {
-                let s = h.snapshot_rx.borrow().clone();
+                let s = h.snapshot_rx.borrow().snapshot.clone();
                 if !s.busy && s.transcript.join("\n").contains(needle) {
                     return s;
                 }
@@ -1692,7 +1712,7 @@ mod tests {
             .replay_after(sa.revision)
             .expect("gap is fillable from the ring");
         assert!(
-            replayed.iter().any(|s| s.revision == sa2.revision),
+            replayed.iter().any(|s| s.snapshot.revision == sa2.revision),
             "replay covers the missed frames"
         );
 
@@ -1724,7 +1744,7 @@ mod tests {
         // whenever the test still holds its own handle clone — so poll instead of racing it
         // (observed flaky on contended CI runners).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !b.snapshot_rx.borrow().closed {
+        while !b.snapshot_rx.borrow().snapshot.closed {
             assert!(
                 std::time::Instant::now() < deadline,
                 "final closed frame never arrived"
@@ -1792,7 +1812,7 @@ mod tests {
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let snap = loop {
-            let s = handle.snapshot_rx.borrow().clone();
+            let s = handle.snapshot_rx.borrow().snapshot.clone();
             if !s.busy && !s.transcript.is_empty() {
                 break s;
             }
@@ -2206,7 +2226,7 @@ mod tests {
         let wait_idle = |h: Arc<SessionDriverHandle>| async move {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
             loop {
-                let s = h.snapshot_rx.borrow().clone();
+                let s = h.snapshot_rx.borrow().snapshot.clone();
                 if !s.busy && !s.transcript.is_empty() {
                     return;
                 }
@@ -2293,7 +2313,7 @@ mod tests {
         let wait_idle = |h: Arc<SessionDriverHandle>| async move {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
             loop {
-                let s = h.snapshot_rx.borrow().clone();
+                let s = h.snapshot_rx.borrow().snapshot.clone();
                 if !s.busy && !s.transcript.is_empty() {
                     return;
                 }
@@ -2806,7 +2826,7 @@ mod tests {
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let pending = loop {
-            let s = handle.snapshot_rx.borrow().clone();
+            let s = handle.snapshot_rx.borrow().snapshot.clone();
             if s.permission_prompt.is_some() {
                 break s;
             }
@@ -2899,7 +2919,12 @@ mod tests {
             "a stale seq can never approve"
         );
         assert!(
-            handle.snapshot_rx.borrow().permission_prompt.is_some(),
+            handle
+                .snapshot_rx
+                .borrow()
+                .snapshot
+                .permission_prompt
+                .is_some(),
             "the prompt survives a stale answer"
         );
         // (4) Attach a "client" BEFORE approving so the coming turn-done edge is debounced.
@@ -2922,7 +2947,7 @@ mod tests {
         // wall-clock here includes heavy scheduler contention, not just the (instant) mock turn.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
-            let s = handle.snapshot_rx.borrow().clone();
+            let s = handle.snapshot_rx.borrow().snapshot.clone();
             if !s.busy && s.permission_prompt.is_none() && !s.transcript.is_empty() {
                 break;
             }
@@ -2943,6 +2968,7 @@ mod tests {
             !handle
                 .snapshot_rx
                 .borrow()
+                .snapshot
                 .transcript
                 .iter()
                 .any(|l| l.contains("autofix")),
@@ -3169,7 +3195,7 @@ mod tests {
         // The driver noted both attaches (📎 text mention + 🖼 vision input).
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
-            let s = handle.snapshot_rx.borrow().clone();
+            let s = handle.snapshot_rx.borrow().snapshot.clone();
             let t = s.transcript.join("\n");
             if t.contains("📎 attached") && t.contains("🖼 image attached") {
                 break;
@@ -3192,7 +3218,7 @@ mod tests {
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            let s = handle.snapshot_rx.borrow().clone();
+            let s = handle.snapshot_rx.borrow().snapshot.clone();
             let t = s.transcript.join("\n");
             if !s.busy && t.contains("📎 included") {
                 break;
@@ -3258,7 +3284,7 @@ mod tests {
         // The proposal lands in the snapshot together with its approval question.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let pending = loop {
-            let s = handle.snapshot_rx.borrow().clone();
+            let s = handle.snapshot_rx.borrow().snapshot.clone();
             if s.plan.is_some() && s.question.is_some() {
                 break s;
             }
@@ -3288,7 +3314,7 @@ mod tests {
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            let s = handle.snapshot_rx.borrow().clone();
+            let s = handle.snapshot_rx.borrow().snapshot.clone();
             let t = s.transcript.join("\n");
             if !s.busy && t.contains("plan approved — building in Auto-edit") {
                 break;
