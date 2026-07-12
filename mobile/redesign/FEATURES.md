@@ -71,7 +71,9 @@ Vs the daemon web PWA and the daemon itself — these must all be closed by the 
    page closed; the Expo app has nothing. New app: full Web Push on the web target
    (`public/sw.js` + `lib/push/push.web.ts`); native remains a flagged backend gap (§3).
 2. **Voice input** — PWA has Web Speech transcription into the prompt box; Expo app has none.
-   New app: web target parity via `voice.web.ts`; native mic deferred (flagged, §3).
+   New app: full parity + native mic, both platforms transcribing through the daemon's local
+   whisper endpoint (`POST /api/voice/transcribe`) instead of the browser-only Web Speech API —
+   `lib/voice/voice.ts` (native, expo-audio) / `voice.web.ts` (web + Tauri desktop, WebAudio).
 3. **Paste-image upload** — PWA uploads images pasted into the prompt; missing natively-shaped
    composer. New app: web composer paste handler.
 4. **Protocol-mismatch banner** — PWA warns when `snapshot.protocol != 7`; Expo app ignores it.
@@ -153,7 +155,7 @@ rail replaces tabs and ⌘K is the primary mover.
 | **Agent tree/board**: live subagent cards with cost roll-up | `Snapshot.subagents` | Parity+ | P1 |
 | **Keyboard-first desktop**: ⌘K palette, ⌘1..4 tabs, ⌘N new session, Esc/arrow overlay passthrough, ⌘Enter send | `key` input + local nav | Enhancement | P2 |
 | **Cost analytics view** (Settings → Usage): total/per-project spend aggregated from live + past sessions | `cost_usd` on SessionRow/PastSessionRow | Enhancement | P2 |
-| **Voice input**: web Speech API now; native mic flagged | PWA parity | Parity(web) | P2 |
+| **Voice input**: native + web mic, local-whisper transcription (`POST /api/voice/transcribe`) via animated recording pill, never auto-sends | PWA parity+ | Parity+ | done |
 | **Desktop later** (flagged, not v1): tray fleet glance, local-daemon auto-pair bridge | ARCHITECTURE §6.4 | Enhancement | later |
 
 Non-goals (explicitly out): `forge api` OpenAI-compat server (separate product), any Rust/daemon

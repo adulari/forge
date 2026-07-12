@@ -14,6 +14,7 @@
     "@tauri-apps/plugin-opener": "^2.5.4",
     "@tauri-apps/plugin-websocket": "^2.4.2",
     "expo": "^57",
+    "expo-audio": "~57.0.0",
     "expo-camera": "~57.0.0",
     "expo-clipboard": "~57.0.0",
     "expo-constants": "~57.0.3",

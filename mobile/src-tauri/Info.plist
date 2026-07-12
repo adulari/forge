@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the bundled app's Info.plist (bundle.macOS.infoPlist in tauri.conf.json).
+     getUserMedia() in voice.web.ts needs this to record from the mic in the packaged desktop
+     app — macOS blocks mic access outright without a usage description, no runtime prompt at
+     all. Mirrors app.config.ts's NSMicrophoneUsageDescription for the native (Expo) targets. -->
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Forge lets you dictate messages by voice instead of typing.</string>
+</dict>
+</plist>

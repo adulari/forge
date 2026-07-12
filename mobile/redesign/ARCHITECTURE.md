@@ -89,7 +89,7 @@ anything else platform-forked in a PR is a defect. Mechanisms: Metro extensions
 | Web push | `lib/push/push.web.ts` / `push.ts` (native no-op returning `unsupported`) | Web Push is browser-only; APNs is a flagged backend gap (FEATURES.md §3). |
 | QR pairing | `components/pairing/QRScan.native.tsx` / `.web.tsx` (paste-only + "scan on your phone" hint) | expo-camera scanning is native; web pairing is paste/link. |
 | Haptics | `lib/haptics.ts` (Platform-gated no-op on web) | No web API. |
-| Voice input | `lib/voice/voice.web.ts` (Web Speech API) / `voice.ts` (no-op v1; native STT is a flagged follow-up) | Engine availability differs. |
+| Voice input | `lib/voice/voice.ts` (native: expo-audio m4a/aac) / `.web.ts` (web + Tauri desktop: getUserMedia + WebAudio, client-side 16kHz WAV encode) — both POST to the daemon's local-whisper `/api/voice/transcribe` | Recording API differs per platform; server-side whisper (not Web Speech API) needs a real audio file upload from both. |
 | Keyboard shortcuts / hover | `lib/shortcuts/useHotkeys.web.ts` / no-op native; hover styles inside ds/ primitives via `Platform.OS === "web"` | Pointer/keyboard idioms only exist on web/desktop. |
 | Sheet gesture vs CSS | internal to `ds/Sheet.tsx` (one file, Platform branches) | Gesture-driven on native, transform-transition on web. |
 | Blur/app-state reconnect | already inside `lib/ws.ts` (AppState) — web maps to visibilitychange in a small branch | Lifecycle APIs differ. |

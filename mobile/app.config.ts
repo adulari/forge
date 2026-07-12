@@ -32,6 +32,8 @@ const config: ExpoConfig = {
         "Forge lets you attach photos from your library to a session.",
       NSDocumentsFolderUsageDescription:
         "Forge lets you attach documents to a session.",
+      NSMicrophoneUsageDescription:
+        "Forge lets you dictate messages by voice instead of typing.",
     },
     // SDK 57 privacy manifest mechanism: a `PrivacyInfo.xcprivacy` file at the project
     // root, wired in via `ios.privacyManifests` (expo-build-properties-free path — expo
@@ -86,6 +88,19 @@ const config: ExpoConfig = {
       {
         photosPermission:
           "Forge lets you attach photos from your library to a session.",
+      },
+    ],
+    [
+      "expo-audio",
+      {
+        microphonePermission:
+          "Forge lets you dictate messages by voice instead of typing.",
+        // Voice input is a short one-shot recording the user stops explicitly — it never
+        // continues once the app backgrounds, so the plugin's default background-audio
+        // entitlements (UIBackgroundModes + an Android foreground media-playback service)
+        // would only add unused permission surface.
+        enableBackgroundRecording: false,
+        enableBackgroundPlayback: false,
       },
     ],
     [
