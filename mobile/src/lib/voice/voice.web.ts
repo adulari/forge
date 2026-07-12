@@ -146,4 +146,8 @@ export const voice: VoiceRecorder = {
   async cancel() {
     cleanup();
   },
+
+  // No native recorder handle to release here — `stop()`/`cancel()` already tear down the
+  // WebAudio graph. Exists only to satisfy the shared `VoiceRecorder` interface.
+  dispose() {},
 };

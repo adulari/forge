@@ -99,6 +99,7 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
   const handleCancel = () => {
     haptics.deny();
     void voice.cancel();
+    voice.dispose();
     close();
   };
 
@@ -123,6 +124,10 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
       setPhase("error");
       setErrorMsg(err instanceof Error ? err.message : "transcription failed");
       haptics.mergeConflict();
+    } finally {
+      // The recorder must stay alive (uri readable) until the upload above has settled —
+      // only release it now, win or lose.
+      voice.dispose();
     }
   };
 
