@@ -1,6 +1,6 @@
 "use strict";
 const BASE = "__BASE__";
-const PROTO = 7;
+const PROTO = 8;
 const $ = (id) => document.getElementById(id);
 let ws = null, dead = false, notif = false, curSeq = 0, retries = 0, curOverlay = null;
 // The /copy payload stashed outside the DOM (it can be large / contain anything).
@@ -327,6 +327,14 @@ function render(s) {
     const lim = s.context_limit ? "/" + fmt(s.context_limit) : "";
     $("ctx").textContent = "◷ " + fmt(s.context_tokens) + lim;
   } else { $("ctx").textContent = ""; }
+  // v8: an AI-predicted next prompt rides as the composer's placeholder — no Tab-accept on the
+  // wire, just a hint; the operator still types (or ignores) it like any placeholder.
+  const promptEl = $("prompt");
+  if (!promptEl.value) {
+    promptEl.placeholder = s.suggested_prompt
+      ? "suggested: " + s.suggested_prompt
+      : "type a task or /command…";
+  }
 
   renderTranscript(s);
   renderTasks(s);

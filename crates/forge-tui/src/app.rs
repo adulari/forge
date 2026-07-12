@@ -429,6 +429,11 @@ pub struct App {
     pub input: String,
     /// Byte offset of the text cursor within `input`. Always on a char boundary.
     pub input_cursor: usize,
+    /// An AI-predicted next prompt (`SuggestionReady`), shown as dim ghost text when `input` is
+    /// empty and idle; Tab moves it into `input` (editable, never auto-sent). Cleared at the start
+    /// of every new turn (`on_turn_start`) and on session switch (`clear_transcript`) so a stale
+    /// suggestion from a prior turn/session can never linger.
+    pub suggested_prompt: Option<String>,
     /// The current *partial* (un-flushed, newline-free) line of the streaming reply.
     pub streaming: String,
     /// Accumulated reasoning/thinking text, flushed as a dim block before the answer.
@@ -735,6 +740,7 @@ impl App {
             question_allow_other,
             diff: self.remote_diff(),
             plan: self.plan.clone(),
+            suggested_prompt: self.suggested_prompt.clone(),
         }
     }
 
@@ -1232,6 +1238,8 @@ pub struct RemoteSnapshot {
     pub diff: Option<DiffSnapshot>,
     /// The most recent plan proposal (v7), for the remote plan-approval card.
     pub plan: Option<forge_types::PlanProposal>,
+    /// The predicted next prompt (v8), if any — the page shows it as the composer's placeholder.
+    pub suggested_prompt: Option<String>,
 }
 
 /// One subagent's live row in the TUI.
@@ -2003,6 +2011,11 @@ impl App {
                 ]));
                 self.flush.push(TextLine::default());
             }
+            PresenterEvent::SuggestionReady { text } => {
+                // Silent — no scrollback line. It only ever shows as ghost text in the (by now
+                // empty, idle) input box; see `render_input`.
+                self.suggested_prompt = Some(text);
+            }
             PresenterEvent::Done { stop_reason, .. } => {
                 self.model_search = None;
                 self.done = true;
@@ -2187,6 +2200,18 @@ impl App {
         }
     }
 
+    /// Pure Tab-accept helper for the next-prompt ghost text (see `render_input`): when `input`
+    /// is empty and a suggestion is pending, takes it (clearing `suggested_prompt`) for the
+    /// caller to move into `input`. A no-op (`None`, `suggested_prompt` left untouched) when
+    /// `input` already has text — a stray Tab mid-sentence must never clobber what's being typed.
+    pub fn take_suggestion_for_tab(&mut self) -> Option<String> {
+        if self.input.is_empty() {
+            self.suggested_prompt.take()
+        } else {
+            None
+        }
+    }
+
     /// Called at the start of each new user turn. Collapses the "done" subagent batch that the
     /// panel was holding so it doesn't bleed into the new turn's live region.
     pub fn on_turn_start(&mut self) {
@@ -2210,6 +2235,9 @@ impl App {
         self.turn_base_in = self.session_in;
         self.turn_base_out = self.session_out;
         self.turn_ran = true;
+        // A suggestion predicted from the PREVIOUS turn's response is stale the moment a new
+        // turn starts — never let it linger as ghost text for an unrelated prompt.
+        self.suggested_prompt = None;
     }
 
     /// Cheap per-frame metadata for the sticky activity panel (no transcript cloning). Order:
@@ -2924,6 +2952,7 @@ impl App {
         self.activity_idx = 0;
         self.transcript_scroll = 0;
         self.transcript_follow = true;
+        self.suggested_prompt = None; // stale once the session it was predicted for is gone
     }
 
     /// Wrapped-row metrics for the full-screen transcript: total rows at the given width, and the
@@ -4560,14 +4589,29 @@ fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         text_lines.push(TextLine::from(spans));
     }
 
-    // Ghost placeholder on an empty, idle prompt — advertises the discoverability cues a new user
-    // would otherwise never find (`/` commands, `@` files, `?` keybind help).
+    // Ghost placeholder on an empty, idle prompt. When the last turn predicted a likely next
+    // prompt, show THAT (dim, like Claude Code) with a "tab to accept" hint instead of the
+    // generic discoverability cues — it never affects sizing/cursor math, purely an extra span
+    // appended after the (empty) first line.
     if app.input.is_empty() && !app.busy && app.prompt.is_none() {
         if let Some(first) = text_lines.first_mut() {
-            first.spans.push(Span::styled(
-                "Message…   / commands  ·  @ files  ·  ? keys",
-                Style::default().fg(DIM),
-            ));
+            match &app.suggested_prompt {
+                Some(suggestion) => {
+                    first
+                        .spans
+                        .push(Span::styled(suggestion.clone(), Style::default().fg(DIM)));
+                    first.spans.push(Span::styled(
+                        "  ⇥ tab",
+                        Style::default().fg(DIM).add_modifier(Modifier::DIM),
+                    ));
+                }
+                None => {
+                    first.spans.push(Span::styled(
+                        "Message…   / commands  ·  @ files  ·  ? keys",
+                        Style::default().fg(DIM),
+                    ));
+                }
+            }
         }
     }
 
@@ -6246,6 +6290,71 @@ mod tests {
         assert_eq!(model_short(Some("opus")), "opus");
         assert_eq!(model_short(Some("")), "…");
         assert_eq!(model_short(None), "…");
+    }
+
+    // ── Next-prompt suggestion: SuggestionReady + Tab-accept + turn/session clearing ──────────
+    #[test]
+    fn suggestion_ready_sets_the_field() {
+        let mut app = App::default();
+        assert_eq!(app.suggested_prompt, None);
+        app.apply(PresenterEvent::SuggestionReady {
+            text: "add a test for this".into(),
+        });
+        assert_eq!(app.suggested_prompt.as_deref(), Some("add a test for this"));
+    }
+
+    #[test]
+    fn suggestion_is_cleared_on_new_turn() {
+        let mut app = App {
+            suggested_prompt: Some("stale from the last turn".into()),
+            ..Default::default()
+        };
+        app.on_turn_start();
+        assert_eq!(app.suggested_prompt, None);
+    }
+
+    #[test]
+    fn suggestion_is_cleared_on_session_switch() {
+        let mut app = App {
+            suggested_prompt: Some("stale from the old session".into()),
+            ..Default::default()
+        };
+        app.clear_transcript();
+        assert_eq!(app.suggested_prompt, None);
+    }
+
+    #[test]
+    fn take_suggestion_for_tab_fills_empty_input_and_clears_the_suggestion() {
+        let mut app = App {
+            suggested_prompt: Some("commit these changes".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            app.take_suggestion_for_tab().as_deref(),
+            Some("commit these changes")
+        );
+        assert_eq!(app.suggested_prompt, None, "taken, so consumed");
+    }
+
+    #[test]
+    fn take_suggestion_for_tab_is_a_no_op_when_input_is_not_empty() {
+        let mut app = App {
+            input: "already typing".into(),
+            suggested_prompt: Some("commit these changes".into()),
+            ..Default::default()
+        };
+        assert_eq!(app.take_suggestion_for_tab(), None);
+        // A stray Tab mid-sentence must never clobber the pending suggestion either.
+        assert_eq!(
+            app.suggested_prompt.as_deref(),
+            Some("commit these changes")
+        );
+    }
+
+    #[test]
+    fn take_suggestion_for_tab_is_a_no_op_when_there_is_no_suggestion() {
+        let mut app = App::default();
+        assert_eq!(app.take_suggestion_for_tab(), None);
     }
 
     #[test]
