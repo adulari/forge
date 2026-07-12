@@ -17,11 +17,20 @@ import { IconButton } from "../components/ds/IconButton";
 import { Input } from "../components/ds/Input";
 import { Screen } from "../components/ds/Screen";
 import { SectionHeader } from "../components/ds/SectionHeader";
+import { StatusDot } from "../components/ds/StatusDot";
 import { useToast } from "../components/ds/ToastHost";
 import { QRScan } from "../components/pairing/QRScan";
-import { haptics } from "../lib/haptics";
 import { type ConnectTestState, parseConnectUrl, useAuth } from "../lib/auth";
+import {
+  detectForgeServe,
+  forgeBinaryAvailable,
+  pollForForgeServe,
+  startForgeServe,
+  type DetectedServeState,
+} from "../lib/desktopServe";
+import { haptics } from "../lib/haptics";
 import { goBackOr } from "../lib/nav";
+import { isTauri } from "../lib/platform";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { type } from "../theme/typography";
@@ -44,9 +53,26 @@ function decodeParam(raw: string): string {
   }
 }
 
+// Desktop auto-detect (Tauri only, first-run only — ARCHITECTURE.md §6.4). "idle"/"detecting"/
+// "unavailable" render nothing so the screen never flashes a card that's about to disappear;
+// everything else augments the manual/QR flow below, never replaces it.
+type DesktopAutoState =
+  | { kind: "idle" }
+  | { kind: "detecting" }
+  | { kind: "found"; state: DetectedServeState }
+  | { kind: "found-lan"; state: DetectedServeState }
+  | { kind: "offer-start" }
+  | { kind: "starting" }
+  | { kind: "start-failed"; message: string }
+  | { kind: "unavailable" };
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export default function ConnectScreen() {
   const tokens = useTokens();
-  const { addServer, testConnection } = useAuth();
+  const { addServer, testConnection, servers } = useAuth();
   const toast = useToast();
   const params = useLocalSearchParams<{ url?: string }>();
   // Tracks the last `?url=` value we already applied (not just "did we ever apply one") so a
@@ -108,6 +134,62 @@ export default function ConnectScreen() {
     [addServer, testConnection, canClose, toast],
   );
 
+  // First-run only (no servers stored yet) and Tauri only — detect a locally running
+  // `forge serve` (or offer to start one) instead of making the user paste a URL.
+  const [desktopState, setDesktopState] = useState<DesktopAutoState>({ kind: "idle" });
+  const noServersYet = servers.length === 0;
+
+  useEffect(() => {
+    if (!isTauri || !noServersYet) return;
+    let cancelled = false;
+    setDesktopState({ kind: "detecting" });
+    void (async () => {
+      const found = await detectForgeServe();
+      if (cancelled) return;
+      if (found) {
+        setDesktopState(
+          found.exposure === "lan" ? { kind: "found-lan", state: found } : { kind: "found", state: found },
+        );
+        return;
+      }
+      const available = await forgeBinaryAvailable();
+      if (cancelled) return;
+      setDesktopState(available ? { kind: "offer-start" } : { kind: "unavailable" });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [noServersYet]);
+
+  const onFoundConnectPress = useCallback(() => {
+    if (desktopState.kind !== "found") return;
+    // Hand off to the same test/add/navigate flow the manual field and QR scan use — the card's
+    // own job ends here, the status banner below takes over.
+    setDesktopState({ kind: "idle" });
+    void attemptConnect(desktopState.state.base_url);
+  }, [desktopState, attemptConnect]);
+
+  const onStartServerPress = useCallback(async () => {
+    setDesktopState({ kind: "starting" });
+    try {
+      await startForgeServe();
+    } catch (err) {
+      setDesktopState({ kind: "start-failed", message: errorMessage(err) });
+      return;
+    }
+    const found = await pollForForgeServe();
+    if (!found) {
+      setDesktopState({
+        kind: "start-failed",
+        message:
+          "forge serve didn't come up within 15s — check the terminal it prints to, or paste the connect url manually below.",
+      });
+      return;
+    }
+    setDesktopState({ kind: "idle" });
+    void attemptConnect(found.base_url);
+  }, [attemptConnect]);
+
   const onScanned = useCallback(
     (data: string) => {
       setUrl(data);
@@ -140,6 +222,61 @@ export default function ConnectScreen() {
           agent at once.
         </Text>
       </View>
+
+      {desktopState.kind === "found" ? (
+        <Card variant="feature" style={styles.gapCard}>
+          <SectionHeader>This machine</SectionHeader>
+          <Text style={[type.sub, { color: tokens.ink2 }]}>
+            found forge running on this machine, port {desktopState.state.port}.
+          </Text>
+          <Button label="Connect" onPress={onFoundConnectPress} loading={busy} disabled={busy} fullWidth />
+        </Card>
+      ) : null}
+
+      {desktopState.kind === "found-lan" ? (
+        <Card variant="feature" style={styles.gapCard}>
+          <SectionHeader>This machine</SectionHeader>
+          <Text style={[type.sub, { color: tokens.ink2 }]}>
+            forge is running on this machine over <Text style={{ fontWeight: "600" }}>--lan</Text>, but its
+            self-signed certificate isn&apos;t trusted here — restart it with{" "}
+            <Text style={{ fontWeight: "600" }}>forge serve --local</Text> or{" "}
+            <Text style={{ fontWeight: "600" }}>forge serve --anywhere</Text> to connect from this app.
+          </Text>
+        </Card>
+      ) : null}
+
+      {desktopState.kind === "offer-start" ? (
+        <Card variant="feature" style={styles.gapCard}>
+          <SectionHeader>This machine</SectionHeader>
+          <Text style={[type.sub, { color: tokens.ink2 }]}>
+            forge is installed on this machine — start a local server?
+          </Text>
+          <Button label="Start server" onPress={() => void onStartServerPress()} fullWidth />
+        </Card>
+      ) : null}
+
+      {desktopState.kind === "starting" ? (
+        <Card variant="feature" style={styles.gapCard}>
+          <SectionHeader>This machine</SectionHeader>
+          <View style={styles.startingRow}>
+            <StatusDot state="busy" />
+            <Text style={[type.sub, { color: tokens.ink2 }]}>starting your local forge server…</Text>
+          </View>
+        </Card>
+      ) : null}
+
+      {desktopState.kind === "start-failed" ? (
+        <Card variant="feature" style={styles.gapCard}>
+          <SectionHeader>This machine</SectionHeader>
+          <Text style={[type.sub, { color: tokens.danger }]}>{desktopState.message}</Text>
+          <Button
+            label="Try again"
+            variant="secondary"
+            onPress={() => void onStartServerPress()}
+            fullWidth
+          />
+        </Card>
+      ) : null}
 
       <Card style={styles.gapCard}>
         <SectionHeader>How it works</SectionHeader>
@@ -209,5 +346,6 @@ const styles = StyleSheet.create({
   heroTitle: { letterSpacing: -0.4 },
   gapCard: { gap: space.space12 },
   howItWorksBody: { gap: space.space8, paddingBottom: space.space4 },
+  startingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   successText: { textAlign: "center" },
 });

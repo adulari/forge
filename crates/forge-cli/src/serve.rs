@@ -55,6 +55,9 @@ const ARCHIVE_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 /// The persisted daemon token's file name inside the forge config dir.
 const TOKEN_FILE: &str = "serve-token";
 
+/// The discovery state file's name inside the forge config dir — see [`ServeState`].
+const STATE_FILE: &str = "serve-state.json";
+
 /// Read (or mint) the persisted daemon token. Unlike `/remote`'s per-session ephemeral token,
 /// this one is generated ONCE and reused forever so the PWA origin stays stable; `rotate`
 /// regenerates it (invalidating every installed PWA/link — deliberate, for revocation).
@@ -91,6 +94,65 @@ pub(crate) fn daemon_token_at(path: &std::path::Path, rotate: bool) -> Result<St
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(token)
+}
+
+/// Snapshot of a live `forge serve` daemon, written to `<config_dir>/serve-state.json` right
+/// after a successful bind so a client that can't run a shell/fs plugin (namely the Tauri
+/// desktop app — no such plugin is granted, see `mobile/src-tauri/capabilities/default.json`)
+/// can still auto-detect a running daemon and offer to connect instead of asking for a pasted
+/// URL. Advisory only: a reader MUST check `pid` is still alive before trusting the file — it
+/// is removed on a graceful Ctrl-C shutdown, but a crash or `kill -9` leaves it stale on disk.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
+pub(crate) struct ServeState {
+    pub(crate) pid: u32,
+    pub(crate) port: u16,
+    /// `"local"` (loopback, plain HTTP), `"lan"` (0.0.0.0, self-signed HTTPS — a WebView-based
+    /// client can't trust this cert, so auto-connect must not attempt it), or `"anywhere"`
+    /// (loopback + public tunnel, real TLS).
+    pub(crate) exposure: String,
+    /// The full connect URL — the same string `forge serve` prints, ready to hand to a client.
+    pub(crate) base_url: String,
+    pub(crate) token: String,
+    pub(crate) started_at: u64,
+}
+
+impl ServeState {
+    /// Pure serialization — unit-testable without touching a filesystem.
+    fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).expect("ServeState fields are all serializable")
+    }
+}
+
+/// [`write_state`] against an explicit path (unit-testable without touching the real config).
+fn write_state_at(path: &std::path::Path, state: &ServeState) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::write(path, state.to_json()).with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Write [`ServeState`] to `<config_dir>/serve-state.json`. Best-effort from the caller's
+/// perspective — a failure here must never take the daemon down, it just means desktop
+/// auto-detect won't find this instance.
+pub(crate) fn write_state(state: &ServeState) -> Result<()> {
+    let dir = forge_config::config_dir().context("no config directory on this platform")?;
+    write_state_at(&dir.join(STATE_FILE), state)
+}
+
+/// Remove the state file on graceful shutdown, so a dead daemon never LOOKS live to a reader
+/// that only checks file existence. The pid-liveness check on the reader side (Tauri's
+/// `detect_forge_serve`) is the belt to this suspenders — this just avoids leaving stale
+/// advisory data behind after a clean exit.
+fn remove_state() {
+    if let Some(dir) = forge_config::config_dir() {
+        let _ = std::fs::remove_file(dir.join(STATE_FILE));
+    }
 }
 
 /// The daemon's session registry: id → running driver handle. Mirrors `mcp_serve`'s
@@ -316,6 +378,33 @@ pub(crate) async fn serve_cmd(
         format!("https://{host}:{}/{token}", addr.port())
     };
 
+    // Discovery state for clients that can't run a shell/fs plugin (the Tauri desktop app):
+    // `url` above is already exactly `base_url` for every exposure mode (local/lan/anywhere all
+    // build it as `scheme://host:port/{token}`), so it's reused as-is here.
+    let exposure = if anywhere {
+        "anywhere"
+    } else if local {
+        "local"
+    } else {
+        "lan"
+    };
+    let started_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Err(e) = write_state(&ServeState {
+        pid: std::process::id(),
+        port: addr.port(),
+        exposure: exposure.to_string(),
+        base_url: url.clone(),
+        token: token.clone(),
+        started_at,
+    }) {
+        eprintln!(
+            "⚠ could not write serve-state.json — desktop auto-detect won't find this daemon: {e}"
+        );
+    }
+
     println!("⚒ forge serve — multi-session daemon");
     println!("  listening on {addr} (stable port; sessions survive disconnects)");
     println!("  connect: {url}");
@@ -355,6 +444,7 @@ pub(crate) async fn serve_cmd(
             }
             // Bounded: a wedged driver must not hold the daemon's exit hostage.
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            remove_state();
         }
     }
     drop(tunnel_child); // kill_on_drop tears the tunnel down with the daemon
@@ -1702,6 +1792,51 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "token file is owner-only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn serve_state_serializes_expected_shape() {
+        let state = ServeState {
+            pid: 12345,
+            port: 7420,
+            exposure: "local".to_string(),
+            base_url: "http://127.0.0.1:7420/abc123".to_string(),
+            token: "abc123".to_string(),
+            started_at: 1_700_000_000,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&state.to_json()).unwrap();
+        assert_eq!(parsed["pid"], 12345);
+        assert_eq!(parsed["port"], 7420);
+        assert_eq!(parsed["exposure"], "local");
+        assert_eq!(parsed["base_url"], "http://127.0.0.1:7420/abc123");
+        assert_eq!(parsed["token"], "abc123");
+        assert_eq!(parsed["started_at"], 1_700_000_000);
+    }
+
+    #[test]
+    fn serve_state_writes_0600_and_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("forge-serve-state-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("serve-state.json");
+        let state = ServeState {
+            pid: std::process::id(),
+            port: 7452,
+            exposure: "anywhere".to_string(),
+            base_url: "https://example.trycloudflare.com/deadbeef".to_string(),
+            token: "deadbeef".to_string(),
+            started_at: 1_700_000_001,
+        };
+        write_state_at(&path, &state).unwrap();
+        let read_back: ServeState =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(read_back, state);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "state file is owner-only");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
