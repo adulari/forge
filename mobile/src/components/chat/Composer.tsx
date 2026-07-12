@@ -16,6 +16,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
 import { clearDraft, getDraft, setDraft } from "../../lib/drafts";
+import { isMacOS } from "../../lib/platform";
 import { useUpload } from "../../lib/queries";
 import { useSessionCtx } from "../../lib/sessionContext";
 import { voice } from "../../lib/voice/voice";
@@ -248,6 +249,36 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  // Web/desktop: Ctrl/Cmd+Shift+V starts voice recording from anywhere in the window, not just
+  // when the composer input is focused — mirrors the mic button's own onPress. Document-level
+  // (not the input node) so it fires regardless of focus; the stop side of the toggle lives in
+  // VoiceRecordingPill, which owns the recording state machine once mounted, so this listener
+  // only ever flips idle -> recording and the two can't race each other.
+  useEffect(() => {
+    if (Platform.OS !== "web" || !voice.isSupported()) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.repeat || recording) return;
+      if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || e.key.toLowerCase() !== "v") return;
+      if (attachments.some((a) => a.state === "uploading")) return; // mirrors the mic button's own disabled state
+      const target = e.target;
+      // A text input/textarea elsewhere on the page keeps typing priority — except the
+      // composer's own input, which is the natural place to invoke this shortcut from.
+      if (
+        target instanceof HTMLElement &&
+        target !== (inputRef.current as unknown as HTMLElement | null) &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      ) {
+        return;
+      }
+      e.preventDefault();
+      setRecording(true);
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [recording, attachments]);
+
   return (
     <View
       style={[
@@ -343,7 +374,11 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
               icon={<Mic size={20} strokeWidth={1.75} color={tokens.ink2} />}
               onPress={() => setRecording(true)}
               disabled={attachments.some((a) => a.state === "uploading")}
-              accessibilityLabel="record voice message"
+              accessibilityLabel={
+                Platform.OS === "web"
+                  ? `record voice message (${isMacOS ? "⌘" : "Ctrl"}+Shift+V)`
+                  : "record voice message"
+              }
               testID="composer-mic"
             />
           ) : null}
