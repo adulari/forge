@@ -37,6 +37,10 @@ pub(crate) struct DriverSpec {
     pub model: Option<String>,
     /// Resume an existing session id instead of starting fresh.
     pub resume: Option<String>,
+    /// Start (or switch a resumed session into) this temper/permission-mode instead of whatever
+    /// it already has — the API equivalent of picking a row in the `/mode` picker
+    /// (`forge_tui::PickerKind::Tempers`). `None` leaves the temper untouched.
+    pub temper: Option<forge_types::PermissionMode>,
     /// The daemon's Web Push sender (`None` = push disabled). The driver fires it on
     /// notification-worthy snapshot transitions ([`crate::push::detect_trigger`]) — but only
     /// while zero WS clients are attached ([`crate::push::should_push`]).
@@ -115,6 +119,15 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     }
 
     let mut session = session;
+    // API-requested starting temper (`POST /api/sessions {"temper": ...}`) — reuses the exact
+    // setter `picker_accept` calls for `PickerKind::Tempers` (including the best-effort
+    // persist-as-next-default), so a session created this way starts exactly where picking that
+    // row in the `/mode` picker would have left it. Full is included: picker-level availability
+    // is the bar, and the request-level parse already rejected anything else before we got here.
+    if let Some(mode) = spec.temper {
+        session.set_temper(mode);
+        let _ = forge_config::write_permission_mode(mode);
+    }
     // Root tool calls in the session's own directory when it differs from the process cwd —
     // without this every relative path/shell command would act on the DAEMON's cwd.
     let daemon_cwd = std::env::current_dir()

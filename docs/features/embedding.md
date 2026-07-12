@@ -52,7 +52,8 @@ permission); a remote embedder must be handed the token out of band.
   "worktree": false,                  // true = run in an isolated git worktree branched from HEAD
   "title":    "my embed session",     // optional display title
   "model":    "anthropic/claude-...", // optional model pin
-  "resume":   "<session-id>"          // optional: reattach a persisted session instead of new
+  "resume":   "<session-id>",         // optional: reattach a persisted session instead of new
+  "temper":   "Auto-edit"             // optional starting temper (see below); default: unset
 }
 ```
 
@@ -64,6 +65,15 @@ Response:
 
 Errors are JSON `{ "error": "…" }` with an appropriate status (e.g. `400` for a non-directory
 `cwd`). Use the returned `id` on the WebSocket and history routes.
+
+`temper` starts the session directly in a given permission mode instead of a follow-up
+SHIFT+TAB/`/mode` round trip after connecting. It accepts the same (case-insensitive) names the
+`/mode` picker shows — `Read-only`, `Ask`, `Auto-edit`, `Full` — via
+`forge_types::PermissionMode::from_label`; an unrecognized value is a `400`, never a silent
+fallback to the default temper. **`Full` (Bypass) auto-approves every tool call, including
+shell** — the daemon applies it exactly as the `/mode` picker would (picker-level availability is
+the bar: no extra confirmation layer), so treat a `temper: "Full"` request with the same care as
+a human picking that row.
 
 To **resume** a session from a previous daemon run, first list resumable sessions with
 `GET /api/sessions/past` (§7), then `POST /api/sessions {"resume": id}`; the session's stored cwd
