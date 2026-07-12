@@ -61,7 +61,7 @@ export function StatusStrip(props: StatusStripProps) {
 }
 
 const styles = StyleSheet.create({
-  row: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 44, paddingVertical: space.space8 },
+  row: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 52, paddingVertical: space.space8 },
   tierModel: { flex: 1, flexShrink: 1, minWidth: 0 },
   gauge: { width: 96, flexShrink: 0 },
 });

@@ -75,7 +75,8 @@ export const webInputTextStyle: TextStyle = Platform.OS === "web" ? { fontSize: 
 
 /** `$0.0421` (4dp) under $1, `$12.48` (2dp) at/above $1. */
 export function formatCost(usd: number): string {
-  return Math.abs(usd) < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+  const magnitude = Math.abs(usd);
+  return magnitude < 0.01 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
 }
 
 function formatTokenCount(n: number): string {
