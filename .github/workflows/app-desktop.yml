@@ -1,14 +1,13 @@
 name: app-desktop
 
-# 3-OS Tauri v2 desktop build of the unified app (ARCHITECTURE.md §6, §8 / BUILD_ORDER.md T6.3).
-# `npm run tauri:build` drives everything, including the web export via `beforeBuildCommand`
-# in mobile/src-tauri/tauri.conf.json. Unsigned in v1 (no notarization/codesign secrets) — the
-# raw per-OS bundles are published as build artifacts only, never auto-released.
+# 3-OS Tauri v2 desktop build of the unified app.
+# Bundles are uploaded to the tagged GitHub Release as well as retained as workflow artifacts.
 
 on:
   push:
     tags:
       - "app-v*"
+      - "v*"
   workflow_dispatch:
 
 concurrency:
@@ -64,7 +63,12 @@ jobs:
 
       - name: Build desktop bundle
         working-directory: mobile
-        run: npm run tauri:build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo 'desktop updater signing enabled'; else echo 'LOUD: TAURI signing secrets unset; building unsigned desktop bundles'; fi
+          npm run tauri:build
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v7
@@ -72,3 +76,16 @@ jobs:
           name: forge-desktop-${{ matrix.os }}
           path: mobile/src-tauri/target/release/bundle/**
           if-no-files-found: error
+
+      - name: Publish tagged desktop bundles
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            mobile/src-tauri/target/release/bundle/**/*.dmg
+            mobile/src-tauri/target/release/bundle/**/*.AppImage
+            mobile/src-tauri/target/release/bundle/**/*.deb
+            mobile/src-tauri/target/release/bundle/**/*.exe
+            mobile/src-tauri/target/release/bundle/**/*.sig
+            mobile/src-tauri/target/release/bundle/latest.json
+          fail_on_unmatched_files: false
