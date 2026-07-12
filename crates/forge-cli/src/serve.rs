@@ -15,7 +15,9 @@
 //! - `GET  /api/sessions`             running sessions (id, title, cwd, busy, cost, activity)
 //! - `GET  /api/sessions/past?limit=&before=`  persisted sessions NOT currently running — the
 //!   resurrection browser's data; `resume` one with `POST /api/sessions {resume:<id>}`
-//! - `POST /api/sessions`             create ({cwd, worktree, title?, model?, resume?})
+//! - `POST /api/sessions`             create ({cwd, worktree, title?, model?, resume?, temper?})
+//!   — `temper` starts the session in a given permission mode (case-insensitive: `Read-only`,
+//!   `Ask`, `Auto-edit`, `Full`; unknown values are a `400`, never a silent default)
 //! - `POST /api/sessions/{id}/archive` stop + hide a session (history kept; worktree kept)
 //! - `POST /api/sessions/{id}/merge`   stop, snapshot the worktree, and merge its branch back
 //!   into the base repo (3-way patch; conflicts are reported, never auto-resolved)
@@ -259,6 +261,12 @@ struct CreateSessionReq {
     model: Option<String>,
     /// Resume an existing session id instead of starting fresh.
     resume: Option<String>,
+    /// Start the session directly in this temper/permission-mode instead of the default,
+    /// avoiding a follow-up SHIFT+TAB/`/mode` round trip. Case-insensitive; accepts the same
+    /// names the `/mode` picker shows (`Read-only`, `Ask`, `Auto-edit`, `Full`) — see
+    /// [`forge_types::PermissionMode::from_label`]. An unrecognized value is a `400`, never a
+    /// silent fallback to the default temper.
+    temper: Option<String>,
 }
 
 pub(crate) async fn serve_cmd(
@@ -610,6 +618,16 @@ async fn create_session(
     State(state): State<Arc<DaemonState>>,
     axum::Json(req): axum::Json<CreateSessionReq>,
 ) -> Response {
+    // Validate `temper` first and fail fast — before any worktree/driver side effect — so an
+    // unrecognized value never silently falls back to the default temper.
+    let temper = match req.temper.as_deref() {
+        Some(raw) => match parse_temper(raw) {
+            Ok(mode) => Some(mode),
+            Err(msg) => return err_response(axum::http::StatusCode::BAD_REQUEST, &msg),
+        },
+        None => None,
+    };
+
     let cwd = req
         .cwd
         .filter(|c| !c.trim().is_empty())
@@ -676,6 +694,7 @@ async fn create_session(
         mock: state.mock,
         model: req.model,
         resume: req.resume,
+        temper,
         push: state.push.clone(),
         apns: state.apns.clone(),
     };
@@ -1062,6 +1081,7 @@ async fn merge_session(
         mock: state.mock,
         model: None,
         resume: Some(id.clone()),
+        temper: None,
         push: state.push.clone(),
         apns: state.apns.clone(),
     };
@@ -1765,9 +1785,52 @@ fn err_response(status: axum::http::StatusCode, msg: &str) -> Response {
         .into_response()
 }
 
+/// Parse `CreateSessionReq::temper` — case-insensitive, the same names/aliases
+/// [`forge_types::PermissionMode::from_label`] accepts for the `/mode` picker. On failure,
+/// returns the `400` body text listing every valid name (never silently defaults).
+fn parse_temper(raw: &str) -> Result<forge_types::PermissionMode, String> {
+    forge_types::PermissionMode::from_label(raw).ok_or_else(|| {
+        let valid = forge_types::PermissionMode::all()
+            .iter()
+            .map(|m| m.label())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("temper: unknown value {raw:?} — valid names: {valid}")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_temper_accepts_every_picker_name_case_insensitively() {
+        use forge_types::PermissionMode;
+        for (raw, expect) in [
+            ("Read-only", PermissionMode::Plan),
+            ("read-ONLY", PermissionMode::Plan),
+            ("Ask", PermissionMode::Default),
+            ("ASK", PermissionMode::Default),
+            ("Auto-edit", PermissionMode::AcceptEdits),
+            ("auto-EDIT", PermissionMode::AcceptEdits),
+            ("Full", PermissionMode::Bypass),
+            ("FULL", PermissionMode::Bypass),
+            // Picker-level availability is the bar: Full parses with no extra guard here, same
+            // as it's offered (unguarded) as a row by the `/mode` picker.
+            ("bypass", PermissionMode::Bypass),
+        ] {
+            assert_eq!(parse_temper(raw), Ok(expect), "temper {raw:?}");
+        }
+    }
+
+    #[test]
+    fn parse_temper_rejects_unknown_value_listing_every_valid_name() {
+        let err = parse_temper("yolo").unwrap_err();
+        assert!(err.contains("yolo"), "{err}");
+        for label in ["Read-only", "Ask", "Auto-edit", "Full"] {
+            assert!(err.contains(label), "{err} missing {label}");
+        }
+    }
 
     #[test]
     fn daemon_token_persists_and_rotates() {
@@ -1868,6 +1931,7 @@ mod tests {
             mock: true,
             model: None,
             resume: None,
+            temper: None,
             push: None,
             apns: None,
         };
@@ -1985,6 +2049,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `DriverSpec::temper` reaches the session through the same [`forge_core::Session::
+    /// set_temper`] setter `picker_accept` calls for `PickerKind::Tempers` — including `Full`
+    /// (Bypass), which the `/mode` picker offers unguarded, so the API applies it the same way
+    /// with no extra confirmation layered on top.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn driver_spec_temper_sets_the_session_permission_mode() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("forge-serve-temper-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("FORGE_DB", dir.join("temper-test.db"));
+
+        let handle = spawn_session_driver(DriverSpec {
+            cwd: dir.display().to_string(),
+            worktree: None,
+            title: "temper-e2e".into(),
+            mock: true,
+            model: None,
+            resume: None,
+            temper: Some(forge_types::PermissionMode::Bypass),
+            push: None,
+            apns: None,
+        })
+        .await
+        .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let temper = handle.snapshot_rx.borrow().snapshot.temper.clone();
+            if temper == "Full" {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "temper never applied — last seen {temper:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        handle.shutdown();
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Worktree-backed session create: the worktree exists on disk, is a real git worktree of
     /// the repo, and the driver session runs inside it (cwd + snapshot.worktree agree).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2025,6 +2133,7 @@ mod tests {
             mock: true,
             model: None,
             resume: None,
+            temper: None,
             push: None,
             apns: None,
         })
@@ -2107,6 +2216,7 @@ mod tests {
                     mock: true,
                     model: None,
                     resume: None,
+                    temper: None,
                     push: None,
                     apns: None,
                 })
@@ -2430,6 +2540,7 @@ mod tests {
             mock: true,
             model: None,
             resume: None,
+            temper: None,
             push: None,
             apns: None,
         };
@@ -2531,6 +2642,7 @@ mod tests {
             mock: true,
             model: None,
             resume: None,
+            temper: None,
             push: None,
             apns: None,
         };
@@ -2981,6 +3093,7 @@ mod tests {
                     mock: true,
                     model: None,
                     resume: None,
+                    temper: None,
                     push: Some(notifier.clone()),
                     apns: None,
                 })
@@ -3342,6 +3455,7 @@ mod tests {
                     mock: true,
                     model: None,
                     resume: None,
+                    temper: None,
                     push: None,
                     apns: None,
                 })
@@ -3508,6 +3622,7 @@ mod tests {
             mock: true,
             model: None,
             resume: None,
+            temper: None,
             push: None,
             apns: None,
         })
