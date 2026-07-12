@@ -41,6 +41,7 @@ import { ApiError } from "../../lib/api";
 import { haptics, initHaptics, isHapticsEnabled, setHapticsEnabled } from "../../lib/haptics";
 import { useServerFleets } from "../../lib/queries";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
+import { checkForDesktopUpdate, type DesktopUpdate } from "../../lib/updater";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
@@ -105,6 +106,8 @@ export default function SettingsScreen() {
 
   const [notifyPermission, setNotifyPermission] = useState<NotifyPermission>("default");
   const [notifyBusy, setNotifyBusy] = useState(false);
+  const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdate | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -230,6 +233,30 @@ export default function SettingsScreen() {
     }
   }, [notifyBusy, toast]);
 
+  useEffect(() => {
+    if (!isTauri) return;
+    void checkForDesktopUpdate().then(setDesktopUpdate).catch(() => undefined);
+  }, []);
+
+  const checkDesktopUpdate = useCallback(async () => {
+    setUpdateBusy(true);
+    try {
+      const update = await checkForDesktopUpdate();
+      setDesktopUpdate(update);
+      if (!update) toast.show("Forge is up to date.", { tone: "neutral" });
+    } catch {
+      toast.show("couldn't check for updates.", { tone: "danger" });
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, [toast]);
+
+  const installDesktopUpdate = useCallback(async () => {
+    if (!desktopUpdate) return;
+    setUpdateBusy(true);
+    try { await desktopUpdate.install(); } catch { toast.show("couldn't install update.", { tone: "danger" }); }
+    finally { setUpdateBusy(false); }
+  }, [desktopUpdate, toast]);
   const appVersion = Constants.expoConfig?.version ?? "—";
 
   return (
@@ -388,6 +415,7 @@ export default function SettingsScreen() {
           <KeyValueRow label="Version" value={appVersion} />
           <KeyValueRow label="Protocol" value="v7" />
           <KeyValueRow label="Active server" value={host ? `${host} · ${maskToken(activeToken)}` : "none"} />
+          {isTauri ? <ListRow title={desktopUpdate ? `Update available: ${desktopUpdate.version}` : "Check for updates"} subtitle={desktopUpdate ? "Install and relaunch Forge" : "Desktop releases are checked in the background"} onPress={desktopUpdate ? installDesktopUpdate : checkDesktopUpdate} showSeparator={false} /> : null}
         </Card>
       </View>
 

@@ -27,6 +27,8 @@ import { ToastHost } from "../components/ds/ToastHost";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { AuthProvider, useAuth } from "../lib/auth";
 import { initHaptics } from "../lib/haptics";
+import { isTauri } from "../lib/platform";
+import { checkForDesktopUpdate } from "../lib/updater";
 import { useGlobalShortcuts } from "../lib/shortcuts";
 import { ThemeProvider, useTokens } from "../theme/ThemeProvider";
 import { monoFamily } from "../theme/typography";
@@ -104,6 +106,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     void initHaptics();
+    if (isTauri) void checkForDesktopUpdate().catch(() => undefined);
   }, []);
 
   // Native gets JetBrains Mono from the expo-font config plugin's build-time embed;

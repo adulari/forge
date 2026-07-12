@@ -1,19 +1,21 @@
 name: app-desktop
 
-# 3-OS Tauri v2 desktop build of the unified app (ARCHITECTURE.md §6, §8 / BUILD_ORDER.md T6.3).
-# `npm run tauri:build` drives everything, including the web export via `beforeBuildCommand`
-# in mobile/src-tauri/tauri.conf.json. Unsigned in v1 (no notarization/codesign secrets) — the
-# raw per-OS bundles are published as build artifacts only, never auto-released.
+# 3-OS Tauri v2 desktop build of the unified app.
+# Bundles are uploaded to the tagged GitHub Release as well as retained as workflow artifacts.
 
 on:
   push:
     tags:
       - "app-v*"
+      - "v*"
   workflow_dispatch:
 
 concurrency:
   group: app-desktop-${{ github.ref }}
   cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -21,7 +23,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+          - os: ubuntu-24.04-arm
+            name: linux-aarch64
+          - os: macos-latest
+            name: macos-aarch64
+          - os: macos-latest
+            name: macos-x86_64
+          - os: windows-latest
+            name: windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -46,6 +58,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.name == 'macos-x86_64' && 'x86_64-apple-darwin' || '' }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -64,11 +78,81 @@ jobs:
 
       - name: Build desktop bundle
         working-directory: mobile
-        run: npm run tauri:build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo 'desktop updater signing enabled'; else echo 'LOUD: TAURI signing secrets unset; building unsigned desktop bundles'; fi
+          if [ "${{ matrix.name }}" = macos-x86_64 ]; then npm run tauri:build -- --target x86_64-apple-darwin; else npm run tauri:build; fi
+
+      - name: Normalize release asset names
+        shell: bash
+        working-directory: mobile
+        run: |
+          mkdir -p release-assets
+          root=src-tauri/target/release
+          [ "${{ matrix.name }}" = macos-x86_64 ] && root=src-tauri/target/x86_64-apple-darwin/release || true
+          case "${{ matrix.name }}" in
+            linux-x86_64) cp "$root/bundle/appimage/"*.AppImage release-assets/Forge-desktop-linux-x86_64.AppImage; cp "$root/bundle/appimage/"*.AppImage.sig release-assets/Forge-desktop-linux-x86_64.AppImage.sig; cp "$root/bundle/deb/"*.deb release-assets/Forge-desktop-linux-x86_64.deb ;;
+            linux-aarch64) cp "$root/bundle/appimage/"*.AppImage release-assets/Forge-desktop-linux-aarch64.AppImage; cp "$root/bundle/appimage/"*.AppImage.sig release-assets/Forge-desktop-linux-aarch64.AppImage.sig; cp "$root/bundle/deb/"*.deb release-assets/Forge-desktop-linux-aarch64.deb ;;
+            macos-aarch64) cp "$root/bundle/macos/"*.app.tar.gz release-assets/Forge-desktop-macos-aarch64.app.tar.gz; cp "$root/bundle/macos/"*.app.tar.gz.sig release-assets/Forge-desktop-macos-aarch64.app.tar.gz.sig; cp "$root/bundle/dmg/"*.dmg release-assets/Forge-desktop-macos-aarch64.dmg ;;
+            macos-x86_64) cp "$root/bundle/macos/"*.app.tar.gz release-assets/Forge-desktop-macos-x86_64.app.tar.gz; cp "$root/bundle/macos/"*.app.tar.gz.sig release-assets/Forge-desktop-macos-x86_64.app.tar.gz.sig; cp "$root/bundle/dmg/"*.dmg release-assets/Forge-desktop-macos-x86_64.dmg ;;
+            windows-x86_64) cp "$root/bundle/nsis/"*.exe release-assets/Forge-desktop-windows-x86_64.nsis.exe; cp "$root/bundle/nsis/"*.exe.sig release-assets/Forge-desktop-windows-x86_64.nsis.exe.sig ;;
+          esac
 
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: forge-desktop-${{ matrix.os }}
-          path: mobile/src-tauri/target/release/bundle/**
+          name: forge-desktop-${{ matrix.name }}
+          path: mobile/release-assets/**
           if-no-files-found: error
+
+      - name: Publish tagged desktop bundles
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: mobile/release-assets/*
+          fail_on_unmatched_files: false
+
+  updater:
+    name: assemble updater manifest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: forge-desktop-*
+          path: assets
+          merge-multiple: true
+      - name: Generate latest.json
+        env:
+          VERSION: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, datetime
+          root = pathlib.Path('assets')
+          names = {
+            'darwin-aarch64': 'Forge-desktop-macos-aarch64.app.tar.gz',
+            'darwin-x86_64': 'Forge-desktop-macos-x86_64.app.tar.gz',
+            'linux-x86_64': 'Forge-desktop-linux-x86_64.AppImage',
+            'linux-aarch64': 'Forge-desktop-linux-aarch64.AppImage',
+            'windows-x86_64': 'Forge-desktop-windows-x86_64.nsis.exe',
+          }
+          platforms = {}
+          for platform, filename in names.items():
+            path = root / filename
+            sig = pathlib.Path(str(path) + '.sig')
+            platforms[platform] = {
+              'url': f"https://github.com/{os.environ['REPO']}/releases/download/{os.environ['VERSION']}/{filename}",
+              'signature': sig.read_text().strip(),
+            }
+          manifest = {'version': os.environ['VERSION'].lstrip('v'), 'notes': 'Forge desktop update', 'pub_date': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'platforms': platforms}
+          pathlib.Path('latest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          PY
+      - name: Publish latest.json
+        uses: softprops/action-gh-release@v3
+        with:
+          files: latest.json
+          fail_on_unmatched_files: true

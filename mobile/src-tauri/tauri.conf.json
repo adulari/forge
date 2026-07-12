@@ -27,11 +27,17 @@
       "csp": null
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg1RTRFNjg1RTEwNDU5QUIKUldTcldRVGhoZWJraFNHZUNhY3hmelBSSWNydmtseEl6QXAxQU5uY2c3ZmI1eFlkS2NCemRNSmgK",
+      "endpoints": ["https://github.com/Adulari/forge/releases/latest/download/latest.json"]
+    }
+  },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["appimage", "deb", "dmg", "nsis"],
+    "createUpdaterArtifacts": true,
     "icon": [
-      "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",

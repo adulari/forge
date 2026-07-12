@@ -10,6 +10,8 @@
     "notification:allow-is-permission-granted",
     "notification:allow-request-permission",
     "notification:allow-notify",
+    "updater:default",
+    "process:allow-restart",
     "websocket:default",
     {
       "identifier": "http:default",
