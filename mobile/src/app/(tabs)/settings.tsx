@@ -307,6 +307,11 @@ export default function SettingsScreen() {
         <SectionHeader>Connection</SectionHeader>
         <Card padded={false}>
           <ListRow
+            title="Usage"
+            subtitle="Tokens, costs, and provider plan quotas"
+            onPress={() => router.push("/usage")}
+          />
+          <ListRow
             title="Connection health"
             subtitle={healthCopy}
             leading={<Badge label={health === "checking" ? "checking" : health === "ok" ? "online" : "attention"} tone={healthTone} />}

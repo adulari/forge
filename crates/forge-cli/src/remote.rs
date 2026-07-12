@@ -1341,6 +1341,7 @@ pub fn start(
         // Token-scoped like everything else; this server drives ONE session, so no session
         // parameter exists yet (the multi-session daemon is Phase 4).
         .route(&format!("{base}/api/history"), get(history_page))
+        .route(&format!("{base}/api/usage"), get(usage_page))
         // File/image upload (v7): multipart, stored under `<cwd>/.forge/uploads/<session>/`,
         // delivered to the render loop as a `RemoteInput::Attach` riding the next prompt. The
         // per-route body limit replaces axum's 2 MB default (with headroom for boundaries).
@@ -1613,7 +1614,13 @@ struct HistoryParams {
     limit: Option<usize>,
 }
 
-/// `GET /<token>/api/history?before=<seq>&limit=<n>` — one JSON page of the session's persisted
+async fn usage_page() -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        serde_json::json!({"week":{"sinceEpoch": chrono::Utc::now().timestamp() - 604800,"combined":{"inputTokens":0,"outputTokens":0,"costUsd":0.0},"providers":[]},"session":null,"quota":[]}).to_string(),
+    ).into_response()
+}
+
 /// transcript, newest first (see [`HistoryRow`]). The session id comes from the latest broadcast
 /// snapshot (this server drives ONE session; the multi-session daemon is Phase 4). Serves `[]`
 /// before the first broadcast or when no store seam was provided. The store read runs on the

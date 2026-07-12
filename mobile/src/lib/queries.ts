@@ -18,6 +18,8 @@ import {
   createSession,
   discardSession,
   getHistory,
+  getUsage,
+  type UsageResponse,
   getPastSessions,
   getSessions,
   type HistoryRow,
@@ -119,6 +121,18 @@ export function useHistory(sessionId: string | null) {
       lastPage.length < HISTORY_PAGE_SIZE
         ? undefined
         : lastPage[lastPage.length - 1]?.seq,
+  });
+}
+
+export function useUsage(sessionId?: string | null) {
+  const { baseUrl } = useAuth();
+  const isFocused = useIsFocused();
+  return useQuery<UsageResponse>({
+    queryKey: ["usage", baseUrl, sessionId ?? null],
+    queryFn: () => getUsage(baseUrl as string, sessionId ?? undefined),
+    enabled: baseUrl != null,
+    refetchInterval: isFocused ? 30000 : false,
+    refetchOnWindowFocus: true,
   });
 }
 
