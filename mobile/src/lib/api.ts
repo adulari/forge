@@ -26,6 +26,29 @@ export class ApiError extends Error {
 // Wire types (verbatim field names)
 // ---------------------------------------------------------------------------
 
+export interface ConfigResponse {
+  fields: ConfigField[];
+}
+
+export interface ConfigField {
+  key: string;
+  group: string;
+  field_type: "bool" | "int" | "float" | "enum" | "text";
+  label: string;
+  help: string | null;
+  options: string[];
+  value: string;
+  default: string;
+  modified: boolean;
+  source: "project" | "user" | "default";
+}
+
+export interface UpdateConfigRequest {
+  key: string;
+  value?: string;
+  scope: "user" | "project";
+}
+
 export interface UsageResponse {
   week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
   session: { sessionId: string; combined: UsageTotals; providers: UsageProvider[] } | null;
@@ -305,6 +328,17 @@ export function discardSession(
 ): Promise<DiscardResponse> {
   return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/discard`, {
     method: "POST",
+  });
+}
+
+export function getConfig(baseUrl: string): Promise<ConfigResponse> {
+  return request(baseUrl, "/api/config");
+}
+
+export function updateConfig(baseUrl: string, body: UpdateConfigRequest): Promise<ConfigResponse> {
+  return request(baseUrl, "/api/config", {
+    method: "PUT",
+    body: JSON.stringify(body),
   });
 }
 

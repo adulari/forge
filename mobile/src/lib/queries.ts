@@ -12,6 +12,10 @@ import { useIsFocused } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 
 import {
+  type ConfigResponse,
+  type UpdateConfigRequest,
+  getConfig,
+  updateConfig,
   answer as apiAnswer,
   archiveSession,
   type CreateSessionRequest,
@@ -51,6 +55,7 @@ function keys(baseUrl: string | null) {
     sessions: ["sessions", baseUrl] as const,
     pastSessions: ["sessions", "past", baseUrl] as const,
     history: (sessionId: string) => ["history", baseUrl, sessionId] as const,
+    config: ["config", baseUrl] as const,
   };
 }
 
@@ -122,6 +127,26 @@ export function useHistory(sessionId: string | null) {
       lastPage.length < HISTORY_PAGE_SIZE
         ? undefined
         : lastPage[lastPage.length - 1]?.seq,
+  });
+}
+
+export function useConfig() {
+  const { baseUrl } = useAuth();
+  return useQuery<ConfigResponse>({
+    queryKey: keys(baseUrl).config,
+    queryFn: () => getConfig(baseUrl as string),
+    enabled: baseUrl != null,
+  });
+}
+
+export function useUpdateConfig() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: UpdateConfigRequest) => updateConfig(baseUrl as string, body),
+    onSuccess: (data) => {
+      queryClient.setQueryData(keys(baseUrl).config, data);
+    },
   });
 }
 

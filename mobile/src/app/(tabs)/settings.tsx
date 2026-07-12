@@ -312,6 +312,11 @@ export default function SettingsScreen() {
             onPress={() => router.push("/usage")}
           />
           <ListRow
+            title="Configuration"
+            subtitle="Mesh, models, providers, and runtime behavior"
+            onPress={() => router.push("/configuration")}
+          />
+          <ListRow
             title="Connection health"
             subtitle={healthCopy}
             leading={<Badge label={health === "checking" ? "checking" : health === "ok" ? "online" : "attention"} tone={healthTone} />}
