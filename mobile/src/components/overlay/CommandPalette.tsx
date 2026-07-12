@@ -40,6 +40,7 @@ import React, {
 } from "react";
 import {
   BackHandler,
+  Keyboard,
   Modal,
   Platform,
   Pressable,
@@ -48,6 +49,7 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import Animated, {
   cancelAnimation,
   runOnJS,
@@ -167,6 +169,18 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
   const pathname = usePathname();
   const { baseUrl } = useAuth();
   const reduced = useReducedMotion();
+  const insets = useSafeAreaInsets();
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  useEffect(() => {
+    if (Platform.OS === "web") return;
+    const show = Keyboard.addListener("keyboardWillShow", (event) => setKeyboardHeight(event.endCoordinates.height));
+    const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboardHeight(0));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
 
   const { data: sessions } = useSessions();
   const archiveSession = useArchiveSession();
@@ -523,7 +537,7 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
   const hasResults = filteredItems.length > 0;
 
   const body = (
-    <View style={styles.body}>
+    <View style={[styles.body, { paddingTop: Math.max(12, insets.top) }]}>
       <View style={styles.searchWrap}>
         <SearchField
           value={query}
@@ -536,7 +550,7 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
       </View>
       <ScrollView
         style={styles.scroll}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[styles.scrollContent, { paddingBottom: keyboardHeight + insets.bottom + space.space24 }]}
         keyboardShouldPersistTaps="handled"
       >
         {hasResults ? (

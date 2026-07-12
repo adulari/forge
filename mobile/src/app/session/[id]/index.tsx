@@ -513,6 +513,11 @@ export default function SessionChat() {
   // while busy keeps the just-streamed answer on screen through those frames instead of blanking
   // it back to the "thinking…" indicator, then `finalizing` carries it across the busy->false
   // edge until the history row lands. No frame ever renders the answer absent.
+  const latestAssistantModel = useMemo(
+    () => historyRows.find((row) => row.role === "assistant" && row.model)?.model ?? null,
+    [historyRows],
+  );
+
   const displayText =
     streamingText || (busy ? track.retainedText : "") || (finalizingActive ? finalizing!.text : "");
 

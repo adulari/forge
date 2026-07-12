@@ -127,7 +127,7 @@ function HistoryRowBase({ row, index, onPress }: HistoryRowProps) {
                 <RelativeTime timestampMs={row.last_activity * 1000} />
                 <View style={styles.metaRight}>
                   <Text style={[type.meta, { color: tokens.ink3 }]}>{row.message_count} msgs</Text>
-                  <Text style={[type.meta, { color: tokens.success }]}>{formatCost(row.cost_usd)}</Text>
+                  {row.cost_usd > 0 ? <Text style={[type.meta, { color: tokens.success }]}>{formatCost(row.cost_usd)}</Text> : null}
                 </View>
               </View>
             </View>

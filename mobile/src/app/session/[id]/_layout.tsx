@@ -28,7 +28,7 @@ import { SessionHeader } from "../../../components/session/SessionHeader";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
-import { useTurnCompleted } from "../../../lib/queries";
+import { useHistory, useTurnCompleted } from "../../../lib/queries";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
 import { durations, easings } from "../../../theme/motion";
@@ -58,6 +58,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const pathname = usePathname();
   const { isCompact } = useBreakpoint();
   const { snapshot, connectionState, send, setHeaderHeight, baseUrl, focusComposer } = useSessionCtx();
+  const { data: sessionHistory } = useHistory(sessionId);
+  const latestAssistantModel = useMemo(
+    () => (sessionHistory?.pages ?? []).flat().find((row) => row.role === "assistant" && row.model)?.model ?? null,
+    [sessionHistory],
+  );
   const { open: openPalette } = usePalette();
 
   // ARCHITECTURE §4.1.4: on the `busy` true->false edge, invalidate this session's history
@@ -236,7 +241,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           <StatusStrip
             state={statusState}
             tier={snapshot?.tier ?? null}
-            model={snapshot?.model ?? "—"}
+            model={snapshot?.model && snapshot.model !== "—" ? snapshot.model : latestAssistantModel ?? "—"}
             temper={snapshot?.temper ?? "—"}
             effort={snapshot?.effort}
             send={send}

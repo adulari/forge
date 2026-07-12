@@ -56,7 +56,7 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
 
 const styles = StyleSheet.create({
   wrap: { gap: space.space4 },
-  row: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  row: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 44 },
   title: { flex: 1 },
   // Aligns under the title text, past the 44pt back-button hit area.
   cwd: { paddingLeft: 44 + space.space8 },

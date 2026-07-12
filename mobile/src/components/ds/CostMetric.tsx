@@ -17,6 +17,7 @@ export interface CostMetricProps {
 export function CostMetric({ valueUsd, variant = "meta" }: CostMetricProps) {
   const tokens = useTokens();
   const display = useCountUp(valueUsd);
+  if (!(valueUsd > 0)) return null;
 
   return (
     <Text

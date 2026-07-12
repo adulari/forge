@@ -44,7 +44,7 @@ import { VoiceRecordingPill } from "./VoiceRecordingPill";
 
 const MAX_LINES = 6;
 const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
-const MIN_HEIGHT = LINE_HEIGHT;
+const MIN_HEIGHT = 44;
 const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES;
 const COMMAND_CHIPS = ["/plan", "/compact", "/models", "/mode", "/help"] as const;
 
@@ -481,6 +481,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
                 setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
               }
               multiline
+              textAlignVertical="top"
               // Hidden while the ghost is showing — it renders the same "empty state" copy
               // itself, and both at once would double up.
               placeholder={showGhost ? undefined : "message…"}
@@ -546,8 +547,8 @@ const styles = StyleSheet.create({
   chipsRow: { flexDirection: "row", flexWrap: "wrap", gap: space.space8 },
   chipThumb: { width: 20, height: 20, borderRadius: radii.radius4 },
   row: { flexDirection: "row", alignItems: "flex-end", gap: space.space4 },
-  input: { flex: 1, paddingHorizontal: space.space8, paddingVertical: space.space8 },
-  inputWrap: { flex: 1, position: "relative" },
+  input: { flex: 1, paddingHorizontal: space.space8, paddingVertical: space.space8, textAlignVertical: "top" },
+  inputWrap: { flex: 1, position: "relative", overflow: "visible" },
   // Mirrors `input`'s own padding exactly so the ghost text lines up with where a typed
   // caret would sit — only ever shown while the TextInput is empty (see `suggestionActive`).
   ghostOverlay: {
