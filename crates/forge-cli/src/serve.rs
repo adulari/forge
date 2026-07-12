@@ -27,6 +27,9 @@
 //! - `POST /api/answer`               approve/deny a pending permission prompt over plain HTTP —
 //!   the service worker calls this from a notification action (no page needed); the `seq` is
 //!   validated exactly like the WS path (stale ⇒ 409, and the driver re-validates on receipt)
+//! - `POST /api/voice/transcribe`     local whisper.cpp speech-to-text (voice.md, V1): multipart
+//!   audio (wav/m4a/aac/mp4) + optional `?language=` -> `{"text": "..."}`. Session-independent —
+//!   the model downloads into `{data_dir}/models/whisper/` on first use and is cached in memory.
 //!
 //! Exposure mirrors `/remote`: `--lan` (default) binds 0.0.0.0 with self-signed HTTPS, `--local`
 //! binds loopback plain HTTP, `--anywhere` binds loopback and opens a cloudflared/ngrok tunnel.
@@ -138,6 +141,9 @@ struct DaemonState {
     /// The native iOS (APNs) sender (`None` when `FORGE_APNS_TEAM_ID`/`_KEY_ID`/`_KEY_PATH`
     /// aren't all set — same graceful-absence contract as `push`).
     apns: Option<Arc<crate::apns::ApnsNotifier>>,
+    /// Local whisper.cpp speech-to-text (`POST /api/voice/transcribe`) — caches the loaded model
+    /// across requests.
+    voice: crate::voice::VoiceState,
 }
 
 /// One row of `GET /api/sessions` — the fleet dashboard's data. `waiting` is the killer signal
@@ -263,6 +269,7 @@ pub(crate) async fn serve_cmd(
         default_cwd,
         push,
         apns,
+        voice: crate::voice::VoiceState::new(),
     });
     let app = daemon_router(state);
 
@@ -382,6 +389,15 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(
                     remote::UPLOAD_BODY_LIMIT,
                 )),
+        )
+        // Local whisper.cpp speech-to-text (voice.md, V1): multipart audio in, `{"text": ...}`
+        // out. Session-independent (no `?session=`) — the daemon-wide model cache lives on
+        // `DaemonState.voice`, not on any one session.
+        .route(
+            &format!("{base}/api/voice/transcribe"),
+            post(voice_transcribe).layer(axum::extract::DefaultBodyLimit::max(
+                crate::voice::VOICE_UPLOAD_BODY_LIMIT,
+            )),
         )
         .route(&format!("{base}/api/push/key"), get(push_key))
         .route(&format!("{base}/api/push/subscribe"), post(push_subscribe))
@@ -1423,6 +1439,75 @@ async fn upload(
     json_response(&serde_json::json!({ "files": stored }))
 }
 
+/// Query for `POST /api/voice/transcribe` — an optional language override for this one clip.
+#[derive(serde::Deserialize)]
+struct VoiceTranscribeParams {
+    language: Option<String>,
+}
+
+/// `POST /api/voice/transcribe?language=<code>` — multipart audio in (first field with bytes,
+/// any name), `{"text": "..."}` out. Decodes wav/m4a/aac/mp4, downloads the configured whisper
+/// model on first use, and transcribes locally (voice.md, V1). Not session-scoped: the model
+/// cache lives on `DaemonState`, not any one session.
+async fn voice_transcribe(
+    State(state): State<Arc<DaemonState>>,
+    Query(params): Query<VoiceTranscribeParams>,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let field = match multipart.next_field().await {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return err_response(axum::http::StatusCode::BAD_REQUEST, "no audio in the body")
+        }
+        Err(e) => {
+            return err_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                &format!("malformed multipart body: {e}"),
+            );
+        }
+    };
+    let hint = field
+        .file_name()
+        .map(str::to_string)
+        .or_else(|| field.content_type().map(str::to_string));
+    let bytes = match field.bytes().await {
+        Ok(b) => b.to_vec(),
+        Err(e) => {
+            return err_response(
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("upload failed: {e}"),
+            );
+        }
+    };
+
+    let models_dir = match crate::voice::models_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            return err_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("{e}"),
+            )
+        }
+    };
+    let config = forge_config::load().unwrap_or_default();
+    match crate::voice::transcribe_upload(
+        &state.voice,
+        &config.voice,
+        &models_dir,
+        bytes,
+        hint,
+        params.language,
+    )
+    .await
+    {
+        Ok(text) => json_response(&serde_json::json!({ "text": text })),
+        Err(e) => err_response(
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("{e}"),
+        ),
+    }
+}
+
 /// Query for `GET /api/upload` — which session's upload area to serve from, and which stored
 /// file inside it.
 #[derive(serde::Deserialize)]
@@ -1929,6 +2014,7 @@ mod tests {
             default_cwd: dir.display().to_string(),
             push: None,
             apns: None,
+            voice: crate::voice::VoiceState::new(),
         });
         let router = daemon_router(state);
         let resp = router
@@ -2026,6 +2112,7 @@ mod tests {
             default_cwd: dir.display().to_string(),
             push: None,
             apns: None,
+            voice: crate::voice::VoiceState::new(),
         });
         let router = daemon_router(state);
         let resp = router
@@ -2095,6 +2182,7 @@ mod tests {
             default_cwd: dir.display().to_string(),
             push: None,
             apns: None,
+            voice: crate::voice::VoiceState::new(),
         });
         let router = daemon_router(state);
         let resp = router
@@ -2149,6 +2237,7 @@ mod tests {
             default_cwd: dir.display().to_string(),
             push: None,
             apns: None,
+            voice: crate::voice::VoiceState::new(),
         });
         let router = daemon_router(state);
         let resp = router
@@ -2245,6 +2334,7 @@ mod tests {
             default_cwd: dir.display().to_string(),
             push: None,
             apns: None,
+            voice: crate::voice::VoiceState::new(),
         });
         let router = daemon_router(state);
         let resp = router
@@ -2342,6 +2432,7 @@ mod tests {
             default_cwd: dir.display().to_string(),
             push: None,
             apns: None,
+            voice: crate::voice::VoiceState::new(),
         });
         let router = daemon_router(state);
 
@@ -2415,6 +2506,7 @@ mod tests {
             default_cwd: ".".into(),
             push: None,
             apns: None,
+            voice: crate::voice::VoiceState::new(),
         });
         let router = daemon_router(state);
         let get_key = axum::http::Request::get("/tok/api/push/key")
@@ -2444,6 +2536,7 @@ mod tests {
             default_cwd: ".".into(),
             push: None,
             apns: None,
+            voice: crate::voice::VoiceState::new(),
         });
         let router = daemon_router(state);
         let post_json = |path: &str, body: String| {
@@ -2506,6 +2599,7 @@ mod tests {
             default_cwd: ".".into(),
             push: None,
             apns: Some(apns),
+            voice: crate::voice::VoiceState::new(),
         });
         let router = daemon_router(state);
         let post_json = |path: &str, body: String| {
@@ -2606,6 +2700,7 @@ mod tests {
             default_cwd: dir.display().to_string(),
             push: None,
             apns: None,
+            voice: crate::voice::VoiceState::new(),
         });
         let router = daemon_router(state);
 
@@ -2757,6 +2852,7 @@ mod tests {
             default_cwd: dir.display().to_string(),
             push: Some(notifier),
             apns: None,
+            voice: crate::voice::VoiceState::new(),
         });
         let router = daemon_router(state);
         let post_json = |path: &str, body: String| {
@@ -3117,6 +3213,7 @@ mod tests {
             default_cwd: dir.display().to_string(),
             push: None,
             apns: None,
+            voice: crate::voice::VoiceState::new(),
         });
         let router = daemon_router(state);
         let multipart = |session: &str, filename: &str, ctype: &str, body: &[u8]| {

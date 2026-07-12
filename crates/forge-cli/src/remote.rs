@@ -1123,6 +1123,7 @@ pub fn start(
         upload_root: std::env::current_dir()
             .ok()
             .map(|d| d.join(".forge").join("uploads")),
+        voice: crate::voice::VoiceState::new(),
     });
 
     let app = Router::new()
@@ -1143,6 +1144,14 @@ pub fn start(
             &format!("{base}/api/upload"),
             axum::routing::post(upload_handler)
                 .layer(axum::extract::DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
+        )
+        // Local whisper.cpp speech-to-text (voice.md, V1): multipart audio in, `{"text": ...}`
+        // out. Mirrors the daemon's twin in `serve.rs`.
+        .route(
+            &format!("{base}/api/voice/transcribe"),
+            axum::routing::post(voice_transcribe_handler).layer(
+                axum::extract::DefaultBodyLimit::max(crate::voice::VOICE_UPLOAD_BODY_LIMIT),
+            ),
         )
         // The page's script + stylesheet as separate token-scoped files, so the CSP needs no
         // 'unsafe-inline' anywhere.
@@ -1297,6 +1306,9 @@ struct ServerState {
     /// Where `POST /api/upload` stores files: `<cwd>/.forge/uploads` (a per-session subdirectory
     /// is created under it). `None` when the cwd is unknown — uploads then answer 503.
     upload_root: Option<std::path::PathBuf>,
+    /// Local whisper.cpp speech-to-text (`POST /api/voice/transcribe`) — caches the loaded model
+    /// across requests.
+    voice: crate::voice::VoiceState,
 }
 
 /// The `Content-Security-Policy` for the control page. Everything is same-origin — the script,
@@ -1604,6 +1616,82 @@ fn upload_error(status: axum::http::StatusCode, msg: &str) -> Response {
         serde_json::json!({ "error": msg }).to_string(),
     )
         .into_response()
+}
+
+/// Query for `POST /<token>/api/voice/transcribe` — an optional language override for this clip.
+#[derive(serde::Deserialize)]
+struct VoiceTranscribeParams {
+    language: Option<String>,
+}
+
+/// `POST /<token>/api/voice/transcribe?language=<code>` — local whisper.cpp speech-to-text
+/// (voice.md, V1): multipart audio in (first field with bytes, any name), `{"text": "..."}` out.
+/// Mirrors the daemon's twin in `serve.rs`; not session-scoped (the model cache lives on
+/// `ServerState`, this server only ever drives one session anyway).
+async fn voice_transcribe_handler(
+    State(state): State<Arc<ServerState>>,
+    axum::extract::Query(params): axum::extract::Query<VoiceTranscribeParams>,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let field = match multipart.next_field().await {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            return upload_error(axum::http::StatusCode::BAD_REQUEST, "no audio in the body")
+        }
+        Err(e) => {
+            return upload_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                &format!("malformed multipart body: {e}"),
+            );
+        }
+    };
+    let hint = field
+        .file_name()
+        .map(str::to_string)
+        .or_else(|| field.content_type().map(str::to_string));
+    let bytes = match field.bytes().await {
+        Ok(b) => b.to_vec(),
+        Err(e) => {
+            return upload_error(
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("upload failed: {e}"),
+            );
+        }
+    };
+
+    let models_dir = match crate::voice::models_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            return upload_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("{e}"),
+            )
+        }
+    };
+    let config = forge_config::load().unwrap_or_default();
+    match crate::voice::transcribe_upload(
+        &state.voice,
+        &config.voice,
+        &models_dir,
+        bytes,
+        hint,
+        params.language,
+    )
+    .await
+    {
+        Ok(text) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "application/json"),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
+            serde_json::json!({ "text": text }).to_string(),
+        )
+            .into_response(),
+        Err(e) => upload_error(
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            &format!("{e}"),
+        ),
+    }
 }
 
 /// Query parameters for the WS handshake: `rev` is the last snapshot revision the page saw

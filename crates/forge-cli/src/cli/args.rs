@@ -22,7 +22,7 @@ COMMAND GROUPS:
   Models/mesh    models, mesh, benchmarks   (three views of routing — each --help cross-refs the others)
   Skills/plugins skill, plugin, commands, import   (plugin = canonical pack installer; skill = author/distil)
   Providers      auth, provider, local, setup/init, doctor
-  Integrations   mcp, memory, lattice, assay, git, migrate
+  Integrations   mcp, memory, lattice, assay, git, migrate, voice
   Maintenance    update, self
 
 SCOPE FLAG:
@@ -695,6 +695,35 @@ pub(crate) enum Command {
         /// Run a live offline demo turn (mock model) in a scratch directory.
         #[arg(long)]
         demo: bool,
+    },
+    /// Local whisper.cpp speech-to-text (voice.md, V1) — transcribe an audio file, or
+    /// pre-download a model.
+    Voice {
+        #[command(subcommand)]
+        op: VoiceOp,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum VoiceOp {
+    /// Transcribe an audio file (wav/m4a/aac/mp4) to text on stdout. Downloads the model on
+    /// first use (progress on stderr).
+    Transcribe {
+        /// Path to the audio file.
+        file: String,
+        /// Language code (e.g. `en`, `nl`) — overrides `[voice] language` for this run. Omit (or
+        /// `auto`) to auto-detect.
+        #[arg(long)]
+        language: Option<String>,
+        /// Model size: tiny, base, small, or medium — overrides `[voice] model` for this run.
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Pre-download a whisper model so the first real transcription isn't slowed by the fetch.
+    Setup {
+        /// Model size: tiny, base, small, or medium (default: `[voice] model`, else `base`).
+        #[arg(long)]
+        model: Option<String>,
     },
 }
 

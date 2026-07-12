@@ -31,6 +31,7 @@ forge-skills = { package = "forge-agent-skills", path = "crates/forge-skills", v
 forge-store = { package = "forge-agent-store", path = "crates/forge-store", version = "2.5.7" }
 forge-tools = { package = "forge-agent-tools", path = "crates/forge-tools", version = "2.5.7" }
 forge-tui = { package = "forge-agent-tui", path = "crates/forge-tui", version = "2.5.7" }
+forge-voice = { package = "forge-agent-voice", path = "crates/forge-voice", version = "2.5.7" }
 forge-workflow = { package = "forge-agent-workflow", path = "crates/forge-workflow", version = "2.5.7" }
 
 # External (pinned to current stable as of 2026-06; see ADRs)

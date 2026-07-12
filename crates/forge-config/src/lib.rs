@@ -121,6 +121,11 @@ pub struct Config {
     /// starts it at chat launch so the session is reachable without typing `/remote` first.
     #[serde(default)]
     pub remote: RemoteConfig,
+    /// Local whisper.cpp speech-to-text (voice.md, V1): which model size to run, transcription
+    /// language, and auto-stop-on-silence. Models download on first use into
+    /// `{data_dir}/models/whisper/`.
+    #[serde(default)]
+    pub voice: VoiceConfig,
 }
 
 /// `[remote]` config block — the phone/browser remote-control server (`remote-control.md`).
@@ -174,6 +179,42 @@ pub enum RemoteAuto {
     Lan,
     /// Public tunnel (cloudflared / ngrok) — reachable from any network.
     Anywhere,
+}
+
+/// `[voice]` config block — local whisper.cpp speech-to-text (voice.md).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoiceConfig {
+    /// Whisper model size: `tiny`, `base` (default), `small`, or `medium`. Bigger is more
+    /// accurate and slower; parsed by `forge_voice::ModelKind` at the call site (this crate
+    /// keeps it a plain string so config loading never depends on forge-voice).
+    #[serde(default = "default_voice_model")]
+    pub model: String,
+    /// Transcription language: a whisper.cpp language code (`"en"`, `"nl"`, ...) or `"auto"`
+    /// (default) to detect it from the audio.
+    #[serde(default = "default_voice_language")]
+    pub language: String,
+    /// Auto-stop a recording after this many milliseconds of silence. `0` (default) disables
+    /// auto-stop — recording only ends when the user explicitly stops it.
+    #[serde(default)]
+    pub auto_stop_silence_ms: u64,
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            model: default_voice_model(),
+            language: default_voice_language(),
+            auto_stop_silence_ms: 0,
+        }
+    }
+}
+
+fn default_voice_model() -> String {
+    "base".to_string()
+}
+
+fn default_voice_language() -> String {
+    "auto".to_string()
 }
 
 /// `[providers]` config block. Today just custom OpenAI-compatible endpoints; a home for future
@@ -2005,6 +2046,7 @@ impl Default for Config {
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
             remote: RemoteConfig::default(),
+            voice: VoiceConfig::default(),
         }
     }
 }
@@ -3953,6 +3995,45 @@ mod tests {
         // Absent `auto` (empty block) => off.
         let c: RemoteConfig = toml::from_str("").unwrap();
         assert!(c.startup_exposure().is_none());
+    }
+
+    #[test]
+    fn voice_config_defaults() {
+        let c = VoiceConfig::default();
+        assert_eq!(c.model, "base");
+        assert_eq!(c.language, "auto");
+        assert_eq!(c.auto_stop_silence_ms, 0);
+    }
+
+    #[test]
+    fn voice_config_parses_overrides() {
+        let c: VoiceConfig = toml::from_str(
+            r#"
+model = "small"
+language = "nl"
+auto_stop_silence_ms = 1500
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.model, "small");
+        assert_eq!(c.language, "nl");
+        assert_eq!(c.auto_stop_silence_ms, 1500);
+    }
+
+    #[test]
+    fn config_accepts_voice_block() {
+        let c: Config = toml::from_str(
+            r#"
+permission_mode = "accept-edits"
+[mesh]
+models = {}
+[voice]
+model = "medium"
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.voice.model, "medium");
+        assert_eq!(c.voice.language, "auto");
     }
 
     #[test]

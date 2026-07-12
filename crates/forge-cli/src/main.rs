@@ -14,6 +14,7 @@ pub(crate) use cli::args::{
     AssayCmd, AssayFormat, BenchCmd, Cli, Command, ExportScope, FailOnSeverity, GitCmd,
     ImportSource, LatticeOp, LocalCmd, McpCmd, McpTransportArg, Mode, OutputFormat, PluginCmd,
     PluginMarketplaceCmd, ProviderCmd, QueueCmd, ScheduleCmd, Scope, SelfMcpAction, SkillCmd,
+    VoiceOp,
 };
 pub(crate) use cli::commands::assay::{assay_cmd, spawn_assay};
 pub(crate) use cli::commands::blame::blame_cmd;
@@ -44,6 +45,7 @@ pub(crate) use cli::commands::schedule::schedule_cmd;
 pub(crate) use cli::commands::self_mcp::self_mcp_cmd;
 pub(crate) use cli::commands::skill::{commands_cmd, skill_cmd};
 pub(crate) use cli::commands::tour::tour_cmd;
+pub(crate) use cli::commands::voice::voice_cmd;
 
 mod api_serve;
 mod apns;
@@ -68,6 +70,7 @@ mod replay;
 mod serve;
 mod update;
 mod update_check;
+mod voice;
 
 /// Env var carrying the current subagent nesting depth across the process boundary (forge →
 /// claude/codex → `forge mcp-serve`). mcp-serve advertises `spawn_agents` only while

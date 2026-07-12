@@ -186,5 +186,6 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Queue { cmd } => queue_cmd(cmd),
         Command::Scoreboard => scoreboard_cmd(),
         Command::Tour { demo } => tour_cmd(demo),
+        Command::Voice { op } => voice_cmd(op).await,
     }
 }
