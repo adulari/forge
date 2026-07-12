@@ -5,10 +5,10 @@
 // immediately (one-tap slash command execution, same idea as the command palette's "send as
 // command"). Stop replaces the send circle while busy (`interrupt`).
 //
-// Mic input is intentionally NOT built here: FEATURES.md §5 flags it as a separate `lib/voice/`
-// seam (web Speech API now, native mic deferred) that BUILD_ORDER's T3.2 bullet does not list —
-// a non-functional mic button would be worse than none.
-import { ArrowUp, Clock, FileText, Image as ImageIcon, RotateCcw, Square } from "lucide-react-native";
+// Mic input: DESIGN.md "Mobile/desktop (V3)" — press mic, the input row morphs into
+// VoiceRecordingPill (lib/voice/ start/stop/cancel + POST /api/voice/transcribe), which
+// appends the transcript to the draft and morphs back. Never auto-sends.
+import { ArrowUp, Clock, FileText, Image as ImageIcon, Mic, RotateCcw, Square } from "lucide-react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from "react-native-reanimated";
 import React, { useEffect, useRef, useState } from "react";
 import { Image, Platform, StyleSheet, Text, TextInput, View } from "react-native";
@@ -18,6 +18,7 @@ import { haptics } from "../../lib/haptics";
 import { clearDraft, getDraft, setDraft } from "../../lib/drafts";
 import { useUpload } from "../../lib/queries";
 import { useSessionCtx } from "../../lib/sessionContext";
+import { voice } from "../../lib/voice/voice";
 import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { gutter, radii, space, tapTarget } from "../../theme/tokens";
@@ -37,6 +38,7 @@ import {
   pickImages,
   type SentAttachment,
 } from "./attach";
+import { VoiceRecordingPill } from "./VoiceRecordingPill";
 
 const MAX_LINES = 6;
 const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
@@ -74,6 +76,7 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
   const { draftText: text, setDraftText: setText, draftAttachments: attachments, setDraftAttachments: setAttachments, lastPrompt, setLastPrompt, composerFocusSignal } =
     useSessionCtx();
   const toast = useToast();
+  const [recording, setRecording] = useState(false);
   const [height, setHeight] = useState(MIN_HEIGHT);
   const [draftLoadedSession, setDraftLoadedSession] = useState<string | null>(null);
   const inputRef = useRef<TextInput>(null);
@@ -203,6 +206,16 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   };
 
+  // Reads `textRef` (not the closed-over `text`) for the same reason `commitRef` does below —
+  // this callback is handed to VoiceRecordingPill once and must see the CURRENT draft when the
+  // async transcription resolves, not whatever draft existed when recording started.
+  const appendTranscript = (transcript: string) => {
+    const trimmed = transcript.trim();
+    if (!trimmed) return;
+    const current = textRef.current;
+    setText(current.trim().length > 0 ? `${current} ${trimmed}` : trimmed);
+  };
+
   // Web: Enter=send / Shift+Enter=newline + paste-image. Bound directly to the underlying DOM
   // node (RN-Web's TextInput ref IS that node) since RN's onKeyPress doesn't expose `shiftKey`.
   useEffect(() => {
@@ -251,7 +264,7 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
       ]}
     >
       <HeatEdge active={busy} />
-      {attachments.length > 0 ? (
+      {!recording && attachments.length > 0 ? (
         <View style={styles.chipsRow}>
           {attachments.map((a) => (
             <Chip
@@ -271,58 +284,79 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
         </View>
       ) : null}
 
-      <View style={styles.chipsRow}>
-        {text.length === 0 || text.startsWith("/") ? commandHints.map((cmd) => (
-          <Chip key={cmd} label={cmd} onPress={() => commit(cmd)} testID={`chip-${cmd}`} />
-        )) : null}
-        {lastPrompt ? (
-          <Chip
-            label="resend last"
-            icon={<RotateCcw size={14} strokeWidth={1.75} color={tokens.ink3} />}
-            onPress={() => commit(lastPrompt)}
-            testID="resend-last-prompt"
-          />
-        ) : null}
-      </View>
+      {!recording ? (
+        <View style={styles.chipsRow}>
+          {text.length === 0 || text.startsWith("/") ? commandHints.map((cmd) => (
+            <Chip key={cmd} label={cmd} onPress={() => commit(cmd)} testID={`chip-${cmd}`} />
+          )) : null}
+          {lastPrompt ? (
+            <Chip
+              label="resend last"
+              icon={<RotateCcw size={14} strokeWidth={1.75} color={tokens.ink3} />}
+              onPress={() => commit(lastPrompt)}
+              testID="resend-last-prompt"
+            />
+          ) : null}
+        </View>
+      ) : null}
 
-      <View style={styles.row}>
-        <IconButton
-          icon={<ImageIcon size={20} strokeWidth={1.75} color={tokens.ink2} />}
-          onPress={onAttachImage}
-          accessibilityLabel="attach photo"
+      {recording ? (
+        <VoiceRecordingPill
+          onAppend={(transcript) => {
+            appendTranscript(transcript);
+            setRecording(false);
+          }}
+          onClose={() => setRecording(false)}
         />
-        <IconButton
-          icon={<FileText size={20} strokeWidth={1.75} color={tokens.ink2} />}
-          onPress={onAttachDocument}
-          accessibilityLabel="attach file"
-        />
-        <TextInput
-          ref={inputRef}
-          value={text}
-          onChangeText={setText}
-          returnKeyType="send"
-          autoCapitalize="none"
-          autoCorrect={false}
-          spellCheck={false}
-          onContentSizeChange={(e) =>
-            setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
-          }
-          multiline
-          placeholder="message…"
-          placeholderTextColor={tokens.ink3}
-          style={[type.body, styles.input, webInputTextStyle, { color: tokens.ink, height }]}
-          accessibilityLabel="message"
-          testID="composer-input"
-        />
-        <IconButton
-          icon={<View style={styles.actionIcon}><Animated.View style={sendIconStyle}>{online ? <ArrowUp size={20} strokeWidth={2} color={canSend ? tokens.onAccent : tokens.ink4} /> : <Clock size={18} strokeWidth={1.75} color={canSend ? tokens.onAccent : tokens.ink4} />}</Animated.View><Animated.View style={[styles.actionLayer, stopIconStyle]}><Square size={16} strokeWidth={1.75} color={tokens.onAccent} fill={tokens.onAccent} /></Animated.View></View>}
-          onPress={busy ? onInterrupt : () => commit(text)}
-          disabled={!busy && !canSend}
-          accessibilityLabel={busy ? "stop" : online ? "send" : "queue — will send on reconnect"}
-          style={[styles.sendCircle, { backgroundColor: busy ? tokens.danger : canSend ? tokens.accent : tokens.bg3 }]}
-        />
-      </View>
-      {!online ? (
+      ) : (
+        <View style={styles.row}>
+          <IconButton
+            icon={<ImageIcon size={20} strokeWidth={1.75} color={tokens.ink2} />}
+            onPress={onAttachImage}
+            accessibilityLabel="attach photo"
+          />
+          <IconButton
+            icon={<FileText size={20} strokeWidth={1.75} color={tokens.ink2} />}
+            onPress={onAttachDocument}
+            accessibilityLabel="attach file"
+          />
+          <TextInput
+            ref={inputRef}
+            value={text}
+            onChangeText={setText}
+            returnKeyType="send"
+            autoCapitalize="none"
+            autoCorrect={false}
+            spellCheck={false}
+            onContentSizeChange={(e) =>
+              setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
+            }
+            multiline
+            placeholder="message…"
+            placeholderTextColor={tokens.ink3}
+            style={[type.body, styles.input, webInputTextStyle, { color: tokens.ink, height }]}
+            accessibilityLabel="message"
+            testID="composer-input"
+          />
+          {voice.isSupported() ? (
+            <IconButton
+              icon={<Mic size={20} strokeWidth={1.75} color={tokens.ink2} />}
+              onPress={() => setRecording(true)}
+              disabled={attachments.some((a) => a.state === "uploading")}
+              accessibilityLabel="record voice message"
+              testID="composer-mic"
+            />
+          ) : null}
+          <IconButton
+            icon={<View style={styles.actionIcon}><Animated.View style={sendIconStyle}>{online ? <ArrowUp size={20} strokeWidth={2} color={canSend ? tokens.onAccent : tokens.ink4} /> : <Clock size={18} strokeWidth={1.75} color={canSend ? tokens.onAccent : tokens.ink4} />}</Animated.View><Animated.View style={[styles.actionLayer, stopIconStyle]}><Square size={16} strokeWidth={1.75} color={tokens.onAccent} fill={tokens.onAccent} /></Animated.View></View>}
+            onPress={busy ? onInterrupt : () => commit(text)}
+            disabled={!busy && !canSend}
+            accessibilityLabel={busy ? "stop" : online ? "send" : "queue — will send on reconnect"}
+            style={[styles.sendCircle, { backgroundColor: busy ? tokens.danger : canSend ? tokens.accent : tokens.bg3 }]}
+          />
+        </View>
+      )}
+      {!online && !recording ? (
         <Text style={[type.meta, styles.offlineHint, { color: tokens.ink3 }]}>will send on reconnect</Text>
       ) : null}
     </View>

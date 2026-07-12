@@ -25,6 +25,7 @@ import {
   type PastSessionRow,
   type SessionRow,
   subscribePush,
+  transcribeAudio,
   uploadFile,
 } from "./api";
 import { useAuth } from "./auth";
@@ -180,6 +181,14 @@ export function useUpload() {
   return useMutation({
     mutationFn: ({ sessionId, form }: { sessionId: string; form: FormData }) =>
       uploadFile(baseUrl as string, sessionId, form),
+  });
+}
+
+export function useTranscribe() {
+  const { baseUrl } = useAuth();
+  return useMutation({
+    mutationFn: ({ form, language }: { form: FormData; language?: string }) =>
+      transcribeAudio(baseUrl as string, form, language),
   });
 }
 

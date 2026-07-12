@@ -113,6 +113,10 @@ export interface UploadResponse {
   files: UploadedFile[];
 }
 
+export interface TranscribeResponse {
+  text: string;
+}
+
 export interface AnswerRequest {
   session: string;
   seq: number;
@@ -302,6 +306,17 @@ export function uploadFile(
   form: FormData,
 ): Promise<UploadResponse> {
   return request(baseUrl, `/api/upload${qs({ session: sessionId })}`, {
+    method: "POST",
+    body: form,
+  });
+}
+
+export function transcribeAudio(
+  baseUrl: string,
+  form: FormData,
+  language?: string,
+): Promise<TranscribeResponse> {
+  return request(baseUrl, `/api/voice/transcribe${qs({ language })}`, {
     method: "POST",
     body: form,
   });
