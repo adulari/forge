@@ -28,7 +28,7 @@ import { SessionHeader } from "../../../components/session/SessionHeader";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
-import { useHistory, useTurnCompleted } from "../../../lib/queries";
+import { useHistory, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
 import { durations, easings } from "../../../theme/motion";
@@ -59,6 +59,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const { isCompact } = useBreakpoint();
   const { snapshot, connectionState, send, setHeaderHeight, baseUrl, focusComposer } = useSessionCtx();
   const { data: sessionHistory } = useHistory(sessionId);
+  const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
     () => (sessionHistory?.pages ?? []).flat().find((row) => row.role === "assistant" && row.model)?.model ?? null,
     [sessionHistory],
@@ -251,6 +252,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             costUsd={snapshot?.cost_usd ?? 0}
             contextTokens={snapshot?.context_tokens ?? 0}
             contextLimit={snapshot?.context_limit ?? null}
+            weekly={weekly.mode === "subscription" ? { provider: weekly.provider, deltaPct: weekly.deltaPct } : null}
           />
         </View>
 

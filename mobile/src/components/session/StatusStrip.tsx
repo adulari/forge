@@ -7,7 +7,7 @@ import type { RemoteInput } from "../../lib/ws";
 import { useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../theme/tokens";
-import { type as typeScale } from "../../theme/typography";
+import { tabularNums, type as typeScale } from "../../theme/typography";
 import { ContextGauge } from "../ds/ContextGauge";
 import { CostMetric } from "../ds/CostMetric";
 import { StatusDot } from "../ds/StatusDot";
@@ -23,6 +23,7 @@ export interface StatusStripProps {
   costUsd: number;
   contextTokens: number;
   contextLimit: number | null;
+  weekly?: { provider: string; deltaPct: number } | null;
 }
 
 export function StatusStrip(props: StatusStripProps) {
@@ -46,7 +47,15 @@ export function StatusStrip(props: StatusStripProps) {
           <Text style={[typeScale.meta, styles.tierModel, { color: tokens.ink2 }]} numberOfLines={1}>
             {tierModel}
           </Text>
-          <CostMetric valueUsd={props.costUsd} />
+          {props.weekly ? (
+            <Text
+              style={[typeScale.meta, tabularNums, { color: tokens.success }]}
+              numberOfLines={1}
+              accessibilityLabel={`weekly quota +${props.weekly.deltaPct.toFixed(1)}% this session`}
+            >
+              +{props.weekly.deltaPct.toFixed(1)}% wk
+            </Text>
+          ) : <CostMetric valueUsd={props.costUsd} />}
           {props.contextLimit != null ? (
             <View style={styles.gauge}>
               <ContextGauge used={props.contextTokens} total={props.contextLimit} compact />
