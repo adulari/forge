@@ -131,6 +131,19 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         }
     }
 
+    // A worktree-backed daemon session is an isolated BUILD session — the client spun up a
+    // dedicated git worktree specifically to make changes. Arm the completion-quality guards:
+    // the empty-diff nudge ("implement it, don't describe it") and the progress-gated re-drive
+    // only fire when the session `expect_code_change`. Without this, a serve/app session that ran
+    // tools but edited nothing — a weaker model that investigated then stopped, or a bridge that
+    // hallucinated a completion — was silently accepted as "done" (the biggest serve reliability
+    // gap: every completion guard Forge already built was inert outside `bench swe`). The nudge
+    // still only triggers when tools actually ran and the tree is unchanged, so a pure-answer turn
+    // that touches nothing is unaffected.
+    if spec.worktree.is_some() {
+        session.set_expect_code_change(true);
+    }
+
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
     let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(std::sync::Arc::new(
         remote::SnapshotFrame::new(remote::Snapshot::default()),
