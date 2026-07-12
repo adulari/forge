@@ -1973,7 +1973,17 @@ fn mcp_startup_failed(stderr: &str) -> bool {
 fn classify_in_band_error(binary: &str, e: &str) -> ProviderError {
     let lower = e.to_ascii_lowercase();
     let msg = format!("{binary} error: {e}");
-    if lower.contains("rate") || lower.contains("429") || lower.contains("quota") {
+    // Match rate-limit phrasings, NOT the bare substring "rate" — that matched ordinary words
+    // (gene`rate`, ite`rate`, mode`rate`, accu`rate`, sepa`rate`), so a plain error like "failed to
+    // generate a response" was misclassified as a rate limit → spurious bench + failover under serve.
+    if lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("rate-limit")
+        || lower.contains("ratelimit")
+        || lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("quota")
+    {
         ProviderError::RateLimited {
             message: msg,
             retry_after: None,
@@ -4087,6 +4097,21 @@ mod tests {
         assert!(matches!(
             classify_in_band_error("claude", "weird unmapped thing"),
             ProviderError::Request(_)
+        ));
+        // Regression: ordinary errors containing "rate" as a substring (generate/iterate/moderate)
+        // must NOT be classified as rate limits (they were, benching healthy models under serve).
+        assert!(matches!(
+            classify_in_band_error("claude", "failed to generate a response"),
+            ProviderError::Request(_)
+        ));
+        assert!(matches!(
+            classify_in_band_error("gpt", "could not iterate over the moderate result set"),
+            ProviderError::Request(_)
+        ));
+        // But real rate-limit phrasings still map to RateLimited.
+        assert!(matches!(
+            classify_in_band_error("gpt", "429 Too Many Requests"),
+            ProviderError::RateLimited { .. }
         ));
     }
 
