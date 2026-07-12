@@ -1333,6 +1333,15 @@ pub struct MeshConfig {
     /// enabled by `FORGE_BRIDGE_LEAN=1`. Default false.
     #[serde(default)]
     pub bridge_lean: bool,
+    /// Connect external project MCP servers (dual-graph/token-counter/helm/…) inside the CLI
+    /// bridge. Default false: a bridged claude/codex turn spawns `forge mcp-serve`, and eagerly
+    /// booting every active project MCP server there builds a heavy nested process tree and can
+    /// wedge the whole tool-using turn behind a slow/auth-gated server (e.g. helm). The bridged
+    /// model keeps every Forge CORE tool (file/shell/update_tasks/spawn_agents/use_skill/…)
+    /// regardless — only this external project-MCP surface (and its `mcp_search_tools`/`mcp_call`
+    /// meta-tools) is gated. Also enabled by `FORGE_BRIDGE_MCP_EXTERNAL=1` (env wins). Default false.
+    #[serde(default)]
+    pub bridge_mcp_external: bool,
     /// Enforcement behavior once a cap is reached.
     #[serde(default)]
     pub budget: BudgetBehavior,
@@ -2030,6 +2039,7 @@ impl Default for Config {
                 classifier_model: None,
                 bridge_mode: BridgeMode::default(),
                 bridge_lean: false,
+                bridge_mcp_external: false,
                 daily_budget_usd: None,
                 monthly_cap_usd: None,
                 weekly_budget_usd: None,
@@ -2586,6 +2596,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "mesh.monthly_cap_usd" => Some(("Mesh & Cost", "Monthly spend cap (USD)")),
         "mesh.classifier" => Some(("Mesh & Cost", "Task classifier")),
         "mesh.classifier_model" => Some(("Mesh & Cost", "Classifier model")),
+        "mesh.bridge_mcp_external" => Some(("Mesh & Cost", "Bridge external MCP")),
         "mesh.prefer_subscription" => Some(("Mesh & Cost", "Prefer subscriptions")),
         "mesh.max_output_tokens" => Some(("Mesh & Cost", "Max output tokens")),
         "mesh.architect_mode" => Some(("Mesh & Cost", "Architect mode")),
@@ -2783,6 +2794,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "mesh.monthly_cap_usd" => "Hard monthly spend cap (USD). Empty = unlimited.",
         "mesh.classifier" => "Task-tier classifier: heuristic (instant, no call) or llm (a cheap model labels each turn).",
         "mesh.classifier_model" => "Model the llm classifier calls — pick a $0/local one (e.g. ollama::… or a CLI bridge).",
+        "mesh.bridge_mcp_external" => "Connect external project MCP servers (dual-graph/helm/…) inside the CLI bridge. Off by default — off avoids a heavy nested process tree that can stall tool-using turns. Forge core tools stay either way.",
         "mesh.prefer_subscription" => "Prefer $0 CLI-bridge subscriptions over a metered API model on a tie.",
         "mesh.max_output_tokens" => "Cap on tokens a model may generate per call.",
         "mesh.architect_mode" => "Use a stronger 'architect' model to plan, a cheaper one to edit.",
