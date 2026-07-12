@@ -1301,6 +1301,32 @@ pub(crate) async fn run_chat_tui(
     let mut mesh_load_rx: Option<tokio::sync::oneshot::Receiver<Option<forge_tui::MeshOverlay>>> =
         None;
     let mut usage_load_rx: Option<tokio::sync::oneshot::Receiver<bridge_stats::BridgeStats>> = None;
+    // `/voice`: the real system resources (recorder thread, download/transcribe channels) live
+    // here, loop-local — NOT on `App`, which stays `Clone + Default` and only holds the
+    // rendering-facing `VoiceOverlay`. See `apply_voice_start`/`start_voice_transcribe`.
+    let mut voice_handle: Option<forge_voice::RecordingHandle> = None;
+    let mut voice_model_path: Option<std::path::PathBuf> = None;
+    let mut voice_download_progress_rx: Option<tokio::sync::watch::Receiver<(u64, Option<u64>)>> =
+        None;
+    let mut voice_download_done_rx: Option<
+        tokio::sync::oneshot::Receiver<std::result::Result<forge_voice::RecordingHandle, String>>,
+    > = None;
+    let mut voice_transcript_rx: Option<
+        tokio::sync::oneshot::Receiver<forge_voice::Result<String>>,
+    > = None;
+    // Wall-clock start of the current recording, for the `mm:ss` elapsed label (mirrors
+    // `busy_since`/`turn_elapsed_secs`).
+    let mut voice_started_at: Option<Instant> = None;
+    // When set, the voice overlay's error card auto-closes at this instant (also dismissible by
+    // any keypress — see the modal key handling below).
+    let mut voice_error_until: Option<Instant> = None;
+    // Wall-clock press time of the voice chord, for the push-to-talk tap-vs-hold decision
+    // (`voice_is_hold`). Only meaningful between a `KeyKind::ToggleVoice` press and its matching
+    // `InputEvent::KeyUp` release.
+    let mut voice_press_at: Option<Instant> = None;
+    // True while the kitty keyboard protocol's event-type reporting is pushed for push-to-talk
+    // (see `Tui::push_voice_ptt`) — gates whether `Tui::pop_voice_ptt` is safe to call.
+    let mut voice_ptt_active = false;
     // Remote control (`/remote`): when `Some`, a browser can drive the session. The handle owns
     // the server task + the snapshot channel + the input queue; we broadcast a snapshot each
     // dirty frame and drain inputs to inject them like local keystrokes.
@@ -1633,6 +1659,35 @@ pub(crate) async fn run_chat_tui(
                     }
                     continue;
                 }
+                forge_tui::InputEvent::KeyUp(kind) => {
+                    // Release of the `/voice` push-to-talk chord (the only chord this ever fires
+                    // for — see `InputEvent::KeyUp`'s doc comment). A hold at/past the threshold
+                    // auto-stops and transcribes; a quick tap leaves the overlay in ordinary
+                    // toggle mode (Enter/Esc/r), untouched.
+                    if matches!(kind, KeyKind::ToggleVoice) {
+                        if let Some(pressed_at) = voice_press_at.take() {
+                            let is_recording = matches!(
+                                app.voice.as_ref().map(|v| &v.phase),
+                                Some(forge_tui::VoicePhase::Recording { .. })
+                            );
+                            if is_recording && voice_is_hold(pressed_at.elapsed().as_millis()) {
+                                if let (Some(handle), Some(model_path)) =
+                                    (voice_handle.take(), voice_model_path.clone())
+                                {
+                                    if voice_ptt_active {
+                                        tui.pop_voice_ptt();
+                                        voice_ptt_active = false;
+                                    }
+                                    voice_started_at = None;
+                                    voice_transcript_rx =
+                                        Some(start_voice_transcribe(&mut app, handle, model_path));
+                                    dirty = true;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 forge_tui::InputEvent::Key(k) => k,
             };
 
@@ -1800,7 +1855,8 @@ pub(crate) async fn run_chat_tui(
                 || app.usage_overlay.open
                 || app.mesh_overlay.open
                 || app.at_picker.open
-                || app.picker.open;
+                || app.picker.open
+                || app.voice.is_some();
             if !any_modal_open {
                 // Ctrl+R: toggle the effort slider when nothing else is modal.
                 if matches!(key, KeyKind::ToggleEffortSlider) {
@@ -1941,6 +1997,45 @@ pub(crate) async fn run_chat_tui(
                         app.note("✓ config reloaded (tier override cleared)");
                     } else {
                         app.note("⚠ config reload failed");
+                    }
+                    dirty = true;
+                    continue;
+                }
+
+                if matches!(key, KeyKind::ToggleVoice) {
+                    // Ctrl+V (configurable): same as typing `/voice` — open the recording overlay
+                    // (or kick off the whisper model download first, on first use). Not gated on
+                    // `busy` here: `dispatch_command`'s own `mutates` check excludes `Voice`
+                    // (like `/usage`, it only fills the input box on completion — it never touches
+                    // the running turn). `voice_press_at` feeds the push-to-talk tap-vs-hold
+                    // decision on the matching `InputEvent::KeyUp` release, if one ever arrives.
+                    voice_press_at = Some(Instant::now());
+                    if let DispatchOutcome::PendingVoice(start) = dispatch_command(
+                        "/voice",
+                        &session,
+                        Some(&mut tui),
+                        &mut app,
+                        &catalog,
+                        &mut armed_project,
+                        trust_project,
+                        busy,
+                        &mut assay_lenses,
+                        &mut assay_scope,
+                    )
+                    .await?
+                    {
+                        apply_voice_start(
+                            start,
+                            &mut tui,
+                            &mut app,
+                            &mut voice_handle,
+                            &mut voice_model_path,
+                            &mut voice_download_progress_rx,
+                            &mut voice_download_done_rx,
+                            &mut voice_started_at,
+                            &mut voice_error_until,
+                            &mut voice_ptt_active,
+                        );
                     }
                     dirty = true;
                     continue;
@@ -2276,6 +2371,20 @@ pub(crate) async fn run_chat_tui(
                             DispatchOutcome::PendingUsage(rx) => {
                                 usage_load_rx = Some(rx);
                             }
+                            DispatchOutcome::PendingVoice(start) => {
+                                apply_voice_start(
+                                    start,
+                                    &mut tui,
+                                    &mut app,
+                                    &mut voice_handle,
+                                    &mut voice_model_path,
+                                    &mut voice_download_progress_rx,
+                                    &mut voice_download_done_rx,
+                                    &mut voice_started_at,
+                                    &mut voice_error_until,
+                                    &mut voice_ptt_active,
+                                );
+                            }
                             DispatchOutcome::ToggleRemote { exposure } => {
                                 toggle_remote(
                                     &mut remote,
@@ -2360,6 +2469,94 @@ pub(crate) async fn run_chat_tui(
                         dirty = true;
                     }
                     _ => {}
+                }
+                continue;
+            }
+
+            // The `/voice` recording overlay captures all keys while open. Match on a cloned
+            // phase (not a live borrow) since several arms need to mutate `app.voice` itself.
+            if let Some(phase) = app.voice.as_ref().map(|v| v.phase.clone()) {
+                match phase {
+                    forge_tui::VoicePhase::Error(_) => {
+                        // Any key dismisses early; it also auto-closes after ~2s (ticked below).
+                        app.voice = None;
+                        voice_error_until = None;
+                        dirty = true;
+                    }
+                    forge_tui::VoicePhase::Downloading { .. } => {
+                        if matches!(key, KeyKind::Esc) {
+                            // `forge_voice::ensure_model` has no cancel token — the download
+                            // finishes in the background and its result is simply never looked
+                            // at again (the receivers below are dropped).
+                            app.voice = None;
+                            voice_download_progress_rx = None;
+                            voice_download_done_rx = None;
+                            app.note("voice: cancelled");
+                            dirty = true;
+                        }
+                    }
+                    forge_tui::VoicePhase::Recording { .. } => match key {
+                        KeyKind::Esc => {
+                            if let Some(h) = voice_handle.take() {
+                                h.cancel();
+                            }
+                            if voice_ptt_active {
+                                tui.pop_voice_ptt();
+                                voice_ptt_active = false;
+                            }
+                            voice_started_at = None;
+                            voice_model_path = None;
+                            app.voice = None;
+                            app.note("voice: cancelled");
+                            dirty = true;
+                        }
+                        KeyKind::Enter => {
+                            if let (Some(handle), Some(model_path)) =
+                                (voice_handle.take(), voice_model_path.clone())
+                            {
+                                if voice_ptt_active {
+                                    tui.pop_voice_ptt();
+                                    voice_ptt_active = false;
+                                }
+                                voice_started_at = None;
+                                voice_transcript_rx =
+                                    Some(start_voice_transcribe(&mut app, handle, model_path));
+                                dirty = true;
+                            }
+                        }
+                        KeyKind::Char('r') => {
+                            if let Some(h) = voice_handle.take() {
+                                h.cancel();
+                            }
+                            if voice_ptt_active {
+                                tui.pop_voice_ptt();
+                                voice_ptt_active = false;
+                            }
+                            match forge_voice::Recorder::start() {
+                                Ok(new_handle) => {
+                                    voice_ptt_active = tui.push_voice_ptt();
+                                    voice_handle = Some(new_handle);
+                                    voice_started_at = Some(Instant::now());
+                                    app.voice =
+                                        Some(forge_tui::VoiceOverlay::recording(voice_ptt_active));
+                                    app.note("voice: restarted");
+                                }
+                                Err(e) => {
+                                    voice_started_at = None;
+                                    voice_model_path = None;
+                                    app.voice = Some(forge_tui::VoiceOverlay::error(e.to_string()));
+                                    voice_error_until =
+                                        Some(Instant::now() + Duration::from_secs(2));
+                                }
+                            }
+                            dirty = true;
+                        }
+                        _ => {}
+                    },
+                    forge_tui::VoicePhase::Transcribing => {
+                        // Frozen: whisper runs off-thread via `spawn_blocking`, which has no
+                        // cancel handle — swallow keys until the result (or failure) lands.
+                    }
                 }
                 continue;
             }
@@ -3203,6 +3400,20 @@ pub(crate) async fn run_chat_tui(
                                 DispatchOutcome::PendingUsage(rx) => {
                                     usage_load_rx = Some(rx);
                                 }
+                                DispatchOutcome::PendingVoice(start) => {
+                                    apply_voice_start(
+                                        start,
+                                        &mut tui,
+                                        &mut app,
+                                        &mut voice_handle,
+                                        &mut voice_model_path,
+                                        &mut voice_download_progress_rx,
+                                        &mut voice_download_done_rx,
+                                        &mut voice_started_at,
+                                        &mut voice_error_until,
+                                        &mut voice_ptt_active,
+                                    );
+                                }
                                 DispatchOutcome::ToggleRemote { exposure } => {
                                     toggle_remote(
                                         &mut remote,
@@ -3549,6 +3760,23 @@ pub(crate) async fn run_chat_tui(
                                 }
                                 DispatchOutcome::PendingUsage(rx) => {
                                     usage_load_rx = Some(rx);
+                                }
+                                DispatchOutcome::PendingVoice(start) => {
+                                    // Recording happens on the HOST (where the mic actually is)
+                                    // regardless of which device issued `/voice` — same as every
+                                    // other remotely-triggered command.
+                                    apply_voice_start(
+                                        start,
+                                        &mut tui,
+                                        &mut app,
+                                        &mut voice_handle,
+                                        &mut voice_model_path,
+                                        &mut voice_download_progress_rx,
+                                        &mut voice_download_done_rx,
+                                        &mut voice_started_at,
+                                        &mut voice_error_until,
+                                        &mut voice_ptt_active,
+                                    );
                                 }
                                 DispatchOutcome::ToggleRemote { .. } => {
                                     // Can't be honored here: this drain runs under the
@@ -4092,6 +4320,111 @@ pub(crate) async fn run_chat_tui(
             }
         }
 
+        // `/voice`: animate the REC blink / spinner, tick the elapsed-time counter at 1Hz (mirrors
+        // `turn_elapsed_secs` above), and sample the live RMS level into the waveform ring buffer.
+        // Unconditional `dirty = true` while open, same convention as the mesh/usage overlays
+        // above — the animation itself is the reason to redraw, not a side effect of other state.
+        if let Some(v) = app.voice.as_mut() {
+            v.anim_tick = v.anim_tick.wrapping_add(1);
+            dirty = true;
+            if matches!(v.phase, forge_tui::VoicePhase::Recording { .. }) {
+                if let Some(started) = voice_started_at {
+                    v.elapsed_secs = started.elapsed().as_secs();
+                }
+                if let Some(handle) = &voice_handle {
+                    v.push_level(*handle.levels.borrow());
+                }
+            }
+        }
+        // Auto-close the error card after its timeout (also dismissible by any keypress above).
+        if let Some(until) = voice_error_until {
+            if Instant::now() >= until {
+                app.voice = None;
+                voice_error_until = None;
+                dirty = true;
+            }
+        }
+        // Poll the whisper-model download's progress (a `watch` channel — always holds the latest
+        // value, so `has_changed`/`borrow_and_update` rather than `try_recv`).
+        if let Some(rx) = &mut voice_download_progress_rx {
+            if rx.has_changed().unwrap_or(false) {
+                let (done, total) = *rx.borrow_and_update();
+                if let Some(v) = app.voice.as_mut() {
+                    if let forge_tui::VoicePhase::Downloading {
+                        done_mb, total_mb, ..
+                    } = &mut v.phase
+                    {
+                        *done_mb = done as f64 / 1_048_576.0;
+                        *total_mb = total.map(|t| t as f64 / 1_048_576.0);
+                    }
+                }
+                dirty = true;
+            }
+        }
+        // Poll the download's completion: model landed + recording started (Ok), or a download/mic
+        // failure (Err) — either way the overlay moves out of the `Downloading` phase.
+        if let Some(rx) = &mut voice_download_done_rx {
+            match rx.try_recv() {
+                Ok(Ok(handle)) => {
+                    voice_handle = Some(handle);
+                    voice_started_at = Some(Instant::now());
+                    voice_ptt_active = tui.push_voice_ptt();
+                    app.voice = Some(forge_tui::VoiceOverlay::recording(voice_ptt_active));
+                    voice_download_progress_rx = None;
+                    voice_download_done_rx = None;
+                    dirty = true;
+                }
+                Ok(Err(e)) => {
+                    app.voice = Some(forge_tui::VoiceOverlay::error(format!("voice: {e}")));
+                    voice_error_until = Some(Instant::now() + Duration::from_secs(2));
+                    voice_model_path = None;
+                    voice_download_progress_rx = None;
+                    voice_download_done_rx = None;
+                    dirty = true;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    app.voice = None;
+                    voice_download_progress_rx = None;
+                    voice_download_done_rx = None;
+                    dirty = true;
+                }
+            }
+        }
+        // Poll the transcription result (Enter or a held-then-released push-to-talk chord):
+        // insert into `app.input` at the cursor and close the overlay, or show the failure.
+        if let Some(rx) = &mut voice_transcript_rx {
+            match rx.try_recv() {
+                Ok(Ok(text)) => {
+                    voice_transcript_rx = None;
+                    app.voice = None;
+                    let n = forge_tui::insert_voice_transcript(
+                        &mut app.input,
+                        &mut app.input_cursor,
+                        &text,
+                    );
+                    if n == 0 {
+                        app.note("voice: heard nothing");
+                    } else {
+                        app.note(&format!("voice: inserted {n} chars"));
+                    }
+                    dirty = true;
+                }
+                Ok(Err(e)) => {
+                    voice_transcript_rx = None;
+                    app.voice = Some(forge_tui::VoiceOverlay::error(format!("voice: {e}")));
+                    voice_error_until = Some(Instant::now() + Duration::from_secs(2));
+                    dirty = true;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    voice_transcript_rx = None;
+                    app.voice = None;
+                    dirty = true;
+                }
+            }
+        }
+
         // Push any finalized lines into native scrollback (above the pinned live region). While
         // remote control is on, also fold them into the transcript ring buffer so the phone's
         // snapshot mirrors the conversation tail, then broadcast the snapshot.
@@ -4179,6 +4512,101 @@ pub(crate) async fn run_chat_tui(
             .await;
     }
     Ok(())
+}
+
+/// Push-to-talk hold threshold: a chord release faster than this is a "tap" (leave the overlay in
+/// ordinary toggle mode — Enter/Esc/r); at or past it is a "hold" (auto-stop + transcribe on
+/// release). Pure so the decision is unit-testable in isolation from any terminal/async plumbing.
+pub(crate) const VOICE_PTT_HOLD_MS: u128 = 400;
+
+/// See [`VOICE_PTT_HOLD_MS`].
+pub(crate) fn voice_is_hold(held_ms: u128) -> bool {
+    held_ms >= VOICE_PTT_HOLD_MS
+}
+
+/// Wire a freshly-dispatched `/voice` into the loop-local recorder/download state. `App::voice`
+/// (the rendering-facing state) is already set by `dispatch_command` — this only handles the real
+/// system resources, which must live loop-local so `App` stays `Clone + Default`. Shared by every
+/// place `/voice` can be triggered from: the palette, a typed `/voice` line, remote input, and the
+/// Ctrl+V shortcut. Resets every voice-related loop-local first, so no state from a previous voice
+/// session can bleed through.
+#[allow(clippy::too_many_arguments)]
+fn apply_voice_start(
+    start: VoiceStart,
+    tui: &mut forge_tui::Tui,
+    app: &mut forge_tui::App,
+    voice_handle: &mut Option<forge_voice::RecordingHandle>,
+    voice_model_path: &mut Option<std::path::PathBuf>,
+    voice_download_progress_rx: &mut Option<tokio::sync::watch::Receiver<(u64, Option<u64>)>>,
+    voice_download_done_rx: &mut Option<
+        tokio::sync::oneshot::Receiver<std::result::Result<forge_voice::RecordingHandle, String>>,
+    >,
+    voice_started_at: &mut Option<std::time::Instant>,
+    voice_error_until: &mut Option<std::time::Instant>,
+    voice_ptt_active: &mut bool,
+) {
+    *voice_handle = None;
+    *voice_model_path = None;
+    *voice_download_progress_rx = None;
+    *voice_download_done_rx = None;
+    *voice_started_at = None;
+    *voice_error_until = None;
+    if *voice_ptt_active {
+        tui.pop_voice_ptt();
+        *voice_ptt_active = false;
+    }
+    match start {
+        VoiceStart::Recording { handle, model_path } => {
+            *voice_ptt_active = tui.push_voice_ptt();
+            if let Some(v) = app.voice.as_mut() {
+                v.phase = forge_tui::VoicePhase::Recording {
+                    ptt_active: *voice_ptt_active,
+                };
+            }
+            *voice_handle = Some(handle);
+            *voice_model_path = Some(model_path);
+            *voice_started_at = Some(std::time::Instant::now());
+        }
+        VoiceStart::Downloading {
+            model_path,
+            progress_rx,
+            done_rx,
+        } => {
+            *voice_model_path = Some(model_path);
+            *voice_download_progress_rx = Some(progress_rx);
+            *voice_download_done_rx = Some(done_rx);
+        }
+        VoiceStart::Error => {
+            // `app.voice` is already the error card (set by `dispatch_command`).
+            *voice_error_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+        }
+    }
+}
+
+/// Stop the recording and kick off transcription in the background — shared by the Enter key
+/// (toggle mode) and a held-then-released push-to-talk chord. Moves the overlay into
+/// `VoicePhase::Transcribing`; the tick loop polls the returned receiver for the result.
+fn start_voice_transcribe(
+    app: &mut forge_tui::App,
+    handle: forge_voice::RecordingHandle,
+    model_path: std::path::PathBuf,
+) -> tokio::sync::oneshot::Receiver<forge_voice::Result<String>> {
+    if let Some(v) = app.voice.as_mut() {
+        v.phase = forge_tui::VoicePhase::Transcribing;
+    }
+    let config = forge_config::load().unwrap_or_default();
+    let language = (config.voice.language != "auto").then_some(config.voice.language);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::task::spawn_blocking(move || {
+        let result = (|| -> forge_voice::Result<String> {
+            let samples = handle.stop()?;
+            let transcriber = forge_voice::Transcriber::load(&model_path)?;
+            transcriber.transcribe(&samples, language.as_deref())
+        })();
+        let _ = tx.send(result);
+    });
+    rx
 }
 
 /// `/loop` runtime state: the generation of the in-flight loop turn and how many iterations have
@@ -5050,6 +5478,17 @@ mod tests {
                 subtitle: String::new(),
             })
             .collect()
+    }
+
+    #[test]
+    fn voice_ptt_tap_vs_hold_threshold() {
+        // Faster than the threshold: a tap — leave the overlay in ordinary toggle mode.
+        assert!(!voice_is_hold(0));
+        assert!(!voice_is_hold(VOICE_PTT_HOLD_MS - 1));
+        // At or past the threshold: a hold — auto-stop + transcribe on release.
+        assert!(voice_is_hold(VOICE_PTT_HOLD_MS));
+        assert!(voice_is_hold(VOICE_PTT_HOLD_MS + 1));
+        assert!(voice_is_hold(5_000));
     }
 
     #[test]

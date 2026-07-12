@@ -877,6 +877,21 @@ impl DriverState {
             }
             DispatchOutcome::PendingMesh(rx) => self.mesh_load_rx = Some(rx),
             DispatchOutcome::PendingUsage(rx) => self.usage_load_rx = Some(rx),
+            DispatchOutcome::PendingVoice(start) => {
+                // This daemon-hosted session has no local `Tui` (no PTT push/pop, no waveform
+                // tick loop) — /voice isn't supported headless. Release whatever
+                // `dispatch_command` already started (a live mic stream, or a download) rather
+                // than leaking it, and tell the client why.
+                match start {
+                    VoiceStart::Recording { handle, .. } => handle.cancel(),
+                    VoiceStart::Downloading { .. } | VoiceStart::Error => {}
+                }
+                self.app.voice = None;
+                push_remote_note(
+                    &mut self.notes,
+                    "voice: /voice needs the TUI — not available on a `forge serve`-hosted session",
+                );
+            }
             DispatchOutcome::ToggleRemote { .. } => {
                 push_remote_note(
                     &mut self.notes,

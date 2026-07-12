@@ -49,6 +49,7 @@ pub(crate) fn action_desc(action: &str) -> &'static str {
         "help" => "Show keybind reference (this screen)",
         "checkpoint" => "Save session checkpoint",
         "reload" => "Hot-reload config",
+        "voice" => "Open /voice recording overlay",
         _ => "",
     }
 }
@@ -80,6 +81,7 @@ pub(crate) fn all_actions() -> Vec<&'static str> {
         "help",
         "checkpoint",
         "reload",
+        "voice",
     ]
 }
 

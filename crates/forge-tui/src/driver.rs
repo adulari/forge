@@ -79,6 +79,12 @@ pub enum InputEvent {
         col: u16,
         row: u16,
     },
+    /// Release of a configured chord — only ever produced for the `voice` action, and only while
+    /// the kitty keyboard protocol's event-type reporting is active (pushed for the lifetime of
+    /// the `/voice` overlay's push-to-talk mode; see `push_voice_ptt`/`pop_voice_ptt`). A plain
+    /// terminal never emits Release at all, so this variant simply never appears there — the
+    /// overlay falls back to toggle-only (Enter/Esc/r) in that case.
+    KeyUp(KeyKind),
 }
 
 /// A message from a running turn to the render loop.
@@ -270,6 +276,35 @@ impl Tui {
         self.terminal.size().map(|s| s.height).unwrap_or(24)
     }
 
+    /// Try to enable the kitty keyboard protocol's event-type reporting (Press/Repeat/Release
+    /// instead of Press-only), so the `/voice` overlay can support push-to-talk (hold the chord to
+    /// record, release to transcribe). Scoped to the overlay's own lifetime — pushed when
+    /// recording starts, popped when it stops (`pop_voice_ptt`) — rather than globally, so every
+    /// other keystroke in the app is completely unaffected whether or not this succeeds.
+    ///
+    /// Returns `true` if the terminal supports it and the flags were pushed. Returns `false` on an
+    /// unsupported terminal (a plain xterm etc.) or if the push failed; in either case the caller
+    /// must NOT call [`Tui::pop_voice_ptt`] (nothing was pushed to undo) and the overlay falls back
+    /// to toggle-only (Enter/Esc/r) — a plain terminal never emits `KeyEventKind::Release` at all,
+    /// so `InputEvent::KeyUp` simply never arrives in that case.
+    pub fn push_voice_ptt(&mut self) -> bool {
+        use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+        if !crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false) {
+            return false;
+        }
+        crossterm::execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::REPORT_EVENT_TYPES)
+        )
+        .is_ok()
+    }
+
+    /// Undo a successful [`Tui::push_voice_ptt`]. Only call this when that returned `true`.
+    pub fn pop_voice_ptt(&mut self) {
+        use crossterm::event::PopKeyboardEnhancementFlags;
+        let _ = crossterm::execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
+
     /// Push plain multi-line text into the scrollback (convenience over [`insert_lines`]).
     pub fn print_text(&mut self, text: &str) {
         let lines: Vec<TextLine<'static>> =
@@ -394,6 +429,17 @@ impl Tui {
                     _ => return Ok(None),
                 };
                 return Ok(Some(InputEvent::Key(key)));
+            }
+            // Release of the `voice` chord. Restricted to exactly that one configured action (not
+            // every key) so this can never regress any other keystroke's behavior — and it's only
+            // ever reachable at all when `push_voice_ptt` succeeded, since a terminal without the
+            // kitty protocol simply never emits `KeyEventKind::Release` in the first place.
+            Event::Key(k) if k.kind == KeyEventKind::Release => {
+                if let Some(combo) = self.keybinds.binds.get("voice") {
+                    if crate::keybinds::matches(combo, &k) {
+                        return Ok(Some(InputEvent::KeyUp(KeyKind::ToggleVoice)));
+                    }
+                }
             }
             _ => {}
         }
