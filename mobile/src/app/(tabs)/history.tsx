@@ -4,18 +4,20 @@
 import { router } from "expo-router";
 import { History as HistoryIcon } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import { stripLeadingAttachMentions } from "../../components/chat/MessageRow";
 import { Badge } from "../../components/ds/Badge";
 import { BoundedList } from "../../components/ds/BoundedList";
 import { Button } from "../../components/ds/Button";
+import { Chip } from "../../components/ds/Chip";
 import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { RelativeTime } from "../../components/ds/RelativeTime";
 import { Screen } from "../../components/ds/Screen";
 import { SearchField } from "../../components/ds/SearchField";
+import { SectionHeader } from "../../components/ds/SectionHeader";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { useToast } from "../../components/ds/ToastHost";
 import { ApiError, type PastSessionRow } from "../../lib/api";
@@ -29,6 +31,53 @@ function matchesQuery(row: PastSessionRow, query: string): boolean {
   if (!query) return true;
   const haystack = `${row.title} ${row.cwd}`.toLowerCase();
   return haystack.includes(query);
+}
+
+export type ActivityBucket = "today" | "yesterday" | "week" | "earlier";
+
+export function bucketForActivity(nowSec: number, lastActivitySec: number): ActivityBucket {
+  const now = new Date(nowSec * 1000);
+  const activity = new Date(lastActivitySec * 1000);
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (activity >= todayStart) return "today";
+
+  const yesterdayStart = new Date(todayStart);
+  yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+  if (activity >= yesterdayStart) return "yesterday";
+
+  const weekStart = new Date(todayStart);
+  const daysSinceMonday = (weekStart.getDay() + 6) % 7;
+  weekStart.setDate(weekStart.getDate() - daysSinceMonday);
+  return activity >= weekStart ? "week" : "earlier";
+}
+
+type HistoryFilter = "all" | "waiting" | "busy" | "done";
+type HistoryListItem =
+  | { type: "header"; bucket: ActivityBucket; label: string }
+  | { type: "row"; row: PastSessionRow; index: number };
+
+const FILTERS: { value: HistoryFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "waiting", label: "Waiting" },
+  { value: "busy", label: "Busy" },
+  { value: "done", label: "Done" },
+];
+
+const BUCKETS: { value: ActivityBucket; label: string }[] = [
+  { value: "today", label: "Today" },
+  { value: "yesterday", label: "Yesterday" },
+  { value: "week", label: "This week" },
+  { value: "earlier", label: "Earlier" },
+];
+
+function matchesFilter(row: PastSessionRow, filter: HistoryFilter): boolean {
+  const statefulRow = row as PastSessionRow & { busy?: boolean; waiting?: boolean };
+  const busy = statefulRow.busy === true;
+  const waiting = statefulRow.waiting === true;
+  if (filter === "all") return true;
+  if (filter === "waiting") return waiting;
+  if (filter === "busy") return busy;
+  return !busy && !waiting;
 }
 
 interface HistoryRowProps {
@@ -111,6 +160,7 @@ export default function HistoryScreen() {
   const tokens = useTokens();
   const toast = useToast();
   const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<HistoryFilter>("all");
   const [confirmRow, setConfirmRow] = useState<PastSessionRow | null>(null);
   const [resumingId, setResumingId] = useState<string | null>(null);
 
@@ -130,9 +180,28 @@ export default function HistoryScreen() {
   const rows = useMemo(() => data?.pages.flat() ?? [], [data]);
   const normalizedQuery = query.trim().toLowerCase();
   const filteredRows = useMemo(
-    () => rows.filter((row) => matchesQuery(row, normalizedQuery)),
-    [rows, normalizedQuery],
+    () => rows.filter((row) => matchesQuery(row, normalizedQuery) && matchesFilter(row, filter)),
+    [rows, normalizedQuery, filter],
   );
+  const listItems = useMemo<HistoryListItem[]>(() => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const groups = new Map<ActivityBucket, PastSessionRow[]>();
+    for (const row of filteredRows) {
+      const bucket = bucketForActivity(nowSec, row.last_activity);
+      const group = groups.get(bucket) ?? [];
+      group.push(row);
+      groups.set(bucket, group);
+    }
+
+    return BUCKETS.flatMap(({ value, label }) => {
+      const group = groups.get(value);
+      if (!group?.length) return [];
+      return [
+        { type: "header" as const, bucket: value, label },
+        ...group.map((row, index) => ({ type: "row" as const, row, index })),
+      ];
+    });
+  }, [filteredRows]);
 
   const resume = useCallback(
     (row: PastSessionRow) => {
@@ -159,12 +228,14 @@ export default function HistoryScreen() {
   const onRowPress = useCallback((row: PastSessionRow) => setConfirmRow(row), []);
 
   const renderItem = useCallback(
-    ({ item, index }: { item: PastSessionRow; index: number }) => (
-      <HistoryRow row={item} index={index} onPress={onRowPress} />
-    ),
+    ({ item }: { item: HistoryListItem }) =>
+      item.type === "header" ? <SectionHeader>{item.label}</SectionHeader> : <HistoryRow row={item.row} index={item.index} onPress={onRowPress} />,
     [onRowPress],
   );
-  const keyExtractor = useCallback((item: PastSessionRow) => item.id, []);
+  const keyExtractor = useCallback(
+    (item: HistoryListItem) => (item.type === "header" ? `header:${item.bucket}` : item.row.id),
+    [],
+  );
 
   const onEndReached = useCallback(() => {
     if (hasNextPage && !isFetchingNextPage) fetchNextPage();
@@ -180,6 +251,16 @@ export default function HistoryScreen() {
         autoCorrect={false}
         containerStyle={styles.search}
       />
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filters}>
+        {FILTERS.map((option) => (
+          <Chip
+            key={option.value}
+            label={option.label}
+            selected={filter === option.value}
+            onPress={() => setFilter(option.value)}
+          />
+        ))}
+      </ScrollView>
       {isLoading ? (
         <View>
           {[0, 1, 2].map((i) => (
@@ -192,7 +273,7 @@ export default function HistoryScreen() {
         </View>
       ) : (
         <BoundedList
-          data={filteredRows}
+          data={listItems}
           keyExtractor={keyExtractor}
           renderItem={renderItem}
           ListEmptyComponent={
@@ -205,7 +286,7 @@ export default function HistoryScreen() {
             ) : (
               <EmptyState
                 icon={HistoryIcon}
-                message={normalizedQuery ? "no past sessions match your search." : "no past sessions yet."}
+                message={normalizedQuery || filter !== "all" ? "no past sessions match these filters." : "no past sessions yet."}
               />
             )
           }
@@ -239,6 +320,7 @@ export default function HistoryScreen() {
 const styles = StyleSheet.create({
   screenPad: { paddingTop: space.space12 },
   search: { marginBottom: space.space8 },
+  filters: { gap: space.space8, paddingBottom: space.space8 },
   listPad: { paddingBottom: space.space32 },
   rowBg: { position: "relative" },
   inner: {
