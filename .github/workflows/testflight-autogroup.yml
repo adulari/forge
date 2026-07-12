@@ -1,0 +1,81 @@
+name: testflight-autogroup
+
+# Auto-assigns each new TestFlight build to the internal beta group(s), so testers actually see it
+# without the manual "App Store Connect → TestFlight → group → Builds → add" step
+# (see docs/mobile/APP_STORE_CHECKLIST.md §7). Xcode Cloud builds + uploads on the same push but
+# never assigns a group; this waits for the freshly-uploaded build to finish processing, then
+# assigns it via the App Store Connect API.
+#
+# Config (Settings → Secrets and variables → Actions):
+#   Variable  TESTFLIGHT_GROUPS      comma-separated internal beta group name(s), e.g. "Internal"
+#   Secret    ASC_KEY_ID             App Store Connect API key id
+#   Secret    ASC_ISSUER_ID          ASC API issuer id
+#   Secret    ASC_API_PRIVATE_KEY    contents of the AuthKey_*.p8 (the whole file)
+# If any are unset the run skips cleanly (does not fail).
+on:
+  push:
+    branches: [main]
+    paths: ["mobile/**"]
+  workflow_dispatch:
+    inputs:
+      groups:
+        description: "Override beta group name(s), comma-separated"
+        required: false
+        type: string
+
+concurrency:
+  group: testflight-autogroup
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.check.outputs.ready }}
+    steps:
+      - id: check
+        env:
+          KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ISSUER: ${{ secrets.ASC_ISSUER_ID }}
+          P8: ${{ secrets.ASC_API_PRIVATE_KEY }}
+          GROUPS: ${{ github.event.inputs.groups || vars.TESTFLIGHT_GROUPS }}
+        run: |
+          if [ -n "$KEY_ID" ] && [ -n "$ISSUER" ] && [ -n "$P8" ] && [ -n "$GROUPS" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::testflight-autogroup skipped — set ASC_KEY_ID / ASC_ISSUER_ID / ASC_API_PRIVATE_KEY secrets and the TESTFLIGHT_GROUPS variable to enable."
+          fi
+
+  assign:
+    needs: guard
+    if: needs.guard.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+
+      - name: Resolve version + upload cutoff
+        id: meta
+        run: |
+          # Only assign a build uploaded from this run's build onward (5-min skew margin) so a stale
+          # pre-existing TestFlight build is never re-assigned.
+          echo "after=$(date -u -d '-5 minutes' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          VERSION="$(grep -oE 'version: "[0-9]+\.[0-9]+\.[0-9]+"' mobile/app.config.ts | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Assign build to TestFlight group(s)
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_API_PRIVATE_KEY: ${{ secrets.ASC_API_PRIVATE_KEY }}
+          TESTFLIGHT_GROUPS: ${{ github.event.inputs.groups || vars.TESTFLIGHT_GROUPS }}
+          APP_VERSION: ${{ steps.meta.outputs.version }}
+          UPLOADED_AFTER: ${{ steps.meta.outputs.after }}
+        run: node scripts/testflight-assign-group.mjs

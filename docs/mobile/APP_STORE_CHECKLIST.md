@@ -159,9 +159,18 @@ that code until a device/TestFlight test).
       Cloud handles signing itself (no `eas credentials`/EAS provisioning profile needed — that
       pipeline is gone, this is the only build/distribution path now). Workflow's Archive action
       has `buildDistributionAudience: INTERNAL_ONLY` set, so it auto-uploads to TestFlight on
-      success — but each new build still needs manually assigning to a beta group (App Store
-      Connect → TestFlight → the group → Builds → add) before any tester actually sees it; this
-      isn't automatic even with the audience set.
+      success.
+- [ ] **Beta-group assignment is now automated** by `.github/workflows/testflight-autogroup.yml`
+      (Xcode Cloud can't do this itself — the audience setting only uploads, it never assigns a
+      group). That workflow triggers on the same `main`/`mobile/**` push, waits for the freshly
+      uploaded build to finish processing, then assigns it to the group(s) via the App Store
+      Connect API (`scripts/testflight-assign-group.mjs`). To turn it on, set:
+  - repo **variable** `TESTFLIGHT_GROUPS` = the internal beta group name(s), comma-separated
+    (e.g. `Internal`). The group must already exist in App Store Connect → TestFlight.
+  - repo **secrets** `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_API_PRIVATE_KEY` — an App Store Connect
+    API key (Users and Access → Integrations → App Store Connect API) with the Developer/App
+    Manager role and access to the app; `ASC_API_PRIVATE_KEY` is the whole `AuthKey_*.p8` file.
+    Until these are set the workflow skips cleanly (never fails).
 - [ ] Also set the marketing version (`mobile/app.config.ts`'s `version`) higher than any build
       number Xcode Cloud's own automatic build-number management has already used for the current
       version string, if builds start failing "bundle version must be higher than previously
