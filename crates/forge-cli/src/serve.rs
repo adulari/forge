@@ -32,7 +32,10 @@
 //!   the model downloads into `{data_dir}/models/whisper/` on first use and is cached in memory.
 //!
 //! Exposure mirrors `/remote`: `--lan` (default) binds 0.0.0.0 with self-signed HTTPS, `--local`
-//! binds loopback plain HTTP, `--anywhere` binds loopback and opens a cloudflared/ngrok tunnel.
+//! binds loopback plain HTTP, `--anywhere` binds loopback and opens a cloudflared/ngrok tunnel —
+//! by default an ephemeral quick tunnel (new random URL every launch); set `[remote] tunnel_name`
+//! (cloudflared named tunnel) or `tunnel_hostname` alone (ngrok reserved domain) for a stable URL
+//! across restarts (see [`remote::resolve_tunnel_kind`]).
 
 use std::sync::Arc;
 
@@ -291,13 +294,19 @@ pub(crate) async fn serve_cmd(
 
     let mut tunnel_child = None;
     let url = if anywhere {
-        let kind = remote::detect_tunnel().ok_or_else(|| {
-            anyhow::anyhow!(
-                "no tunnel tool found on PATH — install cloudflared or ngrok for --anywhere"
-            )
-        })?;
-        println!("⚒ opening a public tunnel via {} …", kind.label());
-        let (public, child) = remote::spawn_tunnel(kind, addr.port()).await?;
+        let kind =
+            remote::resolve_tunnel_kind(&config.remote).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let fixed = remote::preferred_tunnel_kind(&config.remote).is_some();
+        println!(
+            "⚒ opening a public tunnel via {} ({})…",
+            kind.label(),
+            if fixed {
+                "stable URL"
+            } else {
+                "quick tunnel — new URL every launch"
+            }
+        );
+        let (public, child) = remote::spawn_tunnel(kind, addr.port(), &config.remote).await?;
         tunnel_child = Some(child);
         format!("{}/{token}", public.trim_end_matches('/'))
     } else if local {

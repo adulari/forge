@@ -146,6 +146,20 @@ pub struct RemoteConfig {
     /// in-chat `/remote` server is unaffected (it keeps its ephemeral per-session port).
     #[serde(default)]
     pub port: Option<u16>,
+    /// A named cloudflared tunnel to run for `--anywhere` instead of an ephemeral quick tunnel,
+    /// so the public URL is stable across launches. The tunnel must already exist
+    /// (`cloudflared tunnel create <name>`) and have a DNS route to `tunnel_hostname`
+    /// (`cloudflared tunnel route dns <name> <hostname>`) — both one-time setup steps. Ignored
+    /// by ngrok (it has no named-tunnel concept). Absent = quick-tunnel behavior, unchanged.
+    #[serde(default)]
+    pub tunnel_name: Option<String>,
+    /// The stable public hostname to advertise for `--anywhere`. Paired with `tunnel_name` for
+    /// cloudflared (the DNS-routed hostname of the named tunnel — cloudflared's named-tunnel run
+    /// prints no URL, so this is how Forge knows what to show/print/QR-code). Set alone (no
+    /// `tunnel_name`) it instead selects ngrok's reserved-domain flow
+    /// (`ngrok http --domain=<hostname> <port>`, needs a domain reserved on the ngrok account).
+    #[serde(default)]
+    pub tunnel_hostname: Option<String>,
 }
 
 /// The default `forge serve` port when `[remote] port` is unset (see [`RemoteConfig::port`]).
@@ -3998,6 +4012,26 @@ mod tests {
         // Absent `auto` (empty block) => off.
         let c: RemoteConfig = toml::from_str("").unwrap();
         assert!(c.startup_exposure().is_none());
+    }
+
+    #[test]
+    fn remote_config_tunnel_fields_default_to_absent() {
+        let c = RemoteConfig::default();
+        assert!(c.tunnel_name.is_none());
+        assert!(c.tunnel_hostname.is_none());
+    }
+
+    #[test]
+    fn remote_config_parses_fixed_tunnel_fields() {
+        let c: RemoteConfig = toml::from_str(
+            r#"
+tunnel_name = "forge"
+tunnel_hostname = "forge.example.com"
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.tunnel_name.as_deref(), Some("forge"));
+        assert_eq!(c.tunnel_hostname.as_deref(), Some("forge.example.com"));
     }
 
     #[test]
