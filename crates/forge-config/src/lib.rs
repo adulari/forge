@@ -91,6 +91,11 @@ pub struct Config {
     /// disable in /config if you find it noisy.
     #[serde(default)]
     pub recap: RecapConfig,
+    /// Next-prompt suggestion: a cheap trivial-tier call after each completed turn that predicts
+    /// the user's likely next prompt, shown as dim ghost text in an empty input (Tab accepts it).
+    /// On by default; disable in /config if you find it noisy.
+    #[serde(default)]
+    pub suggest: SuggestConfig,
     /// Interactive TUI rendering (chat). Controls inline vs. full-screen (alternate-screen) mode.
     #[serde(default)]
     pub tui: TuiConfig,
@@ -755,6 +760,27 @@ impl Default for RecapConfig {
 }
 
 fn default_recap_enabled() -> bool {
+    true
+}
+
+/// Next-prompt suggestion: predicts the user's likely next prompt after each completed turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestConfig {
+    /// Generate a next-prompt suggestion after each completed turn. Default: true. Disable in
+    /// /config if you find it noisy.
+    #[serde(default = "default_suggest_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for SuggestConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_suggest_enabled(),
+        }
+    }
+}
+
+fn default_suggest_enabled() -> bool {
     true
 }
 
@@ -2055,6 +2081,7 @@ impl Default for Config {
             autofix: AutofixConfig::default(),
             assay: AssayConfig::default(),
             recap: RecapConfig::default(),
+            suggest: SuggestConfig::default(),
             tui: TuiConfig::default(),
             local: LocalConfig::default(),
             update: UpdateConfig::default(),
@@ -4071,6 +4098,22 @@ model = "medium"
         .unwrap();
         assert_eq!(c.voice.model, "medium");
         assert_eq!(c.voice.language, "auto");
+    }
+
+    #[test]
+    fn config_accepts_suggest_block() {
+        let c: Config = toml::from_str(
+            r#"
+permission_mode = "accept-edits"
+[mesh]
+models = {}
+[suggest]
+enabled = false
+"#,
+        )
+        .unwrap();
+        assert!(!c.suggest.enabled);
+        assert!(Config::default().suggest.enabled, "default is on");
     }
 
     #[test]

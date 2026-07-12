@@ -2976,6 +2976,20 @@ pub(crate) async fn run_chat_tui(
                 continue;
             }
 
+            // Tab: accept the predicted next-prompt ghost text (see `render_input`) into an idle,
+            // empty input — editable, never auto-sent. Every modal above already `continue`d, so
+            // reaching here proves none is open; `take_suggestion_for_tab` only ever returns
+            // `Some` for an empty input, and both busy/awaiting-question below clear the
+            // suggestion on turn start, so it can never fire mid-turn.
+            if matches!(key, KeyKind::Tab) {
+                if let Some(text) = app.take_suggestion_for_tab() {
+                    app.input = text;
+                    app.input_cursor = app.input.len();
+                    dirty = true;
+                    continue;
+                }
+            }
+
             // Esc / Ctrl-C: while a turn is running it INTERRUPTS the AI (stops the response,
             // keeps Forge alive); while idle it quits. Checked before any prompt handling so the
             // user can never get wedged — interrupting also clears a pending permission/question.
@@ -4955,6 +4969,7 @@ pub(crate) fn build_snapshot_frame(
                 .collect(),
             notes: p.notes,
         }),
+        suggested_prompt: view.suggested_prompt,
         copy_text,
         prompt_seq,
         notes,

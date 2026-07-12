@@ -676,7 +676,11 @@ pub struct RemoteUrl {
 /// becoming vision input and text files `@path` mentions). `GET /api/sessions` rows gained the
 /// fleet fields (`waiting`/`context_tokens`/`context_limit`) and sort waiting-on-decision
 /// first. Voice input is page-side only (Web Speech API) — nothing of it on the wire.
-pub const PROTOCOL_VERSION: u32 = 7;
+///
+/// v8: next-prompt suggestion. `Snapshot` gained `suggested_prompt` (the AI-predicted likely
+/// next prompt, if any — mirrors the TUI's ghost text). The page shows it as the composer's
+/// placeholder text; there is no Tab-accept affordance on the wire, just a hint.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// How many broadcast snapshots the per-server [`EventLog`] retains for reconnect replay. One
 /// entry per *changed* frame covers minutes of activity; a client that was away longer gets a
@@ -951,6 +955,11 @@ pub struct Snapshot {
     pub diff: Option<SnapDiff>,
     /// The most recent plan proposal (v7) — see [`SnapPlan`].
     pub plan: Option<SnapPlan>,
+    /// The AI-predicted next prompt (v8), if any — the page shows it as the composer's
+    /// placeholder text (prefixed "suggested: "). `None` when there is none, or once dismissed
+    /// by a fresh turn/session on the host.
+    #[serde(default)]
+    pub suggested_prompt: Option<String>,
     /// The most recent `/copy` payload, so the REMOTE device can put it on its own clipboard
     /// (the host's clipboard is useless from a phone). Cleared on the next prompt.
     pub copy_text: Option<String>,
@@ -1003,6 +1012,7 @@ impl Default for Snapshot {
             overlay: None,
             diff: None,
             plan: None,
+            suggested_prompt: None,
             copy_text: None,
             prompt_seq: 0,
             notes: Vec::new(),
@@ -2216,6 +2226,7 @@ mod tests {
                 notes: Some("risky".into()),
             }),
             copy_text: Some("fn main() {}".into()),
+            suggested_prompt: Some("add a test for this".into()),
             prompt_seq: 7,
             notes: vec!["⚠ /remote can only be toggled from the TUI".into()],
             revision: 42,
@@ -2280,6 +2291,8 @@ mod tests {
         assert_eq!(v["plan"]["steps"][0]["detail"], "do the thing");
         assert_eq!(v["plan"]["notes"], "risky");
         assert_eq!(v["copy_text"], "fn main() {}");
+        // v8: the next-prompt suggestion rides in the snapshot for the page's composer placeholder.
+        assert_eq!(v["suggested_prompt"], "add a test for this");
         assert_eq!(v["prompt_seq"], 7);
         assert_eq!(v["notes"][0], "⚠ /remote can only be toggled from the TUI");
         assert_eq!(v["revision"], 42);

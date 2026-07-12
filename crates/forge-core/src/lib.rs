@@ -346,6 +346,24 @@ fn recap_line(content: &str) -> Option<String> {
     Some(line.chars().take(240).collect())
 }
 
+/// Reduce a next-prompt-suggestion completion to a clean ghost-text candidate: the first
+/// non-empty line, with quote/backtick characters and any embedded newlines stripped, capped at
+/// 160 chars. `None` when the result is empty, or when it's just the prompt that was already run
+/// (case-insensitive, trimmed) — a suggestion that repeats what the user just asked for is
+/// useless, and a misbehaving trivial-tier model doing that is more likely than it seems.
+fn sanitize_suggestion(content: &str, prev_prompt: &str) -> Option<String> {
+    let line = content.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let cleaned: String = line
+        .chars()
+        .filter(|c| !matches!(c, '"' | '\'' | '`' | '\n' | '\r'))
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() || cleaned.eq_ignore_ascii_case(prev_prompt.trim()) {
+        return None;
+    }
+    Some(cleaned.chars().take(160).collect())
+}
+
 /// Scope key for auto-memory: the current project directory's absolute path (memories are
 /// per-project). Matches the `forge memory` CLI so both see the same store.
 fn memory_scope() -> String {
@@ -3167,6 +3185,12 @@ work (it stalled, errored, only planned, or asked a question), say that instead 
 \"stalled without completing the task\"). Do not invent success. \
 Output ONLY that sentence — no preamble, no quotation marks.";
 
+    const SUGGEST_SYSTEM: &'static str = "You are predicting a coding assistant user's NEXT \
+prompt, Claude-Code-style. Given the user's last request and the tail of the assistant's \
+response, propose the SINGLE most likely next thing this user will ask for: a short imperative \
+instruction, ≤120 characters, no quotation marks, no markdown, no preamble. Output ONLY the \
+prompt text, nothing else.";
+
     /// After a turn completes, make one cheap trivial-tier call to generate a one-line recap,
     /// emitted via [`PresenterEvent::Recap`]. Best-effort: silently skipped on budget exhaustion
     /// or any model error so it can never derail the session.
@@ -3353,6 +3377,97 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                     let _ = store.record_side_call_usage(&id, "recap", &r.usage);
                     if let Some(text) = recap_line(&r.content) {
                         self.presenter.emit(PresenterEvent::Recap { text });
+                    }
+                }
+            }
+        }
+    }
+
+    /// After a turn completes, make one cheap trivial-tier call predicting the user's likely
+    /// next prompt, emitted via [`PresenterEvent::SuggestionReady`] and shown as dim ghost text
+    /// in an empty, idle input box (Tab accepts it — editable, never auto-sent). Best-effort:
+    /// silently skipped on budget exhaustion or any model error, exactly like `generate_recap`,
+    /// whose detachment pattern (and reasoning) this mirrors.
+    async fn generate_suggestion(&mut self, prompt: &str, final_text: &str) {
+        if !self.config.suggest.enabled {
+            return;
+        }
+        if final_text.trim().is_empty() {
+            return;
+        }
+        let budget = BudgetState {
+            spent_today_usd: self.store.spend_today_usd().unwrap_or(0.0),
+            daily_cap_usd: self.config.mesh.daily_budget_usd,
+            spent_week_usd: self.store.spend_this_week_usd().unwrap_or(0.0),
+            weekly_cap_usd: self.config.mesh.weekly_budget_usd,
+            spent_month_usd: self.store.spend_this_month_usd().unwrap_or(0.0),
+            monthly_cap_usd: self.config.mesh.monthly_cap_usd,
+            warn_fraction: self.config.mesh.warn_threshold,
+            min_context_tokens: None,
+        };
+        if budget.status() == BudgetStatus::Exhausted {
+            return;
+        }
+        let health = self.store.current_benched().unwrap_or_default();
+        let quota = self.live_quota();
+        let decision = self
+            .router
+            .route_hinted(
+                "propose the next likely user prompt",
+                false,
+                budget,
+                &health,
+                &quota,
+                Some(TaskTier::Trivial),
+                self.pinned_effort,
+                &self.project,
+            )
+            .await;
+        let model = self.auxiliary_model(&decision);
+        let user_snippet: String = prompt.chars().take(400).collect();
+        // The TAIL of the response (not the head, unlike the recap's snippet) is what best
+        // predicts a likely follow-up — it's what the user is looking at right now.
+        let assistant_chars: Vec<char> = final_text.chars().collect();
+        let tail_start = assistant_chars.len().saturating_sub(2000);
+        let assistant_snippet: String = assistant_chars[tail_start..].iter().collect();
+        let messages = vec![
+            Message::system(Self::SUGGEST_SYSTEM),
+            Message::user(format!(
+                "User's last prompt:\n{user_snippet}\n\nAssistant response (tail):\n{assistant_snippet}"
+            )),
+        ];
+        // Same detached-task reasoning as `generate_recap`: hand off to a channel-backed
+        // presenter's sink when available so the turn ends and input frees immediately, with the
+        // suggestion landing a moment later.
+        let provider = self.provider.clone();
+        let store = self.store.clone();
+        let id = self.id.clone();
+        let prev_prompt = prompt.to_string();
+        match self.presenter.recap_sink() {
+            Some(mut sink) => {
+                tokio::spawn(async move {
+                    let mut on_event = |_: StreamEvent| {};
+                    if let Ok(r) = provider
+                        .complete(&model, &messages, &[], &mut on_event)
+                        .await
+                    {
+                        let _ = store.record_side_call_usage(&id, "suggest", &r.usage);
+                        if let Some(text) = sanitize_suggestion(&r.content, &prev_prompt) {
+                            sink.emit(PresenterEvent::SuggestionReady { text });
+                        }
+                    }
+                });
+            }
+            None => {
+                let mut on_event = |_: StreamEvent| {};
+                if let Ok(r) = provider
+                    .complete(&model, &messages, &[], &mut on_event)
+                    .await
+                {
+                    let _ = store.record_side_call_usage(&id, "suggest", &r.usage);
+                    if let Some(text) = sanitize_suggestion(&r.content, &prev_prompt) {
+                        self.presenter
+                            .emit(PresenterEvent::SuggestionReady { text });
                     }
                 }
             }
@@ -5692,6 +5807,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             },
         });
         self.generate_recap(prompt, &final_text).await;
+        self.generate_suggestion(prompt, &final_text).await;
         // Await the handle so one-shot (forge run) exits only after capture completes. In
         // interactive mode the spinner is already cleared and this is a brief background wait.
         if let Some(handle) = self.capture_memories(prompt, &final_text) {
@@ -7950,6 +8066,39 @@ mod tests {
     use forge_types::SideEffect;
     use std::sync::{Arc, Mutex};
 
+    // ── Next-prompt suggestion sanitizer ────────────────────────────────────────────────────────
+    #[test]
+    fn sanitize_suggestion_strips_quotes_and_newlines() {
+        let raw = "\"add a test for this\"\nextra chatter the model shouldn't have written";
+        assert_eq!(
+            sanitize_suggestion(raw, "fix the bug").as_deref(),
+            Some("add a test for this")
+        );
+    }
+
+    #[test]
+    fn sanitize_suggestion_truncates_to_160_chars() {
+        let raw = "a".repeat(300);
+        let out = sanitize_suggestion(&raw, "unrelated").unwrap();
+        assert_eq!(out.chars().count(), 160);
+    }
+
+    #[test]
+    fn sanitize_suggestion_discards_empty() {
+        assert_eq!(sanitize_suggestion("", "fix the bug"), None);
+        assert_eq!(sanitize_suggestion("   \n  ", "fix the bug"), None);
+        assert_eq!(sanitize_suggestion("\"\"", "fix the bug"), None);
+    }
+
+    #[test]
+    fn sanitize_suggestion_discards_repeat_of_previous_prompt_case_insensitive() {
+        assert_eq!(sanitize_suggestion("Fix The Bug", "  fix the bug  "), None);
+        assert_eq!(
+            sanitize_suggestion("fix the bug now", "fix the bug"),
+            Some("fix the bug now".to_string())
+        );
+    }
+
     // ── Routing context floor — mesh auto-rotation must never pick a too-small window ──────────
     #[test]
     fn routing_min_context_floors_at_coding_baseline_when_transcript_is_small() {
@@ -9037,6 +9186,7 @@ mod tests {
     fn stop_hook_config(command: &str) -> Config {
         let mut config = Config::default();
         config.recap.enabled = false;
+        config.suggest.enabled = false;
         config.mesh.auto_memory = false;
         config.hooks = vec![forge_config::HookConfig {
             event: forge_config::HookEvent::Stop,
@@ -11365,6 +11515,7 @@ mod tests {
         // add a usage row (counted by message_count, not rehydrated), so disable it here.
         let mut config = Config::default();
         config.recap.enabled = false;
+        config.suggest.enabled = false;
 
         // First run on a file-backed store, then drop it.
         let (id, cost1, msgs1) = {
@@ -12809,6 +12960,7 @@ mod tests {
         // The recap + auto-memory summarizers also call the provider at turn end — disable them
         // so the call count below measures ONLY the main loop's completions.
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -12838,6 +12990,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         let answer = session.run_turn("fix the bug").await.unwrap();
@@ -12864,6 +13017,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -12956,6 +13110,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -12995,6 +13150,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -13028,6 +13184,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -13059,6 +13216,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -13141,6 +13299,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -13169,6 +13328,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -13194,6 +13354,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -13292,6 +13453,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -13341,6 +13503,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -13376,6 +13539,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -13402,6 +13566,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.work_root = Some(dir.clone());
         session.set_expect_code_change(true);
@@ -13473,6 +13638,7 @@ mod tests {
         });
         let (store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.set_turn_deadline(std::time::Instant::now() - std::time::Duration::from_secs(1));
         session.run_turn("fix the bug").await.unwrap();
@@ -13503,6 +13669,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.config.mesh.deadline_reconcile = false;
         session.config.mesh.max_steps = 3;
@@ -13528,6 +13695,7 @@ mod tests {
         });
         let (_store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.config.mesh.max_steps = 3;
         session.run_turn("fix the bug").await.unwrap();
@@ -13752,6 +13920,7 @@ mod tests {
         });
         let (store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         // Keep the count deterministic: no side-call diagnosis completions on shell failures.
         session.config.shell.explain_errors = false;
@@ -13776,6 +13945,7 @@ mod tests {
         });
         let (store, mut session) = fixed_session(provider, router);
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.config.shell.explain_errors = false;
         session.config.mesh.env_fight_nudge = false;
@@ -13934,6 +14104,7 @@ mod tests {
         // Isolate the model loop: the end-of-turn recap + auto-memory capture are separate provider
         // calls that would otherwise inflate the invocation count these tests assert on.
         session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         (store, session)
     }

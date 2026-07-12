@@ -229,6 +229,11 @@ pub enum PresenterEvent {
     Recap {
         text: String,
     },
+    /// An AI-predicted next prompt, ready to show as dim ghost text in an empty, idle input box
+    /// (Tab accepts it into the input — editable, never auto-sent).
+    SuggestionReady {
+        text: String,
+    },
     /// A failed shell command was auto-diagnosed by the model (shell-error-interceptor.md):
     /// a short likely-cause + suggested fix, surfaced alongside the tool result.
     ShellDiagnosis {
@@ -518,6 +523,9 @@ impl Presenter for HeadlessPresenter {
             PresenterEvent::Recap { text } => {
                 println!("  ※ recap  {text}");
             }
+            // Ghost-text input suggestions are a TUI-only affordance (dim placeholder + Tab
+            // accept in an interactive input box); headless has no input box to show it in.
+            PresenterEvent::SuggestionReady { .. } => {}
             // The final answer was already streamed via AssistantText; Done is a
             // lifecycle marker, so the headless renderer needs no extra output here.
             PresenterEvent::Done { .. } => {}
