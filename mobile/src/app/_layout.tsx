@@ -26,6 +26,7 @@ import { Screen } from "../components/ds/Screen";
 import { ToastHost } from "../components/ds/ToastHost";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { AuthProvider, useAuth } from "../lib/auth";
+import { initHaptics } from "../lib/haptics";
 import { useGlobalShortcuts } from "../lib/shortcuts";
 import { ThemeProvider, useTokens } from "../theme/ThemeProvider";
 import { monoFamily } from "../theme/typography";
@@ -100,6 +101,10 @@ function RootNavigator() {
 export default function RootLayout() {
   const persistOptions = useMemo(() => ({ persister: asyncStoragePersister }), []);
   useGlobalShortcuts(); // HANDOFF(T5.1): ⌘1..4 tabs / ⌘N new session — web/desktop only, no-op native
+
+  useEffect(() => {
+    void initHaptics();
+  }, []);
 
   // Native gets JetBrains Mono from the expo-font config plugin's build-time embed;
   // that plugin has no effect on the web export, so web needs this runtime load too

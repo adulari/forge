@@ -38,6 +38,7 @@ import {
   type PushSubscriptionState,
 } from "../../lib/push";
 import { ApiError } from "../../lib/api";
+import { haptics, initHaptics, isHapticsEnabled, setHapticsEnabled } from "../../lib/haptics";
 import { useServerFleets } from "../../lib/queries";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
@@ -93,6 +94,7 @@ export default function SettingsScreen() {
   const serverQueries = useServerFleets(servers);
   const [appLock, setAppLock] = useState(false);
   const [appLockLoaded, setAppLockLoaded] = useState(false);
+  const [hapticsEnabled, setHapticsEnabledState] = useState(isHapticsEnabled);
   const [pendingRemove, setPendingRemove] = useState<StoredServer | null>(null);
   const [health, setHealth] = useState<"idle" | "checking" | "ok" | "bad-token" | "unreachable" | "server-error">("idle");
 
@@ -110,6 +112,16 @@ export default function SettingsScreen() {
       if (cancelled) return;
       setAppLock(raw === "true");
       setAppLockLoaded(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void initHaptics().then((value) => {
+      if (!cancelled) setHapticsEnabledState(value);
     });
     return () => {
       cancelled = true;
@@ -164,6 +176,12 @@ export default function SettingsScreen() {
   const onAppLockChange = (value: boolean) => {
     setAppLock(value);
     void AsyncStorage.setItem(APP_LOCK_KEY, value ? "true" : "false");
+  };
+
+  const onHapticsChange = (value: boolean) => {
+    setHapticsEnabledState(value);
+    setHapticsEnabled(value);
+    if (value) haptics.sendPrompt();
   };
 
   const onPushChange = useCallback(
@@ -297,6 +315,18 @@ export default function SettingsScreen() {
                 <Switch value={appLock} onValueChange={onAppLockChange} accessibilityLabel="Require Face ID" />
               ) : undefined
             }
+          />
+        </Card>
+      </View>
+
+      <View>
+        <SectionHeader>Feedback</SectionHeader>
+        <Card padded={false}>
+          <ListRow
+            title="Haptics"
+            subtitle="Use tactile feedback for actions and status changes."
+            showSeparator={false}
+            trailing={<Switch value={hapticsEnabled} onValueChange={onHapticsChange} accessibilityLabel="Haptics" />}
           />
         </Card>
       </View>
