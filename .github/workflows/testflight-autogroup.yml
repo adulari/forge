@@ -64,9 +64,13 @@ jobs:
       - name: Resolve version + upload cutoff
         id: meta
         run: |
-          # Only assign a build uploaded from this run's build onward (5-min skew margin) so a stale
-          # pre-existing TestFlight build is never re-assigned.
-          echo "after=$(date -u -d '-5 minutes' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # On a push, only assign a build uploaded from this run's build onward (5-min skew
+          # margin) so a stale pre-existing TestFlight build is never re-assigned. On a manual
+          # dispatch, leave the cutoff empty so it assigns the latest processed build right now
+          # (an explicit "assign the current build" / backfill action).
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "after=$(date -u -d '-5 minutes' +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          fi
           VERSION="$(grep -oE 'version: "[0-9]+\.[0-9]+\.[0-9]+"' mobile/app.config.ts | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
