@@ -420,6 +420,17 @@ and works identically on the direct and bridge paths — the bridge's tool surfa
 This keeps the per-turn advertised tool count fixed (the meta-tools) no matter how many tools a
 server exposes.
 
+**External MCP is OFF on the CLI bridge by default.** A bridged claude/codex turn spawns
+`forge mcp-serve` as its tool server; eagerly connecting every active project MCP server there
+(e.g. `dual-graph`, `token-counter`, `helm`) builds a heavy nested process tree, and one
+slow/auth-gated server can wedge the whole tool-using turn behind its connect. So by default
+`forge mcp-serve` does **not** connect external project MCP servers, and the `mcp_search_tools`/
+`mcp_call` meta-tools are not advertised on the bridge. The bridged model still keeps every Forge
+**core** tool (file/shell/`update_tasks`/`spawn_agents`/`use_skill`/…) — only the external
+project-MCP surface is gated. Opt back in with `mesh.bridge_mcp_external = true` in config or the
+`FORGE_BRIDGE_MCP_EXTERNAL=1` env override (env wins). This is independent of the direct path,
+which always connects external MCP servers.
+
 ### 5.5 Resources & prompts (Should)
 
 Exposed as meta-tools so they need no new Provider concepts:
