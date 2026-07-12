@@ -20,6 +20,17 @@ function dbToRms01(db: number): number {
   return Math.max(0, Math.min(1, (db - METER_FLOOR_DB) / -METER_FLOOR_DB));
 }
 
+// HIGH_QUALITY records .m4a on both platforms (expo-audio's RecordingPresets docs), so this is
+// the expected case — the map exists so a surprise extension (e.g. `.caf`) is still labeled
+// honestly instead of silently uploaded as a mislabeled m4a.
+const MIME_BY_EXT: Record<string, string> = {
+  m4a: "audio/m4a",
+  caf: "audio/x-caf",
+  aac: "audio/aac",
+  wav: "audio/wav",
+  "3gp": "audio/3gpp",
+};
+
 let recorder: InstanceType<typeof AudioModule.AudioRecorder> | null = null;
 let pollId: ReturnType<typeof setInterval> | null = null;
 
@@ -68,14 +79,21 @@ export const voice: VoiceRecorder = {
     stopPolling();
     if (!recorder) throw new Error("not recording");
     await recorder.stop();
-    const uri = recorder.uri;
-    recorder.release();
-    recorder = null;
+    // Deliberately NOT releasing the recorder here. `release()` detaches the JS object from
+    // its native AVAudioRecorder/MediaRecorder counterpart (expo-modules-core's SharedObject) —
+    // the recorder is the one holding the native file open, and releasing it before the caller
+    // has uploaded `uri` can invalidate that file out from under an in-flight RN FormData read.
+    // The caller must call `dispose()` once the upload (or discard) is done.
+    let uri = recorder.uri;
     if (!uri) throw new Error("recording produced no audio");
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(uri)) uri = `file://${uri}`;
+    const ext = /\.([a-z0-9]+)$/i.exec(uri)?.[1]?.toLowerCase() ?? "m4a";
+    const name = `voice.${ext}`;
+    const mime = MIME_BY_EXT[ext] ?? "audio/m4a";
     return {
-      blobOrFile: { uri, name: "voice.m4a", type: "audio/m4a" },
-      name: "voice.m4a",
-      mime: "audio/m4a",
+      blobOrFile: { uri, name, type: mime },
+      name,
+      mime,
     };
   },
 
@@ -87,6 +105,10 @@ export const voice: VoiceRecorder = {
         // best-effort — recorder may already be invalid, we're discarding either way
       }
     }
+    teardown();
+  },
+
+  dispose() {
     teardown();
   },
 };

@@ -205,7 +205,7 @@ async function request<T>(
       },
     });
   } catch (err) {
-    throw new ApiError(0, "server unreachable", err);
+    throw new ApiError(0, `server unreachable (${(err as Error)?.message ?? "network error"})`, err);
   }
 
   if (res.status === 404) {

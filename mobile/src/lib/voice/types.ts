@@ -8,6 +8,12 @@ export interface VoiceRecorder {
   stop(): Promise<{ blobOrFile: unknown; name: string; mime: string }>;
   /** Abort capturing and discard whatever was recorded so far. */
   cancel(): Promise<void>;
+  /**
+   * Release the underlying recorder now that its file is done being read (uploaded or
+   * discarded). Idempotent — safe to call more than once, and safe to call even if `stop()`
+   * or `cancel()` already tore everything down.
+   */
+  dispose(): void;
   /** Whether this platform/environment can record at all — gates the Composer's mic button. */
   isSupported(): boolean;
 }
