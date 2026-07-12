@@ -26,6 +26,21 @@ export class ApiError extends Error {
 // Wire types (verbatim field names)
 // ---------------------------------------------------------------------------
 
+export interface UsageResponse {
+  week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
+  session: { sessionId: string; combined: UsageTotals; providers: UsageProvider[] } | null;
+  quota: UsageQuota[];
+}
+export interface UsageTotals { inputTokens: number; outputTokens: number; costUsd: number }
+export interface UsageProvider extends UsageTotals { provider: string; kind: "bridge" | "oauth" | "api" }
+export interface UsageQuota {
+  provider: string;
+  kind: "bridge" | "oauth" | "api";
+  windowKind: string;
+  status: string;
+  resetsAt: number | null;
+  fraction: number | null;
+}
 export interface SessionRow {
   id: string;
   title: string;
@@ -291,6 +306,10 @@ export function discardSession(
   return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/discard`, {
     method: "POST",
   });
+}
+
+export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {
+  return request(baseUrl, `/api/usage${qs({ session })}`);
 }
 
 export function getHistory(
