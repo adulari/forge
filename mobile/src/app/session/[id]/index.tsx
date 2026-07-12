@@ -772,6 +772,7 @@ export default function SessionChat() {
         sessionId={sessionId}
         busy={snapshot?.busy ?? false}
         online={online}
+        suggestedPrompt={snapshot?.suggested_prompt ?? null}
         onSend={handleSend}
         onInterrupt={handleInterrupt}
       />

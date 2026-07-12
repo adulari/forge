@@ -55,6 +55,13 @@ export interface SessionCtxValue {
   setDraftAttachments: (next: Attachment[] | ((prev: Attachment[]) => Attachment[])) => void;
   lastPrompt: string | null;
   setLastPrompt: (text: string) => void;
+  /** `suggested_prompt` value already consumed by a send, keyed per session — a completed turn
+   * doesn't refresh the server's suggestion instantly, so the Snapshot keeps echoing the STALE
+   * (pre-send) value for a beat after `commit()` clears the draft. Composer compares the live
+   * `suggested_prompt` against this to suppress re-showing that stale value until the server
+   * actually produces a new one. */
+  suppressedSuggestion: string | null;
+  setSuppressedSuggestion: (text: string | null) => void;
   /** Incremented by the session shell to request that the Composer focus its input
    * (e.g. the ⌘E web shortcut). The Composer watches this counter and focuses on
    * change — a counter (not a boolean) so repeated requests always re-fire. */
@@ -78,6 +85,7 @@ export function SessionProvider({
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const draft = drafts[sessionId] ?? EMPTY_DRAFT;
   const [lastPrompts, setLastPrompts] = useState<Record<string, string>>({});
+  const [suppressedSuggestions, setSuppressedSuggestions] = useState<Record<string, string | null>>({});
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
 
   const [snapshotTimedOut, setSnapshotTimedOut] = useState(false);
@@ -115,6 +123,11 @@ export function SessionProvider({
     [sessionId],
   );
 
+  const setSuppressedSuggestion = useCallback(
+    (text: string | null) => setSuppressedSuggestions((prev) => ({ ...prev, [sessionId]: text })),
+    [sessionId],
+  );
+
   const clearPendingAnswer = useCallback(() => setPendingAnswer(null), []);
 
   const focusComposer = useCallback(
@@ -141,6 +154,8 @@ export function SessionProvider({
       setDraftAttachments,
       lastPrompt: lastPrompts[sessionId] ?? null,
       setLastPrompt,
+      suppressedSuggestion: suppressedSuggestions[sessionId] ?? null,
+      setSuppressedSuggestion,
       composerFocusSignal,
       focusComposer,
     }),
@@ -160,6 +175,8 @@ export function SessionProvider({
       setDraftAttachments,
       lastPrompts,
       setLastPrompt,
+      suppressedSuggestions,
+      setSuppressedSuggestion,
       composerFocusSignal,
       focusComposer,
     ],

@@ -8,8 +8,8 @@
 // Mic input: DESIGN.md "Mobile/desktop (V3)" — press mic, the input row morphs into
 // VoiceRecordingPill (lib/voice/ start/stop/cancel + POST /api/voice/transcribe), which
 // appends the transcript to the draft and morphs back. Never auto-sends.
-import { ArrowUp, Clock, FileText, Image as ImageIcon, Mic, RotateCcw, Square } from "lucide-react-native";
-import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from "react-native-reanimated";
+import { ArrowUp, Clock, FileText, Image as ImageIcon, Mic, RotateCcw, Sparkles, Square } from "lucide-react-native";
+import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import React, { useEffect, useRef, useState } from "react";
 import { Image, Platform, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -53,11 +53,14 @@ export interface ComposerProps {
   busy: boolean;
   /** true when the session WS is `open` — false swaps the send affordance to "queue". */
   online: boolean;
+  /** AI-suggested likely next user prompt (Snapshot.suggested_prompt) — surfaced as ghost text
+   * + Tab-to-fill on a hardware keyboard, or a chip on touch. Never auto-sent. */
+  suggestedPrompt?: string | null;
   onSend: (text: string, attachments: SentAttachment[]) => boolean;
   onInterrupt: () => void;
 }
 
-export function Composer({ sessionId, busy, online, onSend, onInterrupt }: ComposerProps) {
+export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onInterrupt }: ComposerProps) {
   const tokens = useTokens();
   const upload = useUpload();
   const { isCompact } = useBreakpoint();
@@ -75,8 +78,17 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
   // between Chat/Tasks/Agents/Review segments underneath it, which unmounts this component on
   // every tab switch — plain useState here would wipe a half-typed message. Keyed per session
   // (not per-component-instance) so it can't bleed across a session change either.
-  const { draftText: text, setDraftText: setText, draftAttachments: attachments, setDraftAttachments: setAttachments, lastPrompt, setLastPrompt, composerFocusSignal } =
-    useSessionCtx();
+  const {
+    draftText: text,
+    setDraftText: setText,
+    draftAttachments: attachments,
+    setDraftAttachments: setAttachments,
+    lastPrompt,
+    setLastPrompt,
+    suppressedSuggestion,
+    setSuppressedSuggestion,
+    composerFocusSignal,
+  } = useSessionCtx();
   const toast = useToast();
   const [recording, setRecording] = useState(false);
   const [height, setHeight] = useState(MIN_HEIGHT);
@@ -134,6 +146,59 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
 
   const commandHints = COMMAND_CHIPS.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase()));
 
+  // `suggestedPrompt` keeps echoing the STALE pre-send value for a beat after a send clears the
+  // draft (the daemon hasn't refreshed it yet) — `suppressedSuggestion` (SessionContext, set in
+  // `commit` below) masks that exact stale string until the server actually produces a new one.
+  const activeSuggestion =
+    suggestedPrompt && suggestedPrompt !== suppressedSuggestion ? suggestedPrompt : null;
+  const suggestionActive =
+    activeSuggestion != null &&
+    text.trim().length === 0 &&
+    !recording &&
+    attachments.length === 0 &&
+    !busy;
+  const showGhost = Platform.OS === "web" && suggestionActive;
+  const showSuggestionChip = Platform.OS !== "web" && suggestionActive;
+
+  // Cross-fade the suggestion in on first appearance (fade + slight rise, mirrors Forgeline),
+  // quick-crossfade when one suggestion replaces another while visible, fade out otherwise —
+  // never a layout jump, since both the ghost overlay and the chip's own wrapper keep their box.
+  const suggestionOpacity = useSharedValue(0);
+  const suggestionTranslateY = useSharedValue(6);
+  const prevSuggestionRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevSuggestionRef.current;
+    prevSuggestionRef.current = activeSuggestion;
+    if (reduced) {
+      suggestionOpacity.value = activeSuggestion ? 1 : 0;
+      suggestionTranslateY.value = 0;
+      return;
+    }
+    if (activeSuggestion == null) {
+      suggestionOpacity.value = withTiming(0, { duration: durations.fast, easing: easings.standard });
+      return;
+    }
+    if (prev == null) {
+      suggestionOpacity.value = 0;
+      suggestionTranslateY.value = 6;
+      suggestionOpacity.value = withTiming(1, { duration: durations.base, easing: easings.standard });
+      suggestionTranslateY.value = withTiming(0, { duration: durations.base, easing: easings.standard });
+    } else if (prev !== activeSuggestion) {
+      suggestionOpacity.value = withSequence(
+        withTiming(0, { duration: durations.instant, easing: easings.standard }),
+        withTiming(1, { duration: durations.instant, easing: easings.standard }),
+      );
+    } else {
+      suggestionOpacity.value = 1;
+      suggestionTranslateY.value = 0;
+    }
+  }, [activeSuggestion, reduced, suggestionOpacity, suggestionTranslateY]);
+  const suggestionFadeStyle = useAnimatedStyle(() => ({ opacity: suggestionOpacity.value }));
+  const suggestionChipStyle = useAnimatedStyle(() => ({
+    opacity: suggestionOpacity.value,
+    transform: [{ translateY: suggestionTranslateY.value }],
+  }));
+
   const commit = (value: string) => {
     const trimmed = value.trim();
     if (!trimmed) return;
@@ -155,6 +220,9 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
       .map((a) => ({ id: a.id, name: a.name, image: a.image, uri: a.uri, path: a.path }));
     if (!onSend(trimmed, sent)) return;
     setLastPrompt(trimmed);
+    // Whatever suggestion is live right now belongs to the turn that's ending, not the one this
+    // send just started — mask it so it can't flash back in once the draft clears below.
+    if (suggestedPrompt) setSuppressedSuggestion(suggestedPrompt);
     haptics.sendPrompt();
     setText("");
     void clearDraft(sessionId);
@@ -250,6 +318,40 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  // Web ghost text: plain Tab accepts the live suggestion into the (editable) draft — never
+  // auto-sends. Document-level (not the input node) so it also fires when nothing is focused
+  // yet, but yields to Shift+Tab (reverse focus) and to any OTHER input/textarea already
+  // holding focus — the composer's own input is exempted since that's the natural place to
+  // invoke this from.
+  useEffect(() => {
+    if (Platform.OS !== "web" || !showGhost || !activeSuggestion) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Tab" || e.shiftKey || e.repeat || recording) return;
+      const target = e.target;
+      if (
+        target instanceof HTMLElement &&
+        target !== (inputRef.current as unknown as HTMLElement | null) &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
+      ) {
+        return;
+      }
+      e.preventDefault();
+      const suggestion = activeSuggestion;
+      setText(suggestion);
+      const node = inputRef.current as unknown as HTMLTextAreaElement | null;
+      // Cursor must land at the end, editable — the value swap alone doesn't reliably move it
+      // on every browser, so place it explicitly once the DOM has the new value.
+      requestAnimationFrame(() => {
+        node?.focus();
+        node?.setSelectionRange?.(suggestion.length, suggestion.length);
+      });
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [showGhost, activeSuggestion, recording, setText]);
+
   // Web/desktop: Ctrl/Cmd+Shift+V starts voice recording from anywhere in the window, not just
   // when the composer input is focused — mirrors the mic button's own onPress. Document-level
   // (not the input node) so it fires regardless of focus; the stop side (tap-toggle, Enter,
@@ -333,6 +435,16 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
               testID="resend-last-prompt"
             />
           ) : null}
+          {showSuggestionChip && activeSuggestion ? (
+            <Animated.View style={suggestionChipStyle}>
+              <Chip
+                label={activeSuggestion}
+                icon={<Sparkles size={14} strokeWidth={1.75} color={tokens.accent} />}
+                onPress={() => setText(activeSuggestion)}
+                testID="suggested-prompt-chip"
+              />
+            </Animated.View>
+          ) : null}
         </View>
       ) : null}
 
@@ -356,24 +468,43 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
             onPress={onAttachDocument}
             accessibilityLabel="attach file"
           />
-          <TextInput
-            ref={inputRef}
-            value={text}
-            onChangeText={setText}
-            returnKeyType="send"
-            autoCapitalize="none"
-            autoCorrect={false}
-            spellCheck={false}
-            onContentSizeChange={(e) =>
-              setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
-            }
-            multiline
-            placeholder="message…"
-            placeholderTextColor={tokens.ink3}
-            style={[type.body, styles.input, webInputTextStyle, { color: tokens.ink, height }]}
-            accessibilityLabel="message"
-            testID="composer-input"
-          />
+          <View style={styles.inputWrap}>
+            <TextInput
+              ref={inputRef}
+              value={text}
+              onChangeText={setText}
+              returnKeyType="send"
+              autoCapitalize="none"
+              autoCorrect={false}
+              spellCheck={false}
+              onContentSizeChange={(e) =>
+                setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
+              }
+              multiline
+              // Hidden while the ghost is showing — it renders the same "empty state" copy
+              // itself, and both at once would double up.
+              placeholder={showGhost ? undefined : "message…"}
+              placeholderTextColor={tokens.ink3}
+              style={[type.body, styles.input, webInputTextStyle, { color: tokens.ink, height }]}
+              accessibilityLabel="message"
+              testID="composer-input"
+            />
+            {showGhost && activeSuggestion ? (
+              // True ghost text: same font/size/padding/lineHeight as the TextInput above,
+              // absolutely positioned over it. Only ever rendered while `text` is empty (see
+              // `suggestionActive`), so it never has to track the caret mid-string.
+              <Animated.View style={[styles.ghostOverlay, suggestionFadeStyle]} pointerEvents="none">
+                <Text
+                  style={[type.body, webInputTextStyle, { color: tokens.ink3 }]}
+                  numberOfLines={1}
+                  testID="suggested-prompt-ghost"
+                >
+                  {activeSuggestion}
+                  <Text style={[type.meta, { color: tokens.ink4 }]}>  ⇥ tab</Text>
+                </Text>
+              </Animated.View>
+            ) : null}
+          </View>
           {voice.isSupported() ? (
             <IconButton
               icon={<Mic size={20} strokeWidth={1.75} color={tokens.ink2} />}
@@ -416,6 +547,17 @@ const styles = StyleSheet.create({
   chipThumb: { width: 20, height: 20, borderRadius: radii.radius4 },
   row: { flexDirection: "row", alignItems: "flex-end", gap: space.space4 },
   input: { flex: 1, paddingHorizontal: space.space8, paddingVertical: space.space8 },
+  inputWrap: { flex: 1, position: "relative" },
+  // Mirrors `input`'s own padding exactly so the ghost text lines up with where a typed
+  // caret would sit — only ever shown while the TextInput is empty (see `suggestionActive`).
+  ghostOverlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: 0,
+    paddingHorizontal: space.space8,
+    paddingVertical: space.space8,
+  },
   sendCircle: { borderRadius: radii.radiusPill, width: tapTarget, height: tapTarget },
   actionIcon: { width: 20, height: 20, alignItems: "center", justifyContent: "center" },
   actionLayer: { position: "absolute" },
