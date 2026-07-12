@@ -364,6 +364,30 @@ const MAX_TRANSIENT_RETRIES: u32 = 2;
 /// `mesh.rate_limit_wait_secs` (0 disables waiting).
 const MAX_RATE_LIMIT_WAITS: u32 = 2;
 
+/// Absolute floor on the context window (tokens) a mesh-routed model must have for an agentic
+/// coding turn. A fresh session's transcript is ~empty, but the agent still needs room for the
+/// system preamble, tool schemas, a file read or two and the reply — so even at zero transcript we
+/// never route to a tiny-window model. Sits in the wide gap between toy models (≤16k: allam-2-7b,
+/// gemma-2-2b, …) and real frontier coders (all ≥128k), so any value here filters the former and
+/// keeps the latter — mesh auto-rotation stays fully enabled, it just never lands on a window that
+/// can't hold the work (which would otherwise trip the "too small, compact?" prompt every turn).
+const MIN_CODING_CONTEXT: u32 = 32_000;
+
+/// Minimum context window the router must require for the next turn. Two terms, max-combined:
+/// 1. The current transcript must clear `Session::transcript_fits`' bar (transcript ≤ 80% of the
+///    post-reply room), which inverts to `window ≥ transcript·5/4 + output_reserve`. Requiring at
+///    least this stops the router from admitting a model that `admit_failover_model` would instantly
+///    reject — the disagreement that made the mesh churn a consent prompt on every small-window pick.
+/// 2. [`MIN_CODING_CONTEXT`], so a near-empty transcript still demands real working room.
+///
+/// Pure so the gating math is unit-testable without a live `Session`.
+fn routing_min_context_tokens(transcript_tokens: u32, output_reserve: u32) -> u32 {
+    let for_transcript = transcript_tokens.saturating_mul(5) / 4;
+    for_transcript
+        .saturating_add(output_reserve)
+        .max(MIN_CODING_CONTEXT)
+}
+
 // --- Pinned rate-limit backoff (harness-robustness wave 2, fix 1) ------------------------------
 // When the model was EXPLICITLY pinned (`--model` / `/model`), a rate limit must not fail the turn
 // and must not switch models (a pin must pin — the SWE-bench baseline lost 4 instances to
@@ -2470,7 +2494,9 @@ impl Session {
             spent_month_usd: month,
             monthly_cap_usd: self.config.mesh.monthly_cap_usd,
             warn_fraction: self.config.mesh.warn_threshold,
-            min_context_tokens: None,
+            // Same coding-context floor as the main turn loop, so the architect planner's failover
+            // route also skips windows too small to hold the work.
+            min_context_tokens: Some(self.routing_min_context()),
         }
     }
 
@@ -2863,6 +2889,14 @@ Rules:\n\
             .filter(|m| m.visibility.is_llm())
             .map(|m| message_tokens(m) as u64)
             .sum()
+    }
+
+    /// Context-window floor to hand the router for the next turn, so mesh auto-rotation never picks
+    /// a window this turn will immediately overflow. See [`routing_min_context_tokens`].
+    fn routing_min_context(&self) -> u32 {
+        let reserve = self.config.mesh.effective_max_output_tokens().max(1024);
+        let transcript = self.estimated_transcript_tokens().min(u32::MAX as u64) as u32;
+        routing_min_context_tokens(transcript, reserve)
     }
 
     /// Whether the transcript comfortably fits `model`'s window — under 80% of the post-reply room.
@@ -4843,7 +4877,7 @@ Output ONLY that sentence — no preamble, no quotation marks.";
             spent_month_usd: spent_month,
             monthly_cap_usd: self.config.mesh.monthly_cap_usd,
             warn_fraction: self.config.mesh.warn_threshold,
-            min_context_tokens: Some(self.estimated_transcript_tokens() as u32),
+            min_context_tokens: Some(self.routing_min_context()),
         };
         let status = budget.status();
 
@@ -7913,6 +7947,39 @@ mod tests {
     use forge_tui::HeadlessPresenter;
     use forge_types::SideEffect;
     use std::sync::{Arc, Mutex};
+
+    // ── Routing context floor — mesh auto-rotation must never pick a too-small window ──────────
+    #[test]
+    fn routing_min_context_floors_at_coding_baseline_when_transcript_is_small() {
+        // Fresh/short session: transcript demand is tiny, so the absolute coding floor governs —
+        // this is exactly the case that let a 4k model (allam-2-7b) get routed then rejected.
+        assert_eq!(routing_min_context_tokens(0, 4096), MIN_CODING_CONTEXT);
+        assert_eq!(routing_min_context_tokens(2_000, 4096), MIN_CODING_CONTEXT);
+    }
+
+    #[test]
+    fn routing_min_context_tracks_transcript_plus_reserve_once_it_grows() {
+        // Long session: floor must exceed `transcript·5/4 + reserve` so the router never admits a
+        // window `admit_failover_model` would immediately reject (the churning-consent-prompt bug).
+        assert_eq!(
+            routing_min_context_tokens(40_000, 8_192),
+            40_000 * 5 / 4 + 8_192
+        );
+        // Result must clear transcript_fits' bar: window·0.8 - reserve·0.8 ≥ transcript.
+        let (transcript, reserve) = (40_000u32, 8_192u32);
+        let win = routing_min_context_tokens(transcript, reserve) as u64;
+        let usable = (win - reserve as u64) * 8 / 10;
+        assert!(
+            usable >= transcript as u64,
+            "chosen window must fit the transcript"
+        );
+    }
+
+    #[test]
+    fn routing_min_context_saturates_on_absurd_transcript() {
+        // No panic/overflow on a pathological transcript size.
+        assert_eq!(routing_min_context_tokens(u32::MAX, u32::MAX), u32::MAX);
+    }
 
     // ── Token-budget continuation guard (H8) — pure decision, offline-unit-tested ──────────────
     #[test]
