@@ -1,9 +1,15 @@
-// Native (iOS/Android) voice capture — DESIGN.md "Client audio formats": records m4a/aac via
-// expo-audio's HIGH_QUALITY preset (m4a container on both platforms), which the server decodes
-// with symphonia. `AudioModule.AudioRecorder` is used directly (not the `useAudioRecorder` hook)
-// because this module's start/stop/cancel lifecycle is driven by VoiceRecordingPill, not tied to
-// a single component's mount lifecycle.
-import { AudioModule, RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
+// Native (iOS/Android) voice capture — DESIGN.md "Client audio formats". `AudioModule.AudioRecorder`
+// is used directly (not the `useAudioRecorder` hook) because this module's start/stop/cancel
+// lifecycle is driven by VoiceRecordingPill, not tied to a single component's mount lifecycle.
+import {
+  AudioModule,
+  AudioQuality,
+  IOSOutputFormat,
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  type RecordingOptions,
+} from "expo-audio";
 import { File } from "expo-file-system";
 import { Platform } from "react-native";
 
@@ -21,9 +27,9 @@ function dbToRms01(db: number): number {
   return Math.max(0, Math.min(1, (db - METER_FLOOR_DB) / -METER_FLOOR_DB));
 }
 
-// HIGH_QUALITY records .m4a on both platforms (expo-audio's RecordingPresets docs), so this is
-// the expected case — the map exists so a surprise extension (e.g. `.caf`) is still labeled
-// honestly instead of silently uploaded as a mislabeled m4a.
+// iOS records .wav, Android records .m4a (see RECORDING_OPTIONS below) — the map exists so a
+// surprise extension (e.g. `.caf`) is still labeled honestly instead of silently uploaded as a
+// mislabeled m4a.
 const MIME_BY_EXT: Record<string, string> = {
   m4a: "audio/m4a",
   caf: "audio/x-caf",
@@ -31,6 +37,38 @@ const MIME_BY_EXT: Record<string, string> = {
   wav: "audio/wav",
   "3gp": "audio/3gpp",
 };
+
+// iOS records raw Linear PCM .wav instead of an m4a/AAC container: CoreAudio's own m4a muxing
+// has a quirk the server's symphonia (Rust) decoder can't parse ("no audio track found"), even
+// though an ffmpeg-muxed m4a decodes fine — so this sidesteps AAC container parsing entirely.
+// 16kHz mono 16-bit is also whisper's native input, and Android's MediaRecorder can't write wav
+// at all, so Android keeps AAC/m4a, just downsampled to match.
+const RECORDING_OPTIONS: RecordingOptions =
+  Platform.OS === "ios"
+    ? {
+        extension: ".wav",
+        sampleRate: 16000,
+        numberOfChannels: 1,
+        bitRate: 16000 * 16,
+        android: RecordingPresets.HIGH_QUALITY.android,
+        ios: {
+          outputFormat: IOSOutputFormat.LINEARPCM,
+          audioQuality: AudioQuality.MAX,
+          linearPCMBitDepth: 16,
+          linearPCMIsBigEndian: false,
+          linearPCMIsFloat: false,
+        },
+        web: RecordingPresets.HIGH_QUALITY.web,
+      }
+    : {
+        extension: ".m4a",
+        sampleRate: 16000,
+        numberOfChannels: 1,
+        bitRate: 64000,
+        android: { outputFormat: "mpeg4", audioEncoder: "aac" },
+        ios: RecordingPresets.HIGH_QUALITY.ios,
+        web: RecordingPresets.HIGH_QUALITY.web,
+      };
 
 let recorder: InstanceType<typeof AudioModule.AudioRecorder> | null = null;
 let pollId: ReturnType<typeof setInterval> | null = null;
@@ -65,7 +103,7 @@ export const voice: VoiceRecorder = {
     // `AudioModule` native-module class shape, but tsc — which actually type-checks it —
     // resolves it fine.
     // eslint-disable-next-line import/namespace
-    recorder = new AudioModule.AudioRecorder({ ...RecordingPresets.HIGH_QUALITY, isMeteringEnabled: true });
+    recorder = new AudioModule.AudioRecorder({ ...RECORDING_OPTIONS, isMeteringEnabled: true });
     await recorder.prepareToRecordAsync();
     recorder.record();
 
