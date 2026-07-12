@@ -90,12 +90,6 @@ pub(crate) fn build_provider_and_router(
         // does cost-aware selection; any failure falls back to the heuristic.
         // Hybrid additionally skips the LLM call when the heuristic is already confident
         // (score ≤−4 or ≥8), keeping zero added latency for obvious cases.
-        let classifier_model = config
-            .mesh
-            .classifier_model
-            .clone()
-            .or_else(|| config.model_for(TaskTier::Trivial).map(String::from))
-            .unwrap_or_default();
         let classify_provider: Arc<dyn Provider> = if mock {
             Arc::new(MockProvider)
         } else {
@@ -107,7 +101,18 @@ pub(crate) fn build_provider_and_router(
             )
         };
         let hybrid = config.mesh.classifier == ClassifierKind::Hybrid;
-        Arc::new(LlmRouter::new(classify_provider, classifier_model, heuristic).with_hybrid(hybrid))
+        let mut classifier_candidates = Vec::new();
+        if let Some(model) = config.mesh.classifier_model.clone() {
+            classifier_candidates.push(model);
+        }
+        classifier_candidates.extend(heuristic.classifier_candidates());
+        if let Some(model) = config.model_for(TaskTier::Trivial).map(String::from) {
+            classifier_candidates.push(model);
+        }
+        classifier_candidates.dedup();
+        Arc::new(
+            LlmRouter::new(classify_provider, classifier_candidates, heuristic).with_hybrid(hybrid),
+        )
     } else {
         Arc::new(heuristic)
     };

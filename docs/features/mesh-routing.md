@@ -105,9 +105,10 @@ near-boundary prompts pay for an LLM second opinion.
 `mesh.classifier` (`crates/forge-config/src/lib.rs:1698`) selects:
 
 - `heuristic` — explicit opt-in, `score_prompt` only, zero added cost/latency.
-- `llm` (default) — `LlmRouter` (`crates/forge-core/src/llm_router.rs:60`) asks `mesh.classifier_model`
-  for a one-word tier on every turn, falling back to the heuristic on any error, timeout, or
-  unparseable response.
+- `llm` (default) — `LlmRouter` tries the explicit override first, then up to three current
+  trivial-tier catalog choices, finally the configured trivial model. Health is checked per turn;
+  benched models are skipped. Each candidate has a 5-second timeout and the total classification
+  budget is 15 seconds. The first parseable answer wins; failures fall back to the heuristic.
 - `hybrid` — explicit opt-in; heuristic first; the LLM is consulted only in the uncertain band of §2.2.
 
 All classifiers feed the same `HeuristicRouter::decide` selection path.

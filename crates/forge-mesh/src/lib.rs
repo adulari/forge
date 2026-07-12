@@ -667,7 +667,20 @@ impl HeuristicRouter {
         self.config.mesh.auto_discover && self.catalog.as_ref().is_some_and(|c| !c.is_empty())
     }
 
-    /// Candidate models for a tier: the auto-discovered, capability-ranked shortlist when
+    /// Ordered shortlist used by the LLM classifier, following the same trivial-tier ranking as
+    /// normal routing. Health is applied later because it changes between turns.
+    pub fn classifier_candidates(&self) -> Vec<String> {
+        self.candidates_for_tier(
+            TaskTier::Trivial,
+            RouteHints::default(),
+            &SubscriptionQuota::default(),
+            None,
+        )
+        .into_iter()
+        .take(3)
+        .collect()
+    }
+
     /// [`auto_active`](Self::auto_active); otherwise the configured `[mesh.models]` candidates
     /// (the manual/override path, and the offline/no-catalog default).
     fn candidates_for_tier(

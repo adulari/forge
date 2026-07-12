@@ -3,8 +3,10 @@
 //! selection. Any failure — error, timeout, or an unparseable reply — silently falls back to
 //! the deterministic heuristic, so enabling it can never break a turn.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use forge_mesh::{BudgetState, HeuristicRouter, RouteHints, Router, RoutingDecision};
@@ -13,6 +15,8 @@ use forge_types::{EffortLevel, Message, ModelHealth, ProjectContext, Subscriptio
 
 /// Hard ceiling on the classification call so a slow/hung model degrades to the heuristic.
 const CLASSIFY_TIMEOUT: Duration = Duration::from_secs(15);
+const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(5);
+const CACHE_CAPACITY: usize = 64;
 
 /// Prompt that drives the LLM classification call.
 ///
@@ -58,18 +62,24 @@ Classify by what thinking the task demands, not its surface length.";
 ///   or strongly-signalled Complex tasks skip the LLM entirely — zero added latency for them.
 pub struct LlmRouter {
     provider: Arc<dyn Provider>,
-    model: String,
+    candidates: Vec<String>,
     fallback: HeuristicRouter,
     hybrid: bool,
+    cache: Mutex<VecDeque<(u64, TaskTier)>>,
 }
 
 impl LlmRouter {
-    pub fn new(provider: Arc<dyn Provider>, model: String, fallback: HeuristicRouter) -> Self {
+    pub fn new(
+        provider: Arc<dyn Provider>,
+        candidates: Vec<String>,
+        fallback: HeuristicRouter,
+    ) -> Self {
         Self {
             provider,
-            model,
+            candidates,
             fallback,
             hybrid: false,
+            cache: Mutex::new(VecDeque::with_capacity(CACHE_CAPACITY)),
         }
     }
 
@@ -91,6 +101,41 @@ fn parse_tier(text: &str) -> Option<TaskTier> {
             "complex" => Some(TaskTier::Complex),
             _ => None,
         })
+}
+
+fn prompt_hash(prompt: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    prompt.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn guard_tier(llm: TaskTier, heuristic: TaskTier, confident: bool) -> TaskTier {
+    if confident && heuristic == TaskTier::Complex {
+        TaskTier::Complex
+    } else {
+        llm
+    }
+}
+
+impl LlmRouter {
+    fn cached(&self, key: u64) -> Option<TaskTier> {
+        self.cache
+            .lock()
+            .ok()?
+            .iter()
+            .find(|(cached, _)| *cached == key)
+            .map(|(_, tier)| *tier)
+    }
+
+    fn store(&self, key: u64, tier: TaskTier) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.retain(|(cached, _)| *cached != key);
+            if cache.len() == CACHE_CAPACITY {
+                cache.pop_front();
+            }
+            cache.push_back((key, tier));
+        }
+    }
 }
 
 #[async_trait]
@@ -127,45 +172,73 @@ impl Router for LlmRouter {
             }
         }
 
-        let prompt = format!("TASK TO CLASSIFY:\n{prompt}");
-        let messages = [Message::system(CLASSIFY_SYSTEM), Message::user(&prompt)];
-        let mut sink = |_: forge_provider::StreamEvent| {}; // classifier output isn't shown
-
-        let tier = match tokio::time::timeout(
-            CLASSIFY_TIMEOUT,
-            self.provider
-                .complete(&self.model, &messages, &[], &mut sink),
-        )
-        .await
-        {
-            Ok(Ok(resp)) => parse_tier(&resp.content),
-            _ => None, // request error, or timed out
-        };
-
-        match tier {
-            Some(t) => self.fallback.decide(
-                t,
-                format!("classified by {} as {}", self.model, t.as_str()),
+        let (heuristic_tier, heuristic_confident, heuristic_reason) =
+            HeuristicRouter::classify_confident(prompt, project);
+        let key = prompt_hash(prompt);
+        if let Some(tier) = self.cached(key) {
+            let tier = guard_tier(tier, heuristic_tier, heuristic_confident);
+            return self.fallback.decide(
+                tier,
+                format!("cached classifier result: {}", tier.as_str()),
                 budget,
                 health,
                 hints,
                 quota,
                 effort,
                 has_images,
-            ),
+            );
+        }
+
+        let messages = [
+            Message::system(CLASSIFY_SYSTEM),
+            Message::user(format!("TASK TO CLASSIFY:\n{prompt}")),
+        ];
+        let started = Instant::now();
+        let mut answered = None;
+        for model in self.candidates.iter().filter(|m| !health.is_benched(m)) {
+            let remaining = CLASSIFY_TIMEOUT.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                break;
+            }
+            let timeout = remaining.min(CANDIDATE_TIMEOUT);
+            let mut sink = |_: forge_provider::StreamEvent| {};
+            let result = tokio::time::timeout(
+                timeout,
+                self.provider.complete(model, &messages, &[], &mut sink),
+            )
+            .await;
+            if let Ok(Ok(resp)) = result {
+                if let Some(tier) = parse_tier(&resp.content) {
+                    answered = Some((model.as_str(), tier));
+                    break;
+                }
+            }
+        }
+
+        match answered {
+            Some((model, tier)) => {
+                self.store(key, tier);
+                let tier = guard_tier(tier, heuristic_tier, heuristic_confident);
+                let guard = if tier != heuristic_tier && heuristic_confident {
+                    format!("; never-downgrade from {heuristic_reason}")
+                } else {
+                    String::new()
+                };
+                self.fallback.decide(
+                    tier,
+                    format!("classified by {model} as {}{guard}", tier.as_str()),
+                    budget,
+                    health,
+                    hints,
+                    quota,
+                    effort,
+                    has_images,
+                )
+            }
             None => {
-                // Couldn't classify → deterministic heuristic, noted in the rationale.
                 let mut d = self
                     .fallback
-                    .route(
-                        prompt.as_str(),
-                        has_images,
-                        budget,
-                        health,
-                        quota,
-                        effort,
-                        project,
-                    )
+                    .route(prompt, has_images, budget, health, quota, effort, project)
                     .await;
                 d.rationale
                     .push_str(" (llm classify unavailable → heuristic)");
@@ -235,12 +308,138 @@ mod tests {
         }
     }
 
+    struct SequenceProvider {
+        responses: Mutex<Vec<Result<String, ()>>>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl Provider for SequenceProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut EventSink<'_>,
+        ) -> Result<ModelResponse, ProviderError> {
+            self.calls.lock().unwrap().push(model.to_string());
+            match self.responses.lock().unwrap().remove(0) {
+                Ok(content) => Ok(ModelResponse {
+                    content,
+                    tool_calls: Vec::new(),
+                    usage: Default::default(),
+                    quotas: Vec::new(),
+                }),
+                Err(()) => Err(ProviderError::Request("boom".into())),
+            }
+        }
+    }
+
     fn llm_router(reply: Result<&str, ()>) -> LlmRouter {
         let provider = Arc::new(FakeProvider(reply.map(String::from)));
         let fallback = HeuristicRouter::new(forge_config::Config::default());
-        LlmRouter::new(provider, "ollama::tiny".into(), fallback)
+        LlmRouter::new(provider, vec!["ollama::tiny".into()], fallback)
     }
 
+    #[tokio::test]
+    async fn first_candidate_error_uses_second_candidate() {
+        let provider = Arc::new(SequenceProvider {
+            responses: Mutex::new(vec![Err(()), Ok("standard".into())]),
+            calls: Mutex::new(Vec::new()),
+        });
+        let router = LlmRouter::new(
+            provider.clone(),
+            vec!["first::model".into(), "second::model".into()],
+            HeuristicRouter::new(forge_config::Config::default()),
+        );
+        let d = router
+            .route(
+                "implement a small utility",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(d.tier, TaskTier::Standard);
+        assert!(d.rationale.contains("second::model"));
+        assert_eq!(
+            provider.calls.lock().unwrap().as_slice(),
+            ["first::model", "second::model"]
+        );
+    }
+
+    #[tokio::test]
+    async fn benched_first_candidate_is_skipped() {
+        let provider = Arc::new(SequenceProvider {
+            responses: Mutex::new(vec![Ok("complex".into())]),
+            calls: Mutex::new(Vec::new()),
+        });
+        let router = LlmRouter::new(
+            provider.clone(),
+            vec!["first::model".into(), "second::model".into()],
+            HeuristicRouter::new(forge_config::Config::default()),
+        );
+        let health = ModelHealth::new(["first::model".to_string()].into_iter().collect());
+        let _ = router
+            .route(
+                "tweak it",
+                false,
+                BudgetState::default(),
+                &health,
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(provider.calls.lock().unwrap().as_slice(), ["second::model"]);
+    }
+
+    #[tokio::test]
+    async fn never_downgrades_certain_complex() {
+        let router = llm_router(Ok("trivial"));
+        let d = router
+            .route(
+                "analyze the performance bottleneck in the authentication service",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(d.tier, TaskTier::Complex);
+    }
+
+    #[tokio::test]
+    async fn identical_prompt_uses_classifier_cache() {
+        let provider = Arc::new(SequenceProvider {
+            responses: Mutex::new(vec![Ok("standard".into())]),
+            calls: Mutex::new(Vec::new()),
+        });
+        let router = LlmRouter::new(
+            provider.clone(),
+            vec!["cache::model".into()],
+            HeuristicRouter::new(forge_config::Config::default()),
+        );
+        for _ in 0..2 {
+            let _ = router
+                .route(
+                    "implement a small utility",
+                    false,
+                    BudgetState::default(),
+                    &ModelHealth::default(),
+                    &SubscriptionQuota::default(),
+                    None,
+                    &ProjectContext::default(),
+                )
+                .await;
+        }
+        assert_eq!(provider.calls.lock().unwrap().len(), 1);
+    }
     #[test]
     fn parses_tier_words_tolerantly() {
         assert_eq!(parse_tier("complex"), Some(TaskTier::Complex));
@@ -255,7 +454,6 @@ mod tests {
 
     #[tokio::test]
     async fn uses_the_llm_label() {
-        // A short prompt the heuristic would call Trivial, but the LLM says complex.
         let d = llm_router(Ok("complex"))
             .route(
                 "tweak it",
@@ -309,7 +507,7 @@ mod tests {
     fn hybrid_router(reply: Result<&str, ()>) -> LlmRouter {
         let provider = Arc::new(FakeProvider(reply.map(String::from)));
         let fallback = HeuristicRouter::new(forge_config::Config::default());
-        LlmRouter::new(provider, "ollama::tiny".into(), fallback).with_hybrid(true)
+        LlmRouter::new(provider, vec!["ollama::tiny".into()], fallback).with_hybrid(true)
     }
 
     #[tokio::test]
