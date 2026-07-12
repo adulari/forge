@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Path as AxumPath, Query, State};
+use axum::extract::{Json, Path as AxumPath, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
@@ -211,6 +211,49 @@ struct DaemonState {
     /// Local whisper.cpp speech-to-text (`POST /api/voice/transcribe`) — caches the loaded model
     /// across requests.
     voice: crate::voice::VoiceState,
+}
+
+#[derive(serde::Serialize)]
+struct ConfigResponse {
+    fields: Vec<ConfigField>,
+}
+
+#[derive(serde::Serialize)]
+struct ConfigField {
+    key: String,
+    group: String,
+    field_type: String,
+    label: String,
+    help: Option<String>,
+    options: Vec<String>,
+    value: String,
+    default: String,
+    modified: bool,
+    source: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateConfigRequest {
+    key: String,
+    value: Option<String>,
+    scope: ConfigScopeRequest,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConfigScopeRequest {
+    User,
+    Project,
+}
+
+impl From<ConfigScopeRequest> for forge_config::ConfigScope {
+    fn from(value: ConfigScopeRequest) -> Self {
+        match value {
+            ConfigScopeRequest::User => Self::User,
+            ConfigScopeRequest::Project => Self::Project,
+        }
+    }
 }
 
 /// One row of `GET /api/sessions` — the fleet dashboard's data. `waiting` is the killer signal
@@ -487,6 +530,10 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         )
         .route(&format!("{base}/api/history"), get(history_page))
         .route(&format!("{base}/api/usage"), get(usage_page))
+        .route(
+            &format!("{base}/api/config"),
+            get(config_page).put(update_config),
+        )
         // File/image upload (v7): multipart, session-addressed, stored under the session's
         // `.forge/uploads/<id>/` and delivered to its driver as `RemoteInput::Attach`. The
         // per-route body limit replaces axum's 2 MB default.
@@ -1801,6 +1848,76 @@ fn usage_providers(rows: Vec<forge_store::ProviderUsage>) -> (UsageTotals, Vec<U
         .collect();
     (total, providers)
 }
+async fn config_page() -> Response {
+    match tokio::task::spawn_blocking(config_response).await {
+        Ok(response) => json_response(&response),
+        Err(_) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read configuration",
+        ),
+    }
+}
+
+async fn update_config(Json(request): Json<UpdateConfigRequest>) -> Response {
+    let result = tokio::task::spawn_blocking(move || {
+        let descriptors = forge_config::config_descriptors();
+        if !descriptors
+            .iter()
+            .any(|descriptor| descriptor.path == request.key)
+        {
+            return Err("unknown configuration field".to_string());
+        }
+        let scope = request.scope.into();
+        match request.value {
+            Some(value) => forge_config::set_config_value(scope, &request.key, &value),
+            None => forge_config::reset_config_value(scope, &request.key),
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(config_response())
+    })
+    .await;
+
+    match result {
+        Ok(Ok(response)) => json_response(&response),
+        Ok(Err(error)) => err_response(axum::http::StatusCode::BAD_REQUEST, &error),
+        Err(_) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "could not update configuration",
+        ),
+    }
+}
+
+fn config_response() -> ConfigResponse {
+    ConfigResponse {
+        fields: forge_config::config_descriptors()
+            .into_iter()
+            .map(|descriptor| {
+                let (field_type, options) = match descriptor.kind {
+                    forge_config::SettingKind::Bool => ("bool", Vec::new()),
+                    forge_config::SettingKind::Int => ("int", Vec::new()),
+                    forge_config::SettingKind::Float => ("float", Vec::new()),
+                    forge_config::SettingKind::Enum(options) => {
+                        ("enum", options.into_iter().map(str::to_string).collect())
+                    }
+                    forge_config::SettingKind::Text => ("text", Vec::new()),
+                };
+                ConfigField {
+                    key: descriptor.path,
+                    group: descriptor.group,
+                    field_type: field_type.to_string(),
+                    label: descriptor.label,
+                    help: descriptor.help,
+                    options,
+                    value: descriptor.value.display(),
+                    default: descriptor.default.display(),
+                    modified: descriptor.modified,
+                    source: descriptor.source.to_string(),
+                }
+            })
+            .collect(),
+    }
+}
+
 async fn usage_page(
     State(state): State<Arc<DaemonState>>,
     Query(params): Query<UsageParams>,
