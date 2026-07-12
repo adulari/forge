@@ -90,6 +90,12 @@ try {
         Write-Host "install: added $InstallDir to your user PATH (restart other shells to pick it up)"
     }
     Write-Host 'install: done. Run `forge setup` to get started.'
+    $desktop = $env:FORGE_DESKTOP
+    if ($desktop -eq '1') { irm "https://raw.githubusercontent.com/$Repo/main/install-desktop.ps1" | iex }
+    elseif ($desktop -ne '0' -and [Environment]::UserInteractive) {
+        $answer = Read-Host 'Also install the Forge desktop app? [Y/n]'
+        if ($answer -notmatch '^(n|no)$') { irm "https://raw.githubusercontent.com/$Repo/main/install-desktop.ps1" | iex }
+    } elseif ($desktop -ne '0') { Write-Host 'install: skipping desktop app (set FORGE_DESKTOP=1 to install it)' }
 }
 finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

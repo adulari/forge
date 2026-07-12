@@ -135,3 +135,15 @@ case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
   *) printf 'install: add %s to your PATH:\n  export PATH="%s:$PATH"\n' "$INSTALL_DIR" "$INSTALL_DIR" >&2 ;;
 esac
+
+if [ "${FORGE_DESKTOP:-}" = 1 ]; then
+  sh -c "$(fetch https://raw.githubusercontent.com/$REPO/main/install-desktop.sh)"
+elif [ "${FORGE_DESKTOP:-}" = 0 ]; then
+  :
+elif [ -r /dev/tty ]; then
+  printf 'Also install the Forge desktop app? [Y/n] ' >&2
+  read answer </dev/tty || answer=""
+  case "$answer" in n|N|no|NO) ;; *) sh -c "$(fetch https://raw.githubusercontent.com/$REPO/main/install-desktop.sh)" ;; esac
+else
+  printf 'install: skipping desktop app (set FORGE_DESKTOP=1 to install it)\n' >&2
+fi
