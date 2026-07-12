@@ -4,6 +4,7 @@
 //! table, the quota snapshot, the conservation roll, and the final pick + fallback chain. The goal
 //! is to make "why did the mesh choose this?" answerable, and to verify the policy is behaving.
 
+use forge_config::ClassifierKind;
 use forge_types::{
     EffortLevel, ModelHealth, ProjectContext, QuotaStatus, SubscriptionQuota, TaskTier,
 };
@@ -63,7 +64,7 @@ pub struct RoutingExplanation {
     pub fallbacks: Vec<String>,
     pub rationale: String,
     /// Human-readable label for which classifier produced this tier — set by the caller (forge-core)
-    /// based on the configured `mesh.classifier`. Defaults to `"heuristic"`.
+    /// based on the configured `mesh.classifier`. Defaults to `"llm"` (with heuristic fallback).
     pub classifier_label: String,
 }
 
@@ -182,6 +183,12 @@ impl HeuristicRouter {
             })
             .collect();
 
+        let classifier_label = match self.config.mesh.classifier {
+            ClassifierKind::Heuristic => "heuristic".to_string(),
+            ClassifierKind::Llm => "llm".to_string(),
+            ClassifierKind::Hybrid => "hybrid".to_string(),
+        };
+
         RoutingExplanation {
             prompt: prompt.to_string(),
             classified_tier: tier,
@@ -195,7 +202,7 @@ impl HeuristicRouter {
             pick: decision.model,
             fallbacks: decision.fallbacks,
             rationale: decision.rationale,
-            classifier_label: "heuristic".to_string(),
+            classifier_label,
         }
     }
 }
