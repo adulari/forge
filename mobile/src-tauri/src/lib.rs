@@ -8,6 +8,8 @@ use tauri::menu::{Menu, PredefinedMenuItem, SubmenuBuilder};
 #[cfg(debug_assertions)]
 use tauri::Manager;
 
+mod serve_discovery;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -15,6 +17,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_websocket::init())
+        .invoke_handler(tauri::generate_handler![
+            serve_discovery::detect_forge_serve,
+            serve_discovery::forge_binary_available,
+            serve_discovery::start_forge_serve,
+        ])
         .setup(|app| {
             #[cfg(not(target_os = "macos"))]
             app.get_webview_window("main")
