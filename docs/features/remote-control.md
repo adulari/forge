@@ -500,6 +500,36 @@ trusting the project operator's instance can run their own and point `FORGE_APNS
 at it — a strictly better answer for a team/multi-machine setup than "bring your own key
 only," since it centralizes one key without requiring the operator's trust.
 
+## 2g. Run as a background service — `forge service`
+
+`forge serve` is a foreground process by default: close the terminal (or log out), and the
+daemon dies with it. `forge service` installs it as an opt-in, always-on user-level OS service
+so it survives terminal closes, crashes (auto-restart), and — on Linux/macOS — login itself.
+No root/sudo anywhere; this is a per-user service, not a system one.
+
+```
+forge service install [--anywhere|--lan|--local] [--port <p>]   # install + start now
+forge service status                                            # installed? running? port up?
+forge service start | stop | restart                            # control without reinstalling
+forge service uninstall                                         # stop + remove
+```
+
+Exposure defaults to `--lan` (same default as `forge serve` itself) and, together with the
+resolved port, is baked directly into the installed unit — the unit is the single source of
+truth; `status` never parses flags back out of it, it only asks the OS service manager whether
+the unit exists/is running and independently TCP-probes the port.
+
+| OS | Backend | Install | Control |
+|---|---|---|---|
+| Linux | systemd `--user` unit at `~/.config/systemd/user/forge-serve.service` | `systemctl --user daemon-reload` + `enable --now forge-serve` | `systemctl --user start\|stop\|restart forge-serve`, `is-active` for status |
+| macOS | launchd agent at `~/Library/LaunchAgents/dev.forge.serve.plist` (`RunAtLoad`, `KeepAlive.SuccessfulExit=false` — restart on crash only) | `launchctl bootstrap gui/$UID <plist>`, falling back to `launchctl load -w` on older macOS | `launchctl kickstart`/`kill SIGTERM`/`kickstart -k` against `gui/$UID/dev.forge.serve` |
+| Windows | Task Scheduler logon task `ForgeServe` (`/SC ONLOGON`) — not a real Windows Service, since `forge serve` doesn't speak the SCM protocol and wrapping it with an external shim like NSSM isn't worth the added dependency | `schtasks /Create ... /F` + `/Run` to start immediately | `schtasks /Run\|/End /TN ForgeServe` |
+
+Surviving a reboot **before** you log in (Linux) needs `loginctl enable-linger $USER` — `install`
+prints this as a note but never runs it itself (it can require auth). Every backend call
+surfaces the failing command's stderr with an actionable hint (e.g. "is a systemd user manager
+available?") rather than a bare exit code.
+
 ## 4. Surfaces touched
 
 | Layer | Change |
@@ -513,6 +543,7 @@ only," since it centralizes one key without requiring the operator's trust.
 | `forge-tui/src/app.rs` | `App.remote_active`, `question_prompt`, `recent_transcript` ring, `drain_flush_remote`, `remote_snapshot` (tasks/subagents/queued/question options), `remote_overlay()` + `OverlaySnapshot`/`OverlayRowSnapshot` + `picker_kind_wire`, `print_lines`, statusline `◉ remote` segment; v7: `pending_diff`/`turn_diffs` lifecycle (Diff → ToolResult), retained `plan`, `DiffSnapshot` types + `render::diff_file_snapshot` |
 | `forge-tui/src/commands.rs` | `CommandAction::Remote { mode }`, `/remote` (alias `/rc`) parse + registry entry |
 | `forge-cli/src/cli/commands/run.rs` | `DispatchOutcome::ToggleRemote`, `toggle_remote`, `[remote] auto` startup, remote input draining + full-state snapshot broadcast in `run_chat_tui`; v4: `next_input_event` (remote keys join the local key loop), `apply_overlay_input` + `RemoteOverlayOp`, `/keys` host-only note, `remote_copy_text`; v5: `RemoteControl::broadcast` (frame → event log + watch), the `HistoryProvider` closure over the session's store |
+| `forge-cli/src/cli/commands/service.rs` | `forge service install\|uninstall\|status\|start\|stop\|restart` — user-level background daemon for `forge serve` (systemd `--user` / launchd / Task Scheduler backends, no root) |
 | `Cargo.toml` | `axum` (ws), `axum-server` (rustls), `rcgen`, `tokio-tungstenite`, `qrcode`; `tokio` `net` feature |
 | tests | snapshot wire-shape (v5 incl. overlay/copy_text/resync + `HistoryRow`), named-key table, overlay-verb units, per-`PickerKind` projection units, an e2e-style remote drive of the `/model` pin picker asserting the pin changed, `EventLog` replay/eviction/bounded units, history-page store units (windowing/ordering/ui-rows/session-scoping), manifest/base/SW/exposure-mapping units + two `--ignored` real-socket round-trips (page + WS + PWA assets; connect → drop → `?rev=` reconnect asserting exact gap-free replay + history pagination + token-gated 404) |
 
