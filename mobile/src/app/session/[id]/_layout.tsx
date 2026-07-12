@@ -199,7 +199,10 @@ function SessionShell({ sessionId }: { sessionId: string }) {
     <View style={[styles.flex, { backgroundColor: tokens.bg1 }]}>
       <SafeAreaView
         edges={["top", "left", "right"]}
-        style={{ backgroundColor: tokens.bg1 }}
+        // Elevated header surface (thermal elevation): bg2 sits one step above the bg1 chat
+        // behind the <Slot/>, so the status strip + context gauge read as part of the header
+        // instead of floating over the chat. The hairline seals the seam between the two.
+        style={{ backgroundColor: tokens.bg2, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: tokens.border }}
         // Real height of everything stacked above `<Slot/>` (header + any banners + status +
         // segmented) — Chat's `Screen` reads this back as `keyboardVerticalOffset` so
         // KeyboardAvoidingView knows how much real content sits above it instead of a guessed
