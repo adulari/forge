@@ -4,6 +4,7 @@
 // because this module's start/stop/cancel lifecycle is driven by VoiceRecordingPill, not tied to
 // a single component's mount lifecycle.
 import { AudioModule, RecordingPresets, requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
+import { File } from "expo-file-system";
 import { Platform } from "react-native";
 
 import type { VoiceRecorder } from "./types";
@@ -90,8 +91,14 @@ export const voice: VoiceRecorder = {
     const ext = /\.([a-z0-9]+)$/i.exec(uri)?.[1]?.toLowerCase() ?? "m4a";
     const name = `voice.${ext}`;
     const mime = MIME_BY_EXT[ext] ?? "audio/m4a";
+    // Expo's WinterCG `fetch` (native's global fetch) rejects RN's `{uri,name,type}` FormData
+    // shorthand outright — its multipart encoder only accepts a string, a real `Blob`, or an
+    // object with `bytes(): Promise<Uint8Array>` (expo/src/winter/fetch/convertFormData.ts).
+    // A plain adapter satisfies that contract directly, instead of relying on `File`'s own
+    // `.name`/`.type` getters, which reflect the on-disk file and not our derived `name`/`mime`.
+    const file = new File(uri);
     return {
-      blobOrFile: { uri, name, type: mime },
+      blobOrFile: { bytes: () => file.bytes(), name, type: mime },
       name,
       mime,
     };

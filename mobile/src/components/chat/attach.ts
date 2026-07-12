@@ -2,6 +2,9 @@
 // web paste-image extraction. Pure picker/FormData helpers only — the actual POST goes through
 // `useUpload()` (lib/queries.ts) from the Composer, never a raw fetch here (UI_RULES.md #3).
 import * as DocumentPicker from "expo-document-picker";
+// Aliased: this module's `PickedFile.file?: File` field means the DOM/web `File` (see its
+// docstring below) — importing expo-file-system's own `File` class unaliased would shadow that.
+import { File as ExpoFile } from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
 import { Platform } from "react-native";
 
@@ -89,11 +92,19 @@ export function imagesFromClipboardEvent(e: ClipboardEvent): File[] {
   return files;
 }
 
-/** Multipart body for native-picked files (RN's `{uri,name,type}` upload shape). */
+/**
+ * Multipart body for native-picked files. Expo's WinterCG `fetch` (native's global fetch)
+ * rejects RN's `{uri,name,type}` FormData shorthand outright — its multipart encoder only
+ * accepts a string, a real `Blob`, or an object with `bytes(): Promise<Uint8Array>`
+ * (expo/src/winter/fetch/convertFormData.ts). This adapter satisfies that contract directly,
+ * instead of relying on `File`'s own `.name`/`.type` getters, which reflect the on-disk file
+ * and not the picker's `name`/`mimeType`.
+ */
 export function formDataFromPicked(files: PickedFile[]): FormData {
   const form = new FormData();
   for (const f of files) {
-    form.append("files", { uri: f.uri, name: f.name, type: f.mimeType } as unknown as Blob);
+    const file = new ExpoFile(f.uri);
+    form.append("files", { bytes: () => file.bytes(), name: f.name, type: f.mimeType } as unknown as Blob);
   }
   return form;
 }
