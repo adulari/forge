@@ -19,3 +19,4 @@ pub(crate) mod skill;
 #[cfg(test)]
 mod tests;
 pub(crate) mod tour;
+pub(crate) mod voice;
