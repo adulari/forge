@@ -486,6 +486,7 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
             post(discard_session),
         )
         .route(&format!("{base}/api/history"), get(history_page))
+        .route(&format!("{base}/api/usage"), get(usage_page))
         // File/image upload (v7): multipart, session-addressed, stored under the session's
         // `.forge/uploads/<id>/` and delivered to its driver as `RemoteInput::Attach`. The
         // per-route body limit replaces axum's 2 MB default.
@@ -1714,7 +1715,145 @@ fn guess_content_type(path: &str) -> &'static str {
     }
 }
 
-/// Query for `GET /api/history` — Phase 3's route plus the session address.
+#[derive(serde::Deserialize)]
+struct UsageParams {
+    session: Option<String>,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageTotals {
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageProvider {
+    provider: String,
+    kind: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_usd: f64,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageQuota {
+    provider: String,
+    kind: String,
+    window_kind: String,
+    status: String,
+    resets_at: Option<i64>,
+    fraction: Option<f64>,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageWindow {
+    since_epoch: i64,
+    combined: UsageTotals,
+    providers: Vec<UsageProvider>,
+}
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionUsage {
+    session_id: String,
+    combined: UsageTotals,
+    providers: Vec<UsageProvider>,
+}
+#[derive(serde::Serialize)]
+struct UsageResponse {
+    week: UsageWindow,
+    session: Option<SessionUsage>,
+    quota: Vec<UsageQuota>,
+}
+
+fn provider_kind(provider: &str) -> &'static str {
+    if provider.ends_with("-cli") {
+        "bridge"
+    } else if provider.ends_with("-oauth") || provider == "gemini" {
+        "oauth"
+    } else {
+        "api"
+    }
+}
+fn usage_providers(rows: Vec<forge_store::ProviderUsage>) -> (UsageTotals, Vec<UsageProvider>) {
+    let total = rows.iter().fold(
+        UsageTotals {
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
+        },
+        |mut t, r| {
+            t.input_tokens += r.input_tokens;
+            t.output_tokens += r.output_tokens;
+            t.cost_usd += r.cost_usd;
+            t
+        },
+    );
+    let providers = rows
+        .into_iter()
+        .map(|r| UsageProvider {
+            kind: provider_kind(&r.provider).into(),
+            provider: r.provider,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            cost_usd: r.cost_usd,
+        })
+        .collect();
+    (total, providers)
+}
+async fn usage_page(
+    State(state): State<Arc<DaemonState>>,
+    Query(params): Query<UsageParams>,
+) -> Response {
+    let store = state.store.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let now = chrono::Utc::now().timestamp();
+        let week_rows = store
+            .usage_by_provider_since(now - 604800)
+            .unwrap_or_default();
+        let (combined, providers) = usage_providers(week_rows);
+        let session = params.session.filter(|s| !s.is_empty()).map(|id| {
+            let (combined, providers) =
+                usage_providers(store.usage_by_provider_for_session(&id).unwrap_or_default());
+            SessionUsage {
+                session_id: id,
+                combined,
+                providers,
+            }
+        });
+        let quota = store
+            .subscription_windows()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|q| UsageQuota {
+                kind: provider_kind(&q.provider).into(),
+                provider: q.provider,
+                window_kind: q.window_kind,
+                status: q.status,
+                resets_at: q.resets_at,
+                fraction: q.fraction,
+            })
+            .collect();
+        UsageResponse {
+            week: UsageWindow {
+                since_epoch: now - 604800,
+                combined,
+                providers,
+            },
+            session,
+            quota,
+        }
+    })
+    .await;
+    match result {
+        Ok(body) => json_response(&body),
+        Err(_) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "usage unavailable",
+        ),
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct HistoryParams {
     #[serde(default)]

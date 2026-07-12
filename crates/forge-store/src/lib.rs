@@ -255,6 +255,23 @@ pub struct Store {
     live_event_writes: std::sync::atomic::AtomicU64,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderUsage {
+    pub provider: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubscriptionWindow {
+    pub provider: String,
+    pub window_kind: String,
+    pub status: String,
+    pub resets_at: Option<i64>,
+    pub fraction: Option<f64>,
+}
+
 /// How the pool opens a fresh connection. `:memory:` makes a DISTINCT empty DB on every open, so an
 /// in-memory pool is pinned to a single never-recycled connection (see [`Store::build`]).
 #[derive(Clone)]
@@ -1366,7 +1383,63 @@ impl Store {
         Ok(rows.filter_map(std::result::Result::ok).collect())
     }
 
-    /// Total spend across ALL sessions whose `usage` rows fall in `[start, end)` epoch secs.
+    /// Per-provider usage since a rolling epoch timestamp.
+    pub fn usage_by_provider_since(&self, since_epoch: i64) -> Result<Vec<ProviderUsage>> {
+        self.usage_query("WHERE u.created_at >= ?1", [since_epoch])
+    }
+
+    pub fn usage_by_provider_for_session(&self, session_id: &str) -> Result<Vec<ProviderUsage>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT u.provider, COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cost_usd), 0.0)
+             FROM usage u JOIN message m ON m.id = u.message_id WHERE m.session_id = ?1 GROUP BY u.provider
+             ORDER BY SUM(u.cost_usd) DESC, SUM(u.input_tokens + u.output_tokens) DESC",
+        )?;
+        let rows = stmt.query_map([session_id], |r| {
+            Ok(ProviderUsage {
+                provider: r.get(0)?,
+                input_tokens: r.get::<_, i64>(1)? as u64,
+                output_tokens: r.get::<_, i64>(2)? as u64,
+                cost_usd: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    fn usage_query<P: rusqlite::Params>(
+        &self,
+        predicate: &str,
+        params: P,
+    ) -> Result<Vec<ProviderUsage>> {
+        let conn = self.lock()?;
+        let sql = format!("SELECT provider, COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0.0) FROM usage u {predicate} GROUP BY provider ORDER BY SUM(cost_usd) DESC, SUM(input_tokens + output_tokens) DESC");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params, |r| {
+            Ok(ProviderUsage {
+                provider: r.get(0)?,
+                input_tokens: r.get::<_, i64>(1)? as u64,
+                output_tokens: r.get::<_, i64>(2)? as u64,
+                cost_usd: r.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    pub fn subscription_windows(&self) -> Result<Vec<SubscriptionWindow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT provider, window_kind, status, resets_at, fraction FROM subscription_usage WHERE resets_at IS NULL OR resets_at > ?1")?;
+        let rows = stmt.query_map([chrono::Utc::now().timestamp()], |r| {
+            Ok(SubscriptionWindow {
+                provider: r.get(0)?,
+                window_kind: r.get(1)?,
+                status: r.get(2)?,
+                resets_at: r.get(3)?,
+                fraction: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// This is the authoritative budget figure (FR-5): it aggregates `usage.cost_usd` across
     /// every session, not one session's running total.
     pub fn spend_between(&self, start: i64, end: i64) -> Result<f64> {
