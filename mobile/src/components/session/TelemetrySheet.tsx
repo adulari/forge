@@ -10,9 +10,10 @@ import { KeyValueRow } from "../ds/KeyValueRow";
 import { Sheet } from "../ds/Sheet";
 import { EFFORT_LEVELS, type EffortLevel } from "./EffortPicker";
 
-export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, send, costUsd, contextTokens, contextLimit }: {
+export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, send, costUsd, contextTokens, contextLimit, weekly }: {
   visible: boolean; onClose: () => void; tier: string | null; model: string; temper: string; effort?: string | null;
   send: (input: RemoteInput) => boolean; costUsd: number; contextTokens: number; contextLimit: number | null;
+  weekly?: { provider: string; deltaPct: number } | null;
 }) {
   const tokens = useTokens();
   const current = EFFORT_LEVELS.includes(effort as EffortLevel) ? effort : null;
@@ -23,7 +24,10 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
     <View style={styles.content}>
       <Text style={[typeScale.heading, { color: tokens.ink }]}>Session telemetry</Text>
       {contextLimit != null ? <><ContextGauge used={contextTokens} total={contextLimit} /><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatTokenPair(contextTokens, contextLimit)}</Text></> : null}
-      <Text style={[typeScale.bodyBold, { color: tokens.success }]}>cost {formatCost(costUsd)}</Text>
+      {weekly ? <>
+        <Text style={[typeScale.bodyBold, { color: tokens.success }]}>≈ +{weekly.deltaPct.toFixed(1)}% of weekly quota this session</Text>
+        <Text style={[typeScale.meta, { color: tokens.ink3 }]}>Approximate — may be off if other sessions or tools share this {weekly.provider} subscription.</Text>
+      </> : <Text style={[typeScale.bodyBold, { color: tokens.success }]}>cost {formatCost(costUsd)}</Text>}
       <View style={[styles.rows, { borderTopColor: tokens.border }]}>
         <KeyValueRow label="Tier" value={tier ?? "—"} />
         <KeyValueRow label="Model" value={model} />

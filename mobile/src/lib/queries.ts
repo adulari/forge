@@ -44,6 +44,7 @@ const SERVER_FLEET_POLL_MS = 5000;
 const SERVER_FLEET_BACKOFF_MS = 15000;
 const PAST_PAGE_SIZE = 50;
 const HISTORY_PAGE_SIZE = 60;
+const baselines = new Map<string, number>();
 
 function keys(baseUrl: string | null) {
   return {
@@ -136,6 +137,23 @@ export function useUsage(sessionId?: string | null) {
   });
 }
 
+export function useSessionWeeklyDelta(sessionId: string | null) {
+  const usage = useUsage(sessionId).data;
+  const providers = usage?.session?.providers ?? [];
+  const provider = providers
+    .filter((item) => item.kind === "bridge" || item.kind === "oauth")
+    .sort((a, b) => b.outputTokens - a.outputTokens)[0];
+  const current = provider
+    ? usage?.quota.find((item) => item.provider === provider.provider && item.windowKind === "weekly" && item.fraction != null)?.fraction
+    : undefined;
+  const key = provider && sessionId ? `${sessionId}:${provider.provider}` : null;
+  useEffect(() => {
+    if (key && current != null && !baselines.has(key)) baselines.set(key, current);
+  }, [key, current]);
+  if (!provider || current == null || !key) return { mode: "usd" as const };
+  const baseline = baselines.get(key) ?? current;
+  return { mode: "subscription" as const, provider: provider.provider, deltaPct: Math.max(0, current - baseline) * 100, weeklyFraction: current };
+}
 export function useCreateSession() {
   const { baseUrl } = useAuth();
   const queryClient = useQueryClient();
