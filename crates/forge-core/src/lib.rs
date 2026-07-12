@@ -4625,16 +4625,18 @@ Output ONLY that sentence — no preamble, no quotation marks.";
                 recent_sigs.pop_front();
             }
             let osc_count = recent_sigs.iter().filter(|&&s| s == sig).count();
-            // Break-out reset: `osc_count == 1` means this batch is new to the recent window — it
-            // neither repeats the previous step nor recurs in an A→B→A oscillation — so the model
-            // changed course. Clear the one-shot `doom_nudged` latch and the now-stale window so a
-            // *later* genuine loop in the same turn earns its own nudge-before-halt cycle instead of
-            // being hard-halted off a latch left set by an earlier, already-broken loop. A true
-            // spiral keeps recurring (osc_count stays >= 2), so this never fires mid-loop.
+            // Break-out reset: clear the one-shot `doom_nudged` latch when the model changes course,
+            // so a *later* genuine loop in the same turn earns its own nudge-before-halt cycle
+            // instead of being hard-halted off a stale latch. `osc_count == 1` (this signature is
+            // alone in the recent window) is the signal. Do NOT also wipe the window here: on a
+            // strict A,B,A,B alternation every step's signature is "new" to a freshly-cleared window,
+            // so clearing pinned `osc_count` at 1 forever and the guard NEVER fired — the model ran
+            // to the step cap instead of halting (regression the doom_loop test now covers). The
+            // window is bounded and slides on its own (`pop_front` above), so a broken-out model's
+            // stale loop signatures age out naturally, while a true A,B,A,B spiral accumulates to
+            // `DOOM_LOOP_THRESHOLD`.
             if osc_count == 1 {
                 doom_nudged = false;
-                recent_sigs.clear();
-                recent_sigs.push_back(sig);
             }
             // Distinguish the two loop shapes so the warning isn't misleading: a true A,A,A repeat
             // vs an A,B,A,B oscillation (where the model did NOT repeat the *same* call back-to-back).
