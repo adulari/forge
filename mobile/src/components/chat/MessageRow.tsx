@@ -9,6 +9,7 @@ import Animated from "react-native-reanimated";
 
 import type { HistoryRow } from "../../lib/api";
 import { parseReasoning } from "../../lib/reasoning";
+import { haptics } from "../../lib/haptics";
 import { useSessionCtx } from "../../lib/sessionContext";
 import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -26,6 +27,7 @@ const IS_WEB = Platform.OS === "web";
 
 export interface MessageRowProps {
   row: HistoryRow;
+  onLongPress?: (message: HistoryRow) => void;
   /**
    * Client-local attachments for the optimistic "just sent" bubble only — the daemon never
    * persists attachment metadata into `HistoryRow.content` (remote.rs: "the persisted row
@@ -86,7 +88,7 @@ function mentionsFromContent(content: string): {
   return { text: m[2], files, images };
 }
 
-function MessageRowImpl({ row, attachments }: MessageRowProps) {
+function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   const tokens = useTokens();
   const entrance = useForgeline(Math.max(0, row.seq));
   const toast = useToast();
@@ -129,11 +131,17 @@ function MessageRowImpl({ row, attachments }: MessageRowProps) {
     toast.show("message copied");
   };
 
+  const handleLongPress = () => {
+    if (!onLongPress || IS_WEB) return;
+    haptics.select();
+    onLongPress(row);
+  };
+
   return (
     <Animated.View style={[styles.row, !isUser && !isSystem && styles.assistantRow, isUser && styles.userRow, entrance]}>
       {!isUser && !isSystem ? <View style={[styles.spine, { backgroundColor: tokens.border }]} /> : null}
       <Pressable
-        onLongPress={isSystem || IS_WEB ? undefined : onCopyRow}
+        onLongPress={onLongPress && !IS_WEB ? handleLongPress : undefined}
         style={[
           styles.bubble,
           isUser
