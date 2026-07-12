@@ -55,7 +55,10 @@ jobs:
   test:
     name: test (ubuntu-latest)
     if: github.event_name == 'pull_request'
-    runs-on: [self-hosted, linux, x64]
+    # 'heavy' = archlinux-1 only: workspace-wide compiles are the box's big memory consumers —
+    # serializing them on one 12G-capped runner keeps concurrent PRs from OOMing the host
+    # (30G machine; three 8G runners compiling at once repeatedly killed all runner services).
+    runs-on: [self-hosted, linux, x64, heavy]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -72,7 +75,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: [self-hosted, linux, x64]
+          - os: [self-hosted, linux, x64, heavy]
             label: ubuntu-latest
           - os: macos-latest
             label: macos-latest
@@ -93,7 +96,8 @@ jobs:
   # Cargo.toml) surface only at tag time otherwise — exactly what failed v0.4.42's first release.
   # Catch it on every PR. One platform keeps it cheap; the `lto = "thin"` link runs once.
   release-build:
-    runs-on: [self-hosted, linux, x64]
+    # See `test` above: heavy jobs serialize on the one heavy runner.
+    runs-on: [self-hosted, linux, x64, heavy]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
