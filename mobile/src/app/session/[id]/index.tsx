@@ -312,29 +312,30 @@ export default function SessionChat() {
   const latestSeqRef = useRef(-1);
 
   const handleSend = useCallback(
-    (text: string, attachments: SentAttachment[]) => {
+    (text: string, attachments: SentAttachment[]): boolean => {
       const id = `p${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-      setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current, attachments }]);
 
       // Only uploaded (path-bearing) attachments can ride the wire — correlate this exact send's
       // attachments to this exact prompt (ARCHITECTURE §4.1.4 / mobile upload race).
       const withPath = attachments
         .filter((a): a is SentAttachment & { path: string } => a.path != null)
         .map((a) => ({ path: a.path, image: a.image }));
-      if (send({ kind: "prompt", text, attachments: withPath })) return;
+      if (send({ kind: "prompt", text, attachments: withPath })) {
+        setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current, attachments }]);
+        return true;
+      }
       // Socket closed between the `online` render and here (race window). Fall through to
       // the offline queue — it will be flushed in order on the next !open→open edge.
-      setOfflineQueue((prev) => {
-        if (prev.length >= OFFLINE_QUEUE_CAP) {
-          toast.show("offline queue full (20) — prompt dropped", { tone: "danger" });
-          haptics.mergeConflict();
-          setPendingSent((p) => p.filter((x) => x.id !== id));
-          return prev;
-        }
-        return [...prev, { text, attachments: withPath }];
-      });
+      if (offlineQueue.length >= OFFLINE_QUEUE_CAP) {
+        toast.show("offline queue full (20) — prompt dropped", { tone: "danger" });
+        haptics.mergeConflict();
+        return false;
+      }
+      setPendingSent((prev) => [...prev, { id, text, baselineSeq: latestSeqRef.current, attachments }]);
+      setOfflineQueue((prev) => [...prev, { text, attachments: withPath }]);
+      return true;
     },
-    [send, toast],
+    [offlineQueue.length, send, toast],
   );
 
   const handleInterrupt = useCallback(() => {
