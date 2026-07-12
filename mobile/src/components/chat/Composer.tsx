@@ -15,6 +15,7 @@ import { Image, Platform, StyleSheet, Text, TextInput, View } from "react-native
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
+import { clearDraft, getDraft, setDraft } from "../../lib/drafts";
 import { useUpload } from "../../lib/queries";
 import { useSessionCtx } from "../../lib/sessionContext";
 import { durations, easings } from "../../theme/motion";
@@ -48,7 +49,7 @@ export interface ComposerProps {
   busy: boolean;
   /** true when the session WS is `open` — false swaps the send affordance to "queue". */
   online: boolean;
-  onSend: (text: string, attachments: SentAttachment[]) => void;
+  onSend: (text: string, attachments: SentAttachment[]) => boolean;
   onInterrupt: () => void;
 }
 
@@ -74,11 +75,38 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
     useSessionCtx();
   const toast = useToast();
   const [height, setHeight] = useState(MIN_HEIGHT);
+  const [draftLoadedSession, setDraftLoadedSession] = useState<string | null>(null);
   const inputRef = useRef<TextInput>(null);
   const textRef = useRef(text);
   useEffect(() => {
     textRef.current = text;
   }, [text]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDraftLoadedSession(null);
+    setText("");
+    void getDraft(sessionId).then((draft) => {
+      if (cancelled) return;
+      setText(draft ?? "");
+      setDraftLoadedSession(sessionId);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, setText]);
+
+  useEffect(() => {
+    if (draftLoadedSession !== sessionId) return;
+    const timer = setTimeout(() => {
+      if (text.trim().length === 0) {
+        void clearDraft(sessionId);
+      } else {
+        void setDraft(sessionId, text);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [draftLoadedSession, sessionId, text]);
 
   // Shell→Composer focus bridge: the session shell increments `composerFocusSignal` (e.g.
   // the ⌘E web shortcut) to request that this input take focus. A counter so repeated
@@ -120,10 +148,11 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
     const sent: SentAttachment[] = attachments
       .filter((a) => a.state === "done")
       .map((a) => ({ id: a.id, name: a.name, image: a.image, uri: a.uri, path: a.path }));
-    onSend(trimmed, sent);
+    if (!onSend(trimmed, sent)) return;
     setLastPrompt(trimmed);
     haptics.sendPrompt();
     setText("");
+    void clearDraft(sessionId);
     setAttachments([]);
     setHeight(MIN_HEIGHT);
   };
