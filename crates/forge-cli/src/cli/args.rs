@@ -676,6 +676,14 @@ pub(crate) enum Command {
         #[command(subcommand)]
         cmd: Option<ScheduleCmd>,
     },
+    /// Install/control `forge serve` as an opt-in, always-on user-level background service
+    /// (systemd `--user` on Linux, a launchd agent on macOS, a logon scheduled task on Windows).
+    /// Unlike `forge schedule` (fires one-shot ticks), this supervises one long-lived `forge
+    /// serve` process: it restarts on crash and (Linux/macOS) at login.
+    Service {
+        #[command(subcommand)]
+        cmd: ServiceCmd,
+    },
     /// The overnight autopilot: queue big tasks, drain them headless (`run`), read the digest
     /// (`report`). Each drained task runs in its own isolated git worktree, budget-capped and
     /// optionally assay-gated, and leaves a review-ready `autopilot/<slug>` branch. With no
@@ -1056,6 +1064,46 @@ pub(crate) enum ScheduleCmd {
         /// Schedule id, or a prefix of one (see `forge schedule list`).
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ServiceCmd {
+    /// Install and start a user-level background service running `forge serve`. Exposure
+    /// defaults to `--lan` (same default as `forge serve` itself) when none of
+    /// `--anywhere`/`--lan`/`--local` is given.
+    Install {
+        /// Bind loopback and open a public tunnel (cloudflared/ngrok) — passed through to
+        /// `forge serve --anywhere`.
+        #[arg(long, conflicts_with_all = ["lan", "local"])]
+        anywhere: bool,
+        /// Bind the LAN with self-signed HTTPS. This is already the default; accepted for
+        /// symmetry with `forge serve --lan`.
+        #[arg(long, conflicts_with_all = ["anywhere", "local"])]
+        lan: bool,
+        /// Bind loopback only (control from this machine) — passed through to
+        /// `forge serve --local`.
+        #[arg(long, conflicts_with_all = ["anywhere", "lan"])]
+        local: bool,
+        /// Listen port. Defaults to `[remote] port` from config, else 7420 — same resolution as
+        /// `forge serve --port`. The resolved value is baked into the installed unit.
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Stop and remove the background service.
+    Uninstall,
+    /// Report whether the service is installed, running, and whether its port responds.
+    Status {
+        /// Port to probe with a TCP connect. Defaults to `[remote] port` from config, else 7420
+        /// — override this if the service was installed with a non-default `--port`.
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Start the installed service without reinstalling it.
+    Start,
+    /// Stop the installed service without uninstalling it.
+    Stop,
+    /// Restart the installed service.
+    Restart,
 }
 
 #[derive(Subcommand)]
