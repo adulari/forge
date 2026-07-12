@@ -8,6 +8,7 @@ import { Platform, StyleSheet, Text, View } from "react-native";
 
 import { haptics } from "../../lib/haptics";
 import { useTranscribe } from "../../lib/queries";
+import { chordHold, PUSH_TO_TALK_MIN_MS } from "../../lib/voice/chordHold";
 import { voice } from "../../lib/voice/voice";
 import { useThermalPulse } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -129,6 +130,12 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
   // Composer.tsx used to start this recording) toggles it off. Document-level, not tied to any
   // button's focus, so it works as long as the pill is on screen. Gated to `phase === "recording"`
   // — once transcribing or erroring there's nothing left to cancel or stop early.
+  //
+  // The same chord also does push-to-talk, auto-detected from hold duration: Composer stamps
+  // `chordHold.startedAt` on the keydown that started this recording, and the keyup of ANY part
+  // of the chord (V or a modifier, whichever releases first) lands here — the composer's input
+  // row is already unmounted by then. Held >= PUSH_TO_TALK_MIN_MS ⇒ stop+transcribe on release;
+  // shorter was a tap ⇒ recording continues in toggle mode exactly as before.
   useEffect(() => {
     if (Platform.OS !== "web") return;
 
@@ -141,14 +148,37 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
       if (e.key === "Escape") {
         e.preventDefault();
         handleCancel();
-      } else if (e.key === "Enter" || ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "v")) {
+      } else if (e.key === "Enter") {
         e.preventDefault(); // stop it reaching anything that would submit/insert a newline
+        void handleAccept();
+      } else if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "v") {
+        // Only a genuinely NEW tap may toggle-stop: while the starting chord is still held
+        // (no keyup seen yet) its keydowns must not end the recording. `e.repeat` already
+        // filters V's own auto-repeat; the `chordHold` check is the belt-and-braces for it.
+        if (chordHold.startedAt != null) return;
+        e.preventDefault();
         void handleAccept();
       }
     };
 
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (chordHold.startedAt == null) return;
+      const key = e.key.toLowerCase();
+      if (key !== "v" && key !== "shift" && key !== "control" && key !== "meta") return;
+      const heldMs = Date.now() - chordHold.startedAt;
+      // First release of any chord part settles the gesture — clear unconditionally so later
+      // keyups of the remaining chord keys (or unrelated modifier use mid-recording) are inert.
+      chordHold.startedAt = null;
+      if (phase !== "recording") return;
+      if (heldMs >= PUSH_TO_TALK_MIN_MS) void handleAccept();
+    };
+
     document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
+    document.addEventListener("keyup", onKeyUp);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keyup", onKeyUp);
+    };
     // Deliberately scoped to `phase` only: it starts at "recording" and won't change again
     // until one of these handlers fires, so the closures captured here can't go stale mid-flight.
     // eslint-disable-next-line react-hooks/exhaustive-deps

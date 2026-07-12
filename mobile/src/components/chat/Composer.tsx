@@ -19,6 +19,7 @@ import { clearDraft, getDraft, setDraft } from "../../lib/drafts";
 import { isMacOS } from "../../lib/platform";
 import { useUpload } from "../../lib/queries";
 import { useSessionCtx } from "../../lib/sessionContext";
+import { chordHold } from "../../lib/voice/chordHold";
 import { voice } from "../../lib/voice/voice";
 import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -251,9 +252,12 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
 
   // Web/desktop: Ctrl/Cmd+Shift+V starts voice recording from anywhere in the window, not just
   // when the composer input is focused — mirrors the mic button's own onPress. Document-level
-  // (not the input node) so it fires regardless of focus; the stop side of the toggle lives in
-  // VoiceRecordingPill, which owns the recording state machine once mounted, so this listener
-  // only ever flips idle -> recording and the two can't race each other.
+  // (not the input node) so it fires regardless of focus; the stop side (tap-toggle, Enter,
+  // Escape, AND push-to-talk release — the chord's keyup lands after this row has swapped to
+  // the pill) lives in VoiceRecordingPill, which owns the recording state machine once mounted,
+  // so this listener only ever flips idle -> recording and the two can't race each other.
+  // `chordHold.startedAt` stamps the hold start so the pill can tell a tap (<400ms, stay in
+  // toggle mode) from a hold (push-to-talk: stop + transcribe on release).
   useEffect(() => {
     if (Platform.OS !== "web" || !voice.isSupported()) return;
 
@@ -272,6 +276,7 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
         return;
       }
       e.preventDefault();
+      chordHold.startedAt = Date.now();
       setRecording(true);
     };
 
@@ -376,7 +381,7 @@ export function Composer({ sessionId, busy, online, onSend, onInterrupt }: Compo
               disabled={attachments.some((a) => a.state === "uploading")}
               accessibilityLabel={
                 Platform.OS === "web"
-                  ? `record voice message (${isMacOS ? "⌘" : "Ctrl"}+Shift+V)`
+                  ? `record voice message — tap to toggle, hold to talk (${isMacOS ? "⌘" : "Ctrl"}+Shift+V)`
                   : "record voice message"
               }
               testID="composer-mic"
