@@ -777,6 +777,13 @@ fn is_capability_failure(text: &str) -> bool {
         "payment_required",
         "payment method to continue",
         "add a payment method",
+        // Gemini / Antigravity preview models are single-turn only: they reject Forge's multi-turn
+        // agentic conversation with "Multiturn chat is not enabled for models/<name>". This is a
+        // permanent per-model incapability (never recovers on retry), so EXCLUDE the model + fail
+        // over to a capable one instead of failing the whole turn — mesh auto-rotation dogfooding
+        // hit this: a session routed to antigravity-preview died with a hard turn failure.
+        "multiturn chat is not enabled",
+        "multi-turn chat is not enabled",
     ];
     if MARKERS.iter().any(|m| l.contains(m)) {
         return true;
@@ -1742,6 +1749,12 @@ mod tests {
             "this model does not support tool use"
         ));
         assert!(is_capability_failure("unsupported: function calling"));
+
+        // Single-turn-only preview models (Gemini/Antigravity) reject multi-turn agentic chat —
+        // a permanent per-model incapability, must be excluded not turn-failed.
+        assert!(is_capability_failure(
+            "Multiturn chat is not enabled for models/antigravity-preview-05-2026"
+        ));
 
         // Both terms present but FAR apart in unrelated clauses → NOT a capability failure (the old
         // anywhere-match bug would have wrongly excluded the model for a week).
