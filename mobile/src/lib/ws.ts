@@ -9,7 +9,7 @@ import { AppState, type AppStateStatus, Platform } from "react-native";
 
 import { TWebSocket } from "./transport";
 
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 // ---------------------------------------------------------------------------
 // Wire types (verbatim field names, §1.3)
@@ -113,6 +113,9 @@ export interface Snapshot {
   diff: Diff | null;
   plan: Plan | null;
   copy_text: string | null;
+  /** AI-suggested likely next user prompt, refreshed after each completed turn. Absent/null
+   * while none is available — never implies one is pending. */
+  suggested_prompt?: string | null;
   prompt_seq: number;
   notes: string[];
   revision: number;
