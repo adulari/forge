@@ -275,6 +275,49 @@ auto = "lan"          # session is reachable from a phone the moment chat starts
 host = "192.168.1.5"  # optional: advertise this interface instead of the discovered one
 ```
 
+### Stable tunnel URL
+
+By default `--anywhere` opens an ephemeral **quick tunnel**: a new random
+`trycloudflare.com`/`ngrok-free.app` URL every launch. Bookmarking or installing that URL to a
+phone home screen is pointless — it dies the moment you restart. `[remote] tunnel_name` /
+`tunnel_hostname` pin it to a stable hostname instead, so the same link keeps working across
+every `forge chat --anywhere` / `forge serve --anywhere` launch.
+
+**cloudflared (named tunnel)** — one-time setup, then a config line:
+
+```sh
+cloudflared tunnel login                              # authorize cloudflared against your account
+cloudflared tunnel create forge                        # mints a named tunnel + credentials file
+cloudflared tunnel route dns forge forge.example.com   # DNS-routes the hostname to the tunnel
+```
+
+```toml
+[remote]
+tunnel_name     = "forge"               # the named tunnel to run (`cloudflared tunnel run <name>`)
+tunnel_hostname = "forge.example.com"   # the DNS-routed hostname to advertise as the connect URL
+```
+
+A named-tunnel run prints no public URL on its own (the DNS route is already configured), so
+Forge waits for cloudflared's "registered tunnel connection" log lines instead of parsing a URL,
+then advertises `https://forge.example.com` directly.
+
+**ngrok (reserved domain)** — set `tunnel_hostname` alone (no `tunnel_name`, which is a
+cloudflared-only concept):
+
+```toml
+[remote]
+tunnel_hostname = "forge.ngrok.app"   # a domain reserved on your ngrok account/plan
+```
+
+This runs `ngrok http --domain=forge.ngrok.app <port>` instead of the default ephemeral
+`ngrok http <port>`.
+
+If both fields are unset, behavior is unchanged: an ephemeral quick tunnel, whichever of
+cloudflared/ngrok is installed. If `tunnel_name` is set but only ngrok is on `PATH` (or
+`tunnel_hostname` alone is set but only cloudflared is installed), Forge fails fast with a
+message naming what's configured vs. what's actually installed, rather than silently falling
+back to a quick tunnel.
+
 ## 3b. PWA lifetime
 
 The in-chat `/remote` server still mints a fresh port + token per session, so an installed

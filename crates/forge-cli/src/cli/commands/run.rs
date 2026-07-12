@@ -1450,7 +1450,7 @@ pub(crate) async fn run_chat_tui(
             &mut app,
             &mut tui,
             auto.into(),
-            tui_config.remote.host.as_deref(),
+            &tui_config.remote,
             remote_history.clone(),
         )
         .await?;
@@ -2391,7 +2391,7 @@ pub(crate) async fn run_chat_tui(
                                     &mut app,
                                     &mut tui,
                                     exposure,
-                                    tui_config.remote.host.as_deref(),
+                                    &tui_config.remote,
                                     remote_history.clone(),
                                 )
                                 .await?;
@@ -3420,7 +3420,7 @@ pub(crate) async fn run_chat_tui(
                                         &mut app,
                                         &mut tui,
                                         exposure,
-                                        tui_config.remote.host.as_deref(),
+                                        &tui_config.remote,
                                         remote_history.clone(),
                                     )
                                     .await?;
@@ -5329,7 +5329,7 @@ pub(crate) async fn toggle_remote(
     app: &mut forge_tui::App,
     _tui: &mut forge_tui::Tui,
     exposure: remote::Exposure,
-    host_override: Option<&str>,
+    remote_cfg: &forge_config::RemoteConfig,
     history: remote::HistoryProvider,
 ) -> Result<()> {
     if let Some(rc) = remote.take() {
@@ -5345,8 +5345,8 @@ pub(crate) async fn toggle_remote(
         app.note("◉ remote control — opening a public tunnel (this can take a few seconds)…");
     }
     let started = match exposure {
-        remote::Exposure::Anywhere => remote::start_anywhere(Some(history)).await,
-        other => remote::start(other, host_override, Some(history)),
+        remote::Exposure::Anywhere => remote::start_anywhere(Some(history), remote_cfg).await,
+        other => remote::start(other, remote_cfg.host.as_deref(), Some(history)),
     };
     match started {
         Ok(rc) => {
