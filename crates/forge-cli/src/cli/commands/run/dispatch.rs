@@ -61,6 +61,31 @@ pub(crate) enum DispatchOutcome {
     /// `/copy [N]` — write the resolved assistant response text to the clipboard. The driver loop
     /// owns the `arboard::Clipboard`, so dispatch resolves the text and hands it back to copy.
     CopyToClipboard(String),
+    /// `/voice` — the render loop's `App::voice` is already set (rendering-only state); this
+    /// carries the real system resources (recorder thread / download channels), which must live
+    /// loop-local, not on `App` (which stays `Clone + Default`). See `apply_voice_start`.
+    PendingVoice(VoiceStart),
+}
+
+/// What `/voice` produced, handed from [`dispatch_command`] back to the render loop.
+pub(crate) enum VoiceStart {
+    /// The whisper model was already on disk — recording started immediately.
+    Recording {
+        handle: forge_voice::RecordingHandle,
+        model_path: std::path::PathBuf,
+    },
+    /// First use: the model isn't on disk yet. A background task is downloading it (progress on
+    /// `progress_rx`) and will start recording once it lands (result on `done_rx`).
+    Downloading {
+        model_path: std::path::PathBuf,
+        progress_rx: tokio::sync::watch::Receiver<(u64, Option<u64>)>,
+        done_rx: tokio::sync::oneshot::Receiver<
+            std::result::Result<forge_voice::RecordingHandle, String>,
+        >,
+    },
+    /// Failed synchronously (e.g. no microphone device) — `App::voice` is already the error card
+    /// (the message lives there, not duplicated here).
+    Error,
 }
 
 /// Build a fully-populated [`forge_tui::MeshOverlay`] from a routing explanation.
@@ -185,6 +210,9 @@ pub(crate) async fn dispatch_command(
             | CommandAction::Usage
             | CommandAction::Remote { .. }
             | CommandAction::Statusline(_)
+            // /voice only fills the input box on completion — it never touches the running turn
+            // or the session, so (like /usage) it must work while a turn is busy.
+            | CommandAction::Voice
     );
     if busy && mutates {
         app.note("⚠ finish or Esc the current turn first");
@@ -632,6 +660,60 @@ and keep going."
                 return Ok(DispatchOutcome::Handled);
             }
             return Ok(DispatchOutcome::RunDuel { task: text });
+        }
+        // `/voice` (also Ctrl+V) — open the recording overlay. If the configured whisper model
+        // isn't on disk yet, kick off the download in the background (progress feeds the overlay)
+        // and start recording once it lands; otherwise start recording immediately. Either way
+        // `app.voice` is set here so the overlay is visible the instant this returns — only the
+        // real system resources are handed back through `DispatchOutcome::PendingVoice`.
+        CommandAction::Voice => {
+            let config = forge_config::load().unwrap_or_default();
+            let kind: forge_voice::ModelKind = config
+                .voice
+                .model
+                .parse()
+                .unwrap_or(forge_voice::ModelKind::Base);
+            let models_dir = match crate::voice::models_dir() {
+                Ok(d) => d,
+                Err(e) => {
+                    app.note(&format!("voice: {e}"));
+                    return Ok(DispatchOutcome::Handled);
+                }
+            };
+            let model_path = models_dir.join(kind.file_name());
+            let have_model = tokio::fs::try_exists(&model_path).await.unwrap_or(false);
+            if have_model {
+                match forge_voice::Recorder::start() {
+                    Ok(handle) => {
+                        app.voice = Some(forge_tui::VoiceOverlay::recording(false));
+                        return Ok(DispatchOutcome::PendingVoice(VoiceStart::Recording {
+                            handle,
+                            model_path,
+                        }));
+                    }
+                    Err(e) => {
+                        app.voice = Some(forge_tui::VoiceOverlay::error(e.to_string()));
+                        return Ok(DispatchOutcome::PendingVoice(VoiceStart::Error));
+                    }
+                }
+            }
+            let (progress_tx, progress_rx) = tokio::sync::watch::channel((0u64, None::<u64>));
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let result = forge_voice::ensure_model(kind, &models_dir, move |done, total| {
+                    let _ = progress_tx.send((done, total));
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|_path| forge_voice::Recorder::start().map_err(|e| e.to_string()));
+                let _ = done_tx.send(result);
+            });
+            app.voice = Some(forge_tui::VoiceOverlay::downloading(kind.as_str()));
+            return Ok(DispatchOutcome::PendingVoice(VoiceStart::Downloading {
+                model_path,
+                progress_rx,
+                done_rx,
+            }));
         }
         // `/replay <id>` — show a transcript inline; `/replay <a> <b>` diffs two sessions.
         CommandAction::Replay(id_a, id_b) => {

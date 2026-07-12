@@ -1942,6 +1942,9 @@ impl Default for KeybindsConfig {
         binds.insert("help".into(), bind("f1", false, false, false));
         binds.insert("checkpoint".into(), bind("s", true, false, false));
         binds.insert("reload".into(), bind("r", false, true, false));
+        // Ctrl+V: free in the default keymap (paste arrives via bracketed-paste as a distinct
+        // terminal event, never as a Ctrl+V keystroke) — see voice.md.
+        binds.insert("voice".into(), bind("v", true, false, false));
         Self { binds }
     }
 }
@@ -4055,7 +4058,7 @@ auto = "local"
     #[test]
     fn keybinds_default_has_all_actions() {
         let kb = KeybindsConfig::default();
-        assert_eq!(kb.binds.len(), 19);
+        assert_eq!(kb.binds.len(), 20);
         assert_eq!(
             kb.binds["interrupt"],
             KeyCombo {
@@ -4095,7 +4098,7 @@ auto = "local"
     }
 
     /// A partial `[keybinds.binds]` override in the user TOML must DEEP-MERGE over the serialized
-    /// defaults (keeping the other 18 binds), not replace the whole map. `write_keybind` writes a
+    /// defaults (keeping the other 19 binds), not replace the whole map. `write_keybind` writes a
     /// single bind, so a replace would unbind everything else — this guards that regression.
     #[test]
     fn partial_keybind_override_deep_merges_over_defaults() {
@@ -4112,7 +4115,7 @@ auto = "local"
         // The override took effect…
         assert_eq!(cfg.keybinds.binds["toggle_reasoning"].key, "x");
         // …and every other default bind survived the merge.
-        assert_eq!(cfg.keybinds.binds.len(), 19);
+        assert_eq!(cfg.keybinds.binds.len(), 20);
         assert_eq!(cfg.keybinds.binds["interrupt"].key, "c");
         assert_eq!(cfg.keybinds.binds["help"].key, "f1");
     }

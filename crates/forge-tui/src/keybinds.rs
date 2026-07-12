@@ -79,6 +79,7 @@ pub fn action_to_key_kind(action: &str) -> Option<KeyKind> {
         "help" => Some(KeyKind::ShowHelp),
         "checkpoint" => Some(KeyKind::SaveCheckpoint),
         "reload" => Some(KeyKind::ReloadConfig),
+        "voice" => Some(KeyKind::ToggleVoice),
         _ => None,
     }
 }

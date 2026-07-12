@@ -226,6 +226,125 @@ impl MeshOverlay {
     }
 }
 
+/// Ring-buffer width for the `/voice` overlay's live waveform (`▁▂▃▄▅▆▇█` bars) — see voice.md.
+const VOICE_WAVEFORM_BARS: usize = 40;
+
+/// Which phase the `/voice` overlay (`/voice` or Ctrl+V) is in. Pure rendering data — the real
+/// system resources (recorder thread, whisper model, download task) live in the render loop
+/// (`run.rs`), which drives this via `App::voice`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VoicePhase {
+    /// First use: the whisper model isn't on disk yet, fetching it from Hugging Face.
+    Downloading {
+        model: String,
+        done_mb: f64,
+        total_mb: Option<f64>,
+    },
+    /// Capturing from the microphone. `ptt_active` is true when the terminal supports the kitty
+    /// keyboard protocol's release reporting, so holding the chord (instead of tapping it) will
+    /// auto-stop and transcribe on release — the footer hint differs accordingly.
+    Recording { ptt_active: bool },
+    /// Enter (or a push-to-talk release) was pressed: waveform freezes, whisper runs off-thread.
+    Transcribing,
+    /// A download/mic/whisper failure, shown in the card; the render loop auto-closes it after a
+    /// couple of seconds or on the next keypress, whichever comes first.
+    Error(String),
+}
+
+/// State for the `/voice` overlay: live waveform, elapsed timer, model download progress.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VoiceOverlay {
+    pub phase: VoicePhase,
+    /// Wall-clock seconds since recording started; updated by the render loop each tick, the same
+    /// way `App::turn_elapsed_secs` is.
+    pub elapsed_secs: u64,
+    /// Ring buffer of recent RMS levels (0..1), oldest first — scrolls left as new samples arrive.
+    /// Bounded to [`VOICE_WAVEFORM_BARS`].
+    pub waveform: std::collections::VecDeque<f32>,
+    /// Animation tick, advanced every render while open (REC blink / spinner cadence).
+    pub anim_tick: u32,
+}
+
+impl VoiceOverlay {
+    /// First use: the whisper model needs fetching before recording can start.
+    pub fn downloading(model: impl Into<String>) -> Self {
+        Self {
+            phase: VoicePhase::Downloading {
+                model: model.into(),
+                done_mb: 0.0,
+                total_mb: None,
+            },
+            elapsed_secs: 0,
+            waveform: std::collections::VecDeque::with_capacity(VOICE_WAVEFORM_BARS),
+            anim_tick: 0,
+        }
+    }
+
+    /// The model is on disk and the microphone is open.
+    pub fn recording(ptt_active: bool) -> Self {
+        Self {
+            phase: VoicePhase::Recording { ptt_active },
+            elapsed_secs: 0,
+            waveform: std::collections::VecDeque::with_capacity(VOICE_WAVEFORM_BARS),
+            anim_tick: 0,
+        }
+    }
+
+    /// A download/mic/whisper failure, shown in the card until dismissed/timed out.
+    pub fn error(msg: impl Into<String>) -> Self {
+        Self {
+            phase: VoicePhase::Error(msg.into()),
+            elapsed_secs: 0,
+            waveform: std::collections::VecDeque::new(),
+            anim_tick: 0,
+        }
+    }
+
+    /// Push a new RMS level sample, scrolling the waveform ring buffer left once it's full.
+    pub fn push_level(&mut self, level: f32) {
+        if self.waveform.len() >= VOICE_WAVEFORM_BARS {
+            self.waveform.pop_front();
+        }
+        self.waveform.push_back(level.clamp(0.0, 1.0));
+    }
+
+    /// `mm:ss` elapsed-time label.
+    pub fn mmss(&self) -> String {
+        format!(
+            "{:02}:{:02}",
+            self.elapsed_secs / 60,
+            self.elapsed_secs % 60
+        )
+    }
+}
+
+/// Insert a `/voice` transcript into `input` at `cursor`, padding with a single joining space on
+/// whichever side would otherwise run the transcript into existing non-whitespace text (so
+/// `foo|bar` + "hello" → `foo hello |bar`, but empty input + "hello" → `hello` with no stray
+/// space). Mirrors `handle_key`'s char-insertion semantics — cursor lands right after the
+/// inserted text. Returns the number of transcript characters inserted (excluding padding), for
+/// the "inserted N chars" status note. A blank/whitespace-only transcript inserts nothing.
+pub fn insert_voice_transcript(input: &mut String, cursor: &mut usize, text: &str) -> usize {
+    let text = text.trim();
+    if text.is_empty() {
+        return 0;
+    }
+    let at = (*cursor).min(input.len());
+    let needs_lead_space = at > 0 && !input[..at].ends_with(char::is_whitespace);
+    let needs_trail_space = at < input.len() && !input[at..].starts_with(char::is_whitespace);
+    let mut insert = String::new();
+    if needs_lead_space {
+        insert.push(' ');
+    }
+    insert.push_str(text);
+    if needs_trail_space {
+        insert.push(' ');
+    }
+    input.insert_str(at, &insert);
+    *cursor = at + insert.len();
+    text.chars().count()
+}
+
 /// What a paste-block placeholder stands in for: a chunk of pasted text (substituted back into the
 /// prompt on submit) or an attached image (sent out-of-band as vision input, the placeholder
 /// stripped from the text).
@@ -396,6 +515,10 @@ pub struct App {
     pub usage_overlay: UsageOverlay,
     /// The `/mesh` routing-inspector overlay state.
     pub mesh_overlay: MeshOverlay,
+    /// The `/voice` recording overlay (also opened by Ctrl+V), while open. The real system
+    /// resources (recorder thread, whisper model) live in the render loop, not here — this is
+    /// pure rendering data so `App` stays `Clone + Default` (see `VoiceOverlay`).
+    pub voice: Option<VoiceOverlay>,
     /// The dedicated full-screen workflow view (docs/rfcs/forge-workflow.md). Auto-opens on
     /// `WorkflowStarted`; while a workflow is active it owns every `Subagent*` event — those rows
     /// render here, never in the sticky subagent activity panel.
@@ -1329,6 +1452,8 @@ pub enum KeyKind {
     CompactSession,
     /// Hot-reload config without restarting.
     ReloadConfig,
+    /// Ctrl+V (configurable) — open the `/voice` recording overlay, same as typing `/voice`.
+    ToggleVoice,
 }
 
 /// The result of feeding a keystroke to the input line.
@@ -1542,7 +1667,8 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::NewSession
         | KeyKind::UndoWrite
         | KeyKind::CompactSession
-        | KeyKind::ReloadConfig => InputOutcome::Editing,
+        | KeyKind::ReloadConfig
+        | KeyKind::ToggleVoice => InputOutcome::Editing,
     }
 }
 
@@ -3766,6 +3892,7 @@ pub fn render_live(frame: &mut Frame, app: &App) {
     // Usage overlay renders last so it appears on top of everything.
     render_usage_overlay(frame, app);
     render_mesh_overlay(frame, app);
+    render_voice_overlay(frame, app);
     crate::config_editor::render_config_overlay(frame, &app.config_editor);
 }
 
@@ -5094,6 +5221,149 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     );
 }
 
+/// The `/voice` recording overlay: a centered card (not a side drawer, unlike usage/mesh — this
+/// one is a focused single-purpose modal) with a pulsing REC indicator, live waveform, and (on
+/// first use) a whisper-model download progress bar. See voice.md.
+pub fn render_voice_overlay(f: &mut Frame, app: &App) {
+    use ratatui::text::Line;
+
+    let Some(v) = &app.voice else { return };
+    let area = f.area();
+    let w = area.width.saturating_sub(4).clamp(20, 56);
+    let h = 9u16.min(area.height);
+    if area.width < 4 || h == 0 {
+        return;
+    }
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    let card = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    f.render_widget(ratatui::widgets::Clear, card);
+
+    let (title, title_color) = match &v.phase {
+        VoicePhase::Downloading { .. } => (" ⌬ voice — fetching model ".to_string(), ACCENT),
+        VoicePhase::Recording { .. } => (" ● voice ".to_string(), ERRRED),
+        VoicePhase::Transcribing => (" ⌬ voice — transcribing ".to_string(), ACCENT),
+        VoicePhase::Error(_) => (" ⚠ voice ".to_string(), ERRRED),
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .title(Span::styled(title, Style::default().fg(title_color).bold()))
+        .border_style(Style::default().fg(title_color));
+    let inner = block.inner(card);
+    f.render_widget(block, card);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    match &v.phase {
+        VoicePhase::Downloading {
+            model,
+            done_mb,
+            total_mb,
+        } => {
+            let pct = total_mb
+                .filter(|t| *t > 0.0)
+                .map(|t| (done_mb / t * 100.0).min(100.0));
+            let label = match (total_mb, pct) {
+                (Some(t), Some(p)) => {
+                    format!("Fetching whisper-{model} · {done_mb:.0}/{t:.0} MB ({p:.0}%)")
+                }
+                _ => format!("Fetching whisper-{model} · {done_mb:.0} MB"),
+            };
+            let bar_w = inner.width.saturating_sub(2) as usize;
+            let filled = pct
+                .map(|p| ((p / 100.0) * bar_w as f64).round() as usize)
+                .unwrap_or(0)
+                .min(bar_w);
+            let bar = format!(
+                "[{}{}]",
+                "█".repeat(filled),
+                "░".repeat(bar_w.saturating_sub(filled))
+            );
+            let lines = vec![
+                Line::from(Span::styled(label, Style::default().fg(TEXT))),
+                Line::from(Span::styled(bar, Style::default().fg(ACCENT))),
+                Line::from(""),
+                Line::from(Span::styled("  Esc to cancel", Style::default().fg(DIM))),
+            ];
+            f.render_widget(Paragraph::new(lines), inner);
+        }
+        VoicePhase::Recording { ptt_active } => {
+            let blink_on = (v.anim_tick / 6) % 2 == 0;
+            let rec_span = if blink_on {
+                Span::styled("● REC", Style::default().fg(ERRRED).bold())
+            } else {
+                Span::styled("○ REC", Style::default().fg(DIM))
+            };
+            let header = Line::from(vec![
+                rec_span,
+                Span::raw("   "),
+                Span::styled(v.mmss(), Style::default().fg(TEXT)),
+            ]);
+            let waveform = render_voice_waveform(&v.waveform, false);
+            let footer_text = if *ptt_active {
+                "  hold to keep recording · release to transcribe · Enter/Esc/r also work"
+            } else {
+                "  Enter transcribe · Esc cancel · r restart"
+            };
+            let footer = Line::from(Span::styled(footer_text, Style::default().fg(DIM)));
+            let lines = vec![header, Line::from(""), waveform, Line::from(""), footer];
+            f.render_widget(Paragraph::new(lines), inner);
+        }
+        VoicePhase::Transcribing => {
+            let spinner = SPINNER[(v.anim_tick as usize) % SPINNER.len()];
+            let header = Line::from(vec![
+                Span::styled(
+                    format!("{spinner} transcribing…"),
+                    Style::default().fg(ACCENT),
+                ),
+                Span::raw("   "),
+                Span::styled(v.mmss(), Style::default().fg(TEXT)),
+            ]);
+            let waveform = render_voice_waveform(&v.waveform, true);
+            let footer = Line::from(Span::styled("  please wait…", Style::default().fg(DIM)));
+            let lines = vec![header, Line::from(""), waveform, Line::from(""), footer];
+            f.render_widget(Paragraph::new(lines), inner);
+        }
+        VoicePhase::Error(msg) => {
+            let lines = vec![
+                Line::from(Span::styled(msg.clone(), Style::default().fg(ERRRED))),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  any key to dismiss",
+                    Style::default().fg(DIM),
+                )),
+            ];
+            f.render_widget(Paragraph::new(lines), inner);
+        }
+    }
+}
+
+/// Render the waveform ring buffer as a line of `▁▂▃▄▅▆▇█` bars, one per sample, oldest first
+/// (so newer samples appear to scroll in from the right as the ring buffer fills and drops old
+/// ones off the front). `dim` renders it frozen/greyed (the transcribing state).
+fn render_voice_waveform(
+    waveform: &std::collections::VecDeque<f32>,
+    dim: bool,
+) -> ratatui::text::Line<'static> {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let color = if dim { DIM } else { ACCENT };
+    let spans: Vec<Span<'static>> = waveform
+        .iter()
+        .map(|&lvl| {
+            let idx = ((lvl.clamp(0.0, 1.0) * (BARS.len() - 1) as f32).round() as usize)
+                .min(BARS.len() - 1);
+            Span::styled(BARS[idx].to_string(), Style::default().fg(color))
+        })
+        .collect();
+    ratatui::text::Line::from(spans)
+}
+
 /// A compact " (Xm/Xh ago)" suffix for rate-limit data older than ~10 min; empty when fresh or
 /// unknown. Keeps the overlay honest about staleness instead of presenting old % as live.
 fn rl_age_note(age_secs: Option<i64>) -> String {
@@ -6011,6 +6281,109 @@ mod tests {
         assert_eq!(width_cap(40, 6, 48), 48);
         // Width 0 (pre-first-render) falls back to 80, not 0.
         assert!(width_cap(0, 6, 48) >= 48);
+    }
+
+    #[test]
+    fn voice_waveform_scrolls_once_full() {
+        let mut v = VoiceOverlay::recording(false);
+        for i in 0..VOICE_WAVEFORM_BARS {
+            v.push_level(i as f32 / VOICE_WAVEFORM_BARS as f32);
+        }
+        assert_eq!(v.waveform.len(), VOICE_WAVEFORM_BARS);
+        assert_eq!(v.waveform.front().copied(), Some(0.0));
+
+        // One more sample past capacity: the oldest (front) sample drops off, the ring stays
+        // bounded, and the new sample lands at the back.
+        v.push_level(0.5);
+        assert_eq!(v.waveform.len(), VOICE_WAVEFORM_BARS);
+        assert_eq!(
+            v.waveform.front().copied(),
+            Some(1.0 / VOICE_WAVEFORM_BARS as f32)
+        );
+        assert_eq!(v.waveform.back().copied(), Some(0.5));
+    }
+
+    #[test]
+    fn voice_waveform_clamps_out_of_range_levels() {
+        let mut v = VoiceOverlay::recording(false);
+        v.push_level(-0.5);
+        v.push_level(1.7);
+        assert_eq!(
+            v.waveform.iter().copied().collect::<Vec<_>>(),
+            vec![0.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn voice_mmss_formats_minutes_and_seconds() {
+        let mut v = VoiceOverlay::recording(false);
+        assert_eq!(v.mmss(), "00:00");
+        v.elapsed_secs = 65;
+        assert_eq!(v.mmss(), "01:05");
+        v.elapsed_secs = 3661; // over an hour: minutes keep rolling, not clamped to 59
+        assert_eq!(v.mmss(), "61:01");
+    }
+
+    #[test]
+    fn insert_voice_transcript_into_empty_input() {
+        let mut input = String::new();
+        let mut cursor = 0;
+        let n = insert_voice_transcript(&mut input, &mut cursor, "hello world");
+        assert_eq!(input, "hello world");
+        assert_eq!(cursor, input.len());
+        assert_eq!(n, 11);
+    }
+
+    #[test]
+    fn insert_voice_transcript_pads_a_joining_space_on_both_sides() {
+        let mut input = "foobar".to_string();
+        let mut cursor = 3; // between "foo" and "bar"
+        let n = insert_voice_transcript(&mut input, &mut cursor, "hello");
+        assert_eq!(input, "foo hello bar");
+        assert_eq!(n, 5);
+        // Cursor lands right after the inserted text (including its trailing pad space), i.e.
+        // right before "bar" — not right after "hello".
+        assert_eq!(cursor, "foo hello ".len());
+    }
+
+    #[test]
+    fn insert_voice_transcript_skips_padding_next_to_existing_whitespace() {
+        // Cursor right after a trailing space: no double space on the left.
+        let mut input = "hello ".to_string();
+        let mut cursor = input.len();
+        insert_voice_transcript(&mut input, &mut cursor, "world");
+        assert_eq!(input, "hello world");
+
+        // Cursor right before a leading space: no double space on the right.
+        let mut input = " world".to_string();
+        let mut cursor = 0;
+        insert_voice_transcript(&mut input, &mut cursor, "hello");
+        assert_eq!(input, "hello world");
+    }
+
+    #[test]
+    fn insert_voice_transcript_trims_and_ignores_blank_text() {
+        let mut input = "abc".to_string();
+        let mut cursor = 3;
+        let n = insert_voice_transcript(&mut input, &mut cursor, "   ");
+        assert_eq!(input, "abc");
+        assert_eq!(cursor, 3);
+        assert_eq!(n, 0);
+
+        let mut input = String::new();
+        let mut cursor = 0;
+        let n = insert_voice_transcript(&mut input, &mut cursor, "  hi  ");
+        assert_eq!(input, "hi");
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn insert_voice_transcript_clamps_a_stale_out_of_bounds_cursor() {
+        let mut input = "abc".to_string();
+        let mut cursor = 99;
+        insert_voice_transcript(&mut input, &mut cursor, "x");
+        assert_eq!(input, "abc x");
+        assert_eq!(cursor, input.len());
     }
 
     /// Render the pinned live region at its natural (dynamic) live height — so the sticky task +

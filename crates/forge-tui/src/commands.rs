@@ -210,6 +210,11 @@ pub const COMMANDS: &[Command] = &[
         desc: "race 2-3 mesh models on the same task, each in its own worktree, then pick the winner",
         usage: "/duel <task>",
     },
+    Command {
+        name: "voice",
+        desc: "record from the microphone and transcribe into the prompt (also Ctrl+V) — local whisper, never auto-sends",
+        usage: "/voice",
+    },
 ];
 
 /// Subcommand for `/statusline`.
@@ -331,6 +336,10 @@ pub enum CommandAction {
     /// Model arena (`/duel <task>`, docs/features/duel.md): race 2-3 mesh models on the same task
     /// concurrently, each in its own worktree, then let the user pick a winner.
     Duel(String),
+    /// Open the recording overlay: record from the microphone, transcribe locally (whisper), and
+    /// insert the transcript into the prompt (`/voice`, also bound to Ctrl+V — voice.md). Never
+    /// auto-sends.
+    Voice,
     /// Not a known command — the binary shows `unknown command: X`.
     Unknown(String),
 }
@@ -602,6 +611,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "pr" | "pullrequest" => CommandAction::Pr(arg),
         "loop" => CommandAction::Loop(arg),
         "duel" => CommandAction::Duel(arg),
+        "voice" | "record" => CommandAction::Voice,
         "replay" => {
             // `/replay <id>` or `/replay <a> <b>`
             let mut ids = arg.splitn(2, char::is_whitespace);
@@ -1108,6 +1118,8 @@ mod tests {
         assert_eq!(parse_command("/execute"), CommandAction::Execute);
         assert_eq!(parse_command("/approve"), CommandAction::Execute);
         assert_eq!(parse_command("/go"), CommandAction::Execute);
+        assert_eq!(parse_command("/voice"), CommandAction::Voice);
+        assert_eq!(parse_command("/record"), CommandAction::Voice);
     }
 
     #[test]
