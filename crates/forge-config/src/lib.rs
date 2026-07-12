@@ -1313,7 +1313,8 @@ pub struct MeshConfig {
     /// Fraction of a cap that triggers a warning (default 0.8).
     #[serde(default = "default_warn_threshold")]
     pub warn_threshold: f64,
-    /// Which task classifier the mesh uses (ADR-0006). Default = deterministic heuristic.
+    /// Which task classifier the mesh uses (ADR-0006). Default = LLM, falling back to the
+    /// deterministic heuristic when classification is unavailable.
     #[serde(default)]
     pub classifier: ClassifierKind,
     /// Model id the `llm` classifier calls to label the tier (a cheap/$0 model, e.g. a local
@@ -1792,16 +1793,16 @@ pub enum BridgeMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ClassifierKind {
-    /// Deterministic weighted-signal heuristic — zero added cost/latency (default).
-    #[default]
-    Heuristic,
     /// Ask a cheap model to label the tier on every turn, falling back to the heuristic on
     /// any error. One extra round-trip per turn regardless of how obvious the task is.
+    #[default]
     Llm,
+    /// Deterministic weighted-signal heuristic — zero added cost/latency.
+    Heuristic,
     /// Best of both: run the heuristic first; only call the LLM when the heuristic score is
     /// near a tier boundary (score −3…7, i.e. the uncertain middle). Clear Trivial or
     /// strongly-signalled Complex tasks skip the LLM entirely — zero added latency for them.
-    /// Recommended when a fast $0 model (subscription bridge or local ollama) is available.
+    /// Explicit opt-in for installations that prioritize latency over classification accuracy.
     Hybrid,
 }
 

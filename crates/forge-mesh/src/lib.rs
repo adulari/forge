@@ -519,7 +519,8 @@ fn score_prompt(prompt: &str, project: &ProjectContext) -> Classification {
         pts += 2;
         reasons.push("dev-action verb");
     }
-    if is_multistep(&lower) {
+    let multistep = is_multistep(&lower);
+    if multistep {
         pts += 2;
         reasons.push("multi-step scope");
     }
@@ -544,14 +545,16 @@ fn score_prompt(prompt: &str, project: &ProjectContext) -> Classification {
         reasons.push("self-hosting: touches this agent's own core routing/infra");
     }
 
-    // Trivial pulls (strong, regardless of length).
-    if TRIVIAL_HINTS.iter().any(|h| lower.contains(h)) {
+    // Trivial pulls are strong only for a genuinely single mechanical edit. A trivial phrase in
+    // one item of a numbered/multi-step brief must not erase the rest of the requirements.
+    if TRIVIAL_HINTS.iter().any(|h| lower.contains(h)) && !multistep {
         pts -= 5;
         reasons.push("explicit 'quick' hint");
     }
     if TRIVIAL_PATTERNS
         .iter()
         .any(|p| contains_whole_word(&lower, p))
+        && !multistep
     {
         // -8, not -4: an explicit trivial-edit pattern is a strong, deliberate signal (the user
         // is describing a mechanical single-file edit) and should reliably win over ONE weak
@@ -586,10 +589,22 @@ fn score_prompt(prompt: &str, project: &ProjectContext) -> Classification {
 }
 
 fn is_multistep(lower: &str) -> bool {
-    lower.contains(" then ")
+    let numbered_requirements = lower
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            trimmed
+                .find(|c: char| !c.is_ascii_digit())
+                .is_some_and(|i| {
+                    let rest = &trimmed[i..];
+                    rest.starts_with('.') || rest.starts_with(')')
+                })
+        })
+        .count();
+    numbered_requirements >= 2
+        || lower.contains(" then ")
         || lower.contains("\n- ")
         || lower.contains("\n* ")
-        || (lower.contains("1.") && lower.contains("2."))
         || (lower.contains("1)") && lower.contains("2)"))
         || lower.contains("after that")
 }
@@ -2102,6 +2117,23 @@ mod tests {
             println!("[{:?}] {} -> {}", d.tier, &p[..p.len().min(46)], d.model);
         }
         println!();
+    }
+
+    #[test]
+    fn default_classifier_is_llm() {
+        assert_eq!(
+            forge_config::ClassifierKind::default(),
+            forge_config::ClassifierKind::Llm
+        );
+    }
+
+    #[test]
+    fn numbered_build_brief_is_not_trivial_in_heuristic_mode() {
+        let brief = "Fix 11 UI bugs in the Forge mobile app.\n1. Fix navigation state.\n2. Repair keyboard dismissal.\n3. Correct loading state.\n4. Fix settings persistence.\n5. Repair deep links.\n6. Correct accessibility labels.\n7. Fix theme switching.\n8. Repair offline recovery.\n9. Fix list rendering.\n10. Correct error handling.\n11. Update tests. Edit multiple files, run tsc, and commit the changes.";
+        assert_ne!(
+            score_prompt(brief, &ProjectContext::default()).tier,
+            TaskTier::Trivial
+        );
     }
 
     #[tokio::test]

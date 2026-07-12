@@ -1,8 +1,7 @@
-//! Optional cheap-LLM task classifier (ADR-0006 option 2, opt-in). Asks a small model to
+//! Optional cheap-LLM task classifier (ADR-0006). Asks a small model to
 //! label the tier before routing, then reuses the heuristic router's pin/budget/cost-aware
 //! selection. Any failure — error, timeout, or an unparseable reply — silently falls back to
-//! the deterministic heuristic, so enabling it can never break a turn. Off by default (A-2:
-//! no per-task model call unless the user opts in via `mesh.classifier = "llm"`).
+//! the deterministic heuristic, so enabling it can never break a turn.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -128,7 +127,8 @@ impl Router for LlmRouter {
             }
         }
 
-        let messages = [Message::system(CLASSIFY_SYSTEM), Message::user(prompt)];
+        let prompt = format!("TASK TO CLASSIFY:\n{prompt}");
+        let messages = [Message::system(CLASSIFY_SYSTEM), Message::user(&prompt)];
         let mut sink = |_: forge_provider::StreamEvent| {}; // classifier output isn't shown
 
         let tier = match tokio::time::timeout(
@@ -157,7 +157,15 @@ impl Router for LlmRouter {
                 // Couldn't classify → deterministic heuristic, noted in the rationale.
                 let mut d = self
                     .fallback
-                    .route(prompt, has_images, budget, health, quota, effort, project)
+                    .route(
+                        prompt.as_str(),
+                        has_images,
+                        budget,
+                        health,
+                        quota,
+                        effort,
+                        project,
+                    )
                     .await;
                 d.rationale
                     .push_str(" (llm classify unavailable → heuristic)");

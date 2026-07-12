@@ -104,10 +104,11 @@ near-boundary prompts pay for an LLM second opinion.
 
 `mesh.classifier` (`crates/forge-config/src/lib.rs:1698`) selects:
 
-- `heuristic` (default) — `score_prompt` only, zero added cost/latency (ADR-0006 / A-2).
-- `llm` — `LlmRouter` (`crates/forge-core/src/llm_router.rs:60`) asks `mesh.classifier_model`
-  for a one-word tier on every turn, falling back to the heuristic on any error/timeout.
-- `hybrid` — heuristic first; the LLM is consulted only in the uncertain band of §2.2.
+- `heuristic` — explicit opt-in, `score_prompt` only, zero added cost/latency.
+- `llm` (default) — `LlmRouter` (`crates/forge-core/src/llm_router.rs:60`) asks `mesh.classifier_model`
+  for a one-word tier on every turn, falling back to the heuristic on any error, timeout, or
+  unparseable response.
+- `hybrid` — explicit opt-in; heuristic first; the LLM is consulted only in the uncertain band of §2.2.
 
 All classifiers feed the same `HeuristicRouter::decide` selection path.
 
@@ -862,7 +863,7 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 | `models` | shipped free-first lists | Per-tier candidate lists; used verbatim when auto-discovery is off/empty (§3.1) |
 | `auto_discover` | `true` | Rank the discovered catalog instead of `[mesh.models]` (`lib.rs:1279`) |
 | `benchmark_ranking` | `true` | Use AA indices when cached (`lib.rs:1336`) |
-| `classifier` / `classifier_model` | `heuristic` / unset | §2.3 |
+| `classifier` / `classifier_model` | `llm` / unset | §2.3 |
 | `prefer_subscription` | `true` | Configured-path ordering: subscriptions before metered (`lib.rs:1221`) |
 | `subscriptions` | `{}` | Plan slug per provider, captured by `forge init` (`lib.rs:1400`) |
 | `subscription_conserve` | `true` | Enable conservation spreading (§6) (`lib.rs:1331`) |
