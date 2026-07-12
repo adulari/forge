@@ -33,6 +33,7 @@ import Animated, {
 import type { SentAttachment } from "../../../components/chat/attach";
 import CardSlot from "../../../components/chat/CardSlot";
 import { Composer } from "../../../components/chat/Composer";
+import { MessageActionsSheet } from "../../../components/chat/MessageActionsSheet";
 import { Markdown } from "../../../components/chat/Markdown";
 import { MessageRow } from "../../../components/chat/MessageRow";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
@@ -227,9 +228,20 @@ function StreamingAnswer({ text, streaming }: { text: string; streaming: boolean
 export default function SessionChat() {
   const tokens = useTokens();
   const toast = useToast();
-  const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight, pendingAnswer, clearPendingAnswer } = useSessionCtx();
+  const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight, pendingAnswer, clearPendingAnswer, draftText, setDraftText, focusComposer } = useSessionCtx();
 
   const historyQuery = useHistory(sessionId);
+  const [selectedMessage, setSelectedMessage] = useState<HistoryRow | null>(null);
+
+  const onMessageLongPress = useCallback((message: HistoryRow) => {
+    setSelectedMessage(message);
+  }, []);
+
+  const onQuote = useCallback((text: string) => {
+    const quote = text.split("\n").map((line) => `> ${line}`).join("\n");
+    setDraftText(draftText ? `${draftText}\n${quote}` : quote);
+    focusComposer();
+  }, [draftText, focusComposer, setDraftText]);
 
   const listRef = useRef<FlatList<TimelineItem>>(null);
   const [showJump, setShowJump] = useState(false);
@@ -592,7 +604,7 @@ export default function SessionChat() {
     ({ item }: { item: TimelineItem }) => {
       switch (item.kind) {
         case "history":
-          return <MessageRow row={item.row} />;
+          return <MessageRow row={item.row} onLongPress={onMessageLongPress} />;
         case "pendingSent":
           // Renders through the same MessageRow the real (server-truth) row will use once
           // history lands, so there's no visual "jump" when this optimistic bubble is replaced.
@@ -609,6 +621,7 @@ export default function SessionChat() {
                 visibility: "llm",
               }}
               attachments={item.attachments}
+              onLongPress={onMessageLongPress}
             />
           );
         case "streaming": {
@@ -662,7 +675,7 @@ export default function SessionChat() {
           );
       }
     },
-    [tokens.ink2, tokens.ink3, tokens.accent, toolActivity],
+    [tokens.ink2, tokens.ink3, tokens.accent, toolActivity, onMessageLongPress],
   );
 
   const keyExtractor = useCallback((item: TimelineItem) => item.id, []);
@@ -760,6 +773,12 @@ export default function SessionChat() {
         online={online}
         onSend={handleSend}
         onInterrupt={handleInterrupt}
+      />
+      <MessageActionsSheet
+        visible={selectedMessage !== null}
+        message={selectedMessage}
+        onClose={() => setSelectedMessage(null)}
+        onQuote={onQuote}
       />
     </Screen>
   );
