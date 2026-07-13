@@ -1,7 +1,7 @@
 // Session shell header (T3.1, DESIGN_SYSTEM.md §6): back control, title, cwd (mono,
 // head-ellipsized), worktree Badge, exposure Badge. The danger Banner for public exposure
 // is rendered by the shell itself (_layout.tsx) — this component owns the header row only.
-import { ArrowLeft, Search } from "lucide-react-native";
+import { ArrowLeft, Search, Swords } from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -18,9 +18,10 @@ export interface SessionHeaderProps {
   exposure: string;
   onBack: () => void;
   onPalette: () => void;
+  onDuel: () => void;
 }
 
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onDuel }: SessionHeaderProps) {
   const tokens = useTokens();
   const isPublic = exposure.startsWith("public");
 
@@ -31,6 +32,11 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
           icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />}
           onPress={onBack}
           accessibilityLabel="Back"
+        />
+        <IconButton
+          icon={<Swords size={20} strokeWidth={1.75} color={tokens.ink} />}
+          onPress={onDuel}
+          accessibilityLabel="Start model duel"
         />
         <IconButton
           icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />}
