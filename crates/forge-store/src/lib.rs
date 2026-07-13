@@ -255,6 +255,12 @@ pub struct Store {
     live_event_writes: std::sync::atomic::AtomicU64,
 }
 
+/// SQL fragment: the provider namespace (before `::`) of a joined `message.model` (aliased `m`).
+/// `usage.provider` is never written at insert, so usage aggregation derives the provider from the
+/// routed model on the linked message instead. Models with no namespace (e.g. a synthetic
+/// side-call message with no model) fall back to `'other'`.
+const USAGE_PROVIDER_EXPR: &str = "CASE WHEN instr(m.model, '::') > 0 THEN substr(m.model, 1, instr(m.model, '::') - 1) ELSE COALESCE(m.model, 'other') END";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderUsage {
     pub provider: String,
@@ -1390,11 +1396,13 @@ impl Store {
 
     pub fn usage_by_provider_for_session(&self, session_id: &str) -> Result<Vec<ProviderUsage>> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare_cached(
-            "SELECT u.provider, COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cost_usd), 0.0)
-             FROM usage u JOIN message m ON m.id = u.message_id WHERE m.session_id = ?1 GROUP BY u.provider
-             ORDER BY SUM(u.cost_usd) DESC, SUM(u.input_tokens + u.output_tokens) DESC",
-        )?;
+        // Provider derived from `message.model` (see `usage_query`) — `usage.provider` is NULL.
+        let sql = format!(
+            "SELECT {USAGE_PROVIDER_EXPR} AS prov, COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cost_usd), 0.0) \
+             FROM usage u JOIN message m ON m.id = u.message_id WHERE m.session_id = ?1 GROUP BY prov \
+             ORDER BY SUM(u.cost_usd) DESC, SUM(u.input_tokens + u.output_tokens) DESC"
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([session_id], |r| {
             Ok(ProviderUsage {
                 provider: r.get(0)?,
@@ -1412,7 +1420,13 @@ impl Store {
         params: P,
     ) -> Result<Vec<ProviderUsage>> {
         let conn = self.lock()?;
-        let sql = format!("SELECT provider, COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cost_usd), 0.0) FROM usage u {predicate} GROUP BY provider ORDER BY SUM(cost_usd) DESC, SUM(input_tokens + output_tokens) DESC");
+        // Derive the provider from the routed model on the linked message: the `usage.provider`
+        // column is never populated at insert, so grouping on it collapsed every row into one NULL
+        // bucket (and `r.get::<String>` then failed on NULL → the whole page read as "no usage").
+        // `message.model` IS populated (e.g. `codex-oauth::gpt-5.6-terra`); the namespace before
+        // `::` is the provider. GROUP BY the alias `prov`, never a bare `provider` (that binds to
+        // the still-NULL column, not this expression).
+        let sql = format!("SELECT {USAGE_PROVIDER_EXPR} AS prov, COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cost_usd), 0.0) FROM usage u JOIN message m ON m.id = u.message_id {predicate} GROUP BY prov ORDER BY SUM(u.cost_usd) DESC, SUM(u.input_tokens + u.output_tokens) DESC");
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params, |r| {
             Ok(ProviderUsage {
@@ -4430,6 +4444,60 @@ mod tests {
         store.compact_session_store(&sid, "SUMMARY", 2).unwrap();
         let page = store.load_history_page(&sid, None, 10).unwrap();
         assert_eq!(page.len(), 6, "soft-deleted rows still page for the user");
+    }
+
+    #[test]
+    fn usage_by_provider_derives_provider_from_message_model() {
+        // Regression: `usage.provider` is never written at insert. Aggregation must derive the
+        // provider from the linked `message.model` namespace, not group on the NULL column (which
+        // collapsed every row into one bucket and read back as "no usage yet").
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        let usage = |i: u64, o: u64| Usage {
+            input_tokens: i,
+            output_tokens: o,
+            cached_input_tokens: 0,
+            cost_usd: 0.0,
+        };
+        let m0 = store
+            .add_message(
+                &sid,
+                0,
+                Role::Assistant,
+                "a",
+                Some("codex-oauth::gpt-5.6-terra"),
+            )
+            .unwrap();
+        store.record_usage(&sid, &m0, &usage(100, 10)).unwrap();
+        let m1 = store
+            .add_message(
+                &sid,
+                1,
+                Role::Assistant,
+                "b",
+                Some("codex-oauth::gpt-5.6-terra"),
+            )
+            .unwrap();
+        store.record_usage(&sid, &m1, &usage(50, 5)).unwrap();
+        let m2 = store
+            .add_message(&sid, 2, Role::Assistant, "c", Some("nvidia::z-ai/glm-5.2"))
+            .unwrap();
+        store.record_usage(&sid, &m2, &usage(30, 3)).unwrap();
+
+        let week = store.usage_by_provider_since(0).unwrap();
+        let terra = week
+            .iter()
+            .find(|r| r.provider == "codex-oauth")
+            .expect("codex-oauth provider derived from model namespace");
+        assert_eq!(terra.input_tokens, 150, "both terra turns summed");
+        assert_eq!(terra.output_tokens, 15);
+        assert!(
+            week.iter().any(|r| r.provider == "nvidia"),
+            "nvidia derived as a distinct provider, not collapsed into one bucket"
+        );
+
+        let session = store.usage_by_provider_for_session(&sid).unwrap();
+        assert_eq!(session.len(), 2, "two distinct providers in the session");
     }
 
     #[test]
