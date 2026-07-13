@@ -87,10 +87,9 @@ pub async fn fetch_and_persist(models: &[String]) {
                 let _ = store.set_model_context(&id, w);
                 ctx_registry.insert(id, w);
             }
-            // Persist OpenRouter prices plus cross-mapped native provider IDs. A model routed
-            // through NVIDIA NIM (for example) has the same model identifier as OpenRouter's
-            // catalog entry but a different namespace; storing only `openrouter::…` left its
-            // recorded usage permanently priced at $0.
+            // Pricing applies to the exact billed provider/model ID. Subscription and free
+            // providers intentionally retain a zero recorded cost rather than inheriting an
+            // unrelated OpenRouter list price.
             for (id, in_1k, out_1k, cache_1k) in openrouter_pricing(&body) {
                 let _ = store.set_model_pricing(&id, in_1k, out_1k, cache_1k);
             }
@@ -416,13 +415,8 @@ fn openrouter_pricing(body: &serde_json::Value) -> Vec<(String, f64, f64, Option
             let input = per_1k(&pricing["prompt"])?;
             let output = per_1k(&pricing["completion"])?;
             let cache_read = per_1k(&pricing["input_cache_read"]);
-            let mut rates = vec![(format!("openrouter::{id}"), input, output, cache_read)];
-            if let Some(native_id) = native_model_id(id) {
-                rates.push((native_id, input, output, cache_read));
-            }
-            Some(rates)
+            Some((format!("openrouter::{id}"), input, output, cache_read))
         })
-        .flatten()
         .collect()
 }
 
@@ -685,13 +679,6 @@ mod tests {
     #[test]
     fn openrouter_pricing_parses_correctly() {
         let prices = openrouter_pricing(&or_body());
-        let nvidia = prices
-            .iter()
-            .find(|(id, ..)| id == "nvidia::nvidia/llama-3.1-nemotron-70b-instruct")
-            .unwrap();
-        assert!((nvidia.1 - 0.00035).abs() < 1e-12);
-        assert!((nvidia.2 - 0.0004).abs() < 1e-12);
-
         let opus = prices
             .iter()
             .find(|(id, ..)| id == "openrouter::anthropic/claude-opus-4-8")
