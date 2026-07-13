@@ -2780,7 +2780,7 @@ fn flatten_value(prefix: &str, value: &serde_json::Value, out: &mut Vec<SettingL
             for (k, v) in map {
                 // Skip complex top-level sections entirely (their own commands own them).
                 if prefix.is_empty() && COMPLEX_SECTIONS.contains(&k.as_str()) {
-                    if k == "permissions" || k == "statusline" {
+                    if k == "permissions" || k == "statusline" || k == "hooks" {
                         out.push(leaf(k, SettingValue::Json(v.clone())));
                     }
                     continue;
@@ -4277,7 +4277,7 @@ auto = "local"
         assert!(paths.contains(&"shell.sandbox_writable"));
         // Complex sections are excluded (their own commands own them).
         assert!(paths.contains(&"permissions"));
-        assert!(!paths.iter().any(|p| p.starts_with("hooks")));
+        assert!(paths.contains(&"hooks"));
         assert!(!paths.iter().any(|p| p.starts_with("mcp")));
     }
 
