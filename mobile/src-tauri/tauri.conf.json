@@ -29,7 +29,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg1RTRFNjg1RTEwNDU5QUIKUldTcldRVGhoZWJraFNHZUNhY3hmelBSSWNydmtseEl6QXAxQU5uY2c3ZmI1eFlkS2NCemRNSmgK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIwMTA0RENGOTkzQTA4QTAKUldTZ0NEcVp6MDBRSUtyZFVwWmVTbmMwWHlkMFZMelo4NVp3cHEzY21RRGNZMFdzZms3Mk5ESFAK",
       "endpoints": ["https://github.com/Adulari/forge/releases/latest/download/latest.json"]
     }
   },
