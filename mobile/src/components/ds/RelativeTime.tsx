@@ -1,12 +1,11 @@
 // DESIGN_SYSTEM.md §6 Status & data: `RelativeTime` — self-refreshing every 30s,
 // meta style, `12s · 4m · 2h · 3d` via `formatRelativeTime` (§2).
-import React, { useEffect, useState } from "react";
+import React from "react";
 import { Text, type TextStyle } from "react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { formatRelativeTime, type as typeScale } from "../../theme/typography";
-
-const REFRESH_MS = 30_000;
+import { useRelativeClock } from "./relativeClock";
 
 export interface RelativeTimeProps {
   timestampMs: number;
@@ -15,13 +14,7 @@ export interface RelativeTimeProps {
 
 export function RelativeTime({ timestampMs, style }: RelativeTimeProps) {
   const tokens = useTokens();
-  const [, forceTick] = useState(0);
-
-  useEffect(() => {
-    const id = setInterval(() => forceTick((n) => n + 1), REFRESH_MS);
-    return () => clearInterval(id);
-  }, []);
-
+  useRelativeClock();
   const label = formatRelativeTime(timestampMs);
 
   return (
