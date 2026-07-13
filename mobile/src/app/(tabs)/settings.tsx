@@ -316,12 +316,12 @@ export default function SettingsScreen() {
             subtitle="Catalog, provider availability, and failover benches"
             onPress={() => router.push("/models")}
           />
-          <SettingsRow
+          <ListRow
             title="Plans"
             subtitle="Live proposals awaiting review"
             onPress={() => router.push("/plans")}
-||||||| parent of abad6c3 (feat(mobile): add MCP server catalog)
-
+          />
+          <ListRow
             title="MCP servers"
             subtitle="External tools, health, and secret-safe references"
             onPress={() => router.push("/mcp")}

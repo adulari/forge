@@ -1,51 +1,21 @@
 // Session shell header (T3.1, DESIGN_SYSTEM.md §6): back control, title, cwd (mono,
 // head-ellipsized), worktree Badge, exposure Badge. The danger Banner for public exposure
 // is rendered by the shell itself (_layout.tsx) — this component owns the header row only.
-import { ArrowLeft, Search, Swords, History, Map } from "lucide-react-native";
-||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
-import { ArrowLeft, Search } from "lucide-react-native";
-
-import { ArrowLeft, Search, GitFork } from "lucide-react-native";
-||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
-import { ArrowLeft, Search } from "lucide-react-native";
-
-import { ArrowLeft, Search, BookOpen } from "lucide-react-native";
-||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
-import { ArrowLeft, Search } from "lucide-react-native";
-
-import { ArrowLeft, Search, Microscope } from "lucide-react-native";
-||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
-import { ArrowLeft, Search } from "lucide-react-native";
-
-import { ArrowLeft, Search, Bot } from "lucide-react-native";
-||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
-
-||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
-import { ArrowLeft, Search } from "lucide-react-native";
-
-import { ArrowLeft, Search, Bookmark } from "lucide-react-native";
-<<<<<<< HEAD
-||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
-
-||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
-import { ArrowLeft, Search } from "lucide-react-native";
-
-import { ArrowLeft, Search, GitPullRequest } from "lucide-react-native";
-||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
-
-||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
-import { ArrowLeft, Search } from "lucide-react-native";
-
-import { ArrowLeft, Search, Brain } from "lucide-react-native";
-||||||| parent of d85e296 (feat(mobile): inspect code symbols from sessions)
-=======
-||||||| parent of 4a51182 (feat(mobile): inspect code symbols from sessions)
-
-||||||| parent of 6315221 (feat(mobile): inspect code symbols from sessions)
-import { ArrowLeft, Search } from "lucide-react-native";
-
-import { ArrowLeft, Search, Network } from "lucide-react-native";
->>>>>>> d85e296 (feat(mobile): inspect code symbols from sessions)
+import {
+  ArrowLeft,
+  Search,
+  Swords,
+  History,
+  Map,
+  GitFork,
+  BookOpen,
+  Microscope,
+  Bot,
+  Bookmark,
+  GitPullRequest,
+  Brain,
+  Network,
+} from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -65,162 +35,54 @@ export interface SessionHeaderProps {
   onDuel: () => void;
   onReplay: () => void;
   onPlan: () => void;
-||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
-
   onFork: () => void;
-||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
-
   onInit: () => void;
-||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
-
   onAssay: () => void;
-||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
-
   onSelfMcp: () => void;
-||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
-
-||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
-
   onCheckpoint: () => void;
-<<<<<<< HEAD
-||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
-
-||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
-
   onPullRequest: () => void;
-||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
-
-||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
-
   onMemory: () => void;
-||||||| parent of d85e296 (feat(mobile): inspect code symbols from sessions)
-=======
-||||||| parent of 4a51182 (feat(mobile): inspect code symbols from sessions)
-
-||||||| parent of 6315221 (feat(mobile): inspect code symbols from sessions)
-
   onLattice: () => void;
->>>>>>> d85e296 (feat(mobile): inspect code symbols from sessions)
 }
 
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onDuel, onReplay, onPlan }: SessionHeaderProps) {
-||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
-
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onFork }: SessionHeaderProps) {
-||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
-
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onInit }: SessionHeaderProps) {
-||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
-
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onAssay }: SessionHeaderProps) {
-||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
-
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onSelfMcp }: SessionHeaderProps) {
-||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
-
-||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
-
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onCheckpoint }: SessionHeaderProps) {
-<<<<<<< HEAD
-||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
-
-||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
-
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onPullRequest }: SessionHeaderProps) {
-||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
-
-||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
-
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onMemory }: SessionHeaderProps) {
-||||||| parent of d85e296 (feat(mobile): inspect code symbols from sessions)
-=======
-||||||| parent of 4a51182 (feat(mobile): inspect code symbols from sessions)
-
-||||||| parent of 6315221 (feat(mobile): inspect code symbols from sessions)
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
-
-export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onLattice }: SessionHeaderProps) {
->>>>>>> d85e296 (feat(mobile): inspect code symbols from sessions)
+export function SessionHeader({
+  title,
+  cwd,
+  worktree,
+  exposure,
+  onBack,
+  onPalette,
+  onDuel,
+  onReplay,
+  onPlan,
+  onFork,
+  onInit,
+  onAssay,
+  onSelfMcp,
+  onCheckpoint,
+  onPullRequest,
+  onMemory,
+  onLattice,
+}: SessionHeaderProps) {
   const tokens = useTokens();
   const isPublic = exposure.startsWith("public");
 
   return (
     <View style={styles.wrap}>
       <View style={styles.row}>
-        <IconButton
-          icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />}
-          onPress={onBack}
-          accessibilityLabel="Back"
-        />
-        <IconButton
-          icon={<Swords size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onDuel} accessibilityLabel="Start model duel" />
+        <IconButton icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onBack} accessibilityLabel="Back" />
+        <IconButton icon={<Swords size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onDuel} accessibilityLabel="Start model duel" />
         <IconButton icon={<History size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onReplay} accessibilityLabel="Open session replay" />
-        <IconButton icon={<Map size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onPlan} accessibilityLabel="Create implementation plan"
-||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
-
-          icon={<GitFork size={20} strokeWidth={1.75} color={tokens.ink} />}
-          onPress={onFork}
-          accessibilityLabel="Fork session"
-||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
-
-          icon={<BookOpen size={20} strokeWidth={1.75} color={tokens.ink} />}
-          onPress={onInit}
-          accessibilityLabel="Initialize project guidance"
-||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
-
-          icon={<Microscope size={20} strokeWidth={1.75} color={tokens.ink} />}
-          onPress={onAssay}
-          accessibilityLabel="Run quality assay"
-||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
-
-          icon={<Bot size={20} strokeWidth={1.75} color={tokens.ink} />}
-          onPress={onSelfMcp}
-          accessibilityLabel="Manage self MCP agent"
-||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
-
-||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
-
-          icon={<Bookmark size={20} strokeWidth={1.75} color={tokens.ink} />}
-          onPress={onCheckpoint}
-          accessibilityLabel="Manage session checkpoints"
-<<<<<<< HEAD
-||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
-
-||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
-
-          icon={<GitPullRequest size={20} strokeWidth={1.75} color={tokens.ink} />}
-          onPress={onPullRequest}
-          accessibilityLabel="Create pull request"
-||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
-
-||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
-
-          icon={<Brain size={20} strokeWidth={1.75} color={tokens.ink} />}
-          onPress={onMemory}
-          accessibilityLabel="Manage project memory"
-||||||| parent of d85e296 (feat(mobile): inspect code symbols from sessions)
-=======
-||||||| parent of 4a51182 (feat(mobile): inspect code symbols from sessions)
-
-||||||| parent of 6315221 (feat(mobile): inspect code symbols from sessions)
-
-          icon={<Network size={20} strokeWidth={1.75} color={tokens.ink} />}
-          onPress={onLattice}
-          accessibilityLabel="Inspect code symbol"
->>>>>>> d85e296 (feat(mobile): inspect code symbols from sessions)
-        />
-        <IconButton
-          icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />}
-          onPress={onPalette}
-          accessibilityLabel="Open command palette"
-        />
+        <IconButton icon={<Map size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onPlan} accessibilityLabel="Create implementation plan" />
+        <IconButton icon={<GitFork size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onFork} accessibilityLabel="Fork session" />
+        <IconButton icon={<BookOpen size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onInit} accessibilityLabel="Initialize project guidance" />
+        <IconButton icon={<Microscope size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onAssay} accessibilityLabel="Run quality assay" />
+        <IconButton icon={<Bot size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onSelfMcp} accessibilityLabel="Manage self MCP agent" />
+        <IconButton icon={<Bookmark size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onCheckpoint} accessibilityLabel="Manage session checkpoints" />
+        <IconButton icon={<GitPullRequest size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onPullRequest} accessibilityLabel="Create pull request" />
+        <IconButton icon={<Brain size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onMemory} accessibilityLabel="Manage project memory" />
+        <IconButton icon={<Network size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onLattice} accessibilityLabel="Inspect code symbol" />
+        <IconButton icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onPalette} accessibilityLabel="Open command palette" />
         <Text style={[typeScale.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
           {title}
         </Text>

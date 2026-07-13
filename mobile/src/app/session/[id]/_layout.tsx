@@ -27,42 +27,26 @@ import { usePalette } from "../../../components/overlay/CommandPalette";
 import { SessionHeader } from "../../../components/session/SessionHeader";
 import { DuelSheet } from "../../../components/session/DuelSheet";
 import { PlanSheet } from "../../../components/session/PlanSheet";
-||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
 
 import { ForkSheet } from "../../../components/session/ForkSheet";
-||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
 
 import { InitProjectSheet } from "../../../components/session/InitProjectSheet";
-||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
 
 import { AssaySheet } from "../../../components/session/AssaySheet";
-||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
 
 import { SelfMcpSheet } from "../../../components/session/SelfMcpSheet";
-||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
 
-||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
 import { CheckpointSheet } from "../../../components/session/CheckpointSheet";
-<<<<<<< HEAD
-||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
-||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
 import { PullRequestSheet } from "../../../components/session/PullRequestSheet";
-||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
 
-||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
 import { MemorySheet } from "../../../components/session/MemorySheet";
-||||||| parent of d85e296 (feat(mobile): inspect code symbols from sessions)
-=======
-||||||| parent of 4a51182 (feat(mobile): inspect code symbols from sessions)
 
-||||||| parent of 6315221 (feat(mobile): inspect code symbols from sessions)
 
 import { LatticeSheet } from "../../../components/session/LatticeSheet";
->>>>>>> d85e296 (feat(mobile): inspect code symbols from sessions)
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
@@ -98,42 +82,26 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const { snapshot, connectionState, send, setHeaderHeight, baseUrl, focusComposer } = useSessionCtx();
   const [duelVisible, setDuelVisible] = useState(false);
   const [planVisible, setPlanVisible] = useState(false);
-||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
 
   const [forkVisible, setForkVisible] = useState(false);
-||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
 
   const [initVisible, setInitVisible] = useState(false);
-||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
 
   const [assayVisible, setAssayVisible] = useState(false);
-||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
 
   const [selfMcpVisible, setSelfMcpVisible] = useState(false);
-||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
 
-||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
   const [checkpointVisible, setCheckpointVisible] = useState(false);
-<<<<<<< HEAD
-||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
-||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
   const [pullRequestVisible, setPullRequestVisible] = useState(false);
-||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
 
-||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
   const [memoryVisible, setMemoryVisible] = useState(false);
-||||||| parent of d85e296 (feat(mobile): inspect code symbols from sessions)
-=======
-||||||| parent of 4a51182 (feat(mobile): inspect code symbols from sessions)
 
-||||||| parent of 6315221 (feat(mobile): inspect code symbols from sessions)
 
   const [latticeVisible, setLatticeVisible] = useState(false);
->>>>>>> d85e296 (feat(mobile): inspect code symbols from sessions)
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
@@ -297,83 +265,51 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             onDuel={() => setDuelVisible(true)}
             onReplay={() => router.push(`/session/${sessionId}/replay`)}
             onPlan={() => setPlanVisible(true)}
-||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
 
             onFork={() => setForkVisible(true)}
-||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
 
             onInit={() => setInitVisible(true)}
-||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
 
             onAssay={() => setAssayVisible(true)}
-||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
 
             onSelfMcp={() => setSelfMcpVisible(true)}
-||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
 
-||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
             onCheckpoint={() => setCheckpointVisible(true)}
-<<<<<<< HEAD
-||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
-||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
             onPullRequest={() => setPullRequestVisible(true)}
-||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
 
-||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
             onMemory={() => setMemoryVisible(true)}
-||||||| parent of d85e296 (feat(mobile): inspect code symbols from sessions)
-=======
-||||||| parent of 4a51182 (feat(mobile): inspect code symbols from sessions)
 
-||||||| parent of 6315221 (feat(mobile): inspect code symbols from sessions)
 
             onLattice={() => setLatticeVisible(true)}
->>>>>>> d85e296 (feat(mobile): inspect code symbols from sessions)
           />
         </View>
 
         <DuelSheet visible={duelVisible} onClose={() => setDuelVisible(false)} send={send} />
         <PlanSheet visible={planVisible} onClose={() => setPlanVisible(false)} send={send} />
-||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
 
         <ForkSheet visible={forkVisible} onClose={() => setForkVisible(false)} sessionId={sessionId} />
-||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
 
         <InitProjectSheet visible={initVisible} onClose={() => setInitVisible(false)} send={send} />
-||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
 
         <AssaySheet visible={assayVisible} onClose={() => setAssayVisible(false)} send={send} />
-||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
 
         <SelfMcpSheet visible={selfMcpVisible} onClose={() => setSelfMcpVisible(false)} send={send} />
-||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
 
-||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
         <CheckpointSheet visible={checkpointVisible} onClose={() => setCheckpointVisible(false)} send={send} />
-<<<<<<< HEAD
-||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
-||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
         <PullRequestSheet visible={pullRequestVisible} onClose={() => setPullRequestVisible(false)} send={send} />
-||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
 
-||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
         <MemorySheet visible={memoryVisible} onClose={() => setMemoryVisible(false)} send={send} />
-||||||| parent of d85e296 (feat(mobile): inspect code symbols from sessions)
-=======
-||||||| parent of 4a51182 (feat(mobile): inspect code symbols from sessions)
 
-||||||| parent of 6315221 (feat(mobile): inspect code symbols from sessions)
 
         <LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={send} />
->>>>>>> d85e296 (feat(mobile): inspect code symbols from sessions)
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />

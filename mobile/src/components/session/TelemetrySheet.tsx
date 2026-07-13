@@ -22,31 +22,23 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
   const select = (level: EffortLevel | null) => {
     if (send({ kind: "prompt", text: level ? `/effort ${level}` : "/effort" })) onClose();
   };
-<<<<<<< HEAD
   const openTemperPicker = () => {
     if (send({ kind: "prompt", text: "/mode" })) onClose();
   };
   const compact = () => {
     if (send({ kind: "prompt", text: "/compact" })) onClose();
   };
-||||||| parent of 71a4a56 (feat(mobile): choose session model from telemetry)
 
   const chooseModel = () => {
     if (send({ kind: "prompt", text: "/model" })) onClose();
-||||||| parent of 84e9d48 (feat(mobile): restore compacted context)
-=======
+  };
   const restoreContext = () => {
     if (send({ kind: "prompt", text: "/uncompact" })) onClose();
->>>>>>> 84e9d48 (feat(mobile): restore compacted context)
   };
   return <Sheet visible={visible} onClose={onClose} accessibilityLabel="Session telemetry" snapPoints={[0.8]}>
     <View style={styles.content}>
       <Text style={[typeScale.heading, { color: tokens.ink }]}>Session telemetry</Text>
-      {contextLimit != null ? <><ContextGauge used={contextTokens} total={contextLimit} /><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatTokenPair(contextTokens, contextLimit)}</Text><View style={[styles.capacity, { backgroundColor: contextPercent != null && contextPercent >= 90 ? tokens.dangerBg : contextPercent != null && contextPercent >= 70 ? tokens.warnBg : tokens.bg3 }]}><Text style={[typeScale.bodyBold, { color: contextPercent != null && contextPercent >= 90 ? tokens.danger : contextPercent != null && contextPercent >= 70 ? tokens.warn : tokens.ink }]}>{contextPercent?.toFixed(0)}% context capacity used</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{remaining?.toLocaleString()} tokens remaining · Forge reserves output room and compacts when needed.</Text></View><Pressable onPress={compact} accessibilityRole="button" style={[styles.compact, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.accent }]}>Compact context</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Summarize earlier conversation to free capacity</Text></Pressable></> : null}
-||||||| parent of 84e9d48 (feat(mobile): restore compacted context)
-      {contextLimit != null ? <><ContextGauge used={contextTokens} total={contextLimit} /><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatTokenPair(contextTokens, contextLimit)}</Text></> : null}
-
-      {contextLimit != null ? <><ContextGauge used={contextTokens} total={contextLimit} /><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatTokenPair(contextTokens, contextLimit)}</Text><Pressable onPress={restoreContext} accessibilityRole="button" style={[styles.restore, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.ink2 }]}>Restore compacted context</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Bring back the previous full conversation when available</Text></Pressable></> : null}
+      {contextLimit != null ? <><ContextGauge used={contextTokens} total={contextLimit} /><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatTokenPair(contextTokens, contextLimit)}</Text><View style={[styles.capacity, { backgroundColor: contextPercent != null && contextPercent >= 90 ? tokens.dangerBg : contextPercent != null && contextPercent >= 70 ? tokens.warnBg : tokens.bg3 }]}><Text style={[typeScale.bodyBold, { color: contextPercent != null && contextPercent >= 90 ? tokens.danger : contextPercent != null && contextPercent >= 70 ? tokens.warn : tokens.ink }]}>{contextPercent?.toFixed(0)}% context capacity used</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{remaining?.toLocaleString()} tokens remaining · Forge reserves output room and compacts when needed.</Text></View><Pressable onPress={compact} accessibilityRole="button" style={[styles.compact, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.accent }]}>Compact context</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Summarize earlier conversation to free capacity</Text></Pressable><Pressable onPress={restoreContext} accessibilityRole="button" style={[styles.restore, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.ink2 }]}>Restore compacted context</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Bring back the previous full conversation when available</Text></Pressable></> : null}
       {weekly ? <>
         <Text style={[typeScale.bodyBold, { color: tokens.success }]}>≈ +{weekly.deltaPct.toFixed(1)}% of weekly quota this session</Text>
         <Text style={[typeScale.meta, { color: tokens.ink3 }]}>Approximate — may be off if other sessions or tools share this {weekly.provider} subscription.</Text>
@@ -73,8 +65,4 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
     </View>
   </Sheet>;
 }
-const styles = StyleSheet.create({ content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space8 }, meshAction: { paddingVertical: space.space4 }, meshButton: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, capacity: { gap: space.space4, padding: space.space12, borderRadius: 8 }, compact: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, modelRow: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, modelAction: { flex: 1, alignItems: "flex-end", gap: 2, marginLeft: space.space16 }, rows: { borderTopWidth: StyleSheet.hairlineWidth }, options: { gap: space.space8 }, option: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 } });
-||||||| parent of 84e9d48 (feat(mobile): restore compacted context)
-const styles = StyleSheet.create({ content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space8 }, rows: { borderTopWidth: StyleSheet.hairlineWidth }, options: { gap: space.space8 }, option: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 } });
-
-const styles = StyleSheet.create({ content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space8 }, restore: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, rows: { borderTopWidth: StyleSheet.hairlineWidth }, options: { gap: space.space8 }, option: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 } });
+const styles = StyleSheet.create({ content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space8 }, meshAction: { paddingVertical: space.space4 }, meshButton: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, capacity: { gap: space.space4, padding: space.space12, borderRadius: 8 }, compact: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, modelRow: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, modelAction: { flex: 1, alignItems: "flex-end", gap: 2, marginLeft: space.space16 }, restore: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, rows: { borderTopWidth: StyleSheet.hairlineWidth }, options: { gap: space.space8 }, option: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 } });

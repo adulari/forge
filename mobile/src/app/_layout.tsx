@@ -90,7 +90,6 @@ function RootNavigator() {
         <Stack.Screen name="models" />
         <Stack.Screen name="session-tree" />
         <Stack.Screen name="plans" />
-||||||| parent of abad6c3 (feat(mobile): add MCP server catalog)
 
         <Stack.Screen name="mcp" />
         <Stack.Screen name="session/[id]" />
