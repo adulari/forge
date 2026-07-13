@@ -14,6 +14,7 @@ import { type } from "../theme/typography";
 
 const number = (value: number) => new Intl.NumberFormat().format(value);
 const kindTone = (kind: string) => kind === "bridge" ? "accent" : kind === "oauth" ? "success" : "neutral";
+const resetLabel = (resetsAt: number | null) => resetsAt == null ? "reset unknown" : `resets ${new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }).format(new Date(resetsAt * 1000))}`;
 
 export default function UsageScreen() {
   const tokens = useTokens();
@@ -24,7 +25,7 @@ export default function UsageScreen() {
   const query = useUsage(sessionId);
   const selected = window === "session" && query.data?.session ? query.data.session : query.data?.week;
   const providers = selected?.providers ?? [];
-  const quota = query.data?.quota ?? [];
+  const quota = useMemo(() => query.data?.quota ?? [], [query.data?.quota]);
   const refreshing = query.isFetching;
   const totalTokens = (selected?.combined.inputTokens ?? 0) + (selected?.combined.outputTokens ?? 0);
   const quotasByProvider = useMemo(() => new Map(quota.map((item) => [item.provider, quota.filter((q) => q.provider === item.provider)])), [quota]);
@@ -49,7 +50,7 @@ export default function UsageScreen() {
               <View style={styles.row}><Text style={[styles.providerName, { color: tokens.ink }]}>{provider.provider}</Text><Badge label={provider.kind} tone={kindTone(provider.kind) as never} /></View>
               <Text style={[styles.costSmall, { color: tokens.accent }]}>${provider.costUsd.toFixed(2)}</Text>
               <Text style={[styles.detail, { color: tokens.ink3 }]}>{number(provider.inputTokens)} in · {number(provider.outputTokens)} out · {open ? "tap to collapse" : "tap for quota details"}</Text>
-              {(quotasByProvider.get(provider.provider) ?? []).map((q) => <View key={q.windowKind} style={styles.quota}><View style={styles.row}><Text style={[styles.detail, { color: tokens.ink2 }]}>{q.windowKind}</Text><Text style={[styles.detail, { color: tokens.ink3 }]}>{q.status} · {q.fraction == null ? "—" : `${Math.round(q.fraction * 100)}%`}</Text></View><View style={[styles.track, { backgroundColor: tokens.bg3 }]}><View style={[styles.fill, { width: `${Math.min(100, Math.max(0, (q.fraction ?? 0) * 100))}%`, backgroundColor: q.status === "exhausted" ? tokens.danger : q.status === "warning" ? tokens.warn : tokens.accent }]} /></View></View>)}
+              {(quotasByProvider.get(provider.provider) ?? []).map((q) => <View key={q.windowKind} style={styles.quota}><View style={styles.row}><Text style={[styles.detail, { color: tokens.ink2 }]}>{q.windowKind}</Text><Text style={[styles.detail, { color: tokens.ink3 }]}>{q.status} · {q.fraction == null ? "—" : `${Math.round(q.fraction * 100)}%`}</Text></View><Text style={[styles.reset, { color: tokens.ink3 }]}>{resetLabel(q.resetsAt)}</Text><View style={[styles.track, { backgroundColor: tokens.bg3 }]}><View style={[styles.fill, { width: `${Math.min(100, Math.max(0, (q.fraction ?? 0) * 100))}%`, backgroundColor: q.status === "exhausted" ? tokens.danger : q.status === "warning" ? tokens.warn : tokens.accent }]} /></View></View>)}
             </Card>
           </Pressable>
         </Animated.View>;
@@ -58,4 +59,4 @@ export default function UsageScreen() {
   );
 }
 
-const styles = StyleSheet.create({ content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 }, back: { fontSize: 15, fontWeight: "600" }, subtitle: { marginTop: -6 }, hero: { borderWidth: 1, borderRadius: 16, padding: 22, marginTop: 8 }, eyebrow: { fontSize: 11, letterSpacing: 1.4, fontWeight: "700" }, cost: { fontSize: 42, fontWeight: "800", marginTop: 8 }, tokens: { fontSize: 16, fontWeight: "700", marginTop: 2 }, split: { fontSize: 13, marginTop: 5 }, provider: { marginVertical: 2 }, row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, providerName: { fontSize: 17, fontWeight: "700" }, costSmall: { fontSize: 22, fontWeight: "800", marginTop: 10 }, detail: { fontSize: 13, marginTop: 4 }, quota: { marginTop: 12 }, track: { height: 7, borderRadius: 4, overflow: "hidden", marginTop: 6 }, fill: { height: "100%", borderRadius: 4 }, empty: { lineHeight: 21 },});
+const styles = StyleSheet.create({ content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 }, back: { fontSize: 15, fontWeight: "600" }, subtitle: { marginTop: -6 }, hero: { borderWidth: 1, borderRadius: 16, padding: 22, marginTop: 8 }, eyebrow: { fontSize: 11, letterSpacing: 1.4, fontWeight: "700" }, cost: { fontSize: 42, fontWeight: "800", marginTop: 8 }, tokens: { fontSize: 16, fontWeight: "700", marginTop: 2 }, split: { fontSize: 13, marginTop: 5 }, provider: { marginVertical: 2 }, row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, providerName: { fontSize: 17, fontWeight: "700" }, costSmall: { fontSize: 22, fontWeight: "800", marginTop: 10 }, detail: { fontSize: 13, marginTop: 4 }, quota: { marginTop: 12 }, reset: { fontSize: 12, marginTop: 2 }, track: { height: 7, borderRadius: 4, overflow: "hidden", marginTop: 6 }, fill: { height: "100%", borderRadius: 4 }, empty: { lineHeight: 21 },});
