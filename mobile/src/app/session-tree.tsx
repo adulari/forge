@@ -1,7 +1,7 @@
 import { router } from "expo-router";
 import { GitBranch } from "lucide-react-native";
 import React, { useMemo } from "react";
-import { Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { BackLink } from "../components/ds/BackLink";
@@ -59,8 +59,9 @@ export default function SessionTreeScreen() {
         <BackLink />
         <Text style={[type.title, { color: tokens.ink }]}>Session tree</Text>
         <Text style={[type.sub, { color: tokens.ink3 }]}>Forks and their conversation ancestry.</Text>
+        {query.isLoading ? <View style={styles.loading}><ActivityIndicator color={tokens.accent} /><Text style={[type.sub, { color: tokens.ink3 }]}>Loading session ancestry…</Text></View> : null}
         {query.isError ? <Card><Text style={[type.body, { color: tokens.danger }]}>Could not load the session tree. Pull to retry.</Text></Card> : null}
-        {rows.length === 0 && !query.isLoading ? <EmptyState icon={GitBranch} message="No session branches yet." /> : null}
+        {rows.length === 0 && !query.isLoading && !query.isError ? <EmptyState icon={GitBranch} message="No session branches yet." /> : null}
         {rows.map(({ node, depth, orphaned }) => {
           const isFork = node.forked_from != null && !orphaned;
           const relation = orphaned ? "original parent unavailable" : isFork ? `forked at message ${node.forked_at_seq ?? "—"}` : "session root";
@@ -83,6 +84,7 @@ export default function SessionTreeScreen() {
 const styles = StyleSheet.create({
   content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 },
   back: { fontSize: 15, fontWeight: "600" },
+  loading: { alignItems: "center", paddingVertical: space.space32, gap: space.space12 },
   branch: { borderLeftWidth: 1, paddingLeft: space.space8 },
   node: { gap: space.space4, marginBottom: space.space8 },
 });
