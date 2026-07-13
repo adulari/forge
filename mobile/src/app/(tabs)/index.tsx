@@ -250,7 +250,7 @@ export default function FleetScreen() {
         autoCorrect={false}
         containerStyle={styles.search}
       />
-      {hasData ? <><FleetHeader sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /><CoalStrip sessions={data} onPress={(index) => listRef.current?.scrollToIndex({ index: deckRows.findIndex((item) => item.type === "session" && item.row === data[index]), animated: true })} /></> : null}
+      {hasData ? <><FleetHeader sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /><CoalStrip sessions={data} onPress={(index) => { const sessionId = data[index]?.id; const target = deckRows.findIndex((item) => item.type === "session" && item.row.id === sessionId); if (target >= 0) listRef.current?.scrollToIndex({ index: target, animated: true }); }} /></> : null}
       {isFirstLoad ? (
         <View style={styles.list}>
           {[0, 1, 2, 3].map((i) => (
