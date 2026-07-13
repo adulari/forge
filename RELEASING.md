@@ -37,6 +37,15 @@ with the touched file). A minor/major bump with only a "prepared the workspace" 
 either there is real content or it should not be a release. Update the compare links at the bottom:
 add `[X.Y.Z]` and repoint `[Unreleased]` to `vX.Y.Z...HEAD`.
 
+This one section is the single source of truth for the **unified release note** across all three
+surfaces — you do not write notes anywhere else:
+- **GitHub Release** (`v*` tag): `release.yml` composes the body from an all-platform header + this
+  CHANGELOG section, then appends GitHub's auto PR list (hybrid). TUI binaries + desktop bundles +
+  `latest.json` all attach to this same release.
+- **TestFlight** (iOS): `scripts/testflight-assign-group.mjs` reads the same section and sets the
+  build's "What to Test" note via the ASC API (best-effort). The IPA can't live on a GitHub Release
+  — Apple owns mobile distribution — so the *note* is shared even though the artifact isn't.
+
 ## 4. Pre-flight — all must be green (CI runs these too; do not rely on a hook)
 
 ```bash

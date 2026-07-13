@@ -21,6 +21,40 @@
 
 import { createSign } from "node:crypto";
 import { request } from "node:https";
+import { readFileSync } from "node:fs";
+
+// Pull the `## [version]` section out of CHANGELOG.md and flatten it to the plaintext TestFlight
+// accepts (no markdown rendering, 4000-char cap). Keeps the same note the GitHub Release shows, so
+// TUI/desktop/mobile all read from one source. Returns "" if there's no section (then whatsNew is
+// left untouched rather than blanked).
+function changelogNotes(version) {
+  if (!version) return "";
+  let text;
+  try {
+    text = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+  } catch {
+    return "";
+  }
+  const lines = text.split("\n");
+  const start = lines.findIndex((l) => l.replace(/\s+/g, "").startsWith(`##[${version}]`));
+  if (start < 0) return "";
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^##\s/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  const body = lines
+    .slice(start + 1, end)
+    .join("\n")
+    .replace(/\*\*/g, "") // bold markers
+    .replace(/`([^`]*)`/g, "$1") // inline code
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // links -> text
+    .replace(/^\s*###\s+/gm, "") // subsection headers
+    .trim();
+  return body.length > 4000 ? `${body.slice(0, 3997)}...` : body;
+}
 
 const {
   ASC_KEY_ID,
@@ -147,6 +181,36 @@ async function main() {
       else throw e;
     }
   }
+  // 5. Set the build's "What to Test" note from the CHANGELOG section for this version, so mobile
+  //    testers see the same release note as the GitHub Release. Best-effort: a note failure must
+  //    never fail the (already-done) group assignment.
+  const notes = process.env.RELEASE_NOTES?.trim() || changelogNotes(build.attributes?.version);
+  if (notes) {
+    try {
+      const locale = "en-US";
+      const existing = await api("GET", `/v1/builds/${build.id}/betaBuildLocalizations?limit=50`);
+      const loc = (existing.data || []).find((l) => l.attributes?.locale === locale);
+      if (loc) {
+        await api("PATCH", `/v1/betaBuildLocalizations/${loc.id}`, {
+          data: { type: "betaBuildLocalizations", id: loc.id, attributes: { whatsNew: notes } },
+        });
+      } else {
+        await api("POST", "/v1/betaBuildLocalizations", {
+          data: {
+            type: "betaBuildLocalizations",
+            attributes: { locale, whatsNew: notes },
+            relationships: { build: { data: { type: "builds", id: build.id } } },
+          },
+        });
+      }
+      console.log(`  ✓ set What-to-Test note (${notes.length} chars) for build ${build.attributes?.version}`);
+    } catch (e) {
+      console.log(`  ! could not set What-to-Test note (non-fatal): ${e.message}`);
+    }
+  } else {
+    console.log("  = no CHANGELOG section for this version; leaving What-to-Test note untouched");
+  }
+
   console.log("✓ TestFlight group assignment complete");
 }
 
