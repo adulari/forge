@@ -44,25 +44,34 @@ import { SelfMcpSheet } from "../../../components/session/SelfMcpSheet";
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
 import { CheckpointSheet } from "../../../components/session/CheckpointSheet";
-<<<<<<< HEAD
 ||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
 import { PullRequestSheet } from "../../../components/session/PullRequestSheet";
+<<<<<<< HEAD
 ||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
 
 ||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
 import { MemorySheet } from "../../../components/session/MemorySheet";
+<<<<<<< HEAD
 ||||||| parent of 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
-=======
+
 ||||||| parent of 27f786d (feat(mobile): run autonomous loops from sessions)
 
 ||||||| parent of 15fede8 (feat(mobile): run autonomous loops from sessions)
 
 import { LoopSheet } from "../../../components/session/LoopSheet";
->>>>>>> 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
+||||||| parent of 68a0b1f (feat(mobile): configure remote session control)
+=======
+||||||| parent of 8ad0605 (feat(mobile): configure remote session control)
+=======
+||||||| parent of d325584 (feat(mobile): configure remote session control)
+
+import { RemoteSheet } from "../../../components/session/RemoteSheet";
+>>>>>>> 8ad0605 (feat(mobile): configure remote session control)
+>>>>>>> 68a0b1f (feat(mobile): configure remote session control)
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
@@ -115,25 +124,34 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
   const [checkpointVisible, setCheckpointVisible] = useState(false);
-<<<<<<< HEAD
 ||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
   const [pullRequestVisible, setPullRequestVisible] = useState(false);
+<<<<<<< HEAD
 ||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
 
 ||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
   const [memoryVisible, setMemoryVisible] = useState(false);
+<<<<<<< HEAD
 ||||||| parent of 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
-=======
+
 ||||||| parent of 27f786d (feat(mobile): run autonomous loops from sessions)
 
 ||||||| parent of 15fede8 (feat(mobile): run autonomous loops from sessions)
 
   const [loopVisible, setLoopVisible] = useState(false);
->>>>>>> 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
+||||||| parent of 68a0b1f (feat(mobile): configure remote session control)
+=======
+||||||| parent of 8ad0605 (feat(mobile): configure remote session control)
+=======
+||||||| parent of d325584 (feat(mobile): configure remote session control)
+
+  const [remoteVisible, setRemoteVisible] = useState(false);
+>>>>>>> 8ad0605 (feat(mobile): configure remote session control)
+>>>>>>> 68a0b1f (feat(mobile): configure remote session control)
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
@@ -314,25 +332,34 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
             onCheckpoint={() => setCheckpointVisible(true)}
-<<<<<<< HEAD
 ||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
             onPullRequest={() => setPullRequestVisible(true)}
+<<<<<<< HEAD
 ||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
 
 ||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
             onMemory={() => setMemoryVisible(true)}
+<<<<<<< HEAD
 ||||||| parent of 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
-=======
+
 ||||||| parent of 27f786d (feat(mobile): run autonomous loops from sessions)
 
 ||||||| parent of 15fede8 (feat(mobile): run autonomous loops from sessions)
 
             onLoop={() => setLoopVisible(true)}
->>>>>>> 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
+||||||| parent of 68a0b1f (feat(mobile): configure remote session control)
+=======
+||||||| parent of 8ad0605 (feat(mobile): configure remote session control)
+=======
+||||||| parent of d325584 (feat(mobile): configure remote session control)
+
+            onRemote={() => setRemoteVisible(true)}
+>>>>>>> 8ad0605 (feat(mobile): configure remote session control)
+>>>>>>> 68a0b1f (feat(mobile): configure remote session control)
           />
         </View>
 
@@ -355,25 +382,34 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
         <CheckpointSheet visible={checkpointVisible} onClose={() => setCheckpointVisible(false)} send={send} />
-<<<<<<< HEAD
 ||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
         <PullRequestSheet visible={pullRequestVisible} onClose={() => setPullRequestVisible(false)} send={send} />
+<<<<<<< HEAD
 ||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
 
 ||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
         <MemorySheet visible={memoryVisible} onClose={() => setMemoryVisible(false)} send={send} />
+<<<<<<< HEAD
 ||||||| parent of 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
-=======
+
 ||||||| parent of 27f786d (feat(mobile): run autonomous loops from sessions)
 
 ||||||| parent of 15fede8 (feat(mobile): run autonomous loops from sessions)
 
         <LoopSheet visible={loopVisible} onClose={() => setLoopVisible(false)} send={send} />
->>>>>>> 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
+||||||| parent of 68a0b1f (feat(mobile): configure remote session control)
+=======
+||||||| parent of 8ad0605 (feat(mobile): configure remote session control)
+=======
+||||||| parent of d325584 (feat(mobile): configure remote session control)
+
+        <RemoteSheet visible={remoteVisible} onClose={() => setRemoteVisible(false)} send={send} />
+>>>>>>> 8ad0605 (feat(mobile): configure remote session control)
+>>>>>>> 68a0b1f (feat(mobile): configure remote session control)
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />
