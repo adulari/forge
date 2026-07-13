@@ -22,7 +22,7 @@ const resetLabel = (resetsAt: number | null) => resetsAt == null ? "reset unknow
 
 interface ProviderRowProps {
   provider: UsageProvider;
-  quotas: { windowKind: string; status: string; fraction: number | null; resetsAt: number | null }[];
+  quotas: { kind: string; windowKind: string; status: string; fraction: number | null; resetsAt: number | null }[];
 }
 
 const ProviderRow = memo(function ProviderRow({ provider, quotas }: ProviderRowProps) {
@@ -65,19 +65,19 @@ export default function UsageScreen() {
   const query = useUsage(sessionId);
   const selected = window === "week" ? query.data?.week : query.data?.session;
   const providers = selected?.providers ?? [];
-  const hasSession = sessionId != null;
   const { isError, isLoading, isRefetching, refetch, data } = query;
   const quotaRows = data?.quota;
+  const quotaKey = (provider: string, kind: string) => `${kind}:${provider}`;
   const quotasByProvider = useMemo(() => {
     const result = new Map<string, NonNullable<typeof data>["quota"]>();
     for (const quota of quotaRows ?? []) {
-      const rows = result.get(quota.provider) ?? [];
+      const rows = result.get(quotaKey(quota.provider, quota.kind)) ?? [];
       rows.push(quota);
-      result.set(quota.provider, rows);
+      result.set(quotaKey(quota.provider, quota.kind), rows);
     }
     return result;
   }, [quotaRows]);
-  const renderItem = useCallback(({ item }: { item: UsageProvider; index: number }) => <ProviderRow provider={item} quotas={quotasByProvider.get(item.provider) ?? []} />, [quotasByProvider]);
+  const renderItem = useCallback(({ item }: { item: UsageProvider; index: number }) => <ProviderRow provider={item} quotas={quotasByProvider.get(quotaKey(item.provider, item.kind)) ?? []} />, [quotasByProvider]);
   const keyExtractor = useCallback((provider: UsageProvider) => provider.provider, []);
   const hasMeteredApi = providers.some((provider) => provider.kind === "api");
   const apiCostUsd = providers
@@ -91,16 +91,17 @@ export default function UsageScreen() {
       <Text style={[type.title, { color: tokens.ink }]}>Usage</Text>
       <Text style={[styles.subtitle, { color: tokens.ink3 }]}>A clear read on your Forge consumption.</Text>
       <Segmented options={[{ value: "week", label: "This Week" }, { value: "session", label: "This Session" }]} value={window} onChange={setWindow} />
-      <View style={[styles.hero, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
+      {!isLoading && !isError && selected ? <View style={[styles.hero, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
         <Text style={[styles.eyebrow, { color: tokens.ink3 }]}>{usageLabel} · {window === "week" ? "THIS WEEK" : "THIS SESSION"}</Text>
-        {hasMeteredApi ? <Text style={[styles.cost, { color: tokens.accent }]}>{selected ? `$${apiCostUsd.toFixed(2)}` : "—"}</Text> : <Text style={[styles.included, { color: tokens.accent }]}>Included with plan</Text>}
+        {hasMeteredApi ? <Text style={[styles.cost, { color: tokens.accent }]}>{`$${apiCostUsd.toFixed(2)}`}</Text> : <Text style={[styles.included, { color: tokens.accent }]}>Included with plan</Text>}
         <Text style={[styles.tokens, { color: tokens.ink }]}>{number(totalTokens)} tokens</Text>
-        <Text style={[styles.split, { color: tokens.ink3 }]}>{number(selected?.combined.inputTokens ?? 0)} in · {number(selected?.combined.outputTokens ?? 0)} out</Text>
-      </View>
+        <Text style={[styles.split, { color: tokens.ink3 }]}>{number(selected.combined.inputTokens)} in · {number(selected.combined.outputTokens)} out</Text>
+      </View> : null}
+      {isLoading ? <Card><Text style={[styles.empty, { color: tokens.ink3 }]}>Loading usage…</Text></Card> : null}
       {isError ? <Card><Text style={[styles.empty, { color: tokens.danger }]}>Could not load usage. Pull to retry.</Text></Card> : null}
-      {window === "session" && !hasSession && !isLoading ? <Card><Text style={[styles.empty, { color: tokens.ink2 }]}>Choose a session first to see its usage.</Text></Card> : null}
+      {window === "session" && !selected && !isLoading && !isError ? <Card><Text style={[styles.empty, { color: tokens.ink2 }]}>No session usage is available yet. Start or open a session to see its activity.</Text></Card> : null}
     </View>
-  ), [apiCostUsd, hasMeteredApi, hasSession, isError, isLoading, selected, tokens, totalTokens, usageLabel, window]);
+  ), [apiCostUsd, hasMeteredApi, isError, isLoading, selected, tokens, totalTokens, usageLabel, window]);
   const empty = isLoading ? <View /> : <EmptyState icon={Cpu} message="No usage yet. Your provider activity will appear here after the first turn." />;
 
   return (
