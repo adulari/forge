@@ -225,6 +225,7 @@ struct DriverState {
     last_auto_compact_gen: u64,
     turn_handle: Option<tokio::task::JoinHandle<()>>,
     loop_state: Option<LoopState>,
+    goal_state: Option<GoalState>,
     pending: Option<(String, std::sync::mpsc::Sender<ConfirmOutcome>)>,
     pending_question: Option<std::sync::mpsc::Sender<String>>,
     pending_duel: Arc<std::sync::Mutex<PendingDuel>>,
@@ -324,6 +325,7 @@ async fn drive_session(
         last_auto_compact_gen: 0,
         turn_handle: None,
         loop_state: None,
+        goal_state: None,
         pending: None,
         pending_question: None,
         pending_duel: Arc::new(std::sync::Mutex::new(None)),
@@ -792,6 +794,7 @@ impl DriverState {
         self.turn_gen += 1;
         self.busy = false;
         self.loop_state = None;
+        self.goal_state = None;
         if !self.queued_prompts.is_empty() {
             self.queued_prompts.clear();
             self.app.set_queued(&self.queued_prompts);
@@ -880,6 +883,29 @@ impl DriverState {
                     prompt,
                     vec![LOOP_GUIDANCE.to_string()],
                     None,
+                    &self.session,
+                    &self.done_tx,
+                    self.turn_gen,
+                    &mut self.app,
+                    &mut self.busy,
+                    &mut self.busy_since,
+                ));
+            }
+            DispatchOutcome::StartGoal { prompt, goal } => {
+                self.turn_gen += 1;
+                self.goal_state = Some(GoalState {
+                    gen: self.turn_gen,
+                    iter: 1,
+                    prev_done: 0,
+                    no_progress: 0,
+                    goal,
+                });
+                self.app
+                    .note("🎯 goal running autonomously — Stop to interrupt");
+                self.turn_handle = Some(spawn_turn_with(
+                    prompt,
+                    vec![GOAL_GUIDANCE.to_string()],
+                    Some(forge_types::TaskTier::Complex),
                     &self.session,
                     &self.done_tx,
                     self.turn_gen,
@@ -1413,6 +1439,60 @@ impl DriverState {
                 }
             } else {
                 self.loop_state = Some(ls);
+            }
+        }
+        if let Some(gs) = self.goal_state.take() {
+            if gs.gen == g {
+                let (done, total) = {
+                    let s = self.session.lock().await;
+                    let tasks = s.tasks();
+                    (
+                        tasks
+                            .iter()
+                            .filter(|t| t.status == forge_types::TodoStatus::Done)
+                            .count(),
+                        tasks.len(),
+                    )
+                };
+                let last = {
+                    self.session
+                        .lock()
+                        .await
+                        .last_assistant_text()
+                        .map(str::to_string)
+                };
+                let said_complete = last
+                    .as_deref()
+                    .map(|t| t.contains("GOAL COMPLETE"))
+                    .unwrap_or(false);
+                let progressed = done > gs.prev_done;
+                let no_progress = if progressed { 0 } else { gs.no_progress + 1 };
+                match goal_stop_reason(said_complete, done, total, gs.iter, no_progress) {
+                    Some(reason) => self.app.note(reason),
+                    None => {
+                        self.turn_gen += 1;
+                        self.goal_state = Some(GoalState {
+                            gen: self.turn_gen,
+                            iter: gs.iter + 1,
+                            prev_done: done,
+                            no_progress,
+                            goal: gs.goal,
+                        });
+                        self.turn_handle = Some(spawn_turn_with(
+                            GOAL_CONTINUE_PROMPT.to_string(),
+                            vec![GOAL_GUIDANCE.to_string()],
+                            Some(forge_types::TaskTier::Complex),
+                            &self.session,
+                            &self.done_tx,
+                            self.turn_gen,
+                            &mut self.app,
+                            &mut self.busy,
+                            &mut self.busy_since,
+                        ));
+                    }
+                }
+            } else {
+                self.goal_state = Some(gs);
             }
         }
         if self.turn_handle.is_none() && !self.queued_prompts.is_empty() {

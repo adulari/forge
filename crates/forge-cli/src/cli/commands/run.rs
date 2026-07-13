@@ -1281,6 +1281,8 @@ pub(crate) async fn run_chat_tui(
     // `/loop` state: when set, each completed turn of this generation is re-run until the model
     // signals completion or the iteration cap is hit.
     let mut loop_state: Option<LoopState> = None;
+    // `/goal` state: mirrors `loop_state`, driven off the tracked task plan instead of a sentinel.
+    let mut goal_state: Option<GoalState> = None;
     let mut pending: Option<(String, std::sync::mpsc::Sender<ConfirmOutcome>)> = None;
     let mut pending_question: Option<std::sync::mpsc::Sender<String>> = None;
     // `/duel`: the background task writes its finished report + still-alive worktree guards here
@@ -2091,6 +2093,7 @@ pub(crate) async fn run_chat_tui(
                         turn_gen += 1;
                         busy = false;
                         loop_state = None;
+                        goal_state = None;
                         pending = None;
                         pending_question = None;
                         app.prompt = None;
@@ -2146,6 +2149,7 @@ pub(crate) async fn run_chat_tui(
                         turn_gen += 1;
                         busy = false;
                         loop_state = None;
+                        goal_state = None;
                         if !queued_prompts.is_empty() {
                             queued_prompts.clear();
                             app.set_queued(&queued_prompts);
@@ -2359,6 +2363,28 @@ pub(crate) async fn run_chat_tui(
                                     prompt,
                                     vec![LOOP_GUIDANCE.to_string()],
                                     None,
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                ));
+                            }
+                            DispatchOutcome::StartGoal { prompt, goal } => {
+                                turn_gen += 1;
+                                goal_state = Some(GoalState {
+                                    gen: turn_gen,
+                                    iter: 1,
+                                    prev_done: 0,
+                                    no_progress: 0,
+                                    goal,
+                                });
+                                app.note("🎯 goal started — Esc to stop");
+                                turn_handle = Some(spawn_turn_with(
+                                    prompt,
+                                    vec![GOAL_GUIDANCE.to_string()],
+                                    Some(forge_types::TaskTier::Complex),
                                     &session,
                                     &done_tx,
                                     turn_gen,
@@ -3003,6 +3029,7 @@ pub(crate) async fn run_chat_tui(
                     turn_gen += 1; // discard the aborted turn's (now stale) done-signal
                     busy = false;
                     loop_state = None; // a `/loop` in progress stops on interrupt
+                    goal_state = None; // a `/goal` in progress stops on interrupt
                     if !queued_prompts.is_empty() {
                         queued_prompts.clear(); // interrupting drops the queued prompts too
                         app.set_queued(&queued_prompts);
@@ -3410,6 +3437,28 @@ pub(crate) async fn run_chat_tui(
                                         &mut busy_since,
                                     ));
                                 }
+                                DispatchOutcome::StartGoal { prompt, goal } => {
+                                    turn_gen += 1;
+                                    goal_state = Some(GoalState {
+                                        gen: turn_gen,
+                                        iter: 1,
+                                        prev_done: 0,
+                                        no_progress: 0,
+                                        goal,
+                                    });
+                                    app.note("🎯 goal started — Esc to stop");
+                                    turn_handle = Some(spawn_turn_with(
+                                        prompt,
+                                        vec![GOAL_GUIDANCE.to_string()],
+                                        Some(forge_types::TaskTier::Complex),
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                    ));
+                                }
                                 DispatchOutcome::PendingMesh(rx) => {
                                     mesh_load_rx = Some(rx);
                                 }
@@ -3768,6 +3817,28 @@ pub(crate) async fn run_chat_tui(
                                         &mut busy_since,
                                     ));
                                 }
+                                DispatchOutcome::StartGoal { prompt, goal } => {
+                                    turn_gen += 1;
+                                    goal_state = Some(GoalState {
+                                        gen: turn_gen,
+                                        iter: 1,
+                                        prev_done: 0,
+                                        no_progress: 0,
+                                        goal,
+                                    });
+                                    app.note("🎯 goal started — Esc to stop");
+                                    turn_handle = Some(spawn_turn_with(
+                                        prompt,
+                                        vec![GOAL_GUIDANCE.to_string()],
+                                        Some(forge_types::TaskTier::Complex),
+                                        &session,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut app,
+                                        &mut busy,
+                                        &mut busy_since,
+                                    ));
+                                }
                                 DispatchOutcome::Handled => {}
                                 DispatchOutcome::PendingMesh(rx) => {
                                     // The overlay opens loading=true and is projected into
@@ -3927,6 +3998,7 @@ pub(crate) async fn run_chat_tui(
                             turn_gen += 1;
                             busy = false;
                             loop_state = None;
+                            goal_state = None;
                             pending = None;
                             pending_question = None;
                             app.prompt = None;
@@ -4067,6 +4139,62 @@ pub(crate) async fn run_chat_tui(
                         }
                     } else {
                         loop_state = Some(ls); // a different turn finished; keep waiting
+                    }
+                }
+                // `/goal`: if this was a goal turn, decide whether to run another iteration off
+                // the tracked task plan (a session is either looping or goaling, never both).
+                if let Some(gs) = goal_state.take() {
+                    if gs.gen == g {
+                        let (done, total) = {
+                            let s = session.lock().await;
+                            let tasks = s.tasks();
+                            (
+                                tasks
+                                    .iter()
+                                    .filter(|t| t.status == forge_types::TodoStatus::Done)
+                                    .count(),
+                                tasks.len(),
+                            )
+                        };
+                        let last = {
+                            session
+                                .lock()
+                                .await
+                                .last_assistant_text()
+                                .map(str::to_string)
+                        };
+                        let said_complete = last
+                            .as_deref()
+                            .map(|t| t.contains("GOAL COMPLETE"))
+                            .unwrap_or(false);
+                        let progressed = done > gs.prev_done;
+                        let no_progress = if progressed { 0 } else { gs.no_progress + 1 };
+                        match goal_stop_reason(said_complete, done, total, gs.iter, no_progress) {
+                            Some(reason) => app.note(reason),
+                            None => {
+                                turn_gen += 1;
+                                goal_state = Some(GoalState {
+                                    gen: turn_gen,
+                                    iter: gs.iter + 1,
+                                    prev_done: done,
+                                    no_progress,
+                                    goal: gs.goal,
+                                });
+                                turn_handle = Some(spawn_turn_with(
+                                    GOAL_CONTINUE_PROMPT.to_string(),
+                                    vec![GOAL_GUIDANCE.to_string()],
+                                    Some(forge_types::TaskTier::Complex),
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                ));
+                            }
+                        }
+                    } else {
+                        goal_state = Some(gs); // a different turn finished; keep waiting
                     }
                 }
                 // Drain a queued prompt (typed while this turn was running): run it as the next
@@ -4653,6 +4781,57 @@ pub(crate) fn loop_stop_reason(last_assistant: Option<&str>, iter: usize) -> Opt
         Some("◆ loop complete")
     } else if iter >= LOOP_MAX_ITERS {
         Some("◆ loop stopped — hit the iteration cap")
+    } else {
+        None
+    }
+}
+
+/// `/goal` runtime state: the generation of the in-flight goal turn, how many iterations have
+/// run, and how many tasks were done as of the last turn — so stalls (no task progress) can be
+/// detected alongside completion and the iteration cap.
+pub(crate) struct GoalState {
+    gen: u64,
+    iter: usize,
+    prev_done: usize,
+    no_progress: usize,
+    goal: String,
+}
+
+/// Absolute iteration ceiling so a goal that never signals completion can't run forever.
+pub(crate) const GOAL_MAX_ITERS: usize = 200;
+
+/// Consecutive turns with no task-list progress before a goal is declared wedged and stopped.
+pub(crate) const GOAL_NO_PROGRESS_MAX: usize = 6;
+
+/// Guidance injected on every goal turn: work the tracked plan, never stop for approval, and
+/// signal completion explicitly.
+pub(crate) const GOAL_GUIDANCE: &str = "You are in autonomous goal mode. Keep working through the \
+tracked task plan (update_tasks) one item at a time until the entire goal is met. Never stop to \
+ask for approval — you have standing authorization. When (and only when) every task is Done and \
+the goal is fully satisfied, reply with exactly GOAL COMPLETE on its own line and do nothing else.";
+
+/// The prompt each re-drive turn is given once the goal is running autonomously.
+pub(crate) const GOAL_CONTINUE_PROMPT: &str = "Continue the goal. Commit/push/PR any finished \
+work, then take the single highest-value not-done task and complete it end to end. Keep the \
+update_tasks plan current.";
+
+/// Decide whether a goal should stop after a turn. Returns `Some(reason)` to stop (shown to the
+/// user), or `None` to run another iteration. Pure so it's unit-testable.
+pub(crate) fn goal_stop_reason(
+    said_complete: bool,
+    done: usize,
+    total: usize,
+    iter: usize,
+    no_progress: usize,
+) -> Option<&'static str> {
+    if said_complete {
+        Some("🎯 goal complete")
+    } else if total > 0 && done == total {
+        Some("🎯 goal complete — all tasks done")
+    } else if iter >= GOAL_MAX_ITERS {
+        Some("🎯 goal stopped — iteration ceiling")
+    } else if no_progress >= GOAL_NO_PROGRESS_MAX {
+        Some("🎯 goal stalled — no task progress, stopping")
     } else {
         None
     }
@@ -5889,5 +6068,39 @@ mod tests {
         // Clearly-invalid prefixes are rejected so `--model` hard-stops without a catalog.
         assert!(!is_known_provider_prefix("nonsense"));
         assert!(!is_known_provider_prefix("gpt-5"));
+    }
+
+    #[test]
+    fn goal_stop_reason_stops_when_model_says_complete() {
+        assert_eq!(goal_stop_reason(true, 1, 3, 2, 0), Some("🎯 goal complete"));
+    }
+
+    #[test]
+    fn goal_stop_reason_stops_when_all_tasks_done() {
+        assert_eq!(
+            goal_stop_reason(false, 3, 3, 2, 0),
+            Some("🎯 goal complete — all tasks done")
+        );
+    }
+
+    #[test]
+    fn goal_stop_reason_stops_at_iteration_ceiling() {
+        assert_eq!(
+            goal_stop_reason(false, 1, 3, GOAL_MAX_ITERS, 0),
+            Some("🎯 goal stopped — iteration ceiling")
+        );
+    }
+
+    #[test]
+    fn goal_stop_reason_stops_when_wedged() {
+        assert_eq!(
+            goal_stop_reason(false, 1, 3, 2, GOAL_NO_PROGRESS_MAX),
+            Some("🎯 goal stalled — no task progress, stopping")
+        );
+    }
+
+    #[test]
+    fn goal_stop_reason_continues_with_open_tasks_and_progress() {
+        assert_eq!(goal_stop_reason(false, 1, 3, 2, 0), None);
     }
 }
