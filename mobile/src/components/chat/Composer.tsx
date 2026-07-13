@@ -47,7 +47,7 @@ const MAX_LINES = 6;
 const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
 const MIN_HEIGHT = 44;
 const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES;
-const COMMAND_CHIPS = ["/goal", "/undo", "/plan", "/compact", "/models", "/mode", "/help"] as const;
+const COMMAND_CHIPS = ["/goal", "/undo", "/plan", "/compact", "/uncompact", "/models", "/model", "/mode", "/effort", "/mesh", "/help"] as const;
 
 export interface ComposerProps {
   sessionId: string;
@@ -485,6 +485,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
                 setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
               }
               multiline
+              scrollEnabled={height >= MAX_HEIGHT}
               textAlignVertical="top"
               // Hidden while the ghost is showing — it renders the same "empty state" copy
               // itself, and both at once would double up.
