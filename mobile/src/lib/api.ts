@@ -33,7 +33,7 @@ export interface ConfigResponse {
 export interface ConfigField {
   key: string;
   group: string;
-  field_type: "bool" | "int" | "float" | "enum" | "list" | "json" | "text";
+  field_type: "bool" | "int" | "float" | "enum" | "list" | "text";
   label: string;
   help: string | null;
   options: string[];
@@ -49,12 +49,25 @@ export interface UpdateConfigRequest {
   scope: "user" | "project";
 }
 
-export interface SkillRow {
+export interface ModelsResponse {
+  catalog: "available" | "unavailable";
+  providers: ModelProvider[];
+}
+
+export interface ModelProvider {
+  provider: string;
+  models: ModelRow[];
+}
+
+export interface ModelRow {
+  id: string;
   name: string;
-  description: string;
-  scope: "builtin" | "user" | "project";
-  tier: string | null;
-  resources: number;
+  frontier: boolean;
+  free: boolean;
+  paid: boolean;
+  subscription: boolean;
+  estimated_cost_usd: number;
+  health: { until_epoch: number; reason: string } | null;
 }
 
 export interface UsageResponse {
@@ -340,6 +353,10 @@ export function discardSession(
   });
 }
 
+export function getModels(baseUrl: string): Promise<ModelsResponse> {
+  return request(baseUrl, "/api/models");
+}
+
 export function getConfig(baseUrl: string): Promise<ConfigResponse> {
   return request(baseUrl, "/api/config");
 }
@@ -349,10 +366,6 @@ export function updateConfig(baseUrl: string, body: UpdateConfigRequest): Promis
     method: "PUT",
     body: JSON.stringify(body),
   });
-}
-
-export function getSkills(baseUrl: string): Promise<SkillRow[]> {
-  return request(baseUrl, "/api/skills");
 }
 
 export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {
