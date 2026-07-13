@@ -26,6 +26,7 @@ import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { usePalette } from "../../../components/overlay/CommandPalette";
 import { SessionHeader } from "../../../components/session/SessionHeader";
 import { DuelSheet } from "../../../components/session/DuelSheet";
+import { PlanSheet } from "../../../components/session/PlanSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
@@ -60,6 +61,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const { isCompact } = useBreakpoint();
   const { snapshot, connectionState, send, setHeaderHeight, baseUrl, focusComposer } = useSessionCtx();
   const [duelVisible, setDuelVisible] = useState(false);
+  const [planVisible, setPlanVisible] = useState(false);
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
@@ -222,10 +224,12 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             onPalette={openPalette}
             onDuel={() => setDuelVisible(true)}
             onReplay={() => router.push(`/session/${sessionId}/replay`)}
+            onPlan={() => setPlanVisible(true)}
           />
         </View>
 
         <DuelSheet visible={duelVisible} onClose={() => setDuelVisible(false)} send={send} />
+        <PlanSheet visible={planVisible} onClose={() => setPlanVisible(false)} send={send} />
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />
