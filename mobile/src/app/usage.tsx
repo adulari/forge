@@ -65,18 +65,19 @@ export default function UsageScreen() {
   const selected = window === "week" ? query.data?.week : query.data?.session;
   const providers = selected?.providers ?? [];
   const hasSession = sessionId != null;
+  const { isError, isLoading, isRefetching, refetch, data } = query;
+  const quotaRows = data?.quota;
   const quotasByProvider = useMemo(() => {
-    const result = new Map<string, NonNullable<typeof query.data>["quota"]>();
-    for (const quota of query.data?.quota ?? []) {
+    const result = new Map<string, NonNullable<typeof data>["quota"]>();
+    for (const quota of quotaRows ?? []) {
       const rows = result.get(quota.provider) ?? [];
       rows.push(quota);
       result.set(quota.provider, rows);
     }
     return result;
-  }, [query.data?.quota]);
+  }, [quotaRows]);
   const renderItem = useCallback(({ item }: { item: UsageProvider; index: number }) => <ProviderRow provider={item} quotas={quotasByProvider.get(item.provider) ?? []} />, [quotasByProvider]);
   const keyExtractor = useCallback((provider: UsageProvider) => provider.provider, []);
-  const { isError, isLoading, isRefetching, refetch } = query;
   const totalTokens = (selected?.combined.inputTokens ?? 0) + (selected?.combined.outputTokens ?? 0);
   const header = useMemo(() => (
     <View style={styles.header}>
