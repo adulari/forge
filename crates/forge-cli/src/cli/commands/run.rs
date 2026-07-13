@@ -4230,7 +4230,7 @@ pub(crate) async fn run_chat_tui(
                             cap,
                             AUTO_COMPACT_THRESHOLD,
                         );
-                        if app.context_tokens as u64 > trigger {
+                        if app.context_tokens > trigger {
                             let fill = app.context_tokens as f64 / lim as f64;
                             app.note(&format!(
                                 "⚒ context {:.0}% full — auto-compacting",

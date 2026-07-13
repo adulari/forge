@@ -1508,7 +1508,7 @@ impl DriverState {
                     cap,
                     AUTO_COMPACT_THRESHOLD,
                 );
-                if self.app.context_tokens as u64 > trigger {
+                if self.app.context_tokens > trigger {
                     let fill = self.app.context_tokens as f64 / lim as f64;
                     self.app.note(&format!(
                         "⚒ context {:.0}% full — auto-compacting",
