@@ -54,7 +54,7 @@ export function Chip({ label, selected = false, onPress, disabled = false, icon,
         ]}
       >
         {icon ? <View style={styles.icon}>{icon}</View> : null}
-        <Text style={[type.meta, { color: selected ? tokens.accent : tokens.ink2 }]} numberOfLines={1}>
+          <Text style={[type.meta, styles.label, { color: selected ? tokens.accent : tokens.ink2 }]} numberOfLines={1}>
           {label}
         </Text>
       </Pressable>
@@ -69,7 +69,10 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: space.space12,
     minHeight: tapTarget,
+    maxWidth: "100%",
+    flexShrink: 1,
   },
+  label: { flexShrink: 1 },
   icon: {
     marginRight: space.space4,
   },
