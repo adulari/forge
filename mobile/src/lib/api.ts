@@ -57,6 +57,14 @@ export interface SkillRow {
   resources: number;
 }
 
+export interface HookRow {
+  event: string;
+  matcher: string | null;
+  command: string;
+  timeout_secs: number;
+  cc_compat: boolean;
+}
+
 export interface ModelsResponse {
   catalog: "available" | "unavailable";
   providers: ModelProvider[];
@@ -378,6 +386,10 @@ export function updateConfig(baseUrl: string, body: UpdateConfigRequest): Promis
     method: "PUT",
     body: JSON.stringify(body),
   });
+}
+
+export function getHooks(baseUrl: string): Promise<HookRow[]> {
+  return request(baseUrl, "/api/hooks");
 }
 
 export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {
