@@ -86,6 +86,7 @@ export default function ConfigurationScreen() {
     <Text style={[type.title, { color: tokens.ink }]}>Configuration</Text>
     <Text style={[type.sub, { color: tokens.ink3 }]}>Tune Forge’s effective settings. Changes save immediately.</Text>
     <Segmented options={[{ value: "user", label: "Everywhere" }, { value: "project", label: "This project" }]} value={scope} onChange={(value) => setScope(value as Scope)} />
+    <Card><Text style={[type.sub, { color: tokens.ink2 }]}>Saved settings apply to new Forge sessions. Restart forge serve to reload daemon-wide behavior.</Text></Card>
     {query.isError ? <Card><Text style={[type.body, { color: tokens.danger }]}>Could not load configuration. Pull to retry.</Text></Card> : null}
     {query.isLoading ? <Card><Text style={[type.body, { color: tokens.ink3 }]}>Loading your effective configuration…</Text></Card> : null}
     {groups.map(([group, fields]) => <View key={group}><SectionHeader>{group}</SectionHeader><Card padded={false}>{fields.map((field, index) => <ConfigFieldRow key={field.key} field={field} scope={scope} />)}</Card></View>)}
