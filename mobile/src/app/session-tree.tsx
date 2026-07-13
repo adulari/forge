@@ -66,7 +66,7 @@ export default function SessionTreeScreen() {
           const relation = orphaned ? "original parent unavailable" : isFork ? `forked at message ${node.forked_at_seq ?? "—"}` : "session root";
           return (
             <Pressable key={node.id} onPress={() => router.push(`/session/${node.id}`)} accessibilityRole="button" accessibilityLabel={`Open ${titleFor(node)}`}>
-              <View style={[styles.branch, { marginLeft: depth * space.space16, borderLeftColor: depth > 0 ? tokens.border : "transparent" }]}>
+              <View style={[styles.branch, { marginLeft: Math.min(depth, 6) * space.space16, borderLeftColor: depth > 0 ? tokens.border : "transparent" }]}>
                 <Card style={styles.node}>
                   <Text style={[type.body, { color: tokens.ink }]} numberOfLines={1}>{titleFor(node)}</Text>
                   <Text style={[type.sub, { color: tokens.ink3 }]} numberOfLines={1}>{relation} · {formatRelativeTime(node.created_at * 1000)} · {shortId(node.id)}</Text>
