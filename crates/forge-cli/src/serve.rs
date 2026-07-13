@@ -538,6 +538,10 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(&format!("{base}/api/sessions/past"), get(past_sessions))
         .route(&format!("{base}/api/sessions/tree"), get(session_tree))
         .route(
+            &format!("{base}/api/sessions/{{id}}/fork"),
+            post(fork_session),
+        )
+        .route(
             &format!("{base}/api/sessions/{{id}}/archive"),
             post(archive_session),
         )
@@ -803,6 +807,71 @@ async fn create_session(
         Err(e) => err_response(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             &format!("session create failed: {e}"),
+        ),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForkSessionReq {
+    at_seq: i64,
+}
+
+async fn fork_session(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id): AxumPath<String>,
+    axum::Json(req): axum::Json<ForkSessionReq>,
+) -> Response {
+    let store = state.store.clone();
+    let source = id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let cwd = store
+            .session_cwd(&source)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "no such session".to_string())?;
+        let fork_id = store
+            .fork_session(&source, req.at_seq)
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>((fork_id, cwd))
+    })
+    .await;
+    let (fork_id, cwd) = match result {
+        Ok(Ok(value)) => value,
+        Ok(Err(message)) if message == "no such session" => {
+            return err_response(axum::http::StatusCode::NOT_FOUND, &message)
+        }
+        Ok(Err(message)) => return err_response(axum::http::StatusCode::BAD_REQUEST, &message),
+        Err(_) => {
+            return err_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "could not create session fork",
+            )
+        }
+    };
+    let spec = DriverSpec {
+        cwd,
+        worktree: None,
+        title: format!("Fork of {}", &id[..id.len().min(8)]),
+        mock: state.mock,
+        model: None,
+        resume: Some(fork_id.clone()),
+        temper: None,
+        push: state.push.clone(),
+        apns: state.apns.clone(),
+    };
+    match spawn_session_driver(spec).await {
+        Ok(handle) => {
+            let handle = state.registry.insert(handle).await;
+            json_response(&serde_json::json!({
+                "id": handle.session_id,
+                "title": handle.title,
+                "cwd": handle.cwd,
+                "worktree": handle.worktree,
+            }))
+        }
+        Err(error) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("fork start failed: {error}"),
         ),
     }
 }

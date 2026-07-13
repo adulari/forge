@@ -34,6 +34,10 @@ import {
   createMcpServer,
   type McpResponse,
   getMcp,
+||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
+
+  type ForkSessionRequest,
+  forkSession,
   answer as apiAnswer,
   archiveSession,
   type CreateSessionRequest,
@@ -231,6 +235,15 @@ export function useSessionWeeklyDelta(sessionId: string | null) {
   const baseline = baselines.get(key) ?? current;
   return { mode: "subscription" as const, provider: provider.provider, deltaPct: Math.max(0, current - baseline) * 100, weeklyFraction: current };
 }
+export function useForkSession() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: ForkSessionRequest }) => forkSession(baseUrl as string, id, body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessions }),
+  });
+}
+
 export function useCreateSession() {
   const { baseUrl } = useAuth();
   const queryClient = useQueryClient();
