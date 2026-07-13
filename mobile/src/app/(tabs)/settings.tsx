@@ -332,6 +332,11 @@ export default function SettingsScreen() {
             onPress={() => router.push("/hooks")}
           />
           <ListRow
+            title="Session tree"
+            subtitle="Browse forks and conversation ancestry"
+            onPress={() => router.push("/session-tree")}
+          />
+          <ListRow
             title="Connection health"
             subtitle={healthCopy}
             leading={<Badge label={health === "checking" ? "checking" : health === "ok" ? "online" : "attention"} tone={healthTone} />}

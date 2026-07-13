@@ -12,6 +12,8 @@ import { useIsFocused } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 
 import {
+  type SessionTreeRow,
+  getSessionTree,
   type HookRow,
   getHooks,
   type SkillRow,
@@ -59,6 +61,7 @@ const baselines = new Map<string, number>();
 function keys(baseUrl: string | null) {
   return {
     sessions: ["sessions", baseUrl] as const,
+    sessionTree: ["sessions", "tree", baseUrl] as const,
     pastSessions: ["sessions", "past", baseUrl] as const,
     history: (sessionId: string) => ["history", baseUrl, sessionId] as const,
     config: ["config", baseUrl] as const,
@@ -136,6 +139,15 @@ export function useHistory(sessionId: string | null) {
       lastPage.length < HISTORY_PAGE_SIZE
         ? undefined
         : lastPage[lastPage.length - 1]?.seq,
+  });
+}
+
+export function useSessionTree() {
+  const { baseUrl } = useAuth();
+  return useQuery<SessionTreeRow[]>({
+    queryKey: keys(baseUrl).sessionTree,
+    queryFn: () => getSessionTree(baseUrl as string),
+    enabled: baseUrl != null,
   });
 }
 
