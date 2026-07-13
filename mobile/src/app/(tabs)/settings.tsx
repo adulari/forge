@@ -312,6 +312,11 @@ export default function SettingsScreen() {
             onPress={() => router.push("/usage")}
           />
           <ListRow
+            title="Session tree"
+            subtitle="Browse forks and conversation ancestry"
+            onPress={() => router.push("/session-tree")}
+          />
+          <ListRow
             title="Configuration"
             subtitle="Mesh, models, providers, and runtime behavior"
             onPress={() => router.push("/configuration")}

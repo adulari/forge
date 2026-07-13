@@ -16,6 +16,8 @@ import {
   type UpdateConfigRequest,
   getConfig,
   updateConfig,
+  type SessionTreeRow,
+  getSessionTree,
   answer as apiAnswer,
   archiveSession,
   type CreateSessionRequest,
@@ -56,6 +58,7 @@ function keys(baseUrl: string | null) {
     pastSessions: ["sessions", "past", baseUrl] as const,
     history: (sessionId: string) => ["history", baseUrl, sessionId] as const,
     config: ["config", baseUrl] as const,
+    sessionTree: ["sessions", "tree", baseUrl] as const,
   };
 }
 
@@ -127,6 +130,15 @@ export function useHistory(sessionId: string | null) {
       lastPage.length < HISTORY_PAGE_SIZE
         ? undefined
         : lastPage[lastPage.length - 1]?.seq,
+  });
+}
+
+export function useSessionTree() {
+  const { baseUrl } = useAuth();
+  return useQuery<SessionTreeRow[]>({
+    queryKey: keys(baseUrl).sessionTree,
+    queryFn: () => getSessionTree(baseUrl as string),
+    enabled: baseUrl != null,
   });
 }
 

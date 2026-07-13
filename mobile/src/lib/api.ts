@@ -49,6 +49,8 @@ export interface UpdateConfigRequest {
   scope: "user" | "project";
 }
 
+export interface SessionTreeRow { id: string; forked_from: string | null; forked_at_seq: number | null; created_at: number; }
+
 export interface UsageResponse {
   week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
   session: { sessionId: string; combined: UsageTotals; providers: UsageProvider[] } | null;
@@ -342,6 +344,8 @@ export function updateConfig(baseUrl: string, body: UpdateConfigRequest): Promis
     body: JSON.stringify(body),
   });
 }
+
+export function getSessionTree(baseUrl: string): Promise<SessionTreeRow[]> { return request(baseUrl, "/api/sessions/tree"); }
 
 export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {
   return request(baseUrl, `/api/usage${qs({ session })}`);
