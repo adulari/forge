@@ -59,7 +59,7 @@ function ConfigFieldRow({ field, scope }: { field: ConfigField; scope: Scope }) 
         },
       },
     );
-  }, [field.default, field.key, field.value, mutation, scope]);
+  }, [field.default, field.field_type, field.key, field.value, mutation, scope]);
 
   const subtitle = error ?? (saved ? "Saved" : field.help ?? `${field.key} · ${field.source}`);
   if (field.field_type === "bool") {
