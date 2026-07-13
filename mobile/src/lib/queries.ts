@@ -12,6 +12,8 @@ import { useIsFocused } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 
 import {
+  type SkillRow,
+  getSkills,
   type ConfigResponse,
   type UpdateConfigRequest,
   getConfig,
@@ -56,6 +58,7 @@ function keys(baseUrl: string | null) {
     pastSessions: ["sessions", "past", baseUrl] as const,
     history: (sessionId: string) => ["history", baseUrl, sessionId] as const,
     config: ["config", baseUrl] as const,
+    skills: ["skills", baseUrl] as const,
   };
 }
 
@@ -127,6 +130,15 @@ export function useHistory(sessionId: string | null) {
       lastPage.length < HISTORY_PAGE_SIZE
         ? undefined
         : lastPage[lastPage.length - 1]?.seq,
+  });
+}
+
+export function useSkills() {
+  const { baseUrl } = useAuth();
+  return useQuery<SkillRow[]>({
+    queryKey: keys(baseUrl).skills,
+    queryFn: () => getSkills(baseUrl as string),
+    enabled: baseUrl != null,
   });
 }
 

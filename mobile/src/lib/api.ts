@@ -49,6 +49,14 @@ export interface UpdateConfigRequest {
   scope: "user" | "project";
 }
 
+export interface SkillRow {
+  name: string;
+  description: string;
+  scope: "builtin" | "user" | "project";
+  tier: string | null;
+  resources: number;
+}
+
 export interface UsageResponse {
   week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
   session: { sessionId: string; combined: UsageTotals; providers: UsageProvider[] } | null;
@@ -341,6 +349,10 @@ export function updateConfig(baseUrl: string, body: UpdateConfigRequest): Promis
     method: "PUT",
     body: JSON.stringify(body),
   });
+}
+
+export function getSkills(baseUrl: string): Promise<SkillRow[]> {
+  return request(baseUrl, "/api/skills");
 }
 
 export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {
