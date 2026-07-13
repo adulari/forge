@@ -28,6 +28,7 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
         <Text style={[typeScale.bodyBold, { color: tokens.success }]}>≈ +{weekly.deltaPct.toFixed(1)}% of weekly quota this session</Text>
         <Text style={[typeScale.meta, { color: tokens.ink3 }]}>Approximate — may be off if other sessions or tools share this {weekly.provider} subscription.</Text>
       </> : <Text style={[typeScale.bodyBold, { color: tokens.success }]}>cost {formatCost(costUsd)}</Text>}
+      <View style={styles.meshAction}><Pressable onPress={() => { if (send({ kind: "prompt", text: "/mesh" })) onClose(); }} accessibilityRole="button" style={[styles.meshButton, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.accent }]}>Explain mesh routing</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>See why Forge would choose this model</Text></Pressable></View>
       <View style={[styles.rows, { borderTopColor: tokens.border }]}>
         <KeyValueRow label="Tier" value={tier ?? "—"} />
         <KeyValueRow label="Model" value={model} />
@@ -47,4 +48,4 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
     </View>
   </Sheet>;
 }
-const styles = StyleSheet.create({ content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space8 }, rows: { borderTopWidth: StyleSheet.hairlineWidth }, options: { gap: space.space8 }, option: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 } });
+const styles = StyleSheet.create({ content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space8 }, meshAction: { paddingVertical: space.space4 }, meshButton: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, rows: { borderTopWidth: StyleSheet.hairlineWidth }, options: { gap: space.space8 }, option: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 } });
