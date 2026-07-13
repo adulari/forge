@@ -251,7 +251,12 @@ export default function HistoryScreen() {
         autoCorrect={false}
         containerStyle={styles.search}
       />
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filters}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.filtersScroll}
+        contentContainerStyle={styles.filters}
+      >
         {FILTERS.map((option) => (
           <Chip
             key={option.value}
@@ -332,6 +337,10 @@ export default function HistoryScreen() {
 const styles = StyleSheet.create({
   screenPad: { paddingTop: space.space12 },
   search: { marginBottom: space.space8 },
+  // A horizontal ScrollView stretches on its cross-axis inside a flex column on
+  // react-native-web (harmless on native), ballooning to fill the screen and
+  // shoving the list far down — the History "empty gap". Pin it to its content height.
+  filtersScroll: { flexGrow: 0, flexShrink: 0 },
   filters: { gap: space.space8, paddingBottom: space.space8 },
   listPad: { paddingBottom: space.space32 },
   rowBg: { position: "relative" },
