@@ -516,6 +516,7 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
             get(list_sessions).post(create_session),
         )
         .route(&format!("{base}/api/sessions/past"), get(past_sessions))
+        .route(&format!("{base}/api/sessions/tree"), get(session_tree))
         .route(
             &format!("{base}/api/sessions/{{id}}/archive"),
             post(archive_session),
@@ -793,6 +794,37 @@ async fn archive_session(
     }
     let _ = state.store.archive_session(&id);
     json_response(&serde_json::json!({ "ok": true }))
+}
+
+#[derive(serde::Serialize)]
+struct SessionTreeRow {
+    id: String,
+    forked_from: Option<String>,
+    forked_at_seq: Option<i64>,
+    created_at: i64,
+}
+
+async fn session_tree(State(state): State<Arc<DaemonState>>) -> Response {
+    let store = state.store.clone();
+    match tokio::task::spawn_blocking(move || store.fork_nodes()).await {
+        Ok(Ok(nodes)) => json_response(
+            &nodes
+                .into_iter()
+                .map(
+                    |(id, forked_from, forked_at_seq, created_at)| SessionTreeRow {
+                        id,
+                        forked_from,
+                        forked_at_seq,
+                        created_at,
+                    },
+                )
+                .collect::<Vec<_>>(),
+        ),
+        _ => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read session tree",
+        ),
+    }
 }
 
 /// One row of `GET /api/sessions/past` — a persisted session the user could resurrect. Distinct

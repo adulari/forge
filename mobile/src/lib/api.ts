@@ -86,6 +86,13 @@ export interface ModelRow {
   health: { until_epoch: number; reason: string } | null;
 }
 
+export interface SessionTreeRow {
+  id: string;
+  forked_from: string | null;
+  forked_at_seq: number | null;
+  created_at: number;
+}
+
 export interface UsageResponse {
   week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
   session: { sessionId: string; combined: UsageTotals; providers: UsageProvider[] } | null;
@@ -336,6 +343,10 @@ export function createSession(
     method: "POST",
     body: JSON.stringify(body),
   });
+}
+
+export function getSessionTree(baseUrl: string): Promise<SessionTreeRow[]> {
+  return request(baseUrl, "/api/sessions/tree");
 }
 
 export function getPastSessions(
