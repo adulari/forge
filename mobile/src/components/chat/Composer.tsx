@@ -48,6 +48,7 @@ const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
 const MIN_HEIGHT = 44;
 const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES;
 const COMMAND_CHIPS = ["/goal", "/undo", "/plan", "/compact", "/uncompact", "/models", "/model", "/mode", "/effort", "/mesh", "/help"] as const;
+const COMMAND_HINT_LIMIT = 6;
 
 export interface ComposerProps {
   sessionId: string;
@@ -146,7 +147,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const stopIconStyle = useAnimatedStyle(() => ({ opacity: actionProgress.value, transform: [{ scale: 0.8 + actionProgress.value * 0.2 }] }));
   const sendIconStyle = useAnimatedStyle(() => ({ opacity: 1 - actionProgress.value, transform: [{ scale: 1 - actionProgress.value * 0.2 }] }));
 
-  const commandHints = COMMAND_CHIPS.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase()));
+  const commandHints = COMMAND_CHIPS.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase())).slice(0, COMMAND_HINT_LIMIT);
 
   // `suggestedPrompt` keeps echoing the STALE pre-send value for a beat after a send clears the
   // draft (the daemon hasn't refreshed it yet) — `suppressedSuggestion` (SessionContext, set in
@@ -429,7 +430,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
         <View style={styles.chipsRow}>
           {text.length === 0 ? <Chip label="goal" icon={<Sparkles size={14} strokeWidth={1.75} color={tokens.ink3} />} onPress={() => setGoalVisible(true)} testID="chip-goal" /> : null}
           {text.length === 0 || text.startsWith("/") ? commandHints.map((cmd) => (
-            <Chip key={cmd} label={cmd} onPress={() => commit(cmd)} testID={`chip-${cmd}`} />
+            <Chip key={cmd} label={cmd} onPress={() => { setText(cmd); requestAnimationFrame(() => inputRef.current?.focus()); }} testID={`chip-${cmd}`} />
           )) : null}
           {lastPrompt ? (
             <Chip
