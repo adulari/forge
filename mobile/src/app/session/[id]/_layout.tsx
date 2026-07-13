@@ -221,6 +221,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             onBack={() => goBackOr("/(tabs)")}
             onPalette={openPalette}
             onDuel={() => setDuelVisible(true)}
+            onReplay={() => router.push(`/session/${sessionId}/replay`)}
           />
         </View>
 
