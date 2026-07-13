@@ -1,5 +1,5 @@
 import { router } from "expo-router";
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
@@ -34,6 +34,12 @@ function ConfigFieldRow({ field, scope }: { field: ConfigField; scope: Scope }) 
   const [draft, setDraft] = useState(field.value);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setDraft(field.value);
+    setError(null);
+    setSaved(false);
+  }, [field.key, field.value]);
 
   const save = useCallback((value: string | undefined) => {
     if (field.field_type === "json" && value != null) {
@@ -94,8 +100,8 @@ export default function ConfigurationScreen() {
   return <DesktopDrillDown><Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
     <Pressable onPress={() => router.back()} accessibilityRole="button"><Text style={[styles.back, { color: tokens.accent }]}>‹ Settings</Text></Pressable>
     <Text style={[type.title, { color: tokens.ink }]}>Configuration</Text>
-    <Text style={[type.sub, { color: tokens.ink3 }]}>Tune Forge’s effective settings. Changes save immediately.</Text>
-    <Segmented options={[{ value: "user", label: "Everywhere" }, { value: "project", label: "This project" }]} value={scope} onChange={(value) => setScope(value as Scope)} />
+    <Text style={[type.sub, { color: tokens.ink3 }]}>Tune Forge’s effective settings. Choose where edits are saved.</Text>
+    <Segmented options={[{ value: "user", label: "Save everywhere" }, { value: "project", label: "Save in project" }]} value={scope} onChange={(value) => setScope(value as Scope)} />
     <Card><Text style={[type.sub, { color: tokens.ink2 }]}>Saved settings apply to new Forge sessions. Restart forge serve to reload daemon-wide behavior.</Text></Card>
     {query.isError ? <Card><Text style={[type.body, { color: tokens.danger }]}>Could not load configuration. Pull to retry.</Text></Card> : null}
     {query.isLoading ? <Card><Text style={[type.body, { color: tokens.ink3 }]}>Loading your effective configuration…</Text></Card> : null}
