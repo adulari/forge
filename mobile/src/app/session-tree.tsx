@@ -1,8 +1,9 @@
 import { router } from "expo-router";
 import { GitBranch } from "lucide-react-native";
 import React, { useMemo } from "react";
-import { Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
+import { Pressable, RefreshControl, StyleSheet, Text } from "react-native";
 
+import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { Card } from "../components/ds/Card";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
@@ -43,7 +44,8 @@ export default function SessionTreeScreen() {
   const rows = useMemo(() => flattenTree(query.data ?? []), [query.data]);
 
   return (
-    <Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
+    <DesktopDrillDown>
+      <Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
       <Pressable onPress={() => router.back()} accessibilityRole="button">
         <Text style={[styles.back, { color: tokens.accent }]}>‹ Settings</Text>
       </Pressable>
@@ -59,7 +61,8 @@ export default function SessionTreeScreen() {
           </Card>
         </Pressable>
       ))}
-    </Screen>
+      </Screen>
+    </DesktopDrillDown>
   );
 }
 
