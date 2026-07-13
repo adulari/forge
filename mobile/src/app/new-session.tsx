@@ -17,6 +17,7 @@ import { Checkbox } from "../components/ds/Checkbox";
 import { IconButton } from "../components/ds/IconButton";
 import { Input } from "../components/ds/Input";
 import { Screen } from "../components/ds/Screen";
+import { Segmented } from "../components/ds/Segmented";
 import { ApiError } from "../lib/api";
 import { goBackOr } from "../lib/nav";
 import { useCreateSession } from "../lib/queries";
@@ -34,6 +35,7 @@ export default function NewSessionScreen() {
   const [title, setTitle] = useState("");
   const [model, setModel] = useState("");
   const [worktree, setWorktree] = useState(false);
+  const [temper, setTemper] = useState<"Read-only" | "Ask" | "Auto-edit" | "Full">("Ask");
   const [validationError, setValidationError] = useState<string | null>(null);
   const create = useCreateSession();
 
@@ -50,6 +52,7 @@ export default function NewSessionScreen() {
         title: title.trim() || undefined,
         model: model.trim() || undefined,
         worktree,
+        temper,
       },
       {
         onSuccess: (res) => {
@@ -57,7 +60,7 @@ export default function NewSessionScreen() {
         },
       },
     );
-  }, [cwd, title, model, worktree, create]);
+  }, [cwd, title, model, worktree, temper, create]);
 
   const onClose = useCallback(() => goBackOr("/(tabs)"), []);
 
@@ -140,6 +143,12 @@ export default function NewSessionScreen() {
             returnKeyType="done"
             onSubmitEditing={handleSubmit}
           />
+
+          <View style={styles.worktreeBlock}>
+            <Text style={[typeScale.body, { color: tokens.ink }]}>Run mode</Text>
+            <Segmented options={[{ value: "Read-only", label: "Read" }, { value: "Ask", label: "Ask" }, { value: "Auto-edit", label: "Edit" }, { value: "Full", label: "Full" }]} value={temper} onChange={setTemper} />
+            <Text style={[typeScale.sub, { color: tokens.ink3 }]}>{temper === "Read-only" ? "inspect without making changes" : temper === "Ask" ? "ask before edits and commands" : temper === "Auto-edit" ? "apply edits automatically; ask for risky commands" : "full autonomy — use only in trusted projects"}</Text>
+          </View>
 
           <View style={styles.worktreeBlock}>
             <View style={styles.worktreeRow}>
