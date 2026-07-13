@@ -33,7 +33,7 @@ export interface ConfigResponse {
 export interface ConfigField {
   key: string;
   group: string;
-  field_type: "bool" | "int" | "float" | "enum" | "list" | "text";
+  field_type: "bool" | "int" | "float" | "enum" | "list" | "json" | "text";
   label: string;
   help: string | null;
   options: string[];
