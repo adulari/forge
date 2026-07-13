@@ -276,6 +276,10 @@ impl Router for LlmRouter {
             }
         }
     }
+
+    fn trivial_candidates(&self) -> Vec<String> {
+        self.fallback.trivial_candidates()
+    }
 }
 
 #[cfg(test)]

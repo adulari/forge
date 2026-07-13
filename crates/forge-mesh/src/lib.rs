@@ -177,6 +177,13 @@ pub trait Router: Send + Sync {
                 .await,
         ]
     }
+
+    /// Ordered trivial-tier candidate shortlist (health applied by the caller). Default empty so
+    /// non-classifying routers are unaffected. Used to route cheap side-calls (classify, compact)
+    /// with real failover instead of a single fixed model.
+    fn trivial_candidates(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 // --- Classification signals (weighted scoring; see `classify`). Capability over length. ---
@@ -1212,6 +1219,10 @@ impl Router for HeuristicRouter {
                 pinned: false,
             })
             .collect()
+    }
+
+    fn trivial_candidates(&self) -> Vec<String> {
+        self.classifier_candidates()
     }
 }
 

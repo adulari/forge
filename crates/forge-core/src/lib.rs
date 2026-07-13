@@ -984,6 +984,37 @@ fn continuation_decision(
     ContinuationDecision::Nudge
 }
 
+/// Build the failover chain for a cheap trivial-tier side-call (compaction, classification):
+/// the health-filtered top-3 of `trivial` (the router's ranked shortlist) FIRST, then `routed`
+/// (the routed model + its failover chain — preserves the pre-existing rate-limit failover so a
+/// 429 on the summarizer walks to the routed fallback), then `guaranteed` (the session's own,
+/// reachable model) last as a can't-exhaust backstop. Order-preserving dedup, empties dropped, and
+/// never empty. Pure/no I/O so it's offline-unit-testable without a live router.
+fn compact_candidate_chain(
+    trivial: Vec<String>,
+    routed: Vec<String>,
+    guaranteed: &str,
+    is_benched: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |m: String, out: &mut Vec<String>| {
+        if !m.is_empty() && !out.iter().any(|x| x == &m) {
+            out.push(m);
+        }
+    };
+    for m in trivial.into_iter().filter(|m| !is_benched(m)).take(3) {
+        add(m, &mut out);
+    }
+    for m in routed {
+        add(m, &mut out);
+    }
+    add(guaranteed.to_string(), &mut out);
+    if out.is_empty() {
+        out.push(guaranteed.to_string());
+    }
+    out
+}
+
 /// Classify a tool RESULT string as a failure of a given kind, or `None` if it looks like a success.
 ///
 /// Anchored on the markers Forge actually produces for failures (`invoke_tool` returns `"error: …"`
@@ -3102,12 +3133,25 @@ Rules:\n\
             .await;
 
         let messages = [Message::system(COMPACT_SYSTEM), Message::user(rendered)];
-        // Fail over down the routed chain on a transient error: a rate-limited summarizer must not
-        // kill the turn — compaction also runs mid-failover (admit_failover_model), so a dead
-        // model here would otherwise abort an otherwise-recoverable turn.
+        // Compaction must NEVER hard-fail because a cheap trivial model is unreachable (e.g. a
+        // local ollama model when ollama isn't running): losing the summary drops the task plan
+        // with it. Mirror the LLM classifier's approach (#648): try the top trivial candidates,
+        // then fall back to the session's OWN model, which is guaranteed reachable.
         let failover = self.config.mesh.failover;
-        let mut chain = decision.fallbacks.clone().into_iter();
-        let mut model = self.auxiliary_model(&decision);
+        let guaranteed = self
+            .pinned_model()
+            .map(str::to_string)
+            .unwrap_or_else(|| decision.model.clone());
+        // The routed model + its failover chain, preserved so a rate-limited summarizer still walks
+        // to the routed fallback (not just to the guaranteed model).
+        let mut routed = vec![self.auxiliary_model(&decision)];
+        routed.extend(decision.fallbacks.clone());
+        let candidates =
+            compact_candidate_chain(self.router.trivial_candidates(), routed, &guaranteed, |m| {
+                health.is_benched(m)
+            });
+        let mut chain = candidates.into_iter();
+        let mut model = chain.next().expect("compact_candidate_chain is non-empty");
         let resp = loop {
             let mut sink = |_: StreamEvent| {};
             match self
@@ -3116,7 +3160,12 @@ Rules:\n\
                 .await
             {
                 Ok(r) => break r,
-                Err(e) if failover && e.is_retryable() => {
+                // Advance on ANY error (not just retryable ones) while failover is on: a
+                // PERMANENT error on a cheap trivial model (e.g. "provider unavailable" because
+                // ollama isn't running) must still walk the chain to the guaranteed model instead
+                // of aborting — `advance_fallback` already excludes/benches the dead model
+                // appropriately either way.
+                Err(e) if failover => {
                     match self.advance_fallback(&model, &e, &mut chain, "compact") {
                         Some(next) => model = next,
                         None => return Err(CoreError::Provider(e)),
@@ -8205,6 +8254,72 @@ mod tests {
             continuation_decision(false, true, 0.10, CONTINUATION_MAX, 0),
             ContinuationDecision::Accept
         );
+    }
+
+    // ── compact's trivial-tier failover chain — pure decision, offline-unit-tested ─────────────
+    fn routed(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn compact_candidate_chain_filters_benched_models() {
+        let trivial = vec!["ollama::llama3.2".to_string(), "groq::fast".to_string()];
+        let chain =
+            compact_candidate_chain(trivial, routed(&["aux::fallback"]), "session::model", |m| {
+                m == "ollama::llama3.2"
+            });
+        assert_eq!(chain, vec!["groq::fast", "aux::fallback", "session::model"]);
+    }
+
+    #[test]
+    fn compact_candidate_chain_caps_trivial_at_three_then_appends_routed_and_guaranteed() {
+        let trivial = vec![
+            "a::one".to_string(),
+            "b::two".to_string(),
+            "c::three".to_string(),
+            "d::four".to_string(),
+        ];
+        let chain = compact_candidate_chain(
+            trivial,
+            routed(&["aux::fallback"]),
+            "session::model",
+            |_| false,
+        );
+        assert_eq!(
+            chain,
+            vec![
+                "a::one",
+                "b::two",
+                "c::three",
+                "aux::fallback",
+                "session::model"
+            ]
+        );
+    }
+
+    #[test]
+    fn compact_candidate_chain_includes_routed_fallbacks_when_trivial_is_empty() {
+        // Regression: an empty trivial shortlist must still fail over down the ROUTED chain (the
+        // rate-limited-summarizer path), not collapse to just the guaranteed model.
+        let chain = compact_candidate_chain(
+            Vec::new(),
+            routed(&["bad::model", "good::model"]),
+            "bad::model",
+            |_| false,
+        );
+        assert_eq!(chain, vec!["bad::model", "good::model"]);
+    }
+
+    #[test]
+    fn compact_candidate_chain_does_not_duplicate_an_already_present_guaranteed_model() {
+        let trivial = vec!["a::one".to_string(), "session::model".to_string()];
+        let chain = compact_candidate_chain(
+            trivial,
+            routed(&["session::model"]),
+            "session::model",
+            |_| false,
+        );
+        assert_eq!(chain, vec!["a::one", "session::model"]);
     }
 
     #[test]
