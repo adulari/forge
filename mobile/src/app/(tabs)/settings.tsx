@@ -177,8 +177,12 @@ export default function SettingsScreen() {
   const healthTone: BadgeTone = health === "ok" ? "success" : health === "idle" ? "neutral" : health === "checking" ? "warn" : "danger";
 
   const onAppLockChange = (value: boolean) => {
+    const previous = appLock;
     setAppLock(value);
-    void AsyncStorage.setItem(APP_LOCK_KEY, value ? "true" : "false");
+    void AsyncStorage.setItem(APP_LOCK_KEY, value ? "true" : "false").catch(() => {
+      setAppLock(previous);
+      toast.show("couldn't save app lock preference.", { tone: "danger" });
+    });
   };
 
   const onHapticsChange = (value: boolean) => {

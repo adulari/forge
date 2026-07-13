@@ -181,18 +181,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         host: parsed.host,
         addedAt: Date.now(),
       };
-      // Replace an existing entry for the same baseUrl instead of duplicating it.
-      const next = [...servers.filter((s) => s.baseUrl !== server.baseUrl), server];
+      const existing = servers.find((item) => item.baseUrl === server.baseUrl);
+      const replacement = existing ? { ...server, id: existing.id, addedAt: existing.addedAt } : server;
+      const next = [...servers.filter((item) => item.baseUrl !== replacement.baseUrl), replacement];
       await saveServers(next);
       const shouldActivate = options?.setActive ?? true;
       if (shouldActivate) {
-        await setSecureItem(ACTIVE_SERVER_KEY, server.id);
+        await setSecureItem(ACTIVE_SERVER_KEY, replacement.id);
       }
       setServers(next);
       if (shouldActivate) {
-        setActiveServerId(server.id);
+        setActiveServerId(replacement.id);
       }
-      return server;
+      return replacement;
     },
     [servers],
   );

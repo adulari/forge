@@ -3,6 +3,7 @@ import { Copy, Quote } from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
+import { displayMessageText } from "./MessageRow";
 import type { HistoryRow } from "../../lib/api";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
@@ -26,7 +27,7 @@ function firstCodeBlock(text: string): string | null {
 export function MessageActionsSheet({ visible, message, onClose, onQuote }: MessageActionsSheetProps) {
   const tokens = useTokens();
   const toast = useToast();
-  const text = message?.content ?? "";
+  const text = message ? displayMessageText(message) : "";
   const code = firstCodeBlock(text);
 
   const copy = async (value: string) => {

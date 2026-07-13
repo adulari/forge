@@ -88,6 +88,12 @@ function mentionsFromContent(content: string): {
   return { text: m[2], files, images };
 }
 
+export function displayMessageText(row: HistoryRow): string {
+  if (row.role === "user") return mentionsFromContent(row.content).text;
+  if (row.role === "assistant") return parseReasoning(row.content).answer;
+  return row.content;
+}
+
 function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   const tokens = useTokens();
   const entrance = useForgeline(Math.max(0, row.seq));
@@ -125,7 +131,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   // Per-block `selectable` Text (Markdown.tsx) can't drag-select across paragraphs, and there
   // was no way to grab a whole reply at once — one tap/long-press now copies the full row:
   // the parsed answer (no `<think>` block) for assistant turns, else the plain row text.
-  const copyText = parsed ? parsed.answer : isUser ? userText : row.content;
+  const copyText = displayMessageText(row);
   const onCopyRow = async () => {
     await Clipboard.setStringAsync(copyText);
     toast.show("message copied");

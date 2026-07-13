@@ -1,11 +1,11 @@
 import { Cpu } from "lucide-react-native";
-import { router } from "expo-router";
 import React, { memo, useCallback, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { Badge } from "../components/ds/Badge";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { BoundedList } from "../components/ds/BoundedList";
+import { BackLink } from "../components/ds/BackLink";
 import { Card } from "../components/ds/Card";
 import { Screen } from "../components/ds/Screen";
 import { EmptyState } from "../components/ds/EmptyState";
@@ -87,7 +87,7 @@ export default function UsageScreen() {
   const totalTokens = (selected?.combined.inputTokens ?? 0) + (selected?.combined.outputTokens ?? 0);
   const header = useMemo(() => (
     <View style={styles.header}>
-      <Pressable onPress={() => router.back()} accessibilityRole="button"><Text style={[styles.back, { color: tokens.accent }]}>‹ Settings</Text></Pressable>
+      <BackLink />
       <Text style={[type.title, { color: tokens.ink }]}>Usage</Text>
       <Text style={[styles.subtitle, { color: tokens.ink3 }]}>A clear read on your Forge consumption.</Text>
       <Segmented options={[{ value: "week", label: "This Week" }, { value: "session", label: "This Session" }]} value={window} onChange={setWindow} />

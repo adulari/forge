@@ -326,8 +326,9 @@ export default function HistoryScreen() {
         onCancel={() => setConfirmRow(null)}
       />
       {resumingId ? (
-        <View style={[StyleSheet.absoluteFill, styles.resumeOverlay, { backgroundColor: tokens.overlayScrim }]}>
+        <View style={[StyleSheet.absoluteFill, styles.resumeOverlay, { backgroundColor: tokens.overlayScrim }]} accessibilityViewIsModal accessibilityRole="alert" accessibilityLabel="Resuming session">
           <ActivityIndicator color={tokens.accent} />
+          <Text style={[type.body, { color: tokens.ink }]}>Resuming session…</Text>
         </View>
       ) : null}
     </Screen>

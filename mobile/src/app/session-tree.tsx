@@ -1,9 +1,10 @@
 import { router } from "expo-router";
 import { GitBranch } from "lucide-react-native";
 import React, { useMemo } from "react";
-import { Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
+import { BackLink } from "../components/ds/BackLink";
 import { Card } from "../components/ds/Card";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
@@ -55,17 +56,18 @@ export default function SessionTreeScreen() {
   return (
     <DesktopDrillDown>
       <Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
-        <Pressable onPress={() => router.back()} accessibilityRole="button"><Text style={[styles.back, { color: tokens.accent }]}>‹ Settings</Text></Pressable>
+        <BackLink />
         <Text style={[type.title, { color: tokens.ink }]}>Session tree</Text>
         <Text style={[type.sub, { color: tokens.ink3 }]}>Forks and their conversation ancestry.</Text>
+        {query.isLoading ? <View style={styles.loading}><ActivityIndicator color={tokens.accent} /><Text style={[type.sub, { color: tokens.ink3 }]}>Loading session ancestry…</Text></View> : null}
         {query.isError ? <Card><Text style={[type.body, { color: tokens.danger }]}>Could not load the session tree. Pull to retry.</Text></Card> : null}
-        {rows.length === 0 && !query.isLoading ? <EmptyState icon={GitBranch} message="No session branches yet." /> : null}
+        {rows.length === 0 && !query.isLoading && !query.isError ? <EmptyState icon={GitBranch} message="No session branches yet." /> : null}
         {rows.map(({ node, depth, orphaned }) => {
           const isFork = node.forked_from != null && !orphaned;
           const relation = orphaned ? "original parent unavailable" : isFork ? `forked at message ${node.forked_at_seq ?? "—"}` : "session root";
           return (
             <Pressable key={node.id} onPress={() => router.push(`/session/${node.id}`)} accessibilityRole="button" accessibilityLabel={`Open ${titleFor(node)}`}>
-              <View style={[styles.branch, { marginLeft: depth * space.space16, borderLeftColor: depth > 0 ? tokens.border : "transparent" }]}>
+              <View style={[styles.branch, { marginLeft: Math.min(depth, 6) * space.space16, borderLeftColor: depth > 0 ? tokens.border : "transparent" }]}>
                 <Card style={styles.node}>
                   <Text style={[type.body, { color: tokens.ink }]} numberOfLines={1}>{titleFor(node)}</Text>
                   <Text style={[type.sub, { color: tokens.ink3 }]} numberOfLines={1}>{relation} · {formatRelativeTime(node.created_at * 1000)} · {shortId(node.id)}</Text>
@@ -82,6 +84,7 @@ export default function SessionTreeScreen() {
 const styles = StyleSheet.create({
   content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 },
   back: { fontSize: 15, fontWeight: "600" },
+  loading: { alignItems: "center", paddingVertical: space.space32, gap: space.space12 },
   branch: { borderLeftWidth: 1, paddingLeft: space.space8 },
   node: { gap: space.space4, marginBottom: space.space8 },
 });

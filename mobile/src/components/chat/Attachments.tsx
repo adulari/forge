@@ -57,16 +57,12 @@ export function AttachmentRow({ attachments }: { attachments: SentAttachment[] }
         animationType="fade"
         onRequestClose={() => setPreview(null)}
       >
-        <Pressable
-          style={[styles.backdrop, { backgroundColor: tokens.overlayScrim }]}
-          onPress={() => setPreview(null)}
-          accessibilityRole="button"
-          accessibilityLabel="close image preview"
-        >
-          {preview?.uri ? (
-            <Image source={{ uri: preview.uri }} style={styles.full} resizeMode="contain" />
-          ) : null}
-        </Pressable>
+        <View style={[styles.backdrop, { backgroundColor: tokens.overlayScrim }]} accessibilityViewIsModal>
+        <Pressable style={StyleSheet.absoluteFill} onPress={() => setPreview(null)} accessibilityRole="button" accessibilityLabel="Close image preview" />
+        {preview?.uri ? (
+          <Image source={{ uri: preview.uri }} style={styles.full} resizeMode="contain" accessibilityLabel={`Preview of ${preview.name}`} />
+        ) : null}
+      </View>
       </Modal>
     </>
   );
