@@ -46,7 +46,7 @@ const MAX_LINES = 6;
 const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
 const MIN_HEIGHT = 44;
 const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES;
-const COMMAND_CHIPS = ["/plan", "/compact", "/models", "/mode", "/help"] as const;
+const COMMAND_CHIPS = ["/goal", "/plan", "/compact", "/models", "/mode", "/help"] as const;
 
 export interface ComposerProps {
   sessionId: string;
