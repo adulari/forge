@@ -1,7 +1,7 @@
 // DESIGN_SYSTEM.md §5.2 Signal — toast rises 12px + fade `base`, auto-dismiss
 // 3.5s (owned by ToastHost), swipe-to-dismiss.
 import React, { useEffect } from "react";
-import { StyleSheet, Text } from "react-native";
+import { Pressable, StyleSheet, Text } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   runOnJS,
@@ -94,8 +94,15 @@ export function Toast({ toast, onDismiss }: ToastProps) {
         accessibilityRole="alert"
         accessibilityLiveRegion="polite"
         accessibilityLabel={toast.message}
+        accessibilityActions={[{ name: "dismiss", label: "Dismiss notification" }]}
+        onAccessibilityAction={(event) => {
+          if (event.nativeEvent.actionName === "dismiss") dismiss();
+        }}
       >
-        <Text style={[type.body, { color: tokens.ink }]}>{toast.message}</Text>
+        <Text style={[type.body, styles.message, { color: tokens.ink }]}>{toast.message}</Text>
+        <Pressable onPress={dismiss} accessibilityRole="button" accessibilityLabel="Dismiss notification" hitSlop={12}>
+          <Text style={[type.bodyBold, { color: tokens.ink2 }]}>×</Text>
+        </Pressable>
       </Animated.View>
     </GestureDetector>
   );
@@ -109,5 +116,9 @@ const styles = StyleSheet.create({
     paddingVertical: space.space12,
     marginHorizontal: space.space16,
     marginBottom: space.space8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space12,
   },
+  message: { flex: 1 },
 });
