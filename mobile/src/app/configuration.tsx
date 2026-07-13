@@ -78,6 +78,9 @@ function ConfigFieldRow({ field, scope }: { field: ConfigField; scope: Scope }) 
   if (field.field_type === "json") {
     return <View style={styles.field}><Input label={field.label} value={draft} onChangeText={setDraft} onEndEditing={(event) => save(event.nativeEvent.text)} multiline numberOfLines={8} autoCapitalize="none" autoCorrect={false} mono error={error ?? undefined} accessibilityLabel={field.label} /><Text style={[type.sub, { color: tokens.ink3 }]}>{field.help ?? `${field.key} · ${field.source}`}</Text></View>;
   }
+  if (field.field_type === "json") {
+    return <View style={styles.field}><Input label={field.label} value={draft} onChangeText={setDraft} onBlur={() => save(draft)} multiline numberOfLines={8} autoCapitalize="none" autoCorrect={false} mono error={error ?? undefined} accessibilityLabel={field.label} /><Text style={[type.sub, { color: tokens.ink3 }]}>{field.help ?? `${field.key} · ${field.source}`}</Text></View>;
+  }
   if (field.field_type === "enum") {
     return <View style={styles.field}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text><Segmented options={field.options.map((option) => ({ value: option, label: option }))} value={draft} onChange={(value) => { setDraft(value); save(value); }} /></View>;
   }
