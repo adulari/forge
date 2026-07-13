@@ -33,7 +33,7 @@ export interface ConfigResponse {
 export interface ConfigField {
   key: string;
   group: string;
-  field_type: "bool" | "int" | "float" | "enum" | "list" | "text";
+  field_type: "bool" | "int" | "float" | "enum" | "list" | "json" | "text";
   label: string;
   help: string | null;
   options: string[];
@@ -47,6 +47,14 @@ export interface UpdateConfigRequest {
   key: string;
   value?: string;
   scope: "user" | "project";
+}
+
+export interface SkillRow {
+  name: string;
+  description: string;
+  scope: "builtin" | "user" | "project";
+  tier: string | null;
+  resources: number;
 }
 
 export interface ModelsResponse {
@@ -351,6 +359,10 @@ export function discardSession(
   return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/discard`, {
     method: "POST",
   });
+}
+
+export function getSkills(baseUrl: string): Promise<SkillRow[]> {
+  return request(baseUrl, "/api/skills");
 }
 
 export function getModels(baseUrl: string): Promise<ModelsResponse> {
