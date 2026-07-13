@@ -49,6 +49,11 @@ import { CheckpointSheet } from "../../../components/session/CheckpointSheet";
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
 import { PullRequestSheet } from "../../../components/session/PullRequestSheet";
+||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
+
+||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
+
+import { MemorySheet } from "../../../components/session/MemorySheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
@@ -106,6 +111,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
   const [pullRequestVisible, setPullRequestVisible] = useState(false);
+||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
+
+||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
+
+  const [memoryVisible, setMemoryVisible] = useState(false);
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
@@ -291,6 +301,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
             onPullRequest={() => setPullRequestVisible(true)}
+||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
+
+||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
+
+            onMemory={() => setMemoryVisible(true)}
           />
         </View>
 
@@ -318,6 +333,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
         <PullRequestSheet visible={pullRequestVisible} onClose={() => setPullRequestVisible(false)} send={send} />
+||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
+
+||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
+
+        <MemorySheet visible={memoryVisible} onClose={() => setMemoryVisible(false)} send={send} />
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />
