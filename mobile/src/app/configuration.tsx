@@ -66,6 +66,9 @@ function ConfigFieldRow({ field, scope }: { field: ConfigField; scope: Scope }) 
     })();
     return <View style={styles.field}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text>{values.map((value, index) => <Input key={`${field.key}-${index}`} value={value} onChangeText={(next) => { const updated = [...values]; updated[index] = next; setDraft(JSON.stringify(updated)); }} onBlur={() => save(draft)} accessibilityLabel={`${field.label} item ${index + 1}`} autoCapitalize="none" autoCorrect={false} />)}<Pressable onPress={() => { const next = JSON.stringify([...values, ""]); setDraft(next); }} accessibilityRole="button" accessibilityLabel={`Add ${field.label} item`}><Text style={[styles.reset, { color: tokens.accent }]}>Add item</Text></Pressable></View>;
   }
+  if (field.field_type === "json") {
+    return <View style={styles.field}><Input label={field.label} value={draft} onChangeText={setDraft} onBlur={() => save(draft)} multiline numberOfLines={8} autoCapitalize="none" autoCorrect={false} mono error={error ?? undefined} accessibilityLabel={field.label} /><Text style={[type.sub, { color: tokens.ink3 }]}>{field.help ?? `${field.key} · ${field.source}`}</Text></View>;
+  }
   if (field.field_type === "enum") {
     return <View style={styles.field}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text><Segmented options={field.options.map((option) => ({ value: option, label: option }))} value={draft} onChange={(value) => { setDraft(value); save(value); }} /></View>;
   }
