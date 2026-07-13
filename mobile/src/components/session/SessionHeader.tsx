@@ -24,6 +24,12 @@ import { ArrowLeft, Search, Bot } from "lucide-react-native";
 import { ArrowLeft, Search } from "lucide-react-native";
 
 import { ArrowLeft, Search, Bookmark } from "lucide-react-native";
+||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
+
+||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
+import { ArrowLeft, Search } from "lucide-react-native";
+
+import { ArrowLeft, Search, GitPullRequest } from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -60,6 +66,11 @@ export interface SessionHeaderProps {
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
   onCheckpoint: () => void;
+||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
+
+||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
+
+  onPullRequest: () => void;
 }
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onDuel, onReplay, onPlan }: SessionHeaderProps) {
@@ -85,6 +96,12 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onCheckpoint }: SessionHeaderProps) {
+||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
+
+||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
+
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onPullRequest }: SessionHeaderProps) {
   const tokens = useTokens();
   const isPublic = exposure.startsWith("public");
 
@@ -127,6 +144,13 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
           icon={<Bookmark size={20} strokeWidth={1.75} color={tokens.ink} />}
           onPress={onCheckpoint}
           accessibilityLabel="Manage session checkpoints"
+||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
+
+||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
+
+          icon={<GitPullRequest size={20} strokeWidth={1.75} color={tokens.ink} />}
+          onPress={onPullRequest}
+          accessibilityLabel="Create pull request"
         />
         <IconButton
           icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />}

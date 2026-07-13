@@ -44,6 +44,11 @@ import { SelfMcpSheet } from "../../../components/session/SelfMcpSheet";
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
 import { CheckpointSheet } from "../../../components/session/CheckpointSheet";
+||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
+
+||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
+
+import { PullRequestSheet } from "../../../components/session/PullRequestSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
@@ -96,6 +101,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
   const [checkpointVisible, setCheckpointVisible] = useState(false);
+||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
+
+||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
+
+  const [pullRequestVisible, setPullRequestVisible] = useState(false);
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
@@ -276,6 +286,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
             onCheckpoint={() => setCheckpointVisible(true)}
+||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
+
+||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
+
+            onPullRequest={() => setPullRequestVisible(true)}
           />
         </View>
 
@@ -298,6 +313,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
         <CheckpointSheet visible={checkpointVisible} onClose={() => setCheckpointVisible(false)} send={send} />
+||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
+
+||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
+
+        <PullRequestSheet visible={pullRequestVisible} onClose={() => setPullRequestVisible(false)} send={send} />
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />
