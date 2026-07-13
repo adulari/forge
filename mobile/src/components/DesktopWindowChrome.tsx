@@ -6,6 +6,8 @@ import { isMacOS, isTauri } from "../lib/platform";
 import { useTokens } from "../theme/ThemeProvider";
 import { tapTarget } from "../theme/tokens";
 
+export const DESKTOP_WINDOW_CHROME_HEIGHT = 32;
+
 type WebViewProps = ViewProps & { dataSet?: Record<string, string>; onDoubleClick?: () => void };
 const WebView = View as unknown as React.ComponentType<WebViewProps>;
 
@@ -70,7 +72,7 @@ const styles = StyleSheet.create({
     top: 0,
     left: 0,
     right: 0,
-    height: 32,
+    height: DESKTOP_WINDOW_CHROME_HEIGHT,
     borderBottomWidth: StyleSheet.hairlineWidth,
     zIndex: 1000,
     flexDirection: "row",
@@ -78,5 +80,5 @@ const styles = StyleSheet.create({
   },
   macos: { paddingLeft: 76 },
   controls: { flexDirection: "row" },
-  control: { width: tapTarget, height: 32, alignItems: "center", justifyContent: "center" },
+  control: { width: tapTarget, height: DESKTOP_WINDOW_CHROME_HEIGHT, alignItems: "center", justifyContent: "center" },
 });
