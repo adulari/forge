@@ -5,7 +5,10 @@
 use tauri::menu::MenuItemBuilder;
 #[cfg(target_os = "macos")]
 use tauri::menu::{Menu, PredefinedMenuItem, SubmenuBuilder};
-#[cfg(debug_assertions)]
+// `Manager::get_webview_window` is used in the non-macOS setup hook (any profile) and in the
+// debug-only reload menu event, so the import must cover both — gating on debug_assertions alone
+// dropped it from release Linux/Windows builds.
+#[cfg(any(not(target_os = "macos"), debug_assertions))]
 use tauri::Manager;
 
 mod serve_discovery;
@@ -75,5 +78,6 @@ fn install_macos_menu(app: &mut tauri::App) -> tauri::Result<()> {
         .select_all()
         .build()?;
     let menu = Menu::with_items(handle, &[&app_menu, &edit_menu])?;
-    app.set_menu(menu)
+    app.set_menu(menu)?;
+    Ok(())
 }

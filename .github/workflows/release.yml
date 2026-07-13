@@ -75,6 +75,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # alsa-sys (pulled in transitively by the audio-capture path) needs ALSA dev headers +
+      # pkg-config at build time. The self-hosted x64 box already has them system-wide; the
+      # GitHub-hosted aarch64 leg is a clean image, so install them there or cargo build fails
+      # with "failed to run custom build command for alsa-sys".
+      - name: Install Linux audio build deps
+        if: ${{ runner.os == 'Linux' && !matrix.self_hosted }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config
+
       # Ephemeral GitHub-hosted legs have no warm target/ dir, so the cache earns its keep.
       # The self-hosted linux leg skips it: target/ already persists on that box's local disk
       # between runs, so a network cache round-trip would be pure overhead on top of that.
