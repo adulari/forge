@@ -51,16 +51,15 @@ export function bucketForActivity(nowSec: number, lastActivitySec: number): Acti
   return activity >= weekStart ? "week" : "earlier";
 }
 
-type HistoryFilter = "all" | "waiting" | "busy" | "done";
+type HistoryFilter = "all" | "archived" | "active";
 type HistoryListItem =
   | { type: "header"; bucket: ActivityBucket; label: string }
   | { type: "row"; row: PastSessionRow; index: number };
 
 const FILTERS: { value: HistoryFilter; label: string }[] = [
   { value: "all", label: "All" },
-  { value: "waiting", label: "Waiting" },
-  { value: "busy", label: "Busy" },
-  { value: "done", label: "Done" },
+  { value: "archived", label: "Archived" },
+  { value: "active", label: "Active" },
 ];
 
 const BUCKETS: { value: ActivityBucket; label: string }[] = [
@@ -71,13 +70,8 @@ const BUCKETS: { value: ActivityBucket; label: string }[] = [
 ];
 
 function matchesFilter(row: PastSessionRow, filter: HistoryFilter): boolean {
-  const statefulRow = row as PastSessionRow & { busy?: boolean; waiting?: boolean };
-  const busy = statefulRow.busy === true;
-  const waiting = statefulRow.waiting === true;
   if (filter === "all") return true;
-  if (filter === "waiting") return waiting;
-  if (filter === "busy") return busy;
-  return !busy && !waiting;
+  return filter === "archived" ? row.archived : !row.archived;
 }
 
 interface HistoryRowProps {
@@ -257,7 +251,12 @@ export default function HistoryScreen() {
         autoCorrect={false}
         containerStyle={styles.search}
       />
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filters}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.filtersScroll}
+        contentContainerStyle={styles.filters}
+      >
         {FILTERS.map((option) => (
           <Chip
             key={option.value}
@@ -338,6 +337,10 @@ export default function HistoryScreen() {
 const styles = StyleSheet.create({
   screenPad: { paddingTop: space.space12 },
   search: { marginBottom: space.space8 },
+  // A horizontal ScrollView stretches on its cross-axis inside a flex column on
+  // react-native-web (harmless on native), ballooning to fill the screen and
+  // shoving the list far down — the History "empty gap". Pin it to its content height.
+  filtersScroll: { flexGrow: 0, flexShrink: 0 },
   filters: { gap: space.space8, paddingBottom: space.space8 },
   listPad: { paddingBottom: space.space32 },
   rowBg: { position: "relative" },

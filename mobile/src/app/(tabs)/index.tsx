@@ -113,7 +113,12 @@ function FleetServerSwitcher() {
   return (
     <View style={[styles.switcher, { borderBottomColor: tokens.border }]}>
       <Text style={[typeScale.section, { color: tokens.ink3 }]}>servers</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.serverList}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.serverListScroll}
+        contentContainerStyle={styles.serverList}
+      >
         {servers.map((server, index) => {
           const fleet = fleets[index];
           const reachable = fleet.isSuccess;
@@ -283,6 +288,8 @@ const FAB_SIZE = 56;
 
 const styles = StyleSheet.create({
   switcher: { gap: space.space8, paddingTop: space.space12, paddingBottom: space.space12, borderBottomWidth: StyleSheet.hairlineWidth },
+  // Horizontal ScrollViews stretch on their cross-axis in a flex column on web; pin to content.
+  serverListScroll: { flexGrow: 0, flexShrink: 0 },
   serverList: { gap: space.space8 },
   serverChip: { minHeight: 44, maxWidth: 220, flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space12, borderRadius: radii.radiusPill },
   serverDot: { width: 8, height: 8, borderRadius: 4 },

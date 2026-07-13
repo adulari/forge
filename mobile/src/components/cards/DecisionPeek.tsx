@@ -10,7 +10,7 @@
 // `.close()` call needed. There is no lingering connection once dismissed.
 import { AlertTriangle, CircleCheck, X } from "lucide-react-native";
 import React from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { Button } from "../ds/Button";
 import { EmptyState } from "../ds/EmptyState";
@@ -75,7 +75,7 @@ function DecisionPeekBody({ sessionId, onClose }: { sessionId: string; onClose: 
         />
       </View>
 
-      <View style={styles.body}>
+      <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
         {snapshot == null && unreachable ? (
           <EmptyState
             icon={AlertTriangle}
@@ -111,7 +111,7 @@ function DecisionPeekBody({ sessionId, onClose }: { sessionId: string; onClose: 
             action={<Button label="Close" variant="secondary" onPress={onClose} />}
           />
         )}
-      </View>
+      </ScrollView>
     </View>
   );
 }

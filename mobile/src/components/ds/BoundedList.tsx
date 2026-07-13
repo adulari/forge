@@ -84,8 +84,6 @@ function BoundedListInner<T>(
     </View>
   ) : undefined;
 
-  const isEmpty = !data || data.length === 0;
-
   return (
     <View style={styles.fill}>
       <FlatList<T>
@@ -97,7 +95,7 @@ function BoundedListInner<T>(
         ListFooterComponent={footer}
         onEndReached={onEndReached}
         onEndReachedThreshold={onEndReachedThreshold}
-        contentContainerStyle={[isEmpty && styles.grow, contentContainerStyle]}
+        contentContainerStyle={[styles.grow, contentContainerStyle]}
         refreshControl={
           Platform.OS !== "web" && onRefresh ? (
             <RefreshControl

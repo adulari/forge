@@ -25,6 +25,8 @@ import { type as typeScale } from "../../theme/typography";
 
 export interface QRScanProps {
   onScanned: (data: string) => void;
+  /** Starts the scanner only after deliberate user activation. */
+  enabled?: boolean;
   /** Stop reacting to new frames — set while the parent is testing a scanned URL.
    * On web this also tears the MediaStream down so the browser's camera-active
    * indicator turns off while a scan is being tested. */
@@ -77,7 +79,7 @@ const CAN_RETRY: Record<UnavailableReason, boolean> = {
   error: true,
 };
 
-export function QRScan({ onScanned, paused = false }: QRScanProps) {
+export function QRScan({ onScanned, enabled = false, paused = false }: QRScanProps) {
   const tokens = useTokens();
   const reduced = useReducedMotion();
   const [state, setState] = useState<ScanState>({ kind: "requesting" });
@@ -121,6 +123,10 @@ export function QRScan({ onScanned, paused = false }: QRScanProps) {
   }, []);
 
   useEffect(() => {
+    if (!enabled) {
+      stopStream();
+      return;
+    }
     if (paused) {
       stopStream();
       return;
@@ -214,10 +220,14 @@ export function QRScan({ onScanned, paused = false }: QRScanProps) {
       stopStream();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paused, retryTick, stopStream]);
+  }, [enabled, paused, retryTick, stopStream]);
 
   const flashStyle = useAnimatedStyle(() => ({ opacity: flash.value }));
   const retry = () => setRetryTick((n) => n + 1);
+
+  if (!enabled) {
+    return <View style={[styles.hintFrame, { borderColor: tokens.border, backgroundColor: tokens.bg3, borderRadius: radii.radius16 }]} accessibilityRole="image" accessibilityLabel="QR scanner is off until you start scanning"><ScanLine size={24} strokeWidth={1.75} color={tokens.ink3} /><Text style={[typeScale.sub, styles.hint, { color: tokens.ink2 }]}>Camera stays off until you choose to scan.</Text></View>;
+  }
 
   if (state.kind !== "scanning") {
     const text = state.kind === "requesting" ? "requesting camera access…" : state.kind === "denied" ? "camera blocked — allow access in your browser, or paste the connect url below." : UNAVAILABLE_COPY[state.reason];

@@ -69,6 +69,8 @@ const styles = StyleSheet.create({
   themeToggle: {
     alignSelf: "flex-start",
     paddingHorizontal: space.space16,
+    minHeight: 44,
+    justifyContent: "center",
     paddingVertical: space.space8,
     borderRadius: 8,
     borderWidth: StyleSheet.hairlineWidth,

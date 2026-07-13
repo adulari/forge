@@ -22,7 +22,7 @@ const resetLabel = (resetsAt: number | null) => resetsAt == null ? "reset unknow
 
 interface ProviderRowProps {
   provider: UsageProvider;
-  quotas: { windowKind: string; status: string; fraction: number | null; resetsAt: number | null }[];
+  quotas: { kind: string; windowKind: string; status: string; fraction: number | null; resetsAt: number | null }[];
 }
 
 const ProviderRow = memo(function ProviderRow({ provider, quotas }: ProviderRowProps) {
@@ -65,20 +65,25 @@ export default function UsageScreen() {
   const query = useUsage(sessionId);
   const selected = window === "week" ? query.data?.week : query.data?.session;
   const providers = selected?.providers ?? [];
-  const hasSession = sessionId != null;
   const { isError, isLoading, isRefetching, refetch, data } = query;
   const quotaRows = data?.quota;
+  const quotaKey = (provider: string, kind: string) => `${kind}:${provider}`;
   const quotasByProvider = useMemo(() => {
     const result = new Map<string, NonNullable<typeof data>["quota"]>();
     for (const quota of quotaRows ?? []) {
-      const rows = result.get(quota.provider) ?? [];
+      const rows = result.get(quotaKey(quota.provider, quota.kind)) ?? [];
       rows.push(quota);
-      result.set(quota.provider, rows);
+      result.set(quotaKey(quota.provider, quota.kind), rows);
     }
     return result;
   }, [quotaRows]);
-  const renderItem = useCallback(({ item }: { item: UsageProvider; index: number }) => <ProviderRow provider={item} quotas={quotasByProvider.get(item.provider) ?? []} />, [quotasByProvider]);
+  const renderItem = useCallback(({ item }: { item: UsageProvider; index: number }) => <ProviderRow provider={item} quotas={quotasByProvider.get(quotaKey(item.provider, item.kind)) ?? []} />, [quotasByProvider]);
   const keyExtractor = useCallback((provider: UsageProvider) => provider.provider, []);
+  const hasMeteredApi = providers.some((provider) => provider.kind === "api");
+  const apiCostUsd = providers
+    .filter((provider) => provider.kind === "api")
+    .reduce((total, provider) => total + provider.costUsd, 0);
+  const usageLabel = hasMeteredApi ? "API SPEND" : "SUBSCRIPTION USAGE";
   const totalTokens = (selected?.combined.inputTokens ?? 0) + (selected?.combined.outputTokens ?? 0);
   const header = useMemo(() => (
     <View style={styles.header}>
@@ -86,16 +91,17 @@ export default function UsageScreen() {
       <Text style={[type.title, { color: tokens.ink }]}>Usage</Text>
       <Text style={[styles.subtitle, { color: tokens.ink3 }]}>A clear read on your Forge consumption.</Text>
       <Segmented options={[{ value: "week", label: "This Week" }, { value: "session", label: "This Session" }]} value={window} onChange={setWindow} />
-      <View style={[styles.hero, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
-        <Text style={[styles.eyebrow, { color: tokens.ink3 }]}>COMBINED {window === "week" ? "WEEKLY" : "SESSION"}</Text>
-        <Text style={[styles.cost, { color: tokens.accent }]}>{selected ? `$${selected.combined.costUsd.toFixed(2)}` : "—"}</Text>
+      {!isLoading && !isError && selected ? <View style={[styles.hero, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
+        <Text style={[styles.eyebrow, { color: tokens.ink3 }]}>{usageLabel} · {window === "week" ? "THIS WEEK" : "THIS SESSION"}</Text>
+        {hasMeteredApi ? <Text style={[styles.cost, { color: tokens.accent }]}>{`$${apiCostUsd.toFixed(2)}`}</Text> : <Text style={[styles.included, { color: tokens.accent }]}>Included with plan</Text>}
         <Text style={[styles.tokens, { color: tokens.ink }]}>{number(totalTokens)} tokens</Text>
-        <Text style={[styles.split, { color: tokens.ink3 }]}>{number(selected?.combined.inputTokens ?? 0)} in · {number(selected?.combined.outputTokens ?? 0)} out</Text>
-      </View>
+        <Text style={[styles.split, { color: tokens.ink3 }]}>{number(selected.combined.inputTokens)} in · {number(selected.combined.outputTokens)} out</Text>
+      </View> : null}
+      {isLoading ? <Card><Text style={[styles.empty, { color: tokens.ink3 }]}>Loading usage…</Text></Card> : null}
       {isError ? <Card><Text style={[styles.empty, { color: tokens.danger }]}>Could not load usage. Pull to retry.</Text></Card> : null}
-      {window === "session" && !hasSession && !isLoading ? <Card><Text style={[styles.empty, { color: tokens.ink2 }]}>Choose a session first to see its usage.</Text></Card> : null}
+      {window === "session" && !selected && !isLoading && !isError ? <Card><Text style={[styles.empty, { color: tokens.ink2 }]}>No session usage is available yet. Start or open a session to see its activity.</Text></Card> : null}
     </View>
-  ), [hasSession, isError, isLoading, selected, tokens, totalTokens, window]);
+  ), [apiCostUsd, hasMeteredApi, isError, isLoading, selected, tokens, totalTokens, usageLabel, window]);
   const empty = isLoading ? <View /> : <EmptyState icon={Cpu} message="No usage yet. Your provider activity will appear here after the first turn." />;
 
   return (
@@ -116,6 +122,7 @@ const styles = StyleSheet.create({
   hero: { borderWidth: 1, borderRadius: 16, padding: 22, marginTop: 8 },
   eyebrow: { fontSize: 11, letterSpacing: 1.4, fontWeight: "700" },
   cost: { fontSize: 42, fontWeight: "800", marginTop: 8 },
+  included: { fontSize: 24, fontWeight: "800", marginTop: 12 },
   tokens: { fontSize: 16, fontWeight: "700", marginTop: 2 },
   split: { fontSize: 13, marginTop: 5 },
   provider: { marginBottom: space.space8 },

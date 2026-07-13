@@ -4,9 +4,9 @@
 // contract (BUILD_ORDER.md T3.1 HANDOFF): this segment owns its own
 // `<Screen edges={["left","right","bottom"]}>` — the shell above already
 // applied the top safe-area + gutter for the header/status-strip/Segmented.
-import { FileDiff } from "lucide-react-native";
+import { FileDiff, WifiOff } from "lucide-react-native";
 import React from "react";
-import { StyleSheet } from "react-native";
+import { StyleSheet, View } from "react-native";
 
 import { DiffCard } from "../../../components/review/DiffCard";
 import { PlanCard } from "../../../components/review/PlanCard";
@@ -16,7 +16,7 @@ import { useSessionCtx } from "../../../lib/sessionContext";
 import { space } from "../../../theme/tokens";
 
 export default function Review() {
-  const { snapshot, send, setPendingAnswer } = useSessionCtx();
+  const { snapshot, snapshotTimedOut, send, setPendingAnswer } = useSessionCtx();
 
   const plan = snapshot?.plan ?? null;
   const diff = snapshot?.diff ?? null;
@@ -24,7 +24,9 @@ export default function Review() {
 
   return (
     <Screen edges={["left", "right", "bottom"]} scroll contentContainerStyle={styles.content}>
-      {!hasContent ? (
+      {snapshot == null ? (
+        snapshotTimedOut ? <EmptyState icon={WifiOff} message="Could not load this session for review. Check the server connection." /> : <View style={styles.loading} />
+      ) : !hasContent ? (
         <EmptyState icon={FileDiff} message="nothing to review yet" />
       ) : (
         <>
@@ -46,4 +48,5 @@ export default function Review() {
 
 const styles = StyleSheet.create({
   content: { paddingVertical: space.space16, gap: space.space16 },
+  loading: { minHeight: 96 },
 });

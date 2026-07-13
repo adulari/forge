@@ -20,7 +20,13 @@ import { Sheet } from "../ds/Sheet";
 import { StatusDot } from "../ds/StatusDot";
 
 export interface FloorTileProps { row: SessionRow; active: boolean; }
-function connectionLabel(state: string) { return state === "open" ? "live" : state === "unreachable" ? "unreachable" : "reconnecting"; }
+function connectionLabel(state: string) {
+  if (state === "open") return "live";
+  if (state === "unreachable") return "unreachable";
+  if (state === "closed") return "closed";
+  if (state === "idle") return "idle";
+  return "reconnecting";
+}
 
 function FloorTileBase({ row, active }: FloorTileProps) {
   const tokens = useTokens();
@@ -52,5 +58,5 @@ function FloorTileBase({ row, active }: FloorTileProps) {
   </>;
 }
 
-export const FloorTile = React.memo(FloorTileBase, (a, b) => a.active === b.active && a.row.id === b.row.id && a.row.busy === b.row.busy && a.row.waiting === b.row.waiting && a.row.last_activity === b.row.last_activity);
+export const FloorTile = React.memo(FloorTileBase, (a, b) => a.active === b.active && a.row.id === b.row.id && a.row.title === b.row.title && a.row.cost_usd === b.row.cost_usd && a.row.busy === b.row.busy && a.row.waiting === b.row.waiting && a.row.last_activity === b.row.last_activity);
 const styles = StyleSheet.create({ tile: { position: "relative", borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, padding: space.space12, gap: space.space8, overflow: "hidden" }, header: { flexDirection: "row", alignItems: "center", gap: space.space8 }, title: { flex: 1 }, metrics: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, subagents: { gap: space.space4 }, subagent: { opacity: 0.7 }, sheet: { paddingHorizontal: space.space4, paddingBottom: space.space16 } });

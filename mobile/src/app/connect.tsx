@@ -84,6 +84,7 @@ export default function ConnectScreen() {
   const canClose = router.canGoBack();
 
   const [url, setUrl] = useState("");
+  const [scanEnabled, setScanEnabled] = useState(false);
   const [testState, setTestState] = useState<ConnectTestState>("idle");
   const [formatError, setFormatError] = useState<string | null>(null);
 
@@ -296,7 +297,8 @@ export default function ConnectScreen() {
 
       <Card variant="feature" style={styles.gapCard}>
         <SectionHeader>Scan to connect</SectionHeader>
-        <QRScan onScanned={onScanned} paused={busy} />
+        <QRScan onScanned={onScanned} enabled={scanEnabled} paused={busy} />
+        <Button label={scanEnabled ? "Stop scanning" : "Scan QR code"} variant="secondary" onPress={() => setScanEnabled((enabled) => !enabled)} fullWidth />
       </Card>
 
       <Card style={styles.gapCard}>

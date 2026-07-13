@@ -22,6 +22,8 @@ import { type as typeScale } from "../../theme/typography";
 
 export interface QRScanProps {
   onScanned: (data: string) => void;
+  /** Starts the scanner and requests camera permission only after deliberate user activation. */
+  enabled?: boolean;
   /** Stop reacting to new frames — set while the parent is testing a scanned URL. */
   paused?: boolean;
 }
@@ -30,7 +32,7 @@ const FRAME = 240;
 const CORNER = 28;
 const CORNER_W = 3;
 
-export function QRScan({ onScanned, paused = false }: QRScanProps) {
+export function QRScan({ onScanned, enabled = false, paused = false }: QRScanProps) {
   const tokens = useTokens();
   const reduced = useReducedMotion();
   const [permission, requestPermission] = useCameraPermissions();
@@ -38,10 +40,10 @@ export function QRScan({ onScanned, paused = false }: QRScanProps) {
   const flash = useSharedValue(0);
 
   useEffect(() => {
-    if (permission && !permission.granted && permission.canAskAgain) {
+    if (enabled && permission && !permission.granted && permission.canAskAgain) {
       requestPermission();
     }
-  }, [permission, requestPermission]);
+  }, [enabled, permission, requestPermission]);
 
   useEffect(() => {
     // Re-arm once the parent resumes us (e.g. after a failed test on the last scan).
@@ -65,6 +67,10 @@ export function QRScan({ onScanned, paused = false }: QRScanProps) {
   );
 
   const flashStyle = useAnimatedStyle(() => ({ opacity: flash.value }));
+
+  if (!enabled) {
+    return <View style={[styles.frame, styles.center, { borderColor: tokens.border, backgroundColor: tokens.bg3 }]} accessibilityRole="image" accessibilityLabel="QR scanner is off until you start scanning"><Text style={[typeScale.sub, styles.centerText, { color: tokens.ink2 }]}>Camera stays off until you choose to scan.</Text></View>;
+  }
 
   if (!permission || !permission.granted) {
     const canRetry = !permission || permission.canAskAgain;

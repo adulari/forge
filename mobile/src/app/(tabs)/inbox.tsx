@@ -152,6 +152,12 @@ export default function InboxScreen() {
   // renders this same waiting-filtered list via its "Waiting" pill — this screen just fills
   // the detail pane's `<Slot/>` there, so rendering the full Inbox list here too duplicated it.
   if (isExpanded) {
+    if (query.isLoading) {
+      return <Screen scroll={false}><View style={styles.skeletonRow}><Skeleton width="55%" height={17} /><Skeleton width="70%" height={12} /></View></Screen>;
+    }
+    if (query.isError) {
+      return <Screen scroll={false}><EmptyState icon={CircleCheck} message={query.error instanceof ApiError ? query.error.message : "Could not load waiting sessions."} action={<Button label="Retry" variant="secondary" onPress={() => void query.refetch()} />} /></Screen>;
+    }
     return (
       <Screen scroll={false}>
         <EmptyState icon={CircleCheck} message="select a waiting session to see it here." />
