@@ -1,0 +1,26 @@
+name: auto-enable-squash-automerge
+
+# Turn on GitHub auto-merge (squash) for every non-draft PR the moment it opens, so a PR merges
+# itself once the branch-protection "CI" check goes green — no manual "merge" click. Squash is the
+# repo's only allowed merge method, so this always squashes. Auto-merge only fires AFTER required
+# checks + rulesets pass, so this never merges anything unreviewed-by-CI; marking a PR draft opts it
+# out (the ready_for_review event re-arms it). Dependabot PRs are left alone.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable:
+    if: github.event.pull_request.draft == false && github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable squash auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh pr merge "$PR" --auto --squash --repo "$GITHUB_REPOSITORY"
