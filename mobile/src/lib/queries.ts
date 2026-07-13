@@ -28,6 +28,10 @@ import {
   getPlans,
 ||||||| parent of abad6c3 (feat(mobile): add MCP server catalog)
 
+||||||| parent of 4cd3653 (feat(mobile): add MCP servers safely)
+
+  type CreateMcpServerRequest,
+  createMcpServer,
   type McpResponse,
   getMcp,
   answer as apiAnswer,
@@ -157,6 +161,15 @@ export function useSkills() { const { baseUrl } = useAuth(); return useQuery<Ski
 export function useHooks() { const { baseUrl } = useAuth(); return useQuery<HookRow[]>({ queryKey: keys(baseUrl).hooks, queryFn: () => getHooks(baseUrl as string), enabled: baseUrl != null }); }
 export function useModels() { const { baseUrl } = useAuth(); const isFocused = useIsFocused(); return useQuery<ModelsResponse>({ queryKey: keys(baseUrl).models, queryFn: () => getModels(baseUrl as string), enabled: baseUrl != null, refetchOnWindowFocus: isFocused }); }
 export function usePlans() { const { baseUrl } = useAuth(); const isFocused = useIsFocused(); return useQuery<PlanRow[]>({ queryKey: keys(baseUrl).plans, queryFn: () => getPlans(baseUrl as string), enabled: baseUrl != null, refetchInterval: isFocused ? 5000 : false }); }
+  });
+}
+
+export function useCreateMcpServer() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateMcpServerRequest) => createMcpServer(baseUrl as string, body),
+    onSuccess: (data) => queryClient.setQueryData(keys(baseUrl).mcp, data),
   });
 }
 
