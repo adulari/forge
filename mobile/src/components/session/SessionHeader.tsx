@@ -16,7 +16,7 @@ import {
   Swords,
 } from "lucide-react-native";
 import React, { useCallback, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
@@ -70,7 +70,7 @@ export function SessionHeader(props: SessionHeaderProps) {
         <Text style={[typeScale.codeSmall, styles.cwd, { color: tokens.ink2 }]} numberOfLines={1} ellipsizeMode="head">{props.cwd}</Text>
       </View>
       <Sheet visible={actionsVisible} onClose={closeActions} accessibilityLabel="Session actions" snapPoints={[0.8]}>
-        <View style={styles.actions}>
+        <ScrollView contentContainerStyle={styles.actions} keyboardShouldPersistTaps="handled">
           <Text style={[typeScale.heading, { color: tokens.ink }]}>Session actions</Text>
           <ListRow title="Start model duel" leading={<Swords size={20} color={tokens.ink2} />} onPress={() => run(props.onDuel)} />
           <ListRow title="Open session replay" leading={<History size={20} color={tokens.ink2} />} onPress={() => run(props.onReplay)} />
@@ -83,7 +83,7 @@ export function SessionHeader(props: SessionHeaderProps) {
           <ListRow title="Create pull request" leading={<GitPullRequest size={20} color={tokens.ink2} />} onPress={() => run(props.onPullRequest)} />
           <ListRow title="Manage project memory" leading={<Brain size={20} color={tokens.ink2} />} onPress={() => run(props.onMemory)} />
           <ListRow title="Inspect code symbol" leading={<Network size={20} color={tokens.ink2} />} onPress={() => run(props.onLattice)} showSeparator={false} />
-        </View>
+        </ScrollView>
       </Sheet>
     </View>
   );
