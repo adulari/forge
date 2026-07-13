@@ -6,6 +6,50 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.5.8] - 2026-07-13
+
+Release-hardening wave: every platform's release pipeline now builds green end to end
+(CLI/TUI, desktop, and iOS), plus a unified cross-platform release note. Several breakages
+here were latent from a bulk merge and only surfaced in `cargo test`, the separate
+`mobile/src-tauri` workspace, or an actual release build — not in `cargo check`.
+
+### Fixed
+- **Release builds unblocked** (#716, `.github/workflows/release.yml`, `.cargo/config.toml`): removed
+  a committed `.cargo/config.toml` whose absolute `target-dir` made every GitHub-hosted release and
+  desktop build fail with `Permission denied` on `.cargo-build-lock`. Also forced `shell: bash` on
+  the Windows desktop bundle step (POSIX `if` was run under PowerShell).
+- **TUI aarch64 release** (#717, `release.yml`): install `libasound2-dev` + `pkg-config` on the
+  GitHub-hosted arm leg so `alsa-sys` builds (the self-hosted x64 box already had them).
+- **Desktop Linux/Windows compile** (#717, `mobile/src-tauri/src/lib.rs`): `use tauri::Manager` was
+  gated `#[cfg(debug_assertions)]`, but `get_webview_window` runs in the non-macOS setup hook in
+  every profile — release builds failed `E0599`. Regated to `any(not(macos), debug_assertions)`.
+- **Desktop macOS compile** (#717, `mobile/src-tauri/src/lib.rs`): `install_macos_menu` returned
+  `app.set_menu(menu)` (`Result<Option<Menu>>`) against a `-> Result<()>` signature (`E0308`).
+- **serve router panic** (#717, `crates/forge-cli/src/serve.rs`): a duplicate `GET /api/mcp` route
+  panicked axum at router build (`Overlapping method route`), failing 12 serve tests.
+- **Desktop updater signing** (#719, `mobile/src-tauri/tauri.conf.json`): rotated the Tauri updater
+  signing keypair so `TAURI_SIGNING_PRIVATE_KEY` / `_PASSWORD` match the committed pubkey; releases
+  were failing `incorrect updater private key password`.
+- **Desktop macOS + linux-arm bundling** (#720, `tauri.conf.json`, `app-desktop.yml`): added the
+  `app` bundle target so macOS emits the `.app.tar.gz` updater artifact, and installed `xdg-utils`
+  so the arm AppImage bundler finds `xdg-open`.
+- **testflight-autogroup misfire** (#721, `.github/workflows/testflight-autogroup.yml`): made it
+  `workflow_dispatch`-only. It fired on every `mobile/**` push — including desktop-only
+  `mobile/src-tauri/**` edits — then hung ~45m polling for a TestFlight build a plain push never
+  produces (iOS is opt-in).
+
+### Added
+- **Unified release note across TUI, desktop, and mobile** (#718, `release.yml`,
+  `scripts/testflight-assign-group.mjs`, `RELEASING.md`): one `CHANGELOG.md` section is now the
+  single source of truth — it composes the GitHub Release body (all-platform header + curated
+  section + auto PR list) and is pushed to the TestFlight build's "What to Test" note via the ASC
+  API.
+
+### Changed
+- **CLI bridge stall guard** (#715, `crates/forge-provider/src/cli_provider.rs`): the persistent
+  claude bridge now backstops a wedged tool turn (idle × 6) and falls back to a fresh turn instead
+  of hanging indefinitely.
+
 ## [2.5.7] - 2026-07-10
 
 ### Added
@@ -2407,7 +2451,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.7...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.8...HEAD
+[2.5.8]: https://github.com/Adulari/forge/compare/v2.5.7...v2.5.8
 [2.5.7]: https://github.com/Adulari/forge/compare/v2.5.6...v2.5.7
 [2.5.6]: https://github.com/Adulari/forge/compare/v2.5.5...v2.5.6
 [2.5.5]: https://github.com/Adulari/forge/compare/v2.5.4...v2.5.5
