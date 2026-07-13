@@ -317,13 +317,22 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
 **🎨 TUI / UX**
 - Full-screen ratatui TUI: scrollable transcript, pinned panels, live progress, cost meter
 - Context-window token gauge, fuzzy command palette, dynamic `/config` settings editor
-- Unified activity viewer (subagents + critics), dedicated animated workflow view, session/checkpoint pickers
-- `/usage` + `/mesh` overlays, `/model` picker, `/effort` knob, customizable statusline & keybinds
+- In-app configuration editing for scalar and list settings, permission rules, provider settings,
+  keybinds, hooks, and statusline layout — changes are validated and persisted to config
+- Unified activity viewer (subagents + critics), dedicated animated workflow view, live plans dashboard,
+  session tree, session fork, session replay, and session/checkpoint pickers
+- `/usage` + `/mesh` overlays, per-provider weekly/session usage and quota reset times, `/model` picker,
+  `/effort` knob, customizable statusline & keybinds
+- Mesh routing inspector with model availability and health explanations; `forge models --probe` for
+  live model health checks
 - Remote control: drive a session from a phone/desktop browser (`/remote`), or run the
   `forge serve` daemon — N concurrent sessions, stable PWA origin, sessions survive disconnects,
   create/switch/archive from the phone; fleet dashboard (waiting-on-decision sessions first),
   permission + plan + diff review cards, file/image upload, voice input, an offline input queue,
   and actionable web push (approve/deny from the lock screen)
+- Local Whisper voice input in the TUI and companion app, plus desktop voice shortcut support
+- Companion app from the same TypeScript/React Native codebase for iOS, Android, Web, Windows, macOS,
+  and Linux; Tauri desktop builds include signed updates and an in-app update check
 - `--inline` for native scrollback; `--mock` offline deterministic provider (no key needed)
 
 **🔒 Safety**
@@ -353,8 +362,40 @@ curl -fsSL https://raw.githubusercontent.com/Adulari/forge/main/install.sh | sh
 ```
 
 Detects your OS/arch, downloads the matching release binary (verifying its SHA-256), and installs
-`forge` to `~/.local/bin`. Override with `FORGE_VERSION` (a tag) or `FORGE_INSTALL_DIR`. Linux x86-64
-and macOS (Apple Silicon + Intel) are supported; on other arches it falls back to building from source.
+`forge` to `~/.local/bin`. It supports Linux x86-64/ARM64 and macOS Apple Silicon/Intel. Override
+with `FORGE_VERSION` (a tag) or `FORGE_INSTALL_DIR`; unsupported platforms can use Cargo or build
+from source.
+
+The main installer also offers to install the **Forge desktop app** alongside the CLI/TUI. The
+interactive default is **yes**: answer `n` to decline. For scripts, set `FORGE_DESKTOP=0` to skip or
+`FORGE_DESKTOP=1` to install without prompting. In a non-interactive shell it skips the desktop app
+unless `FORGE_DESKTOP=1` is set.
+
+### 🖥️ Desktop app (optional)
+
+Install the companion desktop app directly:
+
+**macOS / Linux:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Adulari/forge/main/install-desktop.sh | sh
+```
+
+The installer selects the matching release bundle: macOS Apple Silicon or Intel, and Linux
+x86-64 or ARM64 AppImage. Desktop bundles are published by the desktop release workflow (alongside
+Windows x86-64 NSIS builds). The Tauri desktop app connects to `forge serve`, supports the same remote
+control UI as the web/mobile app, and checks for signed updates automatically. On Linux it installs
+an AppImage and desktop entry; on macOS it installs `Forge.app` to `/Applications` (or
+`~/Applications`).
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/Adulari/forge/main/install-desktop.ps1 | iex
+```
+
+This downloads and silently installs the Windows x86-64 desktop bundle. The CLI installer remains
+available separately via `install.ps1` below.
 
 ### 🪟 Windows (PowerShell)
 
