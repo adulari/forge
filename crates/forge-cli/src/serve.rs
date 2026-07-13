@@ -534,6 +534,7 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(&format!("{base}/api/hooks"), get(hooks_page))
         .route(&format!("{base}/api/skills"), get(skills_page))
         .route(&format!("{base}/api/models"), get(models_page))
+        .route(&format!("{base}/api/plans"), get(plans_page))
         .route(
             &format!("{base}/api/config"),
             get(config_page).put(update_config),
@@ -2085,36 +2086,25 @@ fn config_response() -> ConfigResponse {
 
 #[derive(serde::Serialize)]
 struct HookRow {
-    event: String,
-    matcher: Option<String>,
-    command: String,
-    timeout_secs: u64,
-    cc_compat: bool,
+    event: String, matcher: Option<String>, command: String, timeout_secs: u64, cc_compat: bool,
+}
+async fn hooks_page() -> Response {
+    match tokio::task::spawn_blocking(|| forge_config::load().unwrap_or_default().hooks.into_iter().map(|hook| HookRow { event: hook.event.cc_name().to_string(), matcher: hook.matcher, command: hook.command, timeout_secs: hook.timeout_secs, cc_compat: hook.cc_compat }).collect::<Vec<_>>()).await {
+        Ok(hooks) => json_response(&hooks),
+        Err(_) => err_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, "could not read hooks"),
+    }
 }
 
-async fn hooks_page() -> Response {
-    match tokio::task::spawn_blocking(|| {
-        forge_config::load()
-            .unwrap_or_default()
-            .hooks
-            .into_iter()
-            .map(|hook| HookRow {
-                event: hook.event.cc_name().to_string(),
-                matcher: hook.matcher,
-                command: hook.command,
-                timeout_secs: hook.timeout_secs,
-                cc_compat: hook.cc_compat,
-            })
-            .collect::<Vec<_>>()
-    })
-    .await
-    {
-        Ok(hooks) => json_response(&hooks),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not read hooks",
-        ),
+#[derive(serde::Serialize)]
+struct PlanRow { session_id: String, session_title: String, title: String, steps: Vec<remote::SnapPlanStep>, notes: Option<String> }
+async fn plans_page(State(state): State<Arc<DaemonState>>) -> Response {
+    let mut plans = Vec::new();
+    for handle in state.registry.all().await {
+        let snapshot = handle.snapshot_rx.borrow().snapshot.clone();
+        if let Some(plan) = snapshot.plan { plans.push(PlanRow { session_id: handle.session_id.clone(), session_title: handle.title.clone(), title: plan.title, steps: plan.steps, notes: plan.notes }); }
     }
+    json_response(&plans)
+}
 }
 
 async fn usage_page(

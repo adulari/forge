@@ -24,6 +24,8 @@ import {
   type UpdateConfigRequest,
   getConfig,
   updateConfig,
+  type PlanRow,
+  getPlans,
   answer as apiAnswer,
   archiveSession,
   type CreateSessionRequest,
@@ -68,6 +70,7 @@ function keys(baseUrl: string | null) {
     skills: ["skills", baseUrl] as const,
     models: ["models", baseUrl] as const,
     hooks: ["hooks", baseUrl] as const,
+    plans: ["plans", baseUrl] as const,
   };
 }
 
@@ -142,41 +145,11 @@ export function useHistory(sessionId: string | null) {
   });
 }
 
-export function useSessionTree() {
-  const { baseUrl } = useAuth();
-  return useQuery<SessionTreeRow[]>({
-    queryKey: keys(baseUrl).sessionTree,
-    queryFn: () => getSessionTree(baseUrl as string),
-    enabled: baseUrl != null,
-  });
-}
-
-export function useSkills() {
-  const { baseUrl } = useAuth();
-  return useQuery<SkillRow[]>({
-    queryKey: keys(baseUrl).skills,
-    queryFn: () => getSkills(baseUrl as string),
-    enabled: baseUrl != null,
-  });
-}
-
-export function useHooks() {
-  const { baseUrl } = useAuth();
-  return useQuery<HookRow[]>({
-    queryKey: keys(baseUrl).hooks,
-    queryFn: () => getHooks(baseUrl as string),
-    enabled: baseUrl != null,
-  });
-}
-
-export function useModels() {
-  const { baseUrl } = useAuth();
-  const isFocused = useIsFocused();
-  return useQuery<ModelsResponse>({
-    queryKey: keys(baseUrl).models,
-    queryFn: () => getModels(baseUrl as string),
-    enabled: baseUrl != null,
-    refetchOnWindowFocus: isFocused,
+export function useSessionTree() { const { baseUrl } = useAuth(); return useQuery<SessionTreeRow[]>({ queryKey: keys(baseUrl).sessionTree, queryFn: () => getSessionTree(baseUrl as string), enabled: baseUrl != null }); }
+export function useSkills() { const { baseUrl } = useAuth(); return useQuery<SkillRow[]>({ queryKey: keys(baseUrl).skills, queryFn: () => getSkills(baseUrl as string), enabled: baseUrl != null }); }
+export function useHooks() { const { baseUrl } = useAuth(); return useQuery<HookRow[]>({ queryKey: keys(baseUrl).hooks, queryFn: () => getHooks(baseUrl as string), enabled: baseUrl != null }); }
+export function useModels() { const { baseUrl } = useAuth(); const isFocused = useIsFocused(); return useQuery<ModelsResponse>({ queryKey: keys(baseUrl).models, queryFn: () => getModels(baseUrl as string), enabled: baseUrl != null, refetchOnWindowFocus: isFocused }); }
+export function usePlans() { const { baseUrl } = useAuth(); const isFocused = useIsFocused(); return useQuery<PlanRow[]>({ queryKey: keys(baseUrl).plans, queryFn: () => getPlans(baseUrl as string), enabled: baseUrl != null, refetchInterval: isFocused ? 5000 : false }); }
   });
 }
 

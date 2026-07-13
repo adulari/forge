@@ -49,49 +49,13 @@ export interface UpdateConfigRequest {
   scope: "user" | "project";
 }
 
-export interface SkillRow {
-  name: string;
-  description: string;
-  scope: "builtin" | "user" | "project";
-  tier: string | null;
-  resources: number;
-}
-
-export interface HookRow {
-  event: string;
-  matcher: string | null;
-  command: string;
-  timeout_secs: number;
-  cc_compat: boolean;
-}
-
-export interface ModelsResponse {
-  catalog: "available" | "unavailable";
-  providers: ModelProvider[];
-}
-
-export interface ModelProvider {
-  provider: string;
-  models: ModelRow[];
-}
-
-export interface ModelRow {
-  id: string;
-  name: string;
-  frontier: boolean;
-  free: boolean;
-  paid: boolean;
-  subscription: boolean;
-  estimated_cost_usd: number;
-  health: { until_epoch: number; reason: string } | null;
-}
-
-export interface SessionTreeRow {
-  id: string;
-  forked_from: string | null;
-  forked_at_seq: number | null;
-  created_at: number;
-}
+export interface SkillRow { name: string; description: string; scope: "builtin" | "user" | "project"; tier: string | null; resources: number; }
+export interface HookRow { event: string; matcher: string | null; command: string; timeout_secs: number; cc_compat: boolean; }
+export interface ModelsResponse { catalog: "available" | "unavailable"; providers: ModelProvider[]; }
+export interface ModelProvider { provider: string; models: ModelRow[]; }
+export interface ModelRow { id: string; name: string; frontier: boolean; free: boolean; paid: boolean; subscription: boolean; estimated_cost_usd: number; health: { until_epoch: number; reason: string } | null; }
+export interface SessionTreeRow { id: string; forked_from: string | null; forked_at_seq: number | null; created_at: number; }
+export interface PlanRow { session_id: string; session_title: string; title: string; steps: { title: string; detail: string }[]; notes: string | null; }
 
 export interface UsageResponse {
   week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
@@ -399,9 +363,8 @@ export function updateConfig(baseUrl: string, body: UpdateConfigRequest): Promis
   });
 }
 
-export function getHooks(baseUrl: string): Promise<HookRow[]> {
-  return request(baseUrl, "/api/hooks");
-}
+export function getHooks(baseUrl: string): Promise<HookRow[]> { return request(baseUrl, "/api/hooks"); }
+export function getPlans(baseUrl: string): Promise<PlanRow[]> { return request(baseUrl, "/api/plans"); }
 
 export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {
   return request(baseUrl, `/api/usage${qs({ session })}`);
