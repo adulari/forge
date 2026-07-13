@@ -1502,8 +1502,14 @@ impl DriverState {
         }
         if self.turn_handle.is_none() && self.turn_gen > self.last_auto_compact_gen {
             if let Some(lim) = self.app.context_limit {
-                let fill = self.app.context_tokens as f64 / lim as f64;
-                if fill > AUTO_COMPACT_THRESHOLD {
+                let cap = self.session.lock().await.compact_cap_tokens();
+                let trigger = forge_core::auto_compact_trigger_tokens(
+                    lim as u64,
+                    cap,
+                    AUTO_COMPACT_THRESHOLD,
+                );
+                if self.app.context_tokens > trigger {
+                    let fill = self.app.context_tokens as f64 / lim as f64;
                     self.app.note(&format!(
                         "⚒ context {:.0}% full — auto-compacting",
                         fill * 100.0

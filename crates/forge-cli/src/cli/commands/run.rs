@@ -4224,8 +4224,14 @@ pub(crate) async fn run_chat_tui(
                 // turn. Without the gen guard this would re-fire on every compact completion.
                 if turn_handle.is_none() && turn_gen > last_auto_compact_gen {
                     if let Some(lim) = app.context_limit {
-                        let fill = app.context_tokens as f64 / lim as f64;
-                        if fill > AUTO_COMPACT_THRESHOLD {
+                        let cap = session.lock().await.compact_cap_tokens();
+                        let trigger = forge_core::auto_compact_trigger_tokens(
+                            lim as u64,
+                            cap,
+                            AUTO_COMPACT_THRESHOLD,
+                        );
+                        if app.context_tokens > trigger {
+                            let fill = app.context_tokens as f64 / lim as f64;
                             app.note(&format!(
                                 "⚒ context {:.0}% full — auto-compacting",
                                 fill * 100.0

@@ -33,6 +33,13 @@ pub mod worktree;
 
 pub use llm_router::LlmRouter;
 
+pub const AUTO_COMPACT_THRESHOLD: f64 = 0.80;
+
+pub fn auto_compact_trigger_tokens(window: u64, cap: u64, fraction: f64) -> u64 {
+    let frac = (window as f64 * fraction).max(0.0) as u64;
+    frac.min(cap)
+}
+
 /// Compaction (`/compact`): keep this many of the most recent messages verbatim; summarize the
 /// rest. Only compact when there are at least `COMPACT_MIN_OLDER` older messages to fold.
 pub(crate) const COMPACT_KEEP_RECENT: usize = 6;
@@ -2033,6 +2040,10 @@ impl Session {
         &self.config.hooks
     }
 
+    pub fn compact_cap_tokens(&self) -> u64 {
+        self.config.mesh.compact_cap_tokens
+    }
+
     /// The session id — used by lifecycle hooks to identify the session.
     pub fn session_id(&self) -> &str {
         &self.id
@@ -3002,7 +3013,13 @@ Rules:\n\
     /// emits its own one-line note). No-op when it already fits or the transcript is too short to
     /// compact. Distinct from the failover consent path ([`admit_failover_model`]).
     async fn auto_compact_if_needed(&mut self, model: &str) {
-        if !self.transcript_fits(model) {
+        let window = self.base_context_window(model) as u64;
+        let trigger = auto_compact_trigger_tokens(
+            window,
+            self.config.mesh.compact_cap_tokens,
+            AUTO_COMPACT_THRESHOLD,
+        );
+        if self.estimated_transcript_tokens() > trigger || !self.transcript_fits(model) {
             // Cheap first: the pipeline's mutating phase — prune bulky OLD tool results in place
             // (no model call). Often reclaims enough that the LLM summarize below isn't needed.
             if prune_and_inject(&mut self.transcript, COMPACT_KEEP_RECENT) > 0 {
