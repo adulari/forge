@@ -12,6 +12,8 @@ import { useIsFocused } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 
 import {
+  type ModelsResponse,
+  getModels,
   type ConfigResponse,
   type UpdateConfigRequest,
   getConfig,
@@ -56,6 +58,7 @@ function keys(baseUrl: string | null) {
     pastSessions: ["sessions", "past", baseUrl] as const,
     history: (sessionId: string) => ["history", baseUrl, sessionId] as const,
     config: ["config", baseUrl] as const,
+    models: ["models", baseUrl] as const,
   };
 }
 
@@ -127,6 +130,17 @@ export function useHistory(sessionId: string | null) {
       lastPage.length < HISTORY_PAGE_SIZE
         ? undefined
         : lastPage[lastPage.length - 1]?.seq,
+  });
+}
+
+export function useModels() {
+  const { baseUrl } = useAuth();
+  const isFocused = useIsFocused();
+  return useQuery<ModelsResponse>({
+    queryKey: keys(baseUrl).models,
+    queryFn: () => getModels(baseUrl as string),
+    enabled: baseUrl != null,
+    refetchOnWindowFocus: isFocused,
   });
 }
 

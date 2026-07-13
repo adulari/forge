@@ -530,6 +530,7 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         )
         .route(&format!("{base}/api/history"), get(history_page))
         .route(&format!("{base}/api/usage"), get(usage_page))
+        .route(&format!("{base}/api/models"), get(models_page))
         .route(
             &format!("{base}/api/config"),
             get(config_page).put(update_config),
@@ -1848,6 +1849,96 @@ fn usage_providers(rows: Vec<forge_store::ProviderUsage>) -> (UsageTotals, Vec<U
         .collect();
     (total, providers)
 }
+#[derive(serde::Serialize)]
+struct ModelsResponse {
+    catalog: &'static str,
+    providers: Vec<ModelProvider>,
+}
+
+#[derive(serde::Serialize)]
+struct ModelProvider {
+    provider: String,
+    models: Vec<ModelRow>,
+}
+
+#[derive(serde::Serialize)]
+struct ModelRow {
+    id: String,
+    name: String,
+    frontier: bool,
+    free: bool,
+    paid: bool,
+    subscription: bool,
+    estimated_cost_usd: f64,
+    health: Option<ModelHealth>,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct ModelHealth {
+    until_epoch: i64,
+    reason: String,
+}
+
+async fn models_page(State(state): State<Arc<DaemonState>>) -> Response {
+    let store = state.store.clone();
+    match tokio::task::spawn_blocking(move || {
+        let Some(catalog) = crate::cli::commands::models::load_cached_catalog() else {
+            return ModelsResponse {
+                catalog: "unavailable",
+                providers: Vec::new(),
+            };
+        };
+        let config = forge_config::load().unwrap_or_default();
+        let pricing = forge_mesh::pricing::Pricing::from_config(&config);
+        let benches: std::collections::HashMap<_, _> = store
+            .current_benched_report()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(model, until_epoch, reason)| {
+                (
+                    model,
+                    ModelHealth {
+                        until_epoch,
+                        reason,
+                    },
+                )
+            })
+            .collect();
+        ModelsResponse {
+            catalog: "available",
+            providers: catalog
+                .by_provider(&pricing)
+                .into_iter()
+                .map(|provider| ModelProvider {
+                    provider: provider.provider,
+                    models: provider
+                        .models
+                        .into_iter()
+                        .map(|model| ModelRow {
+                            health: benches.get(&model.id).cloned(),
+                            id: model.id,
+                            name: model.name,
+                            frontier: model.frontier,
+                            free: model.free,
+                            paid: model.paid,
+                            subscription: model.subscription,
+                            estimated_cost_usd: model.cost,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    })
+    .await
+    {
+        Ok(response) => json_response(&response),
+        Err(_) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read model catalog",
+        ),
+    }
+}
+
 async fn config_page() -> Response {
     match tokio::task::spawn_blocking(config_response).await {
         Ok(response) => json_response(&response),

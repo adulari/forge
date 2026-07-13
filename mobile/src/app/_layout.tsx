@@ -85,6 +85,7 @@ function RootNavigator() {
         <Stack.Screen name="connect" />
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="configuration" />
+        <Stack.Screen name="models" />
         <Stack.Screen name="session/[id]" />
         <Stack.Screen
           name="new-session"

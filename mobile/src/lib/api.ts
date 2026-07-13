@@ -49,6 +49,27 @@ export interface UpdateConfigRequest {
   scope: "user" | "project";
 }
 
+export interface ModelsResponse {
+  catalog: "available" | "unavailable";
+  providers: ModelProvider[];
+}
+
+export interface ModelProvider {
+  provider: string;
+  models: ModelRow[];
+}
+
+export interface ModelRow {
+  id: string;
+  name: string;
+  frontier: boolean;
+  free: boolean;
+  paid: boolean;
+  subscription: boolean;
+  estimated_cost_usd: number;
+  health: { until_epoch: number; reason: string } | null;
+}
+
 export interface UsageResponse {
   week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
   session: { sessionId: string; combined: UsageTotals; providers: UsageProvider[] } | null;
@@ -330,6 +351,10 @@ export function discardSession(
   return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/discard`, {
     method: "POST",
   });
+}
+
+export function getModels(baseUrl: string): Promise<ModelsResponse> {
+  return request(baseUrl, "/api/models");
 }
 
 export function getConfig(baseUrl: string): Promise<ConfigResponse> {
