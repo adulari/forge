@@ -24,28 +24,38 @@ import { ArrowLeft, Search, Bot } from "lucide-react-native";
 import { ArrowLeft, Search } from "lucide-react-native";
 
 import { ArrowLeft, Search, Bookmark } from "lucide-react-native";
-<<<<<<< HEAD
 ||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 import { ArrowLeft, Search } from "lucide-react-native";
 
 import { ArrowLeft, Search, GitPullRequest } from "lucide-react-native";
+<<<<<<< HEAD
 ||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
 
 ||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 import { ArrowLeft, Search } from "lucide-react-native";
 
 import { ArrowLeft, Search, Brain } from "lucide-react-native";
+<<<<<<< HEAD
 ||||||| parent of 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
-=======
+
 ||||||| parent of 27f786d (feat(mobile): run autonomous loops from sessions)
 
 ||||||| parent of 15fede8 (feat(mobile): run autonomous loops from sessions)
 import { ArrowLeft, Search } from "lucide-react-native";
 
 import { ArrowLeft, Search, Repeat2 } from "lucide-react-native";
->>>>>>> 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
+||||||| parent of 68a0b1f (feat(mobile): configure remote session control)
+=======
+||||||| parent of 8ad0605 (feat(mobile): configure remote session control)
+=======
+||||||| parent of d325584 (feat(mobile): configure remote session control)
+import { ArrowLeft, Search } from "lucide-react-native";
+
+import { ArrowLeft, Search, Radio } from "lucide-react-native";
+>>>>>>> 8ad0605 (feat(mobile): configure remote session control)
+>>>>>>> 68a0b1f (feat(mobile): configure remote session control)
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -82,25 +92,34 @@ export interface SessionHeaderProps {
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
   onCheckpoint: () => void;
-<<<<<<< HEAD
 ||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
   onPullRequest: () => void;
+<<<<<<< HEAD
 ||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
 
 ||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
   onMemory: () => void;
+<<<<<<< HEAD
 ||||||| parent of 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
-=======
+
 ||||||| parent of 27f786d (feat(mobile): run autonomous loops from sessions)
 
 ||||||| parent of 15fede8 (feat(mobile): run autonomous loops from sessions)
 
   onLoop: () => void;
->>>>>>> 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
+||||||| parent of 68a0b1f (feat(mobile): configure remote session control)
+=======
+||||||| parent of 8ad0605 (feat(mobile): configure remote session control)
+=======
+||||||| parent of d325584 (feat(mobile): configure remote session control)
+
+  onRemote: () => void;
+>>>>>>> 8ad0605 (feat(mobile): configure remote session control)
+>>>>>>> 68a0b1f (feat(mobile): configure remote session control)
 }
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onDuel, onReplay, onPlan }: SessionHeaderProps) {
@@ -126,28 +145,38 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onCheckpoint }: SessionHeaderProps) {
-<<<<<<< HEAD
 ||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onPullRequest }: SessionHeaderProps) {
+<<<<<<< HEAD
 ||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
 
 ||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onMemory }: SessionHeaderProps) {
+<<<<<<< HEAD
 ||||||| parent of 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
-=======
+
 ||||||| parent of 27f786d (feat(mobile): run autonomous loops from sessions)
 
 ||||||| parent of 15fede8 (feat(mobile): run autonomous loops from sessions)
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onLoop }: SessionHeaderProps) {
->>>>>>> 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
+||||||| parent of 68a0b1f (feat(mobile): configure remote session control)
+=======
+||||||| parent of 8ad0605 (feat(mobile): configure remote session control)
+=======
+||||||| parent of d325584 (feat(mobile): configure remote session control)
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
+
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onRemote }: SessionHeaderProps) {
+>>>>>>> 8ad0605 (feat(mobile): configure remote session control)
+>>>>>>> 68a0b1f (feat(mobile): configure remote session control)
   const tokens = useTokens();
   const isPublic = exposure.startsWith("public");
 
@@ -190,7 +219,6 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
           icon={<Bookmark size={20} strokeWidth={1.75} color={tokens.ink} />}
           onPress={onCheckpoint}
           accessibilityLabel="Manage session checkpoints"
-<<<<<<< HEAD
 ||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
@@ -198,6 +226,7 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
           icon={<GitPullRequest size={20} strokeWidth={1.75} color={tokens.ink} />}
           onPress={onPullRequest}
           accessibilityLabel="Create pull request"
+<<<<<<< HEAD
 ||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
 
 ||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
@@ -205,8 +234,9 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
           icon={<Brain size={20} strokeWidth={1.75} color={tokens.ink} />}
           onPress={onMemory}
           accessibilityLabel="Manage project memory"
+<<<<<<< HEAD
 ||||||| parent of 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
-=======
+
 ||||||| parent of 27f786d (feat(mobile): run autonomous loops from sessions)
 
 ||||||| parent of 15fede8 (feat(mobile): run autonomous loops from sessions)
@@ -214,7 +244,17 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
           icon={<Repeat2 size={20} strokeWidth={1.75} color={tokens.ink} />}
           onPress={onLoop}
           accessibilityLabel="Run autonomous loop"
->>>>>>> 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
+||||||| parent of 68a0b1f (feat(mobile): configure remote session control)
+=======
+||||||| parent of 8ad0605 (feat(mobile): configure remote session control)
+=======
+||||||| parent of d325584 (feat(mobile): configure remote session control)
+
+          icon={<Radio size={20} strokeWidth={1.75} color={tokens.ink} />}
+          onPress={onRemote}
+          accessibilityLabel="Configure remote control"
+>>>>>>> 8ad0605 (feat(mobile): configure remote session control)
+>>>>>>> 68a0b1f (feat(mobile): configure remote session control)
         />
         <IconButton
           icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />}
