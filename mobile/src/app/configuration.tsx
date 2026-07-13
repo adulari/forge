@@ -1,8 +1,8 @@
-import { router } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
+import { BackLink } from "../components/ds/BackLink";
 import { Card } from "../components/ds/Card";
 import { Input } from "../components/ds/Input";
 import { ListRow } from "../components/ds/ListRow";
@@ -98,7 +98,7 @@ export default function ConfigurationScreen() {
   const groups = useMemo(() => grouped(query.data?.fields ?? []), [query.data?.fields]);
 
   return <DesktopDrillDown><Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
-    <Pressable onPress={() => router.back()} accessibilityRole="button"><Text style={[styles.back, { color: tokens.accent }]}>‹ Settings</Text></Pressable>
+    <BackLink />
     <Text style={[type.title, { color: tokens.ink }]}>Configuration</Text>
     <Text style={[type.sub, { color: tokens.ink3 }]}>Tune Forge’s effective settings. Choose where edits are saved.</Text>
     <Segmented options={[{ value: "user", label: "Save everywhere" }, { value: "project", label: "Save in project" }]} value={scope} onChange={(value) => setScope(value as Scope)} />

@@ -1,8 +1,8 @@
-import { router } from "expo-router";
 import { Cpu } from "lucide-react-native";
 import React, { memo, useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 
+import { BackLink } from "../components/ds/BackLink";
 import { Badge } from "../components/ds/Badge";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { BoundedList } from "../components/ds/BoundedList";
@@ -69,7 +69,7 @@ export default function ModelsScreen() {
   const refresh = useCallback(() => void refetch(), [refetch]);
   const header = useMemo(() => (
     <View style={styles.header}>
-      <Pressable onPress={() => router.back()} accessibilityRole="button"><Text style={[styles.back, { color: tokens.accent }]}>‹ Settings</Text></Pressable>
+      <BackLink />
       <Text style={[type.title, { color: tokens.ink }]}>Models & mesh health</Text>
       <Text style={[type.sub, { color: tokens.ink3 }]}>Your discovered catalog and failover protection.</Text>
       {query.isError && items.length > 0 ? <Card><Text style={[type.body, { color: tokens.danger }]}>Could not refresh model health. Showing saved results.</Text></Card> : null}

@@ -4,6 +4,7 @@ import React, { useMemo } from "react";
 import { Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
+import { BackLink } from "../components/ds/BackLink";
 import { Card } from "../components/ds/Card";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
@@ -55,7 +56,7 @@ export default function SessionTreeScreen() {
   return (
     <DesktopDrillDown>
       <Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
-        <Pressable onPress={() => router.back()} accessibilityRole="button"><Text style={[styles.back, { color: tokens.accent }]}>‹ Settings</Text></Pressable>
+        <BackLink />
         <Text style={[type.title, { color: tokens.ink }]}>Session tree</Text>
         <Text style={[type.sub, { color: tokens.ink3 }]}>Forks and their conversation ancestry.</Text>
         {query.isError ? <Card><Text style={[type.body, { color: tokens.danger }]}>Could not load the session tree. Pull to retry.</Text></Card> : null}
