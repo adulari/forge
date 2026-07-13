@@ -44,6 +44,7 @@ import { SelfMcpSheet } from "../../../components/session/SelfMcpSheet";
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
 import { CheckpointSheet } from "../../../components/session/CheckpointSheet";
+<<<<<<< HEAD
 ||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
@@ -54,6 +55,14 @@ import { PullRequestSheet } from "../../../components/session/PullRequestSheet";
 ||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
 import { MemorySheet } from "../../../components/session/MemorySheet";
+||||||| parent of 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
+=======
+||||||| parent of 27f786d (feat(mobile): run autonomous loops from sessions)
+
+||||||| parent of 15fede8 (feat(mobile): run autonomous loops from sessions)
+
+import { LoopSheet } from "../../../components/session/LoopSheet";
+>>>>>>> 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
@@ -106,6 +115,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
   const [checkpointVisible, setCheckpointVisible] = useState(false);
+<<<<<<< HEAD
 ||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
@@ -116,6 +126,14 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
   const [memoryVisible, setMemoryVisible] = useState(false);
+||||||| parent of 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
+=======
+||||||| parent of 27f786d (feat(mobile): run autonomous loops from sessions)
+
+||||||| parent of 15fede8 (feat(mobile): run autonomous loops from sessions)
+
+  const [loopVisible, setLoopVisible] = useState(false);
+>>>>>>> 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
@@ -296,6 +314,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
             onCheckpoint={() => setCheckpointVisible(true)}
+<<<<<<< HEAD
 ||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
@@ -306,6 +325,14 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
             onMemory={() => setMemoryVisible(true)}
+||||||| parent of 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
+=======
+||||||| parent of 27f786d (feat(mobile): run autonomous loops from sessions)
+
+||||||| parent of 15fede8 (feat(mobile): run autonomous loops from sessions)
+
+            onLoop={() => setLoopVisible(true)}
+>>>>>>> 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
           />
         </View>
 
@@ -328,6 +355,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
 
         <CheckpointSheet visible={checkpointVisible} onClose={() => setCheckpointVisible(false)} send={send} />
+<<<<<<< HEAD
 ||||||| parent of 8a05462 (feat(mobile): create pull requests from sessions)
 
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
@@ -338,6 +366,14 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
 
         <MemorySheet visible={memoryVisible} onClose={() => setMemoryVisible(false)} send={send} />
+||||||| parent of 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
+=======
+||||||| parent of 27f786d (feat(mobile): run autonomous loops from sessions)
+
+||||||| parent of 15fede8 (feat(mobile): run autonomous loops from sessions)
+
+        <LoopSheet visible={loopVisible} onClose={() => setLoopVisible(false)} send={send} />
+>>>>>>> 8b2b1e2 (feat(mobile): run autonomous loops from sessions)
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />
