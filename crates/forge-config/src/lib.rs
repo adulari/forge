@@ -2450,6 +2450,8 @@ pub enum SettingValue {
     Str(String),
     /// A string list, edited as JSON so entries may safely contain commas or newlines.
     List(Vec<String>),
+    /// A structured non-secret config value, edited as JSON.
+    Json(serde_json::Value),
     /// An unset optional (serialized `null`) — edited as text, empty clears it.
     Unset,
 }
@@ -2463,6 +2465,7 @@ impl SettingValue {
             SettingValue::Float(_) => "float",
             SettingValue::Str(_) | SettingValue::Unset => "text",
             SettingValue::List(_) => "list",
+            SettingValue::Json(_) => "json",
         }
     }
 
@@ -2474,13 +2477,14 @@ impl SettingValue {
             SettingValue::Float(f) => f.to_string(),
             SettingValue::Str(s) => s.clone(),
             SettingValue::List(values) => serde_json::to_string(values).unwrap_or_default(),
+            SettingValue::Json(value) => serde_json::to_string_pretty(value).unwrap_or_default(),
             SettingValue::Unset => String::new(),
         }
     }
 }
 
 /// Top-level sections that are NOT scalar-editable here — each has its own command/flow.
-const COMPLEX_SECTIONS: &[&str] = &["hooks", "mcp", "permissions"];
+const COMPLEX_SECTIONS: &[&str] = &["hooks", "mcp", "permissions", "statusline"];
 
 /// The complex (table/array) config sections the flat `/config` editor can't surface as scalars.
 /// They're listed read-only there with an "edit in $EDITOR" jump so they're at least discoverable.
@@ -2552,6 +2556,8 @@ pub enum SettingKind {
     Float,
     /// A JSON array of strings, edited with an item-list control.
     List,
+    /// A structured non-secret value, edited as JSON.
+    Json,
     /// A fixed set of valid values — cycled / picked, never typed.
     Enum(Vec<&'static str>),
     Text,
@@ -2684,6 +2690,7 @@ pub fn config_descriptors() -> Vec<SettingDescriptor> {
                     SettingValue::Int(_) => SettingKind::Int,
                     SettingValue::Float(_) => SettingKind::Float,
                     SettingValue::List(_) => SettingKind::List,
+                    SettingValue::Json(_) => SettingKind::Json,
                     _ => SettingKind::Text,
                 },
             };
@@ -2758,6 +2765,9 @@ fn flatten_value(prefix: &str, value: &serde_json::Value, out: &mut Vec<SettingL
             for (k, v) in map {
                 // Skip complex top-level sections entirely (their own commands own them).
                 if prefix.is_empty() && COMPLEX_SECTIONS.contains(&k.as_str()) {
+                    if k == "statusline" {
+                        out.push(leaf(k, SettingValue::Json(v.clone())));
+                    }
                     continue;
                 }
                 let path = if prefix.is_empty() {
@@ -2937,6 +2947,13 @@ fn coerce_value(
             .map(|items| toml::Value::Array(items.into_iter().map(toml::Value::String).collect()))
             .map(Some)
             .map_err(|_| ConfigError::Write("expected a JSON string array".to_string())),
+        Some(SettingValue::Json(_)) => serde_json::from_str::<serde_json::Value>(t)
+            .map_err(|_| ConfigError::Write("expected valid JSON".to_string()))
+            .and_then(|value| {
+                toml::Value::try_from(value).map(Some).map_err(|_| {
+                    ConfigError::Write("JSON value cannot be saved to TOML".to_string())
+                })
+            }),
         // Text or unset/optional: empty clears, otherwise a string.
         _ => {
             if t.is_empty() {
