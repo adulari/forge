@@ -20,6 +20,9 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
   const select = (level: EffortLevel | null) => {
     if (send({ kind: "prompt", text: level ? `/effort ${level}` : "/effort" })) onClose();
   };
+  const openTemperPicker = () => {
+    if (send({ kind: "prompt", text: "/mode" })) onClose();
+  };
   return <Sheet visible={visible} onClose={onClose} accessibilityLabel="Session telemetry" snapPoints={[0.8]}>
     <View style={styles.content}>
       <Text style={[typeScale.heading, { color: tokens.ink }]}>Session telemetry</Text>
@@ -29,6 +32,8 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
         <Text style={[typeScale.meta, { color: tokens.ink3 }]}>Approximate — may be off if other sessions or tools share this {weekly.provider} subscription.</Text>
       </> : <Text style={[typeScale.bodyBold, { color: tokens.success }]}>cost {formatCost(costUsd)}</Text>}
       <View style={styles.meshAction}><Pressable onPress={() => { if (send({ kind: "prompt", text: "/mesh" })) onClose(); }} accessibilityRole="button" style={[styles.meshButton, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.accent }]}>Explain mesh routing</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>See why Forge would choose this model</Text></Pressable></View>
+      <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>Operating mode</Text>
+      <Pressable onPress={openTemperPicker} accessibilityRole="button" style={[styles.option, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.accent }]}>Change operating mode</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{temper}</Text></Pressable>
       <View style={[styles.rows, { borderTopColor: tokens.border }]}>
         <KeyValueRow label="Tier" value={tier ?? "—"} />
         <KeyValueRow label="Model" value={model} />
