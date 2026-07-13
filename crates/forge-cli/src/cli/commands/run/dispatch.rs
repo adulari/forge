@@ -47,6 +47,9 @@ pub(crate) enum DispatchOutcome {
     },
     /// `/loop <task>` — run the task, then re-run each turn until the model signals completion.
     StartLoop { prompt: String },
+    /// `/goal <objective>` — decompose into a tracked task plan, then keep re-running turns
+    /// autonomously until every task is done and the model signals completion.
+    StartGoal { prompt: String, goal: String },
     /// `/duel <task>` — race 2-3 mesh models on the same task, each in its own worktree
     /// (docs/features/duel.md), in a background task like a turn.
     RunDuel { task: String },
@@ -603,13 +606,12 @@ and keep going."
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
             }
             app.note(&format!("🎯 goal set — {text}"));
-            return Ok(DispatchOutcome::RunTurn {
+            return Ok(DispatchOutcome::StartGoal {
                 prompt: format!(
                     "Break this goal into a concrete, ordered plan and record it with the \
                      update_tasks tool, then start on the first step.\n\nGoal: {text}"
                 ),
-                guidance: Vec::new(),
-                tier: Some(forge_types::TaskTier::Complex),
+                goal: text.clone(),
             });
         }
         // `/pr [title]` — turn this session's work into a branch + commit + PR whose body carries
