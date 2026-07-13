@@ -2038,6 +2038,9 @@ struct ModelRow {
     estimated_cost_usd: f64,
     health: Option<ModelHealth>,
     tier: &'static str,
+    benchmark_intelligence: Option<f64>,
+    benchmark_coding: Option<f64>,
+    context_window: Option<u32>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -2097,6 +2100,11 @@ async fn models_page(State(state): State<Arc<DaemonState>>) -> Response {
                             } else {
                                 "trivial"
                             },
+                            benchmark_intelligence: catalog
+                                .benchmark_for(&model.id)
+                                .map(|score| score.0),
+                            benchmark_coding: catalog.benchmark_for(&model.id).map(|score| score.1),
+                            context_window: forge_mesh::pricing::context_limit(&model.id),
                         })
                         .collect(),
                 })

@@ -785,6 +785,14 @@ impl ModelCatalog {
         self
     }
 
+    /// Measured benchmark scores for a discovered model, if it has a matching catalog row.
+    pub fn benchmark_for(&self, model: &str) -> Option<(f64, f64)> {
+        self.bench
+            .as_ref()
+            .and_then(|bench| bench.score_for(model))
+            .map(|score| (score.intelligence, score.coding))
+    }
+
     /// How many of the catalog's models have a benchmark score (for `forge benchmarks` coverage).
     pub fn benchmark_coverage(&self) -> (usize, usize) {
         match &self.bench {
