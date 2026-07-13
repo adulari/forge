@@ -150,7 +150,7 @@ function DiffFileSection({ file, isLast }: { file: DiffFile; isLast: boolean }) 
       </View>
 
       {expanded && !file.binary ? (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.hunkScroll}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={[styles.hunkScroll, styles.horizontalScroll]}>
           <View>
             {file.hunks.map((hunk, hIdx) => (
               <View key={hIdx} style={styles.hunk}>
@@ -188,6 +188,7 @@ const styles = StyleSheet.create({
   filePath: { flex: 1 },
   counts: { flexShrink: 0 },
   hunkScroll: { marginBottom: space.space4 },
+  horizontalScroll: { flexGrow: 0, flexShrink: 0 },
   hunk: { paddingBottom: space.space8 },
   hunkHeader: { paddingHorizontal: space.space12, paddingVertical: space.space4 },
   footer: { paddingHorizontal: space.space12, paddingVertical: space.space8 },

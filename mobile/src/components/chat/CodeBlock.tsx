@@ -185,7 +185,7 @@ export function CodeBlock({ code, language }: CodeBlockProps) {
           }
         />
       </View>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.codeScroll}>
         <Text accessibilityRole="text" selectable style={[type.code, styles.code, { color: tokens.ink }]}>
           {hlTokens.map((t, idx) => (
             <Text key={idx} style={tokenStyle(t.kind, tokens, keywordColor)}>
@@ -212,6 +212,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
+  codeScroll: { flexGrow: 0, flexShrink: 0 },
   code: {
     padding: 12,
     fontFamily: monoFamily.regular,
