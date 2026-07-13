@@ -30,6 +30,12 @@ import { ArrowLeft, Search, Bookmark } from "lucide-react-native";
 import { ArrowLeft, Search } from "lucide-react-native";
 
 import { ArrowLeft, Search, GitPullRequest } from "lucide-react-native";
+||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
+
+||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
+import { ArrowLeft, Search } from "lucide-react-native";
+
+import { ArrowLeft, Search, Brain } from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -71,6 +77,11 @@ export interface SessionHeaderProps {
 ||||||| parent of 8730e72 (feat(mobile): create pull requests from sessions)
 
   onPullRequest: () => void;
+||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
+
+||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
+
+  onMemory: () => void;
 }
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onDuel, onReplay, onPlan }: SessionHeaderProps) {
@@ -102,6 +113,12 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onPullRequest }: SessionHeaderProps) {
+||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
+
+||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
+
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onMemory }: SessionHeaderProps) {
   const tokens = useTokens();
   const isPublic = exposure.startsWith("public");
 
@@ -151,6 +168,13 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
           icon={<GitPullRequest size={20} strokeWidth={1.75} color={tokens.ink} />}
           onPress={onPullRequest}
           accessibilityLabel="Create pull request"
+||||||| parent of f5a183e (feat(mobile): manage project memory from sessions)
+
+||||||| parent of 5951afd (feat(mobile): manage project memory from sessions)
+
+          icon={<Brain size={20} strokeWidth={1.75} color={tokens.ink} />}
+          onPress={onMemory}
+          accessibilityLabel="Manage project memory"
         />
         <IconButton
           icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />}
