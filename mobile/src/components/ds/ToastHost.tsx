@@ -78,6 +78,11 @@ export function ToastHost({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     startFocusTracking();
+    const activeTimers = timers.current;
+    return () => {
+      for (const timer of activeTimers.values()) clearTimeout(timer);
+      activeTimers.clear();
+    };
   }, []);
 
   const dismiss = useCallback((id: string) => {
