@@ -41,7 +41,7 @@ const ModelCard = memo(function ModelCard({ model }: { model: ModelRow }) {
           {model.paid ? <Badge label={model.estimated_cost_usd > 0 ? `~$${model.estimated_cost_usd.toFixed(2)}` : "metered"} tone="neutral" /> : null}
           {model.frontier ? <Badge label="frontier" tone="warn" /> : null}
         </View>
-        {model.health && open ? <Text style={[type.sub, { color: tokens.danger }]}>{model.health.reason} · {retryLabel(model.health.until_epoch)}</Text> : null}
+        {model.health && open ? <Text style={[type.sub, { color: tokens.danger }]} numberOfLines={3}>{model.health.reason} · {retryLabel(model.health.until_epoch)}</Text> : null}
       </Card>
     </Pressable>
   );
