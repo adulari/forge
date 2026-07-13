@@ -64,7 +64,7 @@ function ConfigFieldRow({ field, scope }: { field: ConfigField; scope: Scope }) 
         return [];
       }
     })();
-    return <View style={styles.field}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text>{values.map((value, index) => <Input key={`${field.key}-${index}`} value={value} onChangeText={(next) => { const updated = [...values]; updated[index] = next; setDraft(JSON.stringify(updated)); }} onBlur={() => save(draft)} accessibilityLabel={`${field.label} item ${index + 1}`} autoCapitalize="none" autoCorrect={false} />)}<Pressable onPress={() => { const next = JSON.stringify([...values, ""]); setDraft(next); }} accessibilityRole="button" accessibilityLabel={`Add ${field.label} item`}><Text style={[styles.reset, { color: tokens.accent }]}>Add item</Text></Pressable></View>;
+    return <View style={styles.field}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text>{values.map((value, index) => <View key={`${field.key}-${index}`} style={styles.listItem}><Input containerStyle={styles.listInput} value={value} onChangeText={(next) => { const updated = [...values]; updated[index] = next; setDraft(JSON.stringify(updated)); }} onBlur={() => save(draft)} accessibilityLabel={`${field.label} item ${index + 1}`} autoCapitalize="none" autoCorrect={false} /><Pressable onPress={() => { const next = JSON.stringify(values.filter((_, itemIndex) => itemIndex !== index)); setDraft(next); save(next); }} accessibilityRole="button" accessibilityLabel={`Remove ${field.label} item ${index + 1}`}><Text style={[styles.reset, { color: tokens.danger }]}>Remove</Text></Pressable></View>)}<Pressable onPress={() => { const next = JSON.stringify([...values, ""]); setDraft(next); }} accessibilityRole="button" accessibilityLabel={`Add ${field.label} item`}><Text style={[styles.reset, { color: tokens.accent }]}>Add item</Text></Pressable></View>;
   }
   if (field.field_type === "enum") {
     return <View style={styles.field}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text><Segmented options={field.options.map((option) => ({ value: option, label: option }))} value={draft} onChange={(value) => { setDraft(value); save(value); }} /></View>;
@@ -93,5 +93,7 @@ const styles = StyleSheet.create({
   content: { paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 },
   back: { fontSize: 15, fontWeight: "600" },
   field: { gap: space.space4, paddingHorizontal: space.space16, paddingVertical: space.space12 },
+  listItem: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  listInput: { flex: 1 },
   reset: { fontSize: 13, fontWeight: "600", paddingTop: space.space4 },
 });
