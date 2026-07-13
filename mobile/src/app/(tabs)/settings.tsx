@@ -478,7 +478,7 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   serverLeading: { flexDirection: "row", alignItems: "center", gap: space.space4 },
   reachabilityDot: { width: 8, height: 8, borderRadius: 4 },
-  content: { paddingTop: space.space16, paddingBottom: space.space32, gap: space.space20 },
+  content: { paddingTop: space.space16, paddingBottom: space.space48, gap: space.space20 },
   pageTitle: { paddingHorizontal: space.space4 },
   appearanceCard: { gap: space.space8 },
 });

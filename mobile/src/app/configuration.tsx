@@ -2,6 +2,7 @@ import { router } from "expo-router";
 import React, { useCallback, useMemo, useState } from "react";
 import { Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 
+import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { Card } from "../components/ds/Card";
 import { Input } from "../components/ds/Input";
 import { ListRow } from "../components/ds/ListRow";
@@ -90,7 +91,7 @@ export default function ConfigurationScreen() {
   const [scope, setScope] = useState<Scope>("user");
   const groups = useMemo(() => grouped(query.data?.fields ?? []), [query.data?.fields]);
 
-  return <Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
+  return <DesktopDrillDown><Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
     <Pressable onPress={() => router.back()} accessibilityRole="button"><Text style={[styles.back, { color: tokens.accent }]}>‹ Settings</Text></Pressable>
     <Text style={[type.title, { color: tokens.ink }]}>Configuration</Text>
     <Text style={[type.sub, { color: tokens.ink3 }]}>Tune Forge’s effective settings. Changes save immediately.</Text>
@@ -99,7 +100,7 @@ export default function ConfigurationScreen() {
     {query.isError ? <Card><Text style={[type.body, { color: tokens.danger }]}>Could not load configuration. Pull to retry.</Text></Card> : null}
     {query.isLoading ? <Card><Text style={[type.body, { color: tokens.ink3 }]}>Loading your effective configuration…</Text></Card> : null}
     {groups.map(([group, fields]) => <View key={group}><SectionHeader>{group}</SectionHeader><Card padded={false}>{fields.map((field, index) => <ConfigFieldRow key={field.key} field={field} scope={scope} />)}</Card></View>)}
-  </Screen>;
+  </Screen></DesktopDrillDown>;
 }
 
 const styles = StyleSheet.create({

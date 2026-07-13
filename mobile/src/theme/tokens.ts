@@ -59,6 +59,10 @@ export interface ColorTokens {
   selection: string;
   overlayScrim: string;
   ember: EmberScale;
+  /** Accent with zero alpha for native gradients (avoids transparent-black interpolation). */
+  accentTransparent: string;
+  /** Native approximation opacity for the top ambient ember wash. */
+  forgeWashOpacity: number;
   /** Move 1 (thermal identity) — HeatEdge gradient start (ember400). */
   heatEdgeFrom: string;
   /** Move 1 (thermal identity) — HeatEdge gradient end (ember500). */
@@ -95,6 +99,8 @@ export const darkTokens: ColorTokens = {
   warnBgInk: "#FFD9A8",
   selection: "#2E2415",
   overlayScrim: "rgba(8,8,12,0.6)",
+  accentTransparent: "rgba(255,145,60,0)",
+  forgeWashOpacity: 0.05,
   ember: emberScale,
   heatEdgeFrom: emberScale.ember400,
   heatEdgeTo: emberScale.ember500,
@@ -129,6 +135,8 @@ export const lightTokens: ColorTokens = {
   warnBgInk: "#211F1B",
   selection: "#F6E7D2",
   overlayScrim: "rgba(30,26,20,0.35)",
+  accentTransparent: "rgba(199,93,16,0)",
+  forgeWashOpacity: 0.04,
   ember: emberScale,
   heatEdgeFrom: emberScale.ember400,
   heatEdgeTo: emberScale.ember500,

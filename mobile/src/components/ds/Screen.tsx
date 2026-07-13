@@ -13,7 +13,7 @@ import {
 import { type Edge, SafeAreaView } from "react-native-safe-area-context";
 import { LinearGradient } from "expo-linear-gradient";
 
-import { useTheme } from "../../theme/ThemeProvider";
+import { useTokens } from "../../theme/ThemeProvider";
 import { gutter, type ColorTokens } from "../../theme/tokens";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 
@@ -46,7 +46,7 @@ export function Screen({
   contentContainerStyle,
   style,
 }: ScreenProps) {
-  const { tokens, scheme } = useTheme();
+  const tokens = useTokens();
   const { isCompact } = useBreakpoint();
   const paddingHorizontal = isCompact ? gutter.compact : gutter.medium;
 
@@ -65,7 +65,7 @@ export function Screen({
 
   return (
     <SafeAreaView style={[styles.flex, { backgroundColor: tokens.bg1 }, style]} edges={edges}>
-      <ForgeWash tokens={tokens} scheme={scheme} />
+      <ForgeWash tokens={tokens} />
       {keyboardAvoiding ? (
         <KeyboardAvoidingView
           style={styles.flex}
@@ -88,7 +88,7 @@ export function Screen({
  * aren't supported natively), tinted with the theme's accent at the same low
  * alpha the token spec calls for (5% dark / 4% light).
  */
-function ForgeWash({ tokens, scheme }: { tokens: ColorTokens; scheme: "light" | "dark" }) {
+function ForgeWash({ tokens }: { tokens: ColorTokens }) {
   if (Platform.OS === "web") {
     return (
       <View
@@ -103,10 +103,10 @@ function ForgeWash({ tokens, scheme }: { tokens: ColorTokens; scheme: "light" | 
   return (
     <LinearGradient
       pointerEvents="none"
-      colors={[tokens.accent, "transparent"]}
+      colors={[tokens.accent, tokens.accentTransparent]}
       start={{ x: 0.5, y: 0 }}
       end={{ x: 0.5, y: 1 }}
-      style={[styles.wash, { opacity: scheme === "light" ? 0.04 : 0.05 }]}
+      style={[styles.wash, { opacity: tokens.forgeWashOpacity }]}
     />
   );
 }

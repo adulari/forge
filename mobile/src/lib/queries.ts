@@ -106,12 +106,15 @@ export function useSessions() {
 
 /** Per-server fleet probes for the Settings server switcher. */
 export function useServerFleets(servers: { id: string; baseUrl: string }[]) {
+  const isFocused = useIsFocused();
   return useQueries({
     queries: servers.map((server) => ({
       queryKey: ["sessions", "server", server.id] as const,
       queryFn: () => getSessions(server.baseUrl),
-      refetchInterval: (query: { state: { error: unknown } }) =>
-        query.state.error ? SERVER_FLEET_BACKOFF_MS : SERVER_FLEET_POLL_MS,
+      refetchInterval: isFocused
+        ? (query: { state: { error: unknown } }) =>
+            query.state.error ? SERVER_FLEET_BACKOFF_MS : SERVER_FLEET_POLL_MS
+        : false,
       refetchIntervalInBackground: false,
       retry: false,
     })),

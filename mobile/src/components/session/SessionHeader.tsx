@@ -1,29 +1,30 @@
-// Session shell header (T3.1, DESIGN_SYSTEM.md §6): back control, title, cwd (mono,
-// head-ellipsized), worktree Badge, exposure Badge. The danger Banner for public exposure
-// is rendered by the shell itself (_layout.tsx) — this component owns the header row only.
+// Session shell header: focused controls plus an accessible overflow for less-frequent actions.
 import {
   ArrowLeft,
-  Search,
-  Swords,
+  BookOpen,
+  Bookmark,
+  Bot,
+  Brain,
+  GitFork,
+  GitPullRequest,
   History,
   Map,
-  GitFork,
-  BookOpen,
   Microscope,
-  Bot,
-  Bookmark,
-  GitPullRequest,
-  Brain,
+  MoreHorizontal,
   Network,
+  Search,
+  Swords,
 } from "lucide-react-native";
-import React from "react";
-import { StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useState } from "react";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 import { Badge } from "../ds/Badge";
 import { IconButton } from "../ds/IconButton";
+import { ListRow } from "../ds/ListRow";
+import { Sheet } from "../ds/Sheet";
 
 export interface SessionHeaderProps {
   title: string;
@@ -45,57 +46,45 @@ export interface SessionHeaderProps {
   onLattice: () => void;
 }
 
-export function SessionHeader({
-  title,
-  cwd,
-  worktree,
-  exposure,
-  onBack,
-  onPalette,
-  onDuel,
-  onReplay,
-  onPlan,
-  onFork,
-  onInit,
-  onAssay,
-  onSelfMcp,
-  onCheckpoint,
-  onPullRequest,
-  onMemory,
-  onLattice,
-}: SessionHeaderProps) {
+export function SessionHeader(props: SessionHeaderProps) {
   const tokens = useTokens();
-  const isPublic = exposure.startsWith("public");
+  const [actionsVisible, setActionsVisible] = useState(false);
+  const isPublic = props.exposure.startsWith("public");
+  const closeActions = useCallback(() => setActionsVisible(false), []);
+  const run = useCallback((action: () => void) => {
+    closeActions();
+    action();
+  }, [closeActions]);
 
   return (
     <View style={styles.wrap}>
       <View style={styles.row}>
-        <IconButton icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onBack} accessibilityLabel="Back" />
-        <IconButton icon={<Swords size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onDuel} accessibilityLabel="Start model duel" />
-        <IconButton icon={<History size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onReplay} accessibilityLabel="Open session replay" />
-        <IconButton icon={<Map size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onPlan} accessibilityLabel="Create implementation plan" />
-        <IconButton icon={<GitFork size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onFork} accessibilityLabel="Fork session" />
-        <IconButton icon={<BookOpen size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onInit} accessibilityLabel="Initialize project guidance" />
-        <IconButton icon={<Microscope size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onAssay} accessibilityLabel="Run quality assay" />
-        <IconButton icon={<Bot size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onSelfMcp} accessibilityLabel="Manage self MCP agent" />
-        <IconButton icon={<Bookmark size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onCheckpoint} accessibilityLabel="Manage session checkpoints" />
-        <IconButton icon={<GitPullRequest size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onPullRequest} accessibilityLabel="Create pull request" />
-        <IconButton icon={<Brain size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onMemory} accessibilityLabel="Manage project memory" />
-        <IconButton icon={<Network size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onLattice} accessibilityLabel="Inspect code symbol" />
-        <IconButton icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onPalette} accessibilityLabel="Open command palette" />
-        <Text style={[typeScale.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
-          {title}
-        </Text>
-        {worktree ? <Badge label="worktree" tone="outline" /> : null}
-        <Badge label={exposure} tone={isPublic ? "danger" : "neutral"} />
+        <IconButton icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onBack} accessibilityLabel="Back" />
+        <Text style={[typeScale.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>{props.title}</Text>
+        <IconButton icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onPalette} accessibilityLabel="Open command palette" />
+        <IconButton icon={<MoreHorizontal size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={() => setActionsVisible(true)} accessibilityLabel="Session actions" />
       </View>
-      <Text
-        style={[typeScale.codeSmall, styles.cwd, { color: tokens.ink2 }]}
-        numberOfLines={1}
-        ellipsizeMode="head"
-      >
-        {cwd}
-      </Text>
+      <View style={styles.metaRow}>
+        {props.worktree ? <Badge label="worktree" tone="outline" /> : null}
+        <Badge label={props.exposure} tone={isPublic ? "danger" : "neutral"} />
+        <Text style={[typeScale.codeSmall, styles.cwd, { color: tokens.ink2 }]} numberOfLines={1} ellipsizeMode="head">{props.cwd}</Text>
+      </View>
+      <Sheet visible={actionsVisible} onClose={closeActions} accessibilityLabel="Session actions" snapPoints={[0.8]}>
+        <ScrollView contentContainerStyle={styles.actions} keyboardShouldPersistTaps="handled">
+          <Text style={[typeScale.heading, { color: tokens.ink }]}>Session actions</Text>
+          <ListRow title="Start model duel" leading={<Swords size={20} color={tokens.ink2} />} onPress={() => run(props.onDuel)} />
+          <ListRow title="Open session replay" leading={<History size={20} color={tokens.ink2} />} onPress={() => run(props.onReplay)} />
+          <ListRow title="Create implementation plan" leading={<Map size={20} color={tokens.ink2} />} onPress={() => run(props.onPlan)} />
+          <ListRow title="Fork session" leading={<GitFork size={20} color={tokens.ink2} />} onPress={() => run(props.onFork)} />
+          <ListRow title="Initialize project guidance" leading={<BookOpen size={20} color={tokens.ink2} />} onPress={() => run(props.onInit)} />
+          <ListRow title="Run quality assay" leading={<Microscope size={20} color={tokens.ink2} />} onPress={() => run(props.onAssay)} />
+          <ListRow title="Manage self MCP agent" leading={<Bot size={20} color={tokens.ink2} />} onPress={() => run(props.onSelfMcp)} />
+          <ListRow title="Manage session checkpoints" leading={<Bookmark size={20} color={tokens.ink2} />} onPress={() => run(props.onCheckpoint)} />
+          <ListRow title="Create pull request" leading={<GitPullRequest size={20} color={tokens.ink2} />} onPress={() => run(props.onPullRequest)} />
+          <ListRow title="Manage project memory" leading={<Brain size={20} color={tokens.ink2} />} onPress={() => run(props.onMemory)} />
+          <ListRow title="Inspect code symbol" leading={<Network size={20} color={tokens.ink2} />} onPress={() => run(props.onLattice)} showSeparator={false} />
+        </ScrollView>
+      </Sheet>
     </View>
   );
 }
@@ -104,6 +93,7 @@ const styles = StyleSheet.create({
   wrap: { gap: space.space4 },
   row: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 44 },
   title: { flex: 1 },
-  // Aligns under the title text, past the 44pt back-button hit area.
-  cwd: { paddingLeft: 44 + space.space8 },
+  metaRow: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 20 },
+  cwd: { flex: 1 },
+  actions: { paddingBottom: space.space32 },
 });
