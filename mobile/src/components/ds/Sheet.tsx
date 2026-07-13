@@ -47,11 +47,13 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
   const depth = scheme === "dark" ? depthDark : depthLight;
 
   const sheetHeight = windowHeight * maxHeightRatio;
-  const snapY = useMemo(
-    () => [...snapPoints].map((p) => sheetHeight * (1 - Math.max(0, Math.min(1, p)))).sort((a, b) => a - b),
+  const clampedSnapY = useMemo(
+    () => snapPoints.map((p) => sheetHeight * (1 - Math.max(0, Math.min(1, p)))),
     [snapPoints, sheetHeight],
   );
-  const restY = snapY[0] ?? 0;
+  const restY = clampedSnapY[0] ?? 0;
+  const snapY = useMemo(() => [...clampedSnapY].sort((a, b) => a - b), [clampedSnapY]);
+  const minSnapY = snapY[0] ?? 0;
   const closedY = sheetHeight;
 
   const translateY = useSharedValue(closedY);
@@ -71,11 +73,11 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
     if (visible) {
       if (reduced) {
         translateY.value = restY;
-        scrimOpacity.value = 1;
+        scrimOpacity.value = 1 - restY / sheetHeight;
         return;
       }
       translateY.value = withSpring(restY, springs.sheet);
-      scrimOpacity.value = withTiming(1, { duration: durations.fast, easing: easings.standard });
+      scrimOpacity.value = withTiming(1 - restY / sheetHeight, { duration: durations.fast, easing: easings.standard });
     } else {
       if (reduced) {
         translateY.value = closedY;
@@ -111,8 +113,6 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
     return () => window.removeEventListener("keydown", handler);
   }, [visible, close]);
 
-  const farthestY = snapY[snapY.length - 1] ?? closedY;
-
   const pan = Gesture.Pan()
     .enabled(Platform.OS !== "web")
     .onStart(() => {
@@ -120,11 +120,11 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
     })
     .onUpdate((e) => {
       const next = startY.value + e.translationY;
-      translateY.value = Math.max(farthestY, next);
-      scrimOpacity.value = 1 - Math.min(1, translateY.value / sheetHeight);
+      translateY.value = Math.min(closedY, Math.max(minSnapY, next));
+      scrimOpacity.value = Math.max(0, Math.min(1, 1 - translateY.value / sheetHeight));
     })
     .onEnd((e) => {
-      const pastCloseDistance = translateY.value > sheetHeight * CLOSE_DISTANCE_RATIO;
+      const pastCloseDistance = translateY.value - startY.value > sheetHeight * CLOSE_DISTANCE_RATIO;
       if (e.velocityY > CLOSE_VELOCITY || pastCloseDistance) {
         translateY.value = withTiming(closedY, { duration: durations.sheet, easing: easings.exit }, (finished) => {
           if (finished) runOnJS(setMounted)(false);
@@ -168,8 +168,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
           accessibilityLabel="Close"
         />
       </Animated.View>
-      <GestureDetector gesture={pan}>
-        <Animated.View
+      <Animated.View
           style={[
             styles.sheet,
             {
@@ -185,12 +184,13 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
           accessibilityViewIsModal
           accessibilityLabel={accessibilityLabel}
         >
-          <View style={styles.grabberRow}>
-            <View style={[styles.grabber, { backgroundColor: tokens.border }]} />
-          </View>
+          <GestureDetector gesture={pan}>
+            <View style={styles.grabberRow}>
+              <View style={[styles.grabber, { backgroundColor: tokens.border }]} />
+            </View>
+          </GestureDetector>
           {children}
         </Animated.View>
-      </GestureDetector>
     </View>
   );
 

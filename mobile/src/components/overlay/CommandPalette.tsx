@@ -174,8 +174,10 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
 
   useEffect(() => {
     if (Platform.OS === "web") return;
-    const show = Keyboard.addListener("keyboardWillShow", (event) => setKeyboardHeight(event.endCoordinates.height));
-    const hide = Keyboard.addListener("keyboardWillHide", () => setKeyboardHeight(0));
+    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    const show = Keyboard.addListener(showEvent, (event) => setKeyboardHeight(event.endCoordinates.height));
+    const hide = Keyboard.addListener(hideEvent, () => setKeyboardHeight(0));
     return () => {
       show.remove();
       hide.remove();
@@ -442,6 +444,9 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
         close();
         return;
       }
+      const target = e.target as HTMLElement | null;
+      const isEditing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable;
+      if (isEditing) return;
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setSelectedIndex((i) => (navigableItems.length ? (i + 1) % navigableItems.length : 0));
