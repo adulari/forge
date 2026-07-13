@@ -28,7 +28,7 @@ interface ProviderRowProps {
 const ProviderRow = memo(function ProviderRow({ provider, quotas }: ProviderRowProps) {
   const tokens = useTokens();
   const [open, setOpen] = useState(false);
-  const priceLabel = provider.costUsd > 0 ? `$${provider.costUsd.toFixed(2)}` : provider.kind === "api" ? "No estimate" : "Included";
+  const priceLabel = provider.costUsd > 0 ? `$${provider.costUsd.toFixed(2)}` : provider.kind === "api" ? "No price" : "Included";
   return (
     <Pressable onPress={() => setOpen((value) => !value)} accessibilityRole="button">
       <Card style={styles.provider}>
