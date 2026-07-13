@@ -2,7 +2,7 @@
 // cursor scroll over usePastSessions() (`before` = last row's last_activity),
 // client-side search filter over title/cwd, tap-to-resume via useCreateSession.
 import { router } from "expo-router";
-import { History as HistoryIcon } from "lucide-react-native";
+import { Archive, History as HistoryIcon } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
@@ -21,7 +21,7 @@ import { SectionHeader } from "../../components/ds/SectionHeader";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { useToast } from "../../components/ds/ToastHost";
 import { ApiError, type PastSessionRow } from "../../lib/api";
-import { useCreateSession, usePastSessions } from "../../lib/queries";
+import { useArchiveSession, useCreateSession, usePastSessions } from "../../lib/queries";
 import { useForgeline, useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
@@ -84,9 +84,10 @@ interface HistoryRowProps {
   row: PastSessionRow;
   index: number;
   onPress: (row: PastSessionRow) => void;
+  onArchive: (row: PastSessionRow) => void;
 }
 
-function HistoryRowBase({ row, index, onPress }: HistoryRowProps) {
+function HistoryRowBase({ row, index, onPress, onArchive }: HistoryRowProps) {
   const tokens = useTokens();
   const strike = useStrike();
   const entrance = useForgeline(index);
@@ -128,6 +129,7 @@ function HistoryRowBase({ row, index, onPress }: HistoryRowProps) {
                 <View style={styles.metaRight}>
                   <Text style={[type.meta, { color: tokens.ink3 }]}>{row.message_count} msgs</Text>
                   {row.cost_usd > 0 ? <Text style={[type.meta, { color: tokens.success }]}>{formatCost(row.cost_usd)}</Text> : null}
+                  {!row.archived ? <Pressable onPress={(event) => { event.stopPropagation(); onArchive(row); }} accessibilityRole="button" accessibilityLabel={`Archive ${title}`} hitSlop={space.space8}><Archive size={16} strokeWidth={1.75} color={tokens.ink3} /></Pressable> : null}
                 </View>
               </View>
             </View>
@@ -145,6 +147,7 @@ const HistoryRow = React.memo(HistoryRowBase, (prev, next) => {
   return (
     prev.index === next.index &&
     prev.onPress === next.onPress &&
+    prev.onArchive === next.onArchive &&
     a.id === b.id &&
     a.title === b.title &&
     a.cwd === b.cwd &&
@@ -162,7 +165,9 @@ export default function HistoryScreen() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<HistoryFilter>("all");
   const [confirmRow, setConfirmRow] = useState<PastSessionRow | null>(null);
+  const [archiveRow, setArchiveRow] = useState<PastSessionRow | null>(null);
   const [resumingId, setResumingId] = useState<string | null>(null);
+  const [nowSec] = useState(() => Math.floor(Date.now() / 1000));
 
   const {
     data,
@@ -176,6 +181,7 @@ export default function HistoryScreen() {
     isRefetching,
   } = usePastSessions();
   const createSession = useCreateSession();
+  const archiveSession = useArchiveSession();
 
   const rows = useMemo(() => data?.pages.flat() ?? [], [data]);
   const normalizedQuery = query.trim().toLowerCase();
@@ -184,7 +190,6 @@ export default function HistoryScreen() {
     [rows, normalizedQuery, filter],
   );
   const listItems = useMemo<HistoryListItem[]>(() => {
-    const nowSec = Math.floor(Date.now() / 1000);
     const groups = new Map<ActivityBucket, PastSessionRow[]>();
     for (const row of filteredRows) {
       const bucket = bucketForActivity(nowSec, row.last_activity);
@@ -201,7 +206,7 @@ export default function HistoryScreen() {
         ...group.map((row, index) => ({ type: "row" as const, row, index })),
       ];
     });
-  }, [filteredRows]);
+  }, [filteredRows, nowSec]);
 
   const resume = useCallback(
     (row: PastSessionRow) => {
@@ -226,11 +231,12 @@ export default function HistoryScreen() {
   );
 
   const onRowPress = useCallback((row: PastSessionRow) => setConfirmRow(row), []);
+  const onArchive = useCallback((row: PastSessionRow) => setArchiveRow(row), []);
 
   const renderItem = useCallback(
     ({ item }: { item: HistoryListItem }) =>
-      item.type === "header" ? <SectionHeader>{item.label}</SectionHeader> : <HistoryRow row={item.row} index={item.index} onPress={onRowPress} />,
-    [onRowPress],
+      item.type === "header" ? <SectionHeader>{item.label}</SectionHeader> : <HistoryRow row={item.row} index={item.index} onPress={onRowPress} onArchive={onArchive} />,
+    [onRowPress, onArchive],
   );
   const keyExtractor = useCallback(
     (item: HistoryListItem) => (item.type === "header" ? `header:${item.bucket}` : item.row.id),
@@ -297,6 +303,18 @@ export default function HistoryScreen() {
           contentContainerStyle={styles.listPad}
         />
       )}
+      <ConfirmDialog
+        visible={archiveRow != null}
+        title="Archive this session?"
+        message={archiveRow?.title || archiveRow?.id.slice(0, 8)}
+        confirmLabel="Archive"
+        destructive
+        onConfirm={() => {
+          if (archiveRow) archiveSession.mutate(archiveRow.id, { onError: (err) => toast.show(err instanceof ApiError ? err.message : "could not archive session.", { tone: "danger" }) });
+          setArchiveRow(null);
+        }}
+        onCancel={() => setArchiveRow(null)}
+      />
       <ConfirmDialog
         visible={confirmRow != null}
         title="Resume this session?"
