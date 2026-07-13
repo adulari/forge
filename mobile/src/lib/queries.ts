@@ -237,7 +237,10 @@ export function useForkSession() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body: ForkSessionRequest }) => forkSession(baseUrl as string, id, body),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessions }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessions });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionTree });
+    },
   });
 }
 

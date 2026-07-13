@@ -314,12 +314,12 @@ pub(crate) fn tree_cmd() -> Result<()> {
     let nodes = store.fork_nodes().context("loading sessions")?;
     let in_family: std::collections::HashSet<&str> = nodes
         .iter()
-        .filter_map(|(_, from, ..)| from.as_deref())
+        .filter_map(|node| node.forked_from.as_deref())
         .chain(
             nodes
                 .iter()
-                .filter(|(_, from, ..)| from.is_some())
-                .map(|(id, ..)| id.as_str()),
+                .filter(|node| node.forked_from.is_some())
+                .map(|node| node.id.as_str()),
         )
         .collect();
     if in_family.is_empty() {
@@ -335,15 +335,18 @@ pub(crate) fn tree_cmd() -> Result<()> {
         replay_preview(&first)
     };
     println!("fork tree — counterfactual branches\n");
-    for (id, from, _, _) in &nodes {
-        if from.is_some() || !in_family.contains(id.as_str()) {
+    for node in &nodes {
+        if node.forked_from.is_some() || !in_family.contains(node.id.as_str()) {
             continue; // roots only here; forks render nested below their source
         }
-        println!("● {}  {}", &id[..8], label(id));
-        for (fid, ffrom, fseq, _) in &nodes {
-            if ffrom.as_deref() == Some(id.as_str()) {
-                let at = fseq.map(|s| format!(" @seq {s}")).unwrap_or_default();
-                println!("└─ {}{}  {}", &fid[..8], at, label(fid));
+        println!("● {}  {}", &node.id[..8], label(&node.id));
+        for fork in &nodes {
+            if fork.forked_from.as_deref() == Some(node.id.as_str()) {
+                let at = fork
+                    .forked_at_seq
+                    .map(|seq| format!(" @seq {seq}"))
+                    .unwrap_or_default();
+                println!("└─ {}{}  {}", &fork.id[..8], at, label(&fork.id));
             }
         }
     }

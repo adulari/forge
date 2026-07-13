@@ -3167,8 +3167,15 @@ pub struct HistoryRow {
     pub visibility: Visibility,
 }
 
-/// One `forge tree` row: `(session id, forked_from, forked_at_seq, created_at)`.
-pub type ForkNode = (String, Option<String>, Option<i64>, i64);
+/// One `forge tree` row: a session's display metadata and fork linkage.
+#[derive(Debug, Clone)]
+pub struct ForkNode {
+    pub id: String,
+    pub title: Option<String>,
+    pub forked_from: Option<String>,
+    pub forked_at_seq: Option<i64>,
+    pub created_at: i64,
+}
 
 /// One message of a session enriched with its usage row, for `forge replay`. The token/cost
 /// fields are `None` for messages that never produced a usage record (user/tool messages, or
@@ -4033,16 +4040,22 @@ impl Store {
         Ok(new_id)
     }
 
-    /// Every top-level session's fork linkage, oldest first. Subagent children are excluded —
-    /// `forge tree` shows conversations, not worker fan-out. Each node is
-    /// `(id, forked_from, forked_at_seq, created_at)`.
+    /// `forge tree` shows conversations, not worker fan-out.
     pub fn fork_nodes(&self) -> Result<Vec<ForkNode>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT id, forked_from, forked_at_seq, created_at FROM session \
+            "SELECT id, title, forked_from, forked_at_seq, created_at FROM session \
              WHERE parent_session_id IS NULL ORDER BY created_at, id",
         )?;
-        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+        let rows = stmt.query_map([], |r| {
+            Ok(ForkNode {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                forked_from: r.get(2)?,
+                forked_at_seq: r.get(3)?,
+                created_at: r.get(4)?,
+            })
+        })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(StoreError::from)
     }
@@ -5754,9 +5767,9 @@ mod tests {
 
         // Linkage visible to `forge tree`; the source is untouched.
         let nodes = store.fork_nodes().unwrap();
-        let node = nodes.iter().find(|(id, ..)| id == &fork).unwrap();
-        assert_eq!(node.1.as_deref(), Some(src.as_str()));
-        assert_eq!(node.2, Some(2));
+        let node = nodes.iter().find(|node| node.id == fork).unwrap();
+        assert_eq!(node.forked_from.as_deref(), Some(src.as_str()));
+        assert_eq!(node.forked_at_seq, Some(2));
         assert_eq!(store.load_messages(&src).unwrap().len(), 4);
     }
 

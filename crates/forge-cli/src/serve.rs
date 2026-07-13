@@ -893,6 +893,7 @@ async fn archive_session(
 #[derive(serde::Serialize)]
 struct SessionTreeRow {
     id: String,
+    title: Option<String>,
     forked_from: Option<String>,
     forked_at_seq: Option<i64>,
     created_at: i64,
@@ -904,14 +905,13 @@ async fn session_tree(State(state): State<Arc<DaemonState>>) -> Response {
         Ok(Ok(nodes)) => json_response(
             &nodes
                 .into_iter()
-                .map(
-                    |(id, forked_from, forked_at_seq, created_at)| SessionTreeRow {
-                        id,
-                        forked_from,
-                        forked_at_seq,
-                        created_at,
-                    },
-                )
+                .map(|node| SessionTreeRow {
+                    id: node.id,
+                    title: node.title,
+                    forked_from: node.forked_from,
+                    forked_at_seq: node.forked_at_seq,
+                    created_at: node.created_at,
+                })
                 .collect::<Vec<_>>(),
         ),
         _ => err_response(
