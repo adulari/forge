@@ -559,7 +559,6 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(&format!("{base}/api/skills"), get(skills_page))
         .route(&format!("{base}/api/models"), get(models_page))
         .route(&format!("{base}/api/plans"), get(plans_page))
-        .route(&format!("{base}/api/mcp"), get(mcp_page))
         .route(
             &format!("{base}/api/mcp"),
             get(mcp_page).post(create_mcp_server),
