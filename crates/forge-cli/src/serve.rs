@@ -2037,6 +2037,10 @@ struct ModelRow {
     subscription: bool,
     estimated_cost_usd: f64,
     health: Option<ModelHealth>,
+    tier: &'static str,
+    benchmark_intelligence: Option<f64>,
+    benchmark_coding: Option<f64>,
+    context_window: Option<u32>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -2070,6 +2074,7 @@ async fn models_page(State(state): State<Arc<DaemonState>>) -> Response {
                 )
             })
             .collect();
+        let context_windows = store.all_model_contexts().unwrap_or_default();
         ModelsResponse {
             catalog: "available",
             providers: catalog
@@ -2082,13 +2087,28 @@ async fn models_page(State(state): State<Arc<DaemonState>>) -> Response {
                         .into_iter()
                         .map(|model| ModelRow {
                             health: benches.get(&model.id).cloned(),
-                            id: model.id,
+                            id: model.id.clone(),
                             name: model.name,
                             frontier: model.frontier,
                             free: model.free,
                             paid: model.paid,
                             subscription: model.subscription,
                             estimated_cost_usd: model.cost,
+                            tier: if model.frontier {
+                                "complex"
+                            } else if model.subscription || model.paid {
+                                "standard"
+                            } else {
+                                "trivial"
+                            },
+                            benchmark_intelligence: catalog
+                                .benchmark_for(&model.id)
+                                .map(|score| score.0),
+                            benchmark_coding: catalog.benchmark_for(&model.id).map(|score| score.1),
+                            context_window: context_windows
+                                .get(&model.id)
+                                .copied()
+                                .or_else(|| forge_mesh::pricing::context_limit(&model.id)),
                         })
                         .collect(),
                 })

@@ -14,13 +14,13 @@ import { useFonts } from "expo-font";
 import { Redirect, Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import React, { useEffect, useMemo } from "react";
-import { ActivityIndicator } from "react-native";
+import { ActivityIndicator, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { FleetWatcher } from "../components/fleet/FleetWatcher";
 import { AppLock } from "../components/AppLock";
-import { DesktopWindowChrome } from "../components/DesktopWindowChrome";
+import { DesktopWindowChrome, DESKTOP_WINDOW_CHROME_HEIGHT } from "../components/DesktopWindowChrome";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Screen } from "../components/ds/Screen";
 import { ToastHost } from "../components/ds/ToastHost";
@@ -142,11 +142,13 @@ export default function RootLayout() {
                   <FleetWatcher />
                   {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
                       `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
-                  <PaletteHost>
-                    <AppLock>
-                      <RootNavigator />
-                    </AppLock>
-                  </PaletteHost>
+                  <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
+                    <PaletteHost>
+                      <AppLock>
+                        <RootNavigator />
+                      </AppLock>
+                    </PaletteHost>
+                  </View>
                 </ToastHost>
                 <DesktopWindowChrome />
               </PersistQueryClientProvider>

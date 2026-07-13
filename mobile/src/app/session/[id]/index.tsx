@@ -9,7 +9,7 @@
 // to de-duplicate by content. Turn-completion history invalidation (busy true->false) is already wired by the
 // T3.1 session shell's `useTurnCompleted(snapshot)` call in `_layout.tsx` — not repeated here.
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { ChevronDown, Clock, Hammer, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
+import { ChevronDown, ChevronUp, Clock, Hammer, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -694,6 +694,15 @@ export default function SessionChat() {
 
   const queued = snapshot?.queued ?? [];
   const hasPending = queued.length > 0 || offlineQueue.length > 0;
+  const assistantResponseIndices = useMemo(() => items.reduce<number[]>((indices, item, index) => { if (item.kind === "history" && item.row.role === "assistant") indices.push(index); return indices; }, []), [items]);
+  const [responsePosition, setResponsePosition] = useState(0);
+  useEffect(() => { setResponsePosition((position) => Math.min(position, Math.max(0, assistantResponseIndices.length - 1))); }, [assistantResponseIndices.length]);
+  const jumpToResponse = useCallback((direction: 1 | -1) => {
+    if (assistantResponseIndices.length === 0) return;
+    const next = Math.max(0, Math.min(assistantResponseIndices.length - 1, responsePosition + direction));
+    setResponsePosition(next);
+    listRef.current?.scrollToIndex({ index: assistantResponseIndices[next], animated: true, viewPosition: 0.5 });
+  }, [assistantResponseIndices, responsePosition]);
 
   return (
     // "bottom" deliberately omitted: Composer owns the home-indicator inset itself (its bg2
@@ -737,6 +746,7 @@ export default function SessionChat() {
           }
         />
 
+        {assistantResponseIndices.length > 1 ? <View style={[styles.responseNav, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Pressable onPress={() => jumpToResponse(-1)} disabled={responsePosition === 0} accessibilityRole="button" accessibilityLabel="Previous assistant response" style={styles.responseButton}><ChevronUp size={16} color={tokens.ink2} /></Pressable><Text style={[typeScale.meta, { color: tokens.ink2 }]}>{`${responsePosition + 1} / ${assistantResponseIndices.length} responses`}</Text><Pressable onPress={() => jumpToResponse(1)} disabled={responsePosition === assistantResponseIndices.length - 1} accessibilityRole="button" accessibilityLabel="Next assistant response" style={styles.responseButton}><ChevronDown size={16} color={tokens.ink2} /></Pressable></View> : null}
         {showJump ? (
           <Pressable
             onPress={jumpToLatest}
@@ -839,6 +849,8 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: StyleSheet.hairlineWidth,
   },
+  responseNav: { position: "absolute", bottom: 68, alignSelf: "center", minHeight: 44, flexDirection: "row", alignItems: "center", gap: space.space4, paddingHorizontal: space.space4, borderRadius: 999, borderWidth: StyleSheet.hairlineWidth },
+  responseButton: { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
   pendingRow: {
     flexDirection: "row",
     flexWrap: "wrap",

@@ -52,7 +52,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "model",
-        desc: "pin a specific model for this session (/model <id>), or clear the pin (/model)",
+        desc: "pick or pin a model for this session",
         usage: "/model [<id>]",
     },
     Command {
@@ -252,8 +252,7 @@ pub enum CommandAction {
     Keys,
     ListSessions,
     Resume(String),
-    /// Pin a specific model for all subsequent turns in this session. `None` clears the pin
-    /// and returns to mesh routing. `/model <id>` sets; `/model` clears.
+    /// Pin a specific model for all subsequent turns in this session. `None` opens the picker.
     PinModel(Option<String>),
     /// Open the interactive model browser (`/models`).
     ListModels,
