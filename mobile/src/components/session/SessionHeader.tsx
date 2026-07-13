@@ -2,6 +2,10 @@
 // head-ellipsized), worktree Badge, exposure Badge. The danger Banner for public exposure
 // is rendered by the shell itself (_layout.tsx) — this component owns the header row only.
 import { ArrowLeft, Search, Swords, History, Map } from "lucide-react-native";
+||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
+import { ArrowLeft, Search } from "lucide-react-native";
+
+import { ArrowLeft, Search, GitFork } from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -21,9 +25,16 @@ export interface SessionHeaderProps {
   onDuel: () => void;
   onReplay: () => void;
   onPlan: () => void;
+||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
+
+  onFork: () => void;
 }
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onDuel, onReplay, onPlan }: SessionHeaderProps) {
+||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
+
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onFork }: SessionHeaderProps) {
   const tokens = useTokens();
   const isPublic = exposure.startsWith("public");
 
@@ -39,6 +50,11 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
           icon={<Swords size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onDuel} accessibilityLabel="Start model duel" />
         <IconButton icon={<History size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onReplay} accessibilityLabel="Open session replay" />
         <IconButton icon={<Map size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={onPlan} accessibilityLabel="Create implementation plan"
+||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
+
+          icon={<GitFork size={20} strokeWidth={1.75} color={tokens.ink} />}
+          onPress={onFork}
+          accessibilityLabel="Fork session"
         />
         <IconButton
           icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />}

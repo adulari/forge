@@ -123,6 +123,8 @@ export interface CreateSessionRequest {
   temper?: "Read-only" | "Ask" | "Auto-edit" | "Full";
 }
 
+export interface ForkSessionRequest { at_seq: number; }
+
 export interface CreateSessionResponse {
   id: string;
   title: string;
@@ -299,6 +301,10 @@ function qs(params: Record<string, string | number | undefined>): string {
 // ---------------------------------------------------------------------------
 // Endpoints (§1.2)
 // ---------------------------------------------------------------------------
+
+export function forkSession(baseUrl: string, id: string, body: ForkSessionRequest): Promise<CreateSessionResponse> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/fork`, { method: "POST", body: JSON.stringify(body) });
+}
 
 export function getSessions(baseUrl: string): Promise<SessionRow[]> {
   return request(baseUrl, "/api/sessions");
