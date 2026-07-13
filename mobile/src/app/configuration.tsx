@@ -35,6 +35,15 @@ function ConfigFieldRow({ field, scope }: { field: ConfigField; scope: Scope }) 
   const [saved, setSaved] = useState(false);
 
   const save = useCallback((value: string | undefined) => {
+    if (field.field_type === "json" && value != null) {
+      try {
+        JSON.parse(value);
+      } catch {
+        setSaved(false);
+        setError("Enter valid JSON before saving");
+        return;
+      }
+    }
     setError(null);
     setSaved(false);
     mutation.mutate(
@@ -50,7 +59,7 @@ function ConfigFieldRow({ field, scope }: { field: ConfigField; scope: Scope }) 
         },
       },
     );
-  }, [field.default, field.key, field.value, mutation, scope]);
+  }, [field.default, field.field_type, field.key, field.value, mutation, scope]);
 
   const subtitle = error ?? (saved ? "Saved" : field.help ?? `${field.key} · ${field.source}`);
   if (field.field_type === "bool") {
