@@ -984,30 +984,35 @@ fn continuation_decision(
     ContinuationDecision::Nudge
 }
 
-/// Build the failover chain for a cheap trivial-tier side-call (compaction, classification).
-/// Health-filters `trivial` (the router's ranked shortlist) and caps it at 3, falls back to
-/// `aux_fallback` when nothing ranked survives health-filtering (offline / no catalog), then
-/// always appends `guaranteed` (the session's own, reachable model) last unless it's already
-/// present — so the chain can never fully exhaust on a dead cheap model. Pure/no I/O so it's
-/// offline-unit-testable without a live router.
+/// Build the failover chain for a cheap trivial-tier side-call (compaction, classification):
+/// the health-filtered top-3 of `trivial` (the router's ranked shortlist) FIRST, then `routed`
+/// (the routed model + its failover chain — preserves the pre-existing rate-limit failover so a
+/// 429 on the summarizer walks to the routed fallback), then `guaranteed` (the session's own,
+/// reachable model) last as a can't-exhaust backstop. Order-preserving dedup, empties dropped, and
+/// never empty. Pure/no I/O so it's offline-unit-testable without a live router.
 fn compact_candidate_chain(
     trivial: Vec<String>,
-    aux_fallback: &str,
+    routed: Vec<String>,
     guaranteed: &str,
     is_benched: impl Fn(&str) -> bool,
 ) -> Vec<String> {
-    let mut candidates: Vec<String> = trivial
-        .into_iter()
-        .filter(|m| !is_benched(m))
-        .take(3)
-        .collect();
-    if candidates.is_empty() {
-        candidates.push(aux_fallback.to_string());
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |m: String, out: &mut Vec<String>| {
+        if !m.is_empty() && !out.iter().any(|x| x == &m) {
+            out.push(m);
+        }
+    };
+    for m in trivial.into_iter().filter(|m| !is_benched(m)).take(3) {
+        add(m, &mut out);
     }
-    if !candidates.iter().any(|m| m == guaranteed) {
-        candidates.push(guaranteed.to_string());
+    for m in routed {
+        add(m, &mut out);
     }
-    candidates
+    add(guaranteed.to_string(), &mut out);
+    if out.is_empty() {
+        out.push(guaranteed.to_string());
+    }
+    out
 }
 
 /// Classify a tool RESULT string as a failure of a given kind, or `None` if it looks like a success.
@@ -3137,13 +3142,14 @@ Rules:\n\
             .pinned_model()
             .map(str::to_string)
             .unwrap_or_else(|| decision.model.clone());
-        let aux_fallback = self.auxiliary_model(&decision);
-        let candidates = compact_candidate_chain(
-            self.router.trivial_candidates(),
-            &aux_fallback,
-            &guaranteed,
-            |m| health.is_benched(m),
-        );
+        // The routed model + its failover chain, preserved so a rate-limited summarizer still walks
+        // to the routed fallback (not just to the guaranteed model).
+        let mut routed = vec![self.auxiliary_model(&decision)];
+        routed.extend(decision.fallbacks.clone());
+        let candidates =
+            compact_candidate_chain(self.router.trivial_candidates(), routed, &guaranteed, |m| {
+                health.is_benched(m)
+            });
         let mut chain = candidates.into_iter();
         let mut model = chain.next().expect("compact_candidate_chain is non-empty");
         let resp = loop {
@@ -8251,41 +8257,68 @@ mod tests {
     }
 
     // ── compact's trivial-tier failover chain — pure decision, offline-unit-tested ─────────────
-    #[test]
-    fn compact_candidate_chain_filters_benched_models() {
-        let trivial = vec!["ollama::llama3.2".to_string(), "groq::fast".to_string()];
-        let chain = compact_candidate_chain(trivial, "aux::fallback", "session::model", |m| {
-            m == "ollama::llama3.2"
-        });
-        assert_eq!(chain, vec!["groq::fast", "session::model"]);
+    fn routed(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
     }
 
     #[test]
-    fn compact_candidate_chain_caps_at_three_and_appends_guaranteed_last() {
+    fn compact_candidate_chain_filters_benched_models() {
+        let trivial = vec!["ollama::llama3.2".to_string(), "groq::fast".to_string()];
+        let chain =
+            compact_candidate_chain(trivial, routed(&["aux::fallback"]), "session::model", |m| {
+                m == "ollama::llama3.2"
+            });
+        assert_eq!(chain, vec!["groq::fast", "aux::fallback", "session::model"]);
+    }
+
+    #[test]
+    fn compact_candidate_chain_caps_trivial_at_three_then_appends_routed_and_guaranteed() {
         let trivial = vec![
             "a::one".to_string(),
             "b::two".to_string(),
             "c::three".to_string(),
             "d::four".to_string(),
         ];
-        let chain = compact_candidate_chain(trivial, "aux::fallback", "session::model", |_| false);
+        let chain = compact_candidate_chain(
+            trivial,
+            routed(&["aux::fallback"]),
+            "session::model",
+            |_| false,
+        );
         assert_eq!(
             chain,
-            vec!["a::one", "b::two", "c::three", "session::model"]
+            vec![
+                "a::one",
+                "b::two",
+                "c::three",
+                "aux::fallback",
+                "session::model"
+            ]
         );
     }
 
     #[test]
-    fn compact_candidate_chain_falls_back_to_aux_when_trivial_is_empty() {
-        let chain =
-            compact_candidate_chain(Vec::new(), "aux::fallback", "session::model", |_| false);
-        assert_eq!(chain, vec!["aux::fallback", "session::model"]);
+    fn compact_candidate_chain_includes_routed_fallbacks_when_trivial_is_empty() {
+        // Regression: an empty trivial shortlist must still fail over down the ROUTED chain (the
+        // rate-limited-summarizer path), not collapse to just the guaranteed model.
+        let chain = compact_candidate_chain(
+            Vec::new(),
+            routed(&["bad::model", "good::model"]),
+            "bad::model",
+            |_| false,
+        );
+        assert_eq!(chain, vec!["bad::model", "good::model"]);
     }
 
     #[test]
     fn compact_candidate_chain_does_not_duplicate_an_already_present_guaranteed_model() {
         let trivial = vec!["a::one".to_string(), "session::model".to_string()];
-        let chain = compact_candidate_chain(trivial, "aux::fallback", "session::model", |_| false);
+        let chain = compact_candidate_chain(
+            trivial,
+            routed(&["session::model"]),
+            "session::model",
+            |_| false,
+        );
         assert_eq!(chain, vec!["a::one", "session::model"]);
     }
 
