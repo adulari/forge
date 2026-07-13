@@ -32,13 +32,13 @@ export default function FloorScreen() {
   const columns = width >= 1024 ? 3 : width >= 768 ? 2 : 1;
   const renderItem = useCallback(({ item }: { item: FloorItem }) => item.kind === "tile" ? <View style={[styles.tileWrap, { width: `${100 / columns}%` }]}><FloorTile row={item.row} active={item.active} /></View> : <SessionCard row={item.row} index={item.index} />, [columns]);
   const keyExtractor = useCallback((item: FloorItem) => item.row.id, []);
-  const onViewableItemsChanged = useCallback(({ viewableItems }: { viewableItems: Array<{ item: FloorItem }> }) => {
+  const onViewableItemsChanged = useCallback(({ viewableItems }: { viewableItems: { item: FloorItem }[] }) => {
     setVisibleIds(new Set(viewableItems.filter(({ item }) => item.kind === "tile").slice(0, SOCKET_CAP).map(({ item }) => item.row.id)));
   }, []);
 
   return <Screen scroll={false}>
     <View style={styles.header}><Flame size={20} strokeWidth={1.75} color={tokens.accent} /><Text style={[typeScale.title, { color: tokens.ink }]}>The Floor</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{burning.length} burning</Text></View>
-    <BoundedList data={items} renderItem={renderItem} keyExtractor={keyExtractor} numColumns={columns} onViewableItemsChanged={onViewableItemsChanged} ListEmptyComponent={<EmptyState icon={Flame} message="the floor is cool — no live sessions right now." />} contentContainerStyle={styles.list} />
+    <BoundedList key={`floor-${columns}`} data={items} renderItem={renderItem} keyExtractor={keyExtractor} numColumns={columns} onViewableItemsChanged={onViewableItemsChanged} ListEmptyComponent={<EmptyState icon={Flame} message="the floor is cool — no live sessions right now." />} contentContainerStyle={styles.list} />
   </Screen>;
 }
 

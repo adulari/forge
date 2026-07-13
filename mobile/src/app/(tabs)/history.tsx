@@ -51,16 +51,15 @@ export function bucketForActivity(nowSec: number, lastActivitySec: number): Acti
   return activity >= weekStart ? "week" : "earlier";
 }
 
-type HistoryFilter = "all" | "waiting" | "busy" | "done";
+type HistoryFilter = "all" | "archived" | "active";
 type HistoryListItem =
   | { type: "header"; bucket: ActivityBucket; label: string }
   | { type: "row"; row: PastSessionRow; index: number };
 
 const FILTERS: { value: HistoryFilter; label: string }[] = [
   { value: "all", label: "All" },
-  { value: "waiting", label: "Waiting" },
-  { value: "busy", label: "Busy" },
-  { value: "done", label: "Done" },
+  { value: "archived", label: "Archived" },
+  { value: "active", label: "Active" },
 ];
 
 const BUCKETS: { value: ActivityBucket; label: string }[] = [
@@ -71,13 +70,8 @@ const BUCKETS: { value: ActivityBucket; label: string }[] = [
 ];
 
 function matchesFilter(row: PastSessionRow, filter: HistoryFilter): boolean {
-  const statefulRow = row as PastSessionRow & { busy?: boolean; waiting?: boolean };
-  const busy = statefulRow.busy === true;
-  const waiting = statefulRow.waiting === true;
   if (filter === "all") return true;
-  if (filter === "waiting") return waiting;
-  if (filter === "busy") return busy;
-  return !busy && !waiting;
+  return filter === "archived" ? row.archived : !row.archived;
 }
 
 interface HistoryRowProps {
