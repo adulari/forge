@@ -13,7 +13,7 @@
 import * as Clipboard from "expo-clipboard";
 import { router, Slot, useLocalSearchParams, usePathname } from "expo-router";
 import { ArrowLeft } from "lucide-react-native";
-import React, { useCallback, useEffect, useMemo, useRef } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from "react-native-reanimated";
 import { StyleSheet, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -25,6 +25,7 @@ import { useToast } from "../../../components/ds/ToastHost";
 import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { usePalette } from "../../../components/overlay/CommandPalette";
 import { SessionHeader } from "../../../components/session/SessionHeader";
+import { DuelSheet } from "../../../components/session/DuelSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
@@ -58,6 +59,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const pathname = usePathname();
   const { isCompact } = useBreakpoint();
   const { snapshot, connectionState, send, setHeaderHeight, baseUrl, focusComposer } = useSessionCtx();
+  const [duelVisible, setDuelVisible] = useState(false);
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
@@ -218,8 +220,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             exposure={snapshot?.exposure ?? "loopback"}
             onBack={() => goBackOr("/(tabs)")}
             onPalette={openPalette}
+            onDuel={() => setDuelVisible(true)}
           />
         </View>
+
+        <DuelSheet visible={duelVisible} onClose={() => setDuelVisible(false)} send={send} />
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />
