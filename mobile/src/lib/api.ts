@@ -57,6 +57,27 @@ export interface SkillRow {
   resources: number;
 }
 
+export interface ModelsResponse {
+  catalog: "available" | "unavailable";
+  providers: ModelProvider[];
+}
+
+export interface ModelProvider {
+  provider: string;
+  models: ModelRow[];
+}
+
+export interface ModelRow {
+  id: string;
+  name: string;
+  frontier: boolean;
+  free: boolean;
+  paid: boolean;
+  subscription: boolean;
+  estimated_cost_usd: number;
+  health: { until_epoch: number; reason: string } | null;
+}
+
 export interface UsageResponse {
   week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
   session: { sessionId: string; combined: UsageTotals; providers: UsageProvider[] } | null;
@@ -340,6 +361,14 @@ export function discardSession(
   });
 }
 
+export function getSkills(baseUrl: string): Promise<SkillRow[]> {
+  return request(baseUrl, "/api/skills");
+}
+
+export function getModels(baseUrl: string): Promise<ModelsResponse> {
+  return request(baseUrl, "/api/models");
+}
+
 export function getConfig(baseUrl: string): Promise<ConfigResponse> {
   return request(baseUrl, "/api/config");
 }
@@ -349,10 +378,6 @@ export function updateConfig(baseUrl: string, body: UpdateConfigRequest): Promis
     method: "PUT",
     body: JSON.stringify(body),
   });
-}
-
-export function getSkills(baseUrl: string): Promise<SkillRow[]> {
-  return request(baseUrl, "/api/skills");
 }
 
 export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {
