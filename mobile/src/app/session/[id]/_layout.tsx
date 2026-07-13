@@ -39,6 +39,11 @@ import { AssaySheet } from "../../../components/session/AssaySheet";
 ||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
 
 import { SelfMcpSheet } from "../../../components/session/SelfMcpSheet";
+||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
+
+||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
+
+import { CheckpointSheet } from "../../../components/session/CheckpointSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
@@ -86,6 +91,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
 
   const [selfMcpVisible, setSelfMcpVisible] = useState(false);
+||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
+
+||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
+
+  const [checkpointVisible, setCheckpointVisible] = useState(false);
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
@@ -261,6 +271,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
 
             onSelfMcp={() => setSelfMcpVisible(true)}
+||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
+
+||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
+
+            onCheckpoint={() => setCheckpointVisible(true)}
           />
         </View>
 
@@ -278,6 +293,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
 
         <SelfMcpSheet visible={selfMcpVisible} onClose={() => setSelfMcpVisible(false)} send={send} />
+||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
+
+||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
+
+        <CheckpointSheet visible={checkpointVisible} onClose={() => setCheckpointVisible(false)} send={send} />
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />

@@ -18,6 +18,12 @@ import { ArrowLeft, Search, Microscope } from "lucide-react-native";
 import { ArrowLeft, Search } from "lucide-react-native";
 
 import { ArrowLeft, Search, Bot } from "lucide-react-native";
+||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
+
+||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
+import { ArrowLeft, Search } from "lucide-react-native";
+
+import { ArrowLeft, Search, Bookmark } from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -49,6 +55,11 @@ export interface SessionHeaderProps {
 ||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
 
   onSelfMcp: () => void;
+||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
+
+||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
+
+  onCheckpoint: () => void;
 }
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onDuel, onReplay, onPlan }: SessionHeaderProps) {
@@ -68,6 +79,12 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onSelfMcp }: SessionHeaderProps) {
+||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
+
+||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
+
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onCheckpoint }: SessionHeaderProps) {
   const tokens = useTokens();
   const isPublic = exposure.startsWith("public");
 
@@ -103,6 +120,13 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
           icon={<Bot size={20} strokeWidth={1.75} color={tokens.ink} />}
           onPress={onSelfMcp}
           accessibilityLabel="Manage self MCP agent"
+||||||| parent of bedc925 (feat(mobile): manage session checkpoints)
+
+||||||| parent of 204a6df (feat(mobile): manage session checkpoints)
+
+          icon={<Bookmark size={20} strokeWidth={1.75} color={tokens.ink} />}
+          onPress={onCheckpoint}
+          accessibilityLabel="Manage session checkpoints"
         />
         <IconButton
           icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />}
