@@ -17,6 +17,8 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
 }) {
   const tokens = useTokens();
   const current = EFFORT_LEVELS.includes(effort as EffortLevel) ? effort : null;
+  const contextPercent = contextLimit != null && contextLimit > 0 ? Math.min(100, (contextTokens / contextLimit) * 100) : null;
+  const remaining = contextLimit != null ? Math.max(0, contextLimit - contextTokens) : null;
   const select = (level: EffortLevel | null) => {
     if (send({ kind: "prompt", text: level ? `/effort ${level}` : "/effort" })) onClose();
   };
@@ -26,7 +28,7 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
   return <Sheet visible={visible} onClose={onClose} accessibilityLabel="Session telemetry" snapPoints={[0.8]}>
     <View style={styles.content}>
       <Text style={[typeScale.heading, { color: tokens.ink }]}>Session telemetry</Text>
-      {contextLimit != null ? <><ContextGauge used={contextTokens} total={contextLimit} /><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatTokenPair(contextTokens, contextLimit)}</Text></> : null}
+      {contextLimit != null ? <><ContextGauge used={contextTokens} total={contextLimit} /><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatTokenPair(contextTokens, contextLimit)}</Text><View style={[styles.capacity, { backgroundColor: contextPercent != null && contextPercent >= 90 ? tokens.dangerBg : contextPercent != null && contextPercent >= 70 ? tokens.warnBg : tokens.bg3 }]}><Text style={[typeScale.bodyBold, { color: contextPercent != null && contextPercent >= 90 ? tokens.danger : contextPercent != null && contextPercent >= 70 ? tokens.warn : tokens.ink }]}>{contextPercent?.toFixed(0)}% context capacity used</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{remaining?.toLocaleString()} tokens remaining · Forge reserves output room and compacts when needed.</Text></View></> : null}
       {weekly ? <>
         <Text style={[typeScale.bodyBold, { color: tokens.success }]}>≈ +{weekly.deltaPct.toFixed(1)}% of weekly quota this session</Text>
         <Text style={[typeScale.meta, { color: tokens.ink3 }]}>Approximate — may be off if other sessions or tools share this {weekly.provider} subscription.</Text>
@@ -53,4 +55,4 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
     </View>
   </Sheet>;
 }
-const styles = StyleSheet.create({ content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space8 }, meshAction: { paddingVertical: space.space4 }, meshButton: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, rows: { borderTopWidth: StyleSheet.hairlineWidth }, options: { gap: space.space8 }, option: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 } });
+const styles = StyleSheet.create({ content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space8 }, meshAction: { paddingVertical: space.space4 }, meshButton: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, capacity: { gap: space.space4, padding: space.space12, borderRadius: 8 }, rows: { borderTopWidth: StyleSheet.hairlineWidth }, options: { gap: space.space8 }, option: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 } });
