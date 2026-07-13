@@ -48,7 +48,6 @@ const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
 const MIN_HEIGHT = 44;
 const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES + space.space8;
 const COMMAND_CHIPS = ["/mode", "/assay", "/model", "/models", "/config", "/copy", "/thinking", "/image", "/mcp", "/init", "/new", "/undo", "/checkpoint", "/checkpoints", "/compact", "/uncompact", "/lattice", "/plan", "/execute", "/goal", "/pr", "/loop", "/effort", "/remember", "/memories", "/clear", "/usage", "/mesh", "/remote", "/help"] as const;
-const COMMAND_HINT_LIMIT = 30;
 
 export interface ComposerProps {
   sessionId: string;
@@ -147,7 +146,9 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const stopIconStyle = useAnimatedStyle(() => ({ opacity: actionProgress.value, transform: [{ scale: 0.8 + actionProgress.value * 0.2 }] }));
   const sendIconStyle = useAnimatedStyle(() => ({ opacity: 1 - actionProgress.value, transform: [{ scale: 1 - actionProgress.value * 0.2 }] }));
 
-  const commandHints = COMMAND_CHIPS.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase())).slice(0, COMMAND_HINT_LIMIT);
+  const commandHints = COMMAND_CHIPS.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase()));
+  const leadingCommand = text.match(/^\/(\S*)/)?.[0].toLowerCase();
+  const recognizedCommand = leadingCommand != null && COMMAND_CHIPS.includes(leadingCommand as (typeof COMMAND_CHIPS)[number]);
 
   // `suggestedPrompt` keeps echoing the STALE pre-send value for a beat after a send clears the
   // draft (the daemon hasn't refreshed it yet) — `suppressedSuggestion` (SessionContext, set in
@@ -496,6 +497,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               accessibilityLabel="message"
               testID="composer-input"
             />
+            {recognizedCommand ? <View pointerEvents="none" style={styles.commandRecognition}><Text style={[type.meta, { color: tokens.accent }]}>{leadingCommand} command</Text></View> : null}
             {showGhost && activeSuggestion ? (
               // True ghost text: same font/size/padding/lineHeight as the TextInput above,
               // absolutely positioned over it. Only ever rendered while `text` is empty (see
@@ -557,6 +559,7 @@ const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "flex-end", gap: space.space4 },
   input: { flex: 1, paddingHorizontal: space.space8, paddingVertical: space.space8, textAlignVertical: "top" },
   inputWrap: { flex: 1, position: "relative", overflow: "visible" },
+  commandRecognition: { position: "absolute", right: space.space8, top: space.space8, backgroundColor: "transparent" },
   // Mirrors `input`'s own padding exactly so the ghost text lines up with where a typed
   // caret would sit — only ever shown while the TextInput is empty (see `suggestionActive`).
   ghostOverlay: {
