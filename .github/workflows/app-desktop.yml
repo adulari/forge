@@ -77,6 +77,19 @@ jobs:
         working-directory: mobile
         run: npm ci
 
+      # The Tauri updater compares the app's built-in version against latest.json's version (which
+      # the updater job below derives from the release tag). If they differ, the app thinks an
+      # update is perpetually available, "updates" to a bundle that still reports the old version,
+      # and loops. On a tag build, stamp the app version to the tag so built == manifest.
+      - name: Sync desktop app version to release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        working-directory: mobile
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e "const fs=require('fs'),f='src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(f,'utf8'));j.version=process.argv[1];fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n')" "$VERSION"
+          echo "desktop app version stamped to $VERSION"
+
       - name: Build desktop bundle
         working-directory: mobile
         shell: bash
