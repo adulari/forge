@@ -322,6 +322,11 @@ export default function SettingsScreen() {
             onPress={() => router.push("/skills")}
           />
           <ListRow
+            title="Hooks"
+            subtitle="Automations for session and tool events"
+            onPress={() => router.push("/hooks")}
+          />
+          <ListRow
             title="Connection health"
             subtitle={healthCopy}
             leading={<Badge label={health === "checking" ? "checking" : health === "ok" ? "online" : "attention"} tone={healthTone} />}

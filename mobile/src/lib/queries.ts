@@ -18,6 +18,8 @@ import {
   type UpdateConfigRequest,
   getConfig,
   updateConfig,
+  type HookRow,
+  getHooks,
   answer as apiAnswer,
   archiveSession,
   type CreateSessionRequest,
@@ -58,6 +60,7 @@ function keys(baseUrl: string | null) {
     pastSessions: ["sessions", "past", baseUrl] as const,
     history: (sessionId: string) => ["history", baseUrl, sessionId] as const,
     config: ["config", baseUrl] as const,
+    hooks: ["hooks", baseUrl] as const,
     skills: ["skills", baseUrl] as const,
   };
 }
@@ -138,6 +141,15 @@ export function useSkills() {
   return useQuery<SkillRow[]>({
     queryKey: keys(baseUrl).skills,
     queryFn: () => getSkills(baseUrl as string),
+    enabled: baseUrl != null,
+  });
+}
+
+export function useHooks() {
+  const { baseUrl } = useAuth();
+  return useQuery<HookRow[]>({
+    queryKey: keys(baseUrl).hooks,
+    queryFn: () => getHooks(baseUrl as string),
     enabled: baseUrl != null,
   });
 }

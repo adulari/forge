@@ -57,6 +57,8 @@ export interface SkillRow {
   resources: number;
 }
 
+export interface HookRow { event: string; matcher: string | null; command: string; timeout_secs: number; cc_compat: boolean; }
+
 export interface UsageResponse {
   week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
   session: { sessionId: string; combined: UsageTotals; providers: UsageProvider[] } | null;
@@ -354,6 +356,8 @@ export function updateConfig(baseUrl: string, body: UpdateConfigRequest): Promis
 export function getSkills(baseUrl: string): Promise<SkillRow[]> {
   return request(baseUrl, "/api/skills");
 }
+
+export function getHooks(baseUrl: string): Promise<HookRow[]> { return request(baseUrl, "/api/hooks"); }
 
 export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {
   return request(baseUrl, `/api/usage${qs({ session })}`);
