@@ -16,7 +16,7 @@ export interface ContextGaugeProps {
   compact?: boolean;
 }
 
-const TRACK_HEIGHT = 3;
+const TRACK_HEIGHT = 4;
 
 export function ContextGauge({ used, total, compact = false }: ContextGaugeProps) {
   const tokens = useTokens();
@@ -68,7 +68,9 @@ const styles = StyleSheet.create({
   },
   track: {
     flex: 1,
+    minWidth: 48,
     height: TRACK_HEIGHT,
+    overflow: "hidden",
     borderRadius: radii.radiusPill,
     // Not `overflow: "hidden"` — the fill carries its own matching radius, and an
     // overheat glow (Move 1) needs to bleed a few px beyond the 3px track.
