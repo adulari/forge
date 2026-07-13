@@ -210,7 +210,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
       toast.show("still uploading — wait a moment", { tone: "warn" });
       return;
     }
-    if (attachments.some((a) => a.state === "error")) {
+    if (attachments.some((a) => a.state === "error" || (a.state === "done" && !a.path))) {
       toast.show("an attachment failed — remove it or retry", { tone: "danger" });
       return;
     }
@@ -256,8 +256,9 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
       const form = file ? formDataFromWebFiles([file]) : formDataFromPicked([picked]);
       const res = await upload.mutateAsync({ sessionId, form });
       const uploaded = res.files[0];
+      if (!uploaded?.path) throw new Error("Upload completed without an attachment path");
       setAttachments((prev) =>
-        prev.map((a) => (a.id === id ? { ...a, state: "done", path: uploaded?.path } : a)),
+        prev.map((a) => (a.id === id ? { ...a, state: "done", path: uploaded.path } : a)),
       );
     } catch {
       setAttachments((prev) => prev.map((a) => (a.id === id ? { ...a, state: "error" } : a)));
