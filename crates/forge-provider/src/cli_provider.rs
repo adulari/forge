@@ -2150,11 +2150,23 @@ impl LiveSession {
         let mut data = TurnData::default();
         let mut tool_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        // Backstop against a wedged turn that never truly progresses (#714: a claude persistent-
+        // bridge tool round-trip that deadlocks — claude goes silent on stdout while out-of-band
+        // subagent-sink events keep trickling in, which reset the idle timer forever → the session
+        // hangs `busy` indefinitely). The idle window measures TOTAL silence; this one measures
+        // silence of CLAUDE ITSELF (its stdout), which a sink-event trickle can't refresh. Generous
+        // (idle × 6) so a legitimately long subagent — during which claude is silent but the sink
+        // streams real progress — is never truncated; only a genuinely stuck turn trips it.
+        let max_claude_silence = idle.saturating_mul(6);
+        let mut last_line = std::time::Instant::now();
         enum Ev {
             Line(std::io::Result<Option<String>>),
             Sub(StreamEvent),
         }
         loop {
+            if last_line.elapsed() >= max_claude_silence {
+                return Err(TurnError::Stall);
+            }
             let tick = tokio::time::timeout(idle, async {
                 tokio::select! {
                     biased;
@@ -2169,7 +2181,10 @@ impl LiveSession {
                     on_event(ev);
                     continue;
                 }
-                Ok(Ev::Line(Ok(Some(l)))) => l,
+                Ok(Ev::Line(Ok(Some(l)))) => {
+                    last_line = std::time::Instant::now();
+                    l
+                }
                 Ok(Ev::Line(Ok(None))) => {
                     return Err(TurnError::Eof {
                         tool_ran: data.tool_ran,
@@ -2447,6 +2462,16 @@ impl CliProvider {
             // Fresh process exited before any turn output AND ran no tool → a startup/auth failure
             // with nothing executed; one-shot reports those precisely, so fall back.
             Err(TurnError::Eof { tool_ran: false }) if first_turn => {
+                if let Some(old) = guard.take() {
+                    old.teardown().await;
+                }
+                Err(PersistentTurn::Fallback)
+            }
+            // A wedged persistent process (a tool round-trip that never returned — #714) must not
+            // hard-fail the turn: tear it down and retry on the fresh one-shot transport, which
+            // re-sends the full transcript, so context is preserved and the bridge self-heals
+            // instead of hanging or erroring. Other errors stay hard failures.
+            Err(TurnError::Stall) => {
                 if let Some(old) = guard.take() {
                     old.teardown().await;
                 }
@@ -4164,6 +4189,104 @@ mod tests {
             }
         }
         path.to_string_lossy().into_owned()
+    }
+
+    /// A fake persistent claude whose FIRST turn replies normally but whose SECOND turn reads the
+    /// line then hangs silently forever — models a persistent-bridge later turn that wedges on a
+    /// tool round-trip that never returns (#714).
+    #[cfg(unix)]
+    fn make_fake_wedges_after_first_cli() -> String {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("forge-fake-wedge-{}-{n}", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, "i=0").unwrap();
+        writeln!(f, "while IFS= read -r line; do").unwrap();
+        writeln!(f, "  i=$((i+1))").unwrap();
+        writeln!(f, "  if [ \"$i\" -ge 2 ]; then sleep 3600; continue; fi").unwrap();
+        writeln!(
+            f,
+            r#"  printf '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"reply %d"}}]}}}}\n' "$i""#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"  printf '{{"type":"result","is_error":false,"result":"reply %d","usage":{{"input_tokens":5,"output_tokens":3}}}}\n' "$i""#
+        )
+        .unwrap();
+        writeln!(f, "done").unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        for _ in 0..200 {
+            match std::process::Command::new(&path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(mut c) => {
+                    let _ = c.wait();
+                    break;
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        path.to_string_lossy().into_owned()
+    }
+
+    /// #714: a persistent turn that wedges (a tool round-trip that never returns) must NOT hang the
+    /// session `busy` forever. It stalls within the window and surfaces a RETRYABLE error — so the
+    /// session's model-level failover recovers — instead of hanging or a hard, non-retryable fail.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persistent_turn_that_wedges_does_not_hang_and_is_retryable() {
+        let fake = make_fake_wedges_after_first_cli();
+        let provider = CliProvider::claude_code()
+            .with_harness(false)
+            .with_persistent(true)
+            .with_binary(&fake)
+            .with_timeout(Duration::from_secs(1)); // stall fast
+        let model = "claude-cli::sonnet";
+        let mut sink = |_e: StreamEvent| {};
+
+        let r1 = provider
+            .complete(model, &[Message::user("one")], &[], &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(r1.content.trim(), "reply 1");
+
+        // The 2nd turn reuses the live process, which now wedges. The call must RETURN (bounded by
+        // the stall window), not hang, and the error must be retryable so failover kicks in.
+        let started = std::time::Instant::now();
+        let r2 = provider
+            .complete(
+                model,
+                &[
+                    Message::user("one"),
+                    Message::assistant("reply 1"),
+                    Message::user("two"),
+                ],
+                &[],
+                &mut sink,
+            )
+            .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "wedged turn must not hang — it returned in {:?}",
+            started.elapsed()
+        );
+        let err = r2.expect_err("a wedged turn must error, not silently succeed");
+        assert!(
+            err.is_retryable(),
+            "a wedged bridge turn must be retryable so the session fails over, got: {err:?}"
+        );
     }
 
     #[cfg(unix)]
