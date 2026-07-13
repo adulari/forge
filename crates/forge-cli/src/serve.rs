@@ -530,7 +530,7 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         )
         .route(&format!("{base}/api/history"), get(history_page))
         .route(&format!("{base}/api/usage"), get(usage_page))
-        .route(&format!("{base}/api/skills"), get(skills_page))
+        .route(&format!("{base}/api/models"), get(models_page))
         .route(
             &format!("{base}/api/config"),
             get(config_page).put(update_config),
@@ -1850,39 +1850,91 @@ fn usage_providers(rows: Vec<forge_store::ProviderUsage>) -> (UsageTotals, Vec<U
     (total, providers)
 }
 #[derive(serde::Serialize)]
-struct SkillRow {
-    name: String,
-    description: String,
-    scope: String,
-    tier: Option<String>,
-    resources: usize,
+struct ModelsResponse {
+    catalog: &'static str,
+    providers: Vec<ModelProvider>,
 }
 
-async fn skills_page() -> Response {
-    let rows = tokio::task::spawn_blocking(|| {
-        let catalog = forge_skills::Catalog::load(&forge_config::command_sources());
-        let mut skills: Vec<SkillRow> = catalog
-            .all_skills()
+#[derive(serde::Serialize)]
+struct ModelProvider {
+    provider: String,
+    models: Vec<ModelRow>,
+}
+
+#[derive(serde::Serialize)]
+struct ModelRow {
+    id: String,
+    name: String,
+    frontier: bool,
+    free: bool,
+    paid: bool,
+    subscription: bool,
+    estimated_cost_usd: f64,
+    health: Option<ModelHealth>,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct ModelHealth {
+    until_epoch: i64,
+    reason: String,
+}
+
+async fn models_page(State(state): State<Arc<DaemonState>>) -> Response {
+    let store = state.store.clone();
+    match tokio::task::spawn_blocking(move || {
+        let Some(catalog) = crate::cli::commands::models::load_cached_catalog() else {
+            return ModelsResponse {
+                catalog: "unavailable",
+                providers: Vec::new(),
+            };
+        };
+        let config = forge_config::load().unwrap_or_default();
+        let pricing = forge_mesh::pricing::Pricing::from_config(&config);
+        let benches: std::collections::HashMap<_, _> = store
+            .current_benched_report()
+            .unwrap_or_default()
             .into_iter()
-            .map(|skill| SkillRow {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-                scope: skill.scope.label().to_string(),
-                tier: skill
-                    .tier
-                    .map(|tier| format!("{tier:?}").to_ascii_lowercase()),
-                resources: skill.resources.len(),
+            .map(|(model, until_epoch, reason)| {
+                (
+                    model,
+                    ModelHealth {
+                        until_epoch,
+                        reason,
+                    },
+                )
             })
             .collect();
-        skills.sort_by(|a, b| a.name.cmp(&b.name));
-        skills
+        ModelsResponse {
+            catalog: "available",
+            providers: catalog
+                .by_provider(&pricing)
+                .into_iter()
+                .map(|provider| ModelProvider {
+                    provider: provider.provider,
+                    models: provider
+                        .models
+                        .into_iter()
+                        .map(|model| ModelRow {
+                            health: benches.get(&model.id).cloned(),
+                            id: model.id,
+                            name: model.name,
+                            frontier: model.frontier,
+                            free: model.free,
+                            paid: model.paid,
+                            subscription: model.subscription,
+                            estimated_cost_usd: model.cost,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
     })
-    .await;
-    match rows {
-        Ok(rows) => json_response(&rows),
+    .await
+    {
+        Ok(response) => json_response(&response),
         Err(_) => err_response(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "could not read skills catalog",
+            "could not read model catalog",
         ),
     }
 }
@@ -1936,7 +1988,6 @@ fn config_response() -> ConfigResponse {
                     forge_config::SettingKind::Int => ("int", Vec::new()),
                     forge_config::SettingKind::Float => ("float", Vec::new()),
                     forge_config::SettingKind::List => ("list", Vec::new()),
-                    forge_config::SettingKind::Json => ("json", Vec::new()),
                     forge_config::SettingKind::Enum(options) => {
                         ("enum", options.into_iter().map(str::to_string).collect())
                     }
