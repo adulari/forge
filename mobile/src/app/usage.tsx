@@ -4,6 +4,7 @@ import React, { memo, useCallback, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { Badge } from "../components/ds/Badge";
+import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { BoundedList } from "../components/ds/BoundedList";
 import { Card } from "../components/ds/Card";
 import { Screen } from "../components/ds/Screen";
@@ -98,9 +99,11 @@ export default function UsageScreen() {
   const empty = isLoading ? <View /> : <EmptyState icon={Cpu} message="No usage yet. Your provider activity will appear here after the first turn." />;
 
   return (
-    <Screen scroll={false} contentContainerStyle={styles.screen}>
+    <DesktopDrillDown>
+      <Screen scroll={false} contentContainerStyle={styles.screen}>
       <BoundedList data={providers} renderItem={renderItem} keyExtractor={keyExtractor} ListHeaderComponent={header} ListEmptyComponent={empty} refreshing={isRefetching} onRefresh={() => void refetch()} contentContainerStyle={styles.content} />
-    </Screen>
+      </Screen>
+    </DesktopDrillDown>
   );
 }
 

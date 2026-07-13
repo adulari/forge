@@ -4,6 +4,7 @@ import React, { memo, useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { Badge } from "../components/ds/Badge";
+import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { BoundedList } from "../components/ds/BoundedList";
 import { Card } from "../components/ds/Card";
 import { EmptyState } from "../components/ds/EmptyState";
@@ -85,7 +86,8 @@ export default function ModelsScreen() {
   );
 
   return (
-    <Screen scroll={false} contentContainerStyle={styles.screen}>
+    <DesktopDrillDown>
+      <Screen scroll={false} contentContainerStyle={styles.screen}>
       <BoundedList
         data={items}
         renderItem={renderItem}
@@ -96,7 +98,8 @@ export default function ModelsScreen() {
         onRefresh={refresh}
         contentContainerStyle={styles.content}
       />
-    </Screen>
+      </Screen>
+    </DesktopDrillDown>
   );
 }
 
