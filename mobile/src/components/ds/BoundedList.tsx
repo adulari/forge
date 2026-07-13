@@ -113,7 +113,7 @@ function BoundedListInner<T>(
         windowSize={9}
         initialNumToRender={12}
         {...rest}
-        style={[rest.style, Platform.OS === "web" && (webScrollContain as object)]}
+        style={[styles.fill, rest.style, Platform.OS === "web" && (webScrollContain as object)]}
       />
       {Platform.OS === "ios" ? <BellowsSpinner active={refreshing} /> : null}
     </View>
