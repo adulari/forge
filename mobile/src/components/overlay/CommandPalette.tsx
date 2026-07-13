@@ -429,8 +429,10 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
   const navigableItems = useMemo(() => filteredItems.filter((i) => !i.disabled), [filteredItems]);
   const selectedId = navigableItems[selectedIndex]?.id;
 
-  // -------------------------------------------------------------------------
-  // Web keyboard nav: Up/Down/Enter/Escape. Native has no keyboard — rows are tap-only.
+  useEffect(() => {
+    setSelectedIndex((index) => Math.min(index, Math.max(0, navigableItems.length - 1)));
+  }, [navigableItems.length]);
+
   // -------------------------------------------------------------------------
   useEffect(() => {
     if (Platform.OS !== "web" || !visible) return;
