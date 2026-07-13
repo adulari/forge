@@ -1896,6 +1896,7 @@ fn config_response() -> ConfigResponse {
                     forge_config::SettingKind::Bool => ("bool", Vec::new()),
                     forge_config::SettingKind::Int => ("int", Vec::new()),
                     forge_config::SettingKind::Float => ("float", Vec::new()),
+                    forge_config::SettingKind::List => ("list", Vec::new()),
                     forge_config::SettingKind::Enum(options) => {
                         ("enum", options.into_iter().map(str::to_string).collect())
                     }
