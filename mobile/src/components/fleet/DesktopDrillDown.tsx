@@ -32,7 +32,8 @@ export function ExpandedFleetRail() {
   const rows = useMemo(() => sessions ?? [], [sessions]);
   const waitingCount = useMemo(() => rows.filter((row) => row.waiting).length, [rows]);
   const showingInbox = pathname === "/inbox";
-  const visibleRows = showingInbox ? rows.filter((row) => row.waiting) : rows;
+  const showingFloor = pathname === "/floor";
+  const visibleRows = showingInbox ? rows.filter((row) => row.waiting) : showingFloor ? rows.filter((row) => row.waiting || row.busy) : rows;
 
   return (
     <View style={styles.rail}>
@@ -41,7 +42,7 @@ export function ExpandedFleetRail() {
         <IconButton icon={<Plus size={20} strokeWidth={1.75} color={tokens.accent} />} onPress={() => router.push("/new-session")} accessibilityLabel="New session" />
       </View>
       <View style={styles.pills}><RailPill href="/" label="All" /><RailPill href="/floor" label="Floor" count={rows.filter((row) => row.busy).length} /><RailPill href="/inbox" label="Waiting" count={waitingCount} /></View>
-      <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>{visibleRows.length === 0 ? <EmptyState icon={Flame} message={showingInbox ? "nothing needs you right now." : "no live sessions — start one"} /> : visibleRows.map((row, index) => <SessionCard key={row.id} row={row} index={index} />)}</ScrollView>
+      <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>{visibleRows.length === 0 ? <EmptyState icon={Flame} message={showingInbox ? "nothing needs you right now." : showingFloor ? "the floor is cool — no live sessions right now." : "no live sessions — start one"} /> : visibleRows.map((row, index) => <SessionCard key={row.id} row={row} index={index} />)}</ScrollView>
       <View style={[styles.footer, { borderTopColor: tokens.border }]}><RailFooterIcon href="/history" icon={<History size={20} strokeWidth={1.75} color={tokens.ink2} />} label="History" /><RailFooterIcon href="/settings" icon={<Settings2 size={20} strokeWidth={1.75} color={tokens.ink2} />} label="Settings" /></View>
     </View>
   );
