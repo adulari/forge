@@ -79,6 +79,10 @@ export default function UsageScreen() {
   }, [quotaRows]);
   const renderItem = useCallback(({ item }: { item: UsageProvider; index: number }) => <ProviderRow provider={item} quotas={quotasByProvider.get(quotaKey(item.provider, item.kind)) ?? []} />, [quotasByProvider]);
   const keyExtractor = useCallback((provider: UsageProvider) => provider.provider, []);
+  const subscriptionQuotas = (quotaRows ?? []).filter((quota) => quota.kind !== "api" && quota.fraction != null);
+  const combinedSubscriptionPercent = subscriptionQuotas.length
+    ? Math.round((subscriptionQuotas.reduce((total, quota) => total + (quota.fraction ?? 0), 0) / subscriptionQuotas.length) * 100)
+    : null;
   const hasMeteredApi = providers.some((provider) => provider.kind === "api");
   const apiCostUsd = providers
     .filter((provider) => provider.kind === "api")
@@ -92,8 +96,9 @@ export default function UsageScreen() {
       <Text style={[styles.subtitle, { color: tokens.ink3 }]}>A clear read on your Forge consumption.</Text>
       <Segmented options={[{ value: "week", label: "This Week" }, { value: "session", label: "This Session" }]} value={window} onChange={setWindow} />
       {!isLoading && !isError && selected ? <View style={[styles.hero, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
-        <Text style={[styles.eyebrow, { color: tokens.ink3 }]}>{usageLabel} · {window === "week" ? "THIS WEEK" : "THIS SESSION"}</Text>
-        {hasMeteredApi ? <Text style={[styles.cost, { color: tokens.accent }]}>{`$${apiCostUsd.toFixed(2)}`}</Text> : <Text style={[styles.included, { color: tokens.accent }]}>Included with plan</Text>}
+        <Text style={[styles.eyebrow, { color: tokens.ink3 }]}>{combinedSubscriptionPercent != null ? "COMBINED SUBSCRIPTION USAGE" : `${usageLabel} · ${window === "week" ? "THIS WEEK" : "THIS SESSION"}`}</Text>
+        {combinedSubscriptionPercent != null ? <Text style={[styles.cost, { color: tokens.accent }]}>{combinedSubscriptionPercent}%</Text> : hasMeteredApi ? <Text style={[styles.cost, { color: tokens.accent }]}>{`$${apiCostUsd.toFixed(2)}`}</Text> : <Text style={[styles.included, { color: tokens.accent }]}>Included with plan</Text>}
+        {combinedSubscriptionPercent != null ? <Text style={[styles.tokens, { color: tokens.ink3 }]}>{window === "week" ? "across subscription quotas this week" : "current subscription quota status"}</Text> : null}
         <Text style={[styles.tokens, { color: tokens.ink }]}>{number(totalTokens)} tokens</Text>
         <Text style={[styles.split, { color: tokens.ink3 }]}>{number(selected.combined.inputTokens)} in · {number(selected.combined.outputTokens)} out</Text>
       </View> : null}
@@ -101,7 +106,7 @@ export default function UsageScreen() {
       {isError ? <Card><Text style={[styles.empty, { color: tokens.danger }]}>Could not load usage. Pull to retry.</Text></Card> : null}
       {window === "session" && !selected && !isLoading && !isError ? <Card><Text style={[styles.empty, { color: tokens.ink2 }]}>No session usage is available yet. Start or open a session to see its activity.</Text></Card> : null}
     </View>
-  ), [apiCostUsd, hasMeteredApi, isError, isLoading, selected, tokens, totalTokens, usageLabel, window]);
+  ), [apiCostUsd, combinedSubscriptionPercent, hasMeteredApi, isError, isLoading, selected, tokens, totalTokens, usageLabel, window]);
   const empty = isLoading ? <View /> : <EmptyState icon={Cpu} message="No usage yet. Your provider activity will appear here after the first turn." />;
 
   return (
