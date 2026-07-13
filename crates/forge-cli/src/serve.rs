@@ -2074,6 +2074,7 @@ async fn models_page(State(state): State<Arc<DaemonState>>) -> Response {
                 )
             })
             .collect();
+        let context_windows = store.all_model_contexts().unwrap_or_default();
         ModelsResponse {
             catalog: "available",
             providers: catalog
@@ -2086,7 +2087,7 @@ async fn models_page(State(state): State<Arc<DaemonState>>) -> Response {
                         .into_iter()
                         .map(|model| ModelRow {
                             health: benches.get(&model.id).cloned(),
-                            id: model.id,
+                            id: model.id.clone(),
                             name: model.name,
                             frontier: model.frontier,
                             free: model.free,
@@ -2104,7 +2105,10 @@ async fn models_page(State(state): State<Arc<DaemonState>>) -> Response {
                                 .benchmark_for(&model.id)
                                 .map(|score| score.0),
                             benchmark_coding: catalog.benchmark_for(&model.id).map(|score| score.1),
-                            context_window: forge_mesh::pricing::context_limit(&model.id),
+                            context_window: context_windows
+                                .get(&model.id)
+                                .copied()
+                                .or_else(|| forge_mesh::pricing::context_limit(&model.id)),
                         })
                         .collect(),
                 })
