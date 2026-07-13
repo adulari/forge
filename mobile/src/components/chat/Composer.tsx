@@ -11,7 +11,7 @@
 import { ArrowUp, Clock, FileText, Image as ImageIcon, Mic, RotateCcw, Sparkles, Square } from "lucide-react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import React, { useEffect, useRef, useState } from "react";
-import { Image, Platform, StyleSheet, Text, TextInput, View } from "react-native";
+import { Image, Platform, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
@@ -43,12 +43,12 @@ import {
 import { GoalSheet } from "./GoalSheet";
 import { VoiceRecordingPill } from "./VoiceRecordingPill";
 
-const MAX_LINES = 6;
+const MAX_LINES = 8;
 const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
 const MIN_HEIGHT = 44;
-const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES;
-const COMMAND_CHIPS = ["/goal", "/undo", "/plan", "/compact", "/uncompact", "/models", "/model", "/mode", "/effort", "/mesh", "/help"] as const;
-const COMMAND_HINT_LIMIT = 6;
+const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES + space.space8;
+const COMMAND_CHIPS = ["/mode", "/assay", "/model", "/models", "/config", "/copy", "/thinking", "/image", "/mcp", "/init", "/new", "/undo", "/checkpoint", "/checkpoints", "/compact", "/uncompact", "/lattice", "/plan", "/execute", "/goal", "/pr", "/loop", "/effort", "/remember", "/memories", "/clear", "/usage", "/mesh", "/remote", "/help"] as const;
+const COMMAND_HINT_LIMIT = 30;
 
 export interface ComposerProps {
   sessionId: string;
@@ -427,7 +427,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
       ) : null}
 
       {!recording ? (
-        <View style={styles.chipsRow}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.commandScroll} contentContainerStyle={styles.chipsRow} keyboardShouldPersistTaps="handled">
           {text.length === 0 ? <Chip label="goal" icon={<Sparkles size={14} strokeWidth={1.75} color={tokens.ink3} />} onPress={() => setGoalVisible(true)} testID="chip-goal" /> : null}
           {text.length === 0 || text.startsWith("/") ? commandHints.map((cmd) => (
             <Chip key={cmd} label={cmd} onPress={() => { setText(cmd); requestAnimationFrame(() => inputRef.current?.focus()); }} testID={`chip-${cmd}`} />
@@ -450,7 +450,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               />
             </Animated.View>
           ) : null}
-        </View>
+        </ScrollView>
       ) : null}
 
       {recording ? (
@@ -551,7 +551,8 @@ const styles = StyleSheet.create({
     paddingBottom: space.space8,
     gap: space.space8,
   },
-  chipsRow: { flexDirection: "row", flexWrap: "wrap", gap: space.space8 },
+  chipsRow: { flexDirection: "row", gap: space.space8, paddingRight: space.space12 },
+  commandScroll: { flexGrow: 0, flexShrink: 0 },
   chipThumb: { width: 20, height: 20, borderRadius: radii.radius4 },
   row: { flexDirection: "row", alignItems: "flex-end", gap: space.space4 },
   input: { flex: 1, paddingHorizontal: space.space8, paddingVertical: space.space8, textAlignVertical: "top" },
