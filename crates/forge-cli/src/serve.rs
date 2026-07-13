@@ -535,6 +535,9 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(&format!("{base}/api/skills"), get(skills_page))
         .route(&format!("{base}/api/models"), get(models_page))
         .route(&format!("{base}/api/plans"), get(plans_page))
+||||||| parent of abad6c3 (feat(mobile): add MCP server catalog)
+
+        .route(&format!("{base}/api/mcp"), get(mcp_page))
         .route(
             &format!("{base}/api/config"),
             get(config_page).put(update_config),
@@ -2105,6 +2108,55 @@ async fn plans_page(State(state): State<Arc<DaemonState>>) -> Response {
     }
     json_response(&plans)
 }
+||||||| parent of abad6c3 (feat(mobile): add MCP server catalog)
+
+struct McpServerRow {
+    name: String,
+    transport: String,
+    enabled: bool,
+    auth_configured: bool,
+    secret_env_count: usize,
+}
+
+#[derive(serde::Serialize)]
+struct McpResponse {
+    servers: Vec<McpServerRow>,
+    allowed_servers: Vec<String>,
+    allowed_tools: Vec<String>,
+    call_timeout_secs: u64,
+    connect_timeout_secs: u64,
+}
+
+async fn mcp_page() -> Response {
+    match tokio::task::spawn_blocking(|| {
+        let config = forge_config::load().unwrap_or_default();
+        McpResponse {
+            servers: config
+                .mcp
+                .servers
+                .iter()
+                .map(|server| McpServerRow {
+                    name: server.name.clone(),
+                    transport: server.transport_label().to_string(),
+                    enabled: server.enabled,
+                    auth_configured: server.auth.is_some(),
+                    secret_env_count: server.secret_env.len(),
+                })
+                .collect(),
+            allowed_servers: config.mcp.allow.servers,
+            allowed_tools: config.mcp.allow.tools,
+            call_timeout_secs: config.mcp.call_timeout_secs,
+            connect_timeout_secs: config.mcp.connect_timeout_secs,
+        }
+    })
+    .await
+    {
+        Ok(response) => json_response(&response),
+        Err(_) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read MCP configuration",
+        ),
+    }
 }
 
 async fn usage_page(

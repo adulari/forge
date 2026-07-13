@@ -57,6 +57,9 @@ export interface ModelRow { id: string; name: string; frontier: boolean; free: b
 export interface SessionTreeRow { id: string; forked_from: string | null; forked_at_seq: number | null; created_at: number; }
 export interface PlanRow { session_id: string; session_title: string; title: string; steps: { title: string; detail: string }[]; notes: string | null; }
 
+export interface McpResponse { servers: McpServerRow[]; allowed_servers: string[]; allowed_tools: string[]; call_timeout_secs: number; connect_timeout_secs: number; }
+export interface McpServerRow { name: string; transport: "stdio" | "http" | "sse"; enabled: boolean; auth_configured: boolean; secret_env_count: number; }
+
 export interface UsageResponse {
   week: { sinceEpoch: number; combined: UsageTotals; providers: UsageProvider[] };
   session: { sessionId: string; combined: UsageTotals; providers: UsageProvider[] } | null;
@@ -365,6 +368,8 @@ export function updateConfig(baseUrl: string, body: UpdateConfigRequest): Promis
 
 export function getHooks(baseUrl: string): Promise<HookRow[]> { return request(baseUrl, "/api/hooks"); }
 export function getPlans(baseUrl: string): Promise<PlanRow[]> { return request(baseUrl, "/api/plans"); }
+
+export function getMcp(baseUrl: string): Promise<McpResponse> { return request(baseUrl, "/api/mcp"); }
 
 export function getUsage(baseUrl: string, session?: string): Promise<UsageResponse> {
   return request(baseUrl, `/api/usage${qs({ session })}`);
