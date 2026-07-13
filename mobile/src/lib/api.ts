@@ -107,6 +107,7 @@ export interface CreateSessionRequest {
   title?: string;
   model?: string;
   resume?: string;
+  temper?: "Read-only" | "Ask" | "Auto-edit" | "Full";
 }
 
 export interface CreateSessionResponse {
