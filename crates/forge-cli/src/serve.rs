@@ -2037,6 +2037,7 @@ struct ModelRow {
     subscription: bool,
     estimated_cost_usd: f64,
     health: Option<ModelHealth>,
+    tier: &'static str,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -2089,6 +2090,13 @@ async fn models_page(State(state): State<Arc<DaemonState>>) -> Response {
                             paid: model.paid,
                             subscription: model.subscription,
                             estimated_cost_usd: model.cost,
+                            tier: if model.frontier {
+                                "complex"
+                            } else if model.subscription || model.paid {
+                                "standard"
+                            } else {
+                                "trivial"
+                            },
                         })
                         .collect(),
                 })
