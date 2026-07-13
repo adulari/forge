@@ -2448,6 +2448,8 @@ pub enum SettingValue {
     Int(i64),
     Float(f64),
     Str(String),
+    /// A string list, edited as JSON so entries may safely contain commas or newlines.
+    List(Vec<String>),
     /// An unset optional (serialized `null`) — edited as text, empty clears it.
     Unset,
 }
@@ -2460,6 +2462,7 @@ impl SettingValue {
             SettingValue::Int(_) => "int",
             SettingValue::Float(_) => "float",
             SettingValue::Str(_) | SettingValue::Unset => "text",
+            SettingValue::List(_) => "list",
         }
     }
 
@@ -2470,6 +2473,7 @@ impl SettingValue {
             SettingValue::Int(i) => i.to_string(),
             SettingValue::Float(f) => f.to_string(),
             SettingValue::Str(s) => s.clone(),
+            SettingValue::List(values) => serde_json::to_string(values).unwrap_or_default(),
             SettingValue::Unset => String::new(),
         }
     }
@@ -2546,6 +2550,8 @@ pub enum SettingKind {
     Bool,
     Int,
     Float,
+    /// A JSON array of strings, edited with an item-list control.
+    List,
     /// A fixed set of valid values — cycled / picked, never typed.
     Enum(Vec<&'static str>),
     Text,
@@ -2677,6 +2683,7 @@ pub fn config_descriptors() -> Vec<SettingDescriptor> {
                     SettingValue::Bool(_) => SettingKind::Bool,
                     SettingValue::Int(_) => SettingKind::Int,
                     SettingValue::Float(_) => SettingKind::Float,
+                    SettingValue::List(_) => SettingKind::List,
                     _ => SettingKind::Text,
                 },
             };
@@ -2761,7 +2768,17 @@ fn flatten_value(prefix: &str, value: &serde_json::Value, out: &mut Vec<SettingL
                 flatten_value(&path, v, out);
             }
         }
-        // Arrays are complex — excluded here.
+        // Arrays of strings are a first-class editable list; structured arrays stay out of the
+        // scalar editor so secret-bearing/complex sections retain dedicated safe flows.
+        Value::Array(items) if items.iter().all(|item| item.is_string()) => out.push(leaf(
+            prefix,
+            SettingValue::List(
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect(),
+            ),
+        )),
         Value::Array(_) => {}
         Value::Bool(b) => out.push(leaf(prefix, SettingValue::Bool(*b))),
         Value::Number(n) => {
@@ -2916,6 +2933,10 @@ fn coerce_value(
             .parse::<f64>()
             .map(|f| Some(toml::Value::Float(f)))
             .map_err(|_| ConfigError::Write(format!("expected a number, got '{raw}'"))),
+        Some(SettingValue::List(_)) => serde_json::from_str::<Vec<String>>(t)
+            .map(|items| toml::Value::Array(items.into_iter().map(toml::Value::String).collect()))
+            .map(Some)
+            .map_err(|_| ConfigError::Write("expected a JSON string array".to_string())),
         // Text or unset/optional: empty clears, otherwise a string.
         _ => {
             if t.is_empty() {
@@ -4220,6 +4241,8 @@ auto = "local"
         assert!(paths.contains(&"tui.fullscreen"));
         assert!(paths.contains(&"local.autostart"));
         assert!(paths.contains(&"recap.enabled"));
+        assert!(paths.contains(&"mesh.disabled"));
+        assert!(paths.contains(&"shell.sandbox_writable"));
         // Complex sections are excluded (their own commands own them).
         assert!(!paths.iter().any(|p| p.starts_with("hooks")));
         assert!(!paths.iter().any(|p| p.starts_with("mcp")));
@@ -4271,6 +4294,14 @@ auto = "local"
         // Bad bool/int are rejected, not silently stringified.
         assert!(coerce_value("maybe", Some(&SettingValue::Bool(false))).is_err());
         assert!(coerce_value("3.x", Some(&SettingValue::Int(0))).is_err());
+        assert_eq!(
+            coerce_value("[\"one\", \"two\"]", Some(&SettingValue::List(vec![]))).unwrap(),
+            Some(toml::Value::Array(vec![
+                toml::Value::String("one".to_string()),
+                toml::Value::String("two".to_string()),
+            ]))
+        );
+        assert!(coerce_value("not a list", Some(&SettingValue::List(vec![]))).is_err());
         // Empty on an optional clears it.
         assert_eq!(coerce_value("", Some(&SettingValue::Unset)).unwrap(), None);
     }

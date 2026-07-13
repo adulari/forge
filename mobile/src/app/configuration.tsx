@@ -56,6 +56,16 @@ function ConfigFieldRow({ field, scope }: { field: ConfigField; scope: Scope }) 
   if (field.field_type === "bool") {
     return <ListRow title={field.label} subtitle={subtitle} trailing={<Switch value={draft === "true"} onValueChange={(value) => { setDraft(String(value)); save(String(value)); }} accessibilityLabel={field.label} disabled={mutation.isPending} />} hasInteractiveTrailing />;
   }
+  if (field.field_type === "list") {
+    const values = (() => {
+      try {
+        return JSON.parse(draft) as string[];
+      } catch {
+        return [];
+      }
+    })();
+    return <View style={styles.field}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text>{values.map((value, index) => <Input key={`${field.key}-${index}`} value={value} onChangeText={(next) => { const updated = [...values]; updated[index] = next; setDraft(JSON.stringify(updated)); }} onBlur={() => save(draft)} accessibilityLabel={`${field.label} item ${index + 1}`} autoCapitalize="none" autoCorrect={false} />)}<Pressable onPress={() => { const next = JSON.stringify([...values, ""]); setDraft(next); }} accessibilityRole="button" accessibilityLabel={`Add ${field.label} item`}><Text style={[styles.reset, { color: tokens.accent }]}>Add item</Text></Pressable></View>;
+  }
   if (field.field_type === "enum") {
     return <View style={styles.field}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text><Segmented options={field.options.map((option) => ({ value: option, label: option }))} value={draft} onChange={(value) => { setDraft(value); save(value); }} /></View>;
   }

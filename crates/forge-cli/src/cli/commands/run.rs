@@ -970,6 +970,7 @@ pub(crate) fn config_editor_rows() -> Vec<forge_tui::SettingRow> {
             forge_config::SettingKind::Bool => forge_tui::RowKind::Bool,
             forge_config::SettingKind::Int => forge_tui::RowKind::Int,
             forge_config::SettingKind::Float => forge_tui::RowKind::Float,
+            forge_config::SettingKind::List => forge_tui::RowKind::Text,
             forge_config::SettingKind::Text => forge_tui::RowKind::Text,
             forge_config::SettingKind::Enum(opts) => {
                 forge_tui::RowKind::Enum(opts.into_iter().map(str::to_string).collect())
