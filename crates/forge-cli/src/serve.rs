@@ -530,6 +530,7 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         )
         .route(&format!("{base}/api/history"), get(history_page))
         .route(&format!("{base}/api/usage"), get(usage_page))
+        .route(&format!("{base}/api/hooks"), get(hooks_page))
         .route(&format!("{base}/api/skills"), get(skills_page))
         .route(&format!("{base}/api/models"), get(models_page))
         .route(
@@ -2047,6 +2048,40 @@ fn config_response() -> ConfigResponse {
                 }
             })
             .collect(),
+    }
+}
+
+#[derive(serde::Serialize)]
+struct HookRow {
+    event: String,
+    matcher: Option<String>,
+    command: String,
+    timeout_secs: u64,
+    cc_compat: bool,
+}
+
+async fn hooks_page() -> Response {
+    match tokio::task::spawn_blocking(|| {
+        forge_config::load()
+            .unwrap_or_default()
+            .hooks
+            .into_iter()
+            .map(|hook| HookRow {
+                event: hook.event.cc_name().to_string(),
+                matcher: hook.matcher,
+                command: hook.command,
+                timeout_secs: hook.timeout_secs,
+                cc_compat: hook.cc_compat,
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    {
+        Ok(hooks) => json_response(&hooks),
+        Err(_) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read hooks",
+        ),
     }
 }
 

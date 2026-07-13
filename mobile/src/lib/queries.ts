@@ -12,6 +12,8 @@ import { useIsFocused } from "expo-router";
 import { useEffect, useRef, useState } from "react";
 
 import {
+  type HookRow,
+  getHooks,
   type SkillRow,
   getSkills,
   type ModelsResponse,
@@ -62,6 +64,7 @@ function keys(baseUrl: string | null) {
     config: ["config", baseUrl] as const,
     skills: ["skills", baseUrl] as const,
     models: ["models", baseUrl] as const,
+    hooks: ["hooks", baseUrl] as const,
   };
 }
 
@@ -141,6 +144,15 @@ export function useSkills() {
   return useQuery<SkillRow[]>({
     queryKey: keys(baseUrl).skills,
     queryFn: () => getSkills(baseUrl as string),
+    enabled: baseUrl != null,
+  });
+}
+
+export function useHooks() {
+  const { baseUrl } = useAuth();
+  return useQuery<HookRow[]>({
+    queryKey: keys(baseUrl).hooks,
+    queryFn: () => getHooks(baseUrl as string),
     enabled: baseUrl != null,
   });
 }
