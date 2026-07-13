@@ -1401,6 +1401,16 @@ pub struct MeshConfig {
     /// connection) and fail over, instead of hanging the turn forever. `0` disables the watchdog.
     #[serde(default = "default_stream_idle_timeout_secs")]
     pub stream_idle_timeout_secs: u64,
+    /// Absolute token ceiling at which a session auto-compacts, regardless of the model's real
+    /// context window. Fires at `min(compact_cap_tokens, 0.80 * window)`, so large-window models
+    /// (gpt-5.6 ~1.05M) compact early to cut subscription usage — later compaction burns more.
+    /// Does NOT change the displayed window.
+    /// Default 217_600 = 80% of 272K: OpenAI rolled gpt-5.6 (Sol) back 372K->272K on 2026-07-13 as
+    /// a main source of high usage burn.
+    // TODO(2026-07): raise this cap (toward 80% of 372K ~= 297_600) once OpenAI restores the 372K
+    // window — they said they're bringing it back over the next few days.
+    #[serde(default = "default_compact_cap_tokens")]
+    pub compact_cap_tokens: u64,
     /// Longest rate-limit reset (seconds) Forge will WAIT OUT in-turn to retry the best model rather
     /// than degrade to a lower-ranked one (per-minute free tiers: NIM/Groq/Gemini). A reset longer
     /// than this falls through to failover. `0` disables in-turn waiting entirely.
@@ -1687,6 +1697,10 @@ fn default_stream_idle_timeout_secs() -> u64 {
     // Long enough to never trip during normal generation (incl. slow reasoning models and a
     // bridge running a slow tool), short enough to recover from a genuine stall in reasonable time.
     120
+}
+
+fn default_compact_cap_tokens() -> u64 {
+    217_600
 }
 
 /// Subagent orchestration settings (RFC subagent-orchestration).
@@ -2056,6 +2070,7 @@ impl Default for Config {
                 failover_cooldown_secs: default_failover_cooldown_secs(),
                 rate_limit_wait_secs: default_rate_limit_wait_secs(),
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
+                compact_cap_tokens: default_compact_cap_tokens(),
                 max_steps: default_max_steps(),
                 subscription_conserve: default_subscription_conserve(),
                 benchmark_ranking: default_benchmark_ranking(),
