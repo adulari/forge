@@ -1,5 +1,5 @@
-import React from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useState } from "react";
+import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import type { RemoteInput } from "../../lib/ws";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -8,61 +8,17 @@ import { formatCost, formatTokenPair, type as typeScale } from "../../theme/typo
 import { ContextGauge } from "../ds/ContextGauge";
 import { KeyValueRow } from "../ds/KeyValueRow";
 import { Sheet } from "../ds/Sheet";
-import { EFFORT_LEVELS, type EffortLevel } from "./EffortPicker";
+import { EffortPicker } from "./EffortPicker";
 
-export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, send, costUsd, contextTokens, contextLimit, weekly }: {
-  visible: boolean; onClose: () => void; tier: string | null; model: string; temper: string; effort?: string | null;
-  send: (input: RemoteInput) => boolean; costUsd: number; contextTokens: number; contextLimit: number | null;
-  weekly?: { provider: string; deltaPct: number } | null;
-}) {
+export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, send, costUsd, contextTokens, contextLimit, weekly }: { visible: boolean; onClose: () => void; tier: string | null; model: string; temper: string; effort?: string | null; send: (input: RemoteInput) => boolean; costUsd: number; contextTokens: number; contextLimit: number | null; weekly?: { provider: string; deltaPct: number } | null; }) {
   const tokens = useTokens();
-  const current = EFFORT_LEVELS.includes(effort as EffortLevel) ? effort : null;
+  const [effortVisible, setEffortVisible] = useState(false);
   const contextPercent = contextLimit != null && contextLimit > 0 ? Math.min(100, (contextTokens / contextLimit) * 100) : null;
   const remaining = contextLimit != null ? Math.max(0, contextLimit - contextTokens) : null;
-  const select = (level: EffortLevel | null) => {
-    if (send({ kind: "prompt", text: level ? `/effort ${level}` : "/effort" })) onClose();
-  };
-  const openTemperPicker = () => {
-    if (send({ kind: "prompt", text: "/mode" })) onClose();
-  };
-  const compact = () => {
-    if (send({ kind: "prompt", text: "/compact" })) onClose();
-  };
+  const run = (command: string) => { if (send({ kind: "prompt", text: command })) onClose(); };
 
-  const chooseModel = () => {
-    if (send({ kind: "prompt", text: "/model" })) onClose();
-  };
-  const restoreContext = () => {
-    if (send({ kind: "prompt", text: "/uncompact" })) onClose();
-  };
-  return <Sheet visible={visible} onClose={onClose} accessibilityLabel="Session telemetry" snapPoints={[0.8]}>
-    <View style={styles.content}>
-      <Text style={[typeScale.heading, { color: tokens.ink }]}>Session telemetry</Text>
-      {contextLimit != null ? <><ContextGauge used={contextTokens} total={contextLimit} /><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatTokenPair(contextTokens, contextLimit)}</Text><View style={[styles.capacity, { backgroundColor: contextPercent != null && contextPercent >= 90 ? tokens.dangerBg : contextPercent != null && contextPercent >= 70 ? tokens.warnBg : tokens.bg3 }]}><Text style={[typeScale.bodyBold, { color: contextPercent != null && contextPercent >= 90 ? tokens.danger : contextPercent != null && contextPercent >= 70 ? tokens.warn : tokens.ink }]}>{contextPercent?.toFixed(0)}% context capacity used</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{remaining?.toLocaleString()} tokens remaining · Forge reserves output room and compacts when needed.</Text></View><Pressable onPress={compact} accessibilityRole="button" style={[styles.compact, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.accent }]}>Compact context</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Summarize earlier conversation to free capacity</Text></Pressable><Pressable onPress={restoreContext} accessibilityRole="button" style={[styles.restore, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.ink2 }]}>Restore compacted context</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Bring back the previous full conversation when available</Text></Pressable></> : null}
-      {weekly ? <>
-        <Text style={[typeScale.bodyBold, { color: tokens.success }]}>≈ +{weekly.deltaPct.toFixed(1)}% of weekly quota this session</Text>
-        <Text style={[typeScale.meta, { color: tokens.ink3 }]}>Approximate — may be off if other sessions or tools share this {weekly.provider} subscription.</Text>
-      </> : <Text style={[typeScale.bodyBold, { color: tokens.success }]}>cost {formatCost(costUsd)}</Text>}
-      <View style={styles.meshAction}><Pressable onPress={() => { if (send({ kind: "prompt", text: "/mesh" })) onClose(); }} accessibilityRole="button" style={[styles.meshButton, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.accent }]}>Explain mesh routing</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>See why Forge would choose this model</Text></Pressable></View>
-      <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>Operating mode</Text>
-      <Pressable onPress={openTemperPicker} accessibilityRole="button" style={[styles.option, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.accent }]}>Change operating mode</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{temper}</Text></Pressable>
-      <View style={[styles.rows, { borderTopColor: tokens.border }]}>
-        <KeyValueRow label="Tier" value={tier ?? "—"} />
-        <Pressable onPress={chooseModel} accessibilityRole="button" style={styles.modelRow}><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Model</Text><View style={styles.modelAction}><Text style={[typeScale.bodyBold, { color: tokens.accent }]} numberOfLines={1}>{model}</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Change</Text></View></Pressable>
-        <KeyValueRow label="Temper" value={temper} />
-      </View>
-      <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>Reasoning effort</Text>
-      <View style={styles.options}>
-        {[null, ...EFFORT_LEVELS].map((level) => {
-          const selected = level === current;
-          const label = level ?? "default";
-          return <Pressable key={label} onPress={() => select(level)} accessibilityRole="radio" accessibilityState={{ selected }} style={[styles.option, { backgroundColor: selected ? tokens.selection : tokens.bg2, borderColor: selected ? tokens.accent : tokens.border }]}>
-            <Text style={[typeScale.bodyBold, { color: level === "whitehot" ? tokens.accent : tokens.ink }]}>{label}</Text>
-            {selected ? <Text style={[typeScale.meta, { color: tokens.ink3 }]}>current</Text> : null}
-          </Pressable>;
-        })}
-      </View>
-    </View>
-  </Sheet>;
+  return <><Sheet visible={visible} onClose={onClose} accessibilityLabel="Session telemetry" snapPoints={[0.8]}><ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled"><Text style={[typeScale.heading, { color: tokens.ink }]}>Session telemetry</Text>{contextLimit != null ? <><ContextGauge used={contextTokens} total={contextLimit} /><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatTokenPair(contextTokens, contextLimit)}</Text><View style={[styles.capacity, { backgroundColor: contextPercent != null && contextPercent >= 90 ? tokens.dangerBg : contextPercent != null && contextPercent >= 70 ? tokens.warnBg : tokens.bg3 }]}><Text style={[typeScale.bodyBold, { color: contextPercent != null && contextPercent >= 90 ? tokens.danger : contextPercent != null && contextPercent >= 70 ? tokens.warn : tokens.ink }]}>{contextPercent?.toFixed(0)}% context capacity used</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{remaining?.toLocaleString()} tokens remaining · Forge reserves output room and compacts when needed.</Text></View><Action label="Compact context" detail="Summarize earlier conversation to free capacity" onPress={() => run("/compact")} /><Action label="Restore compacted context" detail="Bring back the previous full conversation when available" onPress={() => run("/uncompact")} /></> : null}{weekly ? <><Text style={[typeScale.bodyBold, { color: tokens.success }]}>≈ +{weekly.deltaPct.toFixed(1)}% of weekly quota this session</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Approximate — may be off if other sessions or tools share this {weekly.provider} subscription.</Text></> : <Text style={[typeScale.bodyBold, { color: tokens.success }]}>cost {formatCost(costUsd)}</Text>}<Action label="Explain mesh routing" detail="See why Forge would choose this model" onPress={() => run("/mesh")} /><Text style={[typeScale.bodyBold, { color: tokens.ink }]}>Operating mode</Text><Action label="Change operating mode" detail={temper} onPress={() => run("/mode")} /><View style={[styles.rows, { borderTopColor: tokens.border }]}><KeyValueRow label="Tier" value={tier ?? "—"} /><Action label="Model" detail={`${model} · Change`} onPress={() => run("/model")} /><KeyValueRow label="Temper" value={temper} /></View><Text style={[typeScale.bodyBold, { color: tokens.ink }]}>Reasoning effort</Text><Action label="Change reasoning effort" detail={effort ?? "default"} onPress={() => setEffortVisible(true)} /></ScrollView></Sheet><EffortPicker effort={effort} send={send} visible={effortVisible} onClose={() => setEffortVisible(false)} showTrigger={false} /></>;
 }
-const styles = StyleSheet.create({ content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space8 }, meshAction: { paddingVertical: space.space4 }, meshButton: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, capacity: { gap: space.space4, padding: space.space12, borderRadius: 8 }, compact: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, modelRow: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, modelAction: { flex: 1, alignItems: "flex-end", gap: 2, marginLeft: space.space16 }, restore: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, rows: { borderTopWidth: StyleSheet.hairlineWidth }, options: { gap: space.space8 }, option: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 } });
+
+function Action({ label, detail, onPress }: { label: string; detail: string; onPress: () => void }) { const tokens = useTokens(); return <Pressable onPress={onPress} accessibilityRole="button" style={[styles.option, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.accent }]}>{label}</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]} numberOfLines={1}>{detail}</Text></Pressable>; }
+const styles = StyleSheet.create({ content: { paddingHorizontal: space.space16, paddingBottom: space.space32, gap: space.space8 }, capacity: { gap: space.space4, padding: space.space12, borderRadius: 8 }, rows: { borderTopWidth: StyleSheet.hairlineWidth }, option: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 } });
