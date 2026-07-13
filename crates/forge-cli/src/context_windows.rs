@@ -29,6 +29,34 @@ use forge_mesh::pricing;
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 
+const OPENROUTER_VENDOR_MAP: &[(&str, &str, bool)] = &[
+    ("anthropic/", "anthropic", true),
+    ("google/", "gemini", true),
+    ("openai/", "openai", true),
+    ("x-ai/", "xai", true),
+    ("deepseek/", "deepseek", true),
+    ("mistralai/", "mistral", true),
+    ("cohere/", "cohere", true),
+    ("amazon/", "amazon", true),
+    // NVIDIA keeps the full path: `nvidia/model` → `nvidia::nvidia/model`.
+    ("nvidia/", "nvidia", false),
+];
+
+fn native_model_id(openrouter_id: &str) -> Option<String> {
+    OPENROUTER_VENDOR_MAP
+        .iter()
+        .find_map(|(prefix, namespace, strip)| {
+            openrouter_id.starts_with(prefix).then(|| {
+                let model_id = if *strip {
+                    openrouter_id.strip_prefix(prefix).unwrap_or(openrouter_id)
+                } else {
+                    openrouter_id
+                };
+                format!("{namespace}::{model_id}")
+            })
+        })
+}
+
 /// Fetch per-model context windows AND prices from all reachable provider APIs, persisting
 /// results into the DB. Best-effort and fail-soft — any error just leaves the conservative floor.
 pub async fn fetch_and_persist(models: &[String]) {
@@ -59,7 +87,10 @@ pub async fn fetch_and_persist(models: &[String]) {
                 let _ = store.set_model_context(&id, w);
                 ctx_registry.insert(id, w);
             }
-            // pricing
+            // Persist OpenRouter prices plus cross-mapped native provider IDs. A model routed
+            // through NVIDIA NIM (for example) has the same model identifier as OpenRouter's
+            // catalog entry but a different namespace; storing only `openrouter::…` left its
+            // recorded usage permanently priced at $0.
             for (id, in_1k, out_1k, cache_1k) in openrouter_pricing(&body) {
                 let _ = store.set_model_pricing(&id, in_1k, out_1k, cache_1k);
             }
@@ -354,20 +385,6 @@ fn openrouter_windows(body: &serde_json::Value) -> Vec<(String, u32)> {
 ///   NVIDIA NIM returns model IDs with their vendor prefix (`nvidia/model`), so keeping the
 ///   full path as the model part matches the Forge catalog ID.
 fn openrouter_native_cross_map(body: &serde_json::Value) -> Vec<(String, u32)> {
-    // (or_vendor_prefix, forge_namespace, strip_prefix)
-    const VENDOR_MAP: &[(&str, &str, bool)] = &[
-        ("anthropic/", "anthropic", true),
-        ("google/", "gemini", true),
-        ("openai/", "openai", true),
-        ("x-ai/", "xai", true),
-        ("deepseek/", "deepseek", true),
-        ("mistralai/", "mistral", true),
-        ("cohere/", "cohere", true),
-        ("amazon/", "amazon", true),
-        // NVIDIA: keep full path so "nvidia/model" → "nvidia::nvidia/model"
-        ("nvidia/", "nvidia", false),
-    ];
-
     let Some(data) = body["data"].as_array() else {
         return Vec::new();
     };
@@ -375,22 +392,7 @@ fn openrouter_native_cross_map(body: &serde_json::Value) -> Vec<(String, u32)> {
         .filter_map(|m| {
             let or_id = m["id"].as_str()?;
             let window = m["context_length"].as_u64().filter(|w| *w > 0)?;
-            let (ns, model_id) = VENDOR_MAP.iter().find_map(|(prefix, ns, strip)| {
-                if or_id.starts_with(prefix) {
-                    let model_id = if *strip {
-                        or_id.strip_prefix(prefix).unwrap_or(or_id)
-                    } else {
-                        or_id
-                    };
-                    Some((*ns, model_id))
-                } else {
-                    None
-                }
-            })?;
-            Some((
-                format!("{ns}::{model_id}"),
-                window.min(u32::MAX as u64) as u32,
-            ))
+            Some((native_model_id(or_id)?, window.min(u32::MAX as u64) as u32))
         })
         .collect()
 }
@@ -414,8 +416,13 @@ fn openrouter_pricing(body: &serde_json::Value) -> Vec<(String, f64, f64, Option
             let input = per_1k(&pricing["prompt"])?;
             let output = per_1k(&pricing["completion"])?;
             let cache_read = per_1k(&pricing["input_cache_read"]);
-            Some((format!("openrouter::{id}"), input, output, cache_read))
+            let mut rates = vec![(format!("openrouter::{id}"), input, output, cache_read)];
+            if let Some(native_id) = native_model_id(id) {
+                rates.push((native_id, input, output, cache_read));
+            }
+            Some(rates)
         })
+        .flatten()
         .collect()
 }
 
@@ -678,6 +685,13 @@ mod tests {
     #[test]
     fn openrouter_pricing_parses_correctly() {
         let prices = openrouter_pricing(&or_body());
+        let nvidia = prices
+            .iter()
+            .find(|(id, ..)| id == "nvidia::nvidia/llama-3.1-nemotron-70b-instruct")
+            .unwrap();
+        assert!((nvidia.1 - 0.00035).abs() < 1e-12);
+        assert!((nvidia.2 - 0.0004).abs() < 1e-12);
+
         let opus = prices
             .iter()
             .find(|(id, ..)| id == "openrouter::anthropic/claude-opus-4-8")

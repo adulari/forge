@@ -21,9 +21,10 @@ export default function UsageScreen() {
   const [window, setWindow] = useState<"week" | "session">("week");
   const [expanded, setExpanded] = useState<string | null>(null);
   const { data: sessions } = useSessions();
-  const sessionId = sessions?.find((session) => session.busy)?.id;
+  const sessionId = sessions?.find((session) => session.busy)?.id ?? sessions?.[0]?.id;
   const query = useUsage(sessionId);
-  const selected = window === "session" && query.data?.session ? query.data.session : query.data?.week;
+  const selected = window === "week" ? query.data?.week : query.data?.session;
+  const hasSession = sessionId != null;
   const providers = selected?.providers ?? [];
   const quota = useMemo(() => query.data?.quota ?? [], [query.data?.quota]);
   const refreshing = query.isFetching;
@@ -38,17 +39,20 @@ export default function UsageScreen() {
       <Segmented options={[{ value: "week", label: "This Week" }, { value: "session", label: "This Session" }]} value={window} onChange={setWindow} />
       <Animated.View entering={FadeInDown.duration(350)} style={[styles.hero, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
         <Text style={[styles.eyebrow, { color: tokens.ink3 }]}>COMBINED {window === "week" ? "WEEKLY" : "SESSION"}</Text>
-        <Text style={[styles.cost, { color: tokens.accent }]}>${(selected?.combined.costUsd ?? 0).toFixed(2)}</Text>
+        <Text style={[styles.cost, { color: tokens.accent }]}>{selected ? `$${selected.combined.costUsd.toFixed(2)}` : "—"}</Text>
         <Text style={[styles.tokens, { color: tokens.ink }]}>{number(totalTokens)} tokens</Text>
         <Text style={[styles.split, { color: tokens.ink3 }]}>{number(selected?.combined.inputTokens ?? 0)} in · {number(selected?.combined.outputTokens ?? 0)} out</Text>
       </Animated.View>
-      {providers.length === 0 ? <Card><Text style={[styles.empty, { color: tokens.ink2 }]}>No usage yet. Your provider activity will glow here after the first turn.</Text></Card> : providers.map((provider, index) => {
+      {query.isError ? <Card><Text style={[styles.empty, { color: tokens.danger }]}>Could not load usage. Pull to retry.</Text></Card> : null}
+      {window === "session" && !hasSession && !query.isLoading ? <Card><Text style={[styles.empty, { color: tokens.ink2 }]}>Choose a session first to see its usage.</Text></Card> : null}
+      {providers.length === 0 && selected && !query.isLoading ? <Card><Text style={[styles.empty, { color: tokens.ink2 }]}>No usage yet. Your provider activity will glow here after the first turn.</Text></Card> : null}
+      {providers.map((provider, index) => {
         const open = expanded === provider.provider;
         return <Animated.View key={provider.provider} entering={FadeInDown.delay(index * 45)} layout={Layout.springify()}>
           <Pressable onPress={() => setExpanded(open ? null : provider.provider)}>
             <Card style={styles.provider}>
               <View style={styles.row}><Text style={[styles.providerName, { color: tokens.ink }]}>{provider.provider}</Text><Badge label={provider.kind} tone={kindTone(provider.kind) as never} /></View>
-              <Text style={[styles.costSmall, { color: tokens.accent }]}>${provider.costUsd.toFixed(2)}</Text>
+              <Text style={[styles.costSmall, { color: tokens.accent }]}>{provider.costUsd > 0 ? `$${provider.costUsd.toFixed(2)}` : provider.kind === "api" ? "No estimate" : "Included with plan"}</Text>
               <Text style={[styles.detail, { color: tokens.ink3 }]}>{number(provider.inputTokens)} in · {number(provider.outputTokens)} out · {open ? "tap to collapse" : "tap for quota details"}</Text>
               {(quotasByProvider.get(provider.provider) ?? []).map((q) => <View key={q.windowKind} style={styles.quota}><View style={styles.row}><Text style={[styles.detail, { color: tokens.ink2 }]}>{q.windowKind}</Text><Text style={[styles.detail, { color: tokens.ink3 }]}>{q.status} · {q.fraction == null ? "—" : `${Math.round(q.fraction * 100)}%`}</Text></View><Text style={[styles.reset, { color: tokens.ink3 }]}>{resetLabel(q.resetsAt)}</Text><View style={[styles.track, { backgroundColor: tokens.bg3 }]}><View style={[styles.fill, { width: `${Math.min(100, Math.max(0, (q.fraction ?? 0) * 100))}%`, backgroundColor: q.status === "exhausted" ? tokens.danger : q.status === "warning" ? tokens.warn : tokens.accent }]} /></View></View>)}
             </Card>
