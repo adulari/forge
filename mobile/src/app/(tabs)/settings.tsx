@@ -316,6 +316,11 @@ export default function SettingsScreen() {
             subtitle="Catalog, provider availability, and failover benches"
             onPress={() => router.push("/models")}
           />
+          <SettingsRow
+            title="Plans"
+            subtitle="Live proposals awaiting review"
+            onPress={() => router.push("/plans")}
+          />
           <ListRow
             title="Configuration"
             subtitle="Mesh, models, providers, and runtime behavior"
