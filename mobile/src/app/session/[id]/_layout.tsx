@@ -33,6 +33,9 @@ import { ForkSheet } from "../../../components/session/ForkSheet";
 ||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
 
 import { InitProjectSheet } from "../../../components/session/InitProjectSheet";
+||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
+
+import { AssaySheet } from "../../../components/session/AssaySheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
@@ -74,6 +77,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
 
   const [initVisible, setInitVisible] = useState(false);
+||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
+
+  const [assayVisible, setAssayVisible] = useState(false);
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
@@ -243,6 +249,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
 
             onInit={() => setInitVisible(true)}
+||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
+
+            onAssay={() => setAssayVisible(true)}
           />
         </View>
 
@@ -254,6 +263,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
 
         <InitProjectSheet visible={initVisible} onClose={() => setInitVisible(false)} send={send} />
+||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
+
+        <AssaySheet visible={assayVisible} onClose={() => setAssayVisible(false)} send={send} />
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />
