@@ -37,3 +37,6 @@ target-e2e/
 
 # Demo recording stage (scripts/demo/setup.sh)
 scripts/demo/.stage/
+
+# Local cargo config (absolute target-dir etc.) must never be committed
+.cargo/

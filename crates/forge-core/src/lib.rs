@@ -1004,7 +1004,7 @@ fn compact_candidate_chain(
     is_benched: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let mut add = |m: String, out: &mut Vec<String>| {
+    let add = |m: String, out: &mut Vec<String>| {
         if !m.is_empty() && !out.iter().any(|x| x == &m) {
             out.push(m);
         }

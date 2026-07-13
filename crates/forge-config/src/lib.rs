@@ -2499,7 +2499,14 @@ impl SettingValue {
 }
 
 /// Top-level sections that are NOT scalar-editable here — each has its own command/flow.
-const COMPLEX_SECTIONS: &[&str] = &["hooks", "mcp", "permissions", "statusline", "keybinds", "providers"];
+const COMPLEX_SECTIONS: &[&str] = &[
+    "hooks",
+    "mcp",
+    "permissions",
+    "statusline",
+    "keybinds",
+    "providers",
+];
 
 /// The complex (table/array) config sections the flat `/config` editor can't surface as scalars.
 /// They're listed read-only there with an "edit in $EDITOR" jump so they're at least discoverable.
@@ -2780,7 +2787,12 @@ fn flatten_value(prefix: &str, value: &serde_json::Value, out: &mut Vec<SettingL
             for (k, v) in map {
                 // Skip complex top-level sections entirely (their own commands own them).
                 if prefix.is_empty() && COMPLEX_SECTIONS.contains(&k.as_str()) {
-                    if k == "permissions" || k == "statusline" || k == "hooks" || k == "keybinds" || k == "providers" {
+                    if k == "permissions"
+                        || k == "statusline"
+                        || k == "hooks"
+                        || k == "keybinds"
+                        || k == "providers"
+                    {
                         out.push(leaf(k, SettingValue::Json(v.clone())));
                     }
                     continue;
