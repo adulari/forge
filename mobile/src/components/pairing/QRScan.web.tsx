@@ -280,8 +280,9 @@ export function QRScan({ onScanned, enabled = false, paused = false }: QRScanPro
 
 const styles = StyleSheet.create({
   frame: {
-    width: FRAME,
-    height: FRAME,
+    width: "100%",
+    maxWidth: FRAME,
+    aspectRatio: 1,
     alignSelf: "center",
     overflow: "hidden",
     borderWidth: StyleSheet.hairlineWidth,

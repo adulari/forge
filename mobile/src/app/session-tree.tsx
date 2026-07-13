@@ -5,10 +5,12 @@ import { ActivityIndicator, Pressable, RefreshControl, StyleSheet, Text, View } 
 
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { BackLink } from "../components/ds/BackLink";
+import { Button } from "../components/ds/Button";
 import { Card } from "../components/ds/Card";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
 import { type SessionTreeRow } from "../lib/api";
+import { useAuth } from "../lib/auth";
 import { useSessionTree } from "../lib/queries";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
@@ -35,13 +37,16 @@ function flattenTree(nodes: SessionTreeRow[]): TreeRow[] {
   }
 
   const rows: TreeRow[] = [];
+  const visited = new Set<string>();
   const visit = (node: SessionTreeRow, depth: number, ancestors: ReadonlySet<string>, orphaned = false) => {
-    if (ancestors.has(node.id)) return;
+    if (ancestors.has(node.id) || visited.has(node.id)) return;
+    visited.add(node.id);
     rows.push({ node, depth, orphaned });
     const nextAncestors = new Set(ancestors).add(node.id);
     for (const child of children.get(node.id) ?? []) visit(child, depth + 1, nextAncestors);
   };
   for (const root of roots) visit(root, 0, new Set(), root.forked_from != null);
+  for (const node of nodes) if (!visited.has(node.id)) visit(node, 0, new Set(), true);
   return rows;
 }
 
@@ -50,6 +55,7 @@ const titleFor = (node: SessionTreeRow) => node.title?.trim() || `Untitled sessi
 
 export default function SessionTreeScreen() {
   const tokens = useTokens();
+  const { baseUrl } = useAuth();
   const query = useSessionTree();
   const rows = useMemo(() => flattenTree(query.data ?? []), [query.data]);
 
@@ -60,9 +66,10 @@ export default function SessionTreeScreen() {
         <Text style={[type.title, { color: tokens.ink }]}>Session tree</Text>
         <Text style={[type.sub, { color: tokens.ink3 }]}>Forks and their conversation ancestry.</Text>
         {query.isLoading ? <View style={styles.loading}><ActivityIndicator color={tokens.accent} /><Text style={[type.sub, { color: tokens.ink3 }]}>Loading session ancestry…</Text></View> : null}
-        {query.isError ? <Card><Text style={[type.body, { color: tokens.danger }]}>Could not load the session tree. Pull to retry.</Text></Card> : null}
-        {rows.length === 0 && !query.isLoading && !query.isError ? <EmptyState icon={GitBranch} message="No session branches yet." /> : null}
-        {rows.map(({ node, depth, orphaned }) => {
+        {query.isError ? <Card><Text style={[type.body, { color: tokens.danger }]}>Could not load the session tree.</Text><Button label="Retry" variant="secondary" onPress={() => void query.refetch()} /></Card> : null}
+        {!baseUrl ? <EmptyState icon={GitBranch} message="Connect a server to view session branches." action={<Button label="Connect server" onPress={() => router.push("/connect")} />} /> : null}
+        {baseUrl && rows.length === 0 && !query.isLoading && !query.isError ? <EmptyState icon={GitBranch} message="No session branches yet." /> : null}
+        {baseUrl ? rows.map(({ node, depth, orphaned }) => {
           const isFork = node.forked_from != null && !orphaned;
           const relation = orphaned ? "original parent unavailable" : isFork ? `forked at message ${node.forked_at_seq ?? "—"}` : "session root";
           return (
@@ -75,7 +82,7 @@ export default function SessionTreeScreen() {
               </View>
             </Pressable>
           );
-        })}
+        }) : null}
       </Screen>
     </DesktopDrillDown>
   );
