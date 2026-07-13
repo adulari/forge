@@ -30,6 +30,8 @@ html, body, #root {
 }
 body { overscroll-behavior: none; -webkit-overflow-scrolling: touch; touch-action: manipulation; }
 * { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; }
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--forge-focus, currentColor); outline-offset: 2px; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 `;
 
