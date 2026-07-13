@@ -40,6 +40,7 @@ export default function NewSessionScreen() {
   const create = useCreateSession();
 
   const handleSubmit = useCallback(() => {
+    if (create.isPending) return;
     const trimmedCwd = cwd.trim();
     if (!trimmedCwd) {
       setValidationError("working directory is required");

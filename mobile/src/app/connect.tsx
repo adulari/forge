@@ -78,6 +78,7 @@ export default function ConnectScreen() {
   // Tracks the last `?url=` value we already applied (not just "did we ever apply one") so a
   // second deep link while this screen is still mounted re-prefills instead of being dropped.
   const lastAppliedUrl = useRef<string | null>(null);
+  const attemptRef = useRef(0);
   // Reached either as the first-run pairing screen (no back stack) or pushed from Settings'
   // "Add server" (has a back stack) — the latter gets a close affordance and must not steal
   // the active connection out from under the user (see attemptConnect below).
@@ -105,6 +106,7 @@ export default function ConnectScreen() {
 
   const attemptConnect = useCallback(
     async (candidate: string) => {
+      const attempt = ++attemptRef.current;
       setFormatError(null);
       const parsed = parseConnectUrl(candidate);
       if (!parsed) {
@@ -115,20 +117,32 @@ export default function ConnectScreen() {
         return;
       }
       setTestState("testing");
-      const result = await testConnection(parsed.baseUrl);
+      let result: ConnectTestState;
+      try {
+        result = await testConnection(parsed.baseUrl);
+      } catch {
+        result = "unreachable";
+      }
+      if (attempt !== attemptRef.current) return;
       setTestState(result);
       if (result === "ok") {
         // Pushed from Settings ("Add server") — add it alongside the existing servers without
         // switching the active connection out from under the user; first-run (no back stack)
         // keeps the original behavior of activating the only server it just added.
         const additional = canClose;
-        const added = await addServer(candidate, { setActive: !additional });
-        haptics.pairSuccess();
-        if (additional) {
-          toast.show(`added ${added.name}`, { tone: "success" });
-          goBackOr("/(tabs)/settings");
-        } else {
-          router.replace("/(tabs)");
+        try {
+          const added = await addServer(candidate, { setActive: !additional });
+          if (attempt !== attemptRef.current) return;
+          haptics.pairSuccess();
+          if (additional) {
+            toast.show(`added ${added.name}`, { tone: "success" });
+            goBackOr("/(tabs)/settings");
+          } else {
+            router.replace("/(tabs)");
+          }
+        } catch {
+          if (attempt !== attemptRef.current) return;
+          setTestState("server-error");
         }
       }
     },
