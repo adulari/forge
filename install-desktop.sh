@@ -38,18 +38,50 @@ case "$kind" in
   appimage)
     dest="${FORGE_DESKTOP_DIR:-$HOME/.local/bin}"; data="${XDG_DATA_HOME:-$HOME/.local/share}"
     mkdir -p "$dest" "$data/applications" "$data/icons/hicolor/256x256/apps"
-    cp "$tmp/$asset" "$dest/forge-desktop.AppImage"; chmod 0755 "$dest/forge-desktop.AppImage"
+    appimg="$tmp/$asset"; chmod 0755 "$appimg"
+    appdir="$data/forge-desktop"
+    # Prefer running the EXTRACTED app via its AppRun rather than the AppImage directly: the
+    # bundled type-2 runtime fails to self-mount on some modern kernels ("fuse: memory allocation
+    # failed") even though the squashfs payload is perfectly valid, so a plain `Exec=...AppImage`
+    # silently never opens. Extraction sidesteps the runtime entirely.
+    rm -rf "$appdir"; extracted=""
+    # 1) The AppImage's own extractor (no extra deps) — works on most hosts.
+    if ( cd "$tmp" && "$appimg" --appimage-extract >/dev/null 2>&1 ) && [ -d "$tmp/squashfs-root" ]; then
+      mv "$tmp/squashfs-root" "$appdir"; extracted=1
+    # 2) Fallback: the runtime's extractor is broken too on some hosts; use system unsquashfs at the
+    #    payload offset (--appimage-offset is a plain ELF read, so it works even when mounting doesn't).
+    elif command -v unsquashfs >/dev/null 2>&1; then
+      off=$("$appimg" --appimage-offset 2>/dev/null || echo 0)
+      [ "${off:-0}" -gt 0 ] && unsquashfs -f -o "$off" -d "$appdir" "$appimg" >/dev/null 2>&1 && extracted=1
+    fi
+    if [ -n "$extracted" ] && [ -x "$appdir/AppRun" ]; then
+      cat > "$dest/forge-desktop" <<EOF
+#!/bin/sh
+# Launch the extracted app via AppRun (the bundled AppImage runtime fails on some kernels).
+exec "$appdir/AppRun" "\$@"
+EOF
+      chmod 0755 "$dest/forge-desktop"
+      exec_line="$dest/forge-desktop"
+      # Drop any stale AppImage from an older install so it doesn't shadow the launcher.
+      rm -f "$dest/forge-desktop.AppImage"
+      printf 'install-desktop: installed Forge (extracted) to %s, launcher %s\n' "$appdir" "$dest/forge-desktop" >&2
+    else
+      # Last resort: install the AppImage as-is (extraction unavailable, e.g. no unsquashfs).
+      cp "$appimg" "$dest/forge-desktop.AppImage"; chmod 0755 "$dest/forge-desktop.AppImage"
+      exec_line="$dest/forge-desktop.AppImage"
+      printf 'install-desktop: installed Forge AppImage to %s (could not extract; install squashfs-tools if it will not launch)\n' "$dest/forge-desktop.AppImage" >&2
+    fi
     # The release companion icon is optional; the desktop entry remains launcher-visible without it.
     dl "$base/Forge-desktop-linux-icon.png" "$data/icons/hicolor/256x256/apps/forge-desktop.png" 2>/dev/null || true
     cat > "$data/applications/forge-desktop.desktop" <<EOF
 [Desktop Entry]
 Name=Forge
 Comment=Forge desktop app
-Exec=$dest/forge-desktop.AppImage
+Exec=$exec_line
 Icon=forge-desktop
 Terminal=false
 Type=Application
 Categories=Development;
 EOF
-    printf 'install-desktop: installed Forge AppImage to %s\n' "$dest/forge-desktop.AppImage" >&2 ;;
+    printf 'install-desktop: desktop entry installed\n' >&2 ;;
 esac
