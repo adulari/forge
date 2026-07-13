@@ -36,6 +36,9 @@ import { InitProjectSheet } from "../../../components/session/InitProjectSheet";
 ||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
 
 import { AssaySheet } from "../../../components/session/AssaySheet";
+||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
+
+import { SelfMcpSheet } from "../../../components/session/SelfMcpSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
@@ -80,6 +83,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
 
   const [assayVisible, setAssayVisible] = useState(false);
+||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
+
+  const [selfMcpVisible, setSelfMcpVisible] = useState(false);
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
@@ -252,6 +258,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
 
             onAssay={() => setAssayVisible(true)}
+||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
+
+            onSelfMcp={() => setSelfMcpVisible(true)}
           />
         </View>
 
@@ -266,6 +275,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
 
         <AssaySheet visible={assayVisible} onClose={() => setAssayVisible(false)} send={send} />
+||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
+
+        <SelfMcpSheet visible={selfMcpVisible} onClose={() => setSelfMcpVisible(false)} send={send} />
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />

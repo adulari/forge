@@ -14,6 +14,10 @@ import { ArrowLeft, Search, BookOpen } from "lucide-react-native";
 import { ArrowLeft, Search } from "lucide-react-native";
 
 import { ArrowLeft, Search, Microscope } from "lucide-react-native";
+||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
+import { ArrowLeft, Search } from "lucide-react-native";
+
+import { ArrowLeft, Search, Bot } from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -42,6 +46,9 @@ export interface SessionHeaderProps {
 ||||||| parent of 86f0b39 (feat(mobile): run quality assays from sessions)
 
   onAssay: () => void;
+||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
+
+  onSelfMcp: () => void;
 }
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onDuel, onReplay, onPlan }: SessionHeaderProps) {
@@ -57,6 +64,10 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onAssay }: SessionHeaderProps) {
+||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
+
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onSelfMcp }: SessionHeaderProps) {
   const tokens = useTokens();
   const isPublic = exposure.startsWith("public");
 
@@ -87,6 +98,11 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
           icon={<Microscope size={20} strokeWidth={1.75} color={tokens.ink} />}
           onPress={onAssay}
           accessibilityLabel="Run quality assay"
+||||||| parent of 4788709 (feat(mobile): manage self MCP agents)
+
+          icon={<Bot size={20} strokeWidth={1.75} color={tokens.ink} />}
+          onPress={onSelfMcp}
+          accessibilityLabel="Manage self MCP agent"
         />
         <IconButton
           icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />}
