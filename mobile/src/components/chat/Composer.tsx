@@ -40,6 +40,7 @@ import {
   pickImages,
   type SentAttachment,
 } from "./attach";
+import { GoalSheet } from "./GoalSheet";
 import { VoiceRecordingPill } from "./VoiceRecordingPill";
 
 const MAX_LINES = 6;
@@ -91,6 +92,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   } = useSessionCtx();
   const toast = useToast();
   const [recording, setRecording] = useState(false);
+  const [goalVisible, setGoalVisible] = useState(false);
   const [height, setHeight] = useState(MIN_HEIGHT);
   const [draftLoadedSession, setDraftLoadedSession] = useState<string | null>(null);
   const inputRef = useRef<TextInput>(null);
@@ -424,6 +426,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
 
       {!recording ? (
         <View style={styles.chipsRow}>
+          {text.length === 0 ? <Chip label="goal" icon={<Sparkles size={14} strokeWidth={1.75} color={tokens.ink3} />} onPress={() => setGoalVisible(true)} testID="chip-goal" /> : null}
           {text.length === 0 || text.startsWith("/") ? commandHints.map((cmd) => (
             <Chip key={cmd} label={cmd} onPress={() => commit(cmd)} testID={`chip-${cmd}`} />
           )) : null}
@@ -531,6 +534,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
       {!online && !recording ? (
         <Text style={[type.meta, styles.offlineHint, { color: tokens.ink3 }]}>will send on reconnect</Text>
       ) : null}
+      <GoalSheet visible={goalVisible} onClose={() => setGoalVisible(false)} onSubmit={commit} />
     </View>
   );
 }
