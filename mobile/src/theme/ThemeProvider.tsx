@@ -1,7 +1,7 @@
 // Light/dark/system theme selection, persisted across launches.
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { useColorScheme as useSystemColorScheme } from "react-native";
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { Platform, useColorScheme as useSystemColorScheme } from "react-native";
 
 import { type ColorTokens, darkTokens, lightTokens } from "./tokens";
 
@@ -28,29 +28,38 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
-    AsyncStorage.getItem(STORAGE_KEY).then((stored) => {
-      if (cancelled) return;
-      if (stored === "light" || stored === "dark" || stored === "system") {
-        setPreference(stored);
-      }
-      setLoaded(true);
-    });
+    AsyncStorage.getItem(STORAGE_KEY)
+      .then((stored) => {
+        if (cancelled) return;
+        if (stored === "light" || stored === "dark" || stored === "system") {
+          setPreference(stored);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setLoaded(true);
+      });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const setScheme = (pref: ThemePreference) => {
+  const setScheme = useCallback((pref: ThemePreference) => {
     setPreference(pref);
-    void AsyncStorage.setItem(STORAGE_KEY, pref);
-  };
+    void AsyncStorage.setItem(STORAGE_KEY, pref).catch(() => undefined);
+  }, []);
 
   const scheme: ThemeScheme = preference === "system" ? (systemScheme === "light" ? "light" : "dark") : preference;
   const tokens = scheme === "light" ? lightTokens : darkTokens;
 
+  useEffect(() => {
+    if (Platform.OS !== "web" || typeof document === "undefined") return;
+    document.querySelector('meta[name="theme-color"]')?.setAttribute("content", tokens.bg1);
+  }, [tokens.bg1]);
+
   const value = useMemo<ThemeContextValue>(
     () => ({ scheme, preference, tokens, setScheme }),
-    [scheme, preference, tokens],
+    [scheme, preference, tokens, setScheme],
   );
 
   // Hold rendering until the persisted preference has loaded so the app never
