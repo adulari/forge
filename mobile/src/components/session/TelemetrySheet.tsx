@@ -22,12 +22,18 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
   const select = (level: EffortLevel | null) => {
     if (send({ kind: "prompt", text: level ? `/effort ${level}` : "/effort" })) onClose();
   };
+<<<<<<< HEAD
   const openTemperPicker = () => {
     if (send({ kind: "prompt", text: "/mode" })) onClose();
   };
   const compact = () => {
     if (send({ kind: "prompt", text: "/compact" })) onClose();
   };
+||||||| parent of 71a4a56 (feat(mobile): choose session model from telemetry)
+=======
+  const chooseModel = () => {
+    if (send({ kind: "prompt", text: "/model" })) onClose();
+>>>>>>> 71a4a56 (feat(mobile): choose session model from telemetry)
   };
   return <Sheet visible={visible} onClose={onClose} accessibilityLabel="Session telemetry" snapPoints={[0.8]}>
     <View style={styles.content}>
@@ -42,7 +48,7 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
       <Pressable onPress={openTemperPicker} accessibilityRole="button" style={[styles.option, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}><Text style={[typeScale.bodyBold, { color: tokens.accent }]}>Change operating mode</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{temper}</Text></Pressable>
       <View style={[styles.rows, { borderTopColor: tokens.border }]}>
         <KeyValueRow label="Tier" value={tier ?? "—"} />
-        <KeyValueRow label="Model" value={model} />
+        <Pressable onPress={chooseModel} accessibilityRole="button" style={styles.modelRow}><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Model</Text><View style={styles.modelAction}><Text style={[typeScale.bodyBold, { color: tokens.accent }]} numberOfLines={1}>{model}</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Change</Text></View></Pressable>
         <KeyValueRow label="Temper" value={temper} />
       </View>
       <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>Reasoning effort</Text>
@@ -59,4 +65,4 @@ export function TelemetrySheet({ visible, onClose, tier, model, temper, effort, 
     </View>
   </Sheet>;
 }
-const styles = StyleSheet.create({ content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space8 }, meshAction: { paddingVertical: space.space4 }, meshButton: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, capacity: { gap: space.space4, padding: space.space12, borderRadius: 8 }, compact: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, rows: { borderTopWidth: StyleSheet.hairlineWidth }, options: { gap: space.space8 }, option: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 } });
+const styles = StyleSheet.create({ content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space8 }, meshAction: { paddingVertical: space.space4 }, meshButton: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, capacity: { gap: space.space4, padding: space.space12, borderRadius: 8 }, compact: { minHeight: 44, justifyContent: "center", gap: 2, paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 }, modelRow: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, modelAction: { flex: 1, alignItems: "flex-end", gap: 2, marginLeft: space.space16 }, rows: { borderTopWidth: StyleSheet.hairlineWidth }, options: { gap: space.space8 }, option: { minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 } });
