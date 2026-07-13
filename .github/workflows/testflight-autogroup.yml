@@ -12,10 +12,12 @@ name: testflight-autogroup
 #   Secret    ASC_ISSUER_ID          ASC API issuer id
 #   Secret    ASC_API_PRIVATE_KEY    contents of the AuthKey_*.p8 (the whole file)
 # If any are unset the run skips cleanly (does not fail).
+# Manual-only. iOS builds are opt-in (Xcode Cloud is triggered by hand, not on push), so this must
+# NOT auto-fire: a plain push produces no new TestFlight build, and the assign job would just hang
+# ~45m polling for one that never arrives. It also used to trigger on any `mobile/**` change —
+# including desktop-only `mobile/src-tauri/**` edits, which have nothing to do with iOS. Dispatch
+# this right after kicking off an Xcode Cloud build (or from the release flow) to assign that build.
 on:
-  push:
-    branches: [main]
-    paths: ["mobile/**"]
   workflow_dispatch:
     inputs:
       groups:
