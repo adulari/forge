@@ -76,7 +76,7 @@ export default function UsageScreen() {
   }, [query.data?.quota]);
   const renderItem = useCallback(({ item }: { item: UsageProvider; index: number }) => <ProviderRow provider={item} quotas={quotasByProvider.get(item.provider) ?? []} />, [quotasByProvider]);
   const keyExtractor = useCallback((provider: UsageProvider) => provider.provider, []);
-  const refresh = useCallback(() => void query.refetch(), [query.refetch]);
+  const { isError, isLoading, isRefetching, refetch } = query;
   const totalTokens = (selected?.combined.inputTokens ?? 0) + (selected?.combined.outputTokens ?? 0);
   const header = useMemo(() => (
     <View style={styles.header}>
@@ -90,15 +90,15 @@ export default function UsageScreen() {
         <Text style={[styles.tokens, { color: tokens.ink }]}>{number(totalTokens)} tokens</Text>
         <Text style={[styles.split, { color: tokens.ink3 }]}>{number(selected?.combined.inputTokens ?? 0)} in · {number(selected?.combined.outputTokens ?? 0)} out</Text>
       </View>
-      {query.isError ? <Card><Text style={[styles.empty, { color: tokens.danger }]}>Could not load usage. Pull to retry.</Text></Card> : null}
-      {window === "session" && !hasSession && !query.isLoading ? <Card><Text style={[styles.empty, { color: tokens.ink2 }]}>Choose a session first to see its usage.</Text></Card> : null}
+      {isError ? <Card><Text style={[styles.empty, { color: tokens.danger }]}>Could not load usage. Pull to retry.</Text></Card> : null}
+      {window === "session" && !hasSession && !isLoading ? <Card><Text style={[styles.empty, { color: tokens.ink2 }]}>Choose a session first to see its usage.</Text></Card> : null}
     </View>
-  ), [hasSession, query.isError, query.isLoading, selected, tokens, totalTokens, window]);
-  const empty = query.isLoading ? <View /> : <EmptyState icon={Cpu} message="No usage yet. Your provider activity will appear here after the first turn." />;
+  ), [hasSession, isError, isLoading, selected, tokens, totalTokens, window]);
+  const empty = isLoading ? <View /> : <EmptyState icon={Cpu} message="No usage yet. Your provider activity will appear here after the first turn." />;
 
   return (
     <Screen scroll={false} contentContainerStyle={styles.screen}>
-      <BoundedList data={providers} renderItem={renderItem} keyExtractor={keyExtractor} ListHeaderComponent={header} ListEmptyComponent={empty} refreshing={query.isRefetching} onRefresh={refresh} contentContainerStyle={styles.content} />
+      <BoundedList data={providers} renderItem={renderItem} keyExtractor={keyExtractor} ListHeaderComponent={header} ListEmptyComponent={empty} refreshing={isRefetching} onRefresh={() => void refetch()} contentContainerStyle={styles.content} />
     </Screen>
   );
 }

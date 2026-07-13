@@ -64,7 +64,8 @@ export default function ModelsScreen() {
     item.kind === "provider" ? <ProviderHeader provider={item.provider} count={item.count} /> : <ModelCard model={item.model} />
   ), []);
   const keyExtractor = useCallback((item: ModelListItem) => item.kind === "provider" ? `provider:${item.provider}` : `model:${item.provider}:${item.model.id}`, []);
-  const refresh = useCallback(() => void query.refetch(), [query.refetch]);
+  const { refetch } = query;
+  const refresh = useCallback(() => void refetch(), [refetch]);
   const header = useMemo(() => (
     <View style={styles.header}>
       <Pressable onPress={() => router.back()} accessibilityRole="button"><Text style={[styles.back, { color: tokens.accent }]}>‹ Settings</Text></Pressable>
