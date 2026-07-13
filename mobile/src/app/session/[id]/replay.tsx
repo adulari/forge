@@ -35,7 +35,7 @@ export default function SessionReplayScreen() {
         }}
         ListHeaderComponent={
           <View style={styles.header}>
-            <Pressable onPress={() => router.back()} accessibilityRole="button">
+            <Pressable onPress={() => router.back()} accessibilityRole="button" accessibilityLabel="Back to session" style={styles.backButton}>
               <Text style={[styles.back, { color: tokens.accent }]}>‹ Session</Text>
             </Pressable>
             <Text style={[type.title, { color: tokens.ink }]}>Session replay</Text>
@@ -72,5 +72,6 @@ const styles = StyleSheet.create({
   content: { paddingHorizontal: space.space16, paddingTop: space.space12, paddingBottom: space.space32, gap: space.space12 },
   header: { gap: space.space12, marginBottom: space.space12 },
   back: { fontSize: 15, fontWeight: "600" },
+  backButton: { minHeight: 44, alignSelf: "flex-start", justifyContent: "center", paddingRight: space.space12 },
   card: { gap: space.space8 },
 });
