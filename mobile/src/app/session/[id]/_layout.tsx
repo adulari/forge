@@ -30,6 +30,9 @@ import { PlanSheet } from "../../../components/session/PlanSheet";
 ||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
 
 import { ForkSheet } from "../../../components/session/ForkSheet";
+||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
+
+import { InitProjectSheet } from "../../../components/session/InitProjectSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
@@ -68,6 +71,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
 
   const [forkVisible, setForkVisible] = useState(false);
+||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
+
+  const [initVisible, setInitVisible] = useState(false);
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
@@ -234,6 +240,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
 
             onFork={() => setForkVisible(true)}
+||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
+
+            onInit={() => setInitVisible(true)}
           />
         </View>
 
@@ -242,6 +251,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 ||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
 
         <ForkSheet visible={forkVisible} onClose={() => setForkVisible(false)} sessionId={sessionId} />
+||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
+
+        <InitProjectSheet visible={initVisible} onClose={() => setInitVisible(false)} send={send} />
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />

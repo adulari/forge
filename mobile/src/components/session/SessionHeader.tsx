@@ -6,6 +6,10 @@ import { ArrowLeft, Search, Swords, History, Map } from "lucide-react-native";
 import { ArrowLeft, Search } from "lucide-react-native";
 
 import { ArrowLeft, Search, GitFork } from "lucide-react-native";
+||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
+import { ArrowLeft, Search } from "lucide-react-native";
+
+import { ArrowLeft, Search, BookOpen } from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -28,6 +32,9 @@ export interface SessionHeaderProps {
 ||||||| parent of d65aed8 (feat(mobile): fork sessions from history)
 
   onFork: () => void;
+||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
+
+  onInit: () => void;
 }
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onDuel, onReplay, onPlan }: SessionHeaderProps) {
@@ -35,6 +42,10 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
 
 export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onFork }: SessionHeaderProps) {
+||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette }: SessionHeaderProps) {
+
+export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalette, onInit }: SessionHeaderProps) {
   const tokens = useTokens();
   const isPublic = exposure.startsWith("public");
 
@@ -55,6 +66,11 @@ export function SessionHeader({ title, cwd, worktree, exposure, onBack, onPalett
           icon={<GitFork size={20} strokeWidth={1.75} color={tokens.ink} />}
           onPress={onFork}
           accessibilityLabel="Fork session"
+||||||| parent of a8da0b2 (feat(mobile): initialize project guidance)
+
+          icon={<BookOpen size={20} strokeWidth={1.75} color={tokens.ink} />}
+          onPress={onInit}
+          accessibilityLabel="Initialize project guidance"
         />
         <IconButton
           icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />}
