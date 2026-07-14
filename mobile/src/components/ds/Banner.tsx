@@ -56,7 +56,7 @@ export function Banner({ tone, message, compact = false, visible = true, style }
       accessibilityRole="alert"
       accessibilityLabel={message}
     >
-      <Text style={[compact ? type.meta : type.sub, { color: ink }]}>{message}</Text>
+      <Text style={[compact ? type.meta : type.sub, styles.message, { color: ink }]}>{message}</Text>
     </Animated.View>
   );
 }
@@ -65,4 +65,5 @@ const styles = StyleSheet.create({
   base: { width: "100%" },
   regular: { paddingHorizontal: space.space16, paddingVertical: space.space12 },
   compact: { paddingHorizontal: space.space16, paddingVertical: space.space4 },
+  message: { flexShrink: 1 },
 });
