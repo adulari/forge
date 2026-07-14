@@ -5,7 +5,7 @@ import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTimin
 
 import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
-import { tapTarget } from "../../theme/tokens";
+import { radii, tapTarget } from "../../theme/tokens";
 
 export interface SwitchProps {
   value: boolean;
@@ -53,7 +53,7 @@ export function Switch({ value, onValueChange, disabled = false, accessibilityLa
       accessibilityRole="switch"
       accessibilityState={{ checked: value, disabled }}
       accessibilityLabel={accessibilityLabel}
-      style={[styles.hit, { opacity: disabled ? 0.4 : 1 }, style]}
+      style={[styles.hit, { opacity: disabled ? 0.4 : 1, borderColor: focused ? tokens.accent : "transparent" }, style]}
     >
       <Animated.View
         style={[styles.track, trackStyle, { borderWidth: focused ? 2 : 0, borderColor: tokens.accent }]}
@@ -71,6 +71,8 @@ const styles = StyleSheet.create({
     width: TRACK_W,
     height: tapTarget,
     justifyContent: "center",
+    borderWidth: 2,
+    borderRadius: radii.radiusPill,
   },
   track: {
     width: TRACK_W,
