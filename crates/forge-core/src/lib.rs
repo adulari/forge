@@ -887,14 +887,49 @@ enum CompletionGate {
 /// * `inspected_this_turn`— the just-observed turn ran an inspection tool (a real check), as opposed
 ///   to merely re-asserting "done" by re-marking the task list (the C8 hole).
 ///
-/// Shared by the CLI-bridge and direct-API paths so both have ONE completion authority: "done"
-/// means a tool proved it. Mirrors the original bridge-only gate exactly.
+/// Shared by the CLI-bridge and direct-API paths so both have ONE completion authority. A completed
+/// no-op task is accepted when the model explains that no change is needed; other claims with
+/// evidence get one verification chance.
+fn completion_claims_no_change(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    [
+        "no change needed",
+        "no changes needed",
+        "no change is needed",
+        "no changes are needed",
+        "no change required",
+        "no changes required",
+        "make no changes",
+        "no file changes",
+        "already satisfied",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
+}
+
 fn completion_gate(
     verify_attempts: usize,
     max_attempts: usize,
     did_real_work: bool,
+    no_change_required: bool,
     inspected_this_turn: bool,
 ) -> CompletionGate {
+    // Read-only / reasoned no-op escape: a completion that explicitly explains no change was needed
+    // is accepted immediately, WITHOUT a forced verification re-drive. This is the fix for the
+    // read-only `/goal` loop (a "check X" / "already satisfied" goal must not be nagged to edit
+    // files). It is the ONLY way to skip the verification pass — a bare `!did_real_work` claim does
+    // NOT, so a bridge that merely re-marks the task list Done still gets caught (see below).
+    if no_change_required {
+        return if inspected_this_turn {
+            CompletionGate::AcceptClean
+        } else {
+            CompletionGate::AcceptNoArtifacts
+        };
+    }
+    // Proven anti-spiral gate (unchanged): a self-reported "done" must survive one forced
+    // verification pass. After that pass, a turn that ran a real inspection is accepted cleanly; a
+    // turn with no external artifacts to check is accepted with a calm note; work that produced state
+    // but was never re-checked burns the cap and is flagged UNVERIFIED — never a silent success.
     if verify_attempts > 0 && (inspected_this_turn || !did_real_work) {
         if inspected_this_turn {
             CompletionGate::AcceptClean
@@ -3667,6 +3702,7 @@ prompt text, nothing else.";
         &mut self,
         verify_attempts: &mut usize,
         did_real_work: bool,
+        no_change_required: bool,
         inspected_this_turn: bool,
     ) -> CompletionGate {
         const MAX_VERIFY_ATTEMPTS: usize = 2;
@@ -3685,6 +3721,7 @@ prompt text, nothing else.";
             *verify_attempts,
             MAX_VERIFY_ATTEMPTS,
             did_real_work,
+            no_change_required,
             inspected_this_turn,
         );
         match gate {
@@ -4648,17 +4685,15 @@ prompt text, nothing else.";
                     } else if !self.tasks.is_empty() {
                         // The bridge reports every task Done — but a self-reported status is exactly
                         // what produced the phantom release (claimed merged + tagged; nothing ran).
-                        // Force ONE tool-grounded verification turn, then judge by whether the turn
-                        // did real, inspectable WORK:
-                        //   * If the turn ran inspectable tools at all (`did_real_work`) — file/shell/
-                        //     read ops — completion is accepted ONLY after the verification turn runs
-                        //     a real inspection (not just re-marking `update_tasks`); otherwise it
-                        //     ends flagged UNVERIFIED. This catches a model that claims done on work
-                        //     it didn't actually finish/verify.
+                        // Force ONE tool-grounded verification turn when work changed external
+                        // state. A read-only completion is already evidenced by its inspection;
+                        // a reasoned no-op is accepted without demanding a meaningless edit.
+                        //   * If the turn ran an inspection, completion is accepted after the one
+                        //     verification turn also inspects.
                         //   * If the turn did NO inspectable work (a pure reasoning/analysis plan —
                         //     the deliverable is the answer text, there is no external state to
-                        //     check), requiring a tool inspection would over-fire. Accept after one
-                        //     verification pass with a calm "not tool-verified" note instead.
+                        //     check), requiring a tool inspection would over-fire. Accept with a
+                        //     calm "not tool-verified" note instead.
                         // `did_real_work` is cumulative over the whole turn; `inspected_this_turn`
                         // is whether the turn just observed ran an inspection tool.
                         let did_real_work =
@@ -4666,6 +4701,7 @@ prompt text, nothing else.";
                         if self.run_completion_gate(
                             &mut verify_attempts,
                             did_real_work,
+                            completion_claims_no_change(&resp.content),
                             inspected_this_turn,
                         ) == CompletionGate::Reverify
                         {
@@ -4761,12 +4797,13 @@ prompt text, nothing else.";
                         // wrongly flag a genuinely-verified turn as UNVERIFIED. Instead ask: did an
                         // inspection run SINCE we last asked for verification? `inspect_at_last_verify`
                         // is the inspect count captured when the verify nudge was (re)issued.
-                        let inspected_since_verify = verify_attempts > 0
-                            && inspect_ran.load(std::sync::atomic::Ordering::Relaxed)
-                                > inspect_at_last_verify;
+                        let inspected_since_verify = inspect_ran
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            > inspect_at_last_verify;
                         if self.run_completion_gate(
                             &mut verify_attempts,
                             did_real_work,
+                            completion_claims_no_change(&resp.content),
                             inspected_since_verify,
                         ) == CompletionGate::Reverify
                         {
@@ -9090,12 +9127,8 @@ mod tests {
         assert!(emitted, "a Tasks event was emitted for the TUI");
     }
 
-    /// Direct-path completion-verification gate (the shared `completion_gate`, ported from the
-    /// bridge in #237). Scripts a direct model that does real work + marks every task Done, then —
-    /// on the forced verification turn — runs a real inspection tool. The turn must be ACCEPTED, not
-    /// flagged UNVERIFIED. This exercises the two direct-path fixes together: (1) the loop counts the
-    /// tools a direct model runs (`inspect_ran`/`tools_ran`, which the stream sink only fed for
-    /// bridges), and (2) the gate measures inspection SINCE the verify request, not step-locally.
+    /// A read-only completion that explains why no change is needed must not receive a redundant
+    /// verification re-drive.
     struct VerifyByInspectingProvider {
         calls: std::sync::atomic::AtomicUsize,
     }
@@ -9118,7 +9151,7 @@ mod tests {
                 args: serde_json::json!({"path": "Cargo.toml"}),
             };
             let resp = match n {
-                // Real work (an inspection) + mark the only task Done.
+                // Read-only evidence + mark the only task Done.
                 0 => ModelResponse {
                     content: "starting".into(),
                     tool_calls: vec![
@@ -9132,34 +9165,21 @@ mod tests {
                     usage,
                     quotas: Vec::new(),
                 },
-                // Claim done (text). The gate must force a verification turn here.
+                // Completion explicitly explains that this read-only task needs no change.
                 1 => ModelResponse {
-                    content: "all done".into(),
+                    content: "Goal complete: no changes are needed; Cargo.toml exists.".into(),
                     tool_calls: vec![],
                     usage,
                     quotas: Vec::new(),
                 },
-                // Respond to the verify nudge by actually inspecting.
-                2 => ModelResponse {
-                    content: "checking the real state".into(),
-                    tool_calls: vec![read()],
-                    usage,
-                    quotas: Vec::new(),
-                },
-                // Now claim done again — having inspected since the request, this must be accepted.
-                _ => ModelResponse {
-                    content: "verified — all done".into(),
-                    tool_calls: vec![],
-                    usage,
-                    quotas: Vec::new(),
-                },
+                _ => unreachable!("a read-only completion must not be re-driven"),
             };
             Ok(resp)
         }
     }
 
     #[tokio::test]
-    async fn direct_gate_accepts_when_the_model_inspects_during_verification() {
+    async fn direct_gate_accepts_read_only_completion_without_redrive() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
@@ -9175,6 +9195,9 @@ mod tests {
             ".",
         )
         .unwrap();
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
 
         session.run_turn("do the task").await.unwrap();
 
@@ -9187,23 +9210,20 @@ mod tests {
                 _ => None,
             })
             .collect();
-        // The gate fired (a verification turn was forced)…
+        // The read-only inspection is sufficient evidence: never add a duplicate completion turn.
         assert!(
-            warnings
+            !warnings
                 .iter()
                 .any(|w| w.contains("verifying with a real state check")),
-            "the verification gate should have forced a state check; warnings: {warnings:?}"
+            "a read-only completion must not be re-driven; warnings: {warnings:?}"
         );
-        // …and because the model actually inspected during verification, completion is ACCEPTED —
-        // it must NOT be flagged UNVERIFIED (the bug: a step-local signal never saw the inspection).
         assert!(
             !warnings.iter().any(|w| w.contains("UNVERIFIED")),
-            "a model that inspected during verification must not be flagged UNVERIFIED; warnings: {warnings:?}"
+            "a read-only completion must not be flagged UNVERIFIED; warnings: {warnings:?}"
         );
     }
 
-    /// The negative half: a direct model that claims done but NEVER inspects, even after being asked,
-    /// must end flagged UNVERIFIED — the gate can't be satisfied by re-asserting "done".
+    /// A prior read-only inspection plus a no-op explanation is sufficient completion evidence.
     struct ClaimsDoneNeverInspectsProvider {
         calls: std::sync::atomic::AtomicUsize,
     }
@@ -9239,9 +9259,9 @@ mod tests {
                     quotas: Vec::new(),
                 }
             } else {
-                // Every subsequent turn: just re-assert done, never inspect.
+                // The initial read is read-only completion evidence; later turns only state no change is needed.
                 ModelResponse {
-                    content: "it's all done, trust me".into(),
+                    content: "no changes are required; it's already satisfied".into(),
                     tool_calls: vec![],
                     usage,
                     quotas: Vec::new(),
@@ -9252,7 +9272,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_gate_flags_unverified_when_the_model_never_inspects() {
+    async fn direct_gate_accepts_prior_read_only_evidence() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let capture = CapturePresenter::default();
         let events = capture.events.clone();
@@ -9281,8 +9301,8 @@ mod tests {
             })
             .collect();
         assert!(
-            warnings.iter().any(|w| w.contains("UNVERIFIED")),
-            "a model that did real work but refuses to verify must end flagged UNVERIFIED; warnings: {warnings:?}"
+            !warnings.iter().any(|w| w.contains("UNVERIFIED")),
+            "a prior read-only inspection plus a no-op explanation is sufficient completion evidence; warnings: {warnings:?}"
         );
     }
 
@@ -9676,28 +9696,49 @@ mod tests {
     }
 
     #[test]
-    fn completion_gate_covers_its_four_outcomes() {
-        // Pure decision table for the completion authority (no I/O, no mocks).
-        // verify_attempts=0 → must verify before accepting any "done" claim.
-        assert!(matches!(
-            completion_gate(0, 2, true, false),
-            CompletionGate::Reverify
+    fn completion_claims_no_change_recognizes_no_op_justifications() {
+        assert!(completion_claims_no_change(
+            "Goal complete: no changes are needed because README.md already exists."
         ));
-        // A real inspection ran on a verify turn → accept cleanly.
-        assert!(matches!(
-            completion_gate(1, 2, true, true),
-            CompletionGate::AcceptClean
+        assert!(completion_claims_no_change(
+            "No fix is applicable; the request is already satisfied."
         ));
-        // Verify turn ran but did NO real work to check (pure analysis) → accept, calm note.
-        assert!(matches!(
-            completion_gate(1, 2, false, false),
+        assert!(!completion_claims_no_change(
+            "Goal complete: implemented the requested change."
+        ));
+    }
+
+    #[test]
+    fn completion_gate_accepts_read_only_and_bounds_unverified_claims() {
+        const MAX: usize = 1;
+        // An explicit "no change needed" completion is accepted immediately — the read-only escape.
+        assert_eq!(
+            completion_gate(0, MAX, true, true, false),
             CompletionGate::AcceptNoArtifacts
-        ));
-        // Budget spent, real work existed but was never inspected → accept, flag UNVERIFIED.
-        assert!(matches!(
-            completion_gate(2, 2, true, false),
+        );
+        assert_eq!(
+            completion_gate(0, MAX, true, true, true),
+            CompletionGate::AcceptClean
+        );
+        // A bare reasoning-only claim (no no_change statement) must survive ONE forced pass first,
+        // then be accepted calmly — it does NOT short-circuit at attempt 0.
+        assert_eq!(
+            completion_gate(0, MAX, false, false, false),
+            CompletionGate::Reverify
+        );
+        assert_eq!(
+            completion_gate(1, MAX, false, false, false),
+            CompletionGate::AcceptNoArtifacts
+        );
+        // Work that produced state is verified once, then flagged UNVERIFIED if never re-checked.
+        assert_eq!(
+            completion_gate(0, MAX, true, false, false),
+            CompletionGate::Reverify
+        );
+        assert_eq!(
+            completion_gate(1, MAX, true, false, false),
             CompletionGate::AcceptUnverified
-        ));
+        );
     }
 
     /// Yields TWO read_file calls (a concurrent read-only batch) with DIFFERENT missing paths every
@@ -15525,53 +15566,32 @@ mod tests {
     }
 
     #[test]
-    fn completion_gate_forces_a_real_check_before_accepting_done() {
-        const MAX: usize = 2;
-        // First "all done" claim is never accepted — force a verification turn regardless of
-        // whether the turn happened to inspect (the claim itself hasn't been re-checked yet).
+    fn completion_gate_accepts_evidence_and_challenges_at_most_once() {
+        const MAX: usize = 1;
+        // Reasoning-only: one forced pass, then accepted calmly (never accepted at attempt 0).
         assert_eq!(
-            completion_gate(0, MAX, true, false),
+            completion_gate(0, MAX, false, false, false),
             CompletionGate::Reverify
         );
         assert_eq!(
-            completion_gate(0, MAX, true, true),
-            CompletionGate::Reverify
-        );
-        assert_eq!(
-            completion_gate(0, MAX, false, false),
-            CompletionGate::Reverify
-        );
-
-        // After ≥1 verification attempt: a turn that actually ran an inspection is accepted cleanly.
-        assert_eq!(
-            completion_gate(1, MAX, true, true),
-            CompletionGate::AcceptClean
-        );
-
-        // Work existed but the verification turn re-asserted done WITHOUT inspecting (the C8 hole):
-        // not yet at the cap, so force one more real check rather than accept.
-        assert_eq!(
-            completion_gate(1, MAX, true, false),
-            CompletionGate::Reverify
-        );
-
-        // No external artifacts to check (pure-analysis turn): accept with the calm note, since
-        // requiring a tool inspection would over-fire.
-        assert_eq!(
-            completion_gate(1, MAX, false, false),
+            completion_gate(1, MAX, false, false, false),
             CompletionGate::AcceptNoArtifacts
         );
-
-        // Verification budget spent while real work existed and was never tool-checked: accept but
-        // flag UNVERIFIED rather than silently report success.
         assert_eq!(
-            completion_gate(MAX, MAX, true, false),
-            CompletionGate::AcceptUnverified
+            completion_gate(0, MAX, true, false, true),
+            CompletionGate::Reverify
         );
-        // …but a turn that DID inspect at the cap is still a clean accept.
         assert_eq!(
-            completion_gate(MAX, MAX, true, true),
+            completion_gate(1, MAX, true, false, true),
             CompletionGate::AcceptClean
+        );
+        assert_eq!(
+            completion_gate(0, MAX, true, false, false),
+            CompletionGate::Reverify
+        );
+        assert_eq!(
+            completion_gate(1, MAX, true, false, false),
+            CompletionGate::AcceptUnverified
         );
     }
 
