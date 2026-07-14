@@ -4,7 +4,7 @@
 // transition 260ms `standard`, Esc/scrim closes. Platform branch lives inside
 // this one file per BUILD_ORDER T1.3.
 import React, { useCallback, useEffect, useState } from "react";
-import { BackHandler, Modal, Platform, Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
+import { BackHandler, Modal, Platform, Pressable, ScrollView, StyleSheet, View, useWindowDimensions } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   cancelAnimation,
@@ -16,7 +16,7 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
-import { durations, easings, springs } from "../../theme/motion";
+import { durations, easings } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, space } from "../../theme/tokens";
 
@@ -38,6 +38,7 @@ const GRABBER_W = 36;
 const GRABBER_H = 4;
 const CLOSE_VELOCITY = 800;
 const CLOSE_DISTANCE_RATIO = 0.3;
+const SHEET_ANIMATION_MS = 200;
 
 export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightRatio = 0.9, accessibilityLabel }: SheetProps) {
   const tokens = useTokens();
@@ -77,7 +78,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
         scrimOpacity.value = 1 - restY / sheetHeight;
         return;
       }
-      translateY.value = withSpring(restY, springs.sheet);
+      translateY.value = withSpring(restY, { damping: 24, stiffness: 420, mass: 0.7 });
       scrimOpacity.value = withTiming(1 - restY / sheetHeight, { duration: durations.fast, easing: easings.standard });
     } else {
       if (reduced) {
@@ -86,7 +87,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
         setMounted(false);
         return;
       }
-      translateY.value = withTiming(closedY, { duration: durations.sheet, easing: easings.exit }, (finished) => {
+      translateY.value = withTiming(closedY, { duration: SHEET_ANIMATION_MS, easing: easings.exit }, (finished) => {
         if (finished) runOnJS(setMounted)(false);
       });
       scrimOpacity.value = withTiming(0, { duration: durations.fast, easing: easings.exit });
@@ -127,14 +128,14 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
     .onEnd((e) => {
       const pastCloseDistance = translateY.value - startY.value > sheetHeight * CLOSE_DISTANCE_RATIO;
       if (e.velocityY > CLOSE_VELOCITY || pastCloseDistance) {
-        translateY.value = withTiming(closedY, { duration: durations.sheet, easing: easings.exit }, (finished) => {
+        translateY.value = withTiming(closedY, { duration: SHEET_ANIMATION_MS, easing: easings.exit }, (finished) => {
           if (finished) runOnJS(setMounted)(false);
         });
         scrimOpacity.value = withTiming(0, { duration: durations.fast, easing: easings.exit });
         runOnJS(close)();
         return;
       }
-      translateY.value = withSpring(0, springs.sheet);
+      translateY.value = withSpring(0, { damping: 24, stiffness: 420, mass: 0.7 });
       scrimOpacity.value = withTiming(1, { duration: durations.base, easing: easings.standard });
     });
 
@@ -185,7 +186,14 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
               <View style={[styles.grabber, { backgroundColor: tokens.border }]} />
             </View>
           </GestureDetector>
-          {children}
+          <ScrollView
+            style={styles.bodyScroll}
+            contentContainerStyle={styles.bodyContent}
+            showsVerticalScrollIndicator
+            keyboardShouldPersistTaps="handled"
+          >
+            {children}
+          </ScrollView>
         </Animated.View>
     </View>
   );
@@ -202,9 +210,11 @@ const styles = StyleSheet.create({
   webTransition: {
     // @ts-expect-error react-native-web-only CSS transition property
     transitionProperty: "transform",
-    transitionDuration: "260ms",
+    transitionDuration: "200ms",
     transitionTimingFunction: "cubic-bezier(0.2, 0, 0, 1)",
   },
   grabberRow: { alignItems: "center", paddingVertical: space.space12 },
   grabber: { width: GRABBER_W, height: GRABBER_H, borderRadius: 999 },
+  bodyScroll: { flexShrink: 1 },
+  bodyContent: { flexGrow: 0 },
 });
