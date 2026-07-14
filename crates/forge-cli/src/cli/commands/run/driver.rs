@@ -1612,19 +1612,81 @@ impl DriverState {
 mod tests {
     use super::*;
 
-    #[test]
-    fn interrupt_drains_queued_prompts_in_fifo_order() {
-        let mut app = App::default();
-        let mut queue = vec!["second".to_string(), "third".to_string()];
-        assert_eq!(
-            take_next_queued_prompt(&mut queue, &mut app).as_deref(),
-            Some("second")
-        );
-        assert_eq!(
-            take_next_queued_prompt(&mut queue, &mut app).as_deref(),
-            Some("third")
-        );
-        assert!(queue.is_empty());
-        assert_eq!(take_next_queued_prompt(&mut queue, &mut app), None);
+    async fn test_driver_state() -> DriverState {
+        let session = super::build_session_with(
+            Box::new(forge_tui::HeadlessPresenter::default()),
+            true,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("build mock session");
+        let catalog =
+            std::sync::Arc::new(forge_skills::Catalog::load(&forge_config::command_sources()));
+        let (done_tx, _) = std::sync::mpsc::channel();
+        DriverState {
+            session: std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+            app: App::default(),
+            catalog,
+            armed_project: std::collections::HashSet::new(),
+            trust_project: false,
+            done_tx,
+            busy: false,
+            busy_since: Instant::now(),
+            turn_gen: 10,
+            last_auto_compact_gen: 0,
+            turn_handle: None,
+            loop_state: None,
+            goal_state: None,
+            pending: None,
+            pending_question: None,
+            pending_duel: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            duel_state: None,
+            assay_lenses: Vec::new(),
+            assay_scope: forge_types::AssayScope::Repo,
+            queued_prompts: Vec::new(),
+            prompt_history: Vec::new(),
+            last_prompt: None,
+            prompt_seq: 0,
+            notes: Vec::new(),
+            copy_text: None,
+            pending_mentions: Vec::new(),
+            remote_keys: std::collections::VecDeque::new(),
+            mesh_load_rx: None,
+            usage_load_rx: None,
+            cwd: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupt_with_queue_starts_fifo_head_and_keeps_driver_busy() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+        state.queued_prompts = vec!["second".into(), "third".into()];
+
+        state.interrupt_turn();
+
+        assert_eq!(state.queued_prompts, vec!["third"]);
+        assert!(state.turn_handle.is_some());
+        assert!(state.busy);
+        assert_eq!(state.turn_gen, 12);
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn interrupt_without_queue_leaves_driver_idle() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+
+        state.interrupt_turn();
+
+        assert!(state.queued_prompts.is_empty());
+        assert!(state.turn_handle.is_none());
+        assert!(!state.busy);
+        assert_eq!(state.turn_gen, 11);
     }
 }
