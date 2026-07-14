@@ -152,7 +152,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
   if (!mounted) return null;
 
   const body = (
-    <View style={StyleSheet.absoluteFill} pointerEvents={visible ? "auto" : "none"}>
+    <View style={styles.modalRoot} pointerEvents={visible ? "auto" : "none"}>
       <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: tokens.overlayScrim }, scrimStyle]}>
         <Pressable
           style={StyleSheet.absoluteFill}
@@ -206,6 +206,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
 }
 
 const styles = StyleSheet.create({
+  modalRoot: { flex: 1 },
   sheet: { position: "absolute", left: 0, right: 0, bottom: 0, overflow: "hidden" },
   webTransition: {
     // @ts-expect-error react-native-web-only CSS transition property
