@@ -29,7 +29,7 @@ export function ContextGauge({ used, total, compact = false }: ContextGaugeProps
 
   return (
     <View
-      style={styles.row}
+      style={[styles.row, compact && styles.compactRow]}
       accessibilityRole="progressbar"
       accessibilityValue={{ min: 0, max: 100, now: Math.round(pct) }}
       accessibilityLabel={`context used ${formatTokenPair(used, total)}`}
@@ -66,9 +66,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: space.space8,
   },
+  compactRow: { flex: 0, minWidth: 78, gap: space.space4 },
   track: {
     flex: 1,
-    minWidth: 48,
+    minWidth: 0,
     height: TRACK_HEIGHT,
     overflow: "hidden",
     borderRadius: radii.radiusPill,
