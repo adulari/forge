@@ -18,20 +18,6 @@ pub(crate) fn build_dispatch_provider(config: &forge_config::Config) -> Dispatch
     DispatchProvider::new(cli_bridge_harness_enabled(config))
 }
 
-#[cfg(test)]
-mod bridge_harness_tests {
-    use super::*;
-
-    #[test]
-    fn serve_dispatch_provider_uses_configured_bridge_mode() {
-        let mut config = forge_config::Config::default();
-        config.mesh.bridge_mode = forge_config::BridgeMode::Harness;
-        assert!(build_dispatch_provider(&config).harness_enabled());
-        config.mesh.bridge_mode = forge_config::BridgeMode::Text;
-        assert!(!build_dispatch_provider(&config).harness_enabled());
-    }
-}
-
 /// Maximum age of a cached catalog before it is considered stale and re-discovered.
 const CATALOG_CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 
@@ -950,4 +936,18 @@ pub(crate) async fn probe_models(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod bridge_harness_tests {
+    use super::*;
+
+    #[test]
+    fn serve_dispatch_provider_uses_configured_bridge_mode() {
+        let mut config = forge_config::Config::default();
+        config.mesh.bridge_mode = forge_config::BridgeMode::Harness;
+        assert!(build_dispatch_provider(&config).harness_enabled());
+        config.mesh.bridge_mode = forge_config::BridgeMode::Text;
+        assert!(!build_dispatch_provider(&config).harness_enabled());
+    }
 }

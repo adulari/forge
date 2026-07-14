@@ -1057,8 +1057,10 @@ mod tests {
     }
 
     fn test_server_with_mode(mode: PermissionMode) -> ForgeMcp {
-        let mut config = Config::default();
-        config.permission_mode = mode;
+        let config = Config {
+            permission_mode: mode,
+            ..Config::default()
+        };
         ForgeMcp {
             registry: ToolRegistry::with_core_tools(),
             mode,
