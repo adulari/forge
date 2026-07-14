@@ -87,8 +87,12 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
   const [initVisible, setInitVisible] = useState(false);
   const [projectWarningDismissed, setProjectWarningDismissed] = useState(false);
+  const [projectSetupRequested, setProjectSetupRequested] = useState(false);
 
-  useEffect(() => setProjectWarningDismissed(false), [sessionId]);
+  useEffect(() => {
+    setProjectWarningDismissed(false);
+    setProjectSetupRequested(false);
+  }, [sessionId]);
 
   const [assayVisible, setAssayVisible] = useState(false);
 
@@ -322,9 +326,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         {projectNeedsInitialization ? (
           <Banner
             tone="warn"
-            message="This project isn't set up for Forge — no project guidance or custom agents. Forge works best with an AGENTS.md and custom agents."
-            actionLabel="Set up"
-            onAction={() => setInitVisible(true)}
+            actionLabel={projectSetupRequested ? undefined : "Set it up for me"}
+            message={projectSetupRequested ? "Setting up Forge for this project…" : "This project isn't set up for Forge — no project guidance or custom agents. Forge works best with an AGENTS.md and custom agents."}
+            onAction={() => {
+              if (sendWithFeedback({ kind: "prompt", text: "/init" })) setProjectSetupRequested(true);
+            }}
             onDismiss={() => setProjectWarningDismissed(true)}
           />
         ) : null}
