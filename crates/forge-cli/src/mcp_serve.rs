@@ -1056,6 +1056,60 @@ mod tests {
         test_server_with_mcp(lean, None)
     }
 
+    fn test_server_with_mode(mode: PermissionMode) -> ForgeMcp {
+        let mut config = Config::default();
+        config.permission_mode = mode;
+        ForgeMcp {
+            registry: ToolRegistry::with_core_tools(),
+            mode,
+            rules: Vec::new(),
+            config,
+            subagents: None,
+            tasks_store: Arc::new(Store::open_in_memory().unwrap()),
+            mcp: None,
+            skills: Arc::new(forge_skills::Catalog::load(
+                &forge_skills::Sources::default(),
+            )),
+            lean: false,
+        }
+    }
+
+    #[test]
+    fn full_mode_exposes_writable_tools_while_ask_stays_gated() {
+        let full = test_server_with_mode(PermissionMode::Bypass);
+        let names: Vec<String> = full
+            .tool_list()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        for write_tool in ["write_file", "edit_file"] {
+            assert!(
+                names.contains(&write_tool.to_string()),
+                "missing {write_tool}"
+            );
+        }
+        assert_eq!(
+            permission::decide(
+                PermissionMode::Bypass,
+                forge_types::SideEffect::Write,
+                "write_file",
+                &serde_json::json!({"path":"file.txt","content":"x"}),
+                &[],
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            permission::decide(
+                PermissionMode::Default,
+                forge_types::SideEffect::Write,
+                "write_file",
+                &serde_json::json!({"path":"file.txt","content":"x"}),
+                &[],
+            ),
+            PermissionDecision::Ask
+        );
+    }
+
     /// Like [`test_server`] but lets a test inject an [`McpManager`] to exercise the external-MCP
     /// surface (meta-tools) the same way `run()`'s gate would when opted in.
     fn test_server_with_mcp(lean: bool, mcp: Option<Arc<forge_mcp::McpManager>>) -> ForgeMcp {
