@@ -6,6 +6,28 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.6.1] - 2026-07-14
+
+Follow-up polish on the v2.6.0 overhaul, from continued user testing of the real builds.
+
+### Fixed
+- **Response navigator** (#748): the up/down chevrons now correctly jump to the previous
+  (earlier) and next (later) assistant response; the "jump to latest" button no longer shows at
+  the same time as the navigator pill.
+- **Session header** (#748): the elevated header surface now covers the full header block —
+  including the model line and the CHAT/TASKS/AGENTS/REVIEW tab strip — on mobile, matching
+  desktop (previously those rows sat on the bare page background).
+- **Session telemetry sheet** (#748): tidied the model-configuration / tier layout — consistent
+  cards, correct alignment, no stray separators or empty gaps.
+- **Context gauge for Codex OAuth** (#748, `forge-mesh`): the gpt-5.6 / gpt-5.3-codex family now
+  reports its context-window size, so the telemetry context bar and the header context gauge render
+  instead of "context capacity is unavailable".
+- **Session actions sheet** (#748): fixed the missing left content padding and wired up action
+  rows that previously did nothing on press.
+- **`/goal` completion** (#749): a finished goal now ends with a single normal final response that
+  summarizes what was done, instead of stacking repeated bare "GOAL COMPLETE" sentinel messages;
+  completion detection was tightened and the re-drive no longer re-emits the marker.
+
 ## [2.6.0] - 2026-07-14
 
 User-tested desktop/mobile UX overhaul. The unified app (`mobile/` — one codebase for the
