@@ -12,7 +12,7 @@
 // press-and-hold fill is a bespoke interaction outside Button's D/P/F/L/X
 // state machine, so keeping this file self-contained avoids a fragile
 // cross-task prop-shape dependency.
-import React, { useCallback, useRef } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated, {
   cancelAnimation,
@@ -57,6 +57,7 @@ export function ConfirmDialog({
   const reduced = useReducedMotion();
   const fill = useSharedValue(0);
   const firedRef = useRef(false);
+  const [focusedAction, setFocusedAction] = useState<"cancel" | "confirm" | null>(null);
 
   const complete = useCallback(() => {
     if (firedRef.current) return;
@@ -113,9 +114,11 @@ export function ConfirmDialog({
           <View style={styles.actions}>
             <Pressable
               onPress={onCancel}
+              onFocus={() => setFocusedAction("cancel")}
+              onBlur={() => setFocusedAction(null)}
               accessibilityRole="button"
               accessibilityLabel={cancelLabel}
-              style={[styles.button, { backgroundColor: tokens.accent }]}
+              style={[styles.button, { backgroundColor: tokens.accent, borderColor: focusedAction === "cancel" ? tokens.onAccent : "transparent" }]}
             >
               <Text style={[type.bodyBold, { color: tokens.onAccent }]}>{cancelLabel}</Text>
             </Pressable>
@@ -125,6 +128,8 @@ export function ConfirmDialog({
                 onPressIn={onHoldIn}
                 onPressOut={onHoldOut}
                 onPress={complete}
+                onFocus={() => setFocusedAction("confirm")}
+                onBlur={() => setFocusedAction(null)}
                 accessibilityRole="button"
                 accessibilityLabel={confirmLabel}
                 accessibilityHint="Press and hold to confirm"
@@ -132,7 +137,7 @@ export function ConfirmDialog({
                 onAccessibilityAction={(e) => {
                   if (e.nativeEvent.actionName === "activate") complete();
                 }}
-                style={[styles.button, styles.holdButton, { borderColor: tokens.danger }]}
+                style={[styles.button, styles.holdButton, { borderColor: focusedAction === "confirm" ? tokens.accent : tokens.danger }]}
               >
                 <Animated.View
                   style={[styles.holdFill, { backgroundColor: tokens.dangerBg, pointerEvents: "none" }, fillStyle]}
@@ -142,9 +147,11 @@ export function ConfirmDialog({
             ) : (
               <Pressable
                 onPress={onConfirm}
+                onFocus={() => setFocusedAction("confirm")}
+                onBlur={() => setFocusedAction(null)}
                 accessibilityRole="button"
                 accessibilityLabel={confirmLabel}
-                style={[styles.button, styles.ghostButton, { borderColor: tokens.border }]}
+                style={[styles.button, styles.ghostButton, { borderColor: focusedAction === "confirm" ? tokens.accent : tokens.border }]}
               >
                 <Text style={[type.bodyBold, { color: tokens.ink }]}>{confirmLabel}</Text>
               </Pressable>
@@ -175,6 +182,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
+    borderWidth: 2,
   },
   ghostButton: { borderWidth: StyleSheet.hairlineWidth },
   holdButton: { borderWidth: StyleSheet.hairlineWidth },
