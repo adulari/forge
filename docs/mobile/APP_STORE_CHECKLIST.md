@@ -160,11 +160,18 @@ that code until a device/TestFlight test).
       pipeline is gone, this is the only build/distribution path now). Workflow's Archive action
       has `buildDistributionAudience: INTERNAL_ONLY` set, so it auto-uploads to TestFlight on
       success.
-- [ ] **Beta-group assignment is now automated** by `.github/workflows/testflight-autogroup.yml`
-      (Xcode Cloud can't do this itself — the audience setting only uploads, it never assigns a
-      group). That workflow triggers on the same `main`/`mobile/**` push, waits for the freshly
-      uploaded build to finish processing, then assigns it to the group(s) via the App Store
-      Connect API (`scripts/testflight-assign-group.mjs`). To turn it on, set:
+- [ ] **Beta-group assignment.** Xcode Cloud uploads the build but never assigns it to a beta
+      group, so testers see nothing until `scripts/testflight-assign-group.mjs` runs. Because iOS
+      builds are opt-in (Xcode Cloud is triggered by hand via the ASC API, not on push), the assign
+      step is **manual-only** — `.github/workflows/testflight-autogroup.yml` is `workflow_dispatch`
+      (auto-firing on push would just hang ~45m polling for a build that a plain push never
+      produces). **Use the one-step trigger** so this can't be forgotten again (it stranded builds
+      #68–#70): `scripts/trigger-ios-build.mjs` triggers the Xcode Cloud build AND, when
+      `TESTFLIGHT_GROUPS` is set, waits for processing and assigns the group in the same run:
+  - `ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_API_PRIVATE_KEY="$(cat AuthKey_*.p8)" TESTFLIGHT_GROUPS=Testers node scripts/trigger-ios-build.mjs`
+  - Or, if you triggered the build another way, assign after the fact with
+    `gh workflow run testflight-autogroup.yml` or `scripts/testflight-assign-group.mjs` directly.
+  - CI config for the workflow path:
   - repo **variable** `TESTFLIGHT_GROUPS` = the internal beta group name(s), comma-separated
     (e.g. `Internal`). The group must already exist in App Store Connect → TestFlight.
   - repo **secrets** `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_API_PRIVATE_KEY` — an App Store Connect
