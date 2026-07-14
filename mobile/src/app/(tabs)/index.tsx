@@ -17,6 +17,7 @@ import { EmptyState } from "../../components/ds/EmptyState";
 import { IconButton } from "../../components/ds/IconButton";
 import { Screen } from "../../components/ds/Screen";
 import { Skeleton } from "../../components/ds/Skeleton";
+import { StatusDot } from "../../components/ds/StatusDot";
 import { ApiError, type SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { useServerFleets, useSessions } from "../../lib/queries";
