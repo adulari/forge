@@ -539,6 +539,13 @@ async fn drive_session(
     let _ = snapshot_tx.send(closed);
 }
 
+fn take_next_queued_prompt(queue: &mut Vec<String>, app: &mut App) -> Option<String> {
+    let next = queue.first().cloned()?;
+    queue.remove(0);
+    app.set_queued(queue);
+    Some(next)
+}
+
 impl DriverState {
     /// One remote input — the headless mirror of `run_chat_tui`'s remote drain, minus the
     /// host-terminal cases (`/remote` toggling, host clipboard).
@@ -792,6 +799,7 @@ impl DriverState {
     }
 
     fn start_turn(&mut self, prompt: &str) {
+        self.last_prompt = Some(prompt.to_string());
         self.turn_gen += 1;
         self.turn_handle = Some(spawn_turn(
             prompt,
@@ -812,16 +820,23 @@ impl DriverState {
         self.busy = false;
         self.loop_state = None;
         self.goal_state = None;
-        if !self.queued_prompts.is_empty() {
-            self.queued_prompts.clear();
-            self.app.set_queued(&self.queued_prompts);
-        }
         self.pending = None;
         self.pending_question = None;
         self.app.prompt = None;
         self.app.clear_question();
         self.app.workflow.on_interrupt();
         self.app.apply(forge_tui::PresenterEvent::AssistantDone);
+
+        // An interrupt cancels only the active turn. Prompts submitted while it was running are
+        // still valid work and must drain FIFO; start the head under the new generation so the
+        // aborted turn's DoneGuard signal remains harmlessly stale.
+        if let Some(next) = self.take_next_queued_prompt() {
+            self.start_turn(&next);
+        }
+    }
+
+    fn take_next_queued_prompt(&mut self) -> Option<String> {
+        take_next_queued_prompt(&mut self.queued_prompts, &mut self.app)
     }
 
     /// Act on a [`DispatchOutcome`] — the headless twin of the TUI's outcome match arms.
@@ -1510,10 +1525,10 @@ impl DriverState {
                 self.goal_state = Some(gs);
             }
         }
-        if self.turn_handle.is_none() && !self.queued_prompts.is_empty() {
-            let next = self.queued_prompts.remove(0);
-            self.app.set_queued(&self.queued_prompts);
-            self.start_turn(&next);
+        if self.turn_handle.is_none() {
+            if let Some(next) = self.take_next_queued_prompt() {
+                self.start_turn(&next);
+            }
         }
         if self.turn_handle.is_none() && self.turn_gen > self.last_auto_compact_gen {
             if let Some(lim) = self.app.context_limit {
@@ -1591,5 +1606,119 @@ impl DriverState {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_driver_state() -> DriverState {
+        let session = super::build_session_with(
+            Box::new(forge_tui::HeadlessPresenter::default()),
+            true,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("build mock session");
+        let catalog =
+            std::sync::Arc::new(forge_skills::Catalog::load(&forge_config::command_sources()));
+        let (done_tx, _) = std::sync::mpsc::channel();
+        DriverState {
+            session: std::sync::Arc::new(tokio::sync::Mutex::new(session)),
+            app: App::default(),
+            catalog,
+            armed_project: std::collections::HashSet::new(),
+            trust_project: false,
+            done_tx,
+            busy: false,
+            busy_since: Instant::now(),
+            turn_gen: 10,
+            last_auto_compact_gen: 0,
+            turn_handle: None,
+            loop_state: None,
+            goal_state: None,
+            pending: None,
+            pending_question: None,
+            pending_duel: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            duel_state: None,
+            assay_lenses: Vec::new(),
+            assay_scope: forge_types::AssayScope::Repo,
+            queued_prompts: Vec::new(),
+            prompt_history: Vec::new(),
+            last_prompt: None,
+            prompt_seq: 0,
+            notes: Vec::new(),
+            copy_text: None,
+            pending_mentions: Vec::new(),
+            remote_keys: std::collections::VecDeque::new(),
+            mesh_load_rx: None,
+            usage_load_rx: None,
+            cwd: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupt_with_queue_starts_fifo_head_and_keeps_driver_busy() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+        state.queued_prompts = vec!["second".into(), "third".into()];
+
+        state.interrupt_turn();
+
+        assert_eq!(state.queued_prompts, vec!["third"]);
+        assert!(state.turn_handle.is_some());
+        assert!(state.busy);
+        assert_eq!(state.turn_gen, 12);
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn stale_interrupt_done_signal_cannot_stop_fifo_drain() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+        state.queued_prompts = vec!["second".into(), "third".into()];
+
+        state.interrupt_turn();
+        assert_eq!(state.last_prompt.as_deref(), Some("second"));
+        assert_eq!(state.queued_prompts, vec!["third"]);
+        assert_eq!(state.turn_gen, 12);
+        assert!(state.busy);
+
+        // The aborted generation's DoneGuard arrives after the replacement turn starts.
+        state.on_turn_done(10).await;
+        assert!(state.busy);
+        assert_eq!(state.turn_gen, 12);
+        assert!(state.turn_handle.is_some());
+        assert_eq!(state.queued_prompts, vec!["third"]);
+
+        // Completing the replacement turn drains the remaining prompt in FIFO order.
+        state.turn_handle.take().unwrap().abort();
+        state.on_turn_done(12).await;
+        assert_eq!(state.queued_prompts, Vec::<String>::new());
+        assert_eq!(state.last_prompt.as_deref(), Some("third"));
+        assert_eq!(state.turn_gen, 13);
+        assert!(state.busy);
+        assert!(state.turn_handle.is_some());
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn interrupt_without_queue_leaves_driver_idle() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+
+        state.interrupt_turn();
+
+        assert!(state.queued_prompts.is_empty());
+        assert!(state.turn_handle.is_none());
+        assert!(!state.busy);
+        assert_eq!(state.turn_gen, 11);
     }
 }
