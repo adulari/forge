@@ -4101,7 +4101,7 @@ prompt text, nothing else.";
                         // pressure, not provider health: immediately advance the existing chain
                         // without benching a healthy shared model.
                         let mut picked = None;
-                        while let Some(next) = chain.next() {
+                        for next in chain.by_ref() {
                             if forge_config::is_model_disabled(&next, &self.config.mesh.disabled)
                                 || self.store.is_model_reserved(&next)
                             {
