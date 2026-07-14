@@ -427,6 +427,10 @@ impl CliProvider {
         self
     }
 
+    pub fn harness_enabled(&self) -> bool {
+        self.harness
+    }
+
     /// Toggle CLI session reuse via `--resume` (claude only). Off → always send the full transcript.
     pub fn with_session_resume(mut self, enabled: bool) -> Self {
         self.resume_enabled = enabled;
