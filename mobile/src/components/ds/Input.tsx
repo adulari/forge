@@ -51,6 +51,7 @@ export function Input({
 }: InputProps) {
   const tokens = useTokens();
   const [focused, setFocused] = useState(false);
+  const [clearFocused, setClearFocused] = useState(false);
   const hasError = !!error;
   const showClear = clearable && !trailing && !disabled && !!value && value.length > 0;
 
@@ -100,9 +101,11 @@ export function Input({
         {showClear ? (
           <Pressable
             onPress={() => onChangeText?.("")}
+            onFocus={() => setClearFocused(true)}
+            onBlur={() => setClearFocused(false)}
             accessibilityRole="button"
             accessibilityLabel="Clear"
-            style={styles.clear}
+            style={[styles.clear, { borderColor: clearFocused ? tokens.accent : "transparent" }]}
           >
             <X size={16} strokeWidth={1.75} color={tokens.ink3} />
           </Pressable>
@@ -132,6 +135,8 @@ const styles = StyleSheet.create({
     marginRight: -space.space8,
     alignItems: "center",
     justifyContent: "center",
+    borderWidth: 2,
+    borderRadius: radii.radius8,
   },
   input: {
     flex: 1,
