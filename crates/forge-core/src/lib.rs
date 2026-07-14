@@ -3956,10 +3956,12 @@ prompt text, nothing else.";
                 // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
                 // smaller-window model still fits. The immutable borrow ends before the block below.
                 let sent = self.transcript_with_preamble(&active_model);
-                // A daemon-lifetime reservation prevents concurrent auto-routes from dispatching
-                // the same model before any failure can update shared health. The local guard
-                // releases on success, error, failover, and task cancellation.
-                let reservation = self.store.try_reserve_model(&active_model);
+                // Auto-routed completions reserve a model before dispatch so independent sessions
+                // can distribute across the fallback chain. Explicit pins deliberately bypass this
+                // scheduler: their existing pin outage/failover policy remains authoritative.
+                let reservation = (!explicit_pin)
+                    .then(|| self.store.try_reserve_model(&active_model))
+                    .flatten();
                 let reserved = reservation.is_some();
                 // Pre-dispatch key backstop: a model can reach here with NO provider key via a path
                 // that isn't key-filtered (the last-resort fallback, or an architect editor/planner
@@ -3968,11 +3970,7 @@ prompt text, nothing else.";
                 // synthesize a permanent Auth failure so the existing failover branch EXCLUDES it and
                 // advances to a usable model. `has_api_key` is true for keyless providers (ollama,
                 // the claude/codex bridges), so a legitimate bridge turn is never short-circuited.
-                let result = if reservation.is_none() && explicit_pin {
-                    Err(forge_provider::ProviderError::Unavailable(format!(
-                        "pinned model '{active_model}' is serving another session"
-                    )))
-                } else if reservation.is_none() {
+                let result = if !explicit_pin && reservation.is_none() {
                     Err(forge_provider::ProviderError::Unavailable(format!(
                         "model '{active_model}' is serving another session"
                     )))
@@ -4098,14 +4096,15 @@ prompt text, nothing else.";
                         }
                         break r;
                     }
-                    Err(e) if !reserved && explicit_pin => return Err(e.into()),
                     Err(e) if failover_enabled && !reserved && !explicit_pin => {
                         // Another session owns this model's reservation. This is scheduling
                         // pressure, not provider health: immediately advance the existing chain
                         // without benching a healthy shared model.
                         let mut picked = None;
                         while let Some(next) = chain.next() {
-                            if self.store.is_model_reserved(&next) {
+                            if forge_config::is_model_disabled(&next, &self.config.mesh.disabled)
+                                || self.store.is_model_reserved(&next)
+                            {
                                 continue;
                             }
                             match self.admit_failover_model(&next).await {
@@ -4395,6 +4394,9 @@ prompt text, nothing else.";
                         // (Yes/No/Always) — "No" skips it and we keep looking for one that fits.
                         let mut picked = None;
                         for next in chain.by_ref() {
+                            if forge_config::is_model_disabled(&next, &self.config.mesh.disabled) {
+                                continue;
+                            }
                             if let Some(p) = &skip_provider {
                                 if forge_config::provider_of(&next) == p.as_str() {
                                     continue;
@@ -14158,6 +14160,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn busy_pinned_model_dispatches_without_a_reservation() {
+        // Pins are governed by their normal outage/failover policy, never rejected solely because
+        // an auto-routed turn holds the model reservation.
+        let provider = Arc::new(EchoProvider {
+            bad: std::collections::HashSet::new(),
+            err: unavailable,
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec!["fallback::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        let _reservation = store.try_reserve_model("pin::model").unwrap();
+
+        assert_eq!(session.run_turn("hi").await.unwrap(), "pin::model");
+    }
+
+    #[tokio::test]
     async fn occupied_model_fails_over_without_benching_it() {
         // A concurrent completion owns the primary reservation. This turn must use an eligible
         // fallback without treating the busy primary as a provider-health failure.
@@ -14176,6 +14196,29 @@ mod tests {
         assert!(
             !store.current_benched().unwrap().is_benched("busy::model"),
             "a live completion is not a provider failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn failover_skips_disabled_candidates_in_a_stale_fallback_chain() {
+        let provider = Arc::new(EchoProvider {
+            bad: ["bad::model".to_string()].into_iter().collect(),
+            err: unavailable,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "bad::model".into(),
+            fallbacks: vec!["disabled::model".into(), "good::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        session.config.mesh.disabled = vec!["disabled".into()];
+
+        assert_eq!(session.run_turn("hi").await.unwrap(), "good::model");
+        assert!(
+            !store
+                .current_benched()
+                .unwrap()
+                .is_benched("disabled::model"),
+            "a disabled stale fallback must not be treated as a provider failure"
         );
     }
 

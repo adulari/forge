@@ -247,8 +247,10 @@ fn json_to_sql_value(v: &serde_json::Value) -> rusqlite::types::Value {
 /// A fetched per-model price row: `(model, input_per_1k, output_per_1k, cache_read_per_1k)` in USD.
 pub type ModelPriceRow = (String, f64, f64, Option<f64>);
 
-/// Process-wide active per-model completion reservations. Stores are opened independently by
-/// daemon sessions, so this registry must not live on a single [`Store`] instance.
+/// Forge-daemon-process-wide active per-model completion reservations. Stores are opened
+/// independently by daemon sessions, so this registry must not live on a single [`Store`] instance.
+/// It intentionally does not coordinate separate Forge processes; cross-process leases are a
+/// later wave-two concern.
 fn in_flight_models() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static MODELS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
