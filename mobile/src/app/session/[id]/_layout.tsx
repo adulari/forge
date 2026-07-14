@@ -339,7 +339,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           <Banner tone="neutral" compact message="reconnecting…" />
         ) : null}
 
-        <View style={gutter}>
+        <View style={[gutter, { backgroundColor: tokens.bg2 }]}>
           <StatusStrip
             state={statusState}
             tier={snapshot?.tier ?? null}
@@ -354,7 +354,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           />
         </View>
 
-        <View style={[gutter, styles.segmentedWrap]}>
+        <View style={[gutter, styles.segmentedWrap, { backgroundColor: tokens.bg2 }]}>
           <Segmented
             options={segmentOptions}
             value={activeSegment}
