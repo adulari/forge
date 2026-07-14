@@ -800,6 +800,7 @@ impl HeuristicRouter {
     /// currently benched (rate-limited / unavailable — failover).
     fn is_usable(&self, m: &str, health: &ModelHealth, quota: &SubscriptionQuota) -> bool {
         (self.model_available)(m)
+            && !forge_config::is_model_disabled(m, &self.config.mesh.disabled)
             && !health.is_benched(m)
             // An exhausted subscription is routed around entirely (L3), like a benched model.
             && !(catalog::is_subscription(m) && quota.is_exhausted(forge_config::provider_of(m)))
@@ -999,23 +1000,14 @@ impl HeuristicRouter {
             let model = if self.is_usable(pin, health, quota) {
                 pin.clone()
             } else {
-                match chain.first().cloned() {
-                    Some(m) => {
-                        why.push_str(&format!(" — fell back to {m} (no usable key for {pin})"));
-                        m
-                    }
-                    None => {
-                        why.push_str(&format!(
-                            " — warning: no usable key for {pin} and no fallback"
-                        ));
-                        pin.clone()
-                    }
-                }
+                why.push_str(" — unavailable");
+                pin.clone()
             };
             chain.retain(|m| m != &model);
-            // `pinned` only when the pin itself is the routed model — a pin that was unusable
-            // (no key) already fell back to a mesh pick above, which is NOT an explicit pin.
-            let pinned = model == *pin;
+            // An explicit pin remains explicit even if the provider is currently unavailable;
+            // dispatching it surfaces the provider's actionable error instead of silently changing
+            // the user's requested model.
+            let pinned = true;
             // Strict pin semantics (harness-robustness wave 2, fix 2): an explicit pin gets NO
             // cross-model fallback chain — mid-turn failover off a pinned model silently
             // contaminated runs that depended on the exact model (the SWE-bench baseline switched
@@ -2851,6 +2843,60 @@ mod tests {
 
     fn benched(models: &[&str]) -> ModelHealth {
         ModelHealth::new(models.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[tokio::test]
+    async fn disabled_models_are_filtered_from_live_routing() {
+        let mut config = Config::default();
+        config.mesh.disabled = vec!["anthropic".into()];
+        let r = HeuristicRouter::new(config)
+            .with_availability(|_| true)
+            .with_catalog(ModelCatalog::new(vec![
+                "anthropic::claude-opus-4-8".into(),
+                "groq::llama-3.1-8b-instant".into(),
+            ]));
+        let d = r
+            .route(
+                "design and architect a complex concurrency refactor across modules",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+
+        assert_ne!(d.model, "anthropic::claude-opus-4-8");
+        assert!(
+            !d.fallbacks
+                .iter()
+                .any(|model| model == "anthropic::claude-opus-4-8"),
+            "disabled model leaked into failover chain: {:?}",
+            d.fallbacks
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_explicit_pin_is_not_silently_rerouted() {
+        let r = HeuristicRouter::new(Config::default())
+            .with_availability(|model| model != "openai::gpt-4o")
+            .with_pin(Some("openai::gpt-4o".into()));
+        let d = r
+            .route(
+                "fix typo",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+
+        assert_eq!(d.model, "openai::gpt-4o");
+        assert!(d.pinned);
+        assert!(d.rationale.contains("unavailable"));
     }
 
     #[tokio::test]

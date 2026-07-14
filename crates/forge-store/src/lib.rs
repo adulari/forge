@@ -247,8 +247,43 @@ fn json_to_sql_value(v: &serde_json::Value) -> rusqlite::types::Value {
 /// A fetched per-model price row: `(model, input_per_1k, output_per_1k, cache_read_per_1k)` in USD.
 pub type ModelPriceRow = (String, f64, f64, Option<f64>);
 
+/// Forge-daemon-process-wide active completion reservations keyed by durable store identity and
+/// model. Stores opened over the same database coordinate; separate databases and in-memory stores
+/// remain isolated. It intentionally does not coordinate separate Forge processes; cross-process
+/// leases are a later wave-two concern.
+fn in_flight_models() -> &'static std::sync::Mutex<std::collections::HashSet<(String, String)>> {
+    static MODELS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+    > = std::sync::OnceLock::new();
+    MODELS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn next_memory_store_id() -> String {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!(
+        "memory:{}",
+        NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+/// An active per-model completion reservation. Dropping it makes the model eligible for another
+/// concurrent session.
+pub struct ModelReservation {
+    store_id: String,
+    model: String,
+}
+
+impl Drop for ModelReservation {
+    fn drop(&mut self) {
+        if let Ok(mut in_flight) = in_flight_models().lock() {
+            in_flight.remove(&(self.store_id.clone(), self.model.clone()));
+        }
+    }
+}
+
 pub struct Store {
     pool: r2d2::Pool<SqliteManager>,
+    reservation_store_id: String,
     /// Append counter for `live_event`, so the ring-buffer prune runs once every
     /// [`LIVE_EVENT_PRUNE_EVERY`] inserts instead of on every append (the old per-insert
     /// correlated-subquery DELETE was O(n) on a hot path).
@@ -763,6 +798,7 @@ impl Store {
     }
 
     fn build(source: ConnSource) -> Result<Self> {
+        let reservation_source = source.clone();
         let in_memory = matches!(source, ConnSource::Memory);
         let manager = SqliteManager { source };
         let builder = r2d2::Pool::builder().test_on_check_out(false);
@@ -797,9 +833,37 @@ impl Store {
             // migrations and the UNIQUE(session_id, seq) index; refuses a DB from a newer build.
             run_migrations(&conn)?;
         }
+        let reservation_store_id = match reservation_source {
+            ConnSource::File(path) => std::fs::canonicalize(&path)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned(),
+            ConnSource::Memory => next_memory_store_id(),
+        };
         Ok(Self {
             pool,
+            reservation_store_id,
             live_event_writes: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// Atomically reserve a model for an active completion. The returned guard releases the
+    /// reservation on every normal return, error, and cancellation path.
+    pub fn try_reserve_model(&self, model: &str) -> Option<ModelReservation> {
+        let mut in_flight = in_flight_models().lock().ok()?;
+        if !in_flight.insert((self.reservation_store_id.clone(), model.to_string())) {
+            return None;
+        }
+        Some(ModelReservation {
+            store_id: self.reservation_store_id.clone(),
+            model: model.to_string(),
+        })
+    }
+
+    /// Check whether a model has an active completion reservation.
+    pub fn is_model_reserved(&self, model: &str) -> bool {
+        in_flight_models().lock().is_ok_and(|in_flight| {
+            in_flight.contains(&(self.reservation_store_id.clone(), model.to_string()))
         })
     }
 
@@ -4125,6 +4189,44 @@ pub struct QueueTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_reservation_conflicts_for_shared_database_but_not_distinct_contexts() {
+        let root = std::env::temp_dir();
+        let shared_path = root.join(format!("forge-store-shared-{}.db", std::process::id()));
+        let other_path = root.join(format!("forge-store-other-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&shared_path);
+        let _ = std::fs::remove_file(&other_path);
+        let first_store = Store::open(&shared_path).unwrap();
+        let second_store = Store::open(&shared_path).unwrap();
+        let other_store = Store::open(&other_path).unwrap();
+        let reservation = first_store.try_reserve_model("openai::gpt-4o").unwrap();
+
+        assert!(second_store.try_reserve_model("openai::gpt-4o").is_none());
+        assert!(other_store.try_reserve_model("openai::gpt-4o").is_some());
+
+        let first_memory = Store::open_in_memory().unwrap();
+        let second_memory = Store::open_in_memory().unwrap();
+        let memory_reservation = first_memory.try_reserve_model("openai::gpt-4o").unwrap();
+        assert!(second_memory.try_reserve_model("openai::gpt-4o").is_some());
+
+        drop(memory_reservation);
+        drop(reservation);
+        let _ = std::fs::remove_file(&shared_path);
+        let _ = std::fs::remove_file(&other_path);
+    }
+
+    #[test]
+    fn model_reservation_is_atomic_and_released_on_drop() {
+        let store = Store::open_in_memory().unwrap();
+        let first = store.try_reserve_model("openai::gpt-4o").unwrap();
+        assert!(store.is_model_reserved("openai::gpt-4o"));
+        assert!(store.try_reserve_model("openai::gpt-4o").is_none());
+
+        drop(first);
+        assert!(!store.is_model_reserved("openai::gpt-4o"));
+        assert!(store.try_reserve_model("openai::gpt-4o").is_some());
+    }
 
     #[test]
     fn view_snapshot_persists_per_session() {
