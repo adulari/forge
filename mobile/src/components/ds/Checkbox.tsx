@@ -38,7 +38,7 @@ export function Checkbox({ value, onValueChange, disabled = false, accessibility
         accessibilityState={{ checked: value, disabled }}
         accessibilityLabel={accessibilityLabel}
         hitSlop={11}
-        style={[styles.hit, style]}
+        style={[styles.hit, { borderColor: focused ? tokens.accent : "transparent" }, style]}
       >
         <View
           style={[
@@ -66,6 +66,8 @@ const styles = StyleSheet.create({
     height: 44,
     alignItems: "center",
     justifyContent: "center",
+    borderWidth: 2,
+    borderRadius: radii.radius8,
   },
   box: {
     borderWidth: 2,
