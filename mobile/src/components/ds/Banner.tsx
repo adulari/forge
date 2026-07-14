@@ -2,7 +2,7 @@
 // neutral, slides down from the header `base`. The "reconnecting" neutral
 // strip variant (`compact`) is 12pt meta, no animation.
 import React, { useEffect } from "react";
-import { StyleSheet, Text, type ViewStyle } from "react-native";
+import { Pressable, StyleSheet, Text, type ViewStyle } from "react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from "react-native-reanimated";
 
 import { useTokens } from "../../theme/ThemeProvider";
@@ -15,6 +15,9 @@ export type BannerTone = "warn" | "danger" | "neutral";
 export interface BannerProps {
   tone: BannerTone;
   message: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  onDismiss?: () => void;
   /** The "reconnecting" strip: 12pt meta text, no animation. Default false. */
   compact?: boolean;
   visible?: boolean;
@@ -23,7 +26,7 @@ export interface BannerProps {
 
 const SLIDE_PX = 8;
 
-export function Banner({ tone, message, compact = false, visible = true, style }: BannerProps) {
+export function Banner({ tone, message, actionLabel, onAction, onDismiss, compact = false, visible = true, style }: BannerProps) {
   const tokens = useTokens();
   const reduced = useReducedMotion();
   const translateY = useSharedValue(compact || reduced ? 0 : visible ? 0 : -SLIDE_PX);
@@ -57,13 +60,25 @@ export function Banner({ tone, message, compact = false, visible = true, style }
       accessibilityLabel={message}
     >
       <Text style={[compact ? type.meta : type.sub, styles.message, { color: ink }]}>{message}</Text>
+      {actionLabel && onAction ? (
+        <Pressable onPress={onAction} accessibilityRole="button" accessibilityLabel={actionLabel}>
+          <Text style={[type.bodyBold, styles.action, { color: ink }]}>{actionLabel}</Text>
+        </Pressable>
+      ) : null}
+      {onDismiss ? (
+        <Pressable onPress={onDismiss} accessibilityRole="button" accessibilityLabel="Dismiss warning" hitSlop={8}>
+          <Text style={[type.bodyBold, styles.dismiss, { color: ink }]}>×</Text>
+        </Pressable>
+      ) : null}
     </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
-  base: { width: "100%" },
+  base: { width: "100%", flexDirection: "row", alignItems: "center", gap: space.space8 },
   regular: { paddingHorizontal: space.space16, paddingVertical: space.space12 },
   compact: { paddingHorizontal: space.space16, paddingVertical: space.space4 },
-  message: { flexShrink: 1 },
+  message: { flex: 1 },
+  action: { textDecorationLine: "underline" },
+  dismiss: { lineHeight: 20 },
 });
