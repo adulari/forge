@@ -113,8 +113,8 @@ fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
 /// Env var enabling the lean bridge tool surface (same effect as `mesh.bridge_lean = true`).
 const BRIDGE_LEAN_ENV: &str = "FORGE_BRIDGE_LEAN";
 
-/// Env var opting the CLI bridge INTO connecting external project MCP servers (same effect as
-/// `mesh.bridge_mcp_external = true`). `1` forces on, `0` forces off, unset defers to config.
+/// Env var overriding bridge external MCP loading. `1` forces on, `0` forces off, unset defers to
+/// `mesh.bridge_mcp_external` (on by default).
 const BRIDGE_MCP_EXTERNAL_ENV: &str = "FORGE_BRIDGE_MCP_EXTERNAL";
 
 /// The `FORGE_BRIDGE_MCP_EXTERNAL` override: `Some(true/false)` when set to `1`/`0`, `None` when
@@ -134,11 +134,10 @@ fn bridge_external_mcp_enabled_with(config_flag: bool, env_override: Option<bool
 }
 
 /// Whether the CLI bridge should connect external project MCP servers (dual-graph/token-counter/
-/// helm/…). OFF by default: eagerly booting every active project MCP server inside the bridge's
-/// `forge mcp-serve` spawns a heavy nested process tree and risks wedging the whole tool-using turn
-/// behind a slow/auth-gated server (e.g. helm). Opt in via `mesh.bridge_mcp_external = true` or
-/// `FORGE_BRIDGE_MCP_EXTERNAL=1` (env wins). The bridged model keeps every Forge CORE tool either
-/// way — only the external project-MCP surface is gated.
+/// helm/…). ON by default: each server connects concurrently in the background under its bounded
+/// connect/discovery timeout, so slow/auth-gated servers are skipped without wedging the turn.
+/// Disable via `mesh.bridge_mcp_external = false` or `FORGE_BRIDGE_MCP_EXTERNAL=0` (env wins).
+/// The bridged model keeps every Forge CORE tool either way.
 fn bridge_external_mcp_enabled(config: &Config) -> bool {
     bridge_external_mcp_enabled_with(config.mesh.bridge_mcp_external, env_bridge_external_mcp())
 }
@@ -884,13 +883,11 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         Some(s) => Arc::clone(&s.ctx.store),
         None => Arc::new(crate::open_store()?),
     };
-    // External project MCP servers (dual-graph/token-counter/helm/…) are OFF on the bridge by
-    // default: eagerly booting every active project MCP server here spawns a heavy nested process
-    // tree, and a slow/auth-gated server (e.g. helm) can wedge the whole tool-using turn — the
-    // documented "bridge stalls on tool-using turns". Opt in via `mesh.bridge_mcp_external` /
-    // `FORGE_BRIDGE_MCP_EXTERNAL=1`. The bridged model keeps every Forge CORE tool (update_tasks,
-    // spawn_agents, file/shell, use_skill, …) regardless; only this external surface (and its
-    // mcp_search_tools/mcp_call meta-tools, which are Some(mcp)-gated below) is skipped.
+    // External project MCP servers (dual-graph/token-counter/helm/…) are ON on the bridge by
+    // default. Each connects concurrently in the background under a bounded handshake/discovery
+    // timeout, so a slow/auth-gated server is skipped without wedging the tool-using turn. Set
+    // `mesh.bridge_mcp_external = false` or `FORGE_BRIDGE_MCP_EXTERNAL=0` to disable this surface.
+    // Forge CORE tools remain available either way.
     //
     // When enabled, connect in the BACKGROUND so Forge's own tools serve IMMEDIATELY — awaiting the
     // connect here previously stalled the whole tool list behind a slow server, so the spawned
@@ -1100,20 +1097,20 @@ mod tests {
     }
 
     #[test]
-    fn bridge_external_mcp_gate_defaults_off_env_overrides_both_ways() {
-        // Default (config false, env unset) → OFF.
-        assert!(!bridge_external_mcp_enabled_with(false, None));
-        // Config opt-in with no env → ON.
+    fn bridge_external_mcp_gate_defaults_on_env_overrides_both_ways() {
+        // Default (config true, env unset) → ON.
         assert!(bridge_external_mcp_enabled_with(true, None));
+        // Config opt-out with no env → OFF.
+        assert!(!bridge_external_mcp_enabled_with(false, None));
         // Env wins in both directions, over either config value.
-        assert!(bridge_external_mcp_enabled_with(false, Some(true)));
         assert!(!bridge_external_mcp_enabled_with(true, Some(false)));
+        assert!(bridge_external_mcp_enabled_with(false, Some(true)));
     }
 
     #[test]
-    fn default_bridge_hides_external_mcp_meta_tools_keeps_core() {
-        // Gate OFF (the default): even with external servers configured the bridge builds mcp=None,
-        // so no mcp_call/mcp_search_tools are advertised — but every Forge core tool stays.
+    fn disabled_bridge_hides_external_mcp_meta_tools_keeps_core() {
+        // Gate OFF: even with external servers configured the bridge builds mcp=None, so no
+        // mcp_call/mcp_search_tools are advertised — but every Forge core tool stays.
         let names: Vec<String> = test_server_with_mcp(false, None)
             .tool_list()
             .into_iter()
@@ -1136,9 +1133,9 @@ mod tests {
     }
 
     #[test]
-    fn opted_in_bridge_advertises_external_mcp_meta_tools() {
-        // Gate ON → run() would build a connecting manager; feeding an equivalent one here shows the
-        // meta-tools are advertised (they come straight from `self.mcp` being Some).
+    fn default_bridge_advertises_external_mcp_meta_tools() {
+        // Gate ON by default → run() builds a connecting manager; feeding an equivalent one here
+        // shows the meta-tools are advertised (they come straight from `self.mcp` being Some).
         let mgr = Arc::new(forge_mcp::McpManager::connecting(
             &mcp_config_with_one_server(),
         ));

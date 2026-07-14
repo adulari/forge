@@ -13,7 +13,7 @@ fn default_call_timeout_secs() -> u64 {
     60
 }
 fn default_connect_timeout_secs() -> u64 {
-    20
+    8
 }
 fn default_max_reconnect_attempts() -> usize {
     3
@@ -35,8 +35,8 @@ pub struct McpConfig {
     /// Per-`tools/call` timeout (default 60s) — a slow/hung server returns a tool error, not a hang.
     #[serde(default = "default_call_timeout_secs")]
     pub call_timeout_secs: u64,
-    /// Connect/initialize budget per server (default 20s) — a slow server lands `failed`/`connecting`
-    /// without delaying session start beyond this.
+    /// Connect, initialize, and initial discovery budget per server (default 8s). Servers connect
+    /// concurrently; a slow one lands `failed` without delaying its healthy peers beyond this.
     #[serde(default = "default_connect_timeout_secs")]
     pub connect_timeout_secs: u64,
     /// Bounded reconnect attempts after a stdio child exits / an HTTP stream drops (default 3).

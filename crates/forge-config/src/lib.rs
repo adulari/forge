@@ -1346,13 +1346,12 @@ pub struct MeshConfig {
     #[serde(default)]
     pub bridge_lean: bool,
     /// Connect external project MCP servers (dual-graph/token-counter/helm/…) inside the CLI
-    /// bridge. Default false: a bridged claude/codex turn spawns `forge mcp-serve`, and eagerly
-    /// booting every active project MCP server there builds a heavy nested process tree and can
-    /// wedge the whole tool-using turn behind a slow/auth-gated server (e.g. helm). The bridged
-    /// model keeps every Forge CORE tool (file/shell/update_tasks/spawn_agents/use_skill/…)
-    /// regardless — only this external project-MCP surface (and its `mcp_search_tools`/`mcp_call`
-    /// meta-tools) is gated. Also enabled by `FORGE_BRIDGE_MCP_EXTERNAL=1` (env wins). Default false.
-    #[serde(default)]
+    /// bridge. Default true: servers connect concurrently in the background, each under the
+    /// configured MCP connect/discovery timeout, so a slow or auth-gated server is skipped rather
+    /// than stalling the bridged turn. Set false or `FORGE_BRIDGE_MCP_EXTERNAL=0` to disable this
+    /// external project-MCP surface (and its `mcp_search_tools`/`mcp_call` meta-tools); Forge CORE
+    /// tools remain available either way. The environment override wins.
+    #[serde(default = "default_true")]
     pub bridge_mcp_external: bool,
     /// Enforcement behavior once a cap is reached.
     #[serde(default)]
@@ -2065,7 +2064,7 @@ impl Default for Config {
                 classifier_model: None,
                 bridge_mode: BridgeMode::default(),
                 bridge_lean: false,
-                bridge_mcp_external: false,
+                bridge_mcp_external: true,
                 daily_budget_usd: None,
                 monthly_cap_usd: None,
                 weekly_budget_usd: None,
@@ -2924,7 +2923,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "mesh.monthly_cap_usd" => "Hard monthly spend cap (USD). Empty = unlimited.",
         "mesh.classifier" => "Task-tier classifier: heuristic (instant, no call) or llm (a cheap model labels each turn).",
         "mesh.classifier_model" => "Model the llm classifier calls — pick a $0/local one (e.g. ollama::… or a CLI bridge).",
-        "mesh.bridge_mcp_external" => "Connect external project MCP servers (dual-graph/helm/…) inside the CLI bridge. Off by default — off avoids a heavy nested process tree that can stall tool-using turns. Forge core tools stay either way.",
+        "mesh.bridge_mcp_external" => "Connect external project MCP servers (dual-graph/helm/…) inside the CLI bridge. On by default; servers connect concurrently in the background with a timeout, so slow servers are skipped instead of stalling turns. Set false to disable. Forge core tools stay either way.",
         "mesh.prefer_subscription" => "Prefer $0 CLI-bridge subscriptions over a metered API model on a tie.",
         "mesh.max_output_tokens" => "Cap on tokens a model may generate per call.",
         "mesh.architect_mode" => "Use a stronger 'architect' model to plan, a cheaper one to edit.",
@@ -4739,6 +4738,26 @@ auto = "local"
         );
         assert!(fps.contains(&"…KEY1".to_string()));
         assert!(fps.contains(&"…KEY2".to_string()));
+    }
+
+    #[test]
+    fn bridge_external_mcp_is_on_by_default_and_toml_can_disable_it() {
+        assert!(Config::default().mesh.bridge_mcp_external, "Rust default");
+        let cfg: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(figment::providers::Toml::string(
+                "[mesh]\nself_review = true\n",
+            ))
+            .extract()
+            .unwrap();
+        assert!(cfg.mesh.bridge_mcp_external, "absent in TOML stays on");
+
+        let disabled: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(figment::providers::Toml::string(
+                "[mesh]\nbridge_mcp_external = false\n",
+            ))
+            .extract()
+            .unwrap();
+        assert!(!disabled.mesh.bridge_mcp_external, "TOML can disable it");
     }
 
     #[test]
