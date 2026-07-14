@@ -6,6 +6,39 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-07-14
+
+User-tested desktop/mobile UX overhaul. The unified app (`mobile/` — one codebase for the
+desktop Tauri app and the mobile app) was tested against the real desktop build across three
+rounds; every fix lands in shared components so desktop and mobile both benefit. Also fixes a
+serve-side model-catalog and per-session usage-attribution gap surfaced by the app.
+
+### Fixed
+- **Desktop window chrome** (#744): the app now reserves a top safe-area / draggable region so
+  page titles, the History search bar, and the session header are never clipped under the native
+  window controls.
+- **Session header & telemetry** (#744, #746): visible back control; the reasoning-effort row is
+  selectable and swaps its picker pane in place within the telemetry sheet (no drawer-over-drawer);
+  the header context gauge is legible.
+- **Models & mesh health** (#744, #745): per-model tier, benchmark scores, and context-window
+  length; auto-ranked and grouped by work tier; search; and a resilient fallback that never shows
+  an empty catalog when the server returned models. Serve's `models` API now emits tier/benchmark/
+  context fields.
+- **Usage** (#744, #745, #746): combined subscription-usage percentage headline; compact, scannable
+  per-provider rows (bridges included); correct per-session token accounting; and session-view
+  provider attribution so side/aux calls are no longer collapsed into a generic "other" bucket.
+- **Floor** (#744): live sessions render in a proper grid with a real empty state.
+- **Configuration / Skills / Hooks** (#744, #745): explicit save affordance and search on
+  Configuration; searchable Skills and Hooks.
+- **Composer & commands** (#744, #745): `/model` and `/models` both let you pick a model; all
+  recognized built-in slash commands autocomplete; the multi-line input grows before it scrolls.
+- **Transcript** (#744, #745): each turn's formatted assistant response renders; a scroll-aware
+  response navigator appears only when scrolled away from the latest message.
+- **Sheets** (#745): bottom sheets size to their content (short content no longer fills the screen),
+  scroll internally when content overflows, and open/close with a faster, crisper animation.
+- **Focus rings** (#745): keyboard focus is themed to the Emberline palette instead of the default
+  browser blue, while staying visible for accessibility.
+
 ## [2.5.8] - 2026-07-13
 
 Release-hardening wave: every platform's release pipeline now builds green end to end
