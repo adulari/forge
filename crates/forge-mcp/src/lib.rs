@@ -393,14 +393,21 @@ impl McpManager {
             .collect();
         let results = futures::future::join_all(jobs.into_iter().map(|(s, deps)| async move {
             let label = s.transport_label();
-            match tokio::time::timeout(connect_timeout, transport::serve(&s, deps)).await {
-                Ok(Ok(service)) => (s.name.clone(), label, Ok(service)),
-                Ok(Err(e)) => (s.name.clone(), label, Err(e)),
+            let name = s.name.clone();
+            let result = tokio::time::timeout(connect_timeout, async {
+                let service = transport::serve(&s, deps).await?;
+                self.add_established(&name, label, service).await;
+                Ok::<(), String>(())
+            })
+            .await;
+            match result {
+                Ok(Ok(())) => (name, label, Ok(())),
+                Ok(Err(reason)) => (name, label, Err(reason)),
                 Err(_) => (
-                    s.name.clone(),
+                    name,
                     label,
                     Err(format!(
-                        "connect timed out after {}s",
+                        "connect/initialize/discovery timed out after {}s",
                         connect_timeout.as_secs()
                     )),
                 ),
@@ -409,56 +416,9 @@ impl McpManager {
         .await;
 
         for (name, label, res) in results {
-            match res {
-                Ok(service) => {
-                    // `transport::serve` above only bounds the handshake; discovery
-                    // (`tools/list`/`resources/list`/`prompts/list`) is a separate round-trip that a
-                    // buggy/hostile server could hang forever without this. Bound it with the same
-                    // `connect_timeout` budget so a single stuck server can't block session startup.
-                    if let Err(_elapsed) = tokio::time::timeout(
-                        connect_timeout,
-                        self.add_established(&name, label, service),
-                    )
-                    .await
-                    {
-                        let reason = format!(
-                            "post-connect discovery timed out after {}s",
-                            connect_timeout.as_secs()
-                        );
-                        tracing::warn!("mcp: server '{name}' failed to connect: {reason}");
-                        self.conns.lock().insert(
-                            name.clone(),
-                            Connection {
-                                name,
-                                status: ServerStatus::Failed(reason),
-                                transport_label: label,
-                                peer: None,
-                                service: None,
-                                tools: vec![],
-                                resources: vec![],
-                                prompts: vec![],
-                                reconnect_attempts: 0,
-                            },
-                        );
-                    }
-                }
-                Err(reason) => {
-                    tracing::warn!("mcp: server '{name}' failed to connect: {reason}");
-                    self.conns.lock().insert(
-                        name.clone(),
-                        Connection {
-                            name,
-                            status: ServerStatus::Failed(reason),
-                            transport_label: label,
-                            peer: None,
-                            service: None,
-                            tools: vec![],
-                            resources: vec![],
-                            prompts: vec![],
-                            reconnect_attempts: 0,
-                        },
-                    );
-                }
+            if let Err(reason) = res {
+                tracing::warn!("mcp: server '{name}' failed to connect: {reason}");
+                self.set_failed(name, label, reason);
             }
         }
         // Surface declared-but-inactive servers (disabled, or excluded by the allowlist) so the
@@ -537,6 +497,23 @@ impl McpManager {
         );
     }
 
+    fn set_failed(&self, name: String, transport_label: &'static str, reason: String) {
+        self.conns.lock().insert(
+            name.clone(),
+            Connection {
+                name,
+                status: ServerStatus::Failed(reason),
+                transport_label,
+                peer: None,
+                service: None,
+                tools: vec![],
+                resources: vec![],
+                prompts: vec![],
+                reconnect_attempts: 0,
+            },
+        );
+    }
+
     /// No servers connected/declared — the whole MCP path is inert.
     pub fn is_empty(&self) -> bool {
         self.conns.lock().is_empty()
@@ -548,81 +525,24 @@ impl McpManager {
     pub async fn connect_one(&self, server: &forge_config::McpServerConfig) -> Result<(), String> {
         let name = server.name.clone();
         let label = server.transport_label();
-        match tokio::time::timeout(
-            self.connect_timeout,
-            transport::serve(server, self.handler_deps()),
-        )
-        .await
-        {
-            Ok(Ok(service)) => {
-                // See `connect_active`: discovery is a separate round-trip from the handshake and
-                // needs its own bound so a server that hangs on `tools/list` can't stall forever.
-                match tokio::time::timeout(
-                    self.connect_timeout,
-                    self.add_established(&name, label, service),
-                )
-                .await
-                {
-                    Ok(()) => Ok(()),
-                    Err(_elapsed) => {
-                        let reason = format!(
-                            "post-connect discovery timed out after {}s",
-                            self.connect_timeout.as_secs()
-                        );
-                        self.conns.lock().insert(
-                            name.clone(),
-                            Connection {
-                                name,
-                                status: ServerStatus::Failed(reason.clone()),
-                                transport_label: label,
-                                peer: None,
-                                service: None,
-                                tools: vec![],
-                                resources: vec![],
-                                prompts: vec![],
-                                reconnect_attempts: 0,
-                            },
-                        );
-                        Err(reason)
-                    }
-                }
-            }
-            Ok(Err(e)) => {
-                self.conns.lock().insert(
-                    name.clone(),
-                    Connection {
-                        name,
-                        status: ServerStatus::Failed(e.clone()),
-                        transport_label: label,
-                        peer: None,
-                        service: None,
-                        tools: vec![],
-                        resources: vec![],
-                        prompts: vec![],
-                        reconnect_attempts: 0,
-                    },
-                );
-                Err(e)
+        let result = tokio::time::timeout(self.connect_timeout, async {
+            let service = transport::serve(server, self.handler_deps()).await?;
+            self.add_established(&name, label, service).await;
+            Ok::<(), String>(())
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(reason)) => {
+                self.set_failed(name, label, reason.clone());
+                Err(reason)
             }
             Err(_) => {
                 let reason = format!(
-                    "connect timed out after {}s",
+                    "connect/initialize/discovery timed out after {}s",
                     self.connect_timeout.as_secs()
                 );
-                self.conns.lock().insert(
-                    name.clone(),
-                    Connection {
-                        name,
-                        status: ServerStatus::Failed(reason.clone()),
-                        transport_label: label,
-                        peer: None,
-                        service: None,
-                        tools: vec![],
-                        resources: vec![],
-                        prompts: vec![],
-                        reconnect_attempts: 0,
-                    },
-                );
+                self.set_failed(name, label, reason.clone());
                 Err(reason)
             }
         }
@@ -986,22 +906,13 @@ impl McpManager {
             .unwrap_or(0);
         tokio::time::sleep(Duration::from_millis(200 * (attempt as u64 + 1))).await;
         let label = cfg.transport_label();
-        let established = match tokio::time::timeout(
-            self.connect_timeout,
-            transport::serve(&cfg, self.handler_deps()),
-        )
+        let established = tokio::time::timeout(self.connect_timeout, async {
+            let service = transport::serve(&cfg, self.handler_deps()).await?;
+            self.add_established(server, label, service).await;
+            Ok::<(), String>(())
+        })
         .await
-        {
-            // Discovery (`tools/list`/etc.) is a separate round-trip from the handshake above and
-            // needs its own bound — a server that hangs there must not wedge this reconnect forever.
-            Ok(Ok(service)) => tokio::time::timeout(
-                self.connect_timeout,
-                self.add_established(server, label, service),
-            )
-            .await
-            .is_ok(),
-            _ => false,
-        };
+        .is_ok_and(|result| result.is_ok());
         if established {
             self.peer_for(server)
         } else {
@@ -1526,6 +1437,68 @@ mod tests {
             "meta-tools advertised before any connection completes"
         );
         assert!(mgr.knows_tool(MCP_CALL), "mcp_call routable immediately");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_server_is_skipped_while_healthy_tools_remain_available() {
+        use std::time::Instant;
+
+        let config = McpConfig {
+            connect_timeout_secs: 1,
+            servers: vec![
+                forge_config::McpServerConfig {
+                    name: "slow".into(),
+                    transport: forge_config::McpTransport::Stdio {
+                        command: "sh".into(),
+                        args: vec!["-c".into(), "sleep 5".into()],
+                        env: Default::default(),
+                    },
+                    auth: None,
+                    secret_env: vec![],
+                    enabled: true,
+                },
+                forge_config::McpServerConfig {
+                    name: "also-slow".into(),
+                    transport: forge_config::McpTransport::Stdio {
+                        command: "sh".into(),
+                        args: vec!["-c".into(), "sleep 5".into()],
+                        env: Default::default(),
+                    },
+                    auth: None,
+                    secret_env: vec![],
+                    enabled: true,
+                },
+            ],
+            ..Default::default()
+        };
+        let mgr = testsupport::manager_with_echo(&config).await;
+        let started = Instant::now();
+        mgr.connect_active().await;
+
+        assert!(
+            started.elapsed() < Duration::from_millis(1800),
+            "timeout must bound the pass"
+        );
+        let slow = mgr
+            .status_lines()
+            .into_iter()
+            .find(|line| line.name == "slow")
+            .expect("slow server is reported");
+        assert_eq!(slow.status, "failed");
+        assert!(slow.detail.unwrap_or_default().contains("timed out"));
+        assert!(
+            mgr.status_lines()
+                .into_iter()
+                .any(|line| line.name == "also-slow" && line.status == "failed"),
+            "all timed-out servers are skipped"
+        );
+        assert!(
+            mgr.tool_lines("test")
+                .iter()
+                .any(|(name, _)| name == "test__echo"),
+            "healthy server tools remain loaded"
+        );
     }
 
     // ---- lock hardening (item 5): parking_lot never poisons ----
