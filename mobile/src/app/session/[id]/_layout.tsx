@@ -249,9 +249,8 @@ function SessionShell({ sessionId }: { sessionId: string }) {
     <View style={[styles.flex, { backgroundColor: tokens.bg1 }]}>
       <SafeAreaView
         edges={["top", "left", "right"]}
-        // Elevated header surface (thermal elevation): bg2 sits one step above the bg1 chat
-        // behind the <Slot/>, so the status strip + context gauge read as part of the header
-        // instead of floating over the chat. The hairline seals the seam between the two.
+        // One native elevated surface owns both the physical top inset and every header row.
+        // Keeping the fill on this SafeAreaView avoids exposing bg1 between sibling rows.
         style={{ backgroundColor: tokens.bg2, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: tokens.border }}
         // Real height of everything stacked above `<Slot/>` (header + any banners + status +
         // segmented) — Chat's `Screen` reads this back as `keyboardVerticalOffset` so
@@ -259,9 +258,6 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         // constant. Banners are conditional, so this legitimately changes across snapshots.
         onLayout={(e) => setHeaderHeight(e.nativeEvent.layout.height)}
       >
-        <View
-          style={[styles.headerSurface, { backgroundColor: tokens.bg2, borderBottomColor: tokens.border }]}
-        >
         <View style={gutter}>
           <SessionHeader
             title={snapshot?.title || `session ${sessionId.slice(0, 8)}`}
@@ -339,7 +335,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           <Banner tone="neutral" compact message="reconnecting…" />
         ) : null}
 
-        <View style={[gutter, { backgroundColor: tokens.bg2 }]}>
+        <View style={gutter}>
           <StatusStrip
             state={statusState}
             tier={snapshot?.tier ?? null}
@@ -354,14 +350,13 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           />
         </View>
 
-        <View style={[gutter, styles.segmentedWrap, { backgroundColor: tokens.bg2 }]}>
+        <View style={[gutter, styles.segmentedWrap]}>
           <Segmented
             options={segmentOptions}
             value={activeSegment}
             onChange={onSegmentChange}
             testID="session-segmented"
           />
-        </View>
         </View>
       </SafeAreaView>
 
@@ -400,6 +395,5 @@ export default function SessionLayout() {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  headerSurface: { borderBottomWidth: StyleSheet.hairlineWidth },
   segmentedWrap: { paddingBottom: space.space8 },
 });

@@ -16,8 +16,8 @@ import { CostMetric } from "../../components/ds/CostMetric";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { IconButton } from "../../components/ds/IconButton";
 import { Screen } from "../../components/ds/Screen";
-import { StatusDot } from "../../components/ds/StatusDot";
 import { Skeleton } from "../../components/ds/Skeleton";
+import { StatusDot } from "../../components/ds/StatusDot";
 import { ApiError, type SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { useServerFleets, useSessions } from "../../lib/queries";
@@ -57,7 +57,7 @@ function FleetHeader({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: S
     <View style={[styles.header, { borderBottomColor: tokens.border }]}>
       <View style={styles.headerStat}>
         <Text style={[typeScale.section, { color: tokens.ink3 }]}>spend</Text>
-        <CostMetric valueUsd={totalCost} variant="bodyBold" />
+        <CostMetric valueUsd={totalCost} variant="bodyBold" showZero />
       </View>
       <Pressable
         onPress={onToggleNeedsYou}
@@ -81,13 +81,29 @@ function FleetHeader({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: S
   );
 }
 
-function CoalStrip({ sessions, onPress }: { sessions: SessionRow[]; onPress: (index: number) => void }) {
+function SessionJumpStrip({ sessions, onPress }: { sessions: SessionRow[]; onPress: (sessionId: string) => void }) {
   const tokens = useTokens();
   const visible = sessions.slice(0, 14);
-  return <View style={styles.coalStrip}>{visible.map((session, index) => {
-    const state = session.waiting ? "waiting" : session.busy ? "busy" : "idle";
-    return <Pressable key={session.id} onPress={() => onPress(index)} accessibilityLabel={`Jump to ${session.title || session.id}`} style={styles.coal}><StatusDot state={state} size={6} /></Pressable>;
-  })}{sessions.length > visible.length ? <Text style={[typeScale.meta, { color: tokens.ink3 }]}>+{sessions.length - visible.length}</Text> : null}</View>;
+
+  if (visible.length === 0) return null;
+
+  return (
+    <View style={[styles.jumpStrip, { borderBottomColor: tokens.border }]}>
+      <Text style={[typeScale.section, { color: tokens.ink3 }]}>sessions</Text>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.jumpStripDots}>
+        {visible.map((session) => (
+          <Pressable
+            key={session.id}
+            onPress={() => onPress(session.id)}
+            style={({ pressed }) => [styles.jumpDot, { backgroundColor: tokens.ink3, opacity: pressed ? 0.6 : 1 }]}
+            accessibilityRole="button"
+            accessibilityLabel={`Jump to ${session.title || session.id}`}
+          />
+        ))}
+        {sessions.length > visible.length ? <Text style={[typeScale.meta, { color: tokens.ink3 }]}>+{sessions.length - visible.length}</Text> : null}
+      </ScrollView>
+    </View>
+  );
 }
 
 function FleetRowSkeleton() {
@@ -250,7 +266,7 @@ export default function FleetScreen() {
         autoCorrect={false}
         containerStyle={styles.search}
       />
-      {hasData ? <><FleetHeader sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /><CoalStrip sessions={data} onPress={(index) => { const sessionId = data[index]?.id; const target = deckRows.findIndex((item) => item.type === "session" && item.row.id === sessionId); if (target >= 0) listRef.current?.scrollToIndex({ index: target, animated: true }); }} /></> : null}
+      {hasData ? <><FleetHeader sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /><SessionJumpStrip sessions={filteredData} onPress={(sessionId) => { const target = deckRows.findIndex((item) => item.type === "session" && item.row.id === sessionId); if (target >= 0) listRef.current?.scrollToIndex({ index: target, animated: true }); }} /></> : null}
       {isFirstLoad ? (
         <View style={styles.list}>
           {[0, 1, 2, 3].map((i) => (
@@ -310,8 +326,9 @@ const styles = StyleSheet.create({
   emptyWrap: { flex: 1 },
   emptyAsh: { flexDirection: "row", justifyContent: "center", gap: space.space8, paddingTop: space.space24 },
   ashCoal: { width: 6, height: 6, borderRadius: 3 },
-  coalStrip: { flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: space.space8, paddingVertical: space.space8 },
-  coal: { minWidth: 12, minHeight: 12, alignItems: "center", justifyContent: "center" },
+  jumpStrip: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingVertical: space.space8, borderBottomWidth: StyleSheet.hairlineWidth },
+  jumpStripDots: { alignItems: "center", gap: space.space8 },
+  jumpDot: { width: 6, height: 6, borderRadius: 3 },
   groupLabel: { paddingTop: space.space16, paddingHorizontal: space.space16 },
   headerDivider: { borderLeftWidth: StyleSheet.hairlineWidth, paddingLeft: space.space12 },
   skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
