@@ -228,6 +228,7 @@ mod tests {
             auth: ApnsAuth::from_scalar(&[7u8; 32], "TEAM", "KEY"),
             client: reqwest::Client::new(),
             allowed_topics: allowed_topics.iter().map(|s| s.to_string()).collect(),
+            relay_token: None,
             limiters: Arc::new(RateLimiters::new(1000, 60, 1_000_000)),
         })
     }
