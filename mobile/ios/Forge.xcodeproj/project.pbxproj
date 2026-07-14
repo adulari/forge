@@ -462,7 +462,7 @@
 				VERSIONING_SYSTEM = "apple-generic";
 				DEVELOPMENT_TEAM = 95VXXPD28Y;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				CODE_SIGN_ENTITLEMENTS = Forge/Forge.entitlements;
+				CODE_SIGN_ENTITLEMENTS = Forge/Forge.Release.entitlements;
 			};
 			name = Release;
 		};

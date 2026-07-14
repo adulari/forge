@@ -1,5 +1,5 @@
 import { Platform } from "react-native";
-import { requireNativeModule } from "expo-modules-core";
+import { EventEmitter, requireNativeModule } from "expo-modules-core";
 
 // Real module only exists on iOS (see ios/LiveActivityModule.swift) — every export here
 // degrades to a safe no-op on other platforms so callers don't need their own Platform.OS guard.
@@ -33,6 +33,18 @@ function loadNative(): NativeLiveActivity | null {
 }
 
 const native = loadNative();
+const emitter = native ? new EventEmitter(native) : null;
+
+export type LiveActivityPushToken = {
+  sessionId: string;
+  pushToken: string;
+};
+
+export function addLiveActivityPushTokenListener(
+  listener: (token: LiveActivityPushToken) => void,
+): { remove(): void } {
+  return emitter?.addListener("pushToken", listener) ?? { remove() {} };
+}
 
 export async function isLiveActivitySupported(): Promise<boolean> {
   if (!native) return false;

@@ -33,6 +33,7 @@ struct AppState {
     auth: ApnsAuth,
     client: reqwest::Client,
     allowed_topics: Vec<String>,
+    relay_token: Option<String>,
     limiters: Arc<RateLimiters>,
 }
 
@@ -56,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         auth,
         client,
         allowed_topics: config.allowed_topics,
+        relay_token: config.relay_token,
         limiters,
     });
 
@@ -114,6 +116,11 @@ async fn send_push(
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
     // --- validation, before anything touches Apple or the rate limiters ---
+    if let Some(expected) = &state.relay_token {
+        if header_str(&headers, "x-forge-relay-token") != Some(expected) {
+            return (StatusCode::UNAUTHORIZED, "valid relay token required").into_response();
+        }
+    }
     if !is_valid_device_token(&device_token) {
         return (StatusCode::BAD_REQUEST, "device_token must be 64 hex chars").into_response();
     }
@@ -130,6 +137,13 @@ async fn send_push(
         return (
             StatusCode::BAD_REQUEST,
             "apns-push-type must be alert or liveactivity",
+        )
+            .into_response();
+    }
+    if (push_type == "liveactivity") != topic.ends_with(".push-type.liveactivity") {
+        return (
+            StatusCode::BAD_REQUEST,
+            "liveactivity pushes require a .push-type.liveactivity topic",
         )
             .into_response();
     }
@@ -164,7 +178,10 @@ async fn send_push(
         )
         .header("apns-topic", &topic)
         .header("apns-push-type", push_type)
-        .header("apns-priority", "10")
+        .header(
+            "apns-priority",
+            header_str(&headers, "apns-priority").unwrap_or("10"),
+        )
         .json(&payload)
         .send()
         .await;
@@ -211,6 +228,7 @@ mod tests {
             auth: ApnsAuth::from_scalar(&[7u8; 32], "TEAM", "KEY"),
             client: reqwest::Client::new(),
             allowed_topics: allowed_topics.iter().map(|s| s.to_string()).collect(),
+            relay_token: None,
             limiters: Arc::new(RateLimiters::new(1000, 60, 1_000_000)),
         })
     }
