@@ -539,6 +539,13 @@ async fn drive_session(
     let _ = snapshot_tx.send(closed);
 }
 
+fn take_next_queued_prompt(queue: &mut Vec<String>, app: &mut App) -> Option<String> {
+    let next = queue.first().cloned()?;
+    queue.remove(0);
+    app.set_queued(queue);
+    Some(next)
+}
+
 impl DriverState {
     /// One remote input — the headless mirror of `run_chat_tui`'s remote drain, minus the
     /// host-terminal cases (`/remote` toggling, host clipboard).
@@ -812,16 +819,23 @@ impl DriverState {
         self.busy = false;
         self.loop_state = None;
         self.goal_state = None;
-        if !self.queued_prompts.is_empty() {
-            self.queued_prompts.clear();
-            self.app.set_queued(&self.queued_prompts);
-        }
         self.pending = None;
         self.pending_question = None;
         self.app.prompt = None;
         self.app.clear_question();
         self.app.workflow.on_interrupt();
         self.app.apply(forge_tui::PresenterEvent::AssistantDone);
+
+        // An interrupt cancels only the active turn. Prompts submitted while it was running are
+        // still valid work and must drain FIFO; start the head under the new generation so the
+        // aborted turn's DoneGuard signal remains harmlessly stale.
+        if let Some(next) = self.take_next_queued_prompt() {
+            self.start_turn(&next);
+        }
+    }
+
+    fn take_next_queued_prompt(&mut self) -> Option<String> {
+        take_next_queued_prompt(&mut self.queued_prompts, &mut self.app)
     }
 
     /// Act on a [`DispatchOutcome`] — the headless twin of the TUI's outcome match arms.
@@ -1510,10 +1524,10 @@ impl DriverState {
                 self.goal_state = Some(gs);
             }
         }
-        if self.turn_handle.is_none() && !self.queued_prompts.is_empty() {
-            let next = self.queued_prompts.remove(0);
-            self.app.set_queued(&self.queued_prompts);
-            self.start_turn(&next);
+        if self.turn_handle.is_none() {
+            if let Some(next) = self.take_next_queued_prompt() {
+                self.start_turn(&next);
+            }
         }
         if self.turn_handle.is_none() && self.turn_gen > self.last_auto_compact_gen {
             if let Some(lim) = self.app.context_limit {
@@ -1591,5 +1605,26 @@ impl DriverState {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupt_drains_queued_prompts_in_fifo_order() {
+        let mut app = App::default();
+        let mut queue = vec!["second".to_string(), "third".to_string()];
+        assert_eq!(
+            take_next_queued_prompt(&mut queue, &mut app).as_deref(),
+            Some("second")
+        );
+        assert_eq!(
+            take_next_queued_prompt(&mut queue, &mut app).as_deref(),
+            Some("third")
+        );
+        assert!(queue.is_empty());
+        assert_eq!(take_next_queued_prompt(&mut queue, &mut app), None);
     }
 }
