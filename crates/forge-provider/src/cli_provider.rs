@@ -28,7 +28,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use forge_types::{Message, Role, Usage};
+use forge_types::{Message, PermissionMode, Role, Usage};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -537,9 +537,12 @@ fn bridge_mcp_env(
             env.push(("FORGE_CHECKPOINT_SESSION".to_string(), c.session.clone()));
             env.push(("FORGE_CHECKPOINT_SEQ".to_string(), c.seq.to_string()));
             env.push(("FORGE_CHECKPOINT_ROOT".to_string(), c.root.clone()));
-            // The parent's live temper, so the bridge's permission gate matches the UI mode
-            // (Plan→Auto-edit switches reach mcp-serve instead of it using the stale config).
-            env.push(("FORGE_PERMISSION_MODE".to_string(), c.mode.clone()));
+            // Only canonical permission keys cross the process boundary. Invalid values fail closed
+            // to Ask instead of allowing the child to inherit a more permissive on-disk mode.
+            let mode = PermissionMode::from_key(&c.mode)
+                .unwrap_or(PermissionMode::Default)
+                .key();
+            env.push(("FORGE_PERMISSION_MODE".to_string(), mode.to_string()));
         }
         None => {
             for key in [
@@ -3408,6 +3411,43 @@ mod tests {
         assert_eq!(get("FORGE_CHECKPOINT_ROOT"), Some("/abs/checkpoints"));
         assert_eq!(get("FORGE_PERMISSION_MODE"), Some("accept-edits"));
         assert_eq!(get("FORGE_SUBAGENT_SINK"), Some("/tmp/sink.jsonl"));
+        assert!(env
+            .iter()
+            .all(|(key, value)| { key != "FORGE_PERMISSION_MODE" || value == "accept-edits" }));
+
+        // Full and Ask must cross the bridge as their canonical keys. The child uses these keys
+        // to select the same Forge MCP gate; it must never receive a display label or Debug name.
+        for (mode, expected) in [("bypass", "bypass"), ("default", "default")] {
+            let ctx = CheckpointContext {
+                session: "s".to_string(),
+                seq: 1,
+                root: "/tmp/checkpoints".to_string(),
+                mode: mode.to_string(),
+            };
+            let env = bridge_mcp_env(None, Some(&ctx));
+            assert_eq!(
+                env.iter()
+                    .find(|(key, _)| key == "FORGE_PERMISSION_MODE")
+                    .map(|(_, value)| value.as_str()),
+                Some(expected)
+            );
+        }
+
+        // Unknown input fails closed to Ask rather than inheriting a permissive config in the
+        // child process.
+        let invalid = CheckpointContext {
+            session: "s".to_string(),
+            seq: 1,
+            root: "/tmp/checkpoints".to_string(),
+            mode: "Full".to_string(),
+        };
+        let env = bridge_mcp_env(None, Some(&invalid));
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "FORGE_PERMISSION_MODE")
+                .map(|(_, value)| value.as_str()),
+            Some("default")
+        );
 
         // The function only READS env (for the legacy/depth fallback) — it must never WRITE it, so a
         // value present after the call cannot have been published by this code path.
