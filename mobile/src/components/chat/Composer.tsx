@@ -47,7 +47,7 @@ const MAX_LINES = 8;
 const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
 const MIN_HEIGHT = 44;
 const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES + space.space8;
-const COMMAND_CHIPS = ["/mode", "/assay", "/model", "/models", "/config", "/copy", "/thinking", "/image", "/mcp", "/init", "/new", "/undo", "/checkpoint", "/checkpoints", "/compact", "/uncompact", "/lattice", "/plan", "/execute", "/goal", "/pr", "/loop", "/effort", "/remember", "/memories", "/clear", "/usage", "/mesh", "/remote", "/help"] as const;
+import { BUILTIN_COMMANDS, isKnownCommand, useSkillCommands } from "../../lib/commands";
 
 export interface ComposerProps {
   sessionId: string;
@@ -146,9 +146,11 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const stopIconStyle = useAnimatedStyle(() => ({ opacity: actionProgress.value, transform: [{ scale: 0.8 + actionProgress.value * 0.2 }] }));
   const sendIconStyle = useAnimatedStyle(() => ({ opacity: 1 - actionProgress.value, transform: [{ scale: 1 - actionProgress.value * 0.2 }] }));
 
-  const commandHints = COMMAND_CHIPS.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase()));
+  const skillCommands = useSkillCommands();
+  const allCommands = [...BUILTIN_COMMANDS, ...skillCommands.map((s) => s.name)];
+  const commandHints = allCommands.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase()));
   const leadingCommand = text.match(/^\/(\S*)/)?.[0].toLowerCase();
-  const recognizedCommand = leadingCommand != null && COMMAND_CHIPS.includes(leadingCommand as (typeof COMMAND_CHIPS)[number]);
+  const recognizedCommand = leadingCommand != null && isKnownCommand(leadingCommand, skillCommands.map((s) => s.name));
 
   // `suggestedPrompt` keeps echoing the STALE pre-send value for a beat after a send clears the
   // draft (the daemon hasn't refreshed it yet) — `suppressedSuggestion` (SessionContext, set in

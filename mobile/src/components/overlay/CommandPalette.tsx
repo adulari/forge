@@ -80,7 +80,7 @@ import { Sheet } from "../ds/Sheet";
 import { StatusDot } from "../ds/StatusDot";
 import { useToast } from "../ds/ToastHost";
 
-const SLASH_COMMANDS = ["/plan", "/compact", "/models", "/mode", "/help"] as const;
+import { BUILTIN_COMMANDS, useSkillCommands } from "../../lib/commands";
 const TRANSIENT_SEND_TIMEOUT_MS = 5000;
 const PANEL_WIDTH = 560;
 const ICON_SIZE = 18;
@@ -343,16 +343,21 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
       },
     });
 
-    for (const cmd of SLASH_COMMANDS) {
+    const skillCommands = useSkillCommands();
+    const allCommands: { name: string; description?: string }[] = [
+      ...BUILTIN_COMMANDS.map((name) => ({ name })),
+      ...skillCommands,
+    ];
+    for (const cmd of allCommands) {
       items.push({
-        id: `action:cmd:${cmd}`,
+        id: `action:cmd:${cmd.name}`,
         group: "actions",
-        title: cmd,
-        subtitle: activeSessionId ? "send to the current session" : "open a session first",
-        keywords: cmd,
+        title: cmd.name,
+        subtitle: cmd.description ?? (activeSessionId ? "send to the current session" : "open a session first"),
+        keywords: cmd.description ? `${cmd.name} ${cmd.description}` : cmd.name,
         disabled: !activeSessionId,
         leading: <Wand2 size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
-        onSelect: () => runSlashCommand(cmd),
+        onSelect: () => runSlashCommand(cmd.name),
       });
     }
 
