@@ -470,6 +470,13 @@ fn contains_whole_word(haystack: &str, needle: &str) -> bool {
 
 /// Whether a prompt reads as a coding task (code fences, code tokens, or a dev-action verb) — the
 /// signal behind the mild coding-provider prior.
+/// Source-file extensions — a task that names a source file is editing code even when it carries
+/// no code snippet or dev-action verb (e.g. "fix the padding in ForgeSessionActivity.swift").
+const SOURCE_FILE_EXTS: &[&str] = &[
+    ".rs", ".ts", ".tsx", ".js", ".jsx", ".swift", ".py", ".go", ".java", ".kt", ".rb", ".cpp",
+    ".css", ".html", ".sh", ".toml", ".yaml", ".yml", ".sql", ".vue", ".php",
+];
+
 fn is_code_heavy(prompt: &str) -> bool {
     let lower = prompt.to_lowercase();
     prompt.contains("```")
@@ -477,6 +484,7 @@ fn is_code_heavy(prompt: &str) -> bool {
         || ACTION_VERBS
             .iter()
             .any(|v| contains_word_boundary(&lower, v))
+        || SOURCE_FILE_EXTS.iter().any(|e| lower.contains(e))
 }
 
 /// Score a prompt's difficulty from weighted local signals (deterministic, no I/O of its own —
@@ -674,9 +682,27 @@ impl HeuristicRouter {
         self.config.mesh.auto_discover && self.catalog.as_ref().is_some_and(|c| !c.is_empty())
     }
 
-    /// Ordered shortlist used by the LLM classifier, following the same trivial-tier ranking as
-    /// normal routing. Health is applied later because it changes between turns.
+    /// Ordered shortlist used by the LLM classifier. It classifies with capable, FREE models —
+    /// deliberately NOT the weakest trivial-tier models (which mislabel real code work as trivial,
+    /// then route it to a model too weak to do it) and NOT subscription models (which would burn
+    /// quota on every turn's classification). Ranked at the Standard tier and filtered to free, so
+    /// the label is reliable at zero cost. Falls back to the trivial-tier shortlist if no free
+    /// Standard model is available. Health is applied later because it changes between turns.
     pub fn classifier_candidates(&self) -> Vec<String> {
+        let capable_free: Vec<String> = self
+            .candidates_for_tier(
+                TaskTier::Standard,
+                RouteHints::default(),
+                &SubscriptionQuota::default(),
+                None,
+            )
+            .into_iter()
+            .filter(|m| catalog::is_free(m, self.pricing.estimated_cost(m), false))
+            .take(3)
+            .collect();
+        if !capable_free.is_empty() {
+            return capable_free;
+        }
         self.candidates_for_tier(
             TaskTier::Trivial,
             RouteHints::default(),

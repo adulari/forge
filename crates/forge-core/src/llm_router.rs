@@ -109,11 +109,21 @@ fn prompt_hash(prompt: &str) -> u64 {
     hasher.finish()
 }
 
-fn guard_tier(llm: TaskTier, heuristic: TaskTier, confident: bool) -> TaskTier {
-    if confident && heuristic == TaskTier::Complex {
+fn guard_tier(llm: TaskTier, heuristic: TaskTier, confident: bool, code_heavy: bool) -> TaskTier {
+    let tier = if confident && heuristic == TaskTier::Complex {
         TaskTier::Complex
     } else {
         llm
+    };
+    // Hard floor: a code-editing task must NEVER route to the Trivial tier. Trivial-tier models
+    // (the cheapest free models) cannot reliably write correct code, however "mechanical" the
+    // classifier judged the task — and the LLM classifier itself runs on those same weak models,
+    // so it frequently under-labels real code work as trivial. This guardrail is independent of
+    // the classifier's verdict: if the turn touches code, the floor is Standard.
+    if code_heavy && tier == TaskTier::Trivial {
+        TaskTier::Standard
+    } else {
+        tier
     }
 }
 
@@ -159,6 +169,11 @@ impl Router for LlmRouter {
         if self.hybrid {
             let (tier, confident, reason) = HeuristicRouter::classify_confident(prompt, project);
             if confident {
+                let tier = if hints.code_heavy && tier == TaskTier::Trivial {
+                    TaskTier::Standard
+                } else {
+                    tier
+                };
                 return self.fallback.decide(
                     tier,
                     format!("{reason} (hybrid: heuristic confident)"),
@@ -176,7 +191,7 @@ impl Router for LlmRouter {
             HeuristicRouter::classify_confident(prompt, project);
         let key = prompt_hash(prompt);
         if let Some(tier) = self.cached(key) {
-            let tier = guard_tier(tier, heuristic_tier, heuristic_confident);
+            let tier = guard_tier(tier, heuristic_tier, heuristic_confident, hints.code_heavy);
             return self.fallback.decide(
                 tier,
                 format!("cached classifier result: {}", tier.as_str()),
@@ -218,7 +233,7 @@ impl Router for LlmRouter {
         match answered {
             Some((model, tier)) => {
                 self.store(key, tier);
-                let tier = guard_tier(tier, heuristic_tier, heuristic_confident);
+                let tier = guard_tier(tier, heuristic_tier, heuristic_confident, hints.code_heavy);
                 let guard = if tier != heuristic_tier && heuristic_confident {
                     format!("; never-downgrade from {heuristic_reason}")
                 } else {
@@ -471,6 +486,30 @@ mod tests {
             .await;
         assert_eq!(d.tier, TaskTier::Complex); // AC-B1
         assert!(d.rationale.contains("classified by"), "{}", d.rationale);
+    }
+
+    #[tokio::test]
+    async fn code_editing_task_never_routes_trivial() {
+        // The LLM classifier itself runs on weak trivial-tier models and frequently under-labels
+        // real code work as "trivial" — which would then route the edit to a model too weak to
+        // write correct code. A code-editing turn must floor at Standard regardless of the label.
+        let d = llm_router(Ok("trivial"))
+            .route(
+                "fix the padding in ForgeSessionActivity.swift so the content stops clipping",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+        assert_eq!(
+            d.tier,
+            TaskTier::Standard,
+            "a code-editing task labeled trivial must floor to Standard: {}",
+            d.rationale
+        );
     }
 
     #[tokio::test]
