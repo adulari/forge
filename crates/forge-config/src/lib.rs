@@ -2240,6 +2240,20 @@ pub fn project_initialization(cwd: &Path) -> ProjectInitialization {
     }
 }
 
+/// Whether this project has already attempted automatic setup. Stored as a Forge-owned marker so
+/// an unsuccessful model turn cannot consume quota again on every new session.
+pub fn project_auto_setup_attempted(cwd: &Path) -> bool {
+    cwd.join(".forge/.auto-setup-attempted").is_file()
+}
+
+/// Record an automatic setup attempt before its model turn starts. The marker never overwrites
+/// user files and is only used to prevent repeated opt-in attempts for the same project.
+pub fn mark_project_auto_setup_attempted(cwd: &Path) -> std::io::Result<()> {
+    let dir = cwd.join(".forge");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(".auto-setup-attempted"), "auto setup attempted\n")
+}
+
 fn directory_has_entries(path: &Path) -> bool {
     std::fs::read_dir(path)
         .ok()

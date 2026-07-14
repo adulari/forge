@@ -1307,12 +1307,12 @@ pub(crate) async fn run_chat_tui(
     // speed independent of the loop frequency (one frame per 60ms, exactly as before).
     let mut busy_since = Instant::now();
 
+    let project_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     if tui_config.project.auto_initialize
-        && !forge_config::project_initialization(
-            &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-        )
-        .initialized
+        && !forge_config::project_initialization(&project_cwd).initialized
+        && !forge_config::project_auto_setup_attempted(&project_cwd)
     {
+        let _ = forge_config::mark_project_auto_setup_attempted(&project_cwd);
         app.note("⚙ Setting up Forge for this project automatically…");
         turn_gen += 1;
         let (prompt, guidance, tier) = project_setup_turn();

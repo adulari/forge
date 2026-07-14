@@ -315,7 +315,8 @@ async fn drive_session(
     let auto_setup = forge_config::load()
         .map(|config| config.project.auto_initialize)
         .unwrap_or(false)
-        && !forge_config::project_initialization(std::path::Path::new(&cwd)).initialized;
+        && !forge_config::project_initialization(std::path::Path::new(&cwd)).initialized
+        && !forge_config::project_auto_setup_attempted(std::path::Path::new(&cwd));
 
     let mut st = DriverState {
         session,
@@ -358,6 +359,7 @@ async fn drive_session(
     let mut turn_error: Option<String> = None;
 
     if auto_setup {
+        let _ = forge_config::mark_project_auto_setup_attempted(std::path::Path::new(&cwd));
         st.app
             .note("⚙ Setting up Forge for this project automatically…");
         st.handle_outcome(project_setup_outcome());
