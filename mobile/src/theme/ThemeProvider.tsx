@@ -55,7 +55,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (Platform.OS !== "web" || typeof document === "undefined") return;
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content", tokens.bg1);
-  }, [tokens.bg1]);
+    document.documentElement.style.setProperty("--forge-focus", tokens.accent);
+  }, [tokens.accent, tokens.bg1]);
 
   const value = useMemo<ThemeContextValue>(
     () => ({ scheme, preference, tokens, setScheme }),

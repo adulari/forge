@@ -16,7 +16,7 @@ export interface ContextGaugeProps {
   compact?: boolean;
 }
 
-const TRACK_HEIGHT = 3;
+const TRACK_HEIGHT = 4;
 
 export function ContextGauge({ used, total, compact = false }: ContextGaugeProps) {
   const tokens = useTokens();
@@ -29,7 +29,7 @@ export function ContextGauge({ used, total, compact = false }: ContextGaugeProps
 
   return (
     <View
-      style={styles.row}
+      style={[styles.row, compact && styles.compactRow]}
       accessibilityRole="progressbar"
       accessibilityValue={{ min: 0, max: 100, now: Math.round(pct) }}
       accessibilityLabel={`context used ${formatTokenPair(used, total)}`}
@@ -66,9 +66,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: space.space8,
   },
+  compactRow: { flex: 0, minWidth: 78, gap: space.space4 },
   track: {
     flex: 1,
+    minWidth: 0,
     height: TRACK_HEIGHT,
+    overflow: "hidden",
     borderRadius: radii.radiusPill,
     // Not `overflow: "hidden"` — the fill carries its own matching radius, and an
     // overheat glow (Move 1) needs to bleed a few px beyond the 3px track.

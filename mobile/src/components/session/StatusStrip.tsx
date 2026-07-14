@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { ChevronRight } from "lucide-react-native";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text } from "react-native";
 import Animated from "react-native-reanimated";
 
 import type { RemoteInput } from "../../lib/ws";
@@ -56,11 +56,7 @@ export function StatusStrip(props: StatusStripProps) {
               +{props.weekly.deltaPct.toFixed(1)}% wk
             </Text>
           ) : <CostMetric valueUsd={props.costUsd} />}
-          {props.contextLimit != null ? (
-            <View style={styles.gauge}>
-              <ContextGauge used={props.contextTokens} total={props.contextLimit} compact />
-            </View>
-          ) : null}
+          {props.contextLimit != null ? <ContextGauge used={props.contextTokens} total={props.contextLimit} compact /> : null}
           <ChevronRight size={16} strokeWidth={1.75} color={tokens.ink3} />
         </Pressable>
       </Animated.View>
@@ -72,5 +68,4 @@ export function StatusStrip(props: StatusStripProps) {
 const styles = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 52, paddingVertical: space.space8 },
   tierModel: { flex: 1, flexShrink: 1, minWidth: 0 },
-  gauge: { width: 96, flexShrink: 0 },
 });

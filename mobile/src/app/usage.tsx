@@ -28,18 +28,16 @@ interface ProviderRowProps {
 const ProviderRow = memo(function ProviderRow({ provider, quotas }: ProviderRowProps) {
   const tokens = useTokens();
   const [open, setOpen] = useState(false);
-  const priceLabel = provider.costUsd > 0
-    ? `$${provider.costUsd.toFixed(2)}`
-    : provider.kind === "api" ? "No estimate" : "Included with plan";
+  const priceLabel = provider.costUsd > 0 ? `$${provider.costUsd.toFixed(2)}` : provider.kind === "api" ? "No price" : "Included";
   return (
     <Pressable onPress={() => setOpen((value) => !value)} accessibilityRole="button">
       <Card style={styles.provider}>
         <View style={styles.row}>
           <Text style={[styles.providerName, { color: tokens.ink }]} numberOfLines={1}>{provider.provider}</Text>
           <Badge label={provider.kind} tone={kindTone(provider.kind) as never} />
+          <Text style={[styles.price, { color: provider.costUsd > 0 ? tokens.accent : tokens.ink3 }]}>{priceLabel}</Text>
         </View>
-        <Text style={[styles.costSmall, { color: tokens.accent }]}>{priceLabel}</Text>
-        <Text style={[styles.detail, { color: tokens.ink3 }]}>{number(provider.inputTokens)} in · {number(provider.outputTokens)} out · {open ? "tap to collapse" : "tap for quota details"}</Text>
+        <Text style={[styles.detail, { color: tokens.ink3 }]}>{number(provider.inputTokens)} in · {number(provider.outputTokens)} out · {open ? "tap to collapse" : "tap for details"}</Text>
         {open ? quotas.map((quota) => (
           <View key={quota.windowKind} style={styles.quota}>
             <View style={styles.row}>
@@ -80,8 +78,8 @@ export default function UsageScreen() {
   const renderItem = useCallback(({ item }: { item: UsageProvider; index: number }) => <ProviderRow provider={item} quotas={quotasByProvider.get(quotaKey(item.provider, item.kind)) ?? []} />, [quotasByProvider]);
   const keyExtractor = useCallback((provider: UsageProvider) => provider.provider, []);
   const subscriptionQuotas = (quotaRows ?? []).filter((quota) => quota.kind !== "api" && quota.fraction != null);
-  const combinedSubscriptionPercent = subscriptionQuotas.length
-    ? Math.round((subscriptionQuotas.reduce((total, quota) => total + (quota.fraction ?? 0), 0) / subscriptionQuotas.length) * 100)
+  const combinedSubscriptionPercent = window === "week" && subscriptionQuotas.length > 0
+    ? Math.round(subscriptionQuotas.reduce((total, quota) => total + (quota.fraction ?? 0), 0) * 100 / subscriptionQuotas.length)
     : null;
   const hasMeteredApi = providers.some((provider) => provider.kind === "api");
   const apiCostUsd = providers
@@ -96,9 +94,9 @@ export default function UsageScreen() {
       <Text style={[styles.subtitle, { color: tokens.ink3 }]}>A clear read on your Forge consumption.</Text>
       <Segmented options={[{ value: "week", label: "This Week" }, { value: "session", label: "This Session" }]} value={window} onChange={setWindow} />
       {!isLoading && !isError && selected ? <View style={[styles.hero, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
-        <Text style={[styles.eyebrow, { color: tokens.ink3 }]}>{combinedSubscriptionPercent != null ? "COMBINED SUBSCRIPTION USAGE" : `${usageLabel} · ${window === "week" ? "THIS WEEK" : "THIS SESSION"}`}</Text>
-        {combinedSubscriptionPercent != null ? <Text style={[styles.cost, { color: tokens.accent }]}>{combinedSubscriptionPercent}%</Text> : hasMeteredApi ? <Text style={[styles.cost, { color: tokens.accent }]}>{`$${apiCostUsd.toFixed(2)}`}</Text> : <Text style={[styles.included, { color: tokens.accent }]}>Included with plan</Text>}
-        {combinedSubscriptionPercent != null ? <Text style={[styles.tokens, { color: tokens.ink3 }]}>{window === "week" ? "across subscription quotas this week" : "current subscription quota status"}</Text> : null}
+        <Text style={[styles.eyebrow, { color: tokens.ink3 }]}>{combinedSubscriptionPercent != null ? "COMBINED SUBSCRIPTION USAGE" : window === "session" ? "THIS SESSION" : usageLabel}</Text>
+        {combinedSubscriptionPercent != null ? <Text style={[styles.cost, { color: tokens.accent }]}>{combinedSubscriptionPercent}%</Text> : hasMeteredApi ? <Text style={[styles.cost, { color: tokens.accent }]}>{`$${apiCostUsd.toFixed(2)}`}</Text> : <Text style={[styles.included, { color: tokens.accent }]}>{window === "session" ? "Session activity" : "Included with plan"}</Text>}
+        {combinedSubscriptionPercent != null ? <Text style={[styles.tokens, { color: tokens.ink3 }]}>Average current subscription quota consumption</Text> : null}
         <Text style={[styles.tokens, { color: tokens.ink }]}>{number(totalTokens)} tokens</Text>
         <Text style={[styles.split, { color: tokens.ink3 }]}>{number(selected.combined.inputTokens)} in · {number(selected.combined.outputTokens)} out</Text>
       </View> : null}
@@ -133,7 +131,7 @@ const styles = StyleSheet.create({
   provider: { marginBottom: space.space8 },
   row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: space.space8 },
   providerName: { flex: 1, fontSize: 17, fontWeight: "700" },
-  costSmall: { fontSize: 22, fontWeight: "800", marginTop: 10 },
+  price: { fontSize: 13, fontWeight: "700", flexShrink: 0 },
   detail: { fontSize: 13, marginTop: 4 },
   quota: { marginTop: 12 },
   reset: { fontSize: 12, marginTop: 2 },

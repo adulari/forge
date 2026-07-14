@@ -49,6 +49,6 @@ export function EmptyState({ icon: Icon, message, action }: EmptyStateProps) {
 
 const styles = StyleSheet.create({
   container: { alignItems: "center", justifyContent: "center", padding: space.space32, gap: space.space12 },
-  message: { textAlign: "center" },
-  action: { marginTop: space.space8 },
+  message: { textAlign: "center", flexShrink: 1, maxWidth: "100%" },
+  action: { marginTop: space.space8, width: "100%", alignItems: "center" },
 });

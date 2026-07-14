@@ -597,7 +597,16 @@ export default function SessionChat() {
   }, [items]);
 
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    setShowJump(e.nativeEvent.contentOffset.y > JUMP_THRESHOLD_PX);
+    const awayFromLatest = e.nativeEvent.contentOffset.y > JUMP_THRESHOLD_PX;
+    setShowJump(awayFromLatest);
+    if (!awayFromLatest) {
+      setShowResponseNav(false);
+      if (responseNavTimer.current) clearTimeout(responseNavTimer.current);
+      return;
+    }
+    setShowResponseNav(true);
+    if (responseNavTimer.current) clearTimeout(responseNavTimer.current);
+    responseNavTimer.current = setTimeout(() => setShowResponseNav(false), 2500);
   }, []);
 
   const jumpToLatest = useCallback(() => {
@@ -696,7 +705,10 @@ export default function SessionChat() {
   const hasPending = queued.length > 0 || offlineQueue.length > 0;
   const assistantResponseIndices = useMemo(() => items.reduce<number[]>((indices, item, index) => { if (item.kind === "history" && item.row.role === "assistant") indices.push(index); return indices; }, []), [items]);
   const [responsePosition, setResponsePosition] = useState(0);
+  const [showResponseNav, setShowResponseNav] = useState(false);
+  const responseNavTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => { setResponsePosition((position) => Math.min(position, Math.max(0, assistantResponseIndices.length - 1))); }, [assistantResponseIndices.length]);
+  useEffect(() => () => { if (responseNavTimer.current) clearTimeout(responseNavTimer.current); }, []);
   const jumpToResponse = useCallback((direction: 1 | -1) => {
     if (assistantResponseIndices.length === 0) return;
     const next = Math.max(0, Math.min(assistantResponseIndices.length - 1, responsePosition + direction));
@@ -746,7 +758,7 @@ export default function SessionChat() {
           }
         />
 
-        {assistantResponseIndices.length > 1 ? <View style={[styles.responseNav, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Pressable onPress={() => jumpToResponse(-1)} disabled={responsePosition === 0} accessibilityRole="button" accessibilityLabel="Previous assistant response" style={styles.responseButton}><ChevronUp size={16} color={tokens.ink2} /></Pressable><Text style={[typeScale.meta, { color: tokens.ink2 }]}>{`${responsePosition + 1} / ${assistantResponseIndices.length} responses`}</Text><Pressable onPress={() => jumpToResponse(1)} disabled={responsePosition === assistantResponseIndices.length - 1} accessibilityRole="button" accessibilityLabel="Next assistant response" style={styles.responseButton}><ChevronDown size={16} color={tokens.ink2} /></Pressable></View> : null}
+        {showResponseNav && assistantResponseIndices.length > 1 ? <View style={[styles.responseNav, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Pressable onPress={() => jumpToResponse(1)} disabled={responsePosition === assistantResponseIndices.length - 1} accessibilityRole="button" accessibilityLabel="Previous assistant response" style={styles.responseButton}><ChevronUp size={16} color={tokens.ink2} /></Pressable><Text style={[typeScale.meta, { color: tokens.ink2 }]}>{`${responsePosition + 1} / ${assistantResponseIndices.length} responses`}</Text><Pressable onPress={() => jumpToResponse(-1)} disabled={responsePosition === 0} accessibilityRole="button" accessibilityLabel="Next assistant response" style={styles.responseButton}><ChevronDown size={16} color={tokens.ink2} /></Pressable></View> : null}
         {showJump ? (
           <Pressable
             onPress={jumpToLatest}

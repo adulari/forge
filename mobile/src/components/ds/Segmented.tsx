@@ -67,6 +67,7 @@ export function Segmented<T extends string = string>({ options, value, onChange,
     >
       {width > 0 ? (
         <Animated.View
+          pointerEvents="none"
           style={[styles.thumb, thumbStyle, { backgroundColor: tokens.bg2, borderRadius: radii.radius8 - 2 }]}
         >
           <View

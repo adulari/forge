@@ -1,5 +1,5 @@
 // DESIGN_SYSTEM.md §6 SearchField — Input + search icon + cancel, debounced 150ms.
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Search } from "lucide-react-native";
 
@@ -33,6 +33,7 @@ export function SearchField({
 }: SearchFieldProps) {
   const tokens = useTokens();
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [cancelFocused, setCancelFocused] = useState(false);
 
   useEffect(() => {
     if (!onDebouncedChange) return;
@@ -63,9 +64,11 @@ export function SearchField({
             onCancel?.();
           }}
           hitSlop={8}
+          onFocus={() => setCancelFocused(true)}
+          onBlur={() => setCancelFocused(false)}
           accessibilityRole="button"
           accessibilityLabel="Cancel search"
-          style={styles.cancel}
+          style={[styles.cancel, { borderColor: cancelFocused ? tokens.accent : "transparent" }]}
         >
           <Text style={[type.body, { color: tokens.accent }]}>Cancel</Text>
         </Pressable>
@@ -85,6 +88,7 @@ const styles = StyleSheet.create({
   cancel: {
     marginLeft: space.space12,
     minHeight: 44,
-    justifyContent: "center",
+    borderWidth: 2,
+    borderRadius: 8,
   },
 });
