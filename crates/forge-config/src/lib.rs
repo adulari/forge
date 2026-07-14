@@ -3,7 +3,7 @@
 //! come from environment variables first, then the OS keyring (`forge auth`).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::Figment;
@@ -2192,6 +2192,53 @@ pub fn cursor_dir() -> Option<PathBuf> {
 /// files that don't follow a fixed tool-specific directory structure.
 pub fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf())
+}
+
+/// Whether a project contains Forge-specific guidance, configuration, agents, skills, or commands.
+///
+/// This is the canonical project-initialization check. Callers must pass the session's effective
+/// working directory so worktrees and multi-project servers are evaluated correctly.
+pub fn project_initialization(cwd: &Path) -> ProjectInitialization {
+    let forge = cwd.join(".forge");
+    let initialized = [
+        cwd.join("AGENTS.md"),
+        cwd.join("FORGE.md"),
+        cwd.join("CLAUDE.md"),
+        forge.join("AGENTS.md"),
+        forge.join("FORGE.md"),
+        forge.join("config.toml"),
+        forge.join("agents.md"),
+        forge.join("mcp.toml"),
+        forge.join("settings.json"),
+    ]
+    .iter()
+    .any(|path| path.is_file())
+        || directory_has_entries(&forge.join("agents"))
+        || directory_has_entries(&forge.join("skills"))
+        || directory_has_entries(&forge.join("commands"))
+        || directory_has_entries(&cwd.join(".claude/agents"));
+
+    ProjectInitialization {
+        initialized,
+        hint: (!initialized).then(|| {
+            "No project guidance, custom agents, skills, commands, or Forge config found. Add AGENTS.md or run /init."
+                .to_string()
+        }),
+    }
+}
+
+fn directory_has_entries(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .ok()
+        .and_then(|mut entries| entries.next())
+        .is_some()
+}
+
+/// Canonical project-initialization result for a session working directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectInitialization {
+    pub initialized: bool,
+    pub hint: Option<String>,
 }
 
 /// The command/skill discovery sources, scope-tagged: user scope (`<config>/forge/{commands,
@@ -5148,6 +5195,25 @@ reason = "no privilege escalation"
                 "https://my-resource.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version={DEFAULT_AZURE_API_VERSION}"
             )
         );
+    }
+
+    #[test]
+    fn project_initialization_detects_guidance_agents_and_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!project_initialization(dir.path()).initialized);
+
+        std::fs::write(dir.path().join("AGENTS.md"), "guidance").unwrap();
+        assert!(project_initialization(dir.path()).initialized);
+        std::fs::remove_file(dir.path().join("AGENTS.md")).unwrap();
+
+        std::fs::create_dir_all(dir.path().join(".forge/agents")).unwrap();
+        std::fs::write(dir.path().join(".forge/agents/reviewer.md"), "agent").unwrap();
+        assert!(project_initialization(dir.path()).initialized);
+        std::fs::remove_dir_all(dir.path().join(".forge")).unwrap();
+
+        std::fs::create_dir_all(dir.path().join(".claude/agents")).unwrap();
+        std::fs::write(dir.path().join(".claude/agents/reviewer.md"), "agent").unwrap();
+        assert!(project_initialization(dir.path()).initialized);
     }
 
     #[test]
