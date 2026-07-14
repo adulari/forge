@@ -323,17 +323,6 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
         <LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={sendWithFeedback} />
 
-        {projectNeedsInitialization ? (
-          <Banner
-            tone="warn"
-            actionLabel={projectSetupRequested ? undefined : "Set it up for me"}
-            message={projectSetupRequested ? "Setting up Forge for this project…" : "This project isn't set up for Forge — no project guidance or custom agents. Forge works best with an AGENTS.md and custom agents."}
-            onAction={() => {
-              if (sendWithFeedback({ kind: "prompt", text: "/init" })) setProjectSetupRequested(true);
-            }}
-            onDismiss={() => setProjectWarningDismissed(true)}
-          />
-        ) : null}
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />
         ) : null}
@@ -377,6 +366,17 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             testID="session-segmented"
           />
         </View>
+        {projectNeedsInitialization ? (
+          <Banner
+            tone="warn"
+            actionLabel={projectSetupRequested ? undefined : "Set it up for me"}
+            message={projectSetupRequested ? "Setting up Forge for this project…" : "This project isn't set up for Forge — no project guidance or custom agents. Forge works best with an AGENTS.md and custom agents."}
+            onAction={() => {
+              if (sendWithFeedback({ kind: "prompt", text: "/init" })) setProjectSetupRequested(true);
+            }}
+            onDismiss={() => setProjectWarningDismissed(true)}
+          />
+        ) : null}
       </SafeAreaView>
 
       <Animated.View key={activeSegment} style={[styles.flex, segmentStyle]}>
