@@ -799,6 +799,7 @@ impl DriverState {
     }
 
     fn start_turn(&mut self, prompt: &str) {
+        self.last_prompt = Some(prompt.to_string());
         self.turn_gen += 1;
         self.turn_handle = Some(spawn_turn(
             prompt,
@@ -1684,12 +1685,13 @@ mod tests {
         state.queued_prompts = vec!["second".into(), "third".into()];
 
         state.interrupt_turn();
+        assert_eq!(state.last_prompt.as_deref(), Some("second"));
         assert_eq!(state.queued_prompts, vec!["third"]);
         assert_eq!(state.turn_gen, 12);
         assert!(state.busy);
 
         // The aborted generation's DoneGuard arrives after the replacement turn starts.
-        state.on_turn_done(11).await;
+        state.on_turn_done(10).await;
         assert!(state.busy);
         assert_eq!(state.turn_gen, 12);
         assert!(state.turn_handle.is_some());
@@ -1699,6 +1701,7 @@ mod tests {
         state.turn_handle.take().unwrap().abort();
         state.on_turn_done(12).await;
         assert_eq!(state.queued_prompts, Vec::<String>::new());
+        assert_eq!(state.last_prompt.as_deref(), Some("third"));
         assert_eq!(state.turn_gen, 13);
         assert!(state.busy);
         assert!(state.turn_handle.is_some());
