@@ -257,16 +257,13 @@ function SessionShell({ sessionId }: { sessionId: string }) {
     <View style={[styles.flex, { backgroundColor: tokens.bg1 }]}>
       <SafeAreaView
         edges={["top", "left", "right"]}
-        // One native elevated surface owns both the physical top inset and every header row.
-        // Keeping the fill on this SafeAreaView avoids exposing bg1 between sibling rows.
         style={{ backgroundColor: tokens.bg2, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: tokens.border }}
-        // Real height of everything stacked above `<Slot/>` (header + any banners + status +
-        // segmented) — Chat's `Screen` reads this back as `keyboardVerticalOffset` so
-        // KeyboardAvoidingView knows how much real content sits above it instead of a guessed
-        // constant. Banners are conditional, so this legitimately changes across snapshots.
         onLayout={(e) => setHeaderHeight(e.nativeEvent.layout.height)}
       >
-        <View style={gutter}>
+        {/* Explicit bg2 wrapper fills every header row while SafeAreaView owns the
+            physical top inset and reports the complete header height. */}
+        <View style={{ backgroundColor: tokens.bg2 }}>
+          <View style={gutter}>
           <SessionHeader
             title={snapshot?.title || `session ${sessionId.slice(0, 8)}`}
             cwd={snapshot?.cwd ?? sessionId}
@@ -298,7 +295,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
             onLattice={() => setLatticeVisible(true)}
           />
-        </View>
+          </View>
 
         <DuelSheet visible={duelVisible} onClose={() => setDuelVisible(false)} send={sendWithFeedback} />
         <PlanSheet visible={planVisible} onClose={() => setPlanVisible(false)} send={sendWithFeedback} />
@@ -358,25 +355,27 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           />
         </View>
 
-        <View style={[gutter, styles.segmentedWrap]}>
-          <Segmented
-            options={segmentOptions}
-            value={activeSegment}
-            onChange={onSegmentChange}
-            testID="session-segmented"
-          />
+          <View style={[gutter, styles.segmentedWrap]}>
+            <Segmented
+              options={segmentOptions}
+              value={activeSegment}
+              onChange={onSegmentChange}
+              testID="session-segmented"
+              flush
+            />
+          </View>
+          {projectNeedsInitialization ? (
+            <Banner
+              tone="warn"
+              actionLabel={projectSetupRequested ? undefined : "Set it up for me"}
+              message={projectSetupRequested ? "Setting up Forge for this project…" : "This project isn't set up for Forge — no project guidance or custom agents. Forge works best with an AGENTS.md and custom agents."}
+              onAction={() => {
+                if (sendWithFeedback({ kind: "prompt", text: "/init" })) setProjectSetupRequested(true);
+              }}
+              onDismiss={() => setProjectWarningDismissed(true)}
+            />
+          ) : null}
         </View>
-        {projectNeedsInitialization ? (
-          <Banner
-            tone="warn"
-            actionLabel={projectSetupRequested ? undefined : "Set it up for me"}
-            message={projectSetupRequested ? "Setting up Forge for this project…" : "This project isn't set up for Forge — no project guidance or custom agents. Forge works best with an AGENTS.md and custom agents."}
-            onAction={() => {
-              if (sendWithFeedback({ kind: "prompt", text: "/init" })) setProjectSetupRequested(true);
-            }}
-            onDismiss={() => setProjectWarningDismissed(true)}
-          />
-        ) : null}
       </SafeAreaView>
 
       <Animated.View key={activeSegment} style={[styles.flex, segmentStyle]}>

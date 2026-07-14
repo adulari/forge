@@ -29,7 +29,7 @@ export interface SegmentedProps<T extends string = string> {
   flush?: boolean;
 }
 
-export function Segmented<T extends string = string>({ options, value, onChange, testID, flush, ...rest }: SegmentedProps<T>) {
+export function Segmented<T extends string = string>({ options, value, onChange, testID, flush }: SegmentedProps<T>) {
   const tokens = useTokens();
   const reduced = useReducedMotion();
   const [width, setWidth] = useState(0);
