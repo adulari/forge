@@ -2,7 +2,7 @@
 // value ink2, optional chevron. Pressable rows use Strike (§5.2: "every Pressable
 // in ds/") via `useStrike`.
 import { ChevronRight } from "lucide-react-native";
-import React from "react";
+import React, { useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
@@ -22,6 +22,7 @@ export interface KeyValueRowProps {
 export function KeyValueRow({ label, value, onPress, chevron = false, accessibilityLabel }: KeyValueRowProps) {
   const tokens = useTokens();
   const { style: strikeStyle, onPressIn, onPressOut } = useStrike();
+  const [focused, setFocused] = useState(false);
 
   const row = (
     <Animated.View
@@ -48,8 +49,11 @@ export function KeyValueRow({ label, value, onPress, chevron = false, accessibil
       onPress={onPress}
       onPressIn={onPressIn}
       onPressOut={onPressOut}
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel ?? label}
+      style={[styles.pressable, { borderColor: focused ? tokens.accent : "transparent" }]}
     >
       {row}
     </Pressable>
@@ -66,6 +70,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     gap: space.space12,
   },
+  pressable: { borderWidth: 2, borderRadius: 8 },
   // A long value (e.g. a full server hostname) otherwise refuses to shrink — RN's Text
   // defaults to flexShrink: 0, so `space-between` collapses to zero gap and the label and
   // value render touching, with numberOfLines={1} never getting a chance to ellipsize.
