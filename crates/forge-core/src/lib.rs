@@ -2655,9 +2655,11 @@ impl Session {
         // everything" churn on a box with no groq key). `has_api_key` is true for keyless providers
         // (ollama, the claude/codex bridges), so those still qualify.
         let ordered = self.store.transient_benched_ordered().unwrap_or_default();
-        ordered
-            .into_iter()
-            .find(|m| m != just_failed && forge_config::has_api_key(forge_config::provider_of(m)))
+        ordered.into_iter().find(|m| {
+            m != just_failed
+                && !forge_config::is_model_disabled(m, &self.config.mesh.disabled)
+                && forge_config::has_api_key(forge_config::provider_of(m))
+        })
     }
 
     /// The context window (tokens) to assume for `model`: a fetched per-model window (provider API,
@@ -3779,6 +3781,7 @@ prompt text, nothing else.";
         // path passes None, so `chain` is immediately exhausted and failover never fires.
         let fallbacks: Vec<String> = decision.map(|d| d.fallbacks.clone()).unwrap_or_default();
         let mut chain = fallbacks.into_iter();
+        let explicit_pin = decision.is_some_and(|d| d.pinned);
         let mut last_resort_used = false;
         // Bounds the overflow self-heal (shrink + retry the SAME model) so a transcript that can't
         // be shrunk enough eventually falls through to normal failover instead of looping.
@@ -3953,6 +3956,11 @@ prompt text, nothing else.";
                 // "unavailable" on every model in the chain. Re-trimmed per model so failover to a
                 // smaller-window model still fits. The immutable borrow ends before the block below.
                 let sent = self.transcript_with_preamble(&active_model);
+                // A daemon-lifetime reservation prevents concurrent auto-routes from dispatching
+                // the same model before any failure can update shared health. The local guard
+                // releases on success, error, failover, and task cancellation.
+                let reservation = self.store.try_reserve_model(&active_model);
+                let reserved = reservation.is_some();
                 // Pre-dispatch key backstop: a model can reach here with NO provider key via a path
                 // that isn't key-filtered (the last-resort fallback, or an architect editor/planner
                 // default). Dispatching it just yields a no-auth genai "Resolver error" surfaced raw
@@ -3960,10 +3968,20 @@ prompt text, nothing else.";
                 // synthesize a permanent Auth failure so the existing failover branch EXCLUDES it and
                 // advances to a usable model. `has_api_key` is true for keyless providers (ollama,
                 // the claude/codex bridges), so a legitimate bridge turn is never short-circuited.
-                let result = if !forge_config::has_api_key(forge_config::provider_of(&active_model))
+                let result = if reservation.is_none() && explicit_pin {
+                    Err(forge_provider::ProviderError::Unavailable(format!(
+                        "pinned model '{active_model}' is serving another session"
+                    )))
+                } else if reservation.is_none() {
+                    Err(forge_provider::ProviderError::Unavailable(format!(
+                        "model '{active_model}' is serving another session"
+                    )))
+                } else if forge_config::is_model_disabled(&active_model, &self.config.mesh.disabled)
+                    || !forge_config::has_api_key(forge_config::provider_of(&active_model))
                 {
                     Err(forge_provider::ProviderError::Auth(format!(
-                        "no API key configured for provider '{}'",
+                        "model '{}' is disabled or has no API key configured for provider '{}'",
+                        active_model,
                         forge_config::provider_of(&active_model)
                     )))
                 } else {
@@ -4080,6 +4098,45 @@ prompt text, nothing else.";
                         }
                         break r;
                     }
+                    Err(e) if !reserved && explicit_pin => return Err(e.into()),
+                    Err(e) if failover_enabled && !reserved && !explicit_pin => {
+                        // Another session owns this model's reservation. This is scheduling
+                        // pressure, not provider health: immediately advance the existing chain
+                        // without benching a healthy shared model.
+                        let mut picked = None;
+                        while let Some(next) = chain.next() {
+                            if self.store.is_model_reserved(&next) {
+                                continue;
+                            }
+                            match self.admit_failover_model(&next).await {
+                                Ok(true) => {
+                                    picked = Some(next);
+                                    break;
+                                }
+                                Ok(false) => {
+                                    self.presenter.emit(PresenterEvent::Warning(format!(
+                                        "skipped {next} (declined compaction) — trying the next model"
+                                    )));
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        match picked {
+                            Some(next) => {
+                                self.presenter.emit(PresenterEvent::Routing {
+                                    tier: decision
+                                        .map(|d| d.tier.as_str().to_string())
+                                        .unwrap_or_default(),
+                                    model: next.clone(),
+                                    rationale: format!("model busy: {active_model}"),
+                                });
+                                active_model = next;
+                                transient_retries = 0;
+                                continue;
+                            }
+                            None => return Err(e.into()),
+                        }
+                    }
                     // Context-overflow self-heal — a SEPARATE arm, NOT nested in the `is_retryable`
                     // arm below where it used to sit DEAD: an over-window input is a non-retryable
                     // `Request` error (is_retryable() == false), so that guard never admitted it and
@@ -4105,13 +4162,12 @@ prompt text, nothing else.";
                         continue;
                     }
                     Err(e) if failover_enabled && (e.is_retryable() || e.is_context_overflow()) => {
-                        // Same-model retry for a TRANSIENT failure (a 5xx / dropped stream / network
-                        // blip) before benching + failing over: these often succeed on a second
-                        // attempt, so switching models immediately needlessly degrades the turn. We
-                        // do NOT hot-retry a rate-limit (it would just 429 again — respect the
-                        // cooldown and fail over) or a permanent incapability (no point). Bounded +
-                        // backed off so a genuinely-down model still falls through to failover fast.
+                        // A transient failure other than an explicit provider outage (for example
+                        // a dropped stream) gets a short same-model retry. An `Unavailable`
+                        // response is already a shared health signal: bench it and immediately
+                        // advance the fallback chain instead of delaying every concurrent turn.
                         if transient_retries < MAX_TRANSIENT_RETRIES
+                            && !matches!(e, forge_provider::ProviderError::Unavailable(_))
                             && !e.is_permanent()
                             && !e.is_rate_limited()
                             && !e.is_context_overflow()
@@ -4282,7 +4338,8 @@ prompt text, nothing else.";
                         // normal bench + failover below.
                         let wait_cap =
                             std::time::Duration::from_secs(self.config.mesh.rate_limit_wait_secs);
-                        if e.is_rate_limited()
+                        if pinned_turn
+                            && e.is_rate_limited()
                             && !wait_cap.is_zero()
                             && rate_limit_waits < MAX_RATE_LIMIT_WAITS
                         {
@@ -4327,7 +4384,7 @@ prompt text, nothing else.";
                         // provider's remaining chain entries and cross to the next provider; every
                         // other failure keeps rank order intact. (Without this, dropping the old
                         // provider-interleave would re-expose the 429-storm the interleave guarded.)
-                        let skip_provider = if e.is_rate_limited() {
+                        let skip_provider = if e.is_rate_limited() || e.is_permanent() {
                             Some(forge_config::provider_of(&active_model).to_string())
                         } else {
                             None
@@ -12533,39 +12590,8 @@ mod tests {
         );
     }
 
-    /// Fails the first `fail_first` calls with a NON-overflow transient outage, then answers — to
-    /// prove a transient 5xx/blip self-heals by retrying the SAME model, not by failing over.
-    struct TransientThenOkProvider {
-        calls: std::sync::atomic::AtomicUsize,
-        fail_first: usize,
-    }
-    #[async_trait::async_trait]
-    impl Provider for TransientThenOkProvider {
-        async fn complete(
-            &self,
-            model: &str,
-            _messages: &[Message],
-            _tools: &[ToolSpec],
-            on_event: &mut forge_provider::EventSink<'_>,
-        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
-            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            if n < self.fail_first {
-                return Err(forge_provider::ProviderError::Unavailable(
-                    "502 bad gateway (transient)".into(),
-                ));
-            }
-            on_event(StreamEvent::Text(model.into()));
-            Ok(forge_provider::ModelResponse {
-                content: model.into(),
-                tool_calls: vec![],
-                usage: forge_types::Usage::default(),
-                quotas: Vec::new(),
-            })
-        }
-    }
-
     /// Rate-limits the first `fail_first` calls with a tiny `retry_after`, then answers — to prove
-    /// the in-turn wait-for-reset retries the SAME model instead of degrading to a fallback.
+    /// the in-turn wait-for-reset retries an explicitly pinned model instead of degrading to a fallback.
     struct RateLimitThenOkProvider {
         calls: std::sync::atomic::AtomicUsize,
         fail_first: usize,
@@ -12598,13 +12624,13 @@ mod tests {
 
     #[tokio::test]
     async fn rate_limit_waits_for_reset_and_retries_the_same_model() {
-        // The per-minute free-tier case: the best model 429s with a short reset → wait it out and
-        // retry the SAME model rather than degrading to a lower-ranked fallback.
+        // An explicit pin keeps the requested model: a short 429 reset is waited out before
+        // retrying it. Unpinned routes instead bench and immediately fail over.
         let provider = Arc::new(RateLimitThenOkProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
             fail_first: 1,
         });
-        let router = Arc::new(FixedRouter {
+        let router = Arc::new(PinnedRouter {
             model: "best::model".into(),
             fallbacks: vec!["worse::model".into()],
         });
@@ -14132,29 +14158,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transient_error_retries_same_model_before_failing_over() {
-        // A 5xx/dropped-connection blip should be retried on the SAME model (it usually succeeds on
-        // the next attempt) instead of immediately switching to a worse fallback. Two transient
-        // failures are within MAX_TRANSIENT_RETRIES, so the primary recovers and the fallback is
-        // never used — and the healthy model is not benched.
-        let provider = Arc::new(TransientThenOkProvider {
-            calls: std::sync::atomic::AtomicUsize::new(0),
-            fail_first: MAX_TRANSIENT_RETRIES as usize,
+    async fn occupied_model_fails_over_without_benching_it() {
+        // A concurrent completion owns the primary reservation. This turn must use an eligible
+        // fallback without treating the busy primary as a provider-health failure.
+        let provider = Arc::new(EchoProvider {
+            bad: std::collections::HashSet::new(),
+            err: unavailable,
         });
         let router = Arc::new(FixedRouter {
-            model: "good::model".into(),
-            fallbacks: vec!["fallback::model".into()],
+            model: "busy::model".into(),
+            fallbacks: vec!["good::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        let _reservation = store.try_reserve_model("busy::model").unwrap();
+
+        assert_eq!(session.run_turn("hi").await.unwrap(), "good::model");
+        assert!(
+            !store.current_benched().unwrap().is_benched("busy::model"),
+            "a live completion is not a provider failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_model_is_benched_and_fails_over_without_retrying() {
+        // A provider outage is shared health information, not a reason for every session to wait
+        // through local retries. The next eligible model must serve this turn immediately.
+        let provider = Arc::new(EchoProvider {
+            bad: ["bad::model".to_string()].into_iter().collect(),
+            err: unavailable,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "bad::model".into(),
+            fallbacks: vec!["good::model".into()],
         });
         let (store, mut session) = fixed_session(provider, router);
         let answer = session.run_turn("hi").await.unwrap();
-        assert_eq!(
-            answer, "good::model",
-            "primary recovered via same-model retry; fallback not used"
-        );
-        assert!(
-            store.current_benched().unwrap().is_empty(),
-            "a transient blip that recovered must not bench the model"
-        );
+        assert_eq!(answer, "good::model");
+        assert!(store.current_benched().unwrap().is_benched("bad::model"));
     }
 
     /// Mimics a CLI bridge: returns text with NO structured tool calls (a bridge's tools run in

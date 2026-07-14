@@ -247,8 +247,24 @@ fn json_to_sql_value(v: &serde_json::Value) -> rusqlite::types::Value {
 /// A fetched per-model price row: `(model, input_per_1k, output_per_1k, cache_read_per_1k)` in USD.
 pub type ModelPriceRow = (String, f64, f64, Option<f64>);
 
+/// An active per-model completion reservation. Dropping it makes the model eligible for another
+/// concurrent session.
+pub struct ModelReservation {
+    model: String,
+    in_flight_models: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+}
+
+impl Drop for ModelReservation {
+    fn drop(&mut self) {
+        if let Ok(mut in_flight) = self.in_flight_models.lock() {
+            in_flight.remove(&self.model);
+        }
+    }
+}
+
 pub struct Store {
     pool: r2d2::Pool<SqliteManager>,
+    in_flight_models: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     /// Append counter for `live_event`, so the ring-buffer prune runs once every
     /// [`LIVE_EVENT_PRUNE_EVERY`] inserts instead of on every append (the old per-insert
     /// correlated-subquery DELETE was O(n) on a hot path).
@@ -799,8 +815,31 @@ impl Store {
         }
         Ok(Self {
             pool,
+            in_flight_models: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             live_event_writes: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Atomically reserve a model for an active completion. The returned guard releases the
+    /// reservation on every normal return, error, and cancellation path.
+    pub fn try_reserve_model(&self, model: &str) -> Option<ModelReservation> {
+        let mut in_flight = self.in_flight_models.lock().ok()?;
+        if !in_flight.insert(model.to_string()) {
+            return None;
+        }
+        Some(ModelReservation {
+            model: model.to_string(),
+            in_flight_models: std::sync::Arc::clone(&self.in_flight_models),
+        })
+    }
+
+    /// Check whether a model has an active completion reservation.
+    pub fn is_model_reserved(&self, model: &str) -> bool {
+        self.in_flight_models
+            .lock()
+            .is_ok_and(|in_flight| in_flight.contains(model))
     }
 
     /// Check out a pooled connection. Named `lock` for continuity with the call sites; the returned
@@ -4125,6 +4164,18 @@ pub struct QueueTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_reservation_is_atomic_and_released_on_drop() {
+        let store = Store::open_in_memory().unwrap();
+        let first = store.try_reserve_model("openai::gpt-4o").unwrap();
+        assert!(store.is_model_reserved("openai::gpt-4o"));
+        assert!(store.try_reserve_model("openai::gpt-4o").is_none());
+
+        drop(first);
+        assert!(!store.is_model_reserved("openai::gpt-4o"));
+        assert!(store.try_reserve_model("openai::gpt-4o").is_some());
+    }
 
     #[test]
     fn view_snapshot_persists_per_session() {
