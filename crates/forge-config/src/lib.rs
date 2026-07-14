@@ -96,6 +96,9 @@ pub struct Config {
     /// On by default; disable in /config if you find it noisy.
     #[serde(default)]
     pub suggest: SuggestConfig,
+    /// Project setup behavior for repositories that have no Forge guidance or customizations.
+    #[serde(default)]
+    pub project: ProjectConfig,
     /// Interactive TUI rendering (chat). Controls inline vs. full-screen (alternate-screen) mode.
     #[serde(default)]
     pub tui: TuiConfig,
@@ -782,6 +785,15 @@ impl Default for SuggestConfig {
 
 fn default_suggest_enabled() -> bool {
     true
+}
+
+/// Project initialization behavior. Disabled by default because setup performs a model-backed,
+/// repository-specific analysis and consumes the configured model quota.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    /// Automatically run the tailored project setup once when opening an uninitialized project.
+    #[serde(default)]
+    pub auto_initialize: bool,
 }
 
 /// Interactive chat TUI rendering mode.
@@ -2108,6 +2120,7 @@ impl Default for Config {
             assay: AssayConfig::default(),
             recap: RecapConfig::default(),
             suggest: SuggestConfig::default(),
+            project: ProjectConfig::default(),
             tui: TuiConfig::default(),
             local: LocalConfig::default(),
             update: UpdateConfig::default(),
@@ -2584,6 +2597,7 @@ const PRIORITY_PREFIXES: &[&str] = &[
     "local.model",
     "tui.fullscreen",
     "tui.mouse_capture",
+    "project.auto_initialize",
     "recap.enabled",
     "mesh",
     "local",
@@ -2690,6 +2704,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "local.endpoint" => Some(("Local LLM", "Ollama endpoint")),
         "tui.fullscreen" => Some(("Interface", "Full-screen TUI")),
         "tui.mouse_capture" => Some(("Interface", "Mouse wheel scroll")),
+        "project.auto_initialize" => Some(("Project", "Auto-initialize projects")),
         "recap.enabled" => Some(("Interface", "Per-turn recap")),
         "update.check" => Some(("Interface", "Check for updates")),
         "shell.explain_errors" => Some(("Shell", "Explain failed commands")),
@@ -2908,6 +2923,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "local.endpoint" => "Ollama HTTP endpoint (default http://localhost:11434).",
         "tui.fullscreen" => "Full-screen TUI on the alternate screen. Off = inline in native scrollback.",
         "tui.mouse_capture" => "Wheel scrolls the transcript in full-screen mode (minimal button+wheel reporting, no motion tracking — native click-drag text selection still works). Default on. Off disables mouse reporting entirely; scroll with PgUp/PgDn/Home/End.",
+        "project.auto_initialize" => "Run a model-backed, tailored Forge setup once when opening an uninitialized project.",
         "recap.enabled" => "Show a one-line AI recap after each completed turn.",
         "update.check" => "Check GitHub for a newer Forge release on startup (throttled to once a day).",
         "shell.explain_errors" => "When a shell command fails, the AI explains the likely cause + a fix.",
@@ -5214,6 +5230,16 @@ reason = "no privilege escalation"
         std::fs::create_dir_all(dir.path().join(".claude/agents")).unwrap();
         std::fs::write(dir.path().join(".claude/agents/reviewer.md"), "agent").unwrap();
         assert!(project_initialization(dir.path()).initialized);
+    }
+
+    #[test]
+    fn config_accepts_project_auto_initialize_block() {
+        let cfg: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string("[project]\nauto_initialize = true"))
+            .extract()
+            .unwrap();
+        assert!(cfg.project.auto_initialize);
+        assert!(!Config::default().project.auto_initialize);
     }
 
     #[test]

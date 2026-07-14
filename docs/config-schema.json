@@ -56,6 +56,7 @@
       "additionalProperties": true
     },
     "recap": { "$ref": "#/$defs/RecapConfig" },
+    "project": { "$ref": "#/$defs/ProjectConfig" },
     "tui": {
       "type": "object",
       "description": "Interactive TUI rendering (inline vs. full-screen alternate-screen mode).",
@@ -186,6 +187,14 @@
       "additionalProperties": true,
       "properties": {
         "enabled": { "type": "boolean", "default": true }
+      }
+    },
+    "ProjectConfig": {
+      "type": "object",
+      "description": "Project initialization behavior for repositories without Forge guidance or customizations.",
+      "additionalProperties": true,
+      "properties": {
+        "auto_initialize": { "type": "boolean", "default": false, "description": "Run the model-backed tailored setup once when opening an uninitialized project." }
       }
     },
     "UpdateConfig": {

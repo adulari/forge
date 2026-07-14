@@ -312,6 +312,11 @@ async fn drive_session(
         }
     }
 
+    let auto_setup = forge_config::load()
+        .map(|config| config.project.auto_initialize)
+        .unwrap_or(false)
+        && !forge_config::project_initialization(std::path::Path::new(&cwd)).initialized;
+
     let mut st = DriverState {
         session,
         app,
@@ -351,6 +356,12 @@ async fn drive_session(
     // The most recent genuine turn failure (PresenterEvent::Error), latched so the busy falling
     // edge pushes "failed" instead of "done". Cleared when the next turn starts.
     let mut turn_error: Option<String> = None;
+
+    if auto_setup {
+        st.app
+            .note("⚙ Setting up Forge for this project automatically…");
+        st.handle_outcome(project_setup_outcome());
+    }
 
     loop {
         if *shutdown_rx.borrow_and_update() {

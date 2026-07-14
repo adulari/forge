@@ -1191,7 +1191,7 @@ pub(crate) async fn run_chat_tui(
     );
     if !project.initialized {
         app.apply(forge_tui::PresenterEvent::Warning(
-            "This project isn't set up for Forge — no project guidance or custom agents. Run /init to create project guidance.".to_string(),
+            "This project isn't set up for Forge — no project guidance or custom agents. Run /init to set it up for me.".to_string(),
         ));
     }
     {
@@ -1306,6 +1306,28 @@ pub(crate) async fn run_chat_tui(
     // Baseline for the spinner: deriving the tick from elapsed time keeps the animation
     // speed independent of the loop frequency (one frame per 60ms, exactly as before).
     let mut busy_since = Instant::now();
+
+    if tui_config.project.auto_initialize
+        && !forge_config::project_initialization(
+            &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        )
+        .initialized
+    {
+        app.note("⚙ Setting up Forge for this project automatically…");
+        turn_gen += 1;
+        let (prompt, guidance, tier) = project_setup_turn();
+        turn_handle = Some(spawn_turn_with(
+            prompt,
+            guidance,
+            tier,
+            &session,
+            &done_tx,
+            turn_gen,
+            &mut app,
+            &mut busy,
+            &mut busy_since,
+        ));
+    }
     // Fixed epoch for idle animations (effort slider rainbow, etc.): unlike busy_since this
     // never resets, so idle animations always have a monotonically increasing tick.
     let anim_epoch = Instant::now();
