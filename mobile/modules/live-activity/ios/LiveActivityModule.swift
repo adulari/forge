@@ -1,18 +1,16 @@
 // Bridges ActivityKit's Activity<ForgeSessionActivityAttributes> lifecycle (request/update/end)
-// to JS — there is no JS-callable API for Live Activities anywhere else in this project's
-// dependency tree, so this is a small first-party Expo Module rather than a third-party
-// package (keeps this on ActivityKit's own supported surface, no dependency on an
-// unmaintained-risk community wrapper). This module compiles as its own CocoaPod, separate from
-// the widget extension target, so `ForgeSessionActivityAttributes` (this file's sibling
-// ForgeSessionActivityAttributes.swift) is a literal duplicate of
-// mobile/targets/widget/ForgeSessionActivityAttributes.swift, not a shared reference — see that
-// file's header for why `_shared` doesn't reach here.
+// to JS. This module compiles as its own CocoaPod, so its ActivityAttributes source must remain
+// byte-for-byte identical to the widget extension's copy.
 import ActivityKit
 import ExpoModulesCore
+import OSLog
 
 public class LiveActivityModule: Module {
+    private let logger = Logger(subsystem: "dev.adulari.forge", category: "LiveActivity")
+
     public func definition() -> ModuleDefinition {
         Name("LiveActivity")
+        Events("pushToken")
 
         Function("isSupported") { () -> Bool in
             if #available(iOS 16.1, *) {
@@ -21,24 +19,20 @@ public class LiveActivityModule: Module {
             return false
         }
 
-        // Starts (or reuses, if one's already running for this session) a Live Activity, and
-        // waits briefly for ActivityKit to hand back its first push token (needed for remote
-        // updates while the app is backgrounded/locked). Returns `nil` for both fields if Live
-        // Activities are disabled/unsupported, or the push token if a token never arrives within
-        // the timeout (the activity still starts either way — local `.update()`/`.end()` calls
-        // work regardless of whether a remote push token exists).
         AsyncFunction("start") {
-            (sessionId: String, title: String, busy: Bool, waiting: Bool, costUsd: Double, contextTokens: Int) -> [String: String?] in
-            guard #available(iOS 16.1, *), ActivityAuthorizationInfo().areActivitiesEnabled else {
+            (sessionId: String, title: String, busy: Bool, waiting: Bool, costUsd: Double, contextTokens: Int) throws -> [String: String?] in
+            guard #available(iOS 16.1, *) else {
+                return ["activityId": nil, "pushToken": nil]
+            }
+            guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+                self.logger.notice("Live Activities are disabled for session \(sessionId, privacy: .public)")
                 return ["activityId": nil, "pushToken": nil]
             }
 
-            // Reuse an existing activity for this session rather than starting a duplicate —
-            // the JS side calls `start` once per turn-begin, and a stale prior activity for the
-            // same session (app relaunch mid-turn, etc.) should be adopted, not orphaned.
             if let existing = Activity<ForgeSessionActivityAttributes>.activities.first(where: {
                 $0.attributes.sessionId == sessionId
             }) {
+                self.observePushTokens(for: existing)
                 return ["activityId": existing.id, "pushToken": nil]
             }
 
@@ -46,25 +40,26 @@ public class LiveActivityModule: Module {
             let state = ForgeSessionActivityAttributes.ContentState(
                 busy: busy, waiting: waiting, costUsd: costUsd, contextTokens: contextTokens
             )
-
             do {
                 let activity = try Activity.request(
                     attributes: attributes,
                     content: .init(state: state, staleDate: nil),
                     pushType: .token
                 )
-                let token = await Self.firstPushToken(of: activity)
-                return ["activityId": activity.id, "pushToken": token]
+                self.logger.info("Started Live Activity \(activity.id, privacy: .public) for session \(sessionId, privacy: .public)")
+                self.observePushTokens(for: activity)
+                return ["activityId": activity.id, "pushToken": nil]
             } catch {
-                return ["activityId": nil, "pushToken": nil]
+                self.logger.error("Failed to start Live Activity for session \(sessionId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                throw error
             }
         }
 
         AsyncFunction("update") {
-            (activityId: String, busy: Bool, waiting: Bool, costUsd: Double, contextTokens: Int) in
+            (activityId: String, busy: Bool, waiting: Bool, costUsd: Double, contextTokens: Int) async throws in
             guard #available(iOS 16.1, *) else { return }
             guard let activity = Activity<ForgeSessionActivityAttributes>.activities.first(where: { $0.id == activityId }) else {
-                return
+                throw LiveActivityError.activityNotFound(activityId)
             }
             let state = ForgeSessionActivityAttributes.ContentState(
                 busy: busy, waiting: waiting, costUsd: costUsd, contextTokens: contextTokens
@@ -72,37 +67,35 @@ public class LiveActivityModule: Module {
             await activity.update(.init(state: state, staleDate: nil))
         }
 
-        AsyncFunction("end") { (activityId: String) in
+        AsyncFunction("end") { (activityId: String) async throws in
             guard #available(iOS 16.1, *) else { return }
             guard let activity = Activity<ForgeSessionActivityAttributes>.activities.first(where: { $0.id == activityId }) else {
                 return
             }
             await activity.end(nil, dismissalPolicy: .immediate)
+            self.logger.info("Ended Live Activity \(activityId, privacy: .public)")
         }
     }
 
     @available(iOS 16.1, *)
-    private static func firstPushToken(of activity: Activity<ForgeSessionActivityAttributes>) async -> String? {
-        // ActivityKit hands the push token back asynchronously, usually within a couple of
-        // seconds — bounded wait so `start()` never hangs the JS caller if one never arrives
-        // (e.g. simulator, or the user just denied notification permission).
-        let timeout = Task<String?, Never> {
-            try? await Task.sleep(nanoseconds: 5_000_000_000)
-            return nil
-        }
-        let wait = Task<String?, Never> {
+    private func observePushTokens(for activity: Activity<ForgeSessionActivityAttributes>) {
+        Task { [weak self] in
             for await data in activity.pushTokenUpdates {
-                return data.map { String(format: "%02x", $0) }.joined()
+                let token = data.map { String(format: "%02x", $0) }.joined()
+                self?.logger.info("Received Live Activity push token for session \(activity.attributes.sessionId, privacy: .public)")
+                self?.sendEvent("pushToken", ["sessionId": activity.attributes.sessionId, "pushToken": token])
             }
-            return nil
         }
-        defer { timeout.cancel(); wait.cancel() }
-        return await withTaskGroup(of: String?.self) { group in
-            group.addTask { await wait.value }
-            group.addTask { await timeout.value }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
+    }
+}
+
+private enum LiveActivityError: LocalizedError {
+    case activityNotFound(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .activityNotFound(id):
+            return "Live Activity \(id) is no longer active"
         }
     }
 }

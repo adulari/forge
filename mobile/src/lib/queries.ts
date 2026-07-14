@@ -50,6 +50,7 @@ import {
   type PastSessionRow,
   type SessionRow,
   subscribePush,
+  unsubscribePush,
   transcribeAudio,
   uploadFile,
 } from "./api";
@@ -57,6 +58,7 @@ import { useAuth } from "./auth";
 import type { Snapshot } from "./ws";
 import { syncWidgetSessions } from "./widgetData";
 import {
+  addLiveActivityPushTokenListener,
   endLiveActivity,
   startLiveActivity,
   updateLiveActivity,
@@ -331,15 +333,23 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
   const queryClient = useQueryClient();
   const prevBusyRef = useRef<boolean | undefined>(undefined);
   const activityIdRef = useRef<string | null>(null);
+  const activitySessionIdRef = useRef<string | null>(null);
+  const activeRef = useRef(false);
   const [completed, setCompleted] = useState(false);
 
   useEffect(
     () => () => {
       const id = activityIdRef.current;
+      const activeSessionId = activitySessionIdRef.current;
       activityIdRef.current = null;
+      activitySessionIdRef.current = null;
+      activeRef.current = false;
       if (id) endLiveActivity(id).catch(() => {});
+      if (activeSessionId && baseUrl) {
+        unsubscribePush(baseUrl, { session_id: activeSessionId, push_token: "" }).catch(() => {});
+      }
     },
-    [],
+    [baseUrl],
   );
 
   const busy = snapshot?.busy ?? false;
@@ -349,11 +359,23 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
   const costUsd = snapshot?.cost_usd ?? 0;
   const contextTokens = snapshot?.context_tokens ?? 0;
 
+  useEffect(() => {
+    const subscription = addLiveActivityPushTokenListener(({ sessionId: tokenSessionId, pushToken }) => {
+      if (!baseUrl || tokenSessionId !== activitySessionIdRef.current) return;
+      subscribePush(baseUrl, {
+        session_id: tokenSessionId,
+        push_token: pushToken,
+        environment: __DEV__ ? "sandbox" : "production",
+      }).catch(() => {});
+    });
+    return () => subscription.remove();
+  }, [baseUrl]);
+
   // Detect the busy true->false edge in an effect (never read the ref during render).
   useEffect(() => {
     const wasBusy = prevBusyRef.current;
     const didComplete = wasBusy === true && !busy;
-    const didBegin = wasBusy === false && busy;
+    const didBegin = busy && (!activeRef.current || activitySessionIdRef.current !== sessionId);
     prevBusyRef.current = busy;
     setCompleted(didComplete);
     if (didComplete && sessionId) {
@@ -362,28 +384,38 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
 
     if (!sessionId) return;
     if (didBegin) {
-      startLiveActivity(sessionId, title, busy, waiting, costUsd, contextTokens).then(
-        ({ activityId, pushToken }) => {
-          activityIdRef.current = activityId;
-          if (activityId && pushToken && baseUrl) {
-            subscribePush(baseUrl, {
-              session_id: sessionId,
-              push_token: pushToken,
-              environment: __DEV__ ? "sandbox" : "production",
-            }).catch(() => {});
+      activeRef.current = true;
+      activitySessionIdRef.current = sessionId;
+      startLiveActivity(sessionId, title, busy, waiting, costUsd, contextTokens)
+        .then(({ activityId }) => {
+          if (!activeRef.current || activitySessionIdRef.current !== sessionId) {
+            if (activityId) endLiveActivity(activityId).catch(() => {});
+            return;
           }
-        },
-      );
-    } else if (activityIdRef.current) {
-      if (didComplete) {
-        const id = activityIdRef.current;
-        activityIdRef.current = null;
-        endLiveActivity(id).catch(() => {});
-      } else {
-        updateLiveActivity(activityIdRef.current, busy, waiting, costUsd, contextTokens).catch(
-          () => {},
-        );
+          activityIdRef.current = activityId;
+          if (activityId) {
+            updateLiveActivity(activityId, busy, waiting, costUsd, contextTokens).catch(() => {});
+          }
+        })
+        .catch((error) => {
+          console.warn("Failed to start Live Activity", error);
+          activeRef.current = false;
+          activitySessionIdRef.current = null;
+        });
+    } else if (didComplete) {
+      const id = activityIdRef.current;
+      const activeSessionId = activitySessionIdRef.current;
+      activityIdRef.current = null;
+      activitySessionIdRef.current = null;
+      activeRef.current = false;
+      if (id) endLiveActivity(id).catch(() => {});
+      if (activeSessionId && baseUrl) {
+        unsubscribePush(baseUrl, { session_id: activeSessionId, push_token: "" }).catch(() => {});
       }
+    } else if (activityIdRef.current) {
+      updateLiveActivity(activityIdRef.current, busy, waiting, costUsd, contextTokens).catch(
+        () => {},
+      );
     }
   }, [busy, waiting, sessionId, title, costUsd, contextTokens, baseUrl, queryClient]);
 
