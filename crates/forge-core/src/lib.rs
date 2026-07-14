@@ -914,14 +914,28 @@ fn completion_gate(
     no_change_required: bool,
     inspected_this_turn: bool,
 ) -> CompletionGate {
-    if !did_real_work || no_change_required {
+    // Read-only / reasoned no-op escape: a completion that explicitly explains no change was needed
+    // is accepted immediately, WITHOUT a forced verification re-drive. This is the fix for the
+    // read-only `/goal` loop (a "check X" / "already satisfied" goal must not be nagged to edit
+    // files). It is the ONLY way to skip the verification pass — a bare `!did_real_work` claim does
+    // NOT, so a bridge that merely re-marks the task list Done still gets caught (see below).
+    if no_change_required {
+        return if inspected_this_turn {
+            CompletionGate::AcceptClean
+        } else {
+            CompletionGate::AcceptNoArtifacts
+        };
+    }
+    // Proven anti-spiral gate (unchanged): a self-reported "done" must survive one forced
+    // verification pass. After that pass, a turn that ran a real inspection is accepted cleanly; a
+    // turn with no external artifacts to check is accepted with a calm note; work that produced state
+    // but was never re-checked burns the cap and is flagged UNVERIFIED — never a silent success.
+    if verify_attempts > 0 && (inspected_this_turn || !did_real_work) {
         if inspected_this_turn {
             CompletionGate::AcceptClean
         } else {
             CompletionGate::AcceptNoArtifacts
         }
-    } else if verify_attempts > 0 && inspected_this_turn {
-        CompletionGate::AcceptClean
     } else if verify_attempts < max_attempts {
         CompletionGate::Reverify
     } else {
@@ -3691,7 +3705,7 @@ prompt text, nothing else.";
         no_change_required: bool,
         inspected_this_turn: bool,
     ) -> CompletionGate {
-        const MAX_VERIFY_ATTEMPTS: usize = 1;
+        const MAX_VERIFY_ATTEMPTS: usize = 2;
         // Tool-name-neutral so the SAME nudge works for the bridge (tools are `mcp__forge__*`) and
         // the direct path (`shell`/`read_file`) — the model maps "run a shell command / read a file"
         // to whichever names its toolset exposes.
@@ -9697,14 +9711,26 @@ mod tests {
     #[test]
     fn completion_gate_accepts_read_only_and_bounds_unverified_claims() {
         const MAX: usize = 1;
-        assert_eq!(
-            completion_gate(0, MAX, false, false, false),
-            CompletionGate::AcceptNoArtifacts
-        );
+        // An explicit "no change needed" completion is accepted immediately — the read-only escape.
         assert_eq!(
             completion_gate(0, MAX, true, true, false),
             CompletionGate::AcceptNoArtifacts
         );
+        assert_eq!(
+            completion_gate(0, MAX, true, true, true),
+            CompletionGate::AcceptClean
+        );
+        // A bare reasoning-only claim (no no_change statement) must survive ONE forced pass first,
+        // then be accepted calmly — it does NOT short-circuit at attempt 0.
+        assert_eq!(
+            completion_gate(0, MAX, false, false, false),
+            CompletionGate::Reverify
+        );
+        assert_eq!(
+            completion_gate(1, MAX, false, false, false),
+            CompletionGate::AcceptNoArtifacts
+        );
+        // Work that produced state is verified once, then flagged UNVERIFIED if never re-checked.
         assert_eq!(
             completion_gate(0, MAX, true, false, false),
             CompletionGate::Reverify
@@ -15542,8 +15568,13 @@ mod tests {
     #[test]
     fn completion_gate_accepts_evidence_and_challenges_at_most_once() {
         const MAX: usize = 1;
+        // Reasoning-only: one forced pass, then accepted calmly (never accepted at attempt 0).
         assert_eq!(
             completion_gate(0, MAX, false, false, false),
+            CompletionGate::Reverify
+        );
+        assert_eq!(
+            completion_gate(1, MAX, false, false, false),
             CompletionGate::AcceptNoArtifacts
         );
         assert_eq!(
