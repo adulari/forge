@@ -704,12 +704,19 @@ export default function SessionChat() {
   const [responsePosition, setResponsePosition] = useState(0);
   const [showResponseNav, setShowResponseNav] = useState(false);
   useEffect(() => { setResponsePosition((position) => Math.min(position, Math.max(0, assistantResponseIndices.length - 1))); }, [assistantResponseIndices.length]);
-  const jumpToResponse = useCallback((direction: 1 | -1) => {
+  const jumpToPreviousResponse = useCallback(() => {
     if (assistantResponseIndices.length === 0) return;
-    const next = Math.max(0, Math.min(assistantResponseIndices.length - 1, responsePosition + direction));
+    const previous = Math.min(assistantResponseIndices.length - 1, responsePosition + 1);
+    setResponsePosition(previous);
+    listRef.current?.scrollToIndex({ index: assistantResponseIndices[previous], animated: true, viewPosition: 0.5 });
+  }, [assistantResponseIndices, responsePosition]);
+  const jumpToNextResponse = useCallback(() => {
+    if (assistantResponseIndices.length === 0) return;
+    const next = Math.max(0, responsePosition - 1);
     setResponsePosition(next);
     listRef.current?.scrollToIndex({ index: assistantResponseIndices[next], animated: true, viewPosition: 0.5 });
   }, [assistantResponseIndices, responsePosition]);
+  const responseNavigatorVisible = showResponseNav && assistantResponseIndices.length > 1;
 
   return (
     // "bottom" deliberately omitted: Composer owns the home-indicator inset itself (its bg2
@@ -753,8 +760,30 @@ export default function SessionChat() {
           }
         />
 
-        {showResponseNav && assistantResponseIndices.length > 1 ? <View style={[styles.responseNav, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}><Pressable onPress={() => jumpToResponse(1)} disabled={responsePosition === assistantResponseIndices.length - 1} accessibilityRole="button" accessibilityLabel="Previous assistant response" style={styles.responseButton}><ChevronUp size={16} color={tokens.ink2} /></Pressable><Text style={[typeScale.meta, { color: tokens.ink2 }]}>{`${responsePosition + 1} / ${assistantResponseIndices.length} responses`}</Text><Pressable onPress={() => jumpToResponse(-1)} disabled={responsePosition === 0} accessibilityRole="button" accessibilityLabel="Next assistant response" style={styles.responseButton}><ChevronDown size={16} color={tokens.ink2} /></Pressable></View> : null}
-        {showJump ? (
+        {responseNavigatorVisible ? (
+          <View style={[styles.responseNav, { backgroundColor: tokens.bg3, borderColor: tokens.border }]}>
+            <Pressable
+              onPress={jumpToPreviousResponse}
+              disabled={responsePosition === assistantResponseIndices.length - 1}
+              accessibilityRole="button"
+              accessibilityLabel="Previous assistant response"
+              style={styles.responseButton}
+            >
+              <ChevronUp size={16} color={tokens.ink2} />
+            </Pressable>
+            <Text style={[typeScale.meta, { color: tokens.ink2 }]}>{`${responsePosition + 1} / ${assistantResponseIndices.length} responses`}</Text>
+            <Pressable
+              onPress={jumpToNextResponse}
+              disabled={responsePosition === 0}
+              accessibilityRole="button"
+              accessibilityLabel="Next assistant response"
+              style={styles.responseButton}
+            >
+              <ChevronDown size={16} color={tokens.ink2} />
+            </Pressable>
+          </View>
+        ) : null}
+        {showJump && !responseNavigatorVisible ? (
           <Pressable
             onPress={jumpToLatest}
             accessibilityRole="button"

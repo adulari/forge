@@ -184,15 +184,17 @@ pub(crate) const NOMINAL_OUTPUT_TOKENS: u64 = 500;
 pub const CONSERVATIVE_CONTEXT_WINDOW: u32 = 32_000;
 
 /// The context-window size (in tokens) for a model id, or `None` when we don't have a
-/// well-established figure. Only used as a last-resort fallback for subscription CLI bridges whose
-/// model list can't be queried via an API; all other models should have their windows fetched from
+/// well-established figure. Only used as a last-resort fallback for subscription CLI and OAuth
+/// bridges whose model lists can't be queried via an API; all other models should have their windows fetched from
 /// the provider's model endpoint and persisted via `context_windows::fetch_and_persist`. Returns
 /// `None` for non-bridge models so the statusline omits a fabricated denominator; the core falls
 /// back to
 /// [`CONSERVATIVE_CONTEXT_WINDOW`] only when it must actually bound a request.
 /// Documented in docs/features/mesh-routing.md.
 pub fn context_limit(model: &str) -> Option<u32> {
-    // Subscription CLI bridges carry no queryable API — their windows are hardcoded here.
+    // Subscription bridges carry no queryable API — their windows are hardcoded here.
+    // Codex OAuth names the same Codex family as the CLI bridge, including the 5.6 aliases
+    // and gpt-5.3-codex, so it uses the documented 272k family window as well.
     // All other providers must have their windows fetched from the provider's model endpoint
     // and persisted via `context_windows::fetch_and_persist`; `None` here tells the core to
     // use the DB-stored fetched value or fall back to `CONSERVATIVE_CONTEXT_WINDOW`.
@@ -203,7 +205,7 @@ pub fn context_limit(model: &str) -> Option<u32> {
         // it grew past 200k.
         "claude-cli" if bridge_model.contains("haiku") => Some(200_000),
         "claude-cli" => Some(1_000_000),
-        "codex-cli" => Some(272_000),
+        "codex-cli" | "codex-oauth" => Some(272_000),
         "agy-cli" => Some(1_000_000),
         _ => None,
     }
@@ -238,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn context_limit_only_cli_bridges_everything_else_none() {
+    fn context_limit_covers_subscription_bridges() {
         // CLI bridges can't be queried via API — windows are hardcoded here only.
         // Opus and Sonnet both GA'd to 1M context in March 2026; Haiku did not.
         assert_eq!(context_limit("claude-cli::opus"), Some(1_000_000));
@@ -247,6 +249,10 @@ mod tests {
         assert_eq!(context_limit("claude-cli::"), Some(1_000_000));
         assert_eq!(context_limit("codex-cli::"), Some(272_000));
         assert_eq!(context_limit("codex-cli::gpt-5.5"), Some(272_000));
+        assert_eq!(context_limit("codex-oauth::gpt-5.6-terra"), Some(272_000));
+        assert_eq!(context_limit("codex-oauth::gpt-5.6-sol"), Some(272_000));
+        assert_eq!(context_limit("codex-oauth::gpt-5.6-luna"), Some(272_000));
+        assert_eq!(context_limit("codex-oauth::gpt-5.3-codex"), Some(272_000));
         assert_eq!(context_limit("agy-cli::"), Some(1_000_000));
         // All non-bridge models return None — their windows come from DB (fetch_and_persist).
         assert_eq!(context_limit("anthropic::claude-opus-4-8"), None);

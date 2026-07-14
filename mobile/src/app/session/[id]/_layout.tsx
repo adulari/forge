@@ -109,6 +109,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
     [sessionHistory],
   );
   const { open: openPalette } = usePalette();
+  const sendWithFeedback = useCallback((input: Parameters<typeof send>[0]) => {
+    if (send(input)) return true;
+    toast.show("not sent — reconnect and try again", { tone: "danger" });
+    return false;
+  }, [send, toast]);
 
   // ARCHITECTURE §4.1.4: on the `busy` true->false edge, invalidate this session's history
   // query so the finalized turn appears from the store. The shell only needs to call the
@@ -254,6 +259,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         // constant. Banners are conditional, so this legitimately changes across snapshots.
         onLayout={(e) => setHeaderHeight(e.nativeEvent.layout.height)}
       >
+        <View
+          style={[styles.headerSurface, { backgroundColor: tokens.bg2, borderBottomColor: tokens.border }]}
+        >
         <View style={gutter}>
           <SessionHeader
             title={snapshot?.title || `session ${sessionId.slice(0, 8)}`}
@@ -288,28 +296,28 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           />
         </View>
 
-        <DuelSheet visible={duelVisible} onClose={() => setDuelVisible(false)} send={send} />
-        <PlanSheet visible={planVisible} onClose={() => setPlanVisible(false)} send={send} />
+        <DuelSheet visible={duelVisible} onClose={() => setDuelVisible(false)} send={sendWithFeedback} />
+        <PlanSheet visible={planVisible} onClose={() => setPlanVisible(false)} send={sendWithFeedback} />
 
         <ForkSheet visible={forkVisible} onClose={() => setForkVisible(false)} sessionId={sessionId} />
 
-        <InitProjectSheet visible={initVisible} onClose={() => setInitVisible(false)} send={send} />
+        <InitProjectSheet visible={initVisible} onClose={() => setInitVisible(false)} send={sendWithFeedback} />
 
-        <AssaySheet visible={assayVisible} onClose={() => setAssayVisible(false)} send={send} />
+        <AssaySheet visible={assayVisible} onClose={() => setAssayVisible(false)} send={sendWithFeedback} />
 
-        <SelfMcpSheet visible={selfMcpVisible} onClose={() => setSelfMcpVisible(false)} send={send} />
-
-
-        <CheckpointSheet visible={checkpointVisible} onClose={() => setCheckpointVisible(false)} send={send} />
+        <SelfMcpSheet visible={selfMcpVisible} onClose={() => setSelfMcpVisible(false)} send={sendWithFeedback} />
 
 
-        <PullRequestSheet visible={pullRequestVisible} onClose={() => setPullRequestVisible(false)} send={send} />
+        <CheckpointSheet visible={checkpointVisible} onClose={() => setCheckpointVisible(false)} send={sendWithFeedback} />
 
 
-        <MemorySheet visible={memoryVisible} onClose={() => setMemoryVisible(false)} send={send} />
+        <PullRequestSheet visible={pullRequestVisible} onClose={() => setPullRequestVisible(false)} send={sendWithFeedback} />
 
 
-        <LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={send} />
+        <MemorySheet visible={memoryVisible} onClose={() => setMemoryVisible(false)} send={sendWithFeedback} />
+
+
+        <LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={sendWithFeedback} />
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />
@@ -354,6 +362,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             testID="session-segmented"
           />
         </View>
+        </View>
       </SafeAreaView>
 
       <Animated.View key={activeSegment} style={[styles.flex, segmentStyle]}>
@@ -391,5 +400,6 @@ export default function SessionLayout() {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  headerSurface: { borderBottomWidth: StyleSheet.hairlineWidth },
   segmentedWrap: { paddingBottom: space.space8 },
 });

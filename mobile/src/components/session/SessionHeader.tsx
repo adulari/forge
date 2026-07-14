@@ -95,5 +95,5 @@ const styles = StyleSheet.create({
   title: { flex: 1 },
   metaRow: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 20 },
   cwd: { flex: 1 },
-  actions: { paddingBottom: space.space32 },
+  actions: { paddingHorizontal: space.space16, paddingBottom: space.space32, gap: space.space4 },
 });
