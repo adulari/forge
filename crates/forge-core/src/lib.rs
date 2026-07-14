@@ -1922,7 +1922,7 @@ impl Session {
             session: self.id.clone(),
             seq: self.current_turn_seq,
             root: root.to_string_lossy().into_owned(),
-            mode: self.temper().key().to_string(),
+            mode: self.temper().label().to_string(),
         }
     }
 
@@ -14862,7 +14862,7 @@ mod tests {
         std::fs::write(&file, "ORIGINAL").unwrap();
 
         let config = Config {
-            permission_mode: PermissionMode::AcceptEdits,
+            permission_mode: PermissionMode::Bypass,
             ..Config::default()
         };
         let mut session = Session::start(
@@ -14885,7 +14885,7 @@ mod tests {
         let ctx = session.checkpoint_context();
         assert_eq!(ctx.session, session.id);
         assert_eq!(ctx.seq, session.current_turn_seq);
-        assert_eq!(ctx.mode, session.temper().key());
+        assert_eq!(ctx.mode, session.temper().label());
         assert!(
             std::path::Path::new(&ctx.root).is_absolute(),
             "checkpoint root is absolutized for the child"

@@ -515,6 +515,12 @@ fn forge_mcp_config(forge_exe: &str, mcp_env: &[(String, String)]) -> String {
     )
 }
 
+fn bridge_permission_mode(raw: &str) -> PermissionMode {
+    PermissionMode::from_key(raw)
+        .or_else(|| PermissionMode::from_label(raw))
+        .unwrap_or(PermissionMode::Default)
+}
+
 /// The out-of-band env handed to a bridge turn's `forge mcp-serve` child: the subagent sink plus
 /// the per-turn checkpoint context. The checkpoint values come from the EXPLICIT [`CheckpointContext`]
 /// the parent threaded through (so the parent never mutates its process-global env); when absent
@@ -537,11 +543,10 @@ fn bridge_mcp_env(
             env.push(("FORGE_CHECKPOINT_SESSION".to_string(), c.session.clone()));
             env.push(("FORGE_CHECKPOINT_SEQ".to_string(), c.seq.to_string()));
             env.push(("FORGE_CHECKPOINT_ROOT".to_string(), c.root.clone()));
-            // Only canonical permission keys cross the process boundary. Invalid values fail closed
-            // to Ask instead of allowing the child to inherit a more permissive on-disk mode.
-            let mode = PermissionMode::from_key(&c.mode)
-                .unwrap_or(PermissionMode::Default)
-                .key();
+            // Accept both canonical keys and the upstream/UI representation (Full, Ask, ...).
+            // Invalid values fail closed to Ask instead of allowing the child to inherit a more
+            // permissive on-disk mode.
+            let mode = bridge_permission_mode(&c.mode).key();
             env.push(("FORGE_PERMISSION_MODE".to_string(), mode.to_string()));
         }
         None => {
@@ -3389,6 +3394,37 @@ mod tests {
     }
 
     #[test]
+    fn full_temper_crosses_bridge_as_bypass_and_allows_writes() {
+        // Serve and the UI carry the live value as the display label. This is the real upstream
+        // representation, not the canonical process-boundary key.
+        let ctx = CheckpointContext {
+            session: "full-session".to_string(),
+            seq: 7,
+            root: "/tmp/checkpoints".to_string(),
+            mode: PermissionMode::Bypass.label().to_string(),
+        };
+        let env = bridge_mcp_env(None, Some(&ctx));
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "FORGE_PERMISSION_MODE")
+                .map(|(_, value)| value.as_str()),
+            Some("bypass")
+        );
+
+        let ask = CheckpointContext {
+            mode: PermissionMode::Default.label().to_string(),
+            ..ctx.clone()
+        };
+        let ask_env = bridge_mcp_env(None, Some(&ask));
+        assert_eq!(
+            ask_env
+                .iter()
+                .find(|(key, _)| key == "FORGE_PERMISSION_MODE")
+                .map(|(_, value)| value.as_str()),
+            Some("default")
+        );
+    }
+    #[test]
     fn bridge_mcp_env_uses_explicit_checkpoint_context_not_process_env() {
         // The checkpoint context handed to the `forge mcp-serve` child must come from the EXPLICIT
         // `CheckpointContext` the parent threaded through — not from a process-global `set_var`.
@@ -3415,9 +3451,13 @@ mod tests {
             .iter()
             .all(|(key, value)| { key != "FORGE_PERMISSION_MODE" || value == "accept-edits" }));
 
-        // Full and Ask must cross the bridge as their canonical keys. The child uses these keys
-        // to select the same Forge MCP gate; it must never receive a display label or Debug name.
-        for (mode, expected) in [("bypass", "bypass"), ("default", "default")] {
+        // Full is the upstream/UI representation of Bypass and must normalize to bypass.
+        for (mode, expected) in [
+            ("bypass", "bypass"),
+            ("default", "default"),
+            ("Full", "bypass"),
+            ("Ask", "default"),
+        ] {
             let ctx = CheckpointContext {
                 session: "s".to_string(),
                 seq: 1,
@@ -3439,7 +3479,7 @@ mod tests {
             session: "s".to_string(),
             seq: 1,
             root: "/tmp/checkpoints".to_string(),
-            mode: "Full".to_string(),
+            mode: "yolo".to_string(),
         };
         let env = bridge_mcp_env(None, Some(&invalid));
         assert_eq!(
