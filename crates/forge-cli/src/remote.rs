@@ -913,6 +913,10 @@ pub struct Snapshot {
     /// The isolated worktree the session runs in (v6), when created with `worktree: true` —
     /// `None` for sessions running directly in their cwd.
     pub worktree: Option<String>,
+    /// Whether the session's working directory has been intentionally initialized for Forge.
+    pub project_initialized: bool,
+    /// Why the initialization banner is shown, when `project_initialized` is false.
+    pub project_init_hint: Option<String>,
     /// How the server is exposed: "loopback" | "LAN" | "public (provider)".
     pub exposure: String,
     pub busy: bool,
@@ -990,6 +994,8 @@ impl Default for Snapshot {
             title: String::new(),
             cwd: String::new(),
             worktree: None,
+            project_initialized: true,
+            project_init_hint: None,
             exposure: String::new(),
             busy: false,
             done: false,

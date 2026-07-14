@@ -725,7 +725,17 @@ Layered config — defaults → user → project → env vars:
 
 Key sections: `[mesh]` (routing, budget, conservation, failover), `[permissions]` (per-tool rules),
 `[lattice]` (indexing + embeddings), `[shell]` (sandbox + error interceptor), `[[hooks]]`, `[mcp]`,
-`[git]`, `[assay]`, `[statusline]` (widget layout), `[local]`.
+`[git]`, `[assay]`, `[statusline]` (widget layout), `[local]`, and `[project]`.
+
+```toml
+[project]
+auto_initialize = true # model-backed tailored setup for new, uninitialized projects
+```
+
+When enabled, Forge runs the same safe setup as `/init` once per uninitialized project: it inspects
+that repository and creates only missing tailored `AGENTS.md`, `.forge/agents/*`, and (when useful)
+`.forge/config.toml` files. It never overwrites existing files. The default is `false` because this
+uses a model turn and its configured quota.
 
 ```toml
 [mesh]

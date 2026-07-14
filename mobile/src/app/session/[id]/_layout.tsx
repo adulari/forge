@@ -86,6 +86,13 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const [forkVisible, setForkVisible] = useState(false);
 
   const [initVisible, setInitVisible] = useState(false);
+  const [projectWarningDismissed, setProjectWarningDismissed] = useState(false);
+  const [projectSetupRequested, setProjectSetupRequested] = useState(false);
+
+  useEffect(() => {
+    setProjectWarningDismissed(false);
+    setProjectSetupRequested(false);
+  }, [sessionId]);
 
   const [assayVisible, setAssayVisible] = useState(false);
 
@@ -225,6 +232,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const publicExposure = (snapshot?.exposure ?? "").startsWith("public");
   const reconnecting = connectionState === "reconnecting";
   const unreachable = connectionState === "unreachable";
+  const projectNeedsInitialization = snapshot?.project_initialized === false && !projectWarningDismissed;
 
   const statusState: StatusDotState =
     snapshot == null
@@ -315,6 +323,17 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
         <LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={sendWithFeedback} />
 
+        {projectNeedsInitialization ? (
+          <Banner
+            tone="warn"
+            actionLabel={projectSetupRequested ? undefined : "Set it up for me"}
+            message={projectSetupRequested ? "Setting up Forge for this project…" : "This project isn't set up for Forge — no project guidance or custom agents. Forge works best with an AGENTS.md and custom agents."}
+            onAction={() => {
+              if (sendWithFeedback({ kind: "prompt", text: "/init" })) setProjectSetupRequested(true);
+            }}
+            onDismiss={() => setProjectWarningDismissed(true)}
+          />
+        ) : null}
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />
         ) : null}

@@ -90,6 +90,8 @@ export interface Snapshot {
   title: string;
   cwd: string;
   worktree: string | null;
+  project_initialized: boolean;
+  project_init_hint: string | null;
   exposure: string; // "loopback" | "LAN" | "public (…)"
   busy: boolean;
   done: boolean;

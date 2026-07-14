@@ -3,7 +3,7 @@
 //! come from environment variables first, then the OS keyring (`forge auth`).
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use figment::providers::{Env, Format, Serialized, Toml};
 use figment::Figment;
@@ -96,6 +96,9 @@ pub struct Config {
     /// On by default; disable in /config if you find it noisy.
     #[serde(default)]
     pub suggest: SuggestConfig,
+    /// Project setup behavior for repositories that have no Forge guidance or customizations.
+    #[serde(default)]
+    pub project: ProjectConfig,
     /// Interactive TUI rendering (chat). Controls inline vs. full-screen (alternate-screen) mode.
     #[serde(default)]
     pub tui: TuiConfig,
@@ -782,6 +785,15 @@ impl Default for SuggestConfig {
 
 fn default_suggest_enabled() -> bool {
     true
+}
+
+/// Project initialization behavior. Disabled by default because setup performs a model-backed,
+/// repository-specific analysis and consumes the configured model quota.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    /// Automatically run the tailored project setup once when opening an uninitialized project.
+    #[serde(default)]
+    pub auto_initialize: bool,
 }
 
 /// Interactive chat TUI rendering mode.
@@ -2108,6 +2120,7 @@ impl Default for Config {
             assay: AssayConfig::default(),
             recap: RecapConfig::default(),
             suggest: SuggestConfig::default(),
+            project: ProjectConfig::default(),
             tui: TuiConfig::default(),
             local: LocalConfig::default(),
             update: UpdateConfig::default(),
@@ -2192,6 +2205,67 @@ pub fn cursor_dir() -> Option<PathBuf> {
 /// files that don't follow a fixed tool-specific directory structure.
 pub fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf())
+}
+
+/// Whether a project contains Forge-specific guidance, configuration, agents, skills, or commands.
+///
+/// This is the canonical project-initialization check. Callers must pass the session's effective
+/// working directory so worktrees and multi-project servers are evaluated correctly.
+pub fn project_initialization(cwd: &Path) -> ProjectInitialization {
+    let forge = cwd.join(".forge");
+    let initialized = [
+        cwd.join("AGENTS.md"),
+        cwd.join("FORGE.md"),
+        cwd.join("CLAUDE.md"),
+        forge.join("AGENTS.md"),
+        forge.join("FORGE.md"),
+        forge.join("config.toml"),
+        forge.join("agents.md"),
+        forge.join("mcp.toml"),
+        forge.join("settings.json"),
+    ]
+    .iter()
+    .any(|path| path.is_file())
+        || directory_has_entries(&forge.join("agents"))
+        || directory_has_entries(&forge.join("skills"))
+        || directory_has_entries(&forge.join("commands"))
+        || directory_has_entries(&cwd.join(".claude/agents"));
+
+    ProjectInitialization {
+        initialized,
+        hint: (!initialized).then(|| {
+            "No project guidance, custom agents, skills, commands, or Forge config found. Add AGENTS.md or run /init."
+                .to_string()
+        }),
+    }
+}
+
+/// Whether this project has already attempted automatic setup. Stored as a Forge-owned marker so
+/// an unsuccessful model turn cannot consume quota again on every new session.
+pub fn project_auto_setup_attempted(cwd: &Path) -> bool {
+    cwd.join(".forge/.auto-setup-attempted").is_file()
+}
+
+/// Record an automatic setup attempt before its model turn starts. The marker never overwrites
+/// user files and is only used to prevent repeated opt-in attempts for the same project.
+pub fn mark_project_auto_setup_attempted(cwd: &Path) -> std::io::Result<()> {
+    let dir = cwd.join(".forge");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(".auto-setup-attempted"), "auto setup attempted\n")
+}
+
+fn directory_has_entries(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .ok()
+        .and_then(|mut entries| entries.next())
+        .is_some()
+}
+
+/// Canonical project-initialization result for a session working directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectInitialization {
+    pub initialized: bool,
+    pub hint: Option<String>,
 }
 
 /// The command/skill discovery sources, scope-tagged: user scope (`<config>/forge/{commands,
@@ -2537,6 +2611,7 @@ const PRIORITY_PREFIXES: &[&str] = &[
     "local.model",
     "tui.fullscreen",
     "tui.mouse_capture",
+    "project.auto_initialize",
     "recap.enabled",
     "mesh",
     "local",
@@ -2643,6 +2718,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "local.endpoint" => Some(("Local LLM", "Ollama endpoint")),
         "tui.fullscreen" => Some(("Interface", "Full-screen TUI")),
         "tui.mouse_capture" => Some(("Interface", "Mouse wheel scroll")),
+        "project.auto_initialize" => Some(("Project", "Auto-initialize projects")),
         "recap.enabled" => Some(("Interface", "Per-turn recap")),
         "update.check" => Some(("Interface", "Check for updates")),
         "shell.explain_errors" => Some(("Shell", "Explain failed commands")),
@@ -2861,6 +2937,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "local.endpoint" => "Ollama HTTP endpoint (default http://localhost:11434).",
         "tui.fullscreen" => "Full-screen TUI on the alternate screen. Off = inline in native scrollback.",
         "tui.mouse_capture" => "Wheel scrolls the transcript in full-screen mode (minimal button+wheel reporting, no motion tracking — native click-drag text selection still works). Default on. Off disables mouse reporting entirely; scroll with PgUp/PgDn/Home/End.",
+        "project.auto_initialize" => "Run a model-backed, tailored Forge setup once when opening an uninitialized project.",
         "recap.enabled" => "Show a one-line AI recap after each completed turn.",
         "update.check" => "Check GitHub for a newer Forge release on startup (throttled to once a day).",
         "shell.explain_errors" => "When a shell command fails, the AI explains the likely cause + a fix.",
@@ -5148,6 +5225,35 @@ reason = "no privilege escalation"
                 "https://my-resource.openai.azure.com/openai/deployments/gpt-4o/chat/completions?api-version={DEFAULT_AZURE_API_VERSION}"
             )
         );
+    }
+
+    #[test]
+    fn project_initialization_detects_guidance_agents_and_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!project_initialization(dir.path()).initialized);
+
+        std::fs::write(dir.path().join("AGENTS.md"), "guidance").unwrap();
+        assert!(project_initialization(dir.path()).initialized);
+        std::fs::remove_file(dir.path().join("AGENTS.md")).unwrap();
+
+        std::fs::create_dir_all(dir.path().join(".forge/agents")).unwrap();
+        std::fs::write(dir.path().join(".forge/agents/reviewer.md"), "agent").unwrap();
+        assert!(project_initialization(dir.path()).initialized);
+        std::fs::remove_dir_all(dir.path().join(".forge")).unwrap();
+
+        std::fs::create_dir_all(dir.path().join(".claude/agents")).unwrap();
+        std::fs::write(dir.path().join(".claude/agents/reviewer.md"), "agent").unwrap();
+        assert!(project_initialization(dir.path()).initialized);
+    }
+
+    #[test]
+    fn config_accepts_project_auto_initialize_block() {
+        let cfg: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string("[project]\nauto_initialize = true"))
+            .extract()
+            .unwrap();
+        assert!(cfg.project.auto_initialize);
+        assert!(!Config::default().project.auto_initialize);
     }
 
     #[test]

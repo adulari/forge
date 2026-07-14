@@ -1,5 +1,25 @@
 use super::*;
 
+pub(crate) fn project_setup_turn() -> (String, Vec<String>, Option<forge_types::TaskTier>) {
+    (
+        "Set up Forge for this repository completely and safely. First inspect the real repository (README, manifests, CI, source layout, and existing conventions) with read-only tools; do not guess. Then create ONLY missing Forge setup files, never overwrite any existing file: (1) a concise, tailored root `AGENTS.md` covering overview, verified build/test/lint commands, architecture, and conventions; (2) one or more useful tailored custom agent definitions under `.forge/agents/`; and (3) a minimal `.forge/config.toml` only when it adds a verified project-specific setting. Create directories as needed. Do not modify product source, tests, dependencies, or existing guidance. Finish by reporting exactly what you created."
+            .to_string(),
+        Vec::new(),
+        Some(forge_types::TaskTier::Complex),
+    )
+}
+
+/// The agentic project setup turn used by `/init`, the session banner, and the opt-in automatic
+/// setup. It only creates missing Forge files after inspecting the actual repository.
+pub(crate) fn project_setup_outcome() -> DispatchOutcome {
+    let (prompt, guidance, tier) = project_setup_turn();
+    DispatchOutcome::RunTurn {
+        prompt,
+        guidance,
+        tier,
+    }
+}
+
 /// What a line typed at the chat prompt means.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ChatAction {
@@ -523,21 +543,10 @@ pub(crate) async fn dispatch_command(
                 }
             }
         }
-        // `/init` — scan the repo and write `.forge/AGENTS.md`, the project memory the agent
-        // auto-loads as a standing system prompt on future sessions.
+        // `/init` — run the same tailored, safe setup turn as the session banner and opt-in.
         CommandAction::Init => {
-            app.note("📝 scanning the repo to write .forge/AGENTS.md …");
-            return Ok(DispatchOutcome::RunTurn {
-                prompt: "Analyze this codebase and write a concise `.forge/AGENTS.md` capturing \
-what a new contributor (human or agent) needs: a one-paragraph project overview; how to build, \
-test, lint, and run it; the source layout and architecture; and the project's code conventions. \
-Inspect the real files first (README, package/build manifests, CI config, the main source dirs) \
-using your tools — do not guess. Then create `.forge/AGENTS.md` with the WriteFile tool. Keep it \
-tight and accurate; omit anything you could not verify."
-                    .to_string(),
-                guidance: Vec::new(),
-                tier: Some(forge_types::TaskTier::Complex),
-            });
+            app.note("⚙ Setting up Forge for this project…");
+            return Ok(project_setup_outcome());
         }
         // `/plan <task>` — planning mode: switch to read-only (Plan) temper and run a turn that
         // investigates and proposes a plan without making any edits. Approved with `/execute`.

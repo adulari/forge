@@ -1186,6 +1186,14 @@ pub(crate) async fn run_chat_tui(
         let banner = banner_lines(tui.width());
         app.push_scrollback(banner);
     }
+    let project = forge_config::project_initialization(
+        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+    );
+    if !project.initialized {
+        app.apply(forge_tui::PresenterEvent::Warning(
+            "This project isn't set up for Forge — no project guidance or custom agents. Run /init to set it up for me.".to_string(),
+        ));
+    }
     {
         let s = session.lock().await;
         app.temper = s.temper().label().to_string();
@@ -1298,6 +1306,28 @@ pub(crate) async fn run_chat_tui(
     // Baseline for the spinner: deriving the tick from elapsed time keeps the animation
     // speed independent of the loop frequency (one frame per 60ms, exactly as before).
     let mut busy_since = Instant::now();
+
+    let project_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    if tui_config.project.auto_initialize
+        && !forge_config::project_initialization(&project_cwd).initialized
+        && !forge_config::project_auto_setup_attempted(&project_cwd)
+    {
+        let _ = forge_config::mark_project_auto_setup_attempted(&project_cwd);
+        app.note("⚙ Setting up Forge for this project automatically…");
+        turn_gen += 1;
+        let (prompt, guidance, tier) = project_setup_turn();
+        turn_handle = Some(spawn_turn_with(
+            prompt,
+            guidance,
+            tier,
+            &session,
+            &done_tx,
+            turn_gen,
+            &mut app,
+            &mut busy,
+            &mut busy_since,
+        ));
+    }
     // Fixed epoch for idle animations (effort slider rainbow, etc.): unlike busy_since this
     // never resets, so idle animations always have a monotonically increasing tick.
     let anim_epoch = Instant::now();
@@ -4603,6 +4633,8 @@ pub(crate) async fn run_chat_tui(
                 if let Ok(s) = session.try_lock() {
                     cached_session_id = s.session_id().to_string();
                 }
+                let project =
+                    forge_config::project_initialization(std::path::Path::new(&remote_cwd));
                 let mut snap = build_snapshot_frame(
                     &app,
                     SnapshotIdentity {
@@ -4610,6 +4642,8 @@ pub(crate) async fn run_chat_tui(
                         title: "",
                         cwd: &remote_cwd,
                         worktree: None,
+                        project_initialized: project.initialized,
+                        project_init_hint: project.hint,
                         exposure,
                     },
                     remote_copy_text.clone(),
@@ -5075,6 +5109,10 @@ pub(crate) struct SnapshotIdentity<'a> {
     pub cwd: &'a str,
     /// The isolated worktree the session runs in (v6), if any.
     pub worktree: Option<&'a str>,
+    /// Canonical project initialization state for this session's working directory.
+    pub project_initialized: bool,
+    /// Guidance shown when the project has not been initialized for Forge.
+    pub project_init_hint: Option<String>,
     /// "loopback" | "LAN" | "public (provider)" — see [`remote::exposure_label`].
     pub exposure: String,
 }
@@ -5098,6 +5136,8 @@ pub(crate) fn build_snapshot_frame(
         title: ident.title.to_string(),
         cwd: ident.cwd.to_string(),
         worktree: ident.worktree.map(str::to_string),
+        project_initialized: ident.project_initialized,
+        project_init_hint: ident.project_init_hint,
         exposure: ident.exposure,
         busy: view.busy,
         done: view.done,
