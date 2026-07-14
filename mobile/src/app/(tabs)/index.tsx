@@ -57,7 +57,7 @@ function FleetHeader({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: S
     <View style={[styles.header, { borderBottomColor: tokens.border }]}>
       <View style={styles.headerStat}>
         <Text style={[typeScale.section, { color: tokens.ink3 }]}>spend</Text>
-        <CostMetric valueUsd={totalCost} variant="bodyBold" />
+        <CostMetric valueUsd={totalCost} variant="bodyBold" showZero />
       </View>
       <Pressable
         onPress={onToggleNeedsYou}

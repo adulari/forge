@@ -12,12 +12,14 @@ export interface CostMetricProps {
   /** Typographic scale to render at — callers embed this in different contexts
    *  (AgentCard row vs. SessionCard third line vs. a standalone stat). */
   variant?: "meta" | "sub" | "bodyBold";
+  /** Render a zero-value metric instead of omitting it. */
+  showZero?: boolean;
 }
 
-export function CostMetric({ valueUsd, variant = "meta" }: CostMetricProps) {
+export function CostMetric({ valueUsd, variant = "meta", showZero = false }: CostMetricProps) {
   const tokens = useTokens();
   const display = useCountUp(valueUsd);
-  if (!(valueUsd > 0)) return null;
+  if (!(valueUsd > 0) && !(showZero && valueUsd === 0)) return null;
 
   return (
     <Text
