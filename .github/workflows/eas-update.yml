@@ -1,0 +1,66 @@
+name: eas-update
+
+# Publishes an EAS Update (OTA) to the `production` channel on every push to main that
+# touches the JS bundle / app config. Ships JS + assets only — no native code, no new
+# binary. The installed app checks for + applies the update on launch and foreground
+# (mobile/src/lib/useOtaUpdates.ts), gated by a runtimeVersion fingerprint so an OTA
+# update is only offered to binaries whose native layer matches.
+#
+# `--platform ios` is REQUIRED: the app has native-only modules (live-activity Swift
+# target + expo-audio voice) whose config plugin breaks the web bundle export, so
+# letting eas-cli default to exporting every platform would fail the whole publish.
+#
+# Requires the `EXPO_TOKEN` repo secret (Expo access token) for authentication:
+# https://docs.expo.dev/accounts/programmatic-access
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "mobile/src/**"
+      - "mobile/app.config.ts"
+      - "mobile/package.json"
+      - "mobile/package-lock.json"
+      - "mobile/assets/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eas-update-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: eas update (production / ios)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Need the triggering commit message for `--message`; depth 2 is enough for
+          # the merge commit on main (the push that triggered this run).
+          fetch-depth: 2
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Publish EAS Update (production channel, iOS only)
+        run: |
+          npx eas-cli@latest update \
+            --channel production \
+            --environment production \
+            --platform ios \
+            --message "$(git log -1 --pretty=%s)" \
+            --non-interactive
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}

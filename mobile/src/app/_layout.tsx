@@ -29,6 +29,7 @@ import { AuthProvider, useAuth } from "../lib/auth";
 import { initHaptics } from "../lib/haptics";
 import { isTauri } from "../lib/platform";
 import { checkForDesktopUpdate } from "../lib/updater";
+import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { useGlobalShortcuts } from "../lib/shortcuts";
 import { ThemeProvider, useTokens } from "../theme/ThemeProvider";
 import { monoFamily } from "../theme/typography";
@@ -111,6 +112,7 @@ function RootNavigator() {
 export default function RootLayout() {
   const persistOptions = useMemo(() => ({ persister: asyncStoragePersister }), []);
   useGlobalShortcuts(); // HANDOFF(T5.1): ⌘1..4 tabs / ⌘N new session — web/desktop only, no-op native
+  useOtaUpdates(); // EAS Update OTA check on launch + foreground (no-op in dev / when disabled)
 
   useEffect(() => {
     void initHaptics();

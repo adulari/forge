@@ -10,6 +10,13 @@ const config: ExpoConfig = {
   slug: "forge",
   scheme: "forge",
   version: "1.0.1",
+  runtimeVersion: { policy: "fingerprint" },
+  updates: {
+    url: "https://u.expo.dev/e1d145b5-344e-4147-ba35-5f0b993b4c8c",
+    enabled: true,
+    checkAutomatically: "ON_LOAD",
+    fallbackToCacheTimeout: 0,
+  },
   orientation: "portrait",
   icon: "./assets/icon.png",
   userInterfaceStyle: "automatic",
