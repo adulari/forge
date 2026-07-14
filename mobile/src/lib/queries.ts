@@ -358,6 +358,7 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
   const title = snapshot?.title ?? "";
   const costUsd = snapshot?.cost_usd ?? 0;
   const contextTokens = snapshot?.context_tokens ?? 0;
+  const contextLimit = snapshot?.context_limit ?? 0;
 
   useEffect(() => {
     const subscription = addLiveActivityPushTokenListener(({ sessionId: tokenSessionId, pushToken }) => {
@@ -386,7 +387,7 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
     if (didBegin) {
       activeRef.current = true;
       activitySessionIdRef.current = sessionId;
-      startLiveActivity(sessionId, title, busy, waiting, costUsd, contextTokens)
+      startLiveActivity(sessionId, title, busy, waiting, costUsd, contextTokens, contextLimit)
         .then(({ activityId }) => {
           if (!activeRef.current || activitySessionIdRef.current !== sessionId) {
             if (activityId) endLiveActivity(activityId).catch(() => {});
@@ -394,7 +395,7 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
           }
           activityIdRef.current = activityId;
           if (activityId) {
-            updateLiveActivity(activityId, busy, waiting, costUsd, contextTokens).catch(() => {});
+            updateLiveActivity(activityId, busy, waiting, costUsd, contextTokens, contextLimit).catch(() => {});
           }
         })
         .catch((error) => {
@@ -413,11 +414,11 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
         unsubscribePush(baseUrl, { session_id: activeSessionId, push_token: "" }).catch(() => {});
       }
     } else if (activityIdRef.current) {
-      updateLiveActivity(activityIdRef.current, busy, waiting, costUsd, contextTokens).catch(
+      updateLiveActivity(activityIdRef.current, busy, waiting, costUsd, contextTokens, contextLimit).catch(
         () => {},
       );
     }
-  }, [busy, waiting, sessionId, title, costUsd, contextTokens, baseUrl, queryClient]);
+  }, [busy, waiting, sessionId, title, costUsd, contextTokens, contextLimit, baseUrl, queryClient]);
 
   return completed;
 }

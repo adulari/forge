@@ -32,17 +32,20 @@ struct ForgeSessionActivityWidget: Widget {
                             Text(ForgeActivityStyle.contextLabel(for: context.state))
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
                         ProgressView(value: ForgeActivityStyle.contextProgress(for: context.state))
                             .tint(ForgeActivityStyle.color(for: context.state))
                         HStack {
                             Label(ForgeActivityStyle.costLabel(for: context.state), systemImage: "sparkles")
+                                .fixedSize(horizontal: true, vertical: false)
                             Spacer()
                             Text("Live session")
                         }
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     }
+                    .padding(.horizontal, 4)
                 }
             } compactLeading: {
                 HStack(spacing: 4) {
@@ -95,7 +98,8 @@ private enum ForgeActivityStyle {
     }
 
     static func contextProgress(for state: ForgeSessionActivityAttributes.ContentState) -> Double {
-        min(max(Double(state.contextTokens) / 200_000, 0), 1)
+        let limit = state.contextLimit > 0 ? Double(state.contextLimit) : 200_000.0
+        return min(max(Double(state.contextTokens) / limit, 0), 1)
     }
 
     static func contextLabel(for state: ForgeSessionActivityAttributes.ContentState) -> String {
@@ -149,6 +153,8 @@ private struct ForgeSessionActivityLockScreenView: View {
                 Text(ForgeActivityStyle.costLabel(for: state))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.68))
+                    .fixedSize(horizontal: true, vertical: false)
+                    .layoutPriority(1)
             }
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
@@ -157,13 +163,16 @@ private struct ForgeSessionActivityLockScreenView: View {
                     Spacer()
                     Text(ForgeActivityStyle.contextLabel(for: state))
                         .font(.caption.monospacedDigit())
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .foregroundStyle(.white.opacity(0.72))
                 ProgressView(value: ForgeActivityStyle.contextProgress(for: state))
                     .tint(ForgeActivityStyle.color(for: state))
+                    .padding(.horizontal, 1)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
         .foregroundStyle(.white)
     }
 }

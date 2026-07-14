@@ -12,6 +12,7 @@ type NativeLiveActivity = {
     waiting: boolean,
     costUsd: number,
     contextTokens: number,
+    contextLimit: number,
   ): Promise<{ activityId: string | null; pushToken: string | null }>;
   update(
     activityId: string,
@@ -19,6 +20,7 @@ type NativeLiveActivity = {
     waiting: boolean,
     costUsd: number,
     contextTokens: number,
+    contextLimit: number,
   ): Promise<void>;
   end(activityId: string): Promise<void>;
 };
@@ -61,9 +63,10 @@ export async function startLiveActivity(
   waiting: boolean,
   costUsd: number,
   contextTokens: number,
+  contextLimit: number,
 ): Promise<{ activityId: string | null; pushToken: string | null }> {
   if (!native) return { activityId: null, pushToken: null };
-  return native.start(sessionId, title, busy, waiting, costUsd, contextTokens);
+  return native.start(sessionId, title, busy, waiting, costUsd, contextTokens, contextLimit);
 }
 
 export async function updateLiveActivity(
@@ -72,9 +75,10 @@ export async function updateLiveActivity(
   waiting: boolean,
   costUsd: number,
   contextTokens: number,
+  contextLimit: number,
 ): Promise<void> {
   if (!native) return;
-  await native.update(activityId, busy, waiting, costUsd, contextTokens);
+  await native.update(activityId, busy, waiting, costUsd, contextTokens, contextLimit);
 }
 
 export async function endLiveActivity(activityId: string): Promise<void> {

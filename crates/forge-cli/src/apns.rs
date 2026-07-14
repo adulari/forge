@@ -216,6 +216,7 @@ pub(crate) struct LiveActivityContentState {
     pub waiting: bool,
     pub cost_usd: f64,
     pub context_tokens: u64,
+    pub context_limit: u64,
 }
 
 /// The APNs `event: update` payload for one [`LiveActivityContentState`], per Apple's
@@ -558,6 +559,7 @@ mod tests {
             waiting: false,
             cost_usd: 1.23,
             context_tokens: 4567,
+            context_limit: 200_000,
         };
         let v = live_activity_payload(&content_state, 1_700_000_123);
         assert_eq!(v["aps"]["event"], "update");
@@ -567,6 +569,7 @@ mod tests {
         assert_eq!(cs["waiting"], false);
         assert_eq!(cs["cost_usd"], 1.23);
         assert_eq!(cs["context_tokens"], 4567);
+        assert_eq!(cs["context_limit"], 200_000);
     }
 
     /// All tests below mutate process-global env vars (`std::env::set_var`/`remove_var`) to
