@@ -694,6 +694,11 @@ impl DispatchProvider {
         }
     }
 
+    /// Whether both supported MCP CLI bridges are using Forge's harness mode.
+    pub fn harness_enabled(&self) -> bool {
+        self.claude_cli.harness_enabled() && self.codex_cli.harness_enabled()
+    }
+
     /// Cap output tokens on the genai (API-provider) and xAI-OAuth paths. `0` disables the cap.
     /// The CLI bridges manage their own output, so this doesn't affect them.
     pub fn with_max_output_tokens(mut self, cap: u32) -> Self {

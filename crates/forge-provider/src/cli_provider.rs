@@ -28,7 +28,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use forge_types::{Message, Role, Usage};
+use forge_types::{Message, PermissionMode, Role, Usage};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -427,6 +427,10 @@ impl CliProvider {
         self
     }
 
+    pub fn harness_enabled(&self) -> bool {
+        self.harness
+    }
+
     /// Toggle CLI session reuse via `--resume` (claude only). Off → always send the full transcript.
     pub fn with_session_resume(mut self, enabled: bool) -> Self {
         self.resume_enabled = enabled;
@@ -515,6 +519,12 @@ fn forge_mcp_config(forge_exe: &str, mcp_env: &[(String, String)]) -> String {
     )
 }
 
+fn bridge_permission_mode(raw: &str) -> PermissionMode {
+    PermissionMode::from_key(raw)
+        .or_else(|| PermissionMode::from_label(raw))
+        .unwrap_or(PermissionMode::Default)
+}
+
 /// The out-of-band env handed to a bridge turn's `forge mcp-serve` child: the subagent sink plus
 /// the per-turn checkpoint context. The checkpoint values come from the EXPLICIT [`CheckpointContext`]
 /// the parent threaded through (so the parent never mutates its process-global env); when absent
@@ -537,9 +547,11 @@ fn bridge_mcp_env(
             env.push(("FORGE_CHECKPOINT_SESSION".to_string(), c.session.clone()));
             env.push(("FORGE_CHECKPOINT_SEQ".to_string(), c.seq.to_string()));
             env.push(("FORGE_CHECKPOINT_ROOT".to_string(), c.root.clone()));
-            // The parent's live temper, so the bridge's permission gate matches the UI mode
-            // (Plan→Auto-edit switches reach mcp-serve instead of it using the stale config).
-            env.push(("FORGE_PERMISSION_MODE".to_string(), c.mode.clone()));
+            // Accept both canonical keys and the upstream/UI representation (Full, Ask, ...).
+            // Invalid values fail closed to Ask instead of allowing the child to inherit a more
+            // permissive on-disk mode.
+            let mode = bridge_permission_mode(&c.mode).key();
+            env.push(("FORGE_PERMISSION_MODE".to_string(), mode.to_string()));
         }
         None => {
             for key in [
@@ -3386,6 +3398,37 @@ mod tests {
     }
 
     #[test]
+    fn full_temper_crosses_bridge_as_bypass_and_allows_writes() {
+        // Serve and the UI carry the live value as the display label. This is the real upstream
+        // representation, not the canonical process-boundary key.
+        let ctx = CheckpointContext {
+            session: "full-session".to_string(),
+            seq: 7,
+            root: "/tmp/checkpoints".to_string(),
+            mode: PermissionMode::Bypass.label().to_string(),
+        };
+        let env = bridge_mcp_env(None, Some(&ctx));
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "FORGE_PERMISSION_MODE")
+                .map(|(_, value)| value.as_str()),
+            Some("bypass")
+        );
+
+        let ask = CheckpointContext {
+            mode: PermissionMode::Default.label().to_string(),
+            ..ctx.clone()
+        };
+        let ask_env = bridge_mcp_env(None, Some(&ask));
+        assert_eq!(
+            ask_env
+                .iter()
+                .find(|(key, _)| key == "FORGE_PERMISSION_MODE")
+                .map(|(_, value)| value.as_str()),
+            Some("default")
+        );
+    }
+    #[test]
     fn bridge_mcp_env_uses_explicit_checkpoint_context_not_process_env() {
         // The checkpoint context handed to the `forge mcp-serve` child must come from the EXPLICIT
         // `CheckpointContext` the parent threaded through — not from a process-global `set_var`.
@@ -3408,6 +3451,47 @@ mod tests {
         assert_eq!(get("FORGE_CHECKPOINT_ROOT"), Some("/abs/checkpoints"));
         assert_eq!(get("FORGE_PERMISSION_MODE"), Some("accept-edits"));
         assert_eq!(get("FORGE_SUBAGENT_SINK"), Some("/tmp/sink.jsonl"));
+        assert!(env
+            .iter()
+            .all(|(key, value)| { key != "FORGE_PERMISSION_MODE" || value == "accept-edits" }));
+
+        // Full is the upstream/UI representation of Bypass and must normalize to bypass.
+        for (mode, expected) in [
+            ("bypass", "bypass"),
+            ("default", "default"),
+            ("Full", "bypass"),
+            ("Ask", "default"),
+        ] {
+            let ctx = CheckpointContext {
+                session: "s".to_string(),
+                seq: 1,
+                root: "/tmp/checkpoints".to_string(),
+                mode: mode.to_string(),
+            };
+            let env = bridge_mcp_env(None, Some(&ctx));
+            assert_eq!(
+                env.iter()
+                    .find(|(key, _)| key == "FORGE_PERMISSION_MODE")
+                    .map(|(_, value)| value.as_str()),
+                Some(expected)
+            );
+        }
+
+        // Unknown input fails closed to Ask rather than inheriting a permissive config in the
+        // child process.
+        let invalid = CheckpointContext {
+            session: "s".to_string(),
+            seq: 1,
+            root: "/tmp/checkpoints".to_string(),
+            mode: "yolo".to_string(),
+        };
+        let env = bridge_mcp_env(None, Some(&invalid));
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "FORGE_PERMISSION_MODE")
+                .map(|(_, value)| value.as_str()),
+            Some("default")
+        );
 
         // The function only READS env (for the legacy/depth fallback) — it must never WRITE it, so a
         // value present after the call cannot have been published by this code path.

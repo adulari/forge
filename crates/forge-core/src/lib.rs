@@ -1691,6 +1691,7 @@ impl Session {
     /// orchestrating agent can switch to bypass/accept-edits without restarting the session.
     pub fn set_mode(&mut self, mode: PermissionMode) {
         self.mode = mode;
+        self.config.permission_mode = mode;
     }
 
     /// The session's current permission mode.
@@ -2281,6 +2282,7 @@ impl Session {
     /// the cycle this can reach `Bypass`/Full, since the picker is an explicit, deliberate choice.
     pub fn set_temper(&mut self, mode: PermissionMode) -> PermissionMode {
         self.mode = mode;
+        self.config.permission_mode = mode;
         let _ = self
             .store
             .update_session_mode(&self.id, &format!("{:?}", self.mode));
@@ -14862,7 +14864,7 @@ mod tests {
         std::fs::write(&file, "ORIGINAL").unwrap();
 
         let config = Config {
-            permission_mode: PermissionMode::AcceptEdits,
+            permission_mode: PermissionMode::Default,
             ..Config::default()
         };
         let mut session = Session::start(
@@ -14878,6 +14880,11 @@ mod tests {
             ".",
         )
         .unwrap();
+        assert_eq!(session.temper(), PermissionMode::Default);
+        assert_eq!(session.mode(), PermissionMode::Default);
+        session.set_temper(PermissionMode::Bypass);
+        assert_eq!(session.temper(), PermissionMode::Bypass);
+        assert_eq!(session.mode(), PermissionMode::Bypass);
         session.set_checkpoint_root(dir.join("snaps"));
 
         session.run_turn("edit it").await.unwrap();
