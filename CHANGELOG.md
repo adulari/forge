@@ -6,6 +6,36 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.6.2] - 2026-07-14
+
+Feature + fix wave on top of v2.6.1, from continued dogfooding of the real builds.
+
+### Added
+- **Live Activities** (#754): working iOS Live Activity with a polished Dynamic Island and
+  lock-screen presentation — live session status, model, and progress, wired through the relay
+  with APNs auth.
+- **Uninitialized-project banner** (#755): sessions in a project with no Forge setup (no project
+  guidance file and no custom agents) now show a dismissible warning banner on TUI, desktop, and
+  mobile, computed from one canonical backend heuristic. The banner offers a one-click "set it up"
+  action that runs the init flow, plus an opt-in config setting to auto-initialize every
+  un-initialized project.
+
+### Fixed
+- **Fleet spend + page dots** (#753): the Fleet SPEND stat now always renders a real value
+  (never blank) and the page-indicator dots track the real page count/position instead of looking
+  like a stuck loader.
+- **Session header on native** (#753): the entire header — including the top safe-area inset —
+  now sits on one continuous elevated surface with no two-tone seam on the iOS app.
+- **`/goal` read-only completion** (#756): a read-only / no-op goal (e.g. "check X",
+  "already satisfied") now completes in one clean response instead of looping several times
+  demanding file edits. The proven anti-spiral verification gate is unchanged — a completion is
+  only fast-accepted when the model explicitly explains no change was needed; false "done" claims
+  are still caught, reopened, and re-driven, and unverified work is still flagged.
+- **External MCP servers by default** (#757): the CLI bridge now loads external project MCP
+  servers by default (`mesh.bridge_mcp_external = true`), with a bounded, non-blocking bootstrap so
+  a slow or unreachable server is skipped rather than stalling startup. Fixes the regression where
+  project MCP integrations (e.g. Helm) silently stopped working under a bridged session.
+
 ## [2.6.1] - 2026-07-14
 
 Follow-up polish on the v2.6.0 overhaul, from continued user testing of the real builds.
