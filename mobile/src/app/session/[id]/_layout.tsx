@@ -254,6 +254,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         // constant. Banners are conditional, so this legitimately changes across snapshots.
         onLayout={(e) => setHeaderHeight(e.nativeEvent.layout.height)}
       >
+        <View
+          style={[styles.headerSurface, { backgroundColor: tokens.bg2, borderBottomColor: tokens.border }]}
+        >
         <View style={gutter}>
           <SessionHeader
             title={snapshot?.title || `session ${sessionId.slice(0, 8)}`}
@@ -354,6 +357,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             testID="session-segmented"
           />
         </View>
+        </View>
       </SafeAreaView>
 
       <Animated.View key={activeSegment} style={[styles.flex, segmentStyle]}>
@@ -391,5 +395,6 @@ export default function SessionLayout() {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  headerSurface: { borderBottomWidth: StyleSheet.hairlineWidth },
   segmentedWrap: { paddingBottom: space.space8 },
 });
