@@ -1461,13 +1461,11 @@ impl DriverState {
                         .last_assistant_text()
                         .map(str::to_string)
                 };
-                let said_complete = last
-                    .as_deref()
-                    .map(|t| t.contains("GOAL COMPLETE"))
-                    .unwrap_or(false);
+                let said_complete = is_goal_complete_marker(last.as_deref());
                 let progressed = done > gs.prev_done;
                 let no_progress = if progressed { 0 } else { gs.no_progress + 1 };
                 match goal_stop_reason(said_complete, done, total, gs.iter, no_progress) {
+                    Some(reason) if is_goal_complete_reason(reason) => {}
                     Some(reason) => self.app.note(reason),
                     None => {
                         self.turn_gen += 1;

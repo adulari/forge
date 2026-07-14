@@ -4163,13 +4163,11 @@ pub(crate) async fn run_chat_tui(
                                 .last_assistant_text()
                                 .map(str::to_string)
                         };
-                        let said_complete = last
-                            .as_deref()
-                            .map(|t| t.contains("GOAL COMPLETE"))
-                            .unwrap_or(false);
+                        let said_complete = is_goal_complete_marker(last.as_deref());
                         let progressed = done > gs.prev_done;
                         let no_progress = if progressed { 0 } else { gs.no_progress + 1 };
                         match goal_stop_reason(said_complete, done, total, gs.iter, no_progress) {
+                            Some(reason) if is_goal_complete_reason(reason) => {}
                             Some(reason) => app.note(reason),
                             None => {
                                 turn_gen += 1;
@@ -4814,12 +4812,25 @@ pub(crate) const GOAL_NO_PROGRESS_MAX: usize = 6;
 pub(crate) const GOAL_GUIDANCE: &str = "You are in autonomous goal mode. Keep working through the \
 tracked task plan (update_tasks) one item at a time until the entire goal is met. Never stop to \
 ask for approval — you have standing authorization. When (and only when) every task is Done and \
-the goal is fully satisfied, reply with exactly GOAL COMPLETE on its own line and do nothing else.";
+the goal is fully satisfied, reply with one concise final response that states the goal is complete \
+and briefly summarizes what was done. Do not emit control sentinels or repeated completion messages.";
 
 /// The prompt each re-drive turn is given once the goal is running autonomously.
 pub(crate) const GOAL_CONTINUE_PROMPT: &str = "Continue the goal. Commit/push/PR any finished \
 work, then take the single highest-value not-done task and complete it end to end. Keep the \
 update_tasks plan current.";
+
+/// Legacy completion marker accepted only as an exact standalone reply. New goal guidance asks
+/// for a normal final response and completion is otherwise inferred from the tracked task plan.
+pub(crate) fn is_goal_complete_marker(text: Option<&str>) -> bool {
+    text.is_some_and(|text| text.trim() == "GOAL COMPLETE")
+}
+
+pub(crate) const GOAL_COMPLETE_REASON: &str = "🎯 goal complete";
+
+pub(crate) fn is_goal_complete_reason(reason: &str) -> bool {
+    reason == GOAL_COMPLETE_REASON || reason == "🎯 goal complete — all tasks done"
+}
 
 /// Decide whether a goal should stop after a turn. Returns `Some(reason)` to stop (shown to the
 /// user), or `None` to run another iteration. Pure so it's unit-testable.
@@ -4831,7 +4842,7 @@ pub(crate) fn goal_stop_reason(
     no_progress: usize,
 ) -> Option<&'static str> {
     if said_complete {
-        Some("🎯 goal complete")
+        Some(GOAL_COMPLETE_REASON)
     } else if total > 0 && done == total {
         Some("🎯 goal complete — all tasks done")
     } else if iter >= GOAL_MAX_ITERS {
@@ -6077,8 +6088,22 @@ mod tests {
     }
 
     #[test]
+    fn goal_completion_marker_must_be_a_standalone_reply() {
+        assert!(is_goal_complete_marker(Some("GOAL COMPLETE")));
+        assert!(is_goal_complete_marker(Some("\n  GOAL COMPLETE\n")));
+        assert!(!is_goal_complete_marker(Some("Goal complete — fixed it.")));
+        assert!(!is_goal_complete_marker(Some(
+            "I will reply GOAL COMPLETE when done."
+        )));
+        assert!(!is_goal_complete_marker(None));
+    }
+
+    #[test]
     fn goal_stop_reason_stops_when_model_says_complete() {
-        assert_eq!(goal_stop_reason(true, 1, 3, 2, 0), Some("🎯 goal complete"));
+        assert_eq!(
+            goal_stop_reason(true, 1, 3, 2, 0),
+            Some(GOAL_COMPLETE_REASON)
+        );
     }
 
     #[test]
