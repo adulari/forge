@@ -22,6 +22,8 @@ const config: ExpoConfig = {
       "com.apple.security.application-groups": [APP_GROUP],
     },
     infoPlist: {
+      NSSupportsLiveActivities: true,
+      NSSupportsLiveActivitiesFrequentUpdates: true,
       // Standard HTTPS/TLS to the user's own daemon only — no proprietary/non-standard crypto,
       // so this is exempt from export compliance docs (Apple's own "false" = "no" branch).
       ITSAppUsesNonExemptEncryption: false,

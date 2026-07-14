@@ -55,6 +55,10 @@
     <string>Unlock Forge with Face ID.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Allow $(PRODUCT_NAME) to access your microphone</string>
+    <key>NSSupportsLiveActivities</key>
+    <true/>
+    <key>NSSupportsLiveActivitiesFrequentUpdates</key>
+    <true/>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>Forge lets you attach photos from your library to a session.</string>
     <key>NSUserActivityTypes</key>

@@ -1,12 +1,15 @@
-// LiveActivityModule.swift (this pod) needs the exact same ActivityAttributes type as the widget
-// extension target to call Activity<ForgeSessionActivityAttributes>.request/update/end — but this
-// module compiles as its own separate CocoaPod ("LiveActivity"), not merged into any target by
-// @bacons/apple-targets' `_shared` convention (that only reaches the main app + extension
-// targets). Kept as a literal duplicate, in lockstep, with
-// mobile/targets/widget/ForgeSessionActivityAttributes.swift — change one, change both.
+// Used by this widget extension target (ActivityConfiguration/Dynamic Island in
+// ForgeSessionActivity.swift). NOT in `_shared/` — that convention only merges files into the
+// main app target and this extension target, but mobile/modules/live-activity/ios's
+// LiveActivityModule.swift compiles as its OWN separate CocoaPod (confirmed via a real EAS Build
+// Xcode log: "cannot find type 'ForgeSessionActivityAttributes' in scope" in that pod, even with
+// this file in `_shared/`). So that module keeps its own literal copy of this same struct
+// instead — see mobile/modules/live-activity/ios/ForgeSessionActivityAttributes.swift, which
+// must be changed in lockstep with this file.
 //
-// `ContentState`'s field names are also a hand-kept-in-sync wire contract with
-// crates/forge-cli/src/apns.rs's `LiveActivityContentState`.
+// `ContentState`'s field names are a hand-kept-in-sync wire contract with
+// crates/forge-cli/src/apns.rs's `LiveActivityContentState` — that Rust struct's own doc comment
+// points back here too. Change one side, change all three.
 import ActivityKit
 
 struct ForgeSessionActivityAttributes: ActivityAttributes {
