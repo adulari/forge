@@ -601,12 +601,9 @@ export default function SessionChat() {
     setShowJump(awayFromLatest);
     if (!awayFromLatest) {
       setShowResponseNav(false);
-      if (responseNavTimer.current) clearTimeout(responseNavTimer.current);
       return;
     }
     setShowResponseNav(true);
-    if (responseNavTimer.current) clearTimeout(responseNavTimer.current);
-    responseNavTimer.current = setTimeout(() => setShowResponseNav(false), 2500);
   }, []);
 
   const jumpToLatest = useCallback(() => {
@@ -706,9 +703,7 @@ export default function SessionChat() {
   const assistantResponseIndices = useMemo(() => items.reduce<number[]>((indices, item, index) => { if (item.kind === "history" && item.row.role === "assistant") indices.push(index); return indices; }, []), [items]);
   const [responsePosition, setResponsePosition] = useState(0);
   const [showResponseNav, setShowResponseNav] = useState(false);
-  const responseNavTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => { setResponsePosition((position) => Math.min(position, Math.max(0, assistantResponseIndices.length - 1))); }, [assistantResponseIndices.length]);
-  useEffect(() => () => { if (responseNavTimer.current) clearTimeout(responseNavTimer.current); }, []);
   const jumpToResponse = useCallback((direction: 1 | -1) => {
     if (assistantResponseIndices.length === 0) return;
     const next = Math.max(0, Math.min(assistantResponseIndices.length - 1, responsePosition + direction));

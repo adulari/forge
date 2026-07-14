@@ -255,11 +255,13 @@ pub struct Store {
     live_event_writes: std::sync::atomic::AtomicU64,
 }
 
-/// SQL fragment: the provider namespace (before `::`) of a joined `message.model` (aliased `m`).
-/// `usage.provider` is never written at insert, so usage aggregation derives the provider from the
-/// routed model on the linked message instead. Models with no namespace (e.g. a synthetic
-/// side-call message with no model) fall back to `'other'`.
-const USAGE_PROVIDER_EXPR: &str = "CASE WHEN instr(m.model, '::') > 0 THEN substr(m.model, 1, instr(m.model, '::') - 1) ELSE COALESCE(m.model, 'other') END";
+/// SQL fragment: derives a usage row's provider from its message model (aliased `m`).
+///
+/// Ordinary completions retain their routed model. Synthetic side-call messages (compact,
+/// diagnose) have no model, so inherit the nearest routed model in their session instead of
+/// appearing in a misleading shared `other` bucket. A session containing no routed model at all
+/// still falls back to `other`.
+const USAGE_PROVIDER_EXPR: &str = "COALESCE(NULLIF(CASE WHEN instr(m.model, '::') > 0 THEN substr(m.model, 1, instr(m.model, '::') - 1) ELSE m.model END, ''), (SELECT CASE WHEN instr(pm.model, '::') > 0 THEN substr(pm.model, 1, instr(pm.model, '::') - 1) ELSE pm.model END FROM message pm WHERE pm.session_id = m.session_id AND pm.model IS NOT NULL ORDER BY ABS(pm.seq - m.seq), pm.seq DESC LIMIT 1), 'other')";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderUsage {
@@ -4496,6 +4498,9 @@ mod tests {
             .add_message(&sid, 2, Role::Assistant, "c", Some("nvidia::z-ai/glm-5.2"))
             .unwrap();
         store.record_usage(&sid, &m2, &usage(30, 3)).unwrap();
+        store
+            .record_side_call_usage(&sid, "compact", &usage(20, 2))
+            .unwrap();
 
         let week = store.usage_by_provider_since(0).unwrap();
         let terra = week
@@ -4504,13 +4509,22 @@ mod tests {
             .expect("codex-oauth provider derived from model namespace");
         assert_eq!(terra.input_tokens, 150, "both terra turns summed");
         assert_eq!(terra.output_tokens, 15);
-        assert!(
-            week.iter().any(|r| r.provider == "nvidia"),
-            "nvidia derived as a distinct provider, not collapsed into one bucket"
+        let nvidia = week
+            .iter()
+            .find(|r| r.provider == "nvidia")
+            .expect("nvidia derived as a distinct provider, not collapsed into one bucket");
+        assert_eq!(
+            nvidia.input_tokens, 50,
+            "side-call usage inherits nearest provider"
         );
+        assert_eq!(nvidia.output_tokens, 5);
 
         let session = store.usage_by_provider_for_session(&sid).unwrap();
         assert_eq!(session.len(), 2, "two distinct providers in the session");
+        assert!(
+            !session.iter().any(|r| r.provider == "other"),
+            "side-call usage inherits its session provider instead of creating an other bucket"
+        );
     }
 
     #[test]
