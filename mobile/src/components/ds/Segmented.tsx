@@ -22,9 +22,14 @@ export interface SegmentedProps<T extends string = string> {
   value: T;
   onChange: (value: T) => void;
   testID?: string;
+  /** When true, the track uses bg2 (matching the surrounding header surface) so the
+   * segmented strip blends flush into a uniform header — the selected thumb pops as a
+   * raised chip using bg3. Use this when Segmented is rendered inside a header that
+   * already paints bg2 as its background. */
+  flush?: boolean;
 }
 
-export function Segmented<T extends string = string>({ options, value, onChange, testID }: SegmentedProps<T>) {
+export function Segmented<T extends string = string>({ options, value, onChange, testID, flush, ...rest }: SegmentedProps<T>) {
   const tokens = useTokens();
   const reduced = useReducedMotion();
   const [width, setWidth] = useState(0);
@@ -38,6 +43,11 @@ export function Segmented<T extends string = string>({ options, value, onChange,
     options.findIndex((o) => o.value === value),
   );
   const segmentWidth = options.length > 0 ? (width - 4) / options.length : 0;
+
+  // flush: track = bg2 (header surface), thumb = bg3 (raised chip).
+  // default:  track = bg3,          thumb = bg2 (existing section-style look).
+  const trackBg = flush ? tokens.bg2 : tokens.bg3;
+  const thumbBg = flush ? tokens.bg3 : tokens.bg2;
 
   useEffect(() => {
     if (segmentWidth <= 0) return;
@@ -61,14 +71,14 @@ export function Segmented<T extends string = string>({ options, value, onChange,
   return (
     <View
       onLayout={onLayout}
-      style={[styles.track, { backgroundColor: tokens.bg3, borderRadius: radii.radius8 }]}
+      style={[styles.track, { backgroundColor: trackBg, borderRadius: radii.radius8 }]}
       testID={testID}
       accessibilityRole="tablist"
     >
       {width > 0 ? (
         <Animated.View
           pointerEvents="none"
-          style={[styles.thumb, thumbStyle, { backgroundColor: tokens.bg2, borderRadius: radii.radius8 - 2 }]}
+          style={[styles.thumb, thumbStyle, { backgroundColor: thumbBg, borderRadius: radii.radius8 - 2 }]}
         >
           <View
             style={[
