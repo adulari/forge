@@ -20,7 +20,7 @@ public class LiveActivityModule: Module {
         }
 
         AsyncFunction("start") {
-            (sessionId: String, title: String, busy: Bool, waiting: Bool, costUsd: Double, contextTokens: Int) throws -> [String: String?] in
+            (sessionId: String, title: String, busy: Bool, waiting: Bool, costUsd: Double, contextTokens: Int, contextLimit: Int) throws -> [String: String?] in
             guard #available(iOS 16.1, *) else {
                 return ["activityId": nil, "pushToken": nil]
             }
@@ -38,7 +38,7 @@ public class LiveActivityModule: Module {
 
             let attributes = ForgeSessionActivityAttributes(sessionId: sessionId, title: title)
             let state = ForgeSessionActivityAttributes.ContentState(
-                busy: busy, waiting: waiting, costUsd: costUsd, contextTokens: contextTokens
+                busy: busy, waiting: waiting, costUsd: costUsd, contextTokens: contextTokens, contextLimit: contextLimit
             )
             do {
                 let activity = try Activity.request(
@@ -56,13 +56,13 @@ public class LiveActivityModule: Module {
         }
 
         AsyncFunction("update") {
-            (activityId: String, busy: Bool, waiting: Bool, costUsd: Double, contextTokens: Int) async throws in
+            (activityId: String, busy: Bool, waiting: Bool, costUsd: Double, contextTokens: Int, contextLimit: Int) async throws in
             guard #available(iOS 16.1, *) else { return }
             guard let activity = Activity<ForgeSessionActivityAttributes>.activities.first(where: { $0.id == activityId }) else {
                 throw LiveActivityError.activityNotFound(activityId)
             }
             let state = ForgeSessionActivityAttributes.ContentState(
-                busy: busy, waiting: waiting, costUsd: costUsd, contextTokens: contextTokens
+                busy: busy, waiting: waiting, costUsd: costUsd, contextTokens: contextTokens, contextLimit: contextLimit
             )
             await activity.update(.init(state: state, staleDate: nil))
         }

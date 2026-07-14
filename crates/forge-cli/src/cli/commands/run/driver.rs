@@ -485,6 +485,7 @@ async fn drive_session(
                                         || snap.question.is_some(),
                                     cost_usd: snap.cost_usd,
                                     context_tokens: snap.context_tokens,
+                                    context_limit: snap.context_limit.unwrap_or(200_000) as u64,
                                 },
                             );
                             notifier.dispatch_alert(msg.clone());
