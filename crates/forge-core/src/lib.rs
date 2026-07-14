@@ -1691,6 +1691,7 @@ impl Session {
     /// orchestrating agent can switch to bypass/accept-edits without restarting the session.
     pub fn set_mode(&mut self, mode: PermissionMode) {
         self.mode = mode;
+        self.config.permission_mode = mode;
     }
 
     /// The session's current permission mode.
@@ -1922,7 +1923,7 @@ impl Session {
             session: self.id.clone(),
             seq: self.current_turn_seq,
             root: root.to_string_lossy().into_owned(),
-            mode: self.temper().label().to_string(),
+            mode: self.temper().key().to_string(),
         }
     }
 
@@ -2281,6 +2282,7 @@ impl Session {
     /// the cycle this can reach `Bypass`/Full, since the picker is an explicit, deliberate choice.
     pub fn set_temper(&mut self, mode: PermissionMode) -> PermissionMode {
         self.mode = mode;
+        self.config.permission_mode = mode;
         let _ = self
             .store
             .update_session_mode(&self.id, &format!("{:?}", self.mode));
@@ -14862,7 +14864,7 @@ mod tests {
         std::fs::write(&file, "ORIGINAL").unwrap();
 
         let config = Config {
-            permission_mode: PermissionMode::Bypass,
+            permission_mode: PermissionMode::Default,
             ..Config::default()
         };
         let mut session = Session::start(
@@ -14878,6 +14880,11 @@ mod tests {
             ".",
         )
         .unwrap();
+        assert_eq!(session.temper(), PermissionMode::Default);
+        assert_eq!(session.mode(), PermissionMode::Default);
+        session.set_temper(PermissionMode::Bypass);
+        assert_eq!(session.temper(), PermissionMode::Bypass);
+        assert_eq!(session.mode(), PermissionMode::Bypass);
         session.set_checkpoint_root(dir.join("snaps"));
 
         session.run_turn("edit it").await.unwrap();
@@ -14885,7 +14892,7 @@ mod tests {
         let ctx = session.checkpoint_context();
         assert_eq!(ctx.session, session.id);
         assert_eq!(ctx.seq, session.current_turn_seq);
-        assert_eq!(ctx.mode, session.temper().label());
+        assert_eq!(ctx.mode, session.temper().key());
         assert!(
             std::path::Path::new(&ctx.root).is_absolute(),
             "checkpoint root is absolutized for the child"
