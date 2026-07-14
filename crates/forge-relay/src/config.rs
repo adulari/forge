@@ -11,6 +11,7 @@ pub(crate) struct RelayConfig {
     pub(crate) key_id: String,
     pub(crate) key_pem: String,
     pub(crate) allowed_topics: Vec<String>,
+    pub(crate) relay_token: Option<String>,
     pub(crate) port: u16,
     /// Per-device-token / per-IP send budget within `rate_window_secs` (see `ratelimit.rs`).
     pub(crate) rate_limit_per_window: u32,
@@ -49,6 +50,9 @@ impl RelayConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        let relay_token = std::env::var("FORGE_RELAY_TOKEN")
+            .ok()
+            .filter(|token| !token.is_empty());
         let port = std::env::var("PORT")
             .ok()
             .and_then(|p| p.parse().ok())
@@ -71,6 +75,7 @@ impl RelayConfig {
             key_id,
             key_pem,
             allowed_topics,
+            relay_token,
             port,
             rate_limit_per_window,
             rate_window_secs,
