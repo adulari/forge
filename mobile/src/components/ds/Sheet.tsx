@@ -3,7 +3,7 @@
 // spring to snap points, scrim opacity tracks progress. Web: transform
 // transition 260ms `standard`, Esc/scrim closes. Platform branch lives inside
 // this one file per BUILD_ORDER T1.3.
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { BackHandler, Modal, Platform, Pressable, StyleSheet, View, useWindowDimensions } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
@@ -46,14 +46,11 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
   const reduced = useReducedMotion();
   const depth = scheme === "dark" ? depthDark : depthLight;
 
-  const sheetHeight = windowHeight * maxHeightRatio;
-  const clampedSnapY = useMemo(
-    () => snapPoints.map((p) => sheetHeight * (1 - Math.max(0, Math.min(1, p)))),
-    [snapPoints, sheetHeight],
-  );
-  const restY = clampedSnapY[0] ?? 0;
-  const snapY = useMemo(() => [...clampedSnapY].sort((a, b) => a - b), [clampedSnapY]);
-  const minSnapY = snapY[0] ?? 0;
+  const maxSheetHeight = windowHeight * maxHeightRatio * Math.max(...snapPoints.map((point) => Math.max(0, Math.min(1, point))));
+  const [contentHeight, setContentHeight] = useState(0);
+  const sheetHeight = contentHeight > 0 ? Math.min(contentHeight, maxSheetHeight) : maxSheetHeight;
+  const restY = 0;
+  const minSnapY = 0;
   const closedY = sheetHeight;
 
   const translateY = useSharedValue(closedY);
@@ -61,6 +58,10 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
   const startY = useSharedValue(0);
 
   const [mounted, setMounted] = useState(visible);
+
+  useEffect(() => {
+    if (!visible) setContentHeight(0);
+  }, [visible]);
 
   const close = useCallback(() => onClose(), [onClose]);
 
@@ -133,17 +134,8 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
         runOnJS(close)();
         return;
       }
-      let nearest = snapY[0];
-      let bestDist = Math.abs(translateY.value - snapY[0]);
-      for (const y of snapY) {
-        const d = Math.abs(translateY.value - y);
-        if (d < bestDist) {
-          bestDist = d;
-          nearest = y;
-        }
-      }
-      translateY.value = withSpring(nearest, springs.sheet);
-      scrimOpacity.value = withTiming(1 - nearest / sheetHeight, { duration: durations.base, easing: easings.standard });
+      translateY.value = withSpring(0, springs.sheet);
+      scrimOpacity.value = withTiming(1, { duration: durations.base, easing: easings.standard });
     });
 
   const sheetStyle = useAnimatedStyle(() => ({ transform: [{ translateY: translateY.value }] }));
@@ -173,7 +165,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
             styles.sheet,
             {
               backgroundColor: tokens.bg2,
-              height: sheetHeight,
+              maxHeight: maxSheetHeight,
               borderTopLeftRadius: radii.radius16,
               borderTopRightRadius: radii.radius16,
             },
@@ -183,6 +175,10 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
           ]}
           accessibilityViewIsModal
           accessibilityLabel={accessibilityLabel}
+          onLayout={(event) => {
+            const measured = event.nativeEvent.layout.height;
+            if (measured > 0 && Math.abs(measured - contentHeight) > 1) setContentHeight(measured);
+          }}
         >
           <GestureDetector gesture={pan}>
             <View style={styles.grabberRow}>
@@ -202,7 +198,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
 }
 
 const styles = StyleSheet.create({
-  sheet: { position: "absolute", left: 0, right: 0, bottom: 0 },
+  sheet: { position: "absolute", left: 0, right: 0, bottom: 0, overflow: "hidden" },
   webTransition: {
     // @ts-expect-error react-native-web-only CSS transition property
     transitionProperty: "transform",
