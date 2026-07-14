@@ -1677,6 +1677,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_interrupt_done_signal_cannot_stop_fifo_drain() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+        state.queued_prompts = vec!["second".into(), "third".into()];
+
+        state.interrupt_turn();
+        assert_eq!(state.queued_prompts, vec!["third"]);
+        assert_eq!(state.turn_gen, 12);
+        assert!(state.busy);
+
+        // The aborted generation's DoneGuard arrives after the replacement turn starts.
+        state.on_turn_done(11).await;
+        assert!(state.busy);
+        assert_eq!(state.turn_gen, 12);
+        assert!(state.turn_handle.is_some());
+        assert_eq!(state.queued_prompts, vec!["third"]);
+
+        // Completing the replacement turn drains the remaining prompt in FIFO order.
+        state.turn_handle.take().unwrap().abort();
+        state.on_turn_done(12).await;
+        assert_eq!(state.queued_prompts, Vec::<String>::new());
+        assert_eq!(state.turn_gen, 13);
+        assert!(state.busy);
+        assert!(state.turn_handle.is_some());
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
     async fn interrupt_without_queue_leaves_driver_idle() {
         let mut state = test_driver_state().await;
         state.busy = true;
