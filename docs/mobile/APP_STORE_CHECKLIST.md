@@ -1,7 +1,8 @@
 # App Store readiness checklist (Track B)
 
-Human-facing checklist for shipping Forge to TestFlight/App Store via EAS (`mobile/eas.json`,
-`.github/workflows/mobile-eas.yml`). Everything here is either a manual Apple/App Store Connect
+Human-facing checklist for shipping Forge to TestFlight/App Store via Xcode Cloud (`mobile/eas.json`,
+`mobile/ios/ci_scripts/ci_post_clone.sh`) and for publishing compatible EAS Updates
+(`.github/workflows/eas-update.yml`). Everything here is either a manual Apple/App Store Connect
 step that cannot be scripted, or a piece of app content owned by another workstream — this doc
 just tells you what still needs doing and where.
 
@@ -33,10 +34,10 @@ set up for.
       → App Store Connect API → "+") and register it with EAS
       (`eas credentials` → iOS → App Store Connect API Key) so `eas submit` in CI can authenticate
       non-interactively. This key is stored by EAS, not as a GitHub secret.
-- [ ] Add the **`EXPO_TOKEN`** GitHub Actions secret (Expo access token — Expo dashboard → Account
-      settings → Access tokens) so `.github/workflows/mobile-eas.yml` can run `eas build`/
-      `eas submit` non-interactively. This is the *only* GitHub secret this pipeline needs; the
-      workflow's `guard` job checks for it and skips cleanly if it's absent.
+- [x] Add the **`EXPO_TOKEN`** GitHub Actions secret (Expo access token — Expo dashboard → Account
+      settings → Access tokens) so `.github/workflows/eas-update.yml` can publish compatible
+      production OTA updates non-interactively. This secret does not build or submit a native
+      binary; native iOS builds remain manual Xcode Cloud work.
 
 ## 2. Privacy manifest + App Privacy "nutrition label"
 
@@ -160,6 +161,23 @@ that code until a device/TestFlight test).
       pipeline is gone, this is the only build/distribution path now). Workflow's Archive action
       has `buildDistributionAudience: INTERNAL_ONLY` set, so it auto-uploads to TestFlight on
       success.
+- [ ] **One-time OTA bootstrap**: after the OTA channel configuration is merged, manually run one
+      signed Xcode Cloud build and install its processed TestFlight build. Confirm the generated
+      iOS `Expo.plist` contains `EXUpdatesURL`, `EXUpdatesRequestHeaders` with
+      `expo-channel-name=production`, and `EXUpdatesRuntimeVersion`. This is required before
+      installed binaries can receive production OTA updates; ordinary `main` pushes do not create
+      a native binary.
+- [ ] **OTA compatibility check**: publish only pushes whose complete changed-path set is limited
+      to `mobile/src/**` or `mobile/assets/**` through `.github/workflows/eas-update.yml`. Native
+      dependencies, Expo/RN upgrades, config plugins, permissions, entitlements, iOS/Android
+      files, widgets, Live Activities, or any other path in the same push require a new Xcode Cloud
+      binary or a follow-up OTA-safe push. The workflow skips mixed pushes automatically.
+- [ ] **TestFlight OTA proof**: after the bootstrap build is processed, install it, launch it twice
+      after a known compatible update, and confirm the update is downloaded/applied. Record the
+      binary's fingerprint and production channel before publishing a user-facing OTA.
+- [ ] **Release versioning**: mobile's native marketing/build version may differ from the Forge
+      CLI/desktop version. Label a compatible OTA with the Forge release it carries (for example,
+      `Forge v2.6.3`), and bump the mobile native version only when the native layer changes.
 - [ ] **Beta-group assignment.** Xcode Cloud uploads the build but never assigns it to a beta
       group, so testers see nothing until `scripts/testflight-assign-group.mjs` runs. Because iOS
       builds are opt-in (Xcode Cloud is triggered by hand via the ASC API, not on push), the assign

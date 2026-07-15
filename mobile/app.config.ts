@@ -13,6 +13,9 @@ const config: ExpoConfig = {
   runtimeVersion: { policy: "fingerprint" },
   updates: {
     url: "https://u.expo.dev/e1d145b5-344e-4147-ba35-5f0b993b4c8c",
+    requestHeaders: {
+      "expo-channel-name": "production",
+    },
     enabled: true,
     checkAutomatically: "ON_LOAD",
     fallbackToCacheTimeout: 0,
