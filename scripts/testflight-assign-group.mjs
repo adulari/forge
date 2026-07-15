@@ -169,7 +169,10 @@ async function main() {
     await sleep(intervalMs);
   }
   if (!build) die(`timed out after ${POLL_TIMEOUT_SEC}s waiting for a processed build uploaded after ${UPLOADED_AFTER || "(any)"}`);
-  console.log(`build: ${build.attributes?.version} (${build.id}) — assigning to: ${groups.map((g) => g.name).join(", ")}`);
+  console.log(
+    `build: ${build.attributes?.version} (${build.id}), uploaded ${build.attributes?.uploadedDate ?? "unknown"}` +
+      ` — assigning to: ${groups.map((g) => g.name).join(", ")}`,
+  );
 
   // 4. Assign the build to each group (idempotent: a 409/"already added" is fine).
   for (const g of groups) {
