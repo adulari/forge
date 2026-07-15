@@ -40,7 +40,9 @@ const TAGLINE: &str = "Your coding partner. Describe what you want to do.";
 /// not resize at runtime), so kept small: only the in-flight reply edge, the permission
 /// bar, the input box, and the statusline are pinned — finalized lines flow to scrollback.
 pub const STREAM_PREVIEW_H: u16 = 3;
-pub const PERMISSION_H: u16 = 1;
+/// A permission prompt gets a compact summary plus an untruncated decision row.  Keeping the
+/// controls on their own row means a long tool name or a narrow terminal can never hide `deny`.
+pub const PERMISSION_H: u16 = 2;
 /// Minimum input box height (1 text row + 2 border rows). The box grows up to [`INPUT_MAX_H`] as
 /// the (wrapped/multiline) input gets taller, then scrolls internally.
 pub const INPUT_H: u16 = 3;
@@ -3814,7 +3816,7 @@ fn width_cap(width: u16, reserve: usize, min: usize) -> usize {
 ///   [stream preview / picker / palette]  ← Min(1) after reserving panels
 ///   [running-subagents panel]             ← 0 when none running
 ///   [task list panel]                     ← 0 when empty
-///   [permission bar]
+///   [permission / question response]     ← only while one is pending
 ///   [input box]
 ///   [statusline]
 ///
@@ -3856,11 +3858,12 @@ pub fn render_live(frame: &mut Frame, app: &App) {
     // The input box grows with wrapped/multiline content (capped); the stream area absorbs the
     // change, so the inline viewport's total height is untouched (never resized at runtime).
     let input_h = input_box_height(&app.input, frame.area().width);
+    let permission_h = prompt_height(app);
     let status_h = statusline_height(app);
     // A one-row band between the input and the statusline: shows the animated compaction bar while
     // compacting, otherwise an "approaching auto-compact" hint when the context fills up.
     let band_h = compact_band_height(app);
-    let fixed = PERMISSION_H + input_h + band_h + status_h;
+    let fixed = permission_h + input_h + band_h + status_h;
     let avail = frame.area().height.saturating_sub(fixed);
     let panel_avail = avail.saturating_sub(MIN_STREAM);
 
@@ -3891,7 +3894,7 @@ pub fn render_live(frame: &mut Frame, app: &App) {
         Constraint::Length(work_summary_h),
         Constraint::Length(activity_h),
         Constraint::Length(task_h),
-        Constraint::Length(PERMISSION_H),
+        Constraint::Length(permission_h),
         Constraint::Length(input_h),
         Constraint::Length(band_h),
         Constraint::Length(status_h),
@@ -3962,7 +3965,7 @@ pub fn render_live(frame: &mut Frame, app: &App) {
             areas[4],
         );
     }
-    if app.prompt.is_some() {
+    if permission_h > 0 {
         render_permission(frame, areas[5], app);
     }
     render_input(frame, areas[6], app);
@@ -4665,21 +4668,69 @@ fn tasks_panel_lines(tasks: &[forge_types::TodoItem], height: u16) -> Vec<TextLi
     lines
 }
 
+/// Height reserved for the active response state.  Questions use the composer for their answer,
+/// so they need only a single instruction row; permissions keep their decision keys on row two.
+fn prompt_height(app: &App) -> u16 {
+    if app.prompt.is_none() {
+        0
+    } else if app.awaiting_question() {
+        1
+    } else {
+        PERMISSION_H
+    }
+}
+
 fn render_permission(frame: &mut Frame, area: Rect, app: &App) {
-    if let Some(p) = &app.prompt {
+    let Some(prompt) = &app.prompt else {
+        return;
+    };
+
+    // `prompt` is shared by two fundamentally different interactions.  An AskUserQuestion uses
+    // the composer (number/free-text + Enter), while a tool permission is a single-key decision.
+    // Showing y/a/n for a question was not merely noisy: it suggested keys that could never
+    // answer it.  Keep the two contracts visibly distinct.
+    if app.awaiting_question() {
+        let text_width = area.width.saturating_sub(11) as usize;
         let line = TextLine::from(vec![
             Span::styled(
-                " ◉ RESPOND ",
+                " ◉ ANSWER ",
                 Style::default().fg(STATUSBG).bg(ORANGE).bold(),
             ),
-            Span::styled(format!("  {p}  "), Style::default().fg(WARNYEL)),
-            Span::styled("[y]es", Style::default().fg(OKGREEN).bold()),
-            Span::styled(" / ", Style::default().fg(DIM)),
-            Span::styled("[a]lways", Style::default().fg(OKGREEN).bold()),
-            Span::styled(" / ", Style::default().fg(DIM)),
-            Span::styled("[N]o ", Style::default().fg(ERRRED).bold()),
+            Span::styled(truncate(prompt, text_width), Style::default().fg(WARNYEL)),
+            Span::styled("  Enter submit", Style::default().fg(DIM)),
         ]);
-        frame.render_widget(Paragraph::new(line), area);
+        frame.render_widget(Paragraph::new(line), Rect { height: 1, ..area });
+        return;
+    }
+
+    let summary_width = area.width.saturating_sub(15) as usize;
+    let summary = TextLine::from(vec![
+        Span::styled(
+            " ◉ PERMISSION ",
+            Style::default().fg(STATUSBG).bg(ORANGE).bold(),
+        ),
+        Span::styled(
+            truncate(prompt, summary_width),
+            Style::default().fg(WARNYEL),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(summary), Rect { height: 1, ..area });
+
+    if area.height > 1 {
+        let controls = TextLine::from(vec![
+            Span::styled("   [y]es", Style::default().fg(OKGREEN).bold()),
+            Span::styled("  [a]lways", Style::default().fg(OKGREEN).bold()),
+            Span::styled("  [n]o", Style::default().fg(ERRRED).bold()),
+            Span::styled("  Esc cancel", Style::default().fg(DIM)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(controls),
+            Rect {
+                y: area.y + 1,
+                height: 1,
+                ..area
+            },
+        );
     }
 }
 
@@ -4752,10 +4803,12 @@ pub fn input_cursor_up(input: &str, cursor: usize) -> Option<usize> {
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
-    let (tone, title_text) = if app.busy {
-        (surface::SurfaceTone::Accent, "▸ working…")
+    let (tone, title_text) = if app.awaiting_question() {
+        (surface::SurfaceTone::Warning, "◉ answer")
     } else if app.prompt.is_some() {
         (surface::SurfaceTone::Warning, "◉ respond")
+    } else if app.busy {
+        (surface::SurfaceTone::Accent, "▸ working…")
     } else {
         (surface::SurfaceTone::Brand, "✦ message")
     };
@@ -6270,6 +6323,26 @@ fn statusline_hint(app: &App) -> &'static str {
     }
 }
 
+/// The recovery state that must outrank routine model/cost widgets. On narrow terminals this is
+/// rendered as the whole first status row, so the next safe action is never clipped away.
+fn stop_notice(app: &App, compact: bool) -> Option<(&'static str, Color)> {
+    if !app.done {
+        return None;
+    }
+    match app.last_stop_reason {
+        Some(forge_types::StopReason::MaxSteps) => Some((
+            if compact {
+                "⚠ step limit — send continue"
+            } else {
+                "⚠ step limit — send `continue`"
+            },
+            WARNYEL,
+        )),
+        Some(forge_types::StopReason::BudgetExhausted) => Some(("✕ budget cap", ERRRED)),
+        _ => None,
+    }
+}
+
 fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     let bg = Style::default().bg(STATUSBG);
     let w = area.width;
@@ -6313,29 +6386,24 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(WARNYEL).bold().bg(STATUSBG),
         ));
     }
-    if app.done && w >= 50 {
-        match app.last_stop_reason {
-            Some(forge_types::StopReason::MaxSteps) => {
-                if !first_widget {
-                    left_spans.push(widget_sep());
-                }
-                first_widget = false;
-                left_spans.push(Span::styled(
-                    "⚠ step limit — send `continue`",
-                    Style::default().fg(WARNYEL).bold().bg(STATUSBG),
-                ));
+    let narrow_stop = w < 50 && stop_notice(app, true).is_some();
+    if let Some((label, color)) = stop_notice(app, narrow_stop) {
+        if narrow_stop {
+            // A model/cost segment is useful context; a recovery instruction is more important.
+            // Do not leave a narrow terminal with only a clipped trailing warning.
+            left_spans = vec![
+                Span::styled(" ", bg),
+                Span::styled(label, Style::default().fg(color).bold().bg(STATUSBG)),
+            ];
+        } else {
+            if !first_widget {
+                left_spans.push(widget_sep());
             }
-            Some(forge_types::StopReason::BudgetExhausted) => {
-                if !first_widget {
-                    left_spans.push(widget_sep());
-                }
-                first_widget = false;
-                left_spans.push(Span::styled(
-                    "✕ budget cap",
-                    Style::default().fg(ERRRED).bold().bg(STATUSBG),
-                ));
-            }
-            _ => {}
+            first_widget = false;
+            left_spans.push(Span::styled(
+                label,
+                Style::default().fg(color).bold().bg(STATUSBG),
+            ));
         }
     }
     let _ = first_widget; // suppress unused warning
@@ -6343,7 +6411,9 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
     let version = concat!("v", env!("CARGO_PKG_VERSION"));
     let hint = statusline_hint(app);
     let row1 = Rect { height: 1, ..area };
-    if w >= 70 {
+    if narrow_stop {
+        frame.render_widget(Paragraph::new(TextLine::from(left_spans)).style(bg), row1);
+    } else if w >= 70 {
         let right_text = format!("{version}  {hint}");
         let right_len = right_text.chars().count() as u16;
         let cols =
@@ -6728,6 +6798,54 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect()
+    }
+
+    #[test]
+    fn permission_controls_stay_visible_on_a_narrow_terminal() {
+        let app = App {
+            prompt: Some("allow write_file (FileWrite) [y/n/a=always]".into()),
+            ..Default::default()
+        };
+        let screen = screen_wh(&app, 30, LIVE_H);
+        assert_eq!(prompt_height(&app), PERMISSION_H);
+        assert!(screen.contains("[y]es"), "allow stays visible: {screen}");
+        assert!(
+            screen.contains("[a]lways"),
+            "always stays visible: {screen}"
+        );
+        assert!(screen.contains("[n]o"), "deny stays visible: {screen}");
+    }
+
+    #[test]
+    fn question_response_never_looks_like_a_permission_prompt() {
+        let mut app = App::default();
+        app.set_question(
+            "Which migration should Forge run?",
+            &[QChoice {
+                label: "Safe migration".into(),
+                description: "Keeps existing session data.".into(),
+            }],
+            false,
+        );
+        let screen = screen_wh(&app, 80, LIVE_H);
+        assert_eq!(prompt_height(&app), 1);
+        assert!(
+            screen.contains("ANSWER"),
+            "question state is labelled: {screen}"
+        );
+        assert!(
+            screen.contains("answer"),
+            "composer has answer affordance: {screen}"
+        );
+        assert!(
+            !screen.contains("[y]es"),
+            "no false permission key: {screen}"
+        );
+        assert!(
+            !screen.contains("[a]lways"),
+            "no false always key: {screen}"
+        );
+        assert!(!screen.contains("[n]o"), "no false deny key: {screen}");
     }
 
     #[test]
@@ -7854,6 +7972,24 @@ mod tests {
         };
         let hint = statusline_hint(&app);
         assert!(hint.contains("esc quit"), "done hint: {hint}");
+    }
+
+    #[test]
+    fn narrow_statusline_prioritizes_stop_recovery() {
+        let app = App {
+            done: true,
+            last_stop_reason: Some(forge_types::StopReason::MaxSteps),
+            ..Default::default()
+        };
+        let screen = screen_wh(&app, 30, LIVE_H);
+        assert!(
+            screen.contains("step limit — send continue"),
+            "recovery action remains visible: {screen}"
+        );
+        assert!(
+            !screen.contains("llama3.2"),
+            "routine model context yields to recovery: {screen}"
+        );
     }
 
     #[test]
