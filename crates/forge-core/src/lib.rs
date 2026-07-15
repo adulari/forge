@@ -8937,11 +8937,21 @@ mod tests {
             model: "m".into(),
             fallbacks: vec![],
         });
-        let (_store, mut session) = fixed_session(provider, router);
-
         let dir = std::env::temp_dir().join(format!("forge-batch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let config = Config::default();
+        let mut session = Session::start(
+            Arc::new(Store::open_in_memory().unwrap()),
+            provider,
+            router,
+            ToolRegistry::with_core_tools_in(&dir),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            dir.to_str().expect("temporary workspace path is UTF-8"),
+        )
+        .unwrap();
+
         let mut calls = Vec::new();
         for i in 0..3 {
             let p = dir.join(format!("f{i}.txt"));
@@ -8975,6 +8985,7 @@ mod tests {
         assert_eq!(tools[1].tool_call_id.as_deref(), Some("c1"));
         assert_eq!(tools[2].tool_call_id.as_deref(), Some("c2"));
         assert!(tools[2].content.contains("content-2"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A presenter that records every event so tests can assert on what was shown.
@@ -9025,13 +9036,13 @@ mod tests {
             Arc::new(Store::open_in_memory().unwrap()),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(ScriptedPresenter {
                 answer: answer.to_string(),
                 asks,
             }),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap()
     }
@@ -9130,11 +9141,11 @@ mod tests {
             Arc::clone(&store),
             Arc::new(AskingProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             // CapturePresenter::ask returns the first option ("Postgres").
             Box::new(CapturePresenter::default()),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         let id = session.id().to_string();
@@ -9216,10 +9227,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(McpProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter::default()),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         session.set_mcp(Some(mgr));
@@ -9262,10 +9273,10 @@ mod tests {
             store,
             Arc::new(McpProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter::default()),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         let names: Vec<String> = session.tool_specs().into_iter().map(|s| s.name).collect();
@@ -9347,10 +9358,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(McpCallEchoProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter::default()),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         session.set_mcp(Some(mgr));
@@ -9427,10 +9438,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(TaskingProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         let id = session.id().to_string();
@@ -9517,10 +9528,10 @@ mod tests {
                 calls: std::sync::atomic::AtomicUsize::new(0),
             }),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         session.config.recap.enabled = false;
@@ -9610,10 +9621,10 @@ mod tests {
                 calls: std::sync::atomic::AtomicUsize::new(0),
             }),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -9687,10 +9698,10 @@ mod tests {
             Arc::new(Store::open_in_memory().unwrap()),
             provider,
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap()
     }
@@ -9795,10 +9806,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(DoomLoopProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -9878,10 +9889,10 @@ mod tests {
                 calls: std::sync::atomic::AtomicUsize::new(0),
             }),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -9949,10 +9960,10 @@ mod tests {
                 calls: std::sync::atomic::AtomicUsize::new(0),
             }),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -9985,10 +9996,10 @@ mod tests {
             store,
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         let pinned = forge_mesh::RoutingDecision {
@@ -10115,10 +10126,10 @@ mod tests {
                 calls: std::sync::atomic::AtomicUsize::new(0),
             }),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -10178,10 +10189,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(ConcurrentRepeatProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -10235,10 +10246,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(EndlessToolProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -10331,10 +10342,10 @@ mod tests {
                 calls: std::sync::atomic::AtomicUsize::new(0),
             }),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -10408,10 +10419,10 @@ mod tests {
                 calls: std::sync::atomic::AtomicUsize::new(0),
             }),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -10454,10 +10465,10 @@ mod tests {
                 model: "claude-cli::opus".into(),
                 fallbacks: vec![],
             }),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -10537,10 +10548,10 @@ mod tests {
                 model: "claude-cli::opus".into(),
                 fallbacks: vec![],
             }),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -10573,10 +10584,10 @@ mod tests {
                 model: "claude-cli::opus".into(),
                 fallbacks: vec![],
             }),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -10624,10 +10635,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(EmptyResponseProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -10747,10 +10758,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(ToolCallAsTextProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -10937,10 +10948,10 @@ mod tests {
             store,
             Arc::new(InjectionProbeProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap()
     }
@@ -11110,10 +11121,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(ShellFailProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(presenter),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -11143,10 +11154,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(EchoShellProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(presenter),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -11258,10 +11269,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(UseSkillProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         session.set_skills(Some(Arc::new(catalog)));
@@ -11379,10 +11390,10 @@ mod tests {
             store,
             Arc::new(StallingProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         // The whole call must return well within this bound — if it hangs, the test fails here.
@@ -11441,10 +11452,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(SummarizingProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -11507,10 +11518,10 @@ mod tests {
             Arc::clone(&store),
             provider,
             router,
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         let sid = session.id().to_string();
@@ -11561,10 +11572,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(SummarizingProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         let sid = session.id().to_string();
@@ -11607,10 +11618,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(SummarizingProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         session.transcript.push(Message::user("just one"));
@@ -11625,10 +11636,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(SummarizingProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         session.transcript.push(Message::user("just one"));
@@ -11660,10 +11671,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(ListDirProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -11699,7 +11710,7 @@ mod tests {
             Arc::clone(&store),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter::default()),
             Config::default(),
             &id,
@@ -11717,11 +11728,11 @@ mod tests {
             store,
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             // non-interactive: side-effect tools would be denied, but the mock uses read_file
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -11748,10 +11759,10 @@ mod tests {
             store,
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -11778,10 +11789,10 @@ mod tests {
             Arc::new(Store::open_in_memory().unwrap()),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -11824,17 +11835,65 @@ mod tests {
         config
     }
 
+    fn test_workspace() -> &'static std::path::Path {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+    }
+
     fn fresh_session(store: Arc<Store>, config: Config) -> Session {
+        let workspace = test_workspace();
         Session::start(
             store,
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(workspace),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            workspace.to_str().expect("workspace path is UTF-8"),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn fresh_session_uses_a_durable_explicit_workspace() {
+        let session = fresh_session(
+            Arc::new(Store::open_in_memory().unwrap()),
+            Config::default(),
+        );
+        assert_eq!(
+            session.workspace_root(),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .canonicalize()
+                .as_deref()
+                .expect("manifest directory exists")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_session_ignores_a_deleted_ambient_cwd() {
+        let base =
+            std::env::temp_dir().join(format!("forge-deleted-cwd-{}", forge_types::new_id()));
+        let deleted_cwd = base.join("deleted-cwd");
+        std::fs::create_dir_all(&deleted_cwd).expect("creating temporary cwd");
+
+        {
+            let _cwd_guard = test_cwd_guard(&deleted_cwd);
+            std::fs::remove_dir(&deleted_cwd).expect("removing ambient cwd");
+
+            let session = fresh_session(
+                Arc::new(Store::open_in_memory().unwrap()),
+                Config::default(),
+            );
+            assert_eq!(
+                session.workspace_root(),
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .canonicalize()
+                    .as_deref()
+                    .expect("manifest directory exists")
+            );
+        }
+
+        std::fs::remove_dir_all(base).expect("removing temporary workspace parent");
     }
 
     /// Part C (mobile "stuck busy, no error" bug): a turn-ending failure must surface as an
@@ -11850,12 +11909,12 @@ mod tests {
             Arc::new(Store::open_in_memory().unwrap()),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter {
                 events: events.clone(),
             }),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         s.notify_error("turn failed: no endpoints found that support image input");
@@ -11897,12 +11956,12 @@ mod tests {
             Arc::new(Store::open_in_memory().unwrap()),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter {
                 events: events.clone(),
             }),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         s.generate_recap("Fix buggy.py so average([]) returns 0.0", "")
@@ -12038,7 +12097,7 @@ mod tests {
             Arc::new(Store::open(&path).unwrap()),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             config,
             &id,
@@ -12075,7 +12134,7 @@ mod tests {
             Arc::new(Store::open_in_memory().unwrap()),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             Config::default(),
             "ghost-id",
@@ -12200,10 +12259,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(SpawnThenSynthProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         let parent_id = session.id().to_string();
@@ -12335,10 +12394,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(SpawnThenFollowUpProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         let parent_id = session.id().to_string();
@@ -12401,10 +12460,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(SpawnThenSynthProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         let parent_id = session.id().to_string();
@@ -12507,10 +12566,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(AlwaysRecurseProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         let parent_id = session.id().to_string();
@@ -12553,10 +12612,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(SpawnThenSynthProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         let parent_id = session.id().to_string();
@@ -14778,10 +14837,10 @@ mod tests {
             Arc::clone(&store),
             provider,
             router,
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         (store, session)
@@ -15054,7 +15113,7 @@ mod tests {
             Arc::clone(&store),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             Config::default(),
             &sid,
@@ -15100,7 +15159,7 @@ mod tests {
             Arc::clone(&store),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             Config::default(),
             &sid,
@@ -15440,10 +15499,10 @@ mod tests {
                 store,
                 Arc::new(SlowProvider),
                 Arc::new(HeuristicRouter::new(Config::default())),
-                ToolRegistry::with_core_tools(),
+                ToolRegistry::with_core_tools_in(test_workspace()),
                 Box::new(HeadlessPresenter::new(false)),
                 config,
-                ".",
+                test_workspace().to_str().expect("workspace path is UTF-8"),
             )
             .unwrap(),
         ));
@@ -15515,10 +15574,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(AssayProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(capture),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -15564,10 +15623,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(HeadlessPresenter::new(false)),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         let b_id = b.id().to_string();
@@ -15600,10 +15659,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter::default()),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -15636,10 +15695,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter::default()),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -15824,10 +15883,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter::default()),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
         // Fresh session: edits_this_turn must be 0 before any turn.
@@ -15847,10 +15906,10 @@ mod tests {
             Arc::clone(&store),
             Arc::new(MockProvider),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter::default()),
             Config::default(),
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
 
@@ -16327,10 +16386,10 @@ mod tests {
             Arc::new(Store::open_in_memory().unwrap()),
             Arc::new(forge_provider::MockProvider),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(test_workspace()),
             Box::new(CapturePresenter::default()),
             config,
-            ".",
+            test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap()
     }
