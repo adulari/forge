@@ -68,6 +68,9 @@ pub struct AuthServerMetadata {
     pub token_endpoint: String,
     #[serde(default)]
     pub registration_endpoint: Option<String>,
+    /// RFC 8628 device-authorization endpoint, when advertised.
+    #[serde(default)]
+    pub device_authorization_endpoint: Option<String>,
 }
 
 /// A PKCE pair (RFC 7636): the `verifier` is the secret kept locally; the `challenge` is the

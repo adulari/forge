@@ -152,11 +152,13 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             replace,
             account,
             switch,
+            device,
+            paste,
         } => {
             if provider == "xai-oauth" || provider == "xai_oauth" {
                 auth_xai_oauth(remove, list, replace, account, switch).await
             } else if provider == "codex-oauth" || provider == "codex_oauth" {
-                auth_codex_oauth(remove, list, replace, account, switch).await
+                auth_codex_oauth(remove, list, replace, account, switch, device, paste).await
             } else if account.is_some() || switch {
                 anyhow::bail!(
                     "--account/--switch are only meaningful for `forge auth xai-oauth` or \
