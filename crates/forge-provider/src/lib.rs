@@ -20,7 +20,9 @@ mod oauth_responses;
 mod tool_recovery;
 mod xai_oauth;
 
-pub use cli_provider::{codex_cli_detected_plan, CliKind, CliProvider, SUBAGENT_SINK_ENV};
+pub use cli_provider::{
+    codex_cli_detected_plan, codex_rollout_is_account_wide, CliKind, CliProvider, SUBAGENT_SINK_ENV,
+};
 pub use codex_oauth::{
     detected_plan as codex_oauth_detected_plan, exchange_code as exchange_codex_oauth_code,
     has_session as has_codex_oauth_session, is_pinned_codex_url,
