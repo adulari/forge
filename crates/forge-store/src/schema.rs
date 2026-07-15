@@ -98,6 +98,15 @@ CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage(created_at);
 -- Speeds up spend-by-model JOINs: `JOIN message m ON m.id = u.message_id`.
 CREATE INDEX IF NOT EXISTS idx_usage_message ON usage(message_id);
 
+-- Short-lived, server-authoritative subscription plan observations. The Codex Responses backend
+-- exposes this as x-codex-plan-type; preserving it lets independent Forge processes agree while
+-- it is fresh instead of trusting a possibly stale OAuth JWT claim.
+CREATE TABLE IF NOT EXISTS subscription_plan_observation (
+    provider    TEXT PRIMARY KEY,
+    plan        TEXT NOT NULL,
+    observed_at INTEGER NOT NULL
+);
+
 -- Assay (AI-slop / quality analysis) runs + their findings (docs/features/analysis-mode.md).
 CREATE TABLE IF NOT EXISTS assay_run (
     id          TEXT PRIMARY KEY,

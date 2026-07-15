@@ -8,34 +8,92 @@ use crossterm::terminal::{
 };
 use forge_config::KeybindsConfig;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Terminal;
 
-use crate::app::{ACCENT, DIM, TEXT};
 use crate::commands::COMMANDS;
 use crate::keybind_configurator::{action_desc, all_actions};
 use crate::keybinds::combo_display;
+use crate::surface::{self, ACCENT, DIM, TEXT, TOOLCYAN};
 
-fn reference_lines(keybinds: &KeybindsConfig) -> Vec<Line<'static>> {
+/// The reference page opened initially. Both pages remain one Tab press away from the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelpTab {
+    Commands,
+    Keybinds,
+}
+
+impl HelpTab {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Commands => Self::Keybinds,
+            Self::Keybinds => Self::Commands,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Commands => "Commands",
+            Self::Keybinds => "Keyboard shortcuts",
+        }
+    }
+}
+
+fn command_group(name: &str) -> &'static str {
+    match name {
+        "help" | "keys" | "config" | "mode" | "thinking" | "effort" | "statusline" => "Session",
+        "sessions" | "replay" | "resume" | "new" | "undo" | "checkpoint" | "checkpoints"
+        | "compact" | "uncompact" => "History",
+        "model" | "models" | "usage" | "mesh" | "duel" => "Models & routing",
+        "plan" | "execute" | "goal" | "pr" | "loop" | "workflow" | "assay" | "lattice" => "Work",
+        _ => "Project & tools",
+    }
+}
+
+fn command_reference_lines() -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(Span::styled(
-        "Slash commands",
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        "Start with a plain request. Use / only when you need a specific control.",
+        Style::default().fg(DIM),
     ))];
-    lines.extend(COMMANDS.iter().map(|command| {
-        Line::from(vec![
+    let mut previous_group = None;
+    for command in COMMANDS {
+        let group = command_group(command.name);
+        if previous_group != Some(group) {
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled(
+                group,
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            )));
+            previous_group = Some(group);
+        }
+        lines.push(Line::from(vec![
             Span::styled(
-                format!("  {:<22}", command.usage),
+                format!("  /{:<14}", command.name),
                 Style::default().fg(TEXT),
             ),
             Span::styled(command.desc, Style::default().fg(DIM)),
-        ])
-    }));
+        ]));
+        let basic_usage = format!("/{}", command.name);
+        if command.usage != basic_usage {
+            lines.push(Line::from(Span::styled(
+                format!("      {}", command.usage),
+                Style::default().fg(TOOLCYAN),
+            )));
+        }
+    }
+    lines
+}
+
+fn keybind_reference_lines(keybinds: &KeybindsConfig) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        "F1 or ? opens this page. Change bindings with /keys, then Ctrl+K if you need an action.",
+        Style::default().fg(DIM),
+    ))];
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        "Keybindings",
+        "Keyboard shortcuts",
         Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
     )));
     lines.extend(all_actions().into_iter().map(|action| {
@@ -52,40 +110,39 @@ fn reference_lines(keybinds: &KeybindsConfig) -> Vec<Line<'static>> {
     lines
 }
 
+fn reference_lines(keybinds: &KeybindsConfig, tab: HelpTab) -> Vec<Line<'static>> {
+    match tab {
+        HelpTab::Commands => command_reference_lines(),
+        HelpTab::Keybinds => keybind_reference_lines(keybinds),
+    }
+}
+
 /// Run the read-only command and keyboard reference viewer.
-pub fn run_help(keybinds: &KeybindsConfig) -> io::Result<()> {
+pub fn run_help(keybinds: &KeybindsConfig, initial_tab: HelpTab) -> io::Result<()> {
     enable_raw_mode()?;
     crossterm::execute!(io::stdout(), EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let lines = reference_lines(keybinds);
+    terminal.clear()?;
+    let mut tab = initial_tab;
     let mut scroll = 0u16;
     loop {
         terminal.draw(|frame| {
             let area = frame.area();
-            frame.render_widget(Clear, area);
-            let outer = Block::default()
-                .title(Span::styled(" Help ", Style::default().fg(ACCENT).bold()))
-                .border_type(BorderType::Rounded)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(DIM));
-            let inner = outer.inner(area);
-            frame.render_widget(outer, area);
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(1)])
-                .split(inner);
-            frame.render_widget(
-                Paragraph::new(Text::from(lines.clone()))
-                    .wrap(Wrap { trim: false })
-                    .scroll((scroll, 0)),
-                chunks[0],
+            surface::render_backdrop(frame, area);
+            let inner = surface::render_panel(
+                frame,
+                area,
+                surface::title(tab.title(), surface::SurfaceTone::Accent),
+                Some(surface::hint(
+                    "Tab switch · ↑/↓ scroll · PgUp/PgDn page · Esc/q close",
+                )),
+                surface::SurfaceTone::Accent,
             );
             frame.render_widget(
-                Paragraph::new(Span::styled(
-                    "↑/↓ scroll · PgUp/PgDn page · Esc/q close",
-                    Style::default().fg(DIM),
-                )),
-                chunks[1],
+                Paragraph::new(Text::from(reference_lines(keybinds, tab)))
+                    .wrap(Wrap { trim: true })
+                    .scroll((scroll, 0)),
+                inner,
             );
         })?;
         if let Event::Key(key) = event::read()? {
@@ -98,6 +155,10 @@ pub fn run_help(keybinds: &KeybindsConfig) -> io::Result<()> {
                 KeyCode::Down | KeyCode::Char('j') => scroll = scroll.saturating_add(1),
                 KeyCode::PageUp => scroll = scroll.saturating_sub(10),
                 KeyCode::PageDown => scroll = scroll.saturating_add(10),
+                KeyCode::Tab | KeyCode::BackTab => {
+                    tab = tab.toggle();
+                    scroll = 0;
+                }
                 _ => {}
             }
         }
@@ -112,14 +173,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reference_includes_registry_commands_and_configured_combos() {
-        let lines = reference_lines(&KeybindsConfig::default());
+    fn command_reference_includes_registry_commands() {
+        let lines = reference_lines(&KeybindsConfig::default(), HelpTab::Commands);
         let text = lines
             .iter()
             .flat_map(|line| line.spans.iter())
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert!(text.contains("/help"));
+        assert!(text.contains("/assay [--diff"));
+        assert!(text.contains("Models & routing"));
+    }
+
+    #[test]
+    fn keybind_reference_includes_configured_combos() {
+        let lines = reference_lines(&KeybindsConfig::default(), HelpTab::Keybinds);
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
         assert!(text.contains("F1"));
     }
 }

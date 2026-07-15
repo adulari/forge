@@ -18,6 +18,11 @@ impl Transcriber {
     /// take real wall-clock time (tens to hundreds of ms) and CPU; callers on an async runtime
     /// should run it via `spawn_blocking`.
     pub fn load(model_path: impl AsRef<Path>) -> Result<Self> {
+        // whisper.cpp writes model-load and inference diagnostics directly to stderr unless its
+        // logging hooks are installed. Forge owns the visible terminal, so those native logs must
+        // never bypass the voice overlay and corrupt the chat surface.
+        whisper_rs::install_logging_hooks();
+
         let path = model_path.as_ref();
         let path_str = path
             .to_str()

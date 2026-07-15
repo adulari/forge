@@ -1833,10 +1833,8 @@ pub enum ClassifierKind {
     Llm,
     /// Deterministic weighted-signal heuristic — zero added cost/latency.
     Heuristic,
-    /// Best of both: run the heuristic first; only call the LLM when the heuristic score is
-    /// near a tier boundary (score −3…7, i.e. the uncertain middle). Clear Trivial or
-    /// strongly-signalled Complex tasks skip the LLM entirely — zero added latency for them.
-    /// Explicit opt-in for installations that prioritize latency over classification accuracy.
+    /// Legacy alias for `llm`, retained so existing configurations keep working. Every unhinted
+    /// turn is classified by the LLM; the heuristic is only the final availability fallback.
     Hybrid,
 }
 
@@ -2000,7 +1998,8 @@ impl Default for KeybindsConfig {
         let mut binds = std::collections::BTreeMap::new();
         binds.insert("interrupt".into(), bind("c", true, false, false));
         binds.insert("command_palette".into(), bind("/", false, false, false));
-        binds.insert("skip_model".into(), bind("k", true, false, false));
+        binds.insert("command_center".into(), bind("k", true, false, false));
+        binds.insert("skip_model".into(), bind("k", true, false, true));
         binds.insert("tier_up".into(), bind("up", true, false, false));
         binds.insert("tier_down".into(), bind("down", true, false, false));
         binds.insert("toggle_reasoning".into(), bind("r", true, false, false));
@@ -2020,7 +2019,32 @@ impl Default for KeybindsConfig {
         // Ctrl+V: free in the default keymap (paste arrives via bracketed-paste as a distinct
         // terminal event, never as a Ctrl+V keystroke) — see voice.md.
         binds.insert("voice".into(), bind("v", true, false, false));
+        binds.insert("kill_line_forward".into(), bind("k", false, true, false));
         Self { binds }
+    }
+}
+
+/// Resolve the one default-key collision introduced by the command center. Config files deep-merge
+/// over defaults, so an older persisted default can retain `skip_model = Ctrl+K` alongside the new
+/// command center binding. Move only that legacy default; any other user-selected binding remains
+/// untouched and can still be adjusted in the keybind editor.
+fn migrate_legacy_keybinds(keybinds: &mut KeybindsConfig) {
+    let ctrl_k = KeyCombo {
+        key: "k".to_string(),
+        ctrl: true,
+        alt: false,
+        shift: false,
+    };
+    if keybinds.binds.get("command_center") == Some(&ctrl_k)
+        && keybinds.binds.get("skip_model") == Some(&ctrl_k)
+    {
+        keybinds.binds.insert(
+            "skip_model".to_string(),
+            KeyCombo {
+                shift: true,
+                ..ctrl_k
+            },
+        );
     }
 }
 
@@ -2307,6 +2331,7 @@ pub fn load() -> Result<Config, ConfigError> {
     fig = fig.merge(Env::prefixed("FORGE_").split("__"));
 
     let mut config: Config = fig.extract()?;
+    migrate_legacy_keybinds(&mut config.keybinds);
     // Project-local `.forge/mcp.toml` is the dedicated home for MCP server declarations; when
     // present it sets the whole `[mcp]` section (overriding any `[mcp]` in config.toml). Keeping
     // it a separate file matches Claude-Code's `.mcp.json` convention and keeps server lists out
@@ -4312,7 +4337,7 @@ auto = "local"
     #[test]
     fn keybinds_default_has_all_actions() {
         let kb = KeybindsConfig::default();
-        assert_eq!(kb.binds.len(), 20);
+        assert_eq!(kb.binds.len(), 22);
         assert_eq!(
             kb.binds["interrupt"],
             KeyCombo {
@@ -4349,10 +4374,19 @@ auto = "local"
                 shift: false
             }
         );
+        assert_eq!(
+            kb.binds["command_center"],
+            KeyCombo {
+                key: "k".into(),
+                ctrl: true,
+                alt: false,
+                shift: false
+            }
+        );
     }
 
     /// A partial `[keybinds.binds]` override in the user TOML must DEEP-MERGE over the serialized
-    /// defaults (keeping the other 19 binds), not replace the whole map. `write_keybind` writes a
+    /// defaults (keeping the other 21 binds), not replace the whole map. `write_keybind` writes a
     /// single bind, so a replace would unbind everything else — this guards that regression.
     #[test]
     fn partial_keybind_override_deep_merges_over_defaults() {
@@ -4369,9 +4403,33 @@ auto = "local"
         // The override took effect…
         assert_eq!(cfg.keybinds.binds["toggle_reasoning"].key, "x");
         // …and every other default bind survived the merge.
-        assert_eq!(cfg.keybinds.binds.len(), 20);
+        assert_eq!(cfg.keybinds.binds.len(), 22);
         assert_eq!(cfg.keybinds.binds["interrupt"].key, "c");
         assert_eq!(cfg.keybinds.binds["help"].key, "f1");
+    }
+
+    #[test]
+    fn legacy_ctrl_k_skip_binding_moves_to_shifted_chord() {
+        let mut keybinds = KeybindsConfig::default();
+        keybinds.binds.insert(
+            "skip_model".into(),
+            KeyCombo {
+                key: "k".into(),
+                ctrl: true,
+                alt: false,
+                shift: false,
+            },
+        );
+        migrate_legacy_keybinds(&mut keybinds);
+        assert_eq!(
+            keybinds.binds["skip_model"],
+            KeyCombo {
+                key: "k".into(),
+                ctrl: true,
+                alt: false,
+                shift: true,
+            }
+        );
     }
 
     #[test]

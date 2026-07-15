@@ -8,29 +8,22 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line as TextLine, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table};
+use ratatui::text::Span;
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 use ratatui::Terminal;
 
 use forge_config::KeybindsConfig;
 
 use crate::keybinds::{combo_display, key_event_to_combo};
-
-const ACCENT: Color = Color::Rgb(82, 162, 255);
-const DIM: Color = Color::Rgb(82, 87, 108);
-const TEXT: Color = Color::Rgb(208, 213, 224);
-const OKGREEN: Color = Color::Rgb(92, 208, 122);
-const WARNYEL: Color = Color::Rgb(238, 188, 82);
-const ERRRED: Color = Color::Rgb(243, 92, 92);
-const SELECT_BG: Color = Color::Rgb(40, 70, 132);
-const ORANGE: Color = Color::Rgb(255, 138, 48);
+use crate::surface::{self, ACCENT, DIM, ERRRED, OKGREEN, SELECT_BG, TEXT, WARNYEL};
 
 /// Description for each action.
 pub(crate) fn action_desc(action: &str) -> &'static str {
     match action {
         "interrupt" => "Stop current turn",
+        "command_center" => "Open the searchable command center",
         "command_palette" => "Open slash-command palette",
         "skip_model" => "Mid-turn: abort + retry next model",
         "tier_up" => "Escalate to next tier (mid-turn)",
@@ -50,6 +43,7 @@ pub(crate) fn action_desc(action: &str) -> &'static str {
         "checkpoint" => "Save session checkpoint",
         "reload" => "Hot-reload config",
         "voice" => "Open /voice recording overlay",
+        "kill_line_forward" => "Delete from cursor to end of line",
         _ => "",
     }
 }
@@ -64,6 +58,7 @@ pub(crate) fn all_actions() -> Vec<&'static str> {
     vec![
         "interrupt",
         "command_palette",
+        "command_center",
         "skip_model",
         "tier_up",
         "tier_down",
@@ -82,6 +77,7 @@ pub(crate) fn all_actions() -> Vec<&'static str> {
         "checkpoint",
         "reload",
         "voice",
+        "kill_line_forward",
     ]
 }
 
@@ -113,23 +109,13 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
         let actions_len = actions.len();
         terminal.draw(|f| {
             let area = f.area();
-            f.render_widget(Clear, area);
-
-            let outer = Block::default()
-                .title(TextLine::from(vec![
-                    Span::raw(" "),
-                    Span::styled(
-                        "Keybind Configuration",
-                        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(" "),
-                ]))
-                .border_type(BorderType::Rounded)
-                .borders(Borders::ALL)
-                .style(Style::default().fg(DIM));
-
-            let inner = outer.inner(area);
-            f.render_widget(outer, area);
+            let inner = surface::render_panel(
+                f,
+                area,
+                surface::title("Keybind configuration", surface::SurfaceTone::Accent),
+                None,
+                surface::SurfaceTone::Accent,
+            );
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -260,22 +246,14 @@ pub fn run_keybind_configurator(keybinds: &mut KeybindsConfig) -> io::Result<boo
                     OverlayMode::Capture { action } => action.clone(),
                     _ => String::new(),
                 };
-                let popup_w = 44u16;
-                let popup_h = 5u16;
-                let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-                let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-                let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
-                f.render_widget(Clear, popup_area);
-                let popup = Block::default()
-                    .title(Span::styled(
-                        " Rebind ",
-                        Style::default().fg(ORANGE).add_modifier(Modifier::BOLD),
-                    ))
-                    .border_type(BorderType::Rounded)
-                    .borders(Borders::ALL)
-                    .style(Style::default().fg(DIM));
-                let popup_inner = popup.inner(popup_area);
-                f.render_widget(popup, popup_area);
+                let popup_area = surface::modal_area(area, 44, 5);
+                let popup_inner = surface::render_panel(
+                    f,
+                    popup_area,
+                    surface::title("Rebind", surface::SurfaceTone::Brand),
+                    None,
+                    surface::SurfaceTone::Brand,
+                );
                 let msg = format!("Press the new key for:\n  {}", action_name);
                 f.render_widget(
                     Paragraph::new(Span::styled(msg, Style::default().fg(TEXT))),

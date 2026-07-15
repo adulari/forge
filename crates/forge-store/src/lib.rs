@@ -16,7 +16,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 15;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -692,6 +692,29 @@ fn migration_0013(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// Migration #14: the live Codex backend plan header is a short-lived account observation,
+/// persisted so a new `forge mesh` / TUI process does not fall back to an older JWT claim.
+fn migration_0014(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS subscription_plan_observation (
+             provider TEXT PRIMARY KEY,
+             plan TEXT NOT NULL,
+             observed_at INTEGER NOT NULL
+         )",
+    )
+}
+
+/// Migration #15: v14 briefly translated OpenAI's exact `pro` header to Forge's own
+/// `pro-20x` label. This table is only a short-lived backend observation, so repair that value
+/// in place and preserve the provider's spelling going forward.
+fn migration_0015(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE subscription_plan_observation SET plan = 'pro' WHERE plan = 'pro-20x'",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -708,6 +731,8 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0011,
     migration_0012,
     migration_0013,
+    migration_0014,
+    migration_0015,
 ];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
@@ -776,6 +801,15 @@ fn quota_alias_members(provider: &str) -> Vec<&str> {
         }
     }
     vec![provider]
+}
+
+/// Codex OAuth and the Codex CLI spend the same ChatGPT subscription outside Forge as well as
+/// inside it. Their usage snapshots therefore expire quickly; retaining an old high-water mark
+/// would incorrectly make the mesh avoid both surfaces. Other providers retain their existing
+/// reset-window semantics.
+fn codex_quota_is_fresh(provider: &str, updated_at: i64, now: i64) -> bool {
+    !matches!(provider, "codex-oauth" | "codex-cli")
+        || now.saturating_sub(updated_at) <= forge_types::CODEX_QUOTA_FRESHNESS_SECS
 }
 
 fn quota_status_from_str(status: &str) -> forge_types::QuotaStatus {
@@ -1726,6 +1760,16 @@ impl Store {
         self.bench_model(model, until, &format!("excluded: {reason}"))
     }
 
+    /// Exclude every current and future model alias for `provider` after an authentication
+    /// failure. Auth is credential-wide, so retrying a sibling model only creates failover churn;
+    /// the provider bench naturally expires and is cleared by a successful probe after re-login.
+    pub fn exclude_provider(&self, provider: &str, reason: &str) -> Result<()> {
+        self.exclude_model(
+            &forge_types::provider_bench_key(provider),
+            &format!("provider auth failed: {reason}"),
+        )
+    }
+
     /// The non-excluded model whose bench expires soonest (the "least dead" model), as a
     /// last-resort fallback when every routable model is currently benched but none is a permanent
     /// capability exclusion. `None` when nothing is benched or all benches are permanent
@@ -1775,6 +1819,11 @@ impl Store {
         self.lock()?
             .execute("DELETE FROM model_health WHERE model = ?1", [model])?;
         Ok(())
+    }
+
+    /// Clear a provider-wide auth bench after any of its models passes a probe.
+    pub fn clear_provider_health(&self, provider: &str) -> Result<()> {
+        self.clear_model_health(&forge_types::provider_bench_key(provider))
     }
 
     /// Persist a model's fetched context window (tokens), from a provider's model API. Upsert so a
@@ -2181,8 +2230,71 @@ impl Store {
         updated.map(|u| chrono::Utc::now().timestamp() - u)
     }
 
+    /// Persist the current plan observed from the Codex backend. This is deliberately a tiny
+    /// account snapshot rather than configuration: callers may trust it only while it remains as
+    /// fresh as the associated quota observation.
+    pub fn record_subscription_plan(&self, provider: &str, plan: &str) -> Result<()> {
+        self.record_subscription_plan_at(provider, plan, chrono::Utc::now().timestamp())
+    }
+
+    /// [`Self::record_subscription_plan`] at the actual observation time. Rollout-derived values
+    /// must use this so an older Codex session line cannot make a stale plan look newly observed.
+    pub fn record_subscription_plan_at(
+        &self,
+        provider: &str,
+        plan: &str,
+        observed_at: i64,
+    ) -> Result<()> {
+        let plan = plan.trim();
+        if plan.is_empty() {
+            return Ok(());
+        }
+        with_busy_retry(|| {
+            let conn = self.lock()?;
+            conn.execute(
+                "INSERT INTO subscription_plan_observation (provider, plan, observed_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(provider) DO UPDATE SET plan = excluded.plan,
+                 observed_at = excluded.observed_at
+                 WHERE excluded.observed_at >= subscription_plan_observation.observed_at",
+                (provider, plan, observed_at),
+            )?;
+            Ok(())
+        })
+    }
+
+    /// A current server-observed plan, if one exists. Codex aliases share one account and use the
+    /// same strict five-minute freshness limit as their quota; other providers have no live plan
+    /// source today and therefore return no value unless a future caller writes one.
+    pub fn fresh_subscription_plan(&self, provider: &str) -> Option<String> {
+        let now = chrono::Utc::now().timestamp();
+        let members = quota_alias_members(provider);
+        let placeholders = (0..members.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT plan, observed_at FROM subscription_plan_observation
+             WHERE provider IN ({placeholders}) ORDER BY observed_at DESC LIMIT 1"
+        );
+        let conn = self.lock().ok()?;
+        let mut stmt = conn.prepare(&sql).ok()?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(members.len());
+        for member in &members {
+            params.push(member);
+        }
+        let (plan, observed_at): (String, i64) = stmt
+            .query_row(params.as_slice(), |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()
+            .ok()
+            .flatten()?;
+        codex_quota_is_fresh(provider, observed_at, now).then_some(plan)
+    }
+
     /// Per-provider, per-window fraction from `subscription_usage` (for display).
-    /// Only returns non-stale rows (window hasn't reset yet or has no reset time).
+    /// Only returns non-stale rows (window hasn't reset yet or has no reset time). Alias-group
+    /// members receive the same latest-per-window snapshot, exactly like [`Self::quota_at`], so
+    /// `/usage`, `/mesh`, `forge mesh`, and routing cannot disagree about a shared Codex account.
     /// Returns `HashMap<provider, HashMap<window_kind, fraction>>`.
     pub fn bridge_fractions(
         &self,
@@ -2190,20 +2302,57 @@ impl Store {
         let now = chrono::Utc::now().timestamp();
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
-            "SELECT provider, window_kind, fraction FROM subscription_usage
+            "SELECT provider, window_kind, fraction, updated_at FROM subscription_usage
          WHERE fraction IS NOT NULL AND (resets_at IS NULL OR resets_at > ?1)",
         )?;
-        let mut out: std::collections::HashMap<String, std::collections::HashMap<String, f64>> =
-            std::collections::HashMap::new();
-        let rows = stmt.query_map([now], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, f64>(2)?,
-            ))
-        })?;
-        for row in rows.flatten() {
-            out.entry(row.0).or_default().insert(row.1, row.2);
+        let rows: Vec<(String, String, f64, i64)> = stmt
+            .query_map([now], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .filter_map(std::result::Result::ok)
+            .filter(|row| codex_quota_is_fresh(&row.0, row.3, now))
+            .collect();
+
+        let mut output_providers: std::collections::BTreeSet<&str> =
+            std::collections::BTreeSet::new();
+        for row in &rows {
+            for member in quota_alias_members(&row.0) {
+                output_providers.insert(member);
+            }
+        }
+
+        let mut out = std::collections::HashMap::new();
+        for provider in output_providers {
+            let members = quota_alias_members(provider);
+            let mut windows: std::collections::HashMap<String, &(String, String, f64, i64)> =
+                std::collections::HashMap::new();
+            for row in &rows {
+                if !members.contains(&row.0.as_str()) {
+                    continue;
+                }
+                windows
+                    .entry(row.1.clone())
+                    .and_modify(|existing| {
+                        if row.3 > existing.3 {
+                            *existing = row;
+                        }
+                    })
+                    .or_insert(row);
+            }
+            if !windows.is_empty() {
+                out.insert(
+                    provider.to_string(),
+                    windows
+                        .into_iter()
+                        .map(|(window, row)| (window, row.2))
+                        .collect(),
+                );
+            }
         }
         Ok(out)
     }
@@ -2244,6 +2393,7 @@ impl Store {
                     })
                 })?
                 .filter_map(std::result::Result::ok)
+                .filter(|row| codex_quota_is_fresh(&row.provider, row.updated_at, now))
                 .collect();
             rows
         };
@@ -5015,6 +5165,21 @@ mod tests {
     }
 
     #[test]
+    fn provider_auth_exclusion_benches_all_of_its_model_aliases() {
+        let store = Store::open_in_memory().unwrap();
+        store.exclude_provider("agy-cli", "login required").unwrap();
+        let health = store.current_benched().unwrap();
+        assert!(health.is_benched("agy-cli::gemini-3.1-pro"));
+        assert!(health.is_benched("agy-cli::gemini-3.5-flash"));
+        assert!(!health.is_benched("groq::qwen/qwen3.6-27b"));
+        store.clear_provider_health("agy-cli").unwrap();
+        assert!(!store
+            .current_benched()
+            .unwrap()
+            .is_benched("agy-cli::gemini-3.1-pro"));
+    }
+
+    #[test]
     fn quota_is_upserted_and_expires_when_the_window_resets() {
         let store = Store::open_in_memory().unwrap();
         let hint = |status, resets_at| forge_types::QuotaHint {
@@ -5219,6 +5384,57 @@ mod tests {
         let quota = store.quota_at(0).unwrap();
         assert!((quota.fraction_for("codex-cli") - 0.5).abs() < 1e-9);
         assert!((quota.fraction_for("codex-oauth") - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bridge_fractions_share_the_latest_codex_window_with_both_surfaces() {
+        let store = Store::open_in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        store
+            .record_quota_at(
+                &forge_types::QuotaHint {
+                    provider: "codex-cli".into(),
+                    window: "weekly".into(),
+                    status: forge_types::QuotaStatus::Ok,
+                    resets_at: None,
+                    fraction_used: Some(0.27),
+                },
+                now,
+            )
+            .unwrap();
+
+        let fractions = store.bridge_fractions().unwrap();
+        for provider in ["codex-cli", "codex-oauth"] {
+            assert_eq!(
+                fractions
+                    .get(provider)
+                    .and_then(|windows| windows.get("weekly")),
+                Some(&0.27),
+                "{provider} must display the same shared account snapshot"
+            );
+            assert!(
+                fractions
+                    .get(provider)
+                    .is_none_or(|windows| !windows.contains_key("five_hour")),
+                "an absent 5h window must not be invented"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_codex_plan_observation_is_shared_by_the_oauth_and_cli_aliases() {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .record_subscription_plan("codex-oauth", "pro")
+            .unwrap();
+        assert_eq!(
+            store.fresh_subscription_plan("codex-cli").as_deref(),
+            Some("pro")
+        );
+        assert_eq!(
+            store.fresh_subscription_plan("codex-oauth").as_deref(),
+            Some("pro")
+        );
     }
 
     #[test]
@@ -5460,6 +5676,46 @@ mod tests {
         assert!(quota.is_pressured("claude-cli"));
         assert!(!quota.is_pressured("codex-oauth"));
         assert!((quota.fraction_for("codex-cli") - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stale_codex_quota_does_not_pressure_either_shared_surface() {
+        let store = Store::open_in_memory().unwrap();
+        let now = 10_000;
+        let hint = |provider: &str, fraction| forge_types::QuotaHint {
+            provider: provider.into(),
+            window: "five_hour".into(),
+            status: if fraction >= 0.80 {
+                forge_types::QuotaStatus::Warning
+            } else {
+                forge_types::QuotaStatus::Ok
+            },
+            resets_at: Some(now + 10_000),
+            fraction_used: Some(fraction),
+        };
+
+        // A historical rollout may correctly report 92%, but it cannot describe a shared
+        // subscription after five minutes of external Codex usage.
+        store
+            .record_quota_at(
+                &hint("codex-cli", 0.92),
+                now - forge_types::CODEX_QUOTA_FRESHNESS_SECS - 1,
+            )
+            .unwrap();
+        let quota = store.quota_at(now).unwrap();
+        assert!(!quota.is_pressured("codex-cli"));
+        assert!(!quota.is_pressured("codex-oauth"));
+        assert_eq!(quota.fraction_for("codex-cli"), 0.0);
+        assert_eq!(quota.fraction_for("codex-oauth"), 0.0);
+
+        // A current OAuth header observation becomes authoritative for BOTH names.
+        store
+            .record_quota_at(&hint("codex-oauth", 0.25), now)
+            .unwrap();
+        let quota = store.quota_at(now).unwrap();
+        assert!((quota.fraction_for("codex-cli") - 0.25).abs() < 1e-9);
+        assert!((quota.fraction_for("codex-oauth") - 0.25).abs() < 1e-9);
+        assert!(!quota.is_pressured("codex-cli"));
     }
 
     #[test]

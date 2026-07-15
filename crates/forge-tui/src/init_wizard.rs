@@ -16,16 +16,10 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::{Frame, Terminal};
 
-const ORANGE: Color = Color::Rgb(255, 138, 48);
-const ACCENT: Color = Color::Rgb(82, 162, 255);
-const USER: Color = Color::Rgb(122, 183, 255);
-const DIM: Color = Color::Rgb(82, 87, 108);
-const OKGREEN: Color = Color::Rgb(92, 208, 122);
-const WARNYEL: Color = Color::Rgb(238, 188, 82);
-const TOOLCYAN: Color = Color::Rgb(75, 212, 218);
+use crate::surface::{self, DIM, OKGREEN, ORANGE, TOOLCYAN, USER, WARNYEL};
 
 /// A key-based provider offered in the wizard.
 #[derive(Debug, Clone)]
@@ -327,18 +321,13 @@ fn run_loop(input: WizardInput) -> io::Result<WizardOutcome> {
 
 fn render(f: &mut Frame, state: &State) {
     let area = f.area();
-    f.render_widget(Clear, area);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT))
-        .title(Span::styled(
-            " ◈ Forge setup ",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = surface::render_panel(
+        f,
+        area,
+        surface::title("◈ Forge setup", surface::SurfaceTone::Accent),
+        None,
+        surface::SurfaceTone::Accent,
+    );
 
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(

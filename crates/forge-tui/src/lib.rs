@@ -43,6 +43,7 @@ mod keybind_configurator;
 pub mod keybinds;
 mod render;
 pub mod select;
+mod surface;
 mod transcript;
 mod tui;
 mod workflow_view;
@@ -61,7 +62,7 @@ pub use commands::{
 };
 pub use config_editor::{ConfigAction, ConfigEditor, RowKind, SettingRow};
 pub use driver::{ChannelPresenter, InputEvent, MouseKind, Tui, UiMsg};
-pub use help::run_help;
+pub use help::{run_help, HelpTab};
 pub use init_wizard::{BridgeItem, ProviderItem, WizardInput, WizardOutcome};
 pub use keybind_configurator::run_keybind_configurator;
 /// A styled scrollback line, re-exported so binaries can route out-of-band output to the right

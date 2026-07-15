@@ -62,6 +62,7 @@ pub fn matches(combo: &KeyCombo, ev: &KeyEvent) -> bool {
 pub fn action_to_key_kind(action: &str) -> Option<KeyKind> {
     match action {
         "interrupt" => Some(KeyKind::Esc),
+        "command_center" => Some(KeyKind::OpenCommandCenter),
         "skip_model" => Some(KeyKind::SkipModel),
         "tier_up" => Some(KeyKind::TierUp),
         "tier_down" => Some(KeyKind::TierDown),
@@ -80,6 +81,7 @@ pub fn action_to_key_kind(action: &str) -> Option<KeyKind> {
         "checkpoint" => Some(KeyKind::SaveCheckpoint),
         "reload" => Some(KeyKind::ReloadConfig),
         "voice" => Some(KeyKind::ToggleVoice),
+        "kill_line_forward" => Some(KeyKind::KillLineForward),
         _ => None,
     }
 }

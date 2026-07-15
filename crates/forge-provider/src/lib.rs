@@ -25,7 +25,7 @@ pub use codex_oauth::{
     detected_plan as codex_oauth_detected_plan, exchange_code as exchange_codex_oauth_code,
     has_session as has_codex_oauth_session, is_pinned_codex_url,
     list_models as list_codex_oauth_models, probe_entitlement as probe_codex_entitlement,
-    CodexOauthProvider, CODEX_OAUTH_NAMESPACE,
+    probe_quota as probe_codex_quota, CodexOauthProvider, CODEX_OAUTH_NAMESPACE,
 };
 pub use embedder::{select_embedder, GenaiEmbedder};
 pub use genai_provider::{
@@ -82,6 +82,12 @@ pub fn is_cli_bridge(model: &str) -> bool {
 /// Documented in docs/features/mesh-routing.md.
 const PLAN_CACHE_TTL: Duration = Duration::from_secs(60);
 
+/// A quota response is the backend's current account state, including a plan header. Keep that
+/// observation only as long as the accompanying Codex quota is authoritative; an access-token
+/// claim is merely a fallback when no fresh response has been seen.
+const LIVE_CODEX_PLAN_TTL: Duration =
+    Duration::from_secs(forge_types::CODEX_QUOTA_FRESHNESS_SECS as u64);
+
 type PlanMap = std::collections::HashMap<String, String>;
 
 /// Process-wide memoization for [`detect_subscription_plans`]. Deliberately NOT a process-lifetime
@@ -89,6 +95,10 @@ type PlanMap = std::collections::HashMap<String, String>;
 /// permanent cache would keep serving a stale plan forever after the user switches ChatGPT plans
 /// or accounts. The `Instant` timestamp makes it self-healing on a short TTL instead.
 static PLAN_CACHE: Mutex<Option<(Instant, PlanMap)>> = Mutex::new(None);
+
+/// Fresh `x-codex-plan-type` observed from the account-wide Responses headers. Unlike the JWT
+/// claim this reflects a just-accepted request, which is why it wins after an account upgrades.
+static LIVE_CODEX_PLAN: Mutex<Option<(Instant, String)>> = Mutex::new(None);
 
 /// Per-account ChatGPT plan, detected live from OAuth state and memoized for [`PLAN_CACHE_TTL`].
 /// The uncached lookup (see [`detect_subscription_plans_uncached`]) does an OS keyring read (a
@@ -115,6 +125,33 @@ pub fn detect_subscription_plans() -> std::collections::HashMap<String, String> 
 /// Documented in docs/features/mesh-routing.md.
 pub fn invalidate_plan_cache() {
     clear_cache(&PLAN_CACHE);
+    if let Ok(mut plan) = LIVE_CODEX_PLAN.lock() {
+        *plan = None;
+    }
+}
+
+/// Record a current plan returned by the authoritative Codex backend. Called only after a
+/// successful OAuth response, and deliberately never persisted: it expires with the quota
+/// observation and a future account switch cannot inherit it.
+pub(crate) fn record_live_codex_plan(plan: &str) {
+    let plan = plan.trim().to_string();
+    if plan.is_empty() {
+        return;
+    }
+    if let Ok(mut latest) = LIVE_CODEX_PLAN.lock() {
+        *latest = Some((Instant::now(), plan));
+    }
+    // A route may ask for plans within the normal 60s JWT-cache TTL immediately after this
+    // response; make the freshly observed header visible without waiting for that TTL.
+    clear_cache(&PLAN_CACHE);
+}
+
+/// The fresh backend plan observed in this process, if any. Consumers persist it alongside the
+/// quota snapshot when a completed OAuth turn crosses a process boundary.
+pub fn fresh_live_codex_plan() -> Option<String> {
+    let guard = LIVE_CODEX_PLAN.lock().ok()?;
+    let (observed, plan) = guard.as_ref()?;
+    (observed.elapsed() <= LIVE_CODEX_PLAN_TTL).then(|| plan.clone())
 }
 
 fn clear_cache(cache: &Mutex<Option<(Instant, PlanMap)>>) {
@@ -156,11 +193,31 @@ fn cached_or_fetch(
 /// `[mesh.subscriptions]` says — never fabricated. Each half degrades independently to no entry
 /// (missing session / missing file / no claim), never a panic or an error.
 fn detect_subscription_plans_uncached() -> std::collections::HashMap<String, String> {
-    let mut plans = std::collections::HashMap::new();
-    if let Some(plan) = codex_oauth::detected_plan() {
+    merge_detected_codex_plans(
+        fresh_live_codex_plan(),
+        codex_oauth::detected_plan(),
+        cli_provider::codex_cli_detected_plan(),
+    )
+}
+
+/// Fold the three evidence tiers into the plan map without I/O, keeping the precedence testable.
+/// A fresh header is one account-wide observation, so it deliberately synchronizes both Codex
+/// surfaces rather than letting an older CLI JWT show a contradictory plan.
+fn merge_detected_codex_plans(
+    fresh_header: Option<String>,
+    oauth_jwt: Option<String>,
+    cli_jwt: Option<String>,
+) -> PlanMap {
+    let mut plans = PlanMap::new();
+    if let Some(plan) = fresh_header {
+        plans.insert("codex-oauth".to_string(), plan.clone());
+        plans.insert("codex-cli".to_string(), plan);
+        return plans;
+    }
+    if let Some(plan) = oauth_jwt {
         plans.insert("codex-oauth".to_string(), plan);
     }
-    if let Some(plan) = cli_provider::codex_cli_detected_plan() {
+    if let Some(plan) = cli_jwt {
         plans.insert("codex-cli".to_string(), plan);
     }
     plans
@@ -302,6 +359,17 @@ mod plan_cache_tests {
             "concurrent cold-cache callers must serialize onto a single fetch"
         );
     }
+
+    #[test]
+    fn fresh_backend_plan_overrides_stale_jwts_for_both_codex_surfaces() {
+        let plans = merge_detected_codex_plans(
+            Some("pro".to_string()),
+            Some("prolite".to_string()),
+            Some("prolite".to_string()),
+        );
+        assert_eq!(plans.get("codex-oauth").map(String::as_str), Some("pro"));
+        assert_eq!(plans.get("codex-cli").map(String::as_str), Some("pro"));
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -354,6 +422,12 @@ impl ProviderError {
     /// itself mid-session) — both auth-fail/incapability-fail identically every turn otherwise.
     pub fn is_permanent(&self) -> bool {
         matches!(self, Self::Capability(_) | Self::Auth(_))
+    }
+
+    /// Whether the credential itself is invalid or missing. Unlike a model capability failure,
+    /// every alias for this provider will fail until the user re-authenticates.
+    pub fn is_auth(&self) -> bool {
+        matches!(self, Self::Auth(_))
     }
 
     /// Whether this is a rate-limit / quota-exhaustion failure (HTTP 429, `RESOURCE_EXHAUSTED`).

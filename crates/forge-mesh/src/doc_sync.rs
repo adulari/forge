@@ -189,10 +189,7 @@ mod token_matcher {
 
     #[test]
     fn value_must_be_a_standalone_number_token() {
-        assert!(contains_number_token(
-            "BURN_K_COMPLEX = 0.15 scales",
-            "0.15"
-        ));
+        assert!(contains_number_token("BURN_K_COMPLEX = 0.3 scales", "0.3"));
         assert!(contains_number_token(
             "| Complex | 0.4 | 0.8 | 0.0 |",
             "0.8"
@@ -202,7 +199,7 @@ mod token_matcher {
             "0.15"
         ));
         // Substrings of longer numbers must NOT count.
-        assert!(!contains_number_token("a value of 0.156 here", "0.15"));
+        assert!(!contains_number_token("a value of 0.36 here", "0.3"));
         assert!(!contains_number_token("version 10.15 of macOS", "0.15"));
         assert!(!contains_number_token("pi is 3.0.15-ish", "0.15"));
     }

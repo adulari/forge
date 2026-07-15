@@ -8,14 +8,14 @@ use std::sync::Arc;
 use forge_config::Config;
 use forge_index::Lattice;
 use forge_mesh::pricing::Pricing;
-use forge_mesh::{BudgetState, BudgetStatus, ModelCatalog, Router};
+use forge_mesh::{BudgetState, BudgetStatus, HeuristicRouter, ModelCatalog, Router};
 use forge_provider::{CompletionOptions, Provider, StreamEvent, ToolSpec};
 use forge_store::Store;
 use forge_tools::ToolRegistry;
 use forge_tui::{Presenter, PresenterEvent};
 use forge_types::{
-    EffortLevel, LoopOutcome, Message, PermissionDecision, PermissionMode, PermissionRule, Role,
-    StopReason, TaskTier,
+    EffortLevel, LoopOutcome, Message, ModelHealth, PermissionDecision, PermissionMode,
+    PermissionRule, ProjectContext, Role, StopReason, SubscriptionQuota, TaskTier,
 };
 
 pub mod assay;
@@ -1351,6 +1351,59 @@ struct ModelLoopOutcome {
     mcp_tools_unavailable: bool,
 }
 
+/// A short-lived snapshot used by the mesh inspector. It owns the live router but snapshots the
+/// mutable quota, health, and budget inputs before its LLM classification call, so callers can
+/// render `/mesh` without holding a session lock across network I/O.
+pub struct RoutingInspector {
+    router: Arc<dyn Router>,
+    selection_router: HeuristicRouter,
+    budget: BudgetState,
+    health: ModelHealth,
+    quota: SubscriptionQuota,
+    effort: Option<EffortLevel>,
+    project: ProjectContext,
+}
+
+impl RoutingInspector {
+    /// Classify with the same live router as a real turn, then expose the shared scoring trace.
+    pub async fn explain(&self, prompt: &str) -> forge_mesh::RoutingExplanation {
+        let decision = self
+            .router
+            .route(
+                prompt,
+                false,
+                self.budget,
+                &self.health,
+                &self.quota,
+                self.effort,
+                &self.project,
+            )
+            .await;
+        let classifier_reason = decision
+            .rationale
+            .split(" — ")
+            .next()
+            .unwrap_or(&decision.rationale)
+            .to_string();
+        let fallback = decision.rationale.contains("llm classify unavailable");
+        let mut explanation = self.selection_router.explain_classified(
+            prompt,
+            decision.tier,
+            vec![classifier_reason],
+            self.budget,
+            &self.health,
+            &self.quota,
+            self.effort,
+        );
+        explanation.classifier_label = if fallback {
+            "heuristic fallback (all LLM candidates unavailable)".to_string()
+        } else {
+            "llm".to_string()
+        };
+        explanation
+    }
+}
+
 /// One interactive session. Construct with [`Session::start`], then drive [`Session::run_turn`].
 pub struct Session {
     id: String,
@@ -1548,6 +1601,21 @@ pub fn resolved_subscription_plans(config: &Config) -> std::collections::HashMap
         config.mesh.subscriptions.clone(),
         forge_provider::detect_subscription_plans(),
     )
+}
+
+/// [`resolved_subscription_plans`] enriched by the freshest server-observed Codex plan. The
+/// store observation crosses process boundaries (`forge run` → `forge mesh` / TUI) and expires
+/// with the shared Codex quota, so it can correct a stale JWT without becoming stale state itself.
+pub fn resolved_subscription_plans_with_store(
+    config: &Config,
+    store: &forge_store::Store,
+) -> std::collections::HashMap<String, String> {
+    let mut plans = resolved_subscription_plans(config);
+    if let Some(plan) = store.fresh_subscription_plan("codex-oauth") {
+        plans.insert("codex-oauth".to_string(), plan.clone());
+        plans.insert("codex-cli".to_string(), plan);
+    }
+    plans
 }
 
 #[cfg(test)]
@@ -2981,6 +3049,63 @@ impl Session {
         specs
     }
 
+    /// Whether this turn should expose callable tools to the routed model.
+    ///
+    /// Kept deliberately conservative: standard/complex turns retain the full agent surface;
+    /// a trivial turn only receives tools when the prompt has a clear workspace or external-action
+    /// intent. This prevents small local models from interpreting a requested answer token as a
+    /// function name while preserving tool access for genuine simple file/command tasks.
+    fn should_advertise_tools(tier: TaskTier, prompt: &str) -> bool {
+        if tier != TaskTier::Trivial {
+            return true;
+        }
+        let prompt = prompt.to_ascii_lowercase();
+        [
+            "read ",
+            "inspect ",
+            "search ",
+            "find ",
+            "grep",
+            "rg ",
+            "file",
+            "directory",
+            "repo",
+            "code",
+            "test",
+            "build",
+            "compile",
+            "run ",
+            "execute",
+            "shell",
+            "command",
+            "git",
+            "commit",
+            "diff",
+            "write",
+            "edit",
+            "create",
+            "delete",
+            "implement",
+            "fix ",
+            "debug",
+            "diagnose",
+            "review",
+            "refactor",
+            "install",
+            "web",
+            "http",
+            "url",
+            "browser",
+            "fetch",
+            "download",
+            "mcp",
+            "database",
+            "query",
+        ]
+        .iter()
+        .any(|intent| prompt.contains(intent))
+    }
+
     /// Run one full turn: route -> (model -> tools)* -> final answer. Returns the outcome.
     pub async fn run_turn(&mut self, prompt: &str) -> Result<LoopOutcome, CoreError> {
         self.run_turn_with(prompt, &[], None).await
@@ -2999,7 +3124,10 @@ impl Session {
         self.store
             .current_quota()
             .unwrap_or_default()
-            .with_plans(resolved_subscription_plans(&self.config))
+            .with_plans(resolved_subscription_plans_with_store(
+                &self.config,
+                &self.store,
+            ))
             .with_conserve(self.config.mesh.subscription_conserve)
     }
 
@@ -3038,7 +3166,7 @@ impl Session {
         use forge_config::ClassifierKind;
         exp.classifier_label = match self.config.mesh.classifier {
             ClassifierKind::Heuristic => "heuristic".to_string(),
-            ClassifierKind::Llm => {
+            ClassifierKind::Llm | ClassifierKind::Hybrid => {
                 let m = self
                     .config
                     .mesh
@@ -3047,23 +3175,24 @@ impl Session {
                     .unwrap_or("trivial-tier fallback");
                 format!("llm ({m}) — actual tier may differ from this heuristic preview")
             }
-            ClassifierKind::Hybrid => {
-                let (_, confident, reason) =
-                    forge_mesh::HeuristicRouter::classify_confident(prompt, &self.project);
-                if confident {
-                    format!("hybrid — heuristic confident ({reason}), no llm call")
-                } else {
-                    let m = self
-                        .config
-                        .mesh
-                        .classifier_model
-                        .as_deref()
-                        .unwrap_or("trivial-tier fallback");
-                    format!("hybrid — uncertain zone, llm ({m}) will classify at turn time")
-                }
-            }
         };
         Some(exp)
+    }
+
+    /// Snapshot the live router and routing inputs for an asynchronous `/mesh` inspection.
+    /// `None` when there is no discovered catalog to inspect.
+    pub fn routing_inspector(&self) -> Option<RoutingInspector> {
+        let catalog = self.catalog.clone()?;
+        let health = self.store.current_benched().unwrap_or_default();
+        Some(RoutingInspector {
+            router: Arc::clone(&self.router),
+            selection_router: HeuristicRouter::new(self.config.clone()).with_catalog(catalog),
+            budget: self.budget_snapshot(),
+            health,
+            quota: self.live_quota(),
+            effort: self.pinned_effort(),
+            project: self.project.clone(),
+        })
     }
 
     /// The last-resort model to try when the routed fallback chain is exhausted: the non-excluded
@@ -3527,13 +3656,7 @@ Rules:\n\
         let reason = err.reason();
         let default_cooldown =
             std::time::Duration::from_secs(self.config.mesh.failover_cooldown_secs);
-        if err.is_permanent() {
-            let _ = self.store.exclude_model(model, reason);
-        } else {
-            let _ = self
-                .store
-                .bench_for(model, err.cooldown(default_cooldown), reason);
-        }
+        self.record_model_failure(model, err, default_cooldown);
         let next = chain.next();
         match &next {
             // A hop drives the animated "finding a model" indicator (no per-hop scrollback spam).
@@ -3547,6 +3670,28 @@ Rules:\n\
             ))),
         }
         next
+    }
+
+    /// Persist health at the correct scope: a capability failure is model-specific, while an
+    /// authentication failure applies to every alias of its provider and must stop sibling churn.
+    fn record_model_failure(
+        &self,
+        model: &str,
+        err: &forge_provider::ProviderError,
+        default_cooldown: std::time::Duration,
+    ) {
+        let reason = err.reason();
+        if err.is_auth() {
+            let _ = self
+                .store
+                .exclude_provider(forge_config::provider_of(model), reason);
+        } else if err.is_permanent() {
+            let _ = self.store.exclude_model(model, reason);
+        } else {
+            let _ = self
+                .store
+                .bench_for(model, err.cooldown(default_cooldown), reason);
+        }
     }
 
     pub async fn compact(&mut self, auto: bool) -> Result<(usize, usize), CoreError> {
@@ -4590,6 +4735,14 @@ prompt text, nothing else.";
                         continue;
                     }
                     Err(e) if failover_enabled && (e.is_retryable() || e.is_context_overflow()) => {
+                        // Persist credential failures before applying pinned-model policy. A strict
+                        // pin correctly makes *this* turn fail rather than switch models, but the
+                        // expired credential applies to all aliases and must not remain routable
+                        // on the next mesh decision.
+                        let auth_error = e.is_auth();
+                        if auth_error {
+                            self.record_model_failure(&active_model, &e, default_cooldown);
+                        }
                         // A transient failure other than an explicit provider outage (for example
                         // a dropped stream) gets a short same-model retry. An `Unavailable`
                         // response is already a shared health signal: bench it and immediately
@@ -4786,18 +4939,10 @@ prompt text, nothing else.";
                                 continue;
                             }
                         }
-                        let reason = e.reason();
-                        // A PERMANENT incapability (no tool support / unaffordable) excludes the
-                        // model for a long window so it isn't re-tried every turn (the "every model
-                        // failing" churn); a transient failure benches it on the short cooldown.
-                        if e.is_permanent() {
-                            let _ = self.store.exclude_model(&active_model, reason);
-                        } else {
-                            let _ = self.store.bench_for(
-                                &active_model,
-                                e.cooldown(default_cooldown),
-                                reason,
-                            );
+                        // Auth failures exclude the whole provider; permanent capability failures
+                        // exclude only this model; transient failures take a short bench.
+                        if !auth_error {
+                            self.record_model_failure(&active_model, &e, default_cooldown);
                         }
                         // Drive the single animated "finding a model" indicator instead of emitting
                         // one scrollback warning per hop (the failover spam). It clears itself when
@@ -4821,6 +4966,7 @@ prompt text, nothing else.";
                         // still holds the conversation is used immediately; one that's too small is
                         // a switch that needs (lossy) compaction, so it's gated by consent
                         // (Yes/No/Always) — "No" skips it and we keep looking for one that fits.
+                        let freshly_benched = self.store.current_benched().unwrap_or_default();
                         let mut picked = None;
                         for next in chain.by_ref() {
                             if forge_config::is_model_disabled(&next, &self.config.mesh.disabled) {
@@ -4830,6 +4976,12 @@ prompt text, nothing else.";
                                 if forge_config::provider_of(&next) == p.as_str() {
                                     continue;
                                 }
+                            }
+                            // The original chain was built before this failure. Re-read health
+                            // so an auth failure's new provider-wide bench immediately skips its
+                            // sibling aliases in THIS turn, not only on the next one.
+                            if freshly_benched.is_benched(&next) {
+                                continue;
                             }
                             match self.admit_failover_model(&next).await {
                                 Ok(true) => {
@@ -4915,6 +5067,14 @@ prompt text, nothing else.";
                 &resp.tool_calls,
                 None,
             )?;
+            // A successful Codex OAuth response carries a backend-authoritative plan header.
+            // Persist its short-lived observation even for a model-pinned turn (which has no
+            // auto-routing decision) so the next process's mesh inspector sees the same account.
+            if active_model.starts_with("codex-oauth::") {
+                if let Some(plan) = forge_provider::fresh_live_codex_plan() {
+                    let _ = self.store.record_subscription_plan("codex-oauth", &plan);
+                }
+            }
             // Step-0 routing record and quota-hint persistence are only meaningful for the primary
             // turn (when we have a decision). The autofix re-run skips both.
             if let Some(d) = decision {
@@ -5937,7 +6097,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // the hard-trim floor and lose recent context. Transparent — `compact` emits its own note.
         self.auto_compact_if_needed(&edit_model).await;
 
-        let specs = self.tool_specs();
+        let specs = if Self::should_advertise_tools(decision.tier, prompt) {
+            self.tool_specs()
+        } else {
+            Vec::new()
+        };
         let stream_idle = std::time::Duration::from_secs(self.config.mesh.stream_idle_timeout_secs);
 
         // 3. Model <-> tool loop. The cap is a runaway guard, not a functional limit — the loop
@@ -9515,6 +9679,25 @@ mod tests {
         assert!(names
             .iter()
             .all(|n| !n.starts_with("mcp_") && !n.contains("__")));
+    }
+
+    #[test]
+    fn trivial_explicitly_tool_free_reply_hides_tools() {
+        assert!(
+            !Session::should_advertise_tools(
+                TaskTier::Trivial,
+                "Reply exactly: daemon-stability-check. Do not use tools."
+            ),
+            "a direct tool-free reply must not let a small model hallucinate an MCP call"
+        );
+        assert!(Session::should_advertise_tools(
+            TaskTier::Trivial,
+            "Read README.md and summarize the installation steps."
+        ));
+        assert!(Session::should_advertise_tools(
+            TaskTier::Standard,
+            "Reply exactly: daemon-stability-check. Do not use tools."
+        ));
     }
 
     /// Provider that always calls `mcp_call { name: "test__echo", arguments: { "msg": "hi" } }`.
@@ -15295,6 +15478,51 @@ mod tests {
             (report[0].1 - now - 42).abs() <= 2,
             "cooldown ~42s: {report:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn auth_error_benches_the_entire_provider_before_failover() {
+        let provider = Arc::new(FlakyProvider {
+            bad: ["agy-cli::gemini-3.1-pro".to_string()]
+                .into_iter()
+                .collect(),
+            err: |_| forge_provider::ProviderError::Auth("login required".into()),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "agy-cli::gemini-3.1-pro".into(),
+            fallbacks: vec!["good::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        assert_eq!(session.run_turn("hi").await.unwrap(), "recovered");
+        let health = store.current_benched().unwrap();
+        assert!(health.is_benched("agy-cli::gemini-3.1-pro"));
+        assert!(health.is_benched("agy-cli::gemini-3.5-flash"));
+        assert!(!health.is_benched("good::model"));
+    }
+
+    #[tokio::test]
+    async fn pinned_auth_error_still_benches_the_entire_provider() {
+        // A pin forbids changing models for this turn, but it must not prevent the durable
+        // provider-wide auth exclusion that protects every subsequent mesh route.
+        let provider = Arc::new(FlakyProvider {
+            bad: ["agy-cli::gemini-3.1-pro".to_string()]
+                .into_iter()
+                .collect(),
+            err: |_| forge_provider::ProviderError::Auth("login required".into()),
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "agy-cli::gemini-3.1-pro".into(),
+            fallbacks: vec!["good::model".into()],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        assert!(
+            session.run_turn("hi").await.is_err(),
+            "a strict pin must fail this turn"
+        );
+        let health = store.current_benched().unwrap();
+        assert!(health.is_benched("agy-cli::gemini-3.1-pro"));
+        assert!(health.is_benched("agy-cli::gemini-3.5-flash"));
+        assert!(!health.is_benched("good::model"));
     }
 
     #[tokio::test]

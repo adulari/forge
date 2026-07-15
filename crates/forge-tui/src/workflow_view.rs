@@ -14,13 +14,14 @@
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line as TextLine, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::app::{
     model_short, truncate, ActivityKind, ActivityStatus, App, TranscriptView, ACCENT, DIM, ERRRED,
     OKGREEN, ORANGE, SPINNER, TEXT, TOOLCYAN, WARNYEL,
 };
+use crate::surface::{self, SurfaceTone};
 
 /// Cap on retained narration lines (a chatty script can't grow the feed without bound).
 const LOG_FEED_MAX: usize = 200;
@@ -437,24 +438,20 @@ pub(crate) fn render_workflow_view(f: &mut Frame, app: &App) {
         " ⛓ workflow {name}· {state} · ⧖ {}s ",
         app.turn_elapsed_secs
     );
-    let border_color = match &wf.finished {
-        None => ORANGE,
-        Some((true, _)) => OKGREEN,
-        Some((false, _)) => ERRRED,
+    let tone = match &wf.finished {
+        None => SurfaceTone::Brand,
+        Some((true, _)) => SurfaceTone::Success,
+        Some((false, _)) => SurfaceTone::Danger,
     };
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(
-            title,
-            Style::default().fg(border_color).bold(),
-        ))
-        .title_bottom(Span::styled(
-            " ↑↓ select · ⏎ transcript · esc background (^O reopens) ",
-            Style::default().fg(DIM),
-        ))
-        .border_style(Style::default().fg(border_color));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
+    let inner = surface::render_panel(
+        f,
+        area,
+        surface::title(title, tone),
+        Some(surface::hint(
+            "↑↓ select · ⏎ transcript · Esc background (^O reopens)",
+        )),
+        tone,
+    );
     if inner.width < 24 || inner.height < 4 {
         return;
     }

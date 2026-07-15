@@ -245,7 +245,12 @@ pub(crate) async fn dispatch_command(
         CommandAction::Help | CommandAction::Keys => match tui.as_mut() {
             Some(tui) => {
                 let bindings = app.keybinds.clone();
-                let _ = tui.run_fullscreen(|| forge_tui::run_help(&bindings));
+                let tab = if matches!(action, CommandAction::Help) {
+                    forge_tui::HelpTab::Commands
+                } else {
+                    forge_tui::HelpTab::Keybinds
+                };
+                let _ = tui.run_fullscreen(|| forge_tui::run_help(&bindings, tab));
             }
             None => app.note("⌨ /help is host-only (a fullscreen reference viewer)"),
         },
@@ -846,6 +851,11 @@ and keep going."
             let session_c = session.clone();
             let prompt_str = prompt.trim().to_string();
             tokio::spawn(async move {
+                // `/mesh` must use the same fresh shared Codex snapshot as `forge mesh` and a
+                // real route. Do this before taking the session lock: the OAuth probe is bounded
+                // but network-backed, while explain_routing itself is synchronous.
+                let store = { session_c.lock().await.store.clone() };
+                crate::cli::commands::models::refresh_codex_quota(&store).await;
                 let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
                     .await
                     .unwrap_or_default();
@@ -853,21 +863,14 @@ and keep going."
                     let sc = session_c.clone();
                     tokio::spawn(async move { refresh_claude_quota(&sc).await });
                 }
-                let exp = {
+                let inspector = {
                     let s = session_c.lock().await;
-                    s.seed_subscription_quota_at(
-                        "codex-cli",
-                        "five_hour",
-                        bstats.codex_5h_pct,
-                        bstats.codex_5h_observed_at,
-                    );
-                    s.seed_subscription_quota_at(
-                        "codex-cli",
-                        "weekly",
-                        bstats.codex_weekly_pct,
-                        bstats.codex_weekly_observed_at,
-                    );
-                    s.explain_routing(&to_explain)
+                    seed_subscription_stats(&s, &bstats);
+                    s.routing_inspector()
+                };
+                let exp = match inspector {
+                    Some(inspector) => Some(inspector.explain(&to_explain).await),
+                    None => None,
                 };
                 let _ = tx.send(exp.map(|e| build_mesh_overlay(e, &prompt_str)));
             });

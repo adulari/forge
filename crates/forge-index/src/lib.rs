@@ -359,6 +359,7 @@ impl Lattice {
 
         let mut node_ids: Vec<String> = Vec::with_capacity(parsed.defs.len());
         let mut nodes = Vec::with_capacity(parsed.defs.len());
+        let mut seen_node_ids = std::collections::HashSet::new();
         for d in &parsed.defs {
             let id = sha_hex(
                 format!(
@@ -368,18 +369,23 @@ impl Lattice {
                 .as_bytes(),
             );
             node_ids.push(id.clone());
-            nodes.push(LatticeNodeRow {
-                id,
-                file_id: file_id.clone(),
-                kind: d.kind.clone(),
-                name: d.name.clone(),
-                qualname: Some(d.qualname.clone()),
-                signature: d.signature.clone(),
-                span_start: d.span_start as i64,
-                span_end: d.span_end as i64,
-                line_start: d.line_start as i64,
-                pagerank: 0.0,
-            });
+            // Some parsers can emit the same definition twice (notably shell function forms).
+            // IDs are intentionally deterministic, so retain one node while keeping `node_ids`
+            // indexed by every parser definition for edge/reference construction below.
+            if seen_node_ids.insert(id.clone()) {
+                nodes.push(LatticeNodeRow {
+                    id,
+                    file_id: file_id.clone(),
+                    kind: d.kind.clone(),
+                    name: d.name.clone(),
+                    qualname: Some(d.qualname.clone()),
+                    signature: d.signature.clone(),
+                    span_start: d.span_start as i64,
+                    span_end: d.span_end as i64,
+                    line_start: d.line_start as i64,
+                    pagerank: 0.0,
+                });
+            }
         }
 
         // `contains` edges: enclosing definition → nested definition (struct→method, class→…).
@@ -396,6 +402,8 @@ impl Lattice {
                 });
             }
         }
+        let mut seen_edge_ids = std::collections::HashSet::new();
+        edges.retain(|edge| seen_edge_ids.insert(edge.id.clone()));
 
         // References: each call/use site inside a definition → a name-keyed `lattice_ref` row.
         let mut refs = Vec::new();
@@ -416,6 +424,8 @@ impl Lattice {
                 line: r.line as i64,
             });
         }
+        let mut seen_ref_ids = std::collections::HashSet::new();
+        refs.retain(|reference| seen_ref_ids.insert(reference.id.clone()));
 
         let file = LatticeFileRow {
             id: file_id,

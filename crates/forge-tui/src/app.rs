@@ -9,35 +9,22 @@
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line as TextLine, Span};
-use ratatui::widgets::{Block, BorderType, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 use serde::{Deserialize, Serialize};
 
-use crate::{PresenterEvent, QChoice};
+use crate::{surface, PresenterEvent, QChoice};
 
 // ── Palette ──────────────────────────────────────────────────────────────────
-// `pub(crate)` so sibling render modules (workflow_view) share the one palette.
-// Forge identity
-pub(crate) const ORANGE: Color = Color::Rgb(255, 138, 48); // forge brand — warm ember
-                                                           // Electric blue primary accent (active states, model display, busy indicator)
-pub(crate) const ACCENT: Color = Color::Rgb(82, 162, 255); // electric blue
-                                                           // Text
-const USER: Color = Color::Rgb(122, 183, 255); // user message headers
-pub(crate) const DIM: Color = Color::Rgb(82, 87, 108); // muted / secondary
-pub(crate) const TEXT: Color = Color::Rgb(208, 213, 224); // primary body text
-                                                          // Semantic
-pub(crate) const OKGREEN: Color = Color::Rgb(92, 208, 122); // success / ok
-pub(crate) const ERRRED: Color = Color::Rgb(243, 92, 92); // error
-pub(crate) const WARNYEL: Color = Color::Rgb(238, 188, 82); // warning
-pub(crate) const TOOLCYAN: Color = Color::Rgb(75, 212, 218); // tools / lattice
-                                                             // Surfaces
-const SELECT_BG: Color = Color::Rgb(40, 70, 132); // mouse text-selection
-const STATUSBG: Color = Color::Rgb(14, 15, 21); // deep status-bar bg
-const SEPCOL: Color = Color::Rgb(38, 42, 62); // status-bar separator tint
+// Kept as imports here for readability; values and surface treatment are shared by every view.
+pub(crate) use crate::surface::{
+    ACCENT, DIM, ERRRED, OKGREEN, ORANGE, TEXT, TOOLCYAN, USER, WARNYEL,
+};
+use crate::surface::{SELECT_BG, SEPARATOR as SEPCOL, STATUS_BG as STATUSBG};
 
 pub(crate) const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// ANSI-Shadow block wordmark printed once into scrollback as the welcome banner.
+/// ANSI-Shadow block wordmark retained for terminal startup, with a quieter in-chat welcome.
 const FORGE_WORDMARK: &[&str] = &[
     "███████╗ ██████╗ ██████╗  ██████╗ ███████╗",
     "██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝",
@@ -47,7 +34,7 @@ const FORGE_WORDMARK: &[&str] = &[
     "╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝",
 ];
 const WORDMARK_WIDTH: u16 = 42;
-const TAGLINE: &str = "model-mesh coding agent · type a task to begin";
+const TAGLINE: &str = "Your coding partner. Describe what you want to do.";
 
 /// Pinned live-region geometry. Fixed at terminal creation (ratatui inline viewports do
 /// not resize at runtime), so kept small: only the in-flight reply edge, the permission
@@ -61,8 +48,8 @@ pub const INPUT_H: u16 = 3;
 pub const INPUT_MAX_ROWS: u16 = 6;
 pub const INPUT_MAX_H: u16 = INPUT_MAX_ROWS + 2;
 pub const STATUS_H: u16 = 1;
-/// Fixed inline-viewport height. Large enough to give the task + subagent panels their own rows
-/// (each sized dynamically within `render_live`) while keeping a small idle footprint.
+/// Fixed inline-viewport height. Detailed work stays available on demand rather than permanently
+/// occupying the basic chat flow.
 /// Cannot be resized at runtime — recreating the inline viewport pollutes the terminal scrollback.
 pub const LIVE_H: u16 = 14;
 /// Max task / running-subagent rows shown in their sticky panels before summarizing the overflow.
@@ -467,6 +454,8 @@ pub struct App {
     /// The inline slash-command palette (RFC session-management-and-commands). Open while the
     /// input line starts with `/`.
     pub palette: crate::commands::Palette,
+    /// The global command center, opened with Ctrl+K.
+    pub command_center: crate::commands::CommandCenter,
     /// The interactive session/checkpoint picker (RFC session-management-and-commands). Modal
     /// while open; reused for `/sessions`, `/resume`, and `/checkpoints`.
     pub picker: crate::commands::Picker,
@@ -822,8 +811,9 @@ pub struct OverlayRowSnapshot {
 /// informational rather than selectable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OverlaySnapshot {
-    /// A stable discriminator: `"palette"`, `"picker:<kind>"`, `"picker:at_path"`, `"config"`,
-    /// `"overlay:usage"`, `"overlay:mesh"`, `"overlay:workflow"`.
+    /// A stable discriminator: `"command_center"`, `"palette"`, `"picker:<kind>"`,
+    /// `"picker:at_path"`, `"config"`, `"overlay:usage"`, `"overlay:mesh"`,
+    /// `"overlay:workflow"`.
     pub kind: String,
     pub title: String,
     pub rows: Vec<OverlayRowSnapshot>,
@@ -838,7 +828,7 @@ impl App {
     /// Project the top-most open modal overlay for the remote-control wire (see
     /// [`OverlaySnapshot`]). Precedence mirrors the render loop's key routing, so the projection
     /// is always the surface a keystroke would actually reach: workflow view → `/config` editor →
-    /// palette → `/usage` → `/mesh` → `@path` picker → picker. The `/keys` configurator is
+    /// command center → palette → `/usage` → `/mesh` → `@path` picker → picker. The `/keys` configurator is
     /// exempt by design: it runs a blocking fullscreen loop on the host terminal (never App
     /// state), so there is nothing here to project — the remote drain notes it as host-only.
     pub fn remote_overlay(&self) -> Option<OverlaySnapshot> {
@@ -847,6 +837,9 @@ impl App {
         }
         if self.config_editor.open {
             return Some(self.config_overlay());
+        }
+        if self.command_center.open {
+            return Some(self.command_center_overlay());
         }
         if self.palette.open {
             return Some(self.palette_overlay());
@@ -864,6 +857,46 @@ impl App {
             return Some(self.picker_overlay());
         }
         None
+    }
+
+    /// Whether a framed modal currently covers part of the active viewport. The terminal driver
+    /// uses this edge-triggered signal to invalidate Ratatui's diff buffer on open/close: native
+    /// libraries can bypass Ratatui and write directly to the terminal, so a normal incremental
+    /// draw would otherwise leave stale text visible beneath an overlay.
+    pub(crate) fn modal_surface_open(&self) -> bool {
+        self.command_center.open
+            || self.palette.open
+            || self.picker.open
+            || self.at_picker.open
+            || self.config_editor.open
+            || self.usage_overlay.open
+            || self.mesh_overlay.open
+            || self.voice.is_some()
+    }
+
+    fn command_center_overlay(&self) -> OverlaySnapshot {
+        let rows = self
+            .command_center
+            .matches(&self.palette.extra)
+            .into_iter()
+            .enumerate()
+            .map(|(i, entry)| OverlayRowSnapshot {
+                id: entry.name.clone(),
+                label: format!("/{}", entry.name),
+                detail: entry.desc,
+                selected: i == self.command_center.selected,
+                group: Some(entry.category.to_string()),
+            })
+            .collect();
+        OverlaySnapshot {
+            kind: "command_center".to_string(),
+            title: "command center".to_string(),
+            rows,
+            selected: self.command_center.selected,
+            filter: Some(self.command_center.query.clone()),
+            free_text: false,
+            body: None,
+        }
     }
 
     fn picker_overlay(&self) -> OverlaySnapshot {
@@ -1438,6 +1471,8 @@ pub enum KeyKind {
     TierDown,
     /// Toggle display of model reasoning/thinking blocks.
     ToggleReasoning,
+    /// Open the global searchable command center.
+    OpenCommandCenter,
     /// Open the keybind configurator overlay.
     OpenKeybindConfig,
     /// Open the model picker overlay.
@@ -1665,6 +1700,7 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::TierUp
         | KeyKind::TierDown
         | KeyKind::ToggleReasoning
+        | KeyKind::OpenCommandCenter
         | KeyKind::OpenKeybindConfig
         | KeyKind::ModelPicker
         | KeyKind::EffortCycle
@@ -3828,24 +3864,31 @@ pub fn render_live(frame: &mut Frame, app: &App) {
     let avail = frame.area().height.saturating_sub(fixed);
     let panel_avail = avail.saturating_sub(MIN_STREAM);
 
-    // The activity panel (main chat + subagents + critics) and the tasks panel each want their
-    // full height. When both fit in the panel budget (always true in full-screen mode, where the
-    // live region spans the terminal) they each get it — so the activity list shows every entry up
-    // to its cap, like the tasks list. Only when the inline budget is contended do we split it,
-    // giving each panel a fair half but letting the smaller one keep its full size.
-    let (activity_h, task_h) = split_panel_budget(
-        app.activity_panel_height(),
-        app.tasks_panel_height(),
-        panel_avail,
+    // Basic chat shows a one-line work summary. Ctrl+O expands the existing task and activity
+    // panels on demand, retaining every detail without making parallel work visually dominant.
+    let details_open = app.activity_focused;
+    let (activity_h, task_h) = if details_open {
+        split_panel_budget(
+            app.activity_panel_height(),
+            app.tasks_panel_height(),
+            panel_avail,
+        )
+    } else {
+        (0, 0)
+    };
+    let work_summary_h = u16::from(
+        !details_open
+            && (app.has_activity() || !app.tasks.is_empty() || app.running_assay_critics() > 0),
     );
     // One-line status band while a live workflow's view is backgrounded (Esc'd away): the run's
     // only always-visible trace, since its rows don't join the activity panel.
     let wf_band_h = u16::from(app.workflow.band_visible());
-    let stream_h = avail.saturating_sub(activity_h + task_h + wf_band_h);
+    let stream_h = avail.saturating_sub(activity_h + task_h + wf_band_h + work_summary_h);
 
     let areas = Layout::vertical([
         Constraint::Length(stream_h),
         Constraint::Length(wf_band_h),
+        Constraint::Length(work_summary_h),
         Constraint::Length(activity_h),
         Constraint::Length(task_h),
         Constraint::Length(PERMISSION_H),
@@ -3860,7 +3903,13 @@ pub fn render_live(frame: &mut Frame, app: &App) {
     // above (not the whole screen). The session picker stays a full modal. Otherwise areas[0] is the
     // transcript (full-screen) or the in-flight reply edge (inline).
     const POPUP_MAX: u16 = 10;
-    if app.palette.open || app.at_picker.open {
+    if app.command_center.open {
+        if app.fullscreen {
+            render_transcript_area(frame, areas[0], app);
+        } else {
+            render_preview(frame, areas[0], app);
+        }
+    } else if app.palette.open || app.at_picker.open {
         let (top, popup) = if app.fullscreen && areas[0].height > POPUP_MAX + 1 {
             let popup_h = POPUP_MAX;
             let top = Rect {
@@ -3901,28 +3950,168 @@ pub fn render_live(frame: &mut Frame, app: &App) {
             areas[1],
         );
     }
+    if work_summary_h > 0 {
+        render_work_summary(frame, areas[2], app);
+    }
     if activity_h > 0 {
-        render_activity_panel(frame, areas[2], app);
+        render_activity_panel(frame, areas[3], app);
     }
     if task_h > 0 {
         frame.render_widget(
-            Paragraph::new(tasks_panel_lines(&app.tasks, areas[3].height)),
-            areas[3],
+            Paragraph::new(tasks_panel_lines(&app.tasks, areas[4].height)),
+            areas[4],
         );
     }
     if app.prompt.is_some() {
-        render_permission(frame, areas[4], app);
+        render_permission(frame, areas[5], app);
     }
-    render_input(frame, areas[5], app);
+    render_input(frame, areas[6], app);
     if band_h > 0 {
-        render_compact_band(frame, areas[6], app);
+        render_compact_band(frame, areas[7], app);
     }
-    render_statusline(frame, areas[7], app);
+    render_statusline(frame, areas[8], app);
     // Usage overlay renders last so it appears on top of everything.
     render_usage_overlay(frame, app);
     render_mesh_overlay(frame, app);
     render_voice_overlay(frame, app);
     crate::config_editor::render_config_overlay(frame, &app.config_editor);
+    render_command_center(frame, frame.area(), app);
+}
+
+fn render_work_summary(frame: &mut Frame, area: Rect, app: &App) {
+    let open_tasks = app
+        .tasks
+        .iter()
+        .filter(|task| task.status != forge_types::TodoStatus::Done)
+        .count();
+    let agents = app.running_subagents();
+    let critics = app.running_assay_critics();
+    let mut parts = vec![Span::styled(
+        if app.busy {
+            " Working"
+        } else {
+            " Work summary"
+        },
+        Style::default().fg(ACCENT).bold(),
+    )];
+    if open_tasks > 0 {
+        parts.push(Span::styled(
+            format!(
+                "  {open_tasks} task{}",
+                if open_tasks == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(TEXT),
+        ));
+    }
+    if agents > 0 {
+        parts.push(Span::styled(
+            format!("  {agents} agent{}", if agents == 1 { "" } else { "s" }),
+            Style::default().fg(TOOLCYAN),
+        ));
+    }
+    if critics > 0 {
+        parts.push(Span::styled(
+            format!("  {critics} review{}", if critics == 1 { "" } else { "s" }),
+            Style::default().fg(WARNYEL),
+        ));
+    }
+    parts.push(Span::styled("  Ctrl+O details", Style::default().fg(DIM)));
+    frame.render_widget(Paragraph::new(TextLine::from(parts)), area);
+}
+
+/// Centered, searchable entry point for the complete command and skill catalogue. It is rendered
+/// over the chat rather than replacing it, preserving users' place in the current conversation.
+fn render_command_center(frame: &mut Frame, area: Rect, app: &App) {
+    if !app.command_center.open || area.width < 28 || area.height < 8 {
+        return;
+    }
+
+    let box_area = surface::modal_area(area, 92, 18);
+    let inner = surface::render_panel(
+        frame,
+        box_area,
+        surface::title("Command center", surface::SurfaceTone::Accent),
+        None,
+        surface::SurfaceTone::Accent,
+    );
+    let rows = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let query = if app.command_center.query.is_empty() {
+        "Search commands, skills, settings...".to_string()
+    } else {
+        app.command_center.query.clone()
+    };
+    let query_style = if app.command_center.query.is_empty() {
+        Style::default().fg(DIM)
+    } else {
+        Style::default().fg(TEXT)
+    };
+    frame.render_widget(
+        Paragraph::new(TextLine::from(vec![
+            Span::styled("  > ", Style::default().fg(ORANGE).bold()),
+            Span::styled(query, query_style),
+        ])),
+        rows[0],
+    );
+
+    let entries = app.command_center.matches(&app.palette.extra);
+    let visible = rows[1].height as usize;
+    let start = app
+        .command_center
+        .selected
+        .saturating_sub(visible.saturating_sub(1));
+    let mut previous_category: Option<&str> = None;
+    let mut lines = Vec::with_capacity(visible);
+    for (index, entry) in entries.iter().enumerate().skip(start).take(visible) {
+        if previous_category != Some(entry.category) {
+            if lines.len() >= visible {
+                break;
+            }
+            lines.push(TextLine::from(Span::styled(
+                format!("  {}", entry.category),
+                Style::default().fg(DIM).add_modifier(Modifier::BOLD),
+            )));
+            previous_category = Some(entry.category);
+        }
+        if lines.len() >= visible {
+            break;
+        }
+        let selected = index == app.command_center.selected;
+        let marker = if selected { "› " } else { "  " };
+        let command_style = if selected {
+            Style::default().fg(Color::White).bg(SELECT_BG).bold()
+        } else {
+            Style::default().fg(TOOLCYAN)
+        };
+        let desc_style = if selected {
+            Style::default().fg(Color::White).bg(SELECT_BG)
+        } else {
+            Style::default().fg(DIM)
+        };
+        lines.push(TextLine::from(vec![
+            Span::styled(format!("{marker}/{:<18}", entry.name), command_style),
+            Span::styled(entry.desc.clone(), desc_style),
+        ]));
+    }
+    if lines.is_empty() {
+        lines.push(TextLine::from(Span::styled(
+            "  No commands or skills match.",
+            Style::default().fg(DIM),
+        )));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), rows[1]);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            "↑/↓ select  Enter open  Esc close",
+            Style::default().fg(DIM),
+        )),
+        rows[2],
+    );
 }
 
 /// The inline slash-command palette: a scrolling window of filtered commands, selected row
@@ -4141,6 +4330,38 @@ fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
     let committed = cache.rows.len();
     let edge_len = app.streaming_edge_len(area.width);
     let total = committed + edge_len;
+    if total == 0 && !app.busy {
+        let empty = Layout::vertical([
+            Constraint::Percentage(28),
+            Constraint::Length(7),
+            Constraint::Min(0),
+        ])
+        .split(area);
+        let lines = vec![
+            TextLine::from(Span::styled("Forge", Style::default().fg(ORANGE).bold())),
+            TextLine::from(Span::styled(TAGLINE, Style::default().fg(TEXT))),
+            TextLine::default(),
+            TextLine::from(Span::styled(
+                "Explain this codebase",
+                Style::default().fg(TOOLCYAN),
+            )),
+            TextLine::from(Span::styled(
+                "Review the current changes",
+                Style::default().fg(TOOLCYAN),
+            )),
+            TextLine::from(Span::styled(
+                "Plan a change before editing",
+                Style::default().fg(TOOLCYAN),
+            )),
+            TextLine::from(Span::styled(
+                "Ctrl+K for all actions",
+                Style::default().fg(DIM),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), empty[1]);
+        app.transcript_geom.set(None);
+        return;
+    }
     let max_scroll = total.saturating_sub(body_h);
     let scroll = if app.transcript_follow {
         max_scroll
@@ -4531,21 +4752,15 @@ pub fn input_cursor_up(input: &str, cursor: usize) -> Option<usize> {
 }
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
-    let (border_col, title_text) = if app.busy {
-        (ACCENT, " ▸ working… ")
+    let (tone, title_text) = if app.busy {
+        (surface::SurfaceTone::Accent, "▸ working…")
     } else if app.prompt.is_some() {
-        (WARNYEL, " ◉ respond ")
+        (surface::SurfaceTone::Warning, "◉ respond")
     } else {
-        (ORANGE, " ✦ message ")
+        (surface::SurfaceTone::Brand, "✦ message")
     };
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_col))
-        .padding(Padding::horizontal(1))
-        .title(Span::styled(
-            title_text,
-            Style::default().fg(border_col).bold(),
-        ));
+    let block =
+        surface::panel(surface::title(title_text, tone), tone).padding(Padding::horizontal(1));
 
     // Build one ratatui Line per explicit input line so pasted newlines render as separate rows;
     // long lines are then soft-wrapped by `Wrap`. Slash-command highlighting + block cursor apply
@@ -4820,40 +5035,37 @@ fn context_gauge_spans(used: u64, limit: Option<u32>) -> Vec<Span<'static>> {
     ]
 }
 
-/// Render the `/usage` overlay as a centered popup over the terminal.
+/// Render `/usage` as a centered, summary-first inspector. Spend and token details stay in one
+/// focused view that leaves the active conversation stable in the background.
 pub fn render_usage_overlay(f: &mut Frame, app: &App) {
     if !app.usage_overlay.open {
         return;
     }
     let area = f.area();
-    let target_w = (area.width as f32 * 0.44).ceil() as u16;
-    let frac = ((app.usage_overlay.anim_tick as f32) / 8.0).min(1.0);
-    let w = ((target_w as f32 * frac).ceil() as u16).max(2);
-    let drawer = Rect {
-        x: area.x + area.width.saturating_sub(w),
-        y: area.y,
-        width: w,
-        height: area.height,
-    };
-    f.render_widget(ratatui::widgets::Clear, drawer);
+    // Five summary rows, one table header, and every model row. The inspector grows only as far
+    // as its content needs, preventing a small spend report from becoming a tall empty panel.
+    let content_rows = 6u16.saturating_add(app.usage_overlay.by_model.len() as u16);
+    let inspector = surface::inspector_area(area, content_rows);
 
     let spinner = SPINNER[(app.usage_overlay.anim_tick as usize) % SPINNER.len()];
     let title = if app.usage_overlay.loading {
-        format!(" {spinner} usage  loading… ")
+        format!("{spinner} Usage · loading")
     } else {
-        " ◈ usage ".to_string()
+        "Usage".to_string()
     };
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(title, Style::default().fg(ACCENT).bold()))
-        .border_style(Style::default().fg(ACCENT));
-    let inner = block.inner(drawer);
-    f.render_widget(block, drawer);
+    let inner = surface::render_panel(
+        f,
+        inspector,
+        surface::title(title, surface::SurfaceTone::Accent),
+        Some(surface::hint("Esc close")),
+        surface::SurfaceTone::Accent,
+    );
 
-    if w < 20 {
+    if inner.width < 20 || inner.height < 4 {
         return;
     }
-    let chunks = Layout::vertical([Constraint::Length(7), Constraint::Min(0)]).split(inner);
+    let summary_h = inner.height.min(5);
+    let chunks = Layout::vertical([Constraint::Length(summary_h), Constraint::Min(0)]).split(inner);
 
     let o = &app.usage_overlay;
 
@@ -4952,8 +5164,6 @@ pub fn render_usage_overlay(f: &mut Frame, app: &App) {
         )),
         ratatui::text::Line::from(month_str),
         ratatui::text::Line::from(session_str),
-        ratatui::text::Line::from(""),
-        ratatui::text::Line::from(Span::styled("  Esc to close", Style::default().fg(DIM))),
     ]);
     f.render_widget(Paragraph::new(summary_text), chunks[0]);
 
@@ -5063,7 +5273,8 @@ fn mesh_truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// The animated `/mesh` routing inspector overlay.
+/// Render `/mesh` as a centered routing inspector. The decision and fallback path lead; the full
+/// ranked candidate list remains below for users who need to inspect the routing mechanics.
 pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     if !app.mesh_overlay.open {
         return;
@@ -5073,16 +5284,18 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
 
     let o = &app.mesh_overlay;
     let area = f.area();
-    let target_w = (area.width as f32 * 0.48).ceil() as u16;
-    let frac = ((o.anim_tick as f32) / 8.0).min(1.0);
-    let w = ((target_w as f32 * frac).ceil() as u16).max(2);
-    let drawer = Rect {
-        x: area.x + area.width.saturating_sub(w),
-        y: area.y,
-        width: w,
-        height: area.height,
-    };
-    f.render_widget(ratatui::widgets::Clear, drawer);
+    // Keep the first routing decision and a useful candidate window visible. Larger candidate
+    // sets retain the existing cursor-following scroll behavior instead of stretching the dialog.
+    let decision_rows = 1u16
+        .saturating_add(u16::from(!o.classified.is_empty() || !o.routed.is_empty()))
+        .saturating_add(u16::from(!o.pick.is_empty()))
+        .saturating_add(u16::from(!o.classifier.is_empty()))
+        .saturating_add(u16::from(!o.fallbacks.is_empty()));
+    let quota_rows = o.quota.len() as u16 + u16::from(!o.conserve_line.is_empty());
+    let candidate_rows =
+        (o.candidates.len() as u16).clamp(1, 8) + 2 + u16::from(!o.rationale.is_empty());
+    let content_rows = decision_rows + quota_rows + candidate_rows + 2;
+    let inspector = surface::inspector_area(area, content_rows);
 
     let settled = o.anim_tick >= o.settle_tick();
     let glyph = if settled {
@@ -5090,15 +5303,16 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     } else {
         SPINNER[(o.anim_tick as usize) % SPINNER.len()]
     };
-    let title = format!(" {glyph} mesh inspector ");
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(title, Style::default().fg(ACCENT).bold()))
-        .border_style(Style::default().fg(ACCENT));
-    let inner = block.inner(drawer);
-    f.render_widget(block, drawer);
+    let title = format!("{glyph} Model routing");
+    let inner = surface::render_panel(
+        f,
+        inspector,
+        surface::title(title, surface::SurfaceTone::Tool),
+        Some(surface::hint("↑/↓ browse candidates · Esc close")),
+        surface::SurfaceTone::Tool,
+    );
 
-    if w < 20 {
+    if inner.width < 20 || inner.height < 4 {
         return;
     }
     // Show loading spinner while bridge stats + routing explanation are fetched in background.
@@ -5118,7 +5332,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     let mut top: Vec<Line> = Vec::new();
     if o.prompt.is_empty() {
         top.push(Line::from(Span::styled(
-            "overview · complex-tier ranking — type `/mesh <task>` to trace a specific prompt",
+            "Routing overview — run `/mesh <task>` to trace a specific request.",
             Style::default().fg(DIM),
         )));
     } else {
@@ -5129,18 +5343,38 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
                 inner.width.saturating_sub(8) as usize,
             )),
         ]));
+    }
+    if !o.classified.is_empty() || !o.routed.is_empty() {
         let tier = if !o.routed.is_empty() && o.routed != o.classified {
-            format!("tier  {} → {}   ({})", o.classified, o.routed, o.reasons)
+            format!("{} → {}   ({})", o.classified, o.routed, o.reasons)
         } else {
-            format!("tier  {}   ({})", o.classified, o.reasons)
+            format!("{}   ({})", o.classified, o.reasons)
         };
-        top.push(Line::from(Span::styled(tier, Style::default().fg(ACCENT))));
-        if !o.classifier.is_empty() {
-            top.push(Line::from(vec![
-                Span::styled("cls   ", Style::default().fg(DIM)),
-                Span::styled(o.classifier.clone(), Style::default().fg(DIM)),
-            ]));
-        }
+        top.push(Line::from(vec![
+            Span::styled("decision  ", Style::default().fg(DIM)),
+            Span::styled(tier, Style::default().fg(ACCENT).bold()),
+        ]));
+    }
+    if !o.pick.is_empty() {
+        top.push(Line::from(vec![
+            Span::styled("selected  ", Style::default().fg(DIM)),
+            Span::styled(o.pick.clone(), Style::default().fg(OKGREEN).bold()),
+        ]));
+    }
+    if !o.classifier.is_empty() {
+        top.push(Line::from(vec![
+            Span::styled("classifier  ", Style::default().fg(DIM)),
+            Span::styled(o.classifier.clone(), Style::default().fg(DIM)),
+        ]));
+    }
+    if !o.fallbacks.is_empty() {
+        top.push(Line::from(Span::styled(
+            mesh_truncate(
+                &format!("fallbacks  {}", o.fallbacks.join(" → ")),
+                inner.width as usize,
+            ),
+            Style::default().fg(DIM),
+        )));
     }
     top.push(Line::from(""));
     for q in &o.quota {
@@ -5171,7 +5405,7 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     }
     top.push(Line::from(""));
 
-    let top_h = (top.len() as u16).min(inner.height.saturating_sub(1));
+    let top_h = (top.len() as u16).min(inner.height.saturating_sub(3));
     let chunks = Layout::vertical([Constraint::Length(top_h), Constraint::Min(0)]).split(inner);
     f.render_widget(Paragraph::new(Text::from(top)), chunks[0]);
 
@@ -5244,10 +5478,6 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
             Style::default().fg(DIM),
         )));
     }
-    rows.push(Line::from(Span::styled(
-        "↑/↓ scroll · Esc to close",
-        Style::default().fg(DIM),
-    )));
     // Auto-scroll to keep the cursor row on-screen: stay at the top until the cursor scrolls past
     // the last visible row, then follow it exactly to the bottom edge. Purely a function of
     // `cursor_line` + the viewport height — no state to persist across frames.
@@ -5265,9 +5495,8 @@ pub fn render_mesh_overlay(f: &mut Frame, app: &App) {
     );
 }
 
-/// The `/voice` recording overlay: a centered card (not a side drawer, unlike usage/mesh — this
-/// one is a focused single-purpose modal) with a pulsing REC indicator, live waveform, and (on
-/// first use) a whisper-model download progress bar. See voice.md.
+/// The `/voice` recording overlay: a focused single-purpose card with a pulsing REC indicator,
+/// live waveform, and (on first use) a whisper-model download progress bar. See voice.md.
 pub fn render_voice_overlay(f: &mut Frame, app: &App) {
     use ratatui::text::Line;
 
@@ -5278,28 +5507,19 @@ pub fn render_voice_overlay(f: &mut Frame, app: &App) {
     if area.width < 4 || h == 0 {
         return;
     }
-    let x = area.x + (area.width.saturating_sub(w)) / 2;
-    let y = area.y + (area.height.saturating_sub(h)) / 2;
-    let card = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-    f.render_widget(ratatui::widgets::Clear, card);
+    let card = surface::modal_area(area, w, h);
 
-    let (title, title_color) = match &v.phase {
-        VoicePhase::Downloading { .. } => (" ⌬ voice — fetching model ".to_string(), ACCENT),
-        VoicePhase::Recording { .. } => (" ● voice ".to_string(), ERRRED),
-        VoicePhase::Transcribing => (" ⌬ voice — transcribing ".to_string(), ACCENT),
-        VoicePhase::Error(_) => (" ⚠ voice ".to_string(), ERRRED),
+    let title = match &v.phase {
+        VoicePhase::Downloading { .. } => "⌬ voice — fetching model".to_string(),
+        VoicePhase::Recording { .. } => "● voice".to_string(),
+        VoicePhase::Transcribing => "⌬ voice — transcribing".to_string(),
+        VoicePhase::Error(_) => "⚠ voice".to_string(),
     };
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(title, Style::default().fg(title_color).bold()))
-        .border_style(Style::default().fg(title_color));
-    let inner = block.inner(card);
-    f.render_widget(block, card);
+    let tone = match &v.phase {
+        VoicePhase::Recording { .. } | VoicePhase::Error(_) => surface::SurfaceTone::Danger,
+        VoicePhase::Downloading { .. } | VoicePhase::Transcribing => surface::SurfaceTone::Accent,
+    };
+    let inner = surface::render_panel(f, card, surface::title(title, tone), None, tone);
     if inner.height == 0 || inner.width == 0 {
         return;
     }
@@ -5693,7 +5913,7 @@ fn slider_label_style(idx: usize, tick: usize) -> Style {
 }
 
 /// Draw the effort slider popup: 3 rows anchored at the bottom of `area`.
-/// Uses ratatui Block for the border — alignment is exact regardless of width.
+/// Uses the shared surface frame so the control aligns with every other Forge overlay.
 fn render_effort_slider(frame: &mut Frame, area: Rect, app: &App) {
     if area.height < EFFORT_SLIDER_H || area.width < 24 {
         return;
@@ -5719,17 +5939,12 @@ fn render_effort_slider(frame: &mut Frame, area: Rect, app: &App) {
         " ⚡ effort ".to_string()
     };
 
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_col))
-        .title(Span::styled(
-            title_text,
-            Style::default().fg(border_col).bold(),
-        ))
-        .title_bottom(Span::styled(
-            " ←/→ adjust  Esc close ",
-            Style::default().fg(DIM),
-        ));
+    let block = surface::panel(
+        Span::styled(title_text, Style::default().fg(border_col).bold()),
+        surface::SurfaceTone::Brand,
+    )
+    .border_style(Style::default().fg(border_col))
+    .title_bottom(surface::hint("←/→ adjust  Esc close"));
 
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
@@ -6036,7 +6251,9 @@ fn render_statusline_widget<'a>(
 /// actionable keybind for the current mode is what the user sees. Returns a `&'static str` so
 /// the render path never allocates per frame.
 fn statusline_hint(app: &App) -> &'static str {
-    if app.palette.open {
+    if app.command_center.open {
+        "↑↓ select · ⏎ open · esc close"
+    } else if app.palette.open {
         "↑↓ move · ⏎ run · esc close"
     } else if app.picker.open {
         "↑↓ move · ⏎ select · esc close"
@@ -6047,7 +6264,7 @@ fn statusline_hint(app: &App) -> &'static str {
     } else if app.done {
         "done · esc quit"
     } else if app.input.is_empty() {
-        "/ cmds · ? help · esc quit"
+        "Ctrl+K actions · / · ? keys"
     } else {
         "⏎ send · ⇧⇥ temper"
     }
@@ -6149,7 +6366,7 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         );
     } else if w >= 40 {
         // Narrow: a short hint so the longer idle hint never overruns the version string.
-        let short_hint = "/ · ? help";
+        let short_hint = "/ · ? keys";
         let right_text = format!("{version}  {short_hint}");
         let right_len = right_text.chars().count() as u16;
         let cols =
@@ -6836,6 +7053,7 @@ mod tests {
             model: Some("groq::llama".into()),
             phase: None,
         });
+        app.activity_focused = true;
 
         // Both children appear in the unified activity list while running.
         let live = screen(&app);
@@ -7440,10 +7658,7 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect();
         assert!(text.contains('█'), "ASCII wordmark in banner");
-        assert!(
-            text.contains("model-mesh coding agent"),
-            "tagline in banner"
-        );
+        assert!(text.contains("Your coding partner"), "tagline in banner");
     }
 
     #[test]
@@ -7576,8 +7791,11 @@ mod tests {
     fn statusline_hint_idle_empty_shows_cmds_and_help() {
         let app = App::default();
         let hint = statusline_hint(&app);
-        assert!(hint.contains("? help"), "idle-empty hint has help: {hint}");
-        assert!(hint.contains("/ cmds"), "idle-empty hint has cmds: {hint}");
+        assert!(hint.contains("? keys"), "idle-empty hint has keys: {hint}");
+        assert!(
+            hint.contains("Ctrl+K actions"),
+            "idle-empty hint has actions: {hint}"
+        );
     }
 
     #[test]
@@ -7760,6 +7978,29 @@ mod tests {
         assert!(text.contains("resume a session"), "heading shown: {text}");
         assert!(text.contains("fix the auth bug"), "row subtitle shown");
         assert!(text.contains('▸'), "selected row marked");
+    }
+
+    #[test]
+    fn command_center_and_empty_chat_are_discoverable() {
+        let mut app = App {
+            fullscreen: true,
+            ..Default::default()
+        };
+        let idle = screen_wh(&app, 100, 30);
+        assert!(
+            idle.contains("Explain this codebase"),
+            "starter shown: {idle}"
+        );
+        assert!(
+            idle.contains("Ctrl+K for all actions"),
+            "command hint shown: {idle}"
+        );
+
+        app.command_center.open();
+        let center = screen_wh(&app, 100, 30);
+        assert!(center.contains("Command center"), "title shown: {center}");
+        assert!(center.contains("Start work"), "categories shown: {center}");
+        assert!(center.contains("/plan"), "commands shown: {center}");
     }
 
     #[test]
@@ -8151,6 +8392,11 @@ mod tests {
             todo("write tests", TodoStatus::InProgress),
             todo("ship it", TodoStatus::Pending),
         ]));
+        assert!(
+            screen(&app).contains("Work summary"),
+            "basic chat summarizes work before it is expanded"
+        );
+        app.activity_focused = true;
         let s = screen(&app);
         assert!(
             s.contains("3 tasks (1 done, 1 in progress, 1 open)"),
@@ -8270,6 +8516,7 @@ mod tests {
         use forge_types::TodoStatus;
         let mut app = App::default();
         app.apply(PresenterEvent::Tasks(vec![todo("a", TodoStatus::Pending)]));
+        app.activity_focused = true;
         // The task panel has its OWN region now, so a live reply does NOT mask it — both show.
         app.apply(PresenterEvent::AssistantDelta("streaming now".into()));
         let s = screen(&app);
@@ -8291,6 +8538,7 @@ mod tests {
             phase: None,
         });
         app.apply(PresenterEvent::AssistantDelta("thinking out loud".into()));
+        app.activity_focused = true;
         let s = screen(&app);
         assert!(s.contains("thinking out loud"), "stream shown: {s}");
         assert!(
@@ -8311,6 +8559,7 @@ mod tests {
             phase: None,
         });
         assert_eq!(app.running_subagents(), 1);
+        app.activity_focused = true;
         let s = screen(&app);
         assert!(s.contains("activity ("), "panel header while running: {s}");
         assert!(s.contains("reviewer"), "agent label shown: {s}");
@@ -8383,6 +8632,7 @@ mod tests {
             app.subagents.iter().any(|r| r.id == "phase1-a"),
             "phase 1's row specifically must still be present"
         );
+        app.activity_focused = true;
         let s = screen(&app);
         assert!(
             s.contains("researcher") && s.contains("implementer"),
@@ -8529,6 +8779,7 @@ mod tests {
             model: Some("anthropic::sonnet".into()),
             phase: Some("implement".into()),
         });
+        app.activity_focused = true;
         // The default test screen's activity panel is only a few rows tall — too short to fit 3
         // rows + 2 phase headers alongside the input box/statusline. Use a taller one.
         let s = screen_wh(&app, 100, 30);
@@ -8617,8 +8868,12 @@ mod tests {
             ..Default::default()
         };
         let s = screen_wh(&app, 100, 30);
-        assert!(s.contains("mesh inspector"), "title rendered");
+        assert!(s.contains("Model routing"), "title rendered");
         assert!(s.contains("groq::llama-3.3-70b-versatile"), "pick shown");
+        assert!(
+            s.contains("fallbacks"),
+            "fallback chain remains discoverable"
+        );
         // A tiny terminal must not panic on the layout math.
         let _ = screen_wh(&app, 30, 6);
     }
