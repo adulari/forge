@@ -1904,7 +1904,16 @@ impl CliProvider {
                         self.kind.setup_hint(),
                     )
                 };
-                return Err(ProviderError::Request(msg));
+                // A bridge can fail before emitting any structured stdout event. Its stderr is
+                // still authoritative: in particular, an expired CLI login must become `Auth`
+                // so the core benches the whole provider rather than retrying sibling aliases.
+                // Do not classify the empty-stderr case through `msg`: it deliberately contains
+                // an "is it authenticated?" setup hint, which is advice rather than evidence.
+                return Err(if tail.is_empty() {
+                    ProviderError::Request(msg)
+                } else {
+                    classify_in_band_error(&self.binary, &msg)
+                });
             }
         }
 
@@ -4643,6 +4652,31 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nonzero_exit_with_agy_auth_stderr_is_auth_error() {
+        let fake = make_fake_cli_exit_with_stderr(
+            "",
+            "Error: authentication required. Run 'agy' to log in, then retry.\nError: authentication failed or timed out",
+            1,
+        );
+        let provider = CliProvider::new(CliKind::Antigravity).with_binary(&fake);
+        let mut on_event = |_: StreamEvent| {};
+        let err = provider
+            .complete(
+                "agy-cli::gemini-3.1-pro",
+                &[Message::user("hi")],
+                &[],
+                &mut on_event,
+            )
+            .await
+            .expect_err("authentication-required exit must error");
+        assert!(
+            matches!(err, ProviderError::Auth(ref msg) if msg.contains("authentication required")),
+            "CLI login failures must exclude the whole provider; got {err:?}"
+        );
+    }
+
     // Write an executable shell script that prints `stdout` then exits 0.
     #[cfg(unix)]
     fn make_fake_cli(stdout: &str) -> String {
@@ -4651,6 +4685,11 @@ mod tests {
 
     #[cfg(unix)]
     fn make_fake_cli_exit(stdout: &str, code: i32) -> String {
+        make_fake_cli_exit_with_stderr(stdout, "", code)
+    }
+
+    #[cfg(unix)]
+    fn make_fake_cli_exit_with_stderr(stdout: &str, stderr: &str, code: i32) -> String {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
         // Unique path per call without external deps.
@@ -4661,6 +4700,9 @@ mod tests {
         // Use a heredoc-free script: printf the payload (escaped) then exit.
         writeln!(f, "#!/bin/sh").unwrap();
         write!(f, "cat <<'FORGE_EOF'\n{stdout}\nFORGE_EOF\n").unwrap();
+        if !stderr.is_empty() {
+            write!(f, "cat >&2 <<'FORGE_ERR'\n{stderr}\nFORGE_ERR\n").unwrap();
+        }
         writeln!(f, "exit {code}").unwrap();
         f.sync_all().unwrap();
         drop(f);

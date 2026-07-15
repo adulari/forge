@@ -11,7 +11,7 @@
 use forge_config::provider_oauth::{
     self, CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_KEYRING_PROVIDER, CODEX_OAUTH_TOKEN_ENDPOINT,
 };
-use forge_types::{Message, Usage};
+use forge_types::{Message, QuotaHint, Usage};
 
 use crate::codex_websocket;
 use crate::oauth_responses::{
@@ -58,14 +58,21 @@ fn responses_url() -> String {
 /// Parse account-wide ChatGPT quota from the `x-codex-*` response headers the backend sends on
 /// EVERY `POST {CODEX_API_BASE}/responses` (verified live 2026-07-10):
 /// `x-codex-{primary,secondary}-used-percent`, `-window-minutes` (300→"five_hour",
-/// 10080→"weekly"), `-reset-at` (unix seconds), plus `x-codex-plan-type` (ignored here — plan
-/// detection is the separate, already-shipped [`detected_plan`]). Mirrors
+/// 10080→"weekly"), `-reset-at` (unix seconds), plus `x-codex-plan-type`. A successful backend
+/// response is fresher than the OAuth JWT claim, so its plan is captured as a short-lived shared
+/// account observation. Mirrors
 /// [`codex_websocket::parse_rate_limits_frame`]'s in-band `codex.rate_limits` mapping exactly:
 /// same window labels, same status thresholds, skip a window whose reset has already passed, skip
 /// a window missing `used-percent` (no hint over a wrong hint).
 pub(crate) fn parse_codex_quota_headers(
     headers: &reqwest::header::HeaderMap,
 ) -> Vec<forge_types::QuotaHint> {
+    if let Some(plan) = headers
+        .get("x-codex-plan-type")
+        .and_then(|value| value.to_str().ok())
+    {
+        crate::record_live_codex_plan(plan);
+    }
     let now_secs = now_unix();
     let mut hints = Vec::new();
     for (used_key, mins_key, reset_key, fallback_label) in [
@@ -625,6 +632,47 @@ pub async fn probe_entitlement(
         429 => crate::EntitlementStatus::RateLimited,
         other => crate::EntitlementStatus::Other(other, error_message(&text)),
     })
+}
+
+/// Read the active ChatGPT subscription's current Codex quota with the smallest supported
+/// request. The backend exposes quota only on a Responses call: it has no quota-only endpoint.
+///
+/// The probe deliberately uses the cheapest Codex model, no tools, no storage, no streaming, and
+/// a one-character response request. Callers must gate it on a short freshness interval; the
+/// response headers are account-wide and apply equally to `codex-oauth` and `codex-cli`.
+pub async fn probe_quota() -> Result<Vec<QuotaHint>, ProviderError> {
+    let provider = CodexOauthProvider::new();
+    let pool = provider.account_pool();
+    let (_account_id, token, chatgpt_account_id) = provider.pick_access_token(&pool).await?;
+    let body = serde_json::json!({
+        "model": "gpt-5.4-mini",
+        "input": [{"role": "user", "content": "Reply with a single period."}],
+        "stream": false,
+        "store": false,
+    });
+    let resp = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        provider
+            .http
+            .post(responses_url())
+            .bearer_auth(token)
+            .header("ChatGPT-Account-Id", chatgpt_account_id)
+            .json(&body)
+            .send(),
+    )
+    .await
+    .map_err(|_| ProviderError::Unavailable("Codex quota probe timed out connecting".into()))?
+    .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(classify_codex_status(status.as_u16(), &text, None));
+    }
+    let quotas = parse_codex_quota_headers(resp.headers());
+    // Consume the tiny body before releasing the connection. Quota comes exclusively from the
+    // headers, so malformed body content cannot invalidate a real quota observation.
+    let _ = resp.bytes().await;
+    Ok(quotas)
 }
 
 /// Codex-only request-body shape: the ChatGPT backend rejects requests unless store=false

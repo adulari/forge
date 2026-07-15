@@ -13,16 +13,12 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 
-const ACCENT: Color = Color::Rgb(82, 162, 255);
-const DIM: Color = Color::Rgb(82, 87, 108);
-const OKGREEN: Color = Color::Rgb(92, 208, 122);
-const ERRRED: Color = Color::Rgb(243, 92, 92);
-const FG: Color = Color::Rgb(208, 213, 224);
+use crate::surface::{self, ACCENT, DIM, ERRRED, OKGREEN, TEXT as FG};
 
 /// One selectable row: a primary `label` and a dim `hint` (e.g. transport + source).
 #[derive(Debug, Clone)]
@@ -119,23 +115,17 @@ fn draw_single(
     cursor: usize,
     tick: u64,
 ) {
+    let inner = surface::render_panel(
+        f,
+        f.area(),
+        surface::title(title, surface::SurfaceTone::Accent),
+        None,
+        surface::SurfaceTone::Accent,
+    );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(2),
-        ])
-        .split(f.area());
-    let pulse = if (tick / 6) % 2 == 0 { ACCENT } else { DIM };
-    let header = Line::from(vec![
-        Span::styled("◈ ", Style::default().fg(pulse)),
-        Span::styled(
-            title.to_string(),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    f.render_widget(Paragraph::new(header), chunks[0]);
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
     let mut lines: Vec<Line> = Vec::new();
     for (i, item) in items.iter().enumerate() {
         let on = i == cursor;
@@ -165,7 +155,7 @@ fn draw_single(
                 .borders(Borders::LEFT)
                 .border_style(Style::default().fg(DIM)),
         ),
-        chunks[1],
+        chunks[0],
     );
     let footer = Line::from(vec![
         Span::styled("↑/↓", Style::default().fg(ACCENT)),
@@ -175,7 +165,7 @@ fn draw_single(
         Span::styled("esc", Style::default().fg(ERRRED)),
         Span::styled(" cancel", Style::default().fg(DIM)),
     ]);
-    f.render_widget(Paragraph::new(footer), chunks[2]);
+    f.render_widget(Paragraph::new(footer), chunks[1]);
 }
 
 struct State {
@@ -233,6 +223,13 @@ fn run_loop(
 }
 
 fn draw(f: &mut ratatui::Frame, title: &str, items: &[SelectItem], state: &State) {
+    let inner = surface::render_panel(
+        f,
+        f.area(),
+        surface::title(title, surface::SurfaceTone::Accent),
+        None,
+        surface::SurfaceTone::Accent,
+    );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -240,26 +237,14 @@ fn draw(f: &mut ratatui::Frame, title: &str, items: &[SelectItem], state: &State
             Constraint::Min(1),
             Constraint::Length(2),
         ])
-        .split(f.area());
+        .split(inner);
 
     // Header — the ◈ pulses between accent and dim so the screen reads as "live".
-    let pulse = if (state.tick / 6) % 2 == 0 {
-        ACCENT
-    } else {
-        DIM
-    };
     let n = state.checked.iter().filter(|&&c| c).count();
-    let header = Line::from(vec![
-        Span::styled("◈ ", Style::default().fg(pulse)),
-        Span::styled(
-            title.to_string(),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("   {n}/{} selected", items.len()),
-            Style::default().fg(DIM),
-        ),
-    ]);
+    let header = Line::from(Span::styled(
+        format!("{n}/{} selected", items.len()),
+        Style::default().fg(DIM),
+    ));
     f.render_widget(Paragraph::new(header), chunks[0]);
 
     // The list.

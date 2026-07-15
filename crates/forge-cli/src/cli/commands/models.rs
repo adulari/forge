@@ -21,6 +21,65 @@ pub(crate) fn build_dispatch_provider(config: &forge_config::Config) -> Dispatch
 /// Maximum age of a cached catalog before it is considered stale and re-discovered.
 const CATALOG_CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 
+/// Codex quota changes whenever the shared ChatGPT account is used outside Forge. A cached
+/// reading older than this must never keep the mesh away from Codex; the live OAuth probe below
+/// refreshes it before routing whenever possible.
+pub(crate) const CODEX_QUOTA_MAX_AGE_SECS: i64 = forge_types::CODEX_QUOTA_FRESHNESS_SECS;
+
+fn codex_quota_is_stale(store: &Store) -> bool {
+    !["codex-oauth", "codex-cli"]
+        .into_iter()
+        .filter_map(|provider| store.subscription_age_secs(provider))
+        .any(|age| age <= CODEX_QUOTA_MAX_AGE_SECS)
+}
+
+fn seed_codex_rollout_quota(store: &Store, stats: &crate::bridge_stats::BridgeStats) {
+    seed_store_quota(
+        store,
+        "codex-cli",
+        "five_hour",
+        stats.codex_5h_pct,
+        stats.codex_5h_observed_at,
+    );
+    seed_store_quota(
+        store,
+        "codex-cli",
+        "weekly",
+        stats.codex_weekly_pct,
+        stats.codex_weekly_observed_at,
+    );
+    if let Some(plan) = stats.codex_plan.as_deref() {
+        let observed_at = stats
+            .codex_plan_observed_at
+            .unwrap_or_else(|| chrono::Utc::now().timestamp());
+        let _ = store.record_subscription_plan_at("codex-cli", plan, observed_at);
+    }
+}
+
+/// Refresh the shared Codex quota before a routing decision. A recent Codex CLI rollout remains
+/// a no-cost source; once it is stale, OAuth is preferred and queried with one constrained
+/// `gpt-5.4-mini` request. Failure is deliberately non-fatal: the store filters expired Codex
+/// data, letting normal provider failover handle an unavailable account rather than routing on a
+/// known-stale pressure reading.
+pub(crate) async fn refresh_codex_quota(store: &Store) {
+    if !codex_quota_is_stale(store) {
+        return;
+    }
+    let stats = tokio::task::spawn_blocking(crate::bridge_stats::fetch)
+        .await
+        .unwrap_or_default();
+    seed_codex_rollout_quota(store, &stats);
+    if !codex_quota_is_stale(store) {
+        return;
+    }
+    for hint in crate::bridge_stats::probe_codex_limits().await {
+        let _ = store.record_quota(&hint);
+    }
+    if let Some(plan) = forge_provider::fresh_live_codex_plan() {
+        let _ = store.record_subscription_plan("codex-oauth", &plan);
+    }
+}
+
 /// Path to the on-disk catalog cache (`~/.local/share/forge/catalog.json`).
 fn catalog_cache_path() -> Option<std::path::PathBuf> {
     forge_config::data_dir().map(|d| d.join("catalog.json"))
@@ -91,10 +150,9 @@ pub(crate) fn build_provider_and_router(
         config.mesh.classifier,
         ClassifierKind::Llm | ClassifierKind::Hybrid
     ) {
-        // LLM / Hybrid classifier: a cheap model labels the tier; the heuristic router
-        // does cost-aware selection; any failure falls back to the heuristic.
-        // Hybrid additionally skips the LLM call when the heuristic is already confident
-        // (score ≤−4 or ≥8), keeping zero added latency for obvious cases.
+        // A cheap model labels every unhinted tier; the deterministic router only performs
+        // pin/budget/cost-aware model selection. Heuristic tier classification is reserved for
+        // the final availability fallback after every LLM candidate fails.
         let classify_provider: Arc<dyn Provider> = if mock {
             Arc::new(MockProvider)
         } else {
@@ -105,7 +163,6 @@ pub(crate) fn build_provider_and_router(
                     .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
             )
         };
-        let hybrid = config.mesh.classifier == ClassifierKind::Hybrid;
         let mut classifier_candidates = Vec::new();
         if let Some(model) = config.mesh.classifier_model.clone() {
             classifier_candidates.push(model);
@@ -115,9 +172,11 @@ pub(crate) fn build_provider_and_router(
             classifier_candidates.push(model);
         }
         classifier_candidates.dedup();
-        Arc::new(
-            LlmRouter::new(classify_provider, classifier_candidates, heuristic).with_hybrid(hybrid),
-        )
+        Arc::new(LlmRouter::new(
+            classify_provider,
+            classifier_candidates,
+            heuristic,
+        ))
     } else {
         Arc::new(heuristic)
     };
@@ -299,6 +358,14 @@ pub(crate) async fn discover_catalog(config: &forge_config::Config) -> forge_mes
     .await;
     for list in bridge_lists {
         models.extend(list);
+    }
+    // Keep the configured tier candidates as a cold-start safety net. A provider's model-list
+    // endpoint can be unavailable while its completion endpoint still works (the doctor output
+    // calls this out); without these seeds, a transient listing failure silently removed that
+    // provider from an otherwise healthy auto-discovery mesh. Key/health/credit checks still gate
+    // actual routing, and successfully discovered models retain their normal ranked preference.
+    for tier in [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex] {
+        models.extend(config.candidates_for(tier));
     }
     // Dedup while preserving discovery order (a provider could list the same id twice).
     let mut seen = std::collections::HashSet::new();
@@ -534,25 +601,9 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
         return Ok(());
     }
     let store = open_store()?;
-    // Codex from its rollout files; claude's CURRENT 5h+weekly utilisation from a one-shot
-    // `claude --debug` probe (gated: skip if the store was updated < 5 min ago).
-    let bstats = tokio::task::spawn_blocking(bridge_stats::fetch)
-        .await
-        .unwrap_or_default();
-    seed_store_quota(
-        &store,
-        "codex-cli",
-        "five_hour",
-        bstats.codex_5h_pct,
-        bstats.codex_5h_observed_at,
-    );
-    seed_store_quota(
-        &store,
-        "codex-cli",
-        "weekly",
-        bstats.codex_weekly_pct,
-        bstats.codex_weekly_observed_at,
-    );
+    // Codex prefers a fresh account-wide OAuth header reading; a fresh CLI rollout is the
+    // no-cost fallback. Expired readings are never allowed to bias this route.
+    refresh_codex_quota(&store).await;
     if store
         .subscription_age_secs("claude-cli")
         .is_none_or(|a| a > 300)
@@ -568,7 +619,9 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
     let quota = store
         .current_quota()
         .unwrap_or_default()
-        .with_plans(forge_core::resolved_subscription_plans(&config))
+        .with_plans(forge_core::resolved_subscription_plans_with_store(
+            &config, &store,
+        ))
         .with_conserve(config.mesh.subscription_conserve);
     let health = store.current_benched().unwrap_or_default();
     let budget = forge_mesh::BudgetState {
@@ -590,7 +643,60 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
     let project = std::env::current_dir()
         .map(|cwd| forge_core::project_context::compute(&cwd))
         .unwrap_or_default();
-    let e = router.explain(&prompt, budget, &health, &quota, None, &project);
+    let e = match config.mesh.classifier {
+        ClassifierKind::Heuristic => {
+            router.explain(&prompt, budget, &health, &quota, None, &project)
+        }
+        ClassifierKind::Llm | ClassifierKind::Hybrid => {
+            // `forge mesh <prompt>` must describe the same LLM classification that a real turn
+            // uses, rather than rendering a heuristic preview that can disagree with routing.
+            let mut candidates = Vec::new();
+            if let Some(model) = config.mesh.classifier_model.clone() {
+                candidates.push(model);
+            }
+            candidates.extend(router.classifier_candidates());
+            if let Some(model) = config.model_for(TaskTier::Trivial).map(String::from) {
+                candidates.push(model);
+            }
+            candidates.dedup();
+            let classifier: Arc<dyn Router> = Arc::new(LlmRouter::new(
+                Arc::new(
+                    DispatchProvider::new(false)
+                        .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
+                ),
+                candidates,
+                HeuristicRouter::new(config.clone()).with_catalog(cat.clone()),
+            ));
+            let decision = classifier
+                .route(&prompt, false, budget, &health, &quota, None, &project)
+                .await;
+            let fallback = decision.rationale.contains("llm classify unavailable");
+            // `decide` appends the model-selection reason after an em dash. Keep only the
+            // classifier portion here: `explain_classified` recomputes the same selection once,
+            // avoiding duplicate “auto-selected …” text in the inspector.
+            let classifier_reason = decision
+                .rationale
+                .split(" — ")
+                .next()
+                .unwrap_or(&decision.rationale)
+                .to_string();
+            let mut explained = router.explain_classified(
+                &prompt,
+                decision.tier,
+                vec![classifier_reason],
+                budget,
+                &health,
+                &quota,
+                None,
+            );
+            explained.classifier_label = if fallback {
+                "heuristic fallback (all LLM candidates unavailable)".to_string()
+            } else {
+                "llm".to_string()
+            };
+            explained
+        }
+    };
     if json {
         println!("{}", mesh_explanation_json(&e));
     } else {
@@ -892,9 +998,15 @@ pub(crate) async fn probe_models(
         schema: serde_json::json!({"type": "object", "properties": {}}),
     }];
     let mut sink = |_: forge_provider::StreamEvent| {};
+    let mut auth_failed_providers = std::collections::HashSet::new();
 
     println!("probing {} model(s)…", targets.len());
     for m in targets {
+        let provider_name = forge_config::provider_of(m);
+        if auth_failed_providers.contains(provider_name) {
+            println!("  ↷ {m} — provider auth already failed (skipped)");
+            continue;
+        }
         let res = tokio::time::timeout(
             Duration::from_secs(20),
             provider.complete(m, &ping, &probe_tool, &mut sink),
@@ -903,7 +1015,20 @@ pub(crate) async fn probe_models(
         match res {
             Ok(Ok(_)) => {
                 store.clear_model_health(m).ok();
+                store.clear_provider_health(provider_name).ok();
                 println!("  ✓ {m}");
+            }
+            // A bad credential invalidates every alias for this provider. Persist a provider-wide
+            // exclusion and stop probing its siblings; a later successful probe clears it.
+            Ok(Err(e)) if e.is_auth() => {
+                auth_failed_providers.insert(provider_name.to_string());
+                if let Err(err) = store.exclude_provider(provider_name, e.reason()) {
+                    eprintln!("  ⚠ {m}: provider exclusion not persisted: {err}");
+                }
+                println!(
+                    "  ⊘ {provider_name} — {} (all aliases excluded)",
+                    e.reason()
+                );
             }
             // A PERMANENT incapability (no tool support / unaffordable) → exclude for a long window
             // so discovery stops resurrecting it every run.

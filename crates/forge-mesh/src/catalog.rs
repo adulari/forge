@@ -262,7 +262,7 @@ fn code_prior(provider: &str, code_heavy: bool, tier: TaskTier) -> f64 {
 /// Documented in docs/features/mesh-routing.md; value asserted in sync by `doc_sync::mesh_routing_doc_matches_live_constants`.
 pub(crate) const BURN_K_TRIVIAL: f64 = 1.0;
 pub(crate) const BURN_K_STANDARD: f64 = 0.7;
-pub(crate) const BURN_K_COMPLEX: f64 = 0.15;
+pub(crate) const BURN_K_COMPLEX: f64 = 0.30;
 
 /// Documented in docs/features/mesh-routing.md.
 fn burn_k(tier: TaskTier) -> f64 {

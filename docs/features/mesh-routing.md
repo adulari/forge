@@ -67,7 +67,7 @@ Thresholds (`lib.rs:574-581`): **score ≤ 0 → Trivial, score ≥ 5 → Comple
 
 Hard override first: any `COMPLEX_HINTS` phrase (`lib.rs:185` — "think hard", "ultrathink",
 "step by step", "in depth", "comprehensive", "thorough", …) returns Complex immediately with
-`score = i32::MAX` ("certain", so hybrid mode never second-guesses it).
+`score = i32::MAX` (certain when the heuristic is used as the availability fallback).
 
 Otherwise, points accumulate:
 
@@ -93,23 +93,17 @@ Word-boundary matching: `contains_word_boundary` (`lib.rs:423`) stops "port " ma
 "report "; `contains_whole_word` (`lib.rs:448`) additionally checks the trailing boundary so
 "rename" doesn't fire inside "renames".
 
-### 2.2 Confidence for hybrid mode
-
-`classify_confident` (`crates/forge-mesh/src/lib.rs:737`) reports the tier plus whether the
-heuristic is confident: **confident iff `score == i32::MAX` (hard hint) or `score ≤ −4` or
-`score ≥ 8`.** The uncertain band (−3…7) is what makes `ClassifierKind::Hybrid` cheap: only
-near-boundary prompts pay for an LLM second opinion.
-
 ### 2.3 Classifier kinds
 
 `mesh.classifier` (`crates/forge-config/src/lib.rs:1698`) selects:
 
 - `heuristic` — explicit opt-in, `score_prompt` only, zero added cost/latency.
-- `llm` (default) — `LlmRouter` tries the explicit override first, then up to three current
-  trivial-tier catalog choices, finally the configured trivial model. Health is checked per turn;
+- `llm` (default) — `LlmRouter` tries the explicit override first, then up to three fast free
+  Standard-tier catalog choices, finally the configured trivial model. Health is checked per turn;
   benched models are skipped. Each candidate has a 5-second timeout and the total classification
-  budget is 15 seconds. The first parseable answer wins; failures fall back to the heuristic.
-- `hybrid` — explicit opt-in; heuristic first; the LLM is consulted only in the uncertain band of §2.2.
+  budget is 15 seconds. The first parseable answer wins. Only when every candidate fails, times
+  out, or returns an unparseable reply does the mesh fall back to the heuristic.
+- `hybrid` — legacy alias for `llm`; it no longer skips LLM classification on any normal turn.
 
 All classifiers feed the same `HeuristicRouter::decide` selection path.
 
@@ -313,8 +307,8 @@ a guessed weight.
 - `BURN_K_TRIVIAL` = 1.0 — cheap tiers avoid flagship burn hard; a trivial task never needs the
   expensive sibling's extra capability.
 - `BURN_K_STANDARD` = 0.7
-- `BURN_K_COMPLEX` = 0.15 — Complex still wants the flagship; the penalty only tips a
-  near-capability tie toward the cheaper sibling.
+- `BURN_K_COMPLEX` = 0.3 — Complex still allows a meaningful capability advantage to win, but
+  a near-capability tie now prefers the materially cheaper sibling.
 
 **Quota pressure** — `pressure_multiplier` (`catalog.rs:279`): a linear map of the live
 pace-projected consumed-window fraction (§5.4) to `(0.5 + 1.5 * fraction).clamp(0.5, 2.0)` —
@@ -825,10 +819,10 @@ quota:
 conservation: not fired (roll 0.62 ≥ P 0.42) → subscription kept
 
 candidates (top 8):
-  * #1  claude-cli::fable                  score   6.98  cap  6.49  subscription · frontier
-    #2  codex-cli::gpt-5.6-sol             score   6.82  cap  6.14  subscription · frontier
+  * #1  codex-cli::gpt-5.6-sol             score   6.70  cap  6.14  subscription · frontier
+    #2  claude-cli::fable                  score   6.68  cap  6.49  subscription · frontier
     ...
-pick: claude-cli::fable
+pick: codex-cli::gpt-5.6-sol
 ```
 
 Every number reproduces from this document:
@@ -842,18 +836,17 @@ Every number reproduces from this document:
   factor 1.0, fraction 0) — 0.30 → **30%**. The decision takes the max (0.42); the
   deterministic roll for this prompt is 0.62 ≥ 0.42, so conservation does not fire and no
   `CONSERVE_PENALTY` is applied.
-- **`claude-cli::fable`, score 6.98:** its AA intelligence index measured 59.9 at capture time,
+- **`claude-cli::fable`, score 6.68:** its AA intelligence index measured 59.9 at capture time,
   so q = 59.9 / 20.0 = 2.995; `speed_class(fable)` = 2 (quality-class fallback — fable is
   deliberately NOT in the GPT-5.6 speed substitution, §4.1). Capability (cap column) =
   2·2.995 + 0.25·2 = **6.49**. Plus `cost_pref(Complex, subscription)` = 0.8; `code_prior` 0
-  (not code-heavy); burn penalty = `BURN_K_COMPLEX` 0.15 · ln(10.0) · (0.5 + 1.5·0.26)
-  = 0.15 · 2.3026 · 0.89 = **0.307**. Score = 6.49 + 0.8 − 0.307 = **6.98**.
-- **`codex-cli::gpt-5.6-sol`, score 6.82:** index 58.9 → q = 2.945; `speed_class(sol)` = 1
-  (burn-derived, §4.1). cap = 2·2.945 + 0.25·1 = **6.14**. Plus 0.8; burn = 0.15 · ln(5.0) ·
-  pressure(0.0 → 0.5) = 0.15 · 1.6094 · 0.5 = **0.121**. Score = 6.14 + 0.8 − 0.121 = **6.82**.
-- Fable leads Sol on measured capability (one full bench band) despite carrying twice Sol's
-  burn weight *and* a 26%-consumed window — exactly the intended `BURN_K_COMPLEX` behaviour:
-  at Complex, burn tie-breaks, it doesn't dominate.
+  (not code-heavy); burn penalty = `BURN_K_COMPLEX` 0.30 · ln(10.0) · (0.5 + 1.5·0.26)
+  = 0.30 · 2.3026 · 0.89 = **0.614**. Score = 6.49 + 0.8 − 0.614 = **6.68**.
+- **`codex-cli::gpt-5.6-sol`, score 6.70:** index 58.9 → q = 2.945; `speed_class(sol)` = 1
+  (burn-derived, §4.1). cap = 2·2.945 + 0.25·1 = **6.14**. Plus 0.8; burn = 0.30 · ln(5.0) ·
+  pressure(0.0 → 0.5) = 0.30 · 1.6094 · 0.5 = **0.241**. Score = 6.14 + 0.8 − 0.241 = **6.70**.
+- Sol leads Fable here: Fable's 0.35 capability advantage is not enough to justify twice the
+  burn weight while Claude is 26% consumed. A materially larger benchmark lead still wins.
 
 ## 12. Configuration reference (routing-relevant `[mesh]` keys)
 

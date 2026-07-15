@@ -1,8 +1,9 @@
 /// Read live usage stats from local Codex and Claude session files.
 ///
 /// Codex: `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` — each turn emits
-/// an `event_msg / token_count` line with `rate_limits.primary` (5h window)
-/// and `rate_limits.secondary` (weekly) `used_percent` values.
+/// an `event_msg / token_count` line with rate-limit windows. The primary/secondary positions
+/// are not semantic: current Codex can emit only a weekly window as `primary`, so windows are
+/// identified by their `window_minutes` value (300 = 5h, 10080 = weekly).
 ///
 /// Claude: `~/.claude/projects/**/*.jsonl` — each assistant turn has
 /// `message.usage.{input,output,cache_read,cache_creation}_tokens`.
@@ -17,6 +18,10 @@ use serde_json::Value;
 pub struct BridgeStats {
     pub codex_5h_pct: Option<f64>,
     pub codex_weekly_pct: Option<f64>,
+    /// Exact `rate_limits.plan_type` from the same Codex rollout observation as the quota.
+    /// It is account-authoritative when fresh and supersedes a stale OAuth JWT claim.
+    pub codex_plan: Option<String>,
+    pub codex_plan_observed_at: Option<i64>,
     /// When `codex_5h_pct` was actually OBSERVED (epoch secs): the rollout line's own `timestamp`
     /// field, falling back to the file's mtime. Rollout files can be hours old, so seeding the
     /// store with `now()` would let this stale reading mask fresher `x-codex-*` header data in
@@ -26,6 +31,10 @@ pub struct BridgeStats {
     pub codex_weekly_observed_at: Option<i64>,
     pub claude_5h_pct: Option<f64>,
     pub claude_weekly_pct: Option<f64>,
+    /// Actual cache observation times. These must accompany cache-derived values into the shared
+    /// store so a 674-hour-old statusline file cannot overwrite a newer live-header probe.
+    pub claude_5h_observed_at: Option<i64>,
+    pub claude_weekly_observed_at: Option<i64>,
     pub claude_5h_in: u64,
     pub claude_5h_out: u64,
     pub claude_weekly_in: u64,
@@ -106,6 +115,19 @@ pub fn probe_claude_limits() -> Vec<(String, f64)> {
     res
 }
 
+/// Read the active Codex OAuth account's authoritative, account-wide quota headers. The Codex
+/// backend has no quota-only endpoint, so this is one tiny `gpt-5.4-mini` request with a
+/// one-character reply. Callers gate it on freshness; an unavailable OAuth session intentionally
+/// yields no observation so the CLI-bridge rollout fallback remains available.
+pub async fn probe_codex_limits() -> Vec<forge_types::QuotaHint> {
+    if !forge_provider::has_codex_oauth_session() {
+        return Vec::new();
+    }
+    forge_provider::probe_codex_quota()
+        .await
+        .unwrap_or_default()
+}
+
 /// Find the first numeric run (digits + `.`) appearing after `key` in `text`. Tolerant of the
 /// surrounding `": "..."` / log punctuation between the key and its value.
 fn first_float_after(text: &str, key: &str) -> Option<f64> {
@@ -148,25 +170,35 @@ fn fetch_codex(stats: &mut BridgeStats, home: &Path) {
             }
             let observed_at = codex_line_observed_at(&v, &path);
             let rl = &v["payload"]["rate_limits"];
-            let p_resets = rl["primary"]["resets_at"].as_i64().unwrap_or(0);
-            if p_resets > now {
-                // Window still open — use reported usage.
-                stats.codex_5h_pct = rl["primary"]["used_percent"].as_f64();
-                stats.codex_5h_observed_at = observed_at;
-            } else if p_resets > 0 && now - p_resets < 5 * 3600 {
-                // Window just reset (within the prior 5h period) — usage restarted at 0. The ONLY
-                // moment "0% used" is actually known true is the reset instant itself: the account
-                // may genuinely have burned usage into the new window since (e.g. codex-oauth
-                // turns whose x-codex headers recorded a real fraction). Stamp the inference at
-                // `resets_at`, so it beats pre-reset readings of the old window but loses to any
-                // real post-reset observation.
-                stats.codex_5h_pct = Some(0.0);
-                stats.codex_5h_observed_at = Some(p_resets);
+            if let Some(plan) = rl["plan_type"]
+                .as_str()
+                .filter(|plan| !plan.trim().is_empty())
+            {
+                stats.codex_plan = Some(plan.trim().to_string());
+                stats.codex_plan_observed_at = observed_at;
             }
-            let s_resets = rl["secondary"]["resets_at"].as_i64().unwrap_or(0);
-            if s_resets > now {
-                stats.codex_weekly_pct = rl["secondary"]["used_percent"].as_f64();
-                stats.codex_weekly_observed_at = observed_at;
+            for key in ["primary", "secondary"] {
+                let window = &rl[key];
+                let resets_at = window["resets_at"].as_i64().unwrap_or(0);
+                match window["window_minutes"].as_i64() {
+                    Some(300) if resets_at > now => {
+                        stats.codex_5h_pct = window["used_percent"].as_f64();
+                        stats.codex_5h_observed_at = observed_at;
+                    }
+                    Some(300) if resets_at > 0 && now - resets_at < 5 * 3600 => {
+                        // A recently reset 5h window was known empty only at the reset instant.
+                        // Stamp the inference there so a later real OAuth observation wins.
+                        stats.codex_5h_pct = Some(0.0);
+                        stats.codex_5h_observed_at = Some(resets_at);
+                    }
+                    Some(10080) if resets_at > now => {
+                        stats.codex_weekly_pct = window["used_percent"].as_f64();
+                        stats.codex_weekly_observed_at = observed_at;
+                    }
+                    // Do not infer a window from its primary/secondary position. In particular,
+                    // an absent 5h limit must remain absent rather than appear as 0% or 27%.
+                    _ => {}
+                }
             }
             // Stop as soon as we have at least weekly (most durable) data.
             if stats.codex_weekly_pct.is_some() {
@@ -231,13 +263,16 @@ fn fetch_claude_rate_limits(stats: &mut BridgeStats, home: &Path) {
     // 7-day window barely moves — keeping a 6–24h-old weekly reading is far better than showing
     // nothing (which makes the overlay fall back to raw tokens and the mesh see the plan as 0%).
     // The cache only refreshes while Claude Code renders its statusline, so it routinely lags.
-    let age = now_epoch() - v["ts"].as_i64().unwrap_or(0);
+    let observed_at = v["ts"].as_i64().filter(|&ts| ts > 0);
+    let age = now_epoch().saturating_sub(observed_at.unwrap_or(0));
     stats.claude_rl_age_secs = Some(age);
     if age <= 6 * 3600 {
         stats.claude_5h_pct = v["5h_pct"].as_f64();
+        stats.claude_5h_observed_at = observed_at;
     }
     if age <= 24 * 3600 {
         stats.claude_weekly_pct = v["7d_pct"].as_f64();
+        stats.claude_weekly_observed_at = observed_at;
     }
 }
 
@@ -394,6 +429,74 @@ mod tests {
             Some(reset_at),
             "the inference is knowledge as of the reset instant, not now"
         );
+    }
+
+    #[test]
+    fn fetch_codex_weekly_only_primary_does_not_fabricate_a_five_hour_window() {
+        let home = tempfile::tempdir().unwrap();
+        let now = now_epoch();
+        let line = serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "rate_limits": {
+                    "primary": {"used_percent": 27.0, "window_minutes": 10080, "resets_at": now + 86400},
+                    "secondary": null,
+                }
+            }
+        })
+        .to_string();
+        write_rollout(home.path(), &line);
+
+        let mut stats = BridgeStats::default();
+        fetch_codex(&mut stats, home.path());
+        assert_eq!(stats.codex_5h_pct, None);
+        assert_eq!(stats.codex_weekly_pct, Some(27.0));
+    }
+
+    #[test]
+    fn fetch_codex_rollout_plan_is_preserved_verbatim_with_its_observation_time() {
+        let home = tempfile::tempdir().unwrap();
+        let now = now_epoch();
+        let line = serde_json::json!({
+            "timestamp": chrono::DateTime::from_timestamp(now - 30, 0).unwrap().to_rfc3339(),
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "rate_limits": {
+                    "primary": {"used_percent": 27.0, "window_minutes": 10080, "resets_at": now + 86400},
+                    "secondary": null,
+                    "plan_type": "pro",
+                }
+            }
+        })
+        .to_string();
+        write_rollout(home.path(), &line);
+
+        let mut stats = BridgeStats::default();
+        fetch_codex(&mut stats, home.path());
+        assert_eq!(stats.codex_plan.as_deref(), Some("pro"));
+        assert_eq!(stats.codex_plan_observed_at, Some(now - 30));
+    }
+
+    #[test]
+    fn claude_cache_keeps_its_true_observation_time_for_store_staleness() {
+        let home = tempfile::tempdir().unwrap();
+        let now = now_epoch();
+        let dir = home.path().join(".claude");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".rate-limits-cache.json"),
+            serde_json::json!({"ts": now - 120, "5h_pct": 14.0, "7d_pct": 48.0}).to_string(),
+        )
+        .unwrap();
+
+        let mut stats = BridgeStats::default();
+        fetch_claude_rate_limits(&mut stats, home.path());
+        assert_eq!(stats.claude_5h_pct, Some(14.0));
+        assert_eq!(stats.claude_weekly_pct, Some(48.0));
+        assert_eq!(stats.claude_5h_observed_at, Some(now - 120));
+        assert_eq!(stats.claude_weekly_observed_at, Some(now - 120));
     }
 
     #[test]

@@ -6,20 +6,12 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line as TextLine, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::KeyKind;
+use crate::surface::{self, ACCENT, DIM, ERRRED, OKGREEN, USER, VERY_DIM, WARNYEL};
 use forge_types::truncate_ellipsis as truncate;
-
-use ratatui::style::Color;
-const ACCENT: Color = Color::Rgb(82, 162, 255);
-const DIM: Color = Color::Rgb(82, 87, 108);
-const USER: Color = Color::Rgb(122, 183, 255);
-const OKGREEN: Color = Color::Rgb(92, 208, 122);
-const ERRRED: Color = Color::Rgb(243, 92, 92);
-const WARNYEL: Color = Color::Rgb(238, 188, 82);
-const VERY_DIM: Color = Color::Rgb(54, 58, 74);
 
 /// The editing control a row uses.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -340,11 +332,17 @@ pub fn render_config_overlay(frame: &mut Frame, ed: &ConfigEditor) {
     if !ed.open {
         return;
     }
-    let area = frame.area();
-    if area.height < 6 || area.width < 24 {
+    let frame_area = frame.area();
+    if frame_area.height < 8 || frame_area.width < 24 {
         return;
     }
-    frame.render_widget(Clear, area);
+    let area = surface::render_panel(
+        frame,
+        frame_area,
+        surface::title("Config", surface::SurfaceTone::Accent),
+        Some(surface::hint("Esc close")),
+        surface::SurfaceTone::Accent,
+    );
     let w = area.width as usize;
     let h = area.height as usize;
     let matches = ed.matches();

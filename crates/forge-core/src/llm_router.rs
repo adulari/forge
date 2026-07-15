@@ -1,7 +1,7 @@
-//! Optional cheap-LLM task classifier (ADR-0006). Asks a small model to
-//! label the tier before routing, then reuses the heuristic router's pin/budget/cost-aware
-//! selection. Any failure — error, timeout, or an unparseable reply — silently falls back to
-//! the deterministic heuristic, so enabling it can never break a turn.
+//! Cheap-LLM task classifier (ADR-0006). Asks a small model to label the tier before routing,
+//! then reuses the deterministic router only for pin/budget/cost-aware model selection. The
+//! heuristic tier classifier is an availability fallback: it runs only after every bounded LLM
+//! attempt errors, times out, or returns an unparseable reply.
 
 use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
@@ -50,21 +50,16 @@ CRITICAL: prompt length is irrelevant. Examples — \
 'Audit the permission checks' is COMPLEX (security analysis). \
 'Add a newline to the README' is TRIVIAL despite being in a long message. \
 'Rename foo to bar in utils.rs' is TRIVIAL. \
+'Reply exactly: ok. Do not use tools.' is TRIVIAL. \
 'Implement a rate-limiter with token-bucket' is STANDARD (clear, self-contained). \
 Classify by what thinking the task demands, not its surface length.";
 
-/// A [`Router`] that labels the tier with a cheap model call, falling back to `fallback`.
-///
-/// Two modes:
-/// - `hybrid = false` (Llm): always calls the LLM, every turn.
-/// - `hybrid = true` (Hybrid): checks heuristic confidence first; only calls the LLM when
-///   the heuristic score is near a tier boundary (the uncertain middle zone). Clear Trivial
-///   or strongly-signalled Complex tasks skip the LLM entirely — zero added latency for them.
+/// A [`Router`] that labels every unhinted tier with a cheap model call, falling back to
+/// `fallback` only when no bounded LLM attempt produces a parseable tier.
 pub struct LlmRouter {
     provider: Arc<dyn Provider>,
     candidates: Vec<String>,
     fallback: HeuristicRouter,
-    hybrid: bool,
     cache: Mutex<VecDeque<(u64, TaskTier)>>,
 }
 
@@ -78,15 +73,8 @@ impl LlmRouter {
             provider,
             candidates,
             fallback,
-            hybrid: false,
             cache: Mutex::new(VecDeque::with_capacity(CACHE_CAPACITY)),
         }
-    }
-
-    /// Enable hybrid mode: skip the LLM when the heuristic is already confident.
-    pub fn with_hybrid(mut self, hybrid: bool) -> Self {
-        self.hybrid = hybrid;
-        self
     }
 }
 
@@ -109,12 +97,8 @@ fn prompt_hash(prompt: &str) -> u64 {
     hasher.finish()
 }
 
-fn guard_tier(llm: TaskTier, heuristic: TaskTier, confident: bool, code_heavy: bool) -> TaskTier {
-    let tier = if confident && heuristic == TaskTier::Complex {
-        TaskTier::Complex
-    } else {
-        llm
-    };
+fn guard_tier(llm: TaskTier, code_heavy: bool) -> TaskTier {
+    let tier = llm;
     // Hard floor: a code-editing task must NEVER route to the Trivial tier. Trivial-tier models
     // (the cheapest free models) cannot reliably write correct code, however "mechanical" the
     // classifier judged the task — and the LLM classifier itself runs on those same weak models,
@@ -161,37 +145,9 @@ impl Router for LlmRouter {
         project: &ProjectContext,
     ) -> RoutingDecision {
         let hints = RouteHints::from_prompt(prompt);
-
-        // Hybrid fast-path: if the heuristic is already confident, skip the LLM call. This
-        // keeps zero added latency for obvious Trivial tasks (typo, rename) and strongly-
-        // signalled Complex ones (multiple reasoning terms). Only the uncertain middle — score
-        // −3…7 — triggers the extra round-trip.
-        if self.hybrid {
-            let (tier, confident, reason) = HeuristicRouter::classify_confident(prompt, project);
-            if confident {
-                let tier = if hints.code_heavy && tier == TaskTier::Trivial {
-                    TaskTier::Standard
-                } else {
-                    tier
-                };
-                return self.fallback.decide(
-                    tier,
-                    format!("{reason} (hybrid: heuristic confident)"),
-                    budget,
-                    health,
-                    hints,
-                    quota,
-                    effort,
-                    has_images,
-                );
-            }
-        }
-
-        let (heuristic_tier, heuristic_confident, heuristic_reason) =
-            HeuristicRouter::classify_confident(prompt, project);
         let key = prompt_hash(prompt);
         if let Some(tier) = self.cached(key) {
-            let tier = guard_tier(tier, heuristic_tier, heuristic_confident, hints.code_heavy);
+            let tier = guard_tier(tier, hints.code_heavy);
             return self.fallback.decide(
                 tier,
                 format!("cached classifier result: {}", tier.as_str()),
@@ -233,15 +189,10 @@ impl Router for LlmRouter {
         match answered {
             Some((model, tier)) => {
                 self.store(key, tier);
-                let tier = guard_tier(tier, heuristic_tier, heuristic_confident, hints.code_heavy);
-                let guard = if tier != heuristic_tier && heuristic_confident {
-                    format!("; never-downgrade from {heuristic_reason}")
-                } else {
-                    String::new()
-                };
+                let tier = guard_tier(tier, hints.code_heavy);
                 self.fallback.decide(
                     tier,
-                    format!("classified by {model} as {}{guard}", tier.as_str()),
+                    format!("classified by {model} as {}", tier.as_str()),
                     budget,
                     health,
                     hints,
@@ -417,7 +368,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn never_downgrades_certain_complex() {
+    async fn llm_label_is_not_overridden_by_a_confident_heuristic() {
         let router = llm_router(Ok("trivial"));
         let d = router
             .route(
@@ -430,7 +381,12 @@ mod tests {
                 &ProjectContext::default(),
             )
             .await;
-        assert_eq!(d.tier, TaskTier::Complex);
+        assert_eq!(
+            d.tier,
+            TaskTier::Trivial,
+            "a parseable LLM decision must not be silently replaced by the heuristic"
+        );
+        assert!(d.rationale.contains("classified by"), "{}", d.rationale);
     }
 
     #[tokio::test]
@@ -545,137 +501,5 @@ mod tests {
             .await;
         assert_eq!(d.tier, TaskTier::Trivial);
         assert!(d.rationale.contains("heuristic"), "{}", d.rationale); // AC-B2
-    }
-
-    fn hybrid_router(reply: Result<&str, ()>) -> LlmRouter {
-        let provider = Arc::new(FakeProvider(reply.map(String::from)));
-        let fallback = HeuristicRouter::new(forge_config::Config::default());
-        LlmRouter::new(provider, vec!["ollama::tiny".into()], fallback).with_hybrid(true)
-    }
-
-    #[tokio::test]
-    async fn hybrid_skips_llm_for_confident_trivial() {
-        // "typo" hits TRIVIAL_PATTERNS → score −4 → confident → LLM must NOT be called.
-        // The FakeProvider would return "complex" if called, revealing whether the skip worked.
-        let d = hybrid_router(Ok("complex"))
-            .route(
-                "fix the typo in the readme",
-                false,
-                BudgetState::default(),
-                &ModelHealth::default(),
-                &SubscriptionQuota::default(),
-                None,
-                &ProjectContext::default(),
-            )
-            .await;
-        assert_eq!(
-            d.tier,
-            TaskTier::Trivial,
-            "hybrid must not call LLM for confident Trivial: {}",
-            d.rationale
-        );
-        assert!(
-            d.rationale.contains("confident"),
-            "rationale should mention confident fast-path: {}",
-            d.rationale
-        );
-    }
-
-    #[tokio::test]
-    async fn hybrid_skips_llm_for_confident_complex() {
-        // REASONING_TERM (+5) + two ANALYSIS_TERMS (+3 each) → score 11 ≥ 8 → confident.
-        // FakeProvider returns "trivial" — if called, tier would flip; it must be skipped.
-        let d = hybrid_router(Ok("trivial"))
-            .route(
-                "analyze the performance bottleneck in the authentication service",
-                false,
-                BudgetState::default(),
-                &ModelHealth::default(),
-                &SubscriptionQuota::default(),
-                None,
-                &ProjectContext::default(),
-            )
-            .await;
-        assert_eq!(
-            d.tier,
-            TaskTier::Complex,
-            "hybrid must not call LLM for confident Complex: {}",
-            d.rationale
-        );
-        assert!(
-            d.rationale.contains("confident"),
-            "rationale should mention confident fast-path: {}",
-            d.rationale
-        );
-    }
-
-    #[tokio::test]
-    async fn hybrid_calls_llm_for_uncertain_standard() {
-        // "add a function" → score ~2 (Standard, uncertain) → LLM IS called and overrides.
-        // FakeProvider returns "complex" → tier should become Complex.
-        let d = hybrid_router(Ok("complex"))
-            .route(
-                "add a function that validates emails",
-                false,
-                BudgetState::default(),
-                &ModelHealth::default(),
-                &SubscriptionQuota::default(),
-                None,
-                &ProjectContext::default(),
-            )
-            .await;
-        assert_eq!(
-            d.tier,
-            TaskTier::Complex,
-            "hybrid must use LLM for uncertain Standard: {}",
-            d.rationale
-        );
-        assert!(
-            d.rationale.contains("classified by"),
-            "rationale should show llm result: {}",
-            d.rationale
-        );
-    }
-
-    #[tokio::test]
-    async fn hybrid_calls_llm_for_barely_complex_prompt() {
-        // Single REASONING_TERM → score 5 (barely Complex, uncertain) → LLM IS called.
-        // FakeProvider returns "standard" → tier becomes Standard.
-        let d = hybrid_router(Ok("standard"))
-            .route(
-                "refactor this helper",
-                false,
-                BudgetState::default(),
-                &ModelHealth::default(),
-                &SubscriptionQuota::default(),
-                None,
-                &ProjectContext::default(),
-            )
-            .await;
-        assert_eq!(
-            d.tier,
-            TaskTier::Standard,
-            "hybrid must use LLM for barely-Complex uncertain prompt: {}",
-            d.rationale
-        );
-    }
-
-    #[tokio::test]
-    async fn hybrid_falls_back_gracefully_when_llm_fails() {
-        // Uncertain prompt + provider error → heuristic tier used.
-        let d = hybrid_router(Err(()))
-            .route(
-                "implement a small utility function",
-                false,
-                BudgetState::default(),
-                &ModelHealth::default(),
-                &SubscriptionQuota::default(),
-                None,
-                &ProjectContext::default(),
-            )
-            .await;
-        // Heuristic gives Standard for this prompt.
-        assert_eq!(d.tier, TaskTier::Standard);
-        assert!(d.rationale.contains("heuristic"), "{}", d.rationale);
     }
 }

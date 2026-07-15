@@ -926,24 +926,52 @@ pub fn extract_path_arg(args: &serde_json::Value) -> Option<&str> {
 /// probe) and must not be routed to. Built by the store from the `model_health` table — only
 /// models whose cooldown has not yet elapsed are included — and consulted by the mesh router.
 /// Carries no clock or I/O: the time filtering happens where the snapshot is built.
+/// A synthetic `model_health.model` key representing every model for one provider. Kept in the
+/// existing health table so provider-wide authentication failures persist across sessions without
+/// a schema migration.
+pub const PROVIDER_BENCH_PREFIX: &str = "__forge_provider__::";
+
+/// Stable health-table key for a provider-wide bench.
+pub fn provider_bench_key(provider: &str) -> String {
+    format!("{PROVIDER_BENCH_PREFIX}{provider}")
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct ModelHealth {
     benched: std::collections::HashSet<String>,
+    benched_providers: std::collections::HashSet<String>,
 }
 
 impl ModelHealth {
     pub fn new(benched: std::collections::HashSet<String>) -> Self {
-        Self { benched }
+        let mut benched_providers = std::collections::HashSet::new();
+        let mut benched_models = std::collections::HashSet::new();
+        for entry in benched {
+            if let Some(provider) = entry.strip_prefix(PROVIDER_BENCH_PREFIX) {
+                benched_providers.insert(provider.to_string());
+            } else {
+                benched_models.insert(entry);
+            }
+        }
+        Self {
+            benched: benched_models,
+            benched_providers,
+        }
     }
 
     /// Whether `model` is currently benched and should be skipped by routing.
     pub fn is_benched(&self, model: &str) -> bool {
         self.benched.contains(model)
+            || self.benched_providers.contains(
+                model
+                    .split_once("::")
+                    .map_or(model, |(provider, _)| provider),
+            )
     }
 
     /// True when no model is benched (the common case — lets the router skip filtering).
     pub fn is_empty(&self) -> bool {
-        self.benched.is_empty()
+        self.benched.is_empty() && self.benched_providers.is_empty()
     }
 }
 
@@ -996,6 +1024,11 @@ pub struct SubscriptionQuota {
     /// Whether proactive subscription-conservation spreading is enabled (config opt-out).
     conserve: bool,
 }
+
+/// Maximum age of a Codex account-wide quota observation. Codex usage may be consumed through
+/// either Forge's OAuth surface or the official CLI, so older data is not authoritative enough to
+/// influence mesh conservation or provider selection.
+pub const CODEX_QUOTA_FRESHNESS_SECS: i64 = 5 * 60;
 
 impl SubscriptionQuota {
     pub fn new(by_provider: std::collections::HashMap<String, QuotaStatus>) -> Self {
@@ -1292,6 +1325,14 @@ impl PartialEq<String> for LoopOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_bench_blocks_every_model_alias_for_that_provider() {
+        let health = ModelHealth::new([provider_bench_key("agy-cli")].into_iter().collect());
+        assert!(health.is_benched("agy-cli::gemini-3.1-pro"));
+        assert!(health.is_benched("agy-cli::gemini-3.5-flash"));
+        assert!(!health.is_benched("codex-cli::gpt-5.6-luna"));
+    }
 
     #[test]
     fn extract_path_arg_covers_all_known_keys() {

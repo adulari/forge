@@ -2,7 +2,7 @@
   "mcpServers": {
     "forge": {
       "type": "stdio",
-      "command": "/home/floris/Documents/Repositories/Personal/AI/forge/target/release/forge",
+      "command": "/home/floris/Documents/Repositories/Personal/AI/forge/target/debug/forge",
       "args": [
         "mcp",
         "agent",

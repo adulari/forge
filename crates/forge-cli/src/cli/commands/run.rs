@@ -76,52 +76,52 @@ pub(crate) use driver::*;
 
 /// Keep the command palette in sync with the `/command` token at the cursor (input end): open +
 /// filter when one is present anywhere on the line, close when not (`//` escape yields no token).
-/// Fill in missing bridge-provider percentages on the usage overlay from the store's
-/// `subscription_usage` table (set via rate_limit_event during Forge turns). Used as a
-/// fallback when the statusline cache file is stale or missing.
-/// Populate the overlay's subscription utilisation %s, preferring the STORE's fractions (seeded
-/// from the rate-limit caches at startup AND refreshed live on every CLI-bridge turn via
-/// rate_limit_event) over the raw caches. This is the real staleness fix: a fresh Forge claude/
-/// codex turn updates the store, so the overlay reflects it instead of the frozen statusline cache.
-/// The "Xh ago" note is shown only when the claude reading is still the seeded cache value (i.e. no
-/// live turn refreshed it this session) — when a turn has, the value is current and unmarked.
+/// Ingest an external bridge-stat snapshot into the session's shared quota store. Raw CLI cache
+/// files are input-only; every display and router reads the normalized store after this step.
+pub(crate) fn seed_subscription_stats(session: &Session, bstats: &bridge_stats::BridgeStats) {
+    session.seed_subscription_quota_at(
+        "codex-cli",
+        "five_hour",
+        bstats.codex_5h_pct,
+        bstats.codex_5h_observed_at,
+    );
+    session.seed_subscription_quota_at(
+        "codex-cli",
+        "weekly",
+        bstats.codex_weekly_pct,
+        bstats.codex_weekly_observed_at,
+    );
+    session.seed_subscription_quota_at(
+        "claude-cli",
+        "five_hour",
+        bstats.claude_5h_pct,
+        bstats.claude_5h_observed_at,
+    );
+    session.seed_subscription_quota_at(
+        "claude-cli",
+        "weekly",
+        bstats.claude_weekly_pct,
+        bstats.claude_weekly_observed_at,
+    );
+}
+
+/// Populate subscription utilisation from the shared quota store. This is intentionally the same
+/// normalized snapshot that `/mesh`, `forge mesh`, and the router consult; raw bridge caches must
+/// never directly override the `/usage` percentages.
 pub(crate) fn fill_subscription_pcts(
     overlay: &mut forge_tui::UsageOverlay,
     fracs: &std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
-    bstats: &bridge_stats::BridgeStats,
+    claude_store_age_secs: Option<i64>,
 ) {
     let store = |p: &str, w: &str| fracs.get(p).and_then(|m| m.get(w)).copied();
-    // Cache as the base; override with the store only when it carries a genuinely DIFFERENT (live,
-    // turn-recorded) value, so we never show a store reading staler than the cache. Returns the %
-    // and whether it came from a live override.
-    let pick = |cache: Option<f64>, st: Option<f64>| -> (Option<f64>, bool) {
-        match (st, cache) {
-            (Some(s), Some(c)) => {
-                let sp = s * 100.0;
-                if (sp - c).abs() > 1e-6 {
-                    (Some(sp), true)
-                } else {
-                    (Some(c), false)
-                }
-            }
-            (Some(s), None) => (Some(s * 100.0), true),
-            (None, c) => (c, false),
-        }
-    };
-    let (c5, _) = pick(bstats.claude_5h_pct, store("claude-cli", "five_hour"));
-    let (cw, cw_live) = pick(bstats.claude_weekly_pct, store("claude-cli", "weekly"));
-    overlay.claude_5h_pct = c5;
-    overlay.claude_weekly_pct = cw;
-    let (x5, _) = pick(bstats.codex_5h_pct, store("codex-cli", "five_hour"));
-    let (xw, _) = pick(bstats.codex_weekly_pct, store("codex-cli", "weekly"));
-    overlay.codex_5h_pct = x5;
-    overlay.codex_weekly_pct = xw;
-    // A live turn refreshed the weekly reading → it's current; otherwise surface the cache age.
-    overlay.claude_rl_age_secs = if cw_live {
-        None
-    } else {
-        bstats.claude_rl_age_secs
-    };
+    overlay.claude_5h_pct = store("claude-cli", "five_hour").map(|f| f * 100.0);
+    overlay.claude_weekly_pct = store("claude-cli", "weekly").map(|f| f * 100.0);
+    overlay.codex_5h_pct = store("codex-cli", "five_hour").map(|f| f * 100.0);
+    overlay.codex_weekly_pct = store("codex-cli", "weekly").map(|f| f * 100.0);
+    // Only annotate a genuinely stale STORE observation. A raw cache-file age is not a display
+    // authority: it can be days old while a live Claude header probe has already refreshed the
+    // exact same shared store row.
+    overlay.claude_rl_age_secs = claude_store_age_secs.filter(|&age| age > 300);
 }
 
 pub(crate) fn sync_palette_to_slash_token(app: &mut forge_tui::App) {
@@ -247,6 +247,12 @@ pub(crate) async fn build_session_with_self_mcp(
     let config_default_effort = config.mesh.default_effort.clone();
 
     let store = Arc::new(open_store()?);
+    // Never construct a session router from an expired Codex pressure reading. The helper uses a
+    // fresh CLI rollout when available, otherwise performs one bounded minimal OAuth probe; it
+    // updates the shared codex-oauth/codex-cli quota bucket before this session's first route.
+    if !mock {
+        crate::cli::commands::models::refresh_codex_quota(&store).await;
+    }
     let store_for_lattice = Arc::clone(&store);
     // Startup hint: if models are benched from a prior run/probe, tell the user how to recheck
     // (docs/features/mesh-routing.md — we never auto-probe, so a stale bench is the user's to clear).
@@ -778,21 +784,10 @@ fn abort_turn_before_quit(
     app.clear_question();
 }
 
-/// Whether `prefix` is a provider Forge recognizes — a key-based/custom provider, or one of the
-/// keyless ones (local `ollama`, the `claude-cli`/`codex-cli` bridges). Used to reject a clearly
-/// invalid `--model provider::id` even when no catalog is available to check the full id against.
+/// Whether `prefix` is a provider Forge recognizes. Delegating to config keeps explicit pin
+/// validation aligned with discovery and dispatch as new keyless bridges are added.
 fn is_known_provider_prefix(prefix: &str) -> bool {
-    // `xai-oauth` authenticates via a keyring OAuth session (`forge auth xai-oauth`), not an
-    // env-var API key, so it's never in `known_key_providers()` — same reason the CLI bridges
-    // are keyless here.
-    const KEYLESS: &[&str] = &[
-        "ollama",
-        "claude-cli",
-        "codex-cli",
-        "xai-oauth",
-        "codex-oauth",
-    ];
-    KEYLESS.contains(&prefix) || forge_config::known_key_providers().any(|p| p == prefix)
+    forge_config::is_known_provider(prefix)
 }
 
 /// The OS shell used to run a `StatuslineWidget::Custom` command — same choice as hooks (see
@@ -1134,23 +1129,7 @@ pub(crate) async fn run_chat_tui(
             async move {
                 if let Ok(bstats) = tokio::task::spawn_blocking(bridge_stats::fetch).await {
                     let sess = s.lock().await;
-                    // Codex readings come from rollout files that can be hours old — seed with
-                    // their true observation time so a stale re-seed can't mask fresher
-                    // x-codex-header data in the shared codex quota bucket.
-                    sess.seed_subscription_quota_at(
-                        "codex-cli",
-                        "five_hour",
-                        bstats.codex_5h_pct,
-                        bstats.codex_5h_observed_at,
-                    );
-                    sess.seed_subscription_quota_at(
-                        "codex-cli",
-                        "weekly",
-                        bstats.codex_weekly_pct,
-                        bstats.codex_weekly_observed_at,
-                    );
-                    sess.seed_subscription_quota("claude-cli", "five_hour", bstats.claude_5h_pct);
-                    sess.seed_subscription_quota("claude-cli", "weekly", bstats.claude_weekly_pct);
+                    seed_subscription_stats(&sess, &bstats);
                 }
             }
         });
@@ -1931,13 +1910,20 @@ pub(crate) async fn run_chat_tui(
             // match arm even has a dedicated no-op case for these keys that this ordering made
             // unreachable dead code). Skip straight past all of them while any modal is open, so
             // control reaches that modal's own handler further down instead.
-            let any_modal_open = app.palette.open
+            let any_modal_open = app.command_center.open
+                || app.palette.open
                 || app.usage_overlay.open
                 || app.mesh_overlay.open
                 || app.at_picker.open
                 || app.picker.open
                 || app.voice.is_some();
             if !any_modal_open {
+                if matches!(key, KeyKind::OpenCommandCenter) {
+                    app.command_center.open();
+                    dirty = true;
+                    continue;
+                }
+
                 // Ctrl+R: toggle the effort slider when nothing else is modal.
                 if matches!(key, KeyKind::ToggleEffortSlider) {
                     app.toggle_effort_slider();
@@ -1974,7 +1960,9 @@ pub(crate) async fn run_chat_tui(
 
                 if matches!(key, KeyKind::ShowHelp) {
                     let bindings = app.keybinds.clone();
-                    let _ = tui.run_fullscreen(|| forge_tui::run_help(&bindings));
+                    let _ = tui.run_fullscreen(|| {
+                        forge_tui::run_help(&bindings, forge_tui::HelpTab::Keybinds)
+                    });
                     dirty = true;
                     continue;
                 }
@@ -1987,7 +1975,9 @@ pub(crate) async fn run_chat_tui(
                     && !app.palette.open
                 {
                     let bindings = app.keybinds.clone();
-                    let _ = tui.run_fullscreen(|| forge_tui::run_help(&bindings));
+                    let _ = tui.run_fullscreen(|| {
+                        forge_tui::run_help(&bindings, forge_tui::HelpTab::Keybinds)
+                    });
                     dirty = true;
                     continue;
                 }
@@ -2283,6 +2273,38 @@ pub(crate) async fn run_chat_tui(
                     continue;
                 }
             } // !any_modal_open
+
+            // The command center is modal while open. Selecting an action stages its slash
+            // command in the composer so argument-taking actions remain explicit and reviewable.
+            if app.command_center.open {
+                match key {
+                    KeyKind::Esc => app.command_center.close(),
+                    KeyKind::Up => app.command_center.move_up(),
+                    KeyKind::Down => app.command_center.move_down(&app.palette.extra),
+                    KeyKind::Backspace => {
+                        app.command_center.query.pop();
+                        app.command_center.clamp(&app.palette.extra);
+                    }
+                    KeyKind::Char(c) => {
+                        app.command_center.query.push(c);
+                        app.command_center.clamp(&app.palette.extra);
+                    }
+                    KeyKind::Enter | KeyKind::Tab => {
+                        if let Some(entry) = app.command_center.selected_entry(&app.palette.extra) {
+                            app.input = format!("/{}", entry.name);
+                            if entry.usage.contains('<') {
+                                app.input.push(' ');
+                            }
+                            app.input_cursor = app.input.len();
+                        }
+                        app.command_center.close();
+                        sync_palette_to_slash_token(&mut app);
+                    }
+                    _ => {}
+                }
+                dirty = true;
+                continue;
+            }
 
             // The command palette is modal while open: it owns every key. Esc dismisses it
             // (so the user isn't surprised by a quit); Ctrl-C still maps to Esc → here it just
@@ -3013,7 +3035,7 @@ pub(crate) async fn run_chat_tui(
             if matches!(key, KeyKind::ToggleSubagentDetail) {
                 if app.workflow.exists() {
                     app.workflow.open = true;
-                } else if app.has_activity() {
+                } else if app.has_activity() || !app.tasks().is_empty() {
                     app.activity_focused = !app.activity_focused;
                     if app.activity_focused {
                         app.activity_idx =
@@ -4563,15 +4585,18 @@ pub(crate) async fn run_chat_tui(
                     // the main render loop, and a busy turn parked in a permission/question prompt
                     // holds this lock for the whole prompt. Worst case on contention is one overlay
                     // refresh using stale (empty) fractions, not a permanently wedged loop.
-                    let fracs = session
+                    let (fracs, claude_store_age_secs) = session
                         .try_lock()
-                        .map(|s| s.bridge_fractions())
+                        .map(|s| {
+                            seed_subscription_stats(&s, &bstats);
+                            (s.bridge_fractions(), s.claude_quota_age_secs())
+                        })
                         .unwrap_or_default();
                     app.usage_overlay.claude_5h_in = bstats.claude_5h_in;
                     app.usage_overlay.claude_5h_out = bstats.claude_5h_out;
                     app.usage_overlay.claude_weekly_in = bstats.claude_weekly_in;
                     app.usage_overlay.claude_weekly_out = bstats.claude_weekly_out;
-                    fill_subscription_pcts(&mut app.usage_overlay, &fracs, &bstats);
+                    fill_subscription_pcts(&mut app.usage_overlay, &fracs, claude_store_age_secs);
                     app.usage_overlay.loading = false;
                     usage_load_rx = None;
                     dirty = true;
@@ -5387,6 +5412,7 @@ fn next_input_event(
 pub(crate) fn any_remote_modal_open(app: &forge_tui::App) -> bool {
     app.workflow.open
         || app.config_editor.open
+        || app.command_center.open
         || app.palette.open
         || app.usage_overlay.open
         || app.mesh_overlay.open
@@ -5443,6 +5469,10 @@ pub(crate) fn apply_overlay_input(
                     app.config_editor.filter = text;
                     app.config_editor.selected = 0;
                 }
+            } else if app.command_center.open {
+                app.command_center.query = text;
+                app.command_center.selected = 0;
+                app.command_center.clamp(&app.palette.extra);
             } else if app.palette.open {
                 // Mirror local typing: the palette query IS the input line's slash token.
                 app.input = format!("/{text}");
@@ -5476,6 +5506,13 @@ pub(crate) fn apply_overlay_input(
                     .position(|&i| app.config_editor.rows[i].path == id)
                 {
                     app.config_editor.selected = pos;
+                    return vec![K::Enter];
+                }
+                Vec::new()
+            } else if app.command_center.open {
+                let entries = app.command_center.matches(&app.palette.extra);
+                if let Some(idx) = entries.iter().position(|entry| entry.name == id) {
+                    app.command_center.selected = idx;
                     return vec![K::Enter];
                 }
                 Vec::new()
@@ -6231,6 +6268,7 @@ mod tests {
         assert!(is_known_provider_prefix("ollama"));
         assert!(is_known_provider_prefix("claude-cli"));
         assert!(is_known_provider_prefix("codex-cli"));
+        assert!(is_known_provider_prefix("agy-cli"));
         // Clearly-invalid prefixes are rejected so `--model` hard-stops without a catalog.
         assert!(!is_known_provider_prefix("nonsense"));
         assert!(!is_known_provider_prefix("gpt-5"));

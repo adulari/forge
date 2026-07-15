@@ -689,7 +689,7 @@ impl HeuristicRouter {
     /// the label is reliable at zero cost. Falls back to the trivial-tier shortlist if no free
     /// Standard model is available. Health is applied later because it changes between turns.
     pub fn classifier_candidates(&self) -> Vec<String> {
-        let capable_free: Vec<String> = self
+        let mut capable_free: Vec<String> = self
             .candidates_for_tier(
                 TaskTier::Standard,
                 RouteHints::default(),
@@ -698,8 +698,21 @@ impl HeuristicRouter {
             )
             .into_iter()
             .filter(|m| catalog::is_free(m, self.pricing.estimated_cost(m), false))
-            .take(3)
             .collect();
+        // Classification is latency-sensitive and has a hard 15s total budget. A high-quality
+        // free NIM model is a poor first choice when it routinely spends that entire budget,
+        // forcing the real route onto the heuristic. Keep the Standard-tier quality ordering
+        // within each class, but place known low-latency free providers first. If none is usable
+        // at call time LlmRouter still tries the remaining candidates and then falls back safely.
+        capable_free.sort_by_key(|m| match catalog::provider_of(m) {
+            "groq" => 0,
+            "cerebras" => 1,
+            "sambanova" => 2,
+            "gemini" => 3,
+            "ollama" => 4,
+            _ => 5,
+        });
+        capable_free.truncate(3);
         if !capable_free.is_empty() {
             return capable_free;
         }
@@ -799,11 +812,14 @@ impl HeuristicRouter {
     /// A model is usable if its provider key is present (or it's keyless) AND it isn't
     /// currently benched (rate-limited / unavailable — failover).
     fn is_usable(&self, m: &str, health: &ModelHealth, quota: &SubscriptionQuota) -> bool {
-        (self.model_available)(m)
-            && !forge_config::is_model_disabled(m, &self.config.mesh.disabled)
-            && !health.is_benched(m)
-            // An exhausted subscription is routed around entirely (L3), like a benched model.
-            && !(catalog::is_subscription(m) && quota.is_exhausted(forge_config::provider_of(m)))
+        if !(self.model_available)(m)
+            || forge_config::is_model_disabled(m, &self.config.mesh.disabled)
+            || health.is_benched(m)
+        {
+            return false;
+        }
+        // An exhausted subscription is routed around entirely (L3), like a benched model.
+        !(catalog::is_subscription(m) && quota.is_exhausted(forge_config::provider_of(m)))
     }
 
     /// Whether `m` may be auto-routed / failed-over to under the active credit mode. `Strict` means
@@ -1462,6 +1478,29 @@ mod tests {
         // Treat every provider as available so tier-classification tests are deterministic
         // (no dependence on ambient env/keyring) and exercise no fallback.
         HeuristicRouter::new(Config::default()).with_availability(|_| true)
+    }
+
+    #[test]
+    fn classifier_candidates_prefer_low_latency_free_providers() {
+        // Regression: an NIM candidate could consume the classifier's entire 15-second budget,
+        // so every uncertain request silently fell back to the heuristic despite a fast Groq
+        // model being both configured and usable. The classifier must start with Groq whenever
+        // it is present, while retaining other free providers as bounded fallbacks.
+        let catalog = ModelCatalog::new(vec![
+            "ollama::llama3.2".to_string(),
+            "gemini::gemini-2.5-flash".to_string(),
+            "groq::qwen/qwen3.6-27b".to_string(),
+        ]);
+        let candidates = HeuristicRouter::new(Config::default())
+            .with_catalog(catalog)
+            .classifier_candidates();
+
+        assert_eq!(
+            candidates.first().map(String::as_str),
+            Some("groq::qwen/qwen3.6-27b"),
+            "classifier must use the fast Groq candidate before slower free providers: {candidates:?}"
+        );
+        assert!(candidates.len() <= 3);
     }
 
     #[test]

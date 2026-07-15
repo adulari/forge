@@ -748,6 +748,141 @@ pub struct PaletteEntry {
     pub usage: String,
 }
 
+/// A categorized command row used by the global command center. The slash palette stays focused
+/// on text completion; this surface makes every built-in, skill, and custom command discoverable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandCenterEntry {
+    pub name: String,
+    pub desc: String,
+    pub usage: String,
+    pub category: &'static str,
+}
+
+/// Product-facing categories for the stable command registry.
+pub fn command_category(name: &str) -> &'static str {
+    match name {
+        "new" | "plan" | "execute" | "goal" | "loop" | "workflow" | "duel" => "Start work",
+        "sessions" | "resume" | "replay" | "undo" | "checkpoint" | "checkpoints" | "compact"
+        | "uncompact" | "clear" => "Session",
+        "model" | "models" | "mode" | "effort" | "thinking" | "mesh" | "usage" => "Model & usage",
+        "assay" | "lattice" | "pr" => "Review & ship",
+        "mcp" | "remote" | "self-mcp" | "voice" | "image" => "Integrations",
+        "config" | "statusline" | "keys" | "help" | "init" | "remember" | "memories" => {
+            "Settings & help"
+        }
+        "copy" | "quit" => "Utilities",
+        _ => "More",
+    }
+}
+
+fn command_category_rank(category: &str) -> usize {
+    match category {
+        "Start work" => 0,
+        "Session" => 1,
+        "Model & usage" => 2,
+        "Review & ship" => 3,
+        "Integrations" => 4,
+        "Settings & help" => 5,
+        "Utilities" => 6,
+        "Skills & custom" => 7,
+        _ => 8,
+    }
+}
+
+/// Interaction state for the global searchable command center. Command execution remains routed
+/// through the existing slash-command parser and CLI dispatch layer.
+#[derive(Debug, Clone, Default)]
+pub struct CommandCenter {
+    pub open: bool,
+    pub query: String,
+    pub selected: usize,
+}
+
+impl CommandCenter {
+    pub fn open(&mut self) {
+        self.open = true;
+        self.query.clear();
+        self.selected = 0;
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+        self.query.clear();
+        self.selected = 0;
+    }
+
+    pub fn matches(&self, extra: &[PaletteEntry]) -> Vec<CommandCenterEntry> {
+        let mut entries: Vec<CommandCenterEntry> = COMMANDS
+            .iter()
+            .map(|command| CommandCenterEntry {
+                name: command.name.to_string(),
+                desc: command.desc.to_string(),
+                usage: command.usage.to_string(),
+                category: command_category(command.name),
+            })
+            .collect();
+        entries.extend(extra.iter().map(|entry| CommandCenterEntry {
+            name: entry.name.clone(),
+            desc: entry.desc.clone(),
+            usage: entry.usage.clone(),
+            category: "Skills & custom",
+        }));
+
+        let query = self.query.to_lowercase();
+        let empty_query = query.is_empty();
+        let mut scored: Vec<(u32, usize, CommandCenterEntry)> = entries
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let name_score = match_score(&entry.name, &query);
+                let description_score = match_score(&entry.desc, &query).map(|score| score + 250);
+                name_score
+                    .into_iter()
+                    .chain(description_score)
+                    .min()
+                    .map(|score| (score, index, entry))
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| {
+                    if empty_query {
+                        command_category_rank(a.2.category)
+                            .cmp(&command_category_rank(b.2.category))
+                    } else {
+                        a.1.cmp(&b.1)
+                    }
+                })
+                .then(a.1.cmp(&b.1))
+        });
+        scored.into_iter().map(|(_, _, entry)| entry).collect()
+    }
+
+    pub fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self, extra: &[PaletteEntry]) {
+        let count = self.matches(extra).len();
+        if count > 0 {
+            self.selected = (self.selected + 1).min(count - 1);
+        }
+    }
+
+    pub fn clamp(&mut self, extra: &[PaletteEntry]) {
+        let count = self.matches(extra).len();
+        if count == 0 {
+            self.selected = 0;
+        } else if self.selected >= count {
+            self.selected = count - 1;
+        }
+    }
+
+    pub fn selected_entry(&self, extra: &[PaletteEntry]) -> Option<CommandCenterEntry> {
+        self.matches(extra).into_iter().nth(self.selected)
+    }
+}
+
 /// Inline command-palette state. Opens when the input line starts with `/`. The binary's render
 /// loop drives it via keystrokes and reads the filtered list / selection.
 #[derive(Debug, Clone, Default)]
@@ -1374,6 +1509,44 @@ mod tests {
         p.query = "review".into();
         p.clamp();
         assert_eq!(p.selected_name().as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn command_center_groups_builtins_and_finds_custom_entries() {
+        let center = CommandCenter::default();
+        let entries = center.matches(&[PaletteEntry {
+            name: "shipit".into(),
+            desc: "run the project's release workflow".into(),
+            usage: "/shipit".into(),
+        }]);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.name == "plan" && entry.category == "Start work"),
+            "builtins have stable, user-facing categories"
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| { entry.name == "shipit" && entry.category == "Skills & custom" }),
+            "custom commands remain discoverable"
+        );
+
+        let mut search = CommandCenter::default();
+        search.open();
+        search.query = "release".into();
+        assert_eq!(
+            search
+                .selected_entry(&[PaletteEntry {
+                    name: "shipit".into(),
+                    desc: "run the project's release workflow".into(),
+                    usage: "/shipit".into(),
+                }])
+                .as_ref()
+                .map(|entry| entry.name.as_str()),
+            Some("shipit"),
+            "description search finds commands when users do not know their name"
+        );
     }
 
     #[test]

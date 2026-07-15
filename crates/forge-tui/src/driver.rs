@@ -197,6 +197,9 @@ pub struct Tui {
     mouse_capture: bool,
     /// User-configured keybinds, used by `poll_event` to resolve configurable action keys.
     pub keybinds: forge_config::KeybindsConfig,
+    /// Last modal-surface state. A transition forces a full viewport repaint so external/native
+    /// output can never remain visible under an opaque overlay.
+    modal_surface_open: bool,
 }
 
 /// Set while a full-screen (alternate-screen) TUI is active, so the panic hook knows to leave the
@@ -258,6 +261,7 @@ impl Tui {
             fullscreen,
             mouse_capture,
             keybinds,
+            modal_surface_open: false,
         })
     }
 
@@ -328,6 +332,11 @@ impl Tui {
     }
 
     pub fn draw(&mut self, app: &App) {
+        let modal_surface_open = app.modal_surface_open();
+        if modal_surface_open != self.modal_surface_open {
+            let _ = self.terminal.clear();
+            self.modal_surface_open = modal_surface_open;
+        }
         let _ = self.terminal.draw(|f| app::render_live(f, app));
     }
 
@@ -468,6 +477,7 @@ impl Tui {
                 viewport: viewport(self.fullscreen),
             },
         )?;
+        self.modal_surface_open = false;
         let _ = self.terminal.clear();
         out
     }

@@ -82,8 +82,32 @@ impl HeuristicRouter {
         project: &ProjectContext,
     ) -> RoutingExplanation {
         let cls = score_prompt(prompt, project);
+        self.explain_classified(
+            prompt,
+            cls.tier,
+            cls.reasons.iter().map(|s| s.to_string()).collect(),
+            budget,
+            health,
+            quota,
+            effort,
+        )
+    }
+
+    /// Produce a full [`RoutingExplanation`] using a tier supplied by the production classifier.
+    /// This preserves one scoring/selection implementation while allowing an LLM classifier to
+    /// drive both the actual route and its inspector output.
+    #[allow(clippy::too_many_arguments)]
+    pub fn explain_classified(
+        &self,
+        prompt: &str,
+        tier: TaskTier,
+        classify_reasons: Vec<String>,
+        budget: BudgetState,
+        health: &ModelHealth,
+        quota: &SubscriptionQuota,
+        effort: Option<EffortLevel>,
+    ) -> RoutingExplanation {
         let hints = RouteHints::from_prompt(prompt);
-        let tier = cls.tier;
 
         // The authoritative decision (pin / budget / fallback handling all live here). Compute it
         // FIRST: `decide` can downshift the tier (e.g. budget exhausted → Trivial), and the candidate
@@ -94,7 +118,7 @@ impl HeuristicRouter {
         // live turn's image attachments, so it always explains the text-only routing path.
         let decision = self.decide(
             tier,
-            cls.reasons.join(", "),
+            classify_reasons.join(", "),
             budget,
             health,
             hints,
@@ -193,7 +217,7 @@ impl HeuristicRouter {
             prompt: prompt.to_string(),
             classified_tier: tier,
             routed_tier: decision.tier,
-            classify_reasons: cls.reasons.iter().map(|s| s.to_string()).collect(),
+            classify_reasons,
             code_heavy: hints.code_heavy,
             seed: hints.seed,
             conserve,
@@ -242,6 +266,22 @@ mod tests {
         assert_eq!(selected.row.model, e.pick);
         assert!(!e.candidates.is_empty());
         assert_eq!(e.classified_tier, TaskTier::Complex);
+    }
+
+    #[test]
+    fn explanation_uses_the_tier_supplied_by_the_live_classifier() {
+        let r = router();
+        let e = r.explain_classified(
+            "fix the typo",
+            TaskTier::Complex,
+            vec!["classified by test::classifier as complex".to_string()],
+            BudgetState::default(),
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            None,
+        );
+        assert_eq!(e.classified_tier, TaskTier::Complex);
+        assert!(e.classify_reasons[0].contains("test::classifier"));
     }
 
     #[test]

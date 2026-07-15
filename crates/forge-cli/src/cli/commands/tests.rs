@@ -729,3 +729,42 @@ fn chat_gains_symmetric_tui_flag() {
     assert!(Cli::try_parse_from(["forge", "chat", "--resume", "abc"]).is_ok());
     assert!(Cli::try_parse_from(["forge", "chat", "--resume"]).is_ok());
 }
+
+#[test]
+fn oauth_headless_flags_use_optional_paste_value() {
+    let cli = Cli::try_parse_from(["forge", "auth", "codex-oauth", "--device"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Auth {
+            device: true,
+            paste: None,
+            ..
+        }
+    ));
+
+    let cli = Cli::try_parse_from(["forge", "auth", "codex-oauth", "--paste"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Auth { paste: Some(ref value), .. } if value.is_empty()
+    ));
+
+    let cli = Cli::try_parse_from([
+        "forge",
+        "auth",
+        "codex-oauth",
+        "--paste",
+        "https://localhost/cb?code=c&state=s",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Auth { paste: Some(ref value), .. } if value.contains("state=s")
+    ));
+
+    let cli =
+        Cli::try_parse_from(["forge", "mcp", "login", "srv", "--paste", "code=c&state=s"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Mcp { cmd: Some(McpCmd::Login { paste: Some(ref value), .. }) } if value.contains("state=s")
+    ));
+}

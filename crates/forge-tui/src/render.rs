@@ -17,15 +17,8 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
-// Palette — exact values from crate::app so rendered markdown is pixel-consistent with the TUI.
-const ORANGE: Color = Color::Rgb(255, 138, 48); // forge brand — warm ember
-const ACCENT: Color = Color::Rgb(82, 162, 255); // electric blue (active/interactive)
-const DIM: Color = Color::Rgb(82, 87, 108); // muted / secondary
-const TEXT: Color = Color::Rgb(208, 213, 224); // primary body text
-const OKGREEN: Color = Color::Rgb(92, 208, 122); // success / ok
-const ERRRED: Color = Color::Rgb(243, 92, 92); // error
-const WARNYEL: Color = Color::Rgb(238, 188, 82); // warning
-const TOOLCYAN: Color = Color::Rgb(75, 212, 218); // tools / code / lattice
+use crate::surface::{ACCENT, DIM, ERRRED, OKGREEN, ORANGE, TEXT, TOOLCYAN, WARNYEL};
+
 const CODEFG: Color = TEXT; // code body text = primary body text
 const CODEBG: Color = Color::Rgb(40, 40, 48); // code block background
 
