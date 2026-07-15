@@ -23,8 +23,8 @@ use forge_tui::{handle_key, App, ChannelPresenter, ConfirmOutcome, InputOutcome,
 
 /// What to run: the parameters of one daemon-hosted session.
 pub(crate) struct DriverSpec {
-    /// The session's working directory. When it differs from the daemon process's cwd, tool
-    /// calls are rooted here via `Session::set_work_root` (the audited subagent-worktree rewrite).
+    /// Immutable session workspace. It is canonicalized before the driver is spawned and
+    /// is persisted on the Session; daemon cwd is never used for tool execution.
     pub cwd: String,
     /// The isolated worktree the session runs in, if it was created with `worktree: true`.
     /// Informational here (the `cwd` already points inside it) — persisted + broadcast.
@@ -128,20 +128,14 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         session.set_temper(mode);
         let _ = forge_config::write_permission_mode(mode);
     }
-    // Root tool calls in the session's own directory when it differs from the process cwd —
-    // without this every relative path/shell command would act on the DAEMON's cwd.
-    let daemon_cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    if spec.cwd != daemon_cwd {
-        session.set_work_root(Some(std::path::PathBuf::from(&spec.cwd)));
-        if spec.resume.is_none() {
-            let _ = session.prime_guidance(&[format!(
-                "This session's working directory is {} — resolve every relative path there and \
+    // The workspace is validated during session construction. Keep the legacy setter only
+    // as a compatibility no-op; every session now roots tools unconditionally.
+    if spec.resume.is_none() {
+        let _ = session.prime_guidance(&[format!(
+            "This session's working directory is {} — resolve every relative path there and \
                  pass it as `cwd` to shell commands.",
-                spec.cwd
-            )]);
-        }
+            spec.cwd
+        )]);
     }
 
     // A worktree-backed daemon session is an isolated BUILD session — the client spun up a
@@ -295,11 +289,15 @@ async fn drive_session(
         .collect();
     let trust_project = session.lock().await.commands_trust_project();
     {
-        let hooks = session.lock().await.hooks().to_vec();
-        forge_core::hooks::run_session_hooks(
+        let (hooks, workspace) = {
+            let s = session.lock().await;
+            (s.hooks().to_vec(), s.workspace_root().to_path_buf())
+        };
+        forge_core::hooks::run_session_hooks_in(
             &hooks,
             forge_config::HookEvent::SessionStart,
             &session_id,
+            Some(&workspace),
         )
         .await;
     }
@@ -519,15 +517,24 @@ async fn drive_session(
     st.pending = None;
     st.pending_question = None;
     {
-        let (hooks, sid) = {
+        let (hooks, sid, workspace) = {
             let s = st.session.lock().await;
             if let Some(json) = st.app.view_snapshot_json() {
                 s.save_view_snapshot(&json);
             }
-            (s.hooks().to_vec(), s.session_id().to_string())
+            (
+                s.hooks().to_vec(),
+                s.session_id().to_string(),
+                s.workspace_root().to_path_buf(),
+            )
         };
-        forge_core::hooks::run_session_hooks(&hooks, forge_config::HookEvent::SessionEnd, &sid)
-            .await;
+        forge_core::hooks::run_session_hooks_in(
+            &hooks,
+            forge_config::HookEvent::SessionEnd,
+            &sid,
+            Some(&workspace),
+        )
+        .await;
     }
     let mut closed = last_snap.unwrap_or_default();
     closed.closed = true;
@@ -727,9 +734,14 @@ impl DriverState {
             self.prompt_history.push(trimmed.to_string());
         }
         if let Some(rest) = line.strip_prefix("//") {
-            let hooks = self.session.lock().await.hooks().to_vec();
+            let (hooks, hook_workspace) = {
+                let s = self.session.lock().await;
+                (s.hooks().to_vec(), s.workspace_root().to_path_buf())
+            };
             let escaped = format!("/{rest}");
-            match forge_core::hooks::run_prompt_hooks(&hooks, &escaped).await {
+            match forge_core::hooks::run_prompt_hooks_in(&hooks, &escaped, Some(&hook_workspace))
+                .await
+            {
                 Err(reason) => self
                     .app
                     .note(&format!("⎇ prompt blocked by hook: {reason}")),
@@ -761,8 +773,11 @@ impl DriverState {
             Some(mut mentions) => prepend_attach_mentions(&mut mentions, line),
             None => prepend_attach_mentions(&mut self.pending_mentions, line),
         };
-        let hooks = self.session.lock().await.hooks().to_vec();
-        match forge_core::hooks::run_prompt_hooks(&hooks, &line).await {
+        let (hooks, hook_workspace) = {
+            let s = self.session.lock().await;
+            (s.hooks().to_vec(), s.workspace_root().to_path_buf())
+        };
+        match forge_core::hooks::run_prompt_hooks_in(&hooks, &line, Some(&hook_workspace)).await {
             Err(reason) => self
                 .app
                 .note(&format!("⎇ prompt blocked by hook: {reason}")),

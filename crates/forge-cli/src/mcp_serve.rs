@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use forge_config::Config;
 use forge_core::hooks;
 use forge_core::permission;
@@ -907,11 +907,16 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         .map(|v| v == "1")
         .unwrap_or(false)
         || config.mesh.bridge_lean;
-    let mut registry = ToolRegistry::with_core_tools();
+    let workspace = std::env::current_dir()
+        .and_then(|cwd| cwd.canonicalize())
+        .context("resolving bridge workspace cwd")?;
+    let mut registry = ToolRegistry::with_core_tools_in(&workspace);
     // Same opt-in Landlock sandbox / scoped `CARGO_TARGET_DIR` carve-out as `forge run` (PR #521);
     // wired through the shared `sandboxed_shell_tool` helper so a bridged claude/codex agent driving
     // Forge's tools via this MCP server can also `cargo check`/`build` under confinement.
-    if let Some(shell_tool) = crate::sandboxed_shell_tool(&config) {
+    if let Some(shell_tool) =
+        crate::cli::commands::run::sandboxed_shell_tool_in(&config, &workspace)
+    {
         registry.register(Box::new(shell_tool));
     }
     let server = ForgeMcp {
@@ -1230,7 +1235,7 @@ mod tests {
         }
     }
 
-    /// The bridge's `run()` builds its registry via `crate::sandboxed_shell_tool(&config)` — the
+    /// The bridge's `run()` builds its registry via `crate::cli::commands::run::sandboxed_shell_tool(&config)` — the
     /// exact same helper `forge run` uses (see `cli::commands::run::sandboxed_shell_tool`) — so a
     /// bridged claude/codex agent gets the same scoped `CARGO_TARGET_DIR` carve-out as a direct
     /// `forge run` session (previously mcp-serve only ever registered the plain
@@ -1238,7 +1243,7 @@ mod tests {
     #[test]
     fn sandboxed_shell_tool_is_none_when_config_knobs_are_off() {
         let config = Config::default();
-        assert!(crate::sandboxed_shell_tool(&config).is_none());
+        assert!(crate::cli::commands::run::sandboxed_shell_tool(&config).is_none());
     }
 
     #[test]
@@ -1247,7 +1252,7 @@ mod tests {
         config.shell.scoped_cargo_target = true;
         config.shell.scoped_cargo_target_dir = Some("/tmp/bridge-cargo-target".to_string());
 
-        let shell_tool = crate::sandboxed_shell_tool(&config)
+        let shell_tool = crate::cli::commands::run::sandboxed_shell_tool(&config)
             .expect("scoped_cargo_target=true must build a ShellTool");
         assert_eq!(
             shell_tool.policy.cargo_target_base,

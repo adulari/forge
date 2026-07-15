@@ -1299,6 +1299,7 @@ pub fn start(
     exposure: Exposure,
     host_override: Option<&str>,
     history: Option<HistoryProvider>,
+    workspace: Option<&std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>>,
 ) -> std::io::Result<RemoteControl> {
     let token = random_token();
     let bind_ip: std::net::IpAddr = match exposure {
@@ -1329,10 +1330,7 @@ pub fn start(
         events: events.clone(),
         history,
         base: base.clone(),
-        // The in-chat session runs in the process cwd, so uploads scratch under it.
-        upload_root: std::env::current_dir()
-            .ok()
-            .map(|d| d.join(".forge").join("uploads")),
+        upload_root: workspace.cloned(),
         voice: crate::voice::VoiceState::new(),
     });
 
@@ -1488,9 +1486,10 @@ pub fn start(
 pub async fn start_anywhere(
     history: Option<HistoryProvider>,
     remote_cfg: &forge_config::RemoteConfig,
+    workspace: Option<&std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>>,
 ) -> std::io::Result<RemoteControl> {
     let kind = resolve_tunnel_kind(remote_cfg)?;
-    let mut rc = start(Exposure::Anywhere, None, history)?;
+    let mut rc = start(Exposure::Anywhere, None, history, workspace)?;
     let port = rc.url.addr.port();
     let (public, child) = spawn_tunnel(kind, port, remote_cfg).await?;
     // The control page lives at `/<token>`; the tunnel forwards the whole path, so the public
@@ -1514,8 +1513,8 @@ struct ServerState {
     /// (WS, PWA assets, start_url) is correct under a tunnel/LAN host without the page guessing.
     base: String,
     /// Where `POST /api/upload` stores files: `<cwd>/.forge/uploads` (a per-session subdirectory
-    /// is created under it). `None` when the cwd is unknown — uploads then answer 503.
-    upload_root: Option<std::path::PathBuf>,
+    /// is created under it). The binding follows live `/new` and `/resume` transitions.
+    upload_root: Option<Arc<std::sync::RwLock<std::path::PathBuf>>>,
     /// Local whisper.cpp speech-to-text (`POST /api/voice/transcribe`) — caches the loaded model
     /// across requests.
     voice: crate::voice::VoiceState,
@@ -1738,11 +1737,22 @@ pub(crate) fn store_upload(
 /// `POST /<token>/api/upload` — multipart file/image upload for the in-chat single-session
 /// server (the daemon has its own session-addressed twin in `serve.rs`). Each stored file is
 /// delivered to the render loop as [`RemoteInput::Attach`] and rides the next prompt.
+fn upload_root(
+    workspace: Option<&Arc<std::sync::RwLock<std::path::PathBuf>>>,
+) -> Option<std::path::PathBuf> {
+    workspace.and_then(|workspace| {
+        workspace
+            .read()
+            .ok()
+            .map(|workspace| workspace.join(".forge").join("uploads"))
+    })
+}
+
 async fn upload_handler(
     State(state): State<Arc<ServerState>>,
     mut multipart: axum::extract::Multipart,
 ) -> Response {
-    let Some(root) = state.upload_root.clone() else {
+    let Some(root) = upload_root(state.upload_root.as_ref()) else {
         return upload_error(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "uploads are unavailable (no working directory)",
@@ -2629,6 +2639,23 @@ mod tests {
     }
 
     #[test]
+    fn upload_root_follows_workspace_rebind() {
+        let base = std::env::temp_dir().join(format!("forge-upload-root-{}", std::process::id()));
+        let a = base.join("a");
+        let b = base.join("b");
+        let workspace = Arc::new(std::sync::RwLock::new(a.clone()));
+        assert_eq!(
+            upload_root(Some(&workspace)),
+            Some(a.join(".forge/uploads"))
+        );
+        *workspace.write().unwrap() = b.clone();
+        assert_eq!(
+            upload_root(Some(&workspace)),
+            Some(b.join(".forge/uploads"))
+        );
+    }
+
+    #[test]
     fn upload_names_are_flattened_to_one_safe_component() {
         // Traversal: only the final component survives, and `..` can't survive as dots.
         assert_eq!(sanitize_upload_name("../../etc/passwd"), "passwd");
@@ -3236,7 +3263,7 @@ mod tests {
         // once the assertions pass. Gated behind --ignored so it never runs in CI.
         let _outcome = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             use futures::StreamExt;
-            let rc = start(Exposure::Local, None, None).expect("start loopback server");
+            let rc = start(Exposure::Local, None, None, None).expect("start loopback server");
             let port = rc.url.addr.port();
             let token = rc.url.token.clone();
 
@@ -3357,7 +3384,8 @@ mod tests {
                     visibility: "llm".into(),
                 }]
             });
-            let rc = start(Exposure::Local, None, Some(provider)).expect("start loopback server");
+            let rc =
+                start(Exposure::Local, None, Some(provider), None).expect("start loopback server");
             let port = rc.url.addr.port();
             let token = rc.url.token.clone();
 
@@ -3622,7 +3650,7 @@ mod tests {
     async fn lan_start_url_is_https_with_fingerprint() {
         // `start(Exposure::Lan)` must return an https:// URL and a populated tls_fingerprint.
         // Requires a Tokio runtime because axum-server's from_tcp_rustls wires into the runtime.
-        let rc = start(Exposure::Lan, None, None).expect("start LAN server");
+        let rc = start(Exposure::Lan, None, None, None).expect("start LAN server");
         assert!(
             rc.url.url.starts_with("https://"),
             "LAN URL must be https://: {}",
@@ -3641,7 +3669,7 @@ mod tests {
     async fn local_start_url_is_http_no_fingerprint() {
         // `start(Exposure::Local)` must stay plain HTTP with no fingerprint.
         // Requires a Tokio runtime because axum::serve wires into the runtime.
-        let rc = start(Exposure::Local, None, None).expect("start loopback server");
+        let rc = start(Exposure::Local, None, None, None).expect("start loopback server");
         assert!(
             rc.url.url.starts_with("http://"),
             "loopback URL must be http://: {}",

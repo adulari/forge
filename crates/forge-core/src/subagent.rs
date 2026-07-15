@@ -278,6 +278,18 @@ pub fn rewrite_args_for_worktree(args: &Value, worktree_root: &Path) -> Value {
         }
     }
 
+    // Rewrite batched read paths too.
+    if let Some(Value::Array(paths)) = out.get_mut("paths") {
+        for path in paths {
+            if let Value::String(path) = path {
+                let pb = Path::new(path);
+                if pb.is_relative() {
+                    *path = worktree_root.join(pb).display().to_string();
+                }
+            }
+        }
+    }
+
     // Rewrite "cwd" field (shell tool); inject worktree_root when absent.
     match out.get("cwd") {
         None => {

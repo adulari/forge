@@ -349,8 +349,10 @@ pub(crate) async fn serve_cmd(
     let store = Arc::new(crate::open_store()?);
     let registry = Arc::new(SessionRegistry::new());
     let default_cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| ".".to_string());
+        .and_then(|cwd| cwd.canonicalize())
+        .context("resolving daemon workspace cwd")?
+        .display()
+        .to_string();
     let base = format!("/{token}");
     // Web Push: best-effort. A missing/broken VAPID key disables push (503 on its routes) but
     // must never take the daemon down with it.
@@ -721,6 +723,22 @@ async fn create_session(
         );
     }
 
+    let cwd = match std::fs::canonicalize(&cwd) {
+        Ok(path) if path.is_dir() => path.display().to_string(),
+        Ok(path) => {
+            return err_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                &format!("cwd is not a directory: {}", path.display()),
+            )
+        }
+        Err(error) => {
+            return err_response(
+                axum::http::StatusCode::BAD_REQUEST,
+                &format!("cwd is unavailable: {error}"),
+            )
+        }
+    };
+
     // Keep the guard alive through driver startup so an early error removes its new worktree.
     // Once live, the worktree intentionally outlives the handle for manual review or merge.
     let mut worktree: Option<String> = None;
@@ -818,12 +836,13 @@ async fn fork_session(
 ) -> Response {
     let store = state.store.clone();
     let source = id.clone();
+    let store_for_fork = store.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let cwd = store
+        let cwd = store_for_fork
             .session_cwd(&source)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "no such session".to_string())?;
-        let fork_id = store
+        let fork_id = store_for_fork
             .fork_session(&source, req.at_seq)
             .map_err(|error| error.to_string())?;
         Ok::<_, String>((fork_id, cwd))
@@ -847,7 +866,10 @@ async fn fork_session(
         worktree: None,
         title: format!("Fork of {}", &id[..id.len().min(8)]),
         mock: state.mock,
-        model: None,
+        model: store
+            .session_models(&id)
+            .ok()
+            .and_then(|models| models.last().cloned()),
         resume: Some(fork_id.clone()),
         temper: None,
         push: state.push.clone(),
@@ -1256,7 +1278,11 @@ async fn merge_session(
         worktree: handle.worktree.clone(),
         title: handle.title.clone(),
         mock: state.mock,
-        model: None,
+        model: state
+            .store
+            .session_models(&id)
+            .ok()
+            .and_then(|models| models.last().cloned()),
         resume: Some(id.clone()),
         temper: None,
         push: state.push.clone(),
