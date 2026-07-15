@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use completion::{CompletionContract, CompletionDecision, CompletionEvidence};
 use forge_config::Config;
 use forge_index::Lattice;
 use forge_mesh::pricing::Pricing;
@@ -19,12 +20,15 @@ use forge_types::{
 };
 
 pub mod assay;
+pub(crate) mod completion;
+pub mod context_pack;
 pub(crate) mod context_pipeline;
 pub mod duel;
 pub mod hooks;
 pub mod llm_router;
 pub mod permission;
 pub mod project_context;
+pub mod readiness;
 pub mod snapshot;
 pub mod subagent;
 pub mod tokens;
@@ -911,6 +915,7 @@ fn tool_batch_signature(calls: &[forge_types::ToolCall]) -> u64 {
 /// Decision of the completion-verification gate for a turn that reported every tracked task Done.
 /// A self-reported "all done" is exactly what produced the phantom release (claimed merged + tagged
 /// while nothing ran), so completion must be PROVEN with a real state check, not asserted.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CompletionGate {
     /// Force another tool-grounded verification turn (the caller pushes the verify nudge + loops).
@@ -936,22 +941,10 @@ enum CompletionGate {
 /// no-op task is accepted when the model explains that no change is needed; other claims with
 /// evidence get one verification chance.
 fn completion_claims_no_change(text: &str) -> bool {
-    let text = text.to_ascii_lowercase();
-    [
-        "no change needed",
-        "no changes needed",
-        "no change is needed",
-        "no changes are needed",
-        "no change required",
-        "no changes required",
-        "make no changes",
-        "no file changes",
-        "already satisfied",
-    ]
-    .iter()
-    .any(|phrase| text.contains(phrase))
+    completion::claims_no_change(text)
 }
 
+#[cfg(test)]
 fn completion_gate(
     verify_attempts: usize,
     max_attempts: usize,
@@ -959,32 +952,19 @@ fn completion_gate(
     no_change_required: bool,
     inspected_this_turn: bool,
 ) -> CompletionGate {
-    // Read-only / reasoned no-op escape: a completion that explicitly explains no change was needed
-    // is accepted immediately, WITHOUT a forced verification re-drive. This is the fix for the
-    // read-only `/goal` loop (a "check X" / "already satisfied" goal must not be nagged to edit
-    // files). It is the ONLY way to skip the verification pass — a bare `!did_real_work` claim does
-    // NOT, so a bridge that merely re-marks the task list Done still gets caught (see below).
-    if no_change_required {
-        return if inspected_this_turn {
-            CompletionGate::AcceptClean
-        } else {
-            CompletionGate::AcceptNoArtifacts
-        };
-    }
-    // Proven anti-spiral gate (unchanged): a self-reported "done" must survive one forced
-    // verification pass. After that pass, a turn that ran a real inspection is accepted cleanly; a
-    // turn with no external artifacts to check is accepted with a calm note; work that produced state
-    // but was never re-checked burns the cap and is flagged UNVERIFIED — never a silent success.
-    if verify_attempts > 0 && (inspected_this_turn || !did_real_work) {
-        if inspected_this_turn {
-            CompletionGate::AcceptClean
-        } else {
-            CompletionGate::AcceptNoArtifacts
-        }
-    } else if verify_attempts < max_attempts {
-        CompletionGate::Reverify
-    } else {
-        CompletionGate::AcceptUnverified
+    match CompletionContract::with_observation_budget(max_attempts).decide(
+        TaskIntent::Mutating,
+        verify_attempts,
+        CompletionEvidence {
+            did_real_work,
+            no_change_required,
+            inspected_this_turn,
+        },
+    ) {
+        CompletionDecision::RequestObservation => CompletionGate::Reverify,
+        CompletionDecision::AcceptClean => CompletionGate::AcceptClean,
+        CompletionDecision::AcceptNoArtifacts => CompletionGate::AcceptNoArtifacts,
+        CompletionDecision::AcceptUnverified => CompletionGate::AcceptUnverified,
     }
 }
 
@@ -993,12 +973,7 @@ fn completion_verification_empty_is_terminal(
     tasks: &[forge_types::TodoItem],
     has_prior_final: bool,
 ) -> bool {
-    verify_attempts > 0
-        && !tasks.is_empty()
-        && tasks
-            .iter()
-            .all(|task| matches!(task.status, forge_types::TodoStatus::Done))
-        && has_prior_final
+    completion::empty_verification_is_terminal(verify_attempts, tasks, has_prior_final)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1020,7 +995,7 @@ impl TaskIntent {
         Self::Mutating
     }
 
-    fn is_observational(self) -> bool {
+    pub(crate) fn is_observational(self) -> bool {
         !matches!(self, Self::Mutating)
     }
 }
@@ -1136,24 +1111,19 @@ fn post_check_decision(
     no_change_required: bool,
     inspected_this_turn: bool,
 ) -> PostCheckDecision {
-    if intent.is_observational() {
-        return if inspected_this_turn {
-            PostCheckDecision::AcceptClean
-        } else {
-            PostCheckDecision::AcceptNoArtifacts
-        };
-    }
-    match completion_gate(
+    match CompletionContract::production().decide(
+        intent,
         verify_attempts,
-        2,
-        did_real_work,
-        no_change_required,
-        inspected_this_turn,
+        CompletionEvidence {
+            did_real_work,
+            no_change_required,
+            inspected_this_turn,
+        },
     ) {
-        CompletionGate::Reverify => PostCheckDecision::RequestObservation,
-        CompletionGate::AcceptClean => PostCheckDecision::AcceptClean,
-        CompletionGate::AcceptNoArtifacts => PostCheckDecision::AcceptNoArtifacts,
-        CompletionGate::AcceptUnverified => PostCheckDecision::AcceptUnverified,
+        CompletionDecision::RequestObservation => PostCheckDecision::RequestObservation,
+        CompletionDecision::AcceptClean => PostCheckDecision::AcceptClean,
+        CompletionDecision::AcceptNoArtifacts => PostCheckDecision::AcceptNoArtifacts,
+        CompletionDecision::AcceptUnverified => PostCheckDecision::AcceptUnverified,
     }
 }
 
@@ -1540,6 +1510,8 @@ pub struct Session {
     /// construction, same rationale as `cached_git_branch`, and passed to the mesh router on every
     /// `route`/`route_hinted` call so it can weight self-hosting infrastructure work correctly.
     project: forge_types::ProjectContext,
+    /// Audit record of system context injected during the latest executed turn.
+    last_context_pack: context_pack::ContextPack,
 }
 
 /// Parse `.git/HEAD` contents into a branch name (`ref: refs/heads/<branch>` → `<branch>`).
@@ -1928,6 +1900,7 @@ impl Session {
             // injected — i.e. a fresh session. A resumed session already has it in the transcript.
             cached_agents_md,
             project,
+            last_context_pack: context_pack::ContextPack::default(),
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
@@ -1956,6 +1929,27 @@ impl Session {
 
     pub fn cached_agents_md(&self) -> Option<&str> {
         self.cached_agents_md.as_deref()
+    }
+
+    /// The ordered context that Forge injected during the most recent turn.
+    pub fn last_context_pack(&self) -> &context_pack::ContextPack {
+        &self.last_context_pack
+    }
+
+    /// Persist a system-context message and add its provenance to the active turn's audit pack.
+    fn inject_context(
+        &mut self,
+        pack: &mut context_pack::ContextPack,
+        source: context_pack::ContextSource,
+        reason: &str,
+        content: &str,
+    ) -> Result<(), CoreError> {
+        let seq = self.next_seq();
+        self.store
+            .add_message(&self.id, seq, Role::System, content, None)?;
+        self.transcript.push(Message::system(content));
+        pack.push(source, reason, content);
+        Ok(())
     }
 
     /// Queue images to attach to the next user turn (vision input). Consumed when that turn's user
@@ -3116,19 +3110,9 @@ impl Session {
     /// subsequent turns send to the model. In-memory only — the full transcript stays in the store
     /// for audit/resume (persisting the compacted view across resume is a follow-up). No-op when
     /// the transcript is already short. Returns `(messages_before, messages_after)`.
-    /// Current subscription quota, enriched with the configured plan slugs and the conservation
-    /// opt-out, so the router can spread complex/standard load off a subscription proactively
-    /// (not just react at the hard limit). Defaults to an empty quota when the store read fails.
-    /// Documented in docs/features/mesh-routing.md.
-    fn live_quota(&self) -> forge_types::SubscriptionQuota {
-        self.store
-            .current_quota()
-            .unwrap_or_default()
-            .with_plans(resolved_subscription_plans_with_store(
-                &self.config,
-                &self.store,
-            ))
-            .with_conserve(self.config.mesh.subscription_conserve)
+    /// One source of truth for the health and quota inputs of every mesh decision.
+    pub fn provider_readiness(&self) -> readiness::ProviderReadiness {
+        readiness::ProviderReadiness::snapshot(&self.config, &self.store)
     }
 
     /// The current budget snapshot (spend vs caps) used for routing decisions.
@@ -3154,12 +3138,13 @@ impl Session {
     pub fn explain_routing(&self, prompt: &str) -> Option<forge_mesh::RoutingExplanation> {
         let catalog = self.catalog.clone()?;
         let router = forge_mesh::HeuristicRouter::new(self.config.clone()).with_catalog(catalog);
-        let health = self.store.current_benched().unwrap_or_default();
+        let readiness = self.provider_readiness();
+        let health = readiness.health;
         let mut exp = router.explain(
             prompt,
             self.budget_snapshot(),
             &health,
-            &self.live_quota(),
+            &readiness.quota,
             self.pinned_effort(),
             &self.project,
         );
@@ -3183,13 +3168,14 @@ impl Session {
     /// `None` when there is no discovered catalog to inspect.
     pub fn routing_inspector(&self) -> Option<RoutingInspector> {
         let catalog = self.catalog.clone()?;
-        let health = self.store.current_benched().unwrap_or_default();
+        let readiness = self.provider_readiness();
+        let health = readiness.health;
         Some(RoutingInspector {
             router: Arc::clone(&self.router),
             selection_router: HeuristicRouter::new(self.config.clone()).with_catalog(catalog),
             budget: self.budget_snapshot(),
             health,
-            quota: self.live_quota(),
+            quota: readiness.quota,
             effort: self.pinned_effort(),
             project: self.project.clone(),
         })
@@ -3415,8 +3401,9 @@ Rules:\n\
         let failover = self.config.mesh.failover;
         let fallbacks: Vec<String> = if failover {
             let budget = self.budget_snapshot();
-            let health = self.store.current_benched().unwrap_or_default();
-            let quota = self.live_quota();
+            let readiness = self.provider_readiness();
+            let health = readiness.health;
+            let quota = readiness.quota;
             let d = self
                 .router
                 .route_hinted(
@@ -3738,8 +3725,9 @@ Rules:\n\
             warn_fraction: self.config.mesh.warn_threshold,
             min_context_tokens: None,
         };
-        let health = self.store.current_benched().unwrap_or_default();
-        let quota = self.live_quota();
+        let readiness = self.provider_readiness();
+        let health = readiness.health;
+        let quota = readiness.quota;
         let decision = self
             .router
             .route_hinted(
@@ -3900,8 +3888,9 @@ prompt text, nothing else.";
         if budget.status() == BudgetStatus::Exhausted {
             return None;
         }
-        let health = self.store.current_benched().unwrap_or_default();
-        let quota = self.live_quota();
+        let readiness = self.provider_readiness();
+        let health = readiness.health;
+        let quota = readiness.quota;
         let provider = self.provider.clone();
         let store = self.store.clone();
         let router = self.router.clone();
@@ -3993,8 +3982,9 @@ prompt text, nothing else.";
         if budget.status() == BudgetStatus::Exhausted {
             return;
         }
-        let health = self.store.current_benched().unwrap_or_default();
-        let quota = self.live_quota();
+        let readiness = self.provider_readiness();
+        let health = readiness.health;
+        let quota = readiness.quota;
         let decision = self
             .router
             .route_hinted(
@@ -4080,8 +4070,9 @@ prompt text, nothing else.";
         if budget.status() == BudgetStatus::Exhausted {
             return;
         }
-        let health = self.store.current_benched().unwrap_or_default();
-        let quota = self.live_quota();
+        let readiness = self.provider_readiness();
+        let health = readiness.health;
+        let quota = readiness.quota;
         let decision = self
             .router
             .route_hinted(
@@ -4175,8 +4166,9 @@ prompt text, nothing else.";
         if budget.status() == BudgetStatus::Exhausted {
             return;
         }
-        let health = self.store.current_benched().unwrap_or_default();
-        let quota = self.live_quota();
+        let readiness = self.provider_readiness();
+        let health = readiness.health;
+        let quota = readiness.quota;
         let decision = self
             .router
             .route_hinted(
@@ -5733,6 +5725,8 @@ prompt text, nothing else.";
         guidance: &[String],
         tier_override: Option<TaskTier>,
     ) -> Result<LoopOutcome, CoreError> {
+        self.last_context_pack = context_pack::ContextPack::default();
+        let mut context_pack = context_pack::ContextPack::default();
         // 1. Route the task (deterministic, no model call) and record why. The budget is
         // aggregated across ALL sessions for the current local day + week + month (FR-5), not one
         // session's running total. One combined query instead of three separate ones.
@@ -5790,10 +5784,11 @@ prompt text, nothing else.";
 
         // Route around any currently-benched models (failover): the snapshot excludes models
         // whose cooldown hasn't elapsed, even across restarts (docs/features/mesh-routing.md).
-        let health = self.store.current_benched().unwrap_or_default();
+        let readiness = self.provider_readiness();
+        let health = readiness.health;
         // Quota-aware routing (L3): demote/skip a subscription that the bridge reported is near or
         // over its plan limit (recorded after earlier turns from the CLI's rate-limit events).
-        let quota = self.live_quota();
+        let quota = readiness.quota;
         // A per-turn `tier_override` (command/skill `tier:` hint) wins; otherwise the in-session
         // tier pin (set by the `tier_up`/`tier_down` keybinds) biases routing.
         let effective_tier = tier_override.or(self.pinned_tier);
@@ -5853,26 +5848,24 @@ prompt text, nothing else.";
         // is in context for this turn and rehydrates verbatim on resume (the skill file is not
         // re-read).
         for g in guidance {
-            let gseq = self.next_seq();
-            self.store
-                .add_message(&self.id, gseq, Role::System, g, None)?;
-            self.transcript.push(Message::system(g));
+            self.inject_context(
+                &mut context_pack,
+                context_pack::ContextSource::CommandGuidance,
+                "invoked command or skill guidance",
+                g,
+            )?;
         }
 
         // White-hot effort (docs/features/whitehot-effort.md): xhigh reasoning PLUS a standing
         // orchestration instruction — injected once per pin (set_effort re-arms on change) so
         // repeated turns don't accumulate identical blocks.
         if self.pinned_effort == Some(EffortLevel::WhiteHot) && !self.whitehot_guidance_injected {
-            let gseq = self.next_seq();
-            self.store.add_message(
-                &self.id,
-                gseq,
-                Role::System,
+            self.inject_context(
+                &mut context_pack,
+                context_pack::ContextSource::Workflow,
+                "whitehot effort workflow",
                 workflow::WHITEHOT_GUIDANCE,
-                None,
             )?;
-            self.transcript
-                .push(Message::system(workflow::WHITEHOT_GUIDANCE));
             self.whitehot_guidance_injected = true;
         }
 
@@ -5887,10 +5880,12 @@ prompt text, nothing else.";
         if !self.project_prompt_injected {
             self.project_prompt_injected = true;
             if let Some(body) = self.cached_agents_md.take() {
-                let pseq = self.next_seq();
-                self.store
-                    .add_message(&self.id, pseq, Role::System, &body, None)?;
-                self.transcript.push(Message::system(&body));
+                self.inject_context(
+                    &mut context_pack,
+                    context_pack::ContextSource::ProjectInstructions,
+                    "project AGENTS.md",
+                    &body,
+                )?;
             }
 
             // Auto-memory RECALL: surface the few durable facts from past sessions in this project
@@ -5912,10 +5907,12 @@ prompt text, nothing else.";
                         for m in &mems {
                             block.push_str(&format!("- [{}] {}\n", m.kind, m.text));
                         }
-                        let mseq = self.next_seq();
-                        self.store
-                            .add_message(&self.id, mseq, Role::System, &block, None)?;
-                        self.transcript.push(Message::system(&block));
+                        self.inject_context(
+                            &mut context_pack,
+                            context_pack::ContextSource::Memory,
+                            "relevant durable project memories",
+                            &block,
+                        )?;
                         // Emit a one-line presenter note so the user sees recall happened.
                         self.presenter.emit(PresenterEvent::Warning(format!(
                             "💭 recalled {} memories from past sessions",
@@ -5929,10 +5926,12 @@ prompt text, nothing else.";
             // all available tools on every turn without requiring the user to /orchestrate.
             if self.config.mesh.auto_orchestrate {
                 let guidance = forge_skills::orchestrate_system_guidance();
-                let oseq = self.next_seq();
-                self.store
-                    .add_message(&self.id, oseq, Role::System, guidance, None)?;
-                self.transcript.push(Message::system(guidance));
+                self.inject_context(
+                    &mut context_pack,
+                    context_pack::ContextSource::Orchestration,
+                    "automatic orchestration guidance",
+                    guidance,
+                )?;
             }
 
             // When git co-authoring is on, prime the agent (once) to attribute its work to Forge.
@@ -5945,10 +5944,12 @@ you create commits or pull requests, attribute them to Forge:\n\
 - Commits: a `Co-Authored-By: Forge <forge@adulari.dev>` trailer is added automatically by a git \
 hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
 - Pull requests: include a line in the PR body crediting Forge, e.g. `🔨 Created with Forge`.";
-                let aseq = self.next_seq();
-                self.store
-                    .add_message(&self.id, aseq, Role::System, GIT_ATTRIBUTION, None)?;
-                self.transcript.push(Message::system(GIT_ATTRIBUTION));
+                self.inject_context(
+                    &mut context_pack,
+                    context_pack::ContextSource::Attribution,
+                    "git co-author attribution enabled",
+                    GIT_ATTRIBUTION,
+                )?;
             }
         }
 
@@ -6054,16 +6055,19 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             let symbols = ctx.nodes.len();
             let tokens = ctx.est_tokens;
             let body = ctx.render();
-            let iseq = self.next_seq();
-            self.store
-                .add_message(&self.id, iseq, Role::System, &body, None)?;
-            self.transcript.push(Message::system(&body));
+            self.inject_context(
+                &mut context_pack,
+                context_pack::ContextSource::Lattice,
+                "relevant code retrieval",
+                &body,
+            )?;
             self.presenter.emit(PresenterEvent::ContextInjected {
                 symbols,
                 files,
                 tokens,
             });
         }
+        self.last_context_pack = context_pack;
 
         // ── Architect plan phase (architect_mode) ────────────────────────────────────────────────
         // When enabled: call the strong planner model with NO tools advertised; append its plan to
@@ -6647,7 +6651,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
 
         // Build tier model chains from the catalog (ranked + health-filtered) when available,
         // falling back to the configured model list — same pattern as the CLI's /assay path.
-        let benched = self.store.current_benched().unwrap_or_default();
+        let benched = self.provider_readiness().health;
         let models = {
             let chain = |tier: forge_types::TaskTier| -> Vec<String> {
                 // Catalog path: ranked candidates, drop currently-benched ones first.

@@ -460,7 +460,8 @@ pub(crate) async fn models(probe: bool, probe_all: bool, clear: bool) -> Result<
         let targets: Vec<String> = if probe_all {
             cat.models().to_vec()
         } else {
-            let benched = store.current_benched().unwrap_or_default();
+            let benched =
+                forge_core::readiness::ProviderReadiness::snapshot(&config, &store).health;
             cat.models()
                 .iter()
                 .filter(|m| benched.is_benched(m))
@@ -483,7 +484,7 @@ pub(crate) async fn models(probe: bool, probe_all: bool, clear: bool) -> Result<
     }
 
     let pricing = forge_mesh::pricing::Pricing::from_config(&config);
-    let benched = store.current_benched().unwrap_or_default();
+    let benched = forge_core::readiness::ProviderReadiness::snapshot(&config, &store).health;
     let s = cat.stats(&pricing);
     println!(
         "{} models · {} frontier · {} free · {} subscription · {} paid · {} providers\n",
@@ -616,14 +617,9 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
             seed_store_quota(&store, "claude-cli", &window, Some(frac * 100.0), None);
         }
     }
-    let quota = store
-        .current_quota()
-        .unwrap_or_default()
-        .with_plans(forge_core::resolved_subscription_plans_with_store(
-            &config, &store,
-        ))
-        .with_conserve(config.mesh.subscription_conserve);
-    let health = store.current_benched().unwrap_or_default();
+    let readiness = forge_core::readiness::ProviderReadiness::snapshot(&config, &store);
+    let quota = readiness.quota;
+    let health = readiness.health;
     let budget = forge_mesh::BudgetState {
         spent_today_usd: store.spend_today_usd().unwrap_or(0.0),
         daily_cap_usd: config.mesh.daily_budget_usd,
@@ -637,7 +633,11 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
     let router = HeuristicRouter::new(config.clone()).with_catalog(cat.clone());
 
     if prompt.trim().is_empty() {
-        mesh_overview(&cat, &config, &quota);
+        if json {
+            println!("{}", mesh_overview_json(&cat, &config, &quota));
+        } else {
+            mesh_overview(&cat, &config, &quota);
+        }
         return Ok(());
     }
     let project = std::env::current_dir()
@@ -819,6 +819,71 @@ pub(crate) fn mesh_overview(
         }
     }
     println!("\ntip: `forge mesh \"<your task>\"` explains exactly how one prompt routes.");
+}
+
+/// JSON form of the no-prompt mesh overview, matching the documented `--json` behavior.
+pub(crate) fn mesh_overview_json(
+    cat: &forge_mesh::ModelCatalog,
+    config: &forge_config::Config,
+    quota: &forge_types::SubscriptionQuota,
+) -> String {
+    let pricing = forge_mesh::pricing::Pricing::from_config(config);
+    let mut providers: Vec<&str> = cat
+        .models()
+        .iter()
+        .filter(|model| forge_mesh::catalog::is_subscription(model))
+        .map(|model| forge_mesh::catalog::provider_of(model))
+        .collect();
+    providers.sort_unstable();
+    providers.dedup();
+
+    let subscriptions: Vec<_> = providers
+        .into_iter()
+        .map(|provider| {
+            let fraction = quota.fraction_for(provider);
+            let plan = quota.plan_for(provider);
+            serde_json::json!({
+                "provider": provider,
+                "fraction": fraction,
+                "plan": plan,
+                "status": format!("{:?}", quota.status_for(provider)),
+                "complex_spread_probability": forge_mesh::ModelCatalog::spread_probability(
+                    TaskTier::Complex, fraction, plan, false,
+                ),
+                "standard_spread_probability": forge_mesh::ModelCatalog::spread_probability(
+                    TaskTier::Standard, fraction, plan, false,
+                ),
+            })
+        })
+        .collect();
+    let rankings: serde_json::Map<String, serde_json::Value> =
+        [TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex]
+            .into_iter()
+            .map(|tier| {
+                let (_, rows) = cat.ranked_rows(tier, &pricing, false, 0, quota, None);
+                let rows: Vec<_> = rows
+                    .into_iter()
+                    .take(5)
+                    .map(|row| {
+                        serde_json::json!({
+                            "model": row.model,
+                            "provider": row.provider,
+                            "final_score": row.final_score,
+                            "cost_class": row.cost_class,
+                            "subscription": row.subscription,
+                            "frontier": row.frontier,
+                        })
+                    })
+                    .collect();
+                (tier.as_str().to_string(), serde_json::Value::Array(rows))
+            })
+            .collect();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "subscription_conservation": config.mesh.subscription_conserve,
+        "subscriptions": subscriptions,
+        "rankings": rankings,
+    }))
+    .unwrap_or_else(|_| "{}".to_string())
 }
 
 pub(crate) fn cost_tag(class: u8) -> &'static str {

@@ -188,7 +188,7 @@ pub(crate) async fn assay_run_cmd(
             "assay: no models available — set a provider key (`forge auth <provider>`) or run ollama"
         );
     }
-    let benched = store.current_benched().unwrap_or_default();
+    let benched = forge_core::readiness::ProviderReadiness::snapshot(&config, &store).health;
     let chain = |tier| -> Vec<String> {
         if let Some(ref m) = model_override {
             return vec![m.clone()];
@@ -319,7 +319,7 @@ pub(crate) async fn spawn_assay(
         return Ok(None);
     }
     // Route critics around rate-limited / benched models, like the agent loop does.
-    let benched = store.current_benched().unwrap_or_default();
+    let benched = forge_core::readiness::ProviderReadiness::snapshot(&config, &store).health;
     // Build a CHAIN per tier (ranked, health-filtered): the crew tries them in order and fails
     // over when one rate-limits, instead of giving up on a single dead model.
     let chain = |tier| {
