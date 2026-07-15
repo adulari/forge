@@ -36,7 +36,8 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 chrono.workspace = true
-rmcp = { version = "2.0.0", features = [
+rmcp = { workspace = true, features = [
+    "base64",
     "server",
     "macros",
     "transport-io",
