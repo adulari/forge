@@ -38,7 +38,7 @@ forge-workflow = { package = "forge-agent-workflow", path = "crates/forge-workfl
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "fs", "process", "io-util", "time", "net", "signal"] }
 async-trait = "0.1"
 # MCP protocol SDK; exact pin required for SSE stream compatibility.
-rmcp = { version = "=2.1.0", default-features = false }
+rmcp = { version = "=2.2.0", default-features = false }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
