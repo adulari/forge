@@ -506,17 +506,21 @@ pub(crate) enum Command {
     },
     /// Explain how the mesh routes — classification, scored candidates, quota pressure, the
     /// conservation roll, and the final pick. With a PROMPT, explains that prompt; without one,
-    /// shows the per-tier picks + subscription quota overview. `--json` for machine output.
+    /// shows the per-tier picks + subscription quota overview. `--smoke` verifies a viable pick
+    /// for every task tier without sending a model request. `--json` for machine output.
     ///
     /// See also: `forge models` (the discovered catalog + per-tier picks) and
     /// `forge benchmarks` (the measured quality scores the routing is based on).
     Mesh {
         /// The task prompt to explain (quote it). Omit for the per-tier / quota overview.
-        #[arg(trailing_var_arg = true)]
         prompt: Vec<String>,
         /// Emit the explanation as JSON instead of the formatted view.
         #[arg(long)]
         json: bool,
+        /// Verify the actual router has a viable pick for trivial, standard, and complex work.
+        /// This is selection-only: it never sends a prompt to a model.
+        #[arg(long)]
+        smoke: bool,
     },
     /// Show measured model benchmark scores (Artificial Analysis, ADR-0011) and how well they
     /// cover the discovered catalog. `--refresh` forces a re-fetch (needs ARTIFICIALANALYSIS_API_KEY

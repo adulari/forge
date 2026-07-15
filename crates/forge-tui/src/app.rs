@@ -4334,13 +4334,17 @@ fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
     let edge_len = app.streaming_edge_len(area.width);
     let total = committed + edge_len;
     if total == 0 && !app.busy {
+        // On a normal terminal, make the two operational escape hatches explicit. On compact
+        // terminals the first task suggestions win; the composer still exposes the same commands.
+        let show_readiness = area.height >= 20;
+        let starter_height = if show_readiness { 9 } else { 7 };
         let empty = Layout::vertical([
             Constraint::Percentage(28),
-            Constraint::Length(7),
+            Constraint::Length(starter_height),
             Constraint::Min(0),
         ])
         .split(area);
-        let lines = vec![
+        let mut lines = vec![
             TextLine::from(Span::styled("Forge", Style::default().fg(ORANGE).bold())),
             TextLine::from(Span::styled(TAGLINE, Style::default().fg(TEXT))),
             TextLine::default(),
@@ -4361,6 +4365,16 @@ fn render_transcript_area(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(DIM),
             )),
         ];
+        if show_readiness {
+            lines.push(TextLine::from(Span::styled(
+                "Check readiness with forge doctor",
+                Style::default().fg(DIM),
+            )));
+            lines.push(TextLine::from(Span::styled(
+                "Preview routing with /mesh",
+                Style::default().fg(DIM),
+            )));
+        }
         frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), empty[1]);
         app.transcript_geom.set(None);
         return;
@@ -8130,6 +8144,14 @@ mod tests {
         assert!(
             idle.contains("Ctrl+K for all actions"),
             "command hint shown: {idle}"
+        );
+        assert!(
+            idle.contains("Check readiness with forge doctor"),
+            "setup recovery action shown: {idle}"
+        );
+        assert!(
+            idle.contains("Preview routing with /mesh"),
+            "routing discovery action shown: {idle}"
         );
 
         app.command_center.open();

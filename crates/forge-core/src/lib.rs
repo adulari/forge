@@ -5791,6 +5791,12 @@ prompt text, nothing else.";
         guidance: &[String],
         tier_override: Option<TaskTier>,
     ) -> Result<LoopOutcome, CoreError> {
+        // A TUI/serve driver can remain alive while retention prunes its previously empty parent
+        // row. Every subsequent persistence write references this id, so restore that minimal
+        // parent before routing, command guidance, or the prompt can touch the transcript.
+        let mode = format!("{:?}", self.mode);
+        self.store
+            .ensure_session(&self.id, &self.workspace.display(), &mode)?;
         self.last_context_pack = context_pack::ContextPack::default();
         let mut context_pack = context_pack::ContextPack::default();
         // 1. Route the task (deterministic, no model call) and record why. The budget is
@@ -15576,6 +15582,40 @@ mod tests {
         assert!(msgs[0].content.contains("METHODOLOGY"));
         assert_eq!(msgs[1].role, Role::User);
         assert_eq!(msgs[1].content, "do the thing");
+    }
+
+    #[tokio::test]
+    async fn run_turn_recovers_when_its_empty_parent_session_was_pruned() {
+        // A long-lived TUI driver can retain a freshly-created session id while another process
+        // performs retention. The next turn must restore that parent before it persists command
+        // guidance or the user message; otherwise SQLite reports a raw foreign-key failure.
+        let provider = Arc::new(FlakyProvider {
+            bad: std::collections::HashSet::new(),
+            err: rate_limited,
+        });
+        let router = Arc::new(FixedRouter {
+            model: "good::model".into(),
+            fallbacks: vec![],
+        });
+        let (store, mut session) = fixed_session(provider, router);
+        let session_id = session.id().to_string();
+
+        assert_eq!(store.prune_empty(-1, 1).unwrap(), 1);
+        assert!(!store.session_exists(&session_id).unwrap());
+
+        assert_eq!(
+            session
+                .run_turn_with(
+                    "do the thing",
+                    &["METHODOLOGY: be rigorous".to_string()],
+                    Some(TaskTier::Complex),
+                )
+                .await
+                .unwrap()
+                .text,
+            "recovered"
+        );
+        assert!(store.session_exists(&session_id).unwrap());
     }
 
     #[tokio::test]
