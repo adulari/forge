@@ -94,6 +94,10 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
+        env:
+          FORGE_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
+          FORGE_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
+          FORGE_DISTRIBUTION: github-release
         run: cargo build --release --locked --bin forge --target ${{ matrix.target }}
 
       - name: Upload raw binary

@@ -42,20 +42,21 @@ set up for.
 ## 2. Privacy manifest + App Privacy "nutrition label"
 
 Apple requires both a bundled `PrivacyInfo.xcprivacy` manifest **and** matching answers in App
-Store Connect's App Privacy questionnaire. `PrivacyInfo` content is owned by another worker in this
-project — coordinate with them, don't edit it here. For reference, what this app actually does:
+Store Connect's App Privacy questionnaire. The checked-in manifest and `mobile/app.config.ts` are
+the synchronized source of truth. What this app actually does:
 
-- **Data collected:** the daemon pairing token (`{scheme}://{host}:{port}/{token}`), stored in
+- **Data stored locally:** the daemon pairing token (`{scheme}://{host}:{port}/{token}`), stored in
   `expo-secure-store` on-device. It is a bearer credential for the user's *own* self-hosted `forge
-  serve` daemon — it is never transmitted to Apple, Expo, or any third party, and nothing here
-  calls home to an analytics/telemetry backend.
-- **Data NOT collected:** no tracking, no advertising identifiers, no analytics SDK, no
-  third-party data sharing. Session transcripts/tasks/diffs are fetched live from the user's own
+  serve` daemon — it is never transmitted to Apple, Expo, or any third party.
+- **Anonymous analytics:** fixed installation/activity counters go to PostHog EU. They contain no
+  stable identifier, content, or location, are not linked to a user, are not used for tracking,
+  and can be disabled under Settings → Privacy. There is no analytics SDK or advertising ID.
+- **Data NOT collected:** no tracking or third-party data sharing. Session transcripts/tasks/diffs are fetched live from the user's own
   daemon over the connection they configured and are not persisted by Apple/Expo infrastructure
   beyond the on-device react-query cache.
-- [ ] In App Store Connect → App Privacy, answer accordingly: **no tracking**; the only "data
-      linked to you" category is a credential/token used solely for app functionality (not linked
-      to identity, not used for tracking).
+- [ ] In App Store Connect → App Privacy, answer **no tracking** and declare **Product Interaction
+      → Analytics**, not linked to identity. The pairing credential remains on-device and is used
+      solely for app functionality.
 - [ ] Confirm `PrivacyInfo.xcprivacy` (wherever the owning worker lands it) declares required
       reason API usage matching what's actually called — camera (QR scan), photo library
       (attachments), and secure-store/keychain access (token storage) are the ones this app

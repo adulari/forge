@@ -39,6 +39,10 @@ import {
 } from "../../lib/push";
 import { ApiError } from "../../lib/api";
 import { haptics, initHaptics, isHapticsEnabled, setHapticsEnabled } from "../../lib/haptics";
+import {
+  isAnonymousTelemetryEnabled,
+  setAnonymousTelemetryEnabled,
+} from "../../lib/anonymousTelemetry";
 import { useServerFleets } from "../../lib/queries";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
 import { checkForDesktopUpdate, type DesktopUpdate } from "../../lib/updater";
@@ -96,6 +100,8 @@ export default function SettingsScreen() {
   const [appLock, setAppLock] = useState(false);
   const [appLockLoaded, setAppLockLoaded] = useState(false);
   const [hapticsEnabled, setHapticsEnabledState] = useState(isHapticsEnabled);
+  const [anonymousTelemetry, setAnonymousTelemetry] = useState(true);
+  const [anonymousTelemetryLoaded, setAnonymousTelemetryLoaded] = useState(false);
   const [pendingRemove, setPendingRemove] = useState<StoredServer | null>(null);
   const [health, setHealth] = useState<"idle" | "checking" | "ok" | "bad-token" | "unreachable" | "server-error">("idle");
 
@@ -108,6 +114,19 @@ export default function SettingsScreen() {
   const [notifyBusy, setNotifyBusy] = useState(false);
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdate | null>(null);
   const [updateBusy, setUpdateBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void isAnonymousTelemetryEnabled().then((enabled) => {
+      if (!cancelled) {
+        setAnonymousTelemetry(enabled);
+        setAnonymousTelemetryLoaded(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -189,6 +208,15 @@ export default function SettingsScreen() {
     setHapticsEnabledState(value);
     setHapticsEnabled(value);
     if (value) haptics.sendPrompt();
+  };
+
+  const onAnonymousTelemetryChange = (value: boolean) => {
+    const previous = anonymousTelemetry;
+    setAnonymousTelemetry(value);
+    void setAnonymousTelemetryEnabled(value).catch(() => {
+      setAnonymousTelemetry(previous);
+      toast.show("couldn't save anonymous statistics preference.", { tone: "danger" });
+    });
   };
 
   const onPushChange = useCallback(
@@ -384,6 +412,26 @@ export default function SettingsScreen() {
             trailing={
               appLockLoaded ? (
                 <Switch value={appLock} onValueChange={onAppLockChange} accessibilityLabel="Require Face ID" />
+              ) : undefined
+            }
+          />
+        </Card>
+      </View>
+
+      <View>
+        <SectionHeader>Privacy</SectionHeader>
+        <Card padded={false}>
+          <ListRow
+            title="Anonymous usage statistics"
+            subtitle="Share install and activity counts. Never sends code, prompts, paths, accounts, or a device ID."
+            showSeparator={false}
+            trailing={
+              anonymousTelemetryLoaded ? (
+                <Switch
+                  value={anonymousTelemetry}
+                  onValueChange={onAnonymousTelemetryChange}
+                  accessibilityLabel="Anonymous usage statistics"
+                />
               ) : undefined
             }
           />

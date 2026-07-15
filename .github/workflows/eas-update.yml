@@ -97,3 +97,5 @@ jobs:
             --non-interactive
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EXPO_PUBLIC_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
+          EXPO_PUBLIC_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}

@@ -108,6 +108,10 @@ pub struct Config {
     /// Startup update check (GitHub releases). On by default; throttled to once a day.
     #[serde(default)]
     pub update: UpdateConfig,
+    /// Anonymous product-count telemetry. Enabled by default; no stable identifier or user
+    /// content is ever sent. Disable here, with `FORGE_TELEMETRY=0`, or with `DO_NOT_TRACK=1`.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
     /// When true, Forge starts a sub-Forge session as an MCP server so the agent can use
     /// forge_chat / forge_assay as native tools (self-driving mode). Toggle with
     /// `forge self enable` / `forge self disable`. Off by default.
@@ -868,6 +872,28 @@ pub struct UpdateConfig {
     /// Throttled to once per day; the env var `FORGE_NO_UPDATE_CHECK=1` also disables it.
     #[serde(default = "default_update_check")]
     pub check: bool,
+}
+
+/// `[telemetry]` config block. Forge reports only fixed, anonymous counters; see
+/// `docs/telemetry.md` for the complete wire contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// Send anonymous install and activity counters. This defaults on so aggregate adoption
+    /// numbers are representative; users can opt out without losing any Forge functionality.
+    #[serde(default = "default_telemetry_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_telemetry_enabled(),
+        }
+    }
+}
+
+fn default_telemetry_enabled() -> bool {
+    true
 }
 
 impl Default for UpdateConfig {
@@ -2147,6 +2173,7 @@ impl Default for Config {
             tui: TuiConfig::default(),
             local: LocalConfig::default(),
             update: UpdateConfig::default(),
+            telemetry: TelemetryConfig::default(),
             self_mcp: false,
             statusline: StatuslineConfig::default(),
             keybinds: KeybindsConfig::default(),
@@ -4316,6 +4343,16 @@ enabled = false
         .unwrap();
         assert!(!c.suggest.enabled);
         assert!(Config::default().suggest.enabled, "default is on");
+    }
+
+    #[test]
+    fn config_accepts_anonymous_telemetry_opt_out() {
+        let config: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string("[telemetry]\nenabled = false"))
+            .extract()
+            .unwrap();
+        assert!(!config.telemetry.enabled);
+        assert!(Config::default().telemetry.enabled, "default is on");
     }
 
     #[test]

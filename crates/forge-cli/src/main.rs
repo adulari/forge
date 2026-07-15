@@ -69,6 +69,7 @@ mod push;
 mod remote;
 mod replay;
 mod serve;
+mod telemetry;
 mod update;
 mod update_check;
 mod voice;
@@ -138,7 +139,16 @@ async fn main() {
     init_tracing();
 
     let cli = Cli::parse();
-    if let Err(e) = cli::dispatch::dispatch(cli.command).await {
+    let telemetry_run = telemetry::start(&cli.command);
+    if telemetry_run.show_notice() && std::io::stdout().is_terminal() {
+        println!(
+            "note: Forge sends anonymous usage counts (never code, prompts, paths, or device IDs).\n\
+             Disable with `[telemetry] enabled = false` or `DO_NOT_TRACK=1`."
+        );
+    }
+    let result = cli::dispatch::dispatch(cli.command).await;
+    telemetry::finish(telemetry_run, result.is_ok());
+    if let Err(e) = result {
         print_top_level_error(&e);
         std::process::exit(1);
     }

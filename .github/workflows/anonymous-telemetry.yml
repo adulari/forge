@@ -1,0 +1,22 @@
+name: anonymous distribution telemetry
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  downloads:
+    if: ${{ vars.POSTHOG_PROJECT_KEY != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Send aggregate public download counts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          POSTHOG_PROJECT_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
+          POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
+        run: scripts/collect-distribution-metrics.sh

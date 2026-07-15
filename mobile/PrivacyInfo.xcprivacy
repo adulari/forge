@@ -11,8 +11,9 @@
 
   Data use: the app stores a pairing token (daemon URL/token) locally via expo-secure-store
   (Keychain) and persists a react-query cache via AsyncStorage. It talks only to the
-  self-hosted Forge daemon the user pairs with — no analytics, no ad networks, no
-  third-party data collection or tracking.
+  self-hosted Forge daemon the user pairs with. Forge also sends fixed anonymous product
+  counters to PostHog EU; they contain no stable identifier, content, or location and are
+  not linked to a person or used for tracking.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -22,7 +23,20 @@
 	<key>NSPrivacyTrackingDomains</key>
 	<array/>
 	<key>NSPrivacyCollectedDataTypes</key>
-	<array/>
+	<array>
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeProductInteraction</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+			</array>
+		</dict>
+	</array>
 	<key>NSPrivacyAccessedAPITypes</key>
 	<array>
 		<dict>
