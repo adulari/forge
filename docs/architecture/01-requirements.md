@@ -99,8 +99,8 @@ Approximate user count at launch: 1 (author) → early OSS adopters. External, o
 | Performance (streaming) | Render model tokens to TUI with < 50 ms added latency | Responsive feel during generation |
 | Resource footprint | Idle RSS in low tens of MB; single static binary | "No runtime bloat" promise |
 | Portability | One codebase builds + passes tests on Linux, macOS, Windows | Stated platform requirement |
-| Security | No plaintext secrets; tool side-effects gated by permission policy; no telemetry without opt-in | Handles user code, shell access, and API keys |
-| Privacy | Local-first; nothing leaves the machine except calls to the user's chosen providers | Trust; code is sensitive |
+| Security | No plaintext secrets; tool side-effects gated by permission policy; analytics schema cannot accept user content or stable identifiers | Handles user code, shell access, and API keys |
+| Privacy | Local-first user data; default-on anonymous product counters are disclosed and instantly opt-out | Trust; code is sensitive |
 | Cost-correctness | Cost numbers accurate to provider pricing; budget cap never silently exceeded | The product's core promise is cost control |
 | Reliability | A provider/tool failure degrades gracefully (retry/fallback tier), never corrupts session state | Long agent loops must be robust |
 | Maintainability | Modular boundaries (provider, router, tools, TUI, persistence) swappable in isolation; ≥ baseline test coverage on core logic | Open source; many planned subsystems |
@@ -134,7 +134,8 @@ Approximate user count at launch: 1 (author) → early OSS adopters. External, o
   cheap-LLM classifier is a pluggable, opt-in enhancement (not on by default).
 - **A-3:** "Beautiful TUI" is `ratatui`-based and is the default interactive surface, but
   a headless/pipe mode exists for scripting and CI.
-- **A-4:** Local-first only for v0.1 — no account, no cloud sync, no telemetry.
+- **A-4:** Local-first user data — no account or cloud sync. Forge sends fixed anonymous product
+  counters by default with no stable identifier or content; users can disable them globally.
 - **A-5:** CONFIRMED — tool safety is governed by switchable **permission modes**
   (`default`/ask, `accept-edits`, `bypass`, `plan`/read-only) plus per-tool/project
   allow-ask-deny rules. Default mode is safe (`default`/ask).

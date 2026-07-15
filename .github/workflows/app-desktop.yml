@@ -96,6 +96,8 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          EXPO_PUBLIC_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
+          EXPO_PUBLIC_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
         run: |
           if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo 'desktop updater signing enabled'; else echo 'LOUD: TAURI signing secrets unset; building unsigned desktop bundles'; fi
           if [ "${{ matrix.name }}" = macos-x86_64 ]; then npm run tauri:build -- --target x86_64-apple-darwin; else npm run tauri:build; fi

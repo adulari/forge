@@ -68,6 +68,7 @@
       "additionalProperties": true
     },
     "update": { "$ref": "#/$defs/UpdateConfig" },
+    "telemetry": { "$ref": "#/$defs/TelemetryConfig" },
     "statusline": {
       "type": "object",
       "description": "Customizable statusline layout (left / center / right widget segments).",
@@ -203,6 +204,18 @@
       "additionalProperties": true,
       "properties": {
         "enabled": { "type": "boolean", "default": true }
+      }
+    },
+    "TelemetryConfig": {
+      "type": "object",
+      "description": "Anonymous, content-free product counters. See docs/telemetry.md for the complete event schema.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Send anonymous installation and activity counters without a stable identifier."
+        }
       }
     }
   }

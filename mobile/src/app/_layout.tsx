@@ -20,6 +20,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { FleetWatcher } from "../components/fleet/FleetWatcher";
 import { AppLock } from "../components/AppLock";
+import { AnonymousTelemetry } from "../components/AnonymousTelemetry";
 import { DesktopWindowChrome, DESKTOP_WINDOW_CHROME_HEIGHT } from "../components/DesktopWindowChrome";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Screen } from "../components/ds/Screen";
@@ -141,6 +142,7 @@ export default function RootLayout() {
             <AuthProvider>
               <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
                 <ToastHost>
+                  <AnonymousTelemetry />
                   <FleetWatcher />
                   {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
                       `usePalette().open()` affordance (e.g. a header IconButton) on native. */}

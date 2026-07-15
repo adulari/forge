@@ -36,8 +36,9 @@ ADRs for sources/versions).
 One actor: the **developer**, bringing their own API keys (BYOK). Forge runs entirely on
 their machine. The only outbound traffic is to the model providers the user configures
 (Anthropic, OpenAI over HTTPS; Ollama on localhost). Forge also touches the **local
-filesystem/shell** (via gated tools) and the **OS keyring** (for secret storage). There
-is no Forge cloud, account, or telemetry in v0.1.
+filesystem/shell** (via gated tools) and the **OS keyring** (for secret storage). There is no Forge
+cloud or account. Release builds send a closed set of anonymous adoption counters to PostHog EU;
+the counter path has no access to prompts, repositories, sessions, or a stable installation ID.
 
 ## 3. Containers / crates (C4 level 2)
 
@@ -113,7 +114,7 @@ the **walking skeleton** target for Phase 4.
 | Performance / startup (<100 ms) | Native Rust, single binary, no runtime; lazy-init subsystems; bundled SQLite (no lib lookup) |
 | Streaming responsiveness | Tokio `select!` loop; provider stream events pushed straight to presenter |
 | Footprint / portability | One static binary (bundled SQLite, crossterm); 3-OS CI matrix; no system deps |
-| Security | Single permission broker gates all side effects (ADR-0008); secrets via env+keyring, never in config/logs (ADR-0007); BYOK, no telemetry |
+| Security | Single permission broker gates all side effects (ADR-0008); secrets via env+keyring, never in config/logs (ADR-0007); BYOK; anonymous telemetry has a closed content-free schema |
 | Cost-correctness | `usage` recorded per call from provider token counts; bundled+overridable pricing tables; budget checked inside the router before each call (ADR-0006) |
 | Reliability | Graceful provider/tool failure → retry/fallback tier; WAL SQLite; session state persisted per turn so a crash resumes |
 | Maintainability / extensibility | Trait-fronted crates, one-way deps, no cycles; add provider/tool/router/surface = new impl behind a trait |

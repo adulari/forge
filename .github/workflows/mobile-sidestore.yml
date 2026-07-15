@@ -31,6 +31,8 @@ concurrency:
 env:
   BUNDLE_ID: dev.adulari.forge
   DEVELOPER_NAME: adulari
+  EXPO_PUBLIC_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
+  EXPO_PUBLIC_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
   # Xcode scheme name that `npx expo prebuild -p ios` generates from app.config.ts `name: "Forge"`.
   # TODO: verify against ios/Forge.xcodeproj/xcshareddata/xcschemes/ after a local prebuild if the
   # xcodebuild step below fails to find the scheme.
