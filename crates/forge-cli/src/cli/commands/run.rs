@@ -343,6 +343,8 @@ pub(crate) async fn build_session_with_self_mcp(
         }
     }
 
+    let catalog = catalog
+        .map(|catalog| crate::cli::commands::models::apply_outcome_calibration(catalog, &store));
     let ctx_windows = crate::open_store()
         .ok()
         .and_then(|s| s.all_model_contexts().ok())

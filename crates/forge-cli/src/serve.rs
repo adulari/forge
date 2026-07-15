@@ -128,14 +128,33 @@ impl ServeState {
 /// [`write_state`] against an explicit path (unit-testable without touching the real config).
 fn write_state_at(path: &std::path::Path, state: &ServeState) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating state directory {}", parent.display()))?;
     }
-    std::fs::write(path, state.to_json()).with_context(|| format!("writing {}", path.display()))?;
+    // A reconnecting desktop/mobile client may read this while a daemon is restarting.  Write and
+    // fsync a sibling before rename so it can observe either the complete old state or complete new
+    // state, never a truncated JSON token/URL halfway through an overwrite.
+    let temp = path.with_extension(format!(
+        "tmp-{}-{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    {
+        use std::io::Write;
+        let mut file =
+            std::fs::File::create(&temp).with_context(|| format!("writing {}", temp.display()))?;
+        file.write_all(state.to_json().as_bytes())
+            .with_context(|| format!("writing {}", temp.display()))?;
+        file.sync_all()
+            .with_context(|| format!("syncing {}", temp.display()))?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("securing {}", temp.display()))?;
     }
+    std::fs::rename(&temp, path).with_context(|| format!("publishing {}", path.display()))?;
     Ok(())
 }
 

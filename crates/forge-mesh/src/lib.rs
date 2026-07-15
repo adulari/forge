@@ -17,7 +17,8 @@ pub mod pricing;
 
 pub use bench::{BenchScore, BenchmarkScores};
 pub use catalog::{
-    CatalogStats, ConserveDecision, ModelCatalog, ModelInfo, ProviderGroup, ScoreRow,
+    CatalogStats, ConserveDecision, ModelCatalog, ModelInfo, ProviderGroup, RuntimeCalibration,
+    ScoreRow,
 };
 pub use explain::{CandidateRow, ProviderQuotaView, RoutingExplanation};
 

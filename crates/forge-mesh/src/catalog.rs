@@ -40,6 +40,38 @@ pub struct ModelCatalog {
     /// name. Empty by default — a no-op, `route_score` falls back to the bundled table.
     #[serde(default)]
     burn_weights: HashMap<String, f64>,
+    /// Recent local operational evidence.  It is deliberately not serialized into the discovery
+    /// cache: outcomes are local to a machine/account and are refreshed from the Store per
+    /// session, while the portable catalog remains static model metadata.
+    #[serde(skip)]
+    calibration: HashMap<String, RuntimeCalibration>,
+}
+
+/// Bounded, aggregate runtime evidence supplied by Forge's local outcome ledger.  Static
+/// benchmarks remain dominant; this only breaks close calls after a meaningful sample size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RuntimeCalibration {
+    pub samples: u32,
+    pub success_rate: f64,
+    pub mean_latency_ms: f64,
+}
+
+const CALIBRATION_MIN_SAMPLES: u32 = 20;
+
+fn calibration_adjustment(calibration: Option<&RuntimeCalibration>) -> f64 {
+    let Some(c) = calibration.filter(|c| c.samples >= CALIBRATION_MIN_SAMPLES) else {
+        return 0.0;
+    };
+    // Failure-rate evidence carries most of the (still bounded) signal.  Latency only separates
+    // otherwise-close choices and is logarithmic so a slow long-context model cannot be punished
+    // into the wrong tier.  Result is capped at ±1.25 points against static benchmark scores.
+    let reliability = (c.success_rate.clamp(0.0, 1.0) - 0.90) * 5.0;
+    let latency = if c.mean_latency_ms.is_finite() && c.mean_latency_ms > 0.0 {
+        (4_000.0 / c.mean_latency_ms).ln().clamp(-0.25, 0.25)
+    } else {
+        0.0
+    };
+    (reliability + latency).clamp(-1.25, 1.25)
 }
 
 /// The provider prefix of a `provider::model` id (`"groq"` from `"groq::llama-3.1-8b"`).
@@ -758,6 +790,7 @@ impl ModelCatalog {
             models,
             bench: None,
             burn_weights: HashMap::new(),
+            calibration: HashMap::new(),
         }
     }
 
@@ -782,6 +815,16 @@ impl ModelCatalog {
     /// Documented in docs/features/mesh-routing.md.
     pub fn with_burn_weights(mut self, overrides: HashMap<String, f64>) -> Self {
         self.burn_weights = overrides;
+        self
+    }
+
+    /// Attach local outcome aggregates.  A calibration below the minimum sample gate is retained
+    /// for diagnostics but has exactly zero effect on model ordering.
+    pub fn with_runtime_calibration(
+        mut self,
+        calibration: HashMap<String, RuntimeCalibration>,
+    ) -> Self {
+        self.calibration = calibration;
         self
     }
 
@@ -880,6 +923,7 @@ impl ModelCatalog {
                     &self.burn_weights,
                     superseded.contains(m),
                 );
+                score += calibration_adjustment(self.calibration.get(m));
                 let conserved = is_subscription(m)
                     && provider_conservation_fired(
                         provider_of(m),
@@ -1002,7 +1046,7 @@ impl ModelCatalog {
                     self.bench.as_ref(),
                     &self.burn_weights,
                     superseded.contains(m),
-                );
+                ) + calibration_adjustment(self.calibration.get(m));
                 let sub = is_subscription(m);
                 let penalty = if sub
                     && provider_conservation_fired(
@@ -1155,6 +1199,33 @@ impl ModelCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calibration_is_inert_until_it_has_enough_observations() {
+        assert_eq!(
+            calibration_adjustment(Some(&RuntimeCalibration {
+                samples: CALIBRATION_MIN_SAMPLES - 1,
+                success_rate: 0.0,
+                mean_latency_ms: 120_000.0,
+            })),
+            0.0,
+            "one bad transient sample set must never perturb Mesh ranking"
+        );
+    }
+
+    #[test]
+    fn calibration_is_bounded_after_the_sample_gate() {
+        let adjustment = calibration_adjustment(Some(&RuntimeCalibration {
+            samples: CALIBRATION_MIN_SAMPLES,
+            success_rate: 0.0,
+            mean_latency_ms: 120_000.0,
+        }));
+        assert!(
+            (-1.25..=1.25).contains(&adjustment),
+            "local observations remain a tie-breaker, never a benchmark replacement"
+        );
+        assert!(adjustment < 0.0);
+    }
 
     fn catalog() -> ModelCatalog {
         ModelCatalog::new(vec![
