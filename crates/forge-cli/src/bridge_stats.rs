@@ -242,7 +242,18 @@ fn jsonl_files_in_recent_days(root: &Path, look_back: u32) -> Vec<PathBuf> {
                 .map(|e| e.path())
                 .filter(|p| p.extension().is_some_and(|e| e == "jsonl"))
                 .collect();
-            files.sort_by(|a, b| b.cmp(a)); // newest first within each day
+            // A resumed Codex session keeps its original rollout filename but receives new
+            // rate-limit events for hours afterwards. Filename order therefore picks a stale
+            // short-lived session over the actively-written long-lived one; mtime is the only
+            // correct freshness ordering here. Path order is just a deterministic tie-breaker.
+            files.sort_by(|a, b| {
+                let modified = |path: &PathBuf| {
+                    std::fs::metadata(path)
+                        .and_then(|meta| meta.modified())
+                        .unwrap_or(UNIX_EPOCH)
+                };
+                modified(b).cmp(&modified(a)).then_with(|| b.cmp(a))
+            });
             all.extend(files);
         }
     }

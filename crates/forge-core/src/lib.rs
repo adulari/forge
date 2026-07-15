@@ -11,7 +11,7 @@ use forge_index::Lattice;
 use forge_mesh::pricing::Pricing;
 use forge_mesh::{BudgetState, BudgetStatus, HeuristicRouter, ModelCatalog, Router};
 use forge_provider::{CompletionOptions, Provider, StreamEvent, ToolSpec};
-use forge_store::Store;
+use forge_store::{MeshOutcome, Store};
 use forge_tools::ToolRegistry;
 use forge_tui::{Presenter, PresenterEvent};
 use forge_types::{
@@ -1972,7 +1972,23 @@ impl Session {
 
     /// Attach the discovered catalog so the `/models` browser can read it (composition root).
     pub fn set_catalog(&mut self, catalog: Option<ModelCatalog>) {
-        self.catalog = catalog;
+        let calibration = self
+            .store
+            .model_outcome_calibration()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| {
+                (
+                    row.model,
+                    forge_mesh::RuntimeCalibration {
+                        samples: row.samples,
+                        success_rate: row.success_rate,
+                        mean_latency_ms: row.mean_latency_ms,
+                    },
+                )
+            })
+            .collect();
+        self.catalog = catalog.map(|catalog| catalog.with_runtime_calibration(calibration));
     }
 
     /// Pin (or clear) the in-session model override. When `Some`, subsequent turns use this model
@@ -4515,6 +4531,7 @@ prompt text, nothing else.";
             let tools_before = tools_ran.load(std::sync::atomic::Ordering::Relaxed);
             let inspect_before = inspect_ran.load(std::sync::atomic::Ordering::Relaxed);
             // Stream the reply, with transparent failover for this step's completion.
+            let mut failover_hop = 0u32;
             let mut resp = loop {
                 // Bound what we send to the active model's context window (fetched/heuristic), so a
                 // long conversation can't overflow it — which otherwise fails the turn as
@@ -4535,6 +4552,10 @@ prompt text, nothing else.";
                 // synthesize a permanent Auth failure so the existing failover branch EXCLUDES it and
                 // advances to a usable model. `has_api_key` is true for keyless providers (ollama,
                 // the claude/codex bridges), so a legitimate bridge turn is never short-circuited.
+                let attempt_started_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |elapsed| elapsed.as_secs() as i64);
+                let attempt_started = std::time::Instant::now();
                 let result = if !explicit_pin && reservation.is_none() {
                     Err(forge_provider::ProviderError::Unavailable(format!(
                         "model '{active_model}' is serving another session"
@@ -4654,8 +4675,51 @@ prompt text, nothing else.";
                     );
                     stream_with_idle_timeout(fut, &activity, stream_idle).await
                 };
+                if let Err(error) = &result {
+                    let error_kind = if error.is_auth() {
+                        "auth"
+                    } else if error.is_rate_limited() {
+                        "rate_limited"
+                    } else if error.is_context_overflow() {
+                        "context_overflow"
+                    } else if error.is_permanent() {
+                        "permanent"
+                    } else {
+                        "transient"
+                    };
+                    let _ = self.store.record_mesh_outcome(&MeshOutcome {
+                        session_id: self.id.clone(),
+                        model: active_model.clone(),
+                        tier: decision.map_or(TaskTier::Standard, |d| d.tier),
+                        started_at: attempt_started_at,
+                        completed_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |elapsed| elapsed.as_secs() as i64),
+                        latency_ms: attempt_started.elapsed().as_millis() as u64,
+                        outcome: "failure".to_string(),
+                        error_kind: Some(error_kind.to_string()),
+                        failover_hop,
+                        tool_calls: 0,
+                        verified_completion: false,
+                    });
+                }
                 match result {
                     Ok(r) => {
+                        let _ = self.store.record_mesh_outcome(&MeshOutcome {
+                            session_id: self.id.clone(),
+                            model: active_model.clone(),
+                            tier: decision.map_or(TaskTier::Standard, |d| d.tier),
+                            started_at: attempt_started_at,
+                            completed_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |elapsed| elapsed.as_secs() as i64),
+                            latency_ms: attempt_started.elapsed().as_millis() as u64,
+                            outcome: "success".to_string(),
+                            error_kind: None,
+                            failover_hop,
+                            tool_calls: r.tool_calls.len() as u32,
+                            verified_completion: !r.wants_tools(),
+                        });
                         if !r.content.is_empty() {
                             self.presenter.emit(PresenterEvent::AssistantDone);
                         }
@@ -4695,6 +4759,7 @@ prompt text, nothing else.";
                                     rationale: format!("model busy: {active_model}"),
                                 });
                                 active_model = next;
+                                failover_hop = failover_hop.saturating_add(1);
                                 transient_retries = 0;
                                 continue;
                             }
@@ -5000,6 +5065,7 @@ prompt text, nothing else.";
                                     rationale: format!("failover from {active_model}"),
                                 });
                                 active_model = next;
+                                failover_hop = failover_hop.saturating_add(1);
                                 transient_retries = 0;
                                 continue;
                             }
@@ -5019,6 +5085,7 @@ prompt text, nothing else.";
                                             .to_string(),
                                     });
                                     active_model = m;
+                                    failover_hop = failover_hop.saturating_add(1);
                                     transient_retries = 0;
                                     continue;
                                 }

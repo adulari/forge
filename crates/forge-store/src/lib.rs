@@ -16,7 +16,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 17;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -715,6 +715,45 @@ fn migration_0015(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Privacy-preserving route-attempt outcomes.  Prompts and model output never enter this table:
+/// it is strictly the small amount of operational evidence needed to correct persistent provider
+/// quality/latency drift without letting one transient failure rewrite Mesh ranking.
+fn migration_0016(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS mesh_outcome (
+             id INTEGER PRIMARY KEY,
+             session_id TEXT NOT NULL,
+             model TEXT NOT NULL,
+             tier TEXT NOT NULL,
+             started_at INTEGER NOT NULL,
+             completed_at INTEGER NOT NULL,
+             latency_ms INTEGER NOT NULL,
+             outcome TEXT NOT NULL,
+             error_kind TEXT,
+             failover_hop INTEGER NOT NULL DEFAULT 0,
+             tool_calls INTEGER NOT NULL DEFAULT 0,
+             verified_completion INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE INDEX IF NOT EXISTS idx_mesh_outcome_model_completed
+             ON mesh_outcome(model, completed_at DESC);",
+    )
+}
+
+/// Source freshness for the authoritative direct Codex OAuth probe.  Subscription usage rows are
+/// deliberately shared with the CLI bridge, so their timestamp alone cannot prove that a live
+/// OAuth header has been observed; without this marker a fresh-but-stale bridge rollout could
+/// suppress the preferred probe indefinitely.
+fn migration_0017(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS codex_oauth_quota_observation (
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             observed_at INTEGER NOT NULL
+         )",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -733,6 +772,8 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0013,
     migration_0014,
     migration_0015,
+    migration_0016,
+    migration_0017,
 ];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
@@ -818,6 +859,32 @@ fn quota_status_from_str(status: &str) -> forge_types::QuotaStatus {
         "warning" => forge_types::QuotaStatus::Warning,
         _ => forge_types::QuotaStatus::Ok,
     }
+}
+
+/// One model-call outcome recorded by the Mesh.  This deliberately excludes user content and
+/// response text; it is operational telemetry stored locally with the session metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshOutcome {
+    pub session_id: String,
+    pub model: String,
+    pub tier: TaskTier,
+    pub started_at: i64,
+    pub completed_at: i64,
+    pub latency_ms: u64,
+    pub outcome: String,
+    pub error_kind: Option<String>,
+    pub failover_hop: u32,
+    pub tool_calls: u32,
+    pub verified_completion: bool,
+}
+
+/// Bounded aggregate evidence used by Mesh as a small tie-breaker after enough observations.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelOutcomeCalibration {
+    pub model: String,
+    pub samples: u32,
+    pub success_rate: f64,
+    pub mean_latency_ms: f64,
 }
 
 impl Store {
@@ -2055,6 +2122,134 @@ impl Store {
             tx.commit()?;
             Ok(())
         })
+    }
+
+    /// Append one privacy-preserving routed model-call outcome.  This is deliberately best-effort
+    /// at call sites: a temporary SQLite lock must never turn an otherwise successful model turn
+    /// into a user-visible failure.
+    pub fn record_mesh_outcome(&self, record: &MeshOutcome) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO mesh_outcome
+             (session_id, model, tier, started_at, completed_at, latency_ms, outcome, error_kind,
+              failover_hop, tool_calls, verified_completion)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            (
+                &record.session_id,
+                &record.model,
+                record.tier.as_str(),
+                record.started_at,
+                record.completed_at,
+                record.latency_ms.min(i64::MAX as u64) as i64,
+                &record.outcome,
+                &record.error_kind,
+                record.failover_hop,
+                record.tool_calls,
+                record.verified_completion as i64,
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// Aggregate recent model outcomes for the Mesh.  The query uses only a bounded trailing
+    /// sample per model, so a provider's long-past history cannot permanently dominate its current
+    /// behaviour.  The router itself ignores groups below its minimum-sample gate.
+    pub fn model_outcome_calibration(&self) -> Result<Vec<ModelOutcomeCalibration>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "WITH recent AS (
+                 SELECT model, outcome, latency_ms,
+                        ROW_NUMBER() OVER (PARTITION BY model ORDER BY completed_at DESC, id DESC) AS n
+                 FROM mesh_outcome
+             )
+             SELECT model,
+                    COUNT(*) AS samples,
+                    AVG(CASE WHEN outcome = 'success' THEN 1.0 ELSE 0.0 END) AS success_rate,
+                    AVG(latency_ms) AS mean_latency_ms
+             FROM recent WHERE n <= 120 GROUP BY model",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ModelOutcomeCalibration {
+                    model: row.get(0)?,
+                    samples: row.get::<_, i64>(1)? as u32,
+                    success_rate: row.get(2)?,
+                    mean_latency_ms: row.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Persist one account-wide Codex quota observation for both supported Codex surfaces.
+    ///
+    /// The direct OAuth provider and Codex CLI bridge consume the same ChatGPT allowance.  They
+    /// must therefore expose one identical snapshot to every Mesh/TUI/API consumer; recording a
+    /// header reading under just the transport that happened to obtain it made the two surfaces
+    /// disagree until their next unrelated completion.  This deliberately duplicates the same
+    /// observation (rather than adding them) so alias-group reads retain their latest-wins
+    /// semantics.
+    pub fn record_codex_quota(&self, hint: &forge_types::QuotaHint) -> Result<()> {
+        for provider in ["codex-oauth", "codex-cli"] {
+            let shared = forge_types::QuotaHint {
+                provider: provider.to_string(),
+                window: hint.window.clone(),
+                status: hint.status,
+                resets_at: hint.resets_at,
+                fraction_used: hint.fraction_used,
+            };
+            self.record_quota(&shared)?;
+        }
+        Ok(())
+    }
+
+    /// Persist a quota observation read directly from ChatGPT's Codex OAuth response headers.
+    /// Unlike [`record_codex_quota`](Self::record_codex_quota), this advances the canonical source
+    /// freshness marker and is therefore allowed to suppress another inexpensive probe briefly.
+    pub fn record_live_codex_oauth_quota(&self, hint: &forge_types::QuotaHint) -> Result<()> {
+        self.record_codex_quota(hint)?;
+        self.lock()?.execute(
+            "INSERT INTO codex_oauth_quota_observation (singleton, observed_at)
+             VALUES (1, strftime('%s','now'))
+             ON CONFLICT(singleton) DO UPDATE SET observed_at = excluded.observed_at",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Promote a fresh official-Codex-CLI observation over the shared alias rows. The caller
+    /// enforces the short observation-age gate before calling this: once it is fresh enough, it
+    /// is a stronger source than a Forge OAuth token which may belong to an old account, so its
+    /// receipt time deliberately wins the latest-snapshot merge.
+    pub fn record_codex_quota_at(
+        &self,
+        hint: &forge_types::QuotaHint,
+        _observed_at: i64,
+    ) -> Result<()> {
+        for provider in ["codex-oauth", "codex-cli"] {
+            let shared = forge_types::QuotaHint {
+                provider: provider.to_string(),
+                window: hint.window.clone(),
+                status: hint.status,
+                resets_at: hint.resets_at,
+                fraction_used: hint.fraction_used,
+            };
+            self.record_quota(&shared)?;
+        }
+        Ok(())
+    }
+
+    /// Age of the last direct OAuth header observation, independent from the shared CLI alias
+    /// rows. `None` means no authoritative direct observation has ever been recorded.
+    pub fn codex_oauth_quota_age_secs(&self) -> Result<Option<i64>> {
+        let now = chrono::Utc::now().timestamp();
+        self.lock()?
+            .query_row(
+                "SELECT ?1 - observed_at FROM codex_oauth_quota_observation WHERE singleton = 1",
+                [now],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     /// Append one observation to the quota usage history (mesh-routing.md). Called by
@@ -7158,5 +7353,63 @@ mod tests {
         assert_eq!(store.prune(-1, 50).unwrap(), 2);
         assert!(store.session_cost(&a).is_err(), "old session gone");
         assert!(store.session_cost(&b).is_err());
+    }
+
+    #[test]
+    fn mesh_outcomes_are_bounded_and_aggregate_without_prompt_content() {
+        let store = Store::open_in_memory().unwrap();
+        for n in 0..130 {
+            store
+                .record_mesh_outcome(&MeshOutcome {
+                    session_id: "session".into(),
+                    model: "codex-oauth::gpt-5.4-mini".into(),
+                    tier: TaskTier::Standard,
+                    started_at: n,
+                    completed_at: n,
+                    latency_ms: 100 + n as u64,
+                    outcome: if n < 10 { "failure" } else { "success" }.into(),
+                    error_kind: None,
+                    failover_hop: 0,
+                    tool_calls: 0,
+                    verified_completion: true,
+                })
+                .unwrap();
+        }
+        let rows = store.model_outcome_calibration().unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row.model == "codex-oauth::gpt-5.4-mini")
+            .unwrap();
+        assert_eq!(
+            row.samples, 120,
+            "only the bounded recent tail is considered"
+        );
+        assert_eq!(
+            row.success_rate, 1.0,
+            "old failures decay out of the calibration"
+        );
+        assert!(row.mean_latency_ms > 100.0);
+    }
+
+    #[test]
+    fn only_a_live_oauth_codex_snapshot_advances_the_canonical_freshness_gate() {
+        let store = Store::open_in_memory().unwrap();
+        let hint = forge_types::QuotaHint {
+            provider: "codex-cli".into(),
+            window: "weekly".into(),
+            status: forge_types::QuotaStatus::Ok,
+            resets_at: None,
+            fraction_used: Some(0.27),
+        };
+        store.record_codex_quota(&hint).unwrap();
+        assert_eq!(store.codex_oauth_quota_age_secs().unwrap(), None);
+        store.record_live_codex_oauth_quota(&hint).unwrap();
+        assert!(
+            store
+                .codex_oauth_quota_age_secs()
+                .unwrap()
+                .is_some_and(|age| age <= 1),
+            "a direct header observation, not a bridge alias, owns the refresh gate"
+        );
     }
 }

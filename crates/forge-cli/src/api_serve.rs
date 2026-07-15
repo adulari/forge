@@ -88,6 +88,16 @@ pub(crate) async fn api_serve_cmd(
         None
     };
 
+    let readiness_store = (!mock)
+        .then(crate::open_store)
+        .and_then(Result::ok)
+        .map(Arc::new);
+    let catalog = catalog.map(|catalog| {
+        readiness_store.as_ref().map_or(catalog.clone(), |store| {
+            crate::cli::commands::models::apply_outcome_calibration(catalog, store)
+        })
+    });
+
     let ctx_windows = crate::open_store()
         .ok()
         .and_then(|s| s.all_model_contexts().ok())
@@ -100,11 +110,6 @@ pub(crate) async fn api_serve_cmd(
         ctx_windows,
         std::collections::HashMap::new(),
     );
-
-    let readiness_store = (!mock)
-        .then(crate::open_store)
-        .and_then(Result::ok)
-        .map(Arc::new);
 
     let models = advertised_models(&config, catalog.as_ref());
     let state = Arc::new(ApiState {
