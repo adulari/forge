@@ -1145,7 +1145,7 @@ fn post_check_decision(
     }
     match completion_gate(
         verify_attempts,
-        1,
+        2,
         did_real_work,
         no_change_required,
         inspected_this_turn,
