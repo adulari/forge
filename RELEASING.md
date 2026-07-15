@@ -15,11 +15,11 @@ git fetch origin
 git switch -c release/vX.Y.Z origin/main   # always branch from origin/main, never a stale local
 ```
 
-## 2. Bump the version in ALL THREE places (this is the step that gets missed)
+## 2. Bump the version in the release surfaces
 
 1. `Cargo.toml` — workspace `version = "X.Y.Z"`.
 2. `Cargo.lock` — run `cargo build` once; it rewrites every `forge-*` crate to `X.Y.Z`. Stage it.
-3. `homebrew/forge.rb` — set `version "X.Y.Z"` **and** reset all three `sha256` lines to
+3. `homebrew/forge.rb` — set `version "X.Y.Z"` **and** reset all four `sha256` lines to
    `0000…0000` (64 zeros). The real hashes are filled in step 6, *after* the binaries exist. If you
    forget this, `brew install` silently serves the previous release.
 
@@ -37,14 +37,17 @@ with the touched file). A minor/major bump with only a "prepared the workspace" 
 either there is real content or it should not be a release. Update the compare links at the bottom:
 add `[X.Y.Z]` and repoint `[Unreleased]` to `vX.Y.Z...HEAD`.
 
-This one section is the single source of truth for the **unified release note** across all three
-surfaces — you do not write notes anywhere else:
+This section is the source of truth for the **CLI/TUI and desktop release note**. Mobile uses the
+same human-readable changelog content for OTA/TestFlight “What to Test” notes, but its native
+version is independent and a new binary is only built manually when native changes require it:
 - **GitHub Release** (`v*` tag): `release.yml` composes the body from an all-platform header + this
   CHANGELOG section, then appends GitHub's auto PR list (hybrid). TUI binaries + desktop bundles +
   `latest.json` all attach to this same release.
+- **Mobile OTA** (iOS): `.github/workflows/eas-update.yml` publishes JavaScript/assets to the
+  `production` channel only for mobile-source changes on `main`.
 - **TestFlight** (iOS): `scripts/testflight-assign-group.mjs` reads the same section and sets the
-  build's "What to Test" note via the ASC API (best-effort). The IPA can't live on a GitHub Release
-  — Apple owns mobile distribution — so the *note* is shared even though the artifact isn't.
+  build's "What to Test" note via the ASC API (best-effort). Trigger Xcode Cloud manually only
+  when native changes require a new binary; the IPA is not a GitHub Release asset.
 
 ## 4. Pre-flight — all must be green (CI runs these too; do not rely on a hook)
 

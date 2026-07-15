@@ -6,6 +6,20 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.6.3] - 2026-07-15
+
+Mesh reliability and release-surface hardening from continued dogfooding.
+
+### Added
+- **Headless OAuth login**: Codex paste mode and MCP RFC 8628 device flow now work in
+  non-interactive environments, with state/PKCE validation and linewise pasted redirects.
+
+### Fixed
+- **Mesh post-check scope**: observational verification is bound to the originating session
+  workspace and preserves the mutating retry budget, preventing cross-session false positives.
+- **OTA release safety**: production OTA publishing remains limited to mobile JavaScript/assets;
+  native changes continue to require a separately triggered binary build.
+
 ## [2.6.2] - 2026-07-14
 
 Feature + fix wave on top of v2.6.1, from continued dogfooding of the real builds.
@@ -2536,7 +2550,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.5.8...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.6.3...HEAD
+[2.6.3]: https://github.com/Adulari/forge/compare/v2.6.2...v2.6.3
 [2.5.8]: https://github.com/Adulari/forge/compare/v2.5.7...v2.5.8
 [2.5.7]: https://github.com/Adulari/forge/compare/v2.5.6...v2.5.7
 [2.5.6]: https://github.com/Adulari/forge/compare/v2.5.5...v2.5.6

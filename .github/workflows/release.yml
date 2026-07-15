@@ -166,10 +166,10 @@ jobs:
           sha256sum *.tar.gz *.zip > checksums.txt 2>/dev/null || sha256sum *.tar.gz > checksums.txt
           cat checksums.txt
 
-      # One unified note for all three surfaces. The desktop bundles (app-desktop.yml) and the
-      # mobile TestFlight build (testflight-autogroup.mjs) publish to THIS same version, so the
-      # body names all three and carries the curated CHANGELOG section for this tag. Hybrid:
-      # generate_release_notes below appends GitHub's auto PR list under this curated header.
+      # Keep one curated note for the CLI/TUI and desktop release. Mobile's native app version
+      # is independent; routine mobile changes ship through the production OTA channel. A new
+      # TestFlight binary is a separately triggered Xcode Cloud operation when native changes
+      # require it. Hybrid: generate_release_notes below appends GitHub's auto PR list.
       - name: Compose release notes
         shell: bash
         run: |
@@ -177,10 +177,10 @@ jobs:
           {
             echo "## Forge v${VERSION}"
             echo
-            echo "One release, every surface — same version across all three:"
+            echo "CLI/TUI and desktop release v${VERSION}; mobile remains on its compatible native version."
             echo "- **CLI / TUI** — binaries below (\`*.tar.gz\` / \`*.zip\`) or \`brew upgrade forge\`"
             echo "- **Desktop** (macOS · Windows · Linux) — app bundles below + in-app auto-update"
-            echo "- **Mobile** (iOS) — the matching TestFlight build (same notes under \"What to Test\")"
+            echo "- **Mobile** (iOS) — production OTA by default; native/TestFlight builds are manual when required"
             echo
             # Curated CHANGELOG section for this version, if present.
             awk -v ver="[${VERSION}]" '
