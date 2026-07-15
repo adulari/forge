@@ -33,15 +33,18 @@ create_insight() {
     --get --data-urlencode "search=${name}" "$insight_api")"
   id="$(printf '%s' "$results" |
     jq -r --arg name "$name" '.results[] | select(.name == $name) | .id' | head -1)"
+  payload="$(jq -n \
+    --arg name "$name" \
+    --arg description "$description" \
+    --argjson dashboard "$dashboard_id" \
+    --argjson query "$query" \
+    '{name: $name, description: $description, dashboards: [$dashboard], query: $query}')"
   if [ -z "$id" ]; then
-    payload="$(jq -n \
-      --arg name "$name" \
-      --arg description "$description" \
-      --argjson dashboard "$dashboard_id" \
-      --argjson query "$query" \
-      '{name: $name, description: $description, dashboards: [$dashboard], query: $query}')"
     id="$(curl --fail --silent --show-error -X POST "${auth[@]}" "${json[@]}" \
       --data-binary "$payload" "$insight_api" | jq -r '.id')"
+  else
+    curl --fail --silent --show-error -X PATCH "${auth[@]}" "${json[@]}" \
+      --data-binary "$payload" "${insight_api}${id}/" >/dev/null
   fi
   printf '%s\t%s\n' "$id" "$name"
 }
@@ -56,12 +59,15 @@ trend_query() {
     --arg breakdown "$breakdown" \
     --arg display "$display" \
     '{
-      kind: "TrendsQuery",
-      series: [{kind: "EventsNode", event: $event, math: "total", custom_name: $label}],
-      dateRange: {date_from: $date_from},
-      interval: $interval,
-      breakdownFilter: {breakdown: $breakdown, breakdown_type: "event", breakdown_limit: 12},
-      trendsFilter: {display: $display, showValuesOnSeries: true}
+      kind: "InsightVizNode",
+      source: {
+        kind: "TrendsQuery",
+        series: [{kind: "EventsNode", event: $event, math: "total", custom_name: $label}],
+        dateRange: {date_from: $date_from},
+        interval: $interval,
+        breakdownFilter: {breakdown: $breakdown, breakdown_type: "event", breakdown_limit: 12},
+        trendsFilter: {display: $display, showValuesOnSeries: true}
+      }
     }'
 }
 
@@ -101,14 +107,17 @@ create_insight \
   "$(trend_query forge_active_day "Version" -7d day version ActionsPie)"
 
 reliability_query="$(jq -n '{
-  kind: "TrendsQuery",
-  series: [
-    {kind: "EventsNode", event: "forge_run_succeeded", math: "total", custom_name: "Succeeded"},
-    {kind: "EventsNode", event: "forge_run_failed", math: "total", custom_name: "Failed"}
-  ],
-  dateRange: {date_from: "-30d"},
-  interval: "day",
-  trendsFilter: {display: "ActionsLineGraph", showValuesOnSeries: true}
+  kind: "InsightVizNode",
+  source: {
+    kind: "TrendsQuery",
+    series: [
+      {kind: "EventsNode", event: "forge_run_succeeded", math: "total", custom_name: "Succeeded"},
+      {kind: "EventsNode", event: "forge_run_failed", math: "total", custom_name: "Failed"}
+    ],
+    dateRange: {date_from: "-30d"},
+    interval: "day",
+    trendsFilter: {display: "ActionsLineGraph", showValuesOnSeries: true}
+  }
 }')"
 create_insight \
   "Run reliability" \
@@ -128,11 +137,14 @@ feature_query="$(jq -n '
     ["forge_feature_extensibility", "Plugins & skills"]
   ] as $features |
   {
-    kind: "TrendsQuery",
-    series: ($features | map({kind: "EventsNode", event: .[0], math: "total", custom_name: .[1]})),
-    dateRange: {date_from: "-30d"},
-    interval: "day",
-    trendsFilter: {display: "ActionsBarValue", showValuesOnSeries: true}
+    kind: "InsightVizNode",
+    source: {
+      kind: "TrendsQuery",
+      series: ($features | map({kind: "EventsNode", event: .[0], math: "total", custom_name: .[1]})),
+      dateRange: {date_from: "-30d"},
+      interval: "day",
+      trendsFilter: {display: "ActionsBarValue", showValuesOnSeries: true}
+    }
   }')"
 create_insight \
   "Feature adoption (30 days)" \
@@ -148,7 +160,15 @@ download_query="$(jq -n --arg query "
     argMax(properties.latest_tag, timestamp) AS latest_tag
   FROM events
   WHERE event = 'forge_distribution_snapshot'
-" '{kind: "HogQLQuery", query: $query}')"
+" '{
+  kind: "DataTableNode",
+  source: {kind: "HogQLQuery", query: $query},
+  full: true,
+  showActions: true,
+  showDateRange: false,
+  showExport: true,
+  showReload: true
+}')"
 create_insight \
   "Public release downloads" \
   "Latest cumulative GitHub release-asset download totals, refreshed daily." \
