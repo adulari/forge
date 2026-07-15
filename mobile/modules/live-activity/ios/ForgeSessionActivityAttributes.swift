@@ -18,11 +18,13 @@ struct ForgeSessionActivityAttributes: ActivityAttributes {
         var waiting: Bool
         var costUsd: Double
         var contextTokens: Int
+        var contextLimit: Int
 
         enum CodingKeys: String, CodingKey {
             case busy, waiting
             case costUsd = "cost_usd"
             case contextTokens = "context_tokens"
+            case contextLimit = "context_limit"
         }
     }
 
