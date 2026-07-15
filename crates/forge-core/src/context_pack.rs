@@ -9,6 +9,7 @@
 pub enum ContextSource {
     ProjectInstructions,
     CommandGuidance,
+    TurnContract,
     Memory,
     Orchestration,
     Workflow,
