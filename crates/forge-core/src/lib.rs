@@ -780,6 +780,20 @@ fn working_tree_unchanged(root: Option<&std::path::Path>) -> bool {
     }
 }
 
+fn git_head(root: Option<&std::path::Path>) -> Option<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(["rev-parse", "HEAD"]);
+    if let Some(root) = root {
+        cmd.current_dir(root);
+    }
+    cmd.output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|head| head.trim().to_string())
+        .filter(|head| !head.is_empty())
+}
+
 /// Classify a completed bridge turn as TOOLS-UNAVAILABLE (harness wave 7): the model ran with no
 /// working write tools because Forge's `mcp-serve` server failed to start, so a silent empty
 /// completion is a broken attempt, NOT "the model chose not to edit". True only when ALL hold:
@@ -985,6 +999,161 @@ fn completion_verification_empty_is_terminal(
             .iter()
             .all(|task| matches!(task.status, forge_types::TodoStatus::Done))
         && has_prior_final
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TaskIntent {
+    ReadOnlyReview,
+    PlanOnly,
+    Mutating,
+    Verification,
+}
+
+impl TaskIntent {
+    fn default_for_turn(mode: PermissionMode, expect_code_change: bool) -> Self {
+        if mode == PermissionMode::Plan {
+            return Self::PlanOnly;
+        }
+        if expect_code_change {
+            return Self::Mutating;
+        }
+        Self::Mutating
+    }
+
+    fn is_observational(self) -> bool {
+        !matches!(self, Self::Mutating)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TaskScope {
+    task: String,
+    intent: TaskIntent,
+    root: Option<std::path::PathBuf>,
+    allowed_paths: Vec<std::path::PathBuf>,
+    base_head: Option<String>,
+    permission: PermissionMode,
+    origin_seq: i64,
+    origin_incarnation: String,
+    origin_generation: u64,
+}
+
+impl TaskScope {
+    fn for_turn(
+        task: &str,
+        intent: TaskIntent,
+        mode: PermissionMode,
+        origin_seq: i64,
+        root: Option<std::path::PathBuf>,
+        base_head: Option<String>,
+        origin_incarnation: String,
+        origin_generation: u64,
+    ) -> Self {
+        Self {
+            task: task.to_string(),
+            intent,
+            root,
+            allowed_paths: Vec::new(),
+            base_head,
+            permission: mode,
+            origin_seq,
+            origin_incarnation,
+            origin_generation,
+        }
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        task: &str,
+        intent: TaskIntent,
+        mode: PermissionMode,
+        origin_seq: i64,
+        root: Option<std::path::PathBuf>,
+    ) -> Self {
+        Self::for_turn(
+            task,
+            intent,
+            mode,
+            origin_seq,
+            root,
+            None,
+            "test".to_string(),
+            0,
+        )
+    }
+
+    fn permits_tool(&self, tool: &str) -> bool {
+        if !self.intent.is_observational() {
+            return true;
+        }
+        !matches!(
+            tool,
+            "write_file"
+                | "edit_file"
+                | "delete_file"
+                | "apply_patch"
+                | "shell"
+                | "spawn_agents"
+                | "send_to_agent"
+                | "run_workflow"
+                | "update_tasks"
+                | "remember"
+        )
+    }
+
+    fn audit_digest(&self) -> String {
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.task.hash(&mut hasher);
+        self.intent.hash(&mut hasher);
+        self.root.hash(&mut hasher);
+        self.allowed_paths.hash(&mut hasher);
+        self.base_head.hash(&mut hasher);
+        self.permission.label().hash(&mut hasher);
+        self.origin_seq.hash(&mut hasher);
+        self.origin_incarnation.hash(&mut hasher);
+        self.origin_generation.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+}
+
+/// Typed outcome for the post-completion gate. Only `RequestObservation` may re-drive a model,
+/// and its prompt is fixed observational text rather than an implementation instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PostCheckDecision {
+    RequestObservation,
+    AcceptClean,
+    AcceptNoArtifacts,
+    AcceptUnverified,
+}
+
+fn post_check_decision(
+    intent: TaskIntent,
+    verify_attempts: usize,
+    did_real_work: bool,
+    no_change_required: bool,
+    inspected_this_turn: bool,
+) -> PostCheckDecision {
+    if intent.is_observational() {
+        return if inspected_this_turn {
+            PostCheckDecision::AcceptClean
+        } else {
+            PostCheckDecision::AcceptNoArtifacts
+        };
+    }
+    match completion_gate(
+        verify_attempts,
+        1,
+        did_real_work,
+        no_change_required,
+        inspected_this_turn,
+    ) {
+        CompletionGate::Reverify => PostCheckDecision::RequestObservation,
+        CompletionGate::AcceptClean => PostCheckDecision::AcceptClean,
+        CompletionGate::AcceptNoArtifacts => PostCheckDecision::AcceptNoArtifacts,
+        CompletionGate::AcceptUnverified => PostCheckDecision::AcceptUnverified,
+    }
 }
 
 /// Decision of the token-budget continuation guard (H8): when a code-change turn ends without a
@@ -1209,6 +1378,8 @@ pub struct Session {
     /// A plan proposed this turn via `present_plan` (planning mode), awaiting interactive approval
     /// at turn end. `Some` between the proposal and the approve/revise/cancel decision.
     pending_plan: Option<forge_types::PlanProposal>,
+    /// Immutable authority for the active turn. Observational scopes cannot mutate state or spawn.
+    task_scope: Option<TaskScope>,
     /// Connected external MCP servers (mcp-client.md). `None` when no servers are configured —
     /// the whole MCP path is then inert (zero overhead for non-MCP users).
     mcp: Option<Arc<forge_mcp::McpManager>>,
@@ -1658,6 +1829,7 @@ impl Session {
             catalog: None,
             tasks,
             pending_plan: None,
+            task_scope: None,
             mcp: None,
             lattice: None,
             lattice_watcher: None,
@@ -2730,9 +2902,11 @@ impl Session {
     }
 
     fn tool_specs(&self) -> Vec<ToolSpec> {
+        let scope = self.task_scope.as_ref();
         let mut specs: Vec<ToolSpec> = self
             .tools
             .names()
+            .filter(|name| scope.is_none_or(|scope| scope.permits_tool(name)))
             .filter_map(|name| self.tools.get(name))
             .map(|t| ToolSpec {
                 name: t.name().to_string(),
@@ -2743,7 +2917,12 @@ impl Session {
         // Advertise the subagent virtual tool to the top-level model only (RFC
         // subagent-orchestration). Children build their own registry without it, so the
         // depth-1 recursion guard is structural.
-        if self.config.mesh.subagents.enabled {
+        if self.config.mesh.subagents.enabled
+            && self
+                .task_scope
+                .as_ref()
+                .is_none_or(|scope| scope.permits_tool(subagent::SPAWN_AGENTS_TOOL))
+        {
             specs.push(subagent::spawn_agents_spec(
                 self.config.mesh.subagents.max_agents,
             ));
@@ -2752,14 +2931,30 @@ impl Session {
             specs.push(subagent::send_to_agent_spec());
             specs.push(workflow::run_workflow_spec());
         }
-        // The interactive question tool (AskUserQuestion) — always advertised so the model can
-        // ask the user a focused question with suggested answers (docs/features/ask-user-question.md).
-        specs.push(ask_user_spec());
+        if self
+            .task_scope
+            .as_ref()
+            .is_none_or(|scope| scope.permits_tool(ASK_USER_TOOL))
+        {
+            specs.push(ask_user_spec());
+        }
         // The task-tracking tool — always advertised so the model can keep a live todo list.
-        specs.push(update_tasks_spec());
-        // The on-demand memory tool — always advertised so the model can persist facts at any
+        if self
+            .task_scope
+            .as_ref()
+            .is_none_or(|scope| scope.permits_tool(UPDATE_TASKS_TOOL))
+        {
+            specs.push(update_tasks_spec());
+        }
+        // The on-demand memory tool — model calls this to persist a durable fact at any
         // point during a turn, not just via end-of-turn auto-capture.
-        specs.push(remember_spec());
+        if self
+            .task_scope
+            .as_ref()
+            .is_none_or(|scope| scope.permits_tool(REMEMBER_TOOL))
+        {
+            specs.push(remember_spec());
+        }
         // The plan-presentation tool — offered ONLY in planning mode, so the model proposes a plan
         // (rendered as an interactive card) instead of editing. Gating it to Plan mode also makes
         // the approve→Auto-edit→build flow non-recursive (the build turn can't re-propose a plan).
@@ -3934,8 +4129,8 @@ prompt text, nothing else.";
         did_real_work: bool,
         no_change_required: bool,
         inspected_this_turn: bool,
-    ) -> CompletionGate {
-        const MAX_VERIFY_ATTEMPTS: usize = 2;
+    ) -> PostCheckDecision {
+        const MAX_VERIFY_ATTEMPTS: usize = 1;
         // Tool-name-neutral so the SAME nudge works for the bridge (tools are `mcp__forge__*`) and
         // the direct path (`shell`/`read_file`) — the model maps "run a shell command / read a file"
         // to whichever names its toolset exposes.
@@ -3947,15 +4142,20 @@ prompt text, nothing else.";
              not done and finish it. (If a task has no external artifact to check — a pure analysis \
              answer — say so and restate the result.) Only after confirming every task, state \
              exactly what you checked and stop.";
-        let gate = completion_gate(
+        let intent = self
+            .task_scope
+            .as_ref()
+            .map(|scope| scope.intent)
+            .unwrap_or(TaskIntent::Mutating);
+        let decision = post_check_decision(
+            intent,
             *verify_attempts,
-            MAX_VERIFY_ATTEMPTS,
             did_real_work,
             no_change_required,
             inspected_this_turn,
         );
-        match gate {
-            CompletionGate::Reverify => {
+        match decision {
+            PostCheckDecision::RequestObservation => {
                 *verify_attempts += 1;
                 self.presenter.emit(PresenterEvent::Warning(format!(
                     "all tasks reported done — verifying with a real state check before finishing ({}/{MAX_VERIFY_ATTEMPTS})",
@@ -3967,22 +4167,22 @@ prompt text, nothing else.";
                     .add_message(&self.id, nseq, Role::System, VERIFY_NUDGE, None);
                 self.transcript.push(Message::system(VERIFY_NUDGE));
             }
-            CompletionGate::AcceptNoArtifacts => {
+            PostCheckDecision::AcceptNoArtifacts => {
                 self.presenter.emit(PresenterEvent::Warning(
                     "completion not tool-verified (no external artifacts to check) — accepting the reported result"
                         .to_string(),
                 ));
             }
-            CompletionGate::AcceptUnverified => {
+            PostCheckDecision::AcceptUnverified => {
                 self.presenter.emit(PresenterEvent::Warning(
                     "completion could NOT be tool-verified — the model reported done without \
                      inspecting real state. Treat this result as UNVERIFIED."
                         .to_string(),
                 ));
             }
-            CompletionGate::AcceptClean => {}
+            PostCheckDecision::AcceptClean => {}
         }
-        gate
+        decision
     }
 
     /// Shared model↔tool inner loop used by both the primary turn and the autofix re-run.
@@ -4990,7 +5190,7 @@ prompt text, nothing else.";
                             did_real_work,
                             completion_claims_no_change(&resp.content),
                             inspected_this_turn,
-                        ) == CompletionGate::Reverify
+                        ) == PostCheckDecision::RequestObservation
                         {
                             continue;
                         }
@@ -5092,7 +5292,7 @@ prompt text, nothing else.";
                             did_real_work,
                             completion_claims_no_change(&resp.content),
                             inspected_since_verify,
-                        ) == CompletionGate::Reverify
+                        ) == PostCheckDecision::RequestObservation
                         {
                             // Mark where the next verification window starts: any inspection AFTER
                             // this point counts as responding to the nudge.
@@ -5601,6 +5801,16 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // (PR3): files written during the turn are restorable by rewinding to this boundary.
         let seq = self.next_seq();
         self.current_turn_seq = seq;
+        self.task_scope = Some(TaskScope::for_turn(
+            prompt,
+            TaskIntent::default_for_turn(self.mode, self.expect_code_change),
+            self.mode,
+            seq,
+            self.work_root.clone(),
+            git_head(self.work_root.as_deref()),
+            self.id.clone(),
+            seq as u64,
+        ));
         self.store
             .add_message(&self.id, seq, Role::User, prompt, None)?;
         // Attach any images queued for this turn (vision). They ride on the in-memory transcript
@@ -6584,6 +6794,27 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
     ) -> Result<String, CoreError> {
         // Snapshot args before hooks so the audit row preserves exactly what the model requested.
         let call_args_json = serde_json::to_string(&call.args)?;
+        if let Some(scope) = self
+            .task_scope
+            .as_ref()
+            .filter(|scope| !scope.permits_tool(&call.name))
+        {
+            let result = format!(
+                "permission denied by task scope {}: `{}` is unavailable for {:?}",
+                scope.audit_digest(),
+                call.name,
+                scope.intent
+            );
+            self.store.record_tool_call(
+                msg_id,
+                &call.name,
+                &call_args_json,
+                &result,
+                "denied",
+                "error",
+            )?;
+            return Ok(result);
+        }
         if let Some(warning) = self
             .failure_tracker
             .record_call(&call.name, &call_args_json)
@@ -10078,6 +10309,42 @@ mod tests {
             completion_gate(1, MAX, true, false, false),
             CompletionGate::AcceptUnverified
         );
+    }
+
+    #[test]
+    fn observational_scopes_are_terminal_and_cannot_request_implementation() {
+        for intent in [
+            TaskIntent::ReadOnlyReview,
+            TaskIntent::PlanOnly,
+            TaskIntent::Verification,
+        ] {
+            assert_ne!(
+                post_check_decision(intent, 0, true, false, false),
+                PostCheckDecision::RequestObservation,
+                "{intent:?} completion must not be re-driven"
+            );
+        }
+    }
+
+    #[test]
+    fn observational_scope_denies_mutating_capabilities() {
+        let scope = TaskScope::for_test(
+            "audit the current implementation",
+            TaskIntent::ReadOnlyReview,
+            PermissionMode::Bypass,
+            7,
+            Some(std::path::PathBuf::from("/repo")),
+        );
+        for tool in [
+            "write_file",
+            "shell",
+            "spawn_agents",
+            "run_workflow",
+            "update_tasks",
+        ] {
+            assert!(!scope.permits_tool(tool), "{tool} must be denied");
+        }
+        assert!(scope.permits_tool("read_file"));
     }
 
     /// Yields TWO read_file calls (a concurrent read-only batch) with DIFFERENT missing paths every
