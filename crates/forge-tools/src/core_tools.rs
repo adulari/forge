@@ -210,7 +210,11 @@ impl Tool for ReadFileTool {
         })
     }
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
-        if let Some(paths) = args.get("paths").and_then(Value::as_array) {
+        if let Some(paths) = args
+            .get("paths")
+            .and_then(Value::as_array)
+            .filter(|paths| !paths.is_empty())
+        {
             return Ok(read_many(paths).await);
         }
         let path = str_arg(args, "path")?;
@@ -2184,6 +2188,24 @@ mod tests {
     async fn read_file_requires_path() {
         let err = ReadFileTool.run(&json!({})).await.unwrap_err();
         assert!(matches!(err, ToolError::BadArgs(_)));
+    }
+
+    #[tokio::test]
+    async fn read_file_ignores_an_empty_optional_batch_array() {
+        // Tool-call schemas commonly materialize optional arrays as `[]`. A valid single `path`
+        // must still win, otherwise a model receives an empty successful result and can falsely
+        // claim that a non-empty file has no content.
+        let dir = temp_dir("read-empty-batch");
+        let path = dir.join("f.txt");
+        std::fs::write(&path, "actual contents").unwrap();
+
+        let out = ReadFileTool
+            .run(&json!({ "path": path.to_str().unwrap(), "paths": [] }))
+            .await
+            .unwrap();
+
+        assert_eq!(out, "actual contents");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

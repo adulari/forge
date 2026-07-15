@@ -32,6 +32,7 @@ pub mod readiness;
 pub mod snapshot;
 pub mod subagent;
 pub mod tokens;
+pub mod turn_contract;
 pub mod workflow;
 pub mod worktree;
 
@@ -985,16 +986,6 @@ pub enum TaskIntent {
 }
 
 impl TaskIntent {
-    fn default_for_turn(mode: PermissionMode, expect_code_change: bool) -> Self {
-        if mode == PermissionMode::Plan {
-            return Self::PlanOnly;
-        }
-        if expect_code_change {
-            return Self::Mutating;
-        }
-        Self::Mutating
-    }
-
     pub(crate) fn is_observational(self) -> bool {
         !matches!(self, Self::Mutating)
     }
@@ -1003,7 +994,7 @@ impl TaskIntent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TaskScope {
     task: String,
-    intent: TaskIntent,
+    contract: turn_contract::TurnContract,
     root: Option<std::path::PathBuf>,
     allowed_paths: Vec<std::path::PathBuf>,
     base_head: Option<String>,
@@ -1017,7 +1008,7 @@ impl TaskScope {
     #[allow(clippy::too_many_arguments)]
     fn for_turn(
         task: &str,
-        intent: TaskIntent,
+        contract: turn_contract::TurnContract,
         mode: PermissionMode,
         origin_seq: i64,
         root: Option<std::path::PathBuf>,
@@ -1027,7 +1018,7 @@ impl TaskScope {
     ) -> Self {
         Self {
             task: task.to_string(),
-            intent,
+            contract,
             root,
             allowed_paths: Vec::new(),
             base_head,
@@ -1048,7 +1039,7 @@ impl TaskScope {
     ) -> Self {
         Self::for_turn(
             task,
-            intent,
+            turn_contract::TurnContract::for_test(intent),
             mode,
             origin_seq,
             root,
@@ -1059,7 +1050,7 @@ impl TaskScope {
     }
 
     fn permits_tool(&self, tool: &str) -> bool {
-        if !self.intent.is_observational() {
+        if !self.contract.intent().is_observational() {
             return true;
         }
         !matches!(
@@ -1082,7 +1073,7 @@ impl TaskScope {
 
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.task.hash(&mut hasher);
-        self.intent.hash(&mut hasher);
+        self.contract.hash(&mut hasher);
         self.root.hash(&mut hasher);
         self.allowed_paths.hash(&mut hasher);
         self.base_head.hash(&mut hasher);
@@ -1512,6 +1503,8 @@ pub struct Session {
     project: forge_types::ProjectContext,
     /// Audit record of system context injected during the latest executed turn.
     last_context_pack: context_pack::ContextPack,
+    /// The explicit completion expectation active during the latest turn.
+    last_turn_contract: turn_contract::TurnContract,
 }
 
 /// Parse `.git/HEAD` contents into a branch name (`ref: refs/heads/<branch>` → `<branch>`).
@@ -1901,6 +1894,7 @@ impl Session {
             cached_agents_md,
             project,
             last_context_pack: context_pack::ContextPack::default(),
+            last_turn_contract: turn_contract::TurnContract::default(),
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
@@ -1934,6 +1928,11 @@ impl Session {
     /// The ordered context that Forge injected during the most recent turn.
     pub fn last_context_pack(&self) -> &context_pack::ContextPack {
         &self.last_context_pack
+    }
+
+    /// The completion expectation Forge applied to the most recent turn.
+    pub fn last_turn_contract(&self) -> &turn_contract::TurnContract {
+        &self.last_turn_contract
     }
 
     /// Persist a system-context message and add its provenance to the active turn's audit pack.
@@ -4283,7 +4282,7 @@ prompt text, nothing else.";
         let intent = self
             .task_scope
             .as_ref()
-            .map(|scope| scope.intent)
+            .map(|scope| scope.contract.intent())
             .unwrap_or(TaskIntent::Mutating);
         let decision = post_check_decision(
             intent,
@@ -5961,11 +5960,22 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
 
         // 2. Persist + record the user message. Its seq keys this turn's code-snapshot dir
         // (PR3): files written during the turn are restorable by rewinding to this boundary.
+        let contract =
+            turn_contract::TurnContract::derive(prompt, self.mode, self.expect_code_change);
+        self.last_turn_contract = contract.clone();
+        if let Some(guidance) = contract.guidance() {
+            self.inject_context(
+                &mut context_pack,
+                context_pack::ContextSource::TurnContract,
+                "explicit turn completion contract",
+                guidance,
+            )?;
+        }
         let seq = self.next_seq();
         self.current_turn_seq = seq;
         self.task_scope = Some(TaskScope::for_turn(
             prompt,
-            TaskIntent::default_for_turn(self.mode, self.expect_code_change),
+            contract,
             self.mode,
             seq,
             Some(self.workspace.root().to_path_buf()),
@@ -6170,8 +6180,9 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
 
         // ── Token-budget continuation guard (H8) — empty-diff pushback with a diminishing-returns
         //    stop ────────────────────────────────────────────────────────────────────────────────
-        // Headless code-change runs (`bench swe` marks the session via `set_expect_code_change`;
-        // interactive sessions never set it) sometimes end with the model having WORKED (tools ran)
+        // Code-change contracts (bench marks a whole session via `set_expect_code_change`; an
+        // explicit interactive directive such as "fix ..." creates one for that turn) sometimes
+        // end with the model having WORKED (tools ran)
         // but changed NOTHING — a `codex-cli::gpt-5.5` SWE-bench Lite sweep submitted 8/15 EMPTY
         // patches (raw codex solved 4 of those), the model describing the fix instead of making it.
         // Push back with a synthetic user message demanding the implementation, then re-drive — and
@@ -6193,7 +6204,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // self-review/autofix so any edits it produces are still lint/test-checked.
         // `mesh.nudge_empty_diff = false` disables it wholesale.
         if self.config.mesh.nudge_empty_diff
-            && self.expect_code_change
+            && (self.expect_code_change || self.last_turn_contract.requires_changed_artifact())
             && (turn_tools_ran > 0 || forge_provider::is_cli_bridge(&active_model))
             && self.edits_this_turn == 0
         {
@@ -6972,7 +6983,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 "permission denied by task scope {}: `{}` is unavailable for {:?}",
                 scope.audit_digest(),
                 call.name,
-                scope.intent
+                scope.contract.intent()
             );
             self.store.record_tool_call(
                 msg_id,
@@ -13961,9 +13972,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_diff_nudge_never_fires_for_interactive_sessions() {
-        // `expect_code_change` is only ever set by bench — a plain session with the identical
-        // "explored but changed nothing" turn ends normally, no nudge.
+    async fn explicit_interactive_change_contract_nudges_an_empty_diff() {
+        // A direct `fix ...` request now carries the same artifact requirement that previously
+        // existed only for SWE-bench. The scripted model explores but merely describes, so Forge
+        // re-drives it rather than accepting a phantom implementation.
         let dir = clean_git_repo();
         let provider = Arc::new(DescribeOnlyProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -13981,10 +13993,45 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "no nudge without the code-change flag"
+            2 + CONTINUATION_DIMINISHING_MIN,
+            "the explicit change contract must re-drive an empty implementation"
         );
+        assert_eq!(answer, "still only describing");
+        assert!(session.last_turn_contract().requires_changed_artifact());
+        assert!(session
+            .last_context_pack()
+            .entries()
+            .iter()
+            .any(|entry| entry.source() == context_pack::ContextSource::TurnContract));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_interactive_question_does_not_add_a_recovery_loop() {
+        // Asking how one *would* fix something is advisory. The contract deliberately does not
+        // guess that it is an implementation request, preserving existing one-pass behavior.
+        let dir = clean_git_repo();
+        let provider = Arc::new(DescribeOnlyProvider {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let calls = Arc::clone(&provider);
+        let router = Arc::new(FixedRouter {
+            model: "m::x".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
+        let answer = session
+            .run_turn("How would you fix the bug?")
+            .await
+            .unwrap();
+        assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert_eq!(answer, "here is how you would fix it");
+        assert!(!session.last_turn_contract().requires_changed_artifact());
+        assert!(session.last_context_pack().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -14626,7 +14673,10 @@ mod tests {
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.set_turn_deadline(std::time::Instant::now() - std::time::Duration::from_secs(1));
-        session.run_turn("fix the bug").await.unwrap();
+        session
+            .run_turn("How would you fix the bug?")
+            .await
+            .unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
@@ -14659,7 +14709,10 @@ mod tests {
         session.config.mesh.deadline_reconcile = false;
         session.config.mesh.max_steps = 3;
         session.set_turn_deadline(std::time::Instant::now() - std::time::Duration::from_secs(1));
-        session.run_turn("fix the bug").await.unwrap();
+        session
+            .run_turn("How would you fix the bug?")
+            .await
+            .unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
             3,
@@ -14683,7 +14736,10 @@ mod tests {
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
         session.config.mesh.max_steps = 3;
-        session.run_turn("fix the bug").await.unwrap();
+        session
+            .run_turn("How would you fix the bug?")
+            .await
+            .unwrap();
         assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 3);
     }
 
