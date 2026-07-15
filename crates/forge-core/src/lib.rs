@@ -5806,8 +5806,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             TaskIntent::default_for_turn(self.mode, self.expect_code_change),
             self.mode,
             seq,
-            self.work_root.clone(),
-            git_head(self.work_root.as_deref()),
+            Some(self.workspace.root().to_path_buf()),
+            git_head(Some(self.workspace.root())),
             self.id.clone(),
             seq as u64,
         ));
