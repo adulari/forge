@@ -132,7 +132,11 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         },
         Command::Commands => commands_cmd(),
         Command::Models { probe, all, clear } => models(probe, all, clear).await,
-        Command::Mesh { prompt, json } => mesh_explain(prompt.join(" "), json).await,
+        Command::Mesh {
+            prompt,
+            json,
+            smoke,
+        } => mesh_explain(prompt.join(" "), json, smoke).await,
         Command::Benchmarks { refresh } => benchmarks_cmd(refresh).await,
         Command::Local { sub } => local_cmd(sub).await,
         Command::Doctor => {

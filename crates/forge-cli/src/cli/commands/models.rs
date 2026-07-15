@@ -49,6 +49,29 @@ const CATALOG_CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 /// refreshes it before routing whenever possible.
 pub(crate) const CODEX_QUOTA_MAX_AGE_SECS: i64 = forge_types::CODEX_QUOTA_FRESHNESS_SECS;
 
+/// Choose the source before reading a CLI rollout. A direct OAuth-header observation represents
+/// the account Forge is about to use; a local CLI session can be fresh yet belong to a different
+/// account or retain an obsolete plan. The CLI is therefore a no-cost fallback, never a reason to
+/// skip a due lightweight OAuth probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexQuotaSource {
+    FreshOAuth,
+    ProbeOAuth,
+    CliFallback,
+}
+
+fn codex_quota_source(has_oauth: bool, oauth_age_secs: Option<i64>) -> CodexQuotaSource {
+    if has_oauth {
+        if oauth_age_secs.is_some_and(|age| age <= CODEX_QUOTA_MAX_AGE_SECS) {
+            CodexQuotaSource::FreshOAuth
+        } else {
+            CodexQuotaSource::ProbeOAuth
+        }
+    } else {
+        CodexQuotaSource::CliFallback
+    }
+}
+
 fn codex_quota_is_stale(store: &Store) -> bool {
     !["codex-oauth", "codex-cli"]
         .into_iter()
@@ -105,38 +128,23 @@ fn seed_codex_rollout_quota(store: &Store, stats: &crate::bridge_stats::BridgeSt
     observed
 }
 
-/// Refresh the shared Codex quota before a routing decision. A recent Codex CLI rollout remains
-/// a no-cost source; once it is stale, OAuth is preferred and queried with one constrained
-/// `gpt-5.4-mini` request. Failure is deliberately non-fatal: the store filters expired Codex
-/// data, letting normal provider failover handle an unavailable account rather than routing on a
-/// known-stale pressure reading.
+/// Refresh the shared Codex quota before a routing decision. OAuth is preferred whenever its own
+/// direct observation is stale and uses one tiny shared-meter `gpt-5.6-luna` request. The local
+/// CLI rollout is a no-cost fallback when that probe is unavailable. Failure is deliberately
+/// non-fatal: the store filters expired data, letting normal provider failover handle an
+/// unavailable account rather than routing on a known-stale pressure reading.
 pub(crate) async fn refresh_codex_quota(store: &Store) {
-    // The official CLI's newest rollout is a zero-cost, account-authoritative observation.  It
-    // wins when newer than the bounded freshness window because Forge's separately-authorized
-    // OAuth token can otherwise remain attached to an old ChatGPT account after a plan/account
-    // switch.  Dispatch still prefers the native OAuth provider; this only selects truthful usage.
-    let stats = tokio::task::spawn_blocking(crate::bridge_stats::fetch)
-        .await
-        .unwrap_or_default();
-    if seed_codex_rollout_quota(store, &stats) {
-        return;
-    }
-
     // OAuth header data is the canonical account observation: it comes directly from the
     // ChatGPT Codex backend, includes the provider's exact plan spelling, and naturally omits a
     // disabled window (for example an account with no five-hour allowance).  Prefer it over the
     // bridge rollout file, which is only a best-effort fallback and can be stale while a user is
     // actively consuming Codex outside Forge.
-    if forge_provider::has_codex_oauth_session() {
-        if store
-            .codex_oauth_quota_age_secs()
-            .ok()
-            .flatten()
-            .is_some_and(|age| age <= CODEX_QUOTA_MAX_AGE_SECS)
-        {
-            return;
-        }
-        match forge_provider::probe_codex_quota().await {
+    match codex_quota_source(
+        forge_provider::has_codex_oauth_session(),
+        store.codex_oauth_quota_age_secs().ok().flatten(),
+    ) {
+        CodexQuotaSource::FreshOAuth => return,
+        CodexQuotaSource::ProbeOAuth => match forge_provider::probe_codex_quota().await {
             Ok(hints) if !hints.is_empty() => {
                 for hint in &hints {
                     let _ = store.record_live_codex_oauth_quota(hint);
@@ -152,7 +160,8 @@ pub(crate) async fn refresh_codex_quota(store: &Store) {
             // A successful response without usable quota headers is not a zero-percent reading.
             // Fall through to the CLI source instead of fabricating an allowance or freshness.
             Ok(_) | Err(_) => {}
-        }
+        },
+        CodexQuotaSource::CliFallback => {}
     }
 
     if !codex_quota_is_stale(store) {
@@ -162,6 +171,9 @@ pub(crate) async fn refresh_codex_quota(store: &Store) {
     // No OAuth session or an unavailable OAuth probe: retain the CLI bridge as a no-cost fallback.
     // Its values receive their original observation timestamps, so an old rollout cannot overwrite
     // a later direct-OAuth observation.
+    let stats = tokio::task::spawn_blocking(crate::bridge_stats::fetch)
+        .await
+        .unwrap_or_default();
     let _ = seed_codex_rollout_quota(store, &stats);
     if !codex_quota_is_stale(store) {
         return;
@@ -686,7 +698,112 @@ pub(crate) async fn benchmarks_cmd(refresh: bool) -> Result<()> {
 /// `forge mesh [PROMPT]` — explain how the mesh routes. With a prompt: the full decision trace.
 /// Without one: the per-tier picks + subscription-quota overview. The non-interactive sibling of
 /// the `/mesh` TUI inspector; both read the same [`forge_mesh::RoutingExplanation`] engine.
-pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
+#[derive(Debug)]
+struct MeshSmokeRow {
+    tier: TaskTier,
+    model: String,
+    fallbacks: usize,
+    viable: bool,
+    detail: String,
+}
+
+/// Exercise the real mesh-selection path for every task tier without dispatching a model. This is
+/// deliberately safe to run often: discovery/quota freshness happen in the caller, but these
+/// routes are local and classifier-free because each tier is explicitly hinted.
+async fn mesh_smoke_rows(
+    router: &HeuristicRouter,
+    budget: forge_mesh::BudgetState,
+    health: &forge_types::ModelHealth,
+    quota: &forge_types::SubscriptionQuota,
+) -> Vec<MeshSmokeRow> {
+    let project = forge_types::ProjectContext::default();
+    let cases = [
+        (TaskTier::Trivial, "fix a typo"),
+        (TaskTier::Standard, "add a small endpoint with tests"),
+        (
+            TaskTier::Complex,
+            "design and prove a safe concurrent refactor across modules",
+        ),
+    ];
+    let mut rows = Vec::with_capacity(cases.len());
+    for (tier, prompt) in cases {
+        let decision = router
+            .route_hinted(
+                prompt,
+                false,
+                budget,
+                health,
+                quota,
+                Some(tier),
+                None,
+                &project,
+            )
+            .await;
+        let viable = decision.model != "unknown" && !decision.rationale.contains("no usable key");
+        rows.push(MeshSmokeRow {
+            tier,
+            model: decision.model,
+            fallbacks: decision.fallbacks.len(),
+            viable,
+            detail: decision.rationale,
+        });
+    }
+    rows
+}
+
+fn print_mesh_smoke(rows: &[MeshSmokeRow], json: bool) {
+    if json {
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "tier": row.tier.as_str(),
+                    "model": row.model,
+                    "fallbacks": row.fallbacks,
+                    "viable": row.viable,
+                    "detail": row.detail,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "kind": "mesh-readiness",
+                "selection_only": true,
+                "ready": rows.iter().all(|row| row["viable"] == true),
+                "tiers": rows,
+            })
+        );
+        return;
+    }
+
+    println!("⚒ mesh readiness — selection-only; no model requests\n");
+    for row in rows {
+        let mark = if row.viable { "✓" } else { "✗" };
+        let fallback_label = match row.fallbacks {
+            0 => "no fallback".to_string(),
+            1 => "1 fallback".to_string(),
+            n => format!("{n} fallbacks"),
+        };
+        println!(
+            "  {mark} {:<8} {:<42} {fallback_label}",
+            row.tier.as_str(),
+            row.model
+        );
+        if !row.viable {
+            println!("      → {}", row.detail);
+        }
+    }
+    if rows.iter().all(|row| row.viable) {
+        println!("\nMesh is ready for every task tier.");
+    } else {
+        println!(
+            "\nMesh has no viable route for one or more tiers — run `forge doctor` for fixes."
+        );
+    }
+}
+
+pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Result<()> {
     forge_config::inject_provider_keys();
     let config = forge_config::load().unwrap_or_default();
     let cat = discover_catalog(&config).await;
@@ -729,6 +846,18 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool) -> Result<()> {
         min_context_tokens: None,
     };
     let router = HeuristicRouter::new(config.clone()).with_catalog(cat.clone());
+
+    if smoke {
+        if !prompt.trim().is_empty() {
+            anyhow::bail!("`forge mesh --smoke` does not take a prompt");
+        }
+        let rows = mesh_smoke_rows(&router, budget, &health, &quota).await;
+        print_mesh_smoke(&rows, json);
+        if rows.iter().all(|row| row.viable) {
+            return Ok(());
+        }
+        anyhow::bail!("mesh readiness check failed");
+    }
 
     if prompt.trim().is_empty() {
         if json {
@@ -1237,5 +1366,44 @@ mod bridge_harness_tests {
         assert!(build_dispatch_provider(&config).harness_enabled());
         config.mesh.bridge_mode = forge_config::BridgeMode::Text;
         assert!(!build_dispatch_provider(&config).harness_enabled());
+    }
+
+    #[tokio::test]
+    async fn mesh_smoke_has_a_viable_route_for_every_tier() {
+        // A smoke run never calls a model. It exercises the actual selection seam, forcing each
+        // task tier so an authenticated user can prove their current catalog is routeable before
+        // they start a real task.
+        let router = HeuristicRouter::new(forge_config::Config::default())
+            .with_catalog(ModelCatalog::new(vec!["ollama::llama3.2".into()]));
+        let rows = mesh_smoke_rows(
+            &router,
+            forge_mesh::BudgetState::default(),
+            &forge_types::ModelHealth::default(),
+            &forge_types::SubscriptionQuota::default(),
+        )
+        .await;
+
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|row| row.viable), "rows: {rows:?}");
+        assert_eq!(
+            rows.iter().map(|row| row.tier).collect::<Vec<_>>(),
+            vec![TaskTier::Trivial, TaskTier::Standard, TaskTier::Complex]
+        );
+    }
+
+    #[test]
+    fn oauth_quota_probe_is_preferred_over_a_fresh_cli_rollout() {
+        // The CLI rollout may be fresh but represent a different/stale local Codex session. When
+        // direct OAuth has no fresh observation, its tiny authoritative probe must win; CLI is
+        // only the fallback if the OAuth probe cannot produce quota headers.
+        assert_eq!(codex_quota_source(true, None), CodexQuotaSource::ProbeOAuth);
+        assert_eq!(
+            codex_quota_source(true, Some(CODEX_QUOTA_MAX_AGE_SECS)),
+            CodexQuotaSource::FreshOAuth
+        );
+        assert_eq!(
+            codex_quota_source(false, None),
+            CodexQuotaSource::CliFallback
+        );
     }
 }

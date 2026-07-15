@@ -1075,6 +1075,18 @@ impl Store {
         Ok(id)
     }
 
+    /// Restore a session parent row if a live driver outlasted retention. Existing session
+    /// metadata is deliberately left untouched: this is a narrow durability guard for writes
+    /// that reference `session_id`, not a session update operation.
+    pub fn ensure_session(&self, id: &str, cwd: &str, mode: &str) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO session (id, cwd, permission_mode, total_cost_usd) VALUES (?1, ?2, ?3, 0) \
+             ON CONFLICT(id) DO NOTHING",
+            (id, cwd, mode),
+        )?;
+        Ok(())
+    }
+
     /// The working directory recorded for a session at creation time, or `None` if no such
     /// session exists. Unlike `SessionRegistry::get` (the daemon's in-memory map of currently
     /// running drivers), this reads straight from the store — like [`Store::load_history_page`]
@@ -5093,6 +5105,27 @@ mod tests {
         let id = store.create_session("/x", "default").unwrap();
         assert!(store.session_exists(&id).unwrap());
         assert!(!store.session_exists("nope").unwrap());
+    }
+
+    #[test]
+    fn ensure_session_restores_missing_parent_without_overwriting_existing_metadata() {
+        let store = Store::open_in_memory().unwrap();
+        store.ensure_session("recoverable", "/x", "Bypass").unwrap();
+        assert!(store.session_exists("recoverable").unwrap());
+        assert_eq!(
+            store.session_cwd("recoverable").unwrap().as_deref(),
+            Some("/x")
+        );
+        assert_eq!(store.session_mode("recoverable").unwrap(), "Bypass");
+
+        store
+            .ensure_session("recoverable", "/other", "Plan")
+            .unwrap();
+        assert_eq!(
+            store.session_cwd("recoverable").unwrap().as_deref(),
+            Some("/x")
+        );
+        assert_eq!(store.session_mode("recoverable").unwrap(), "Bypass");
     }
 
     #[test]

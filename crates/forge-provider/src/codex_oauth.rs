@@ -29,6 +29,14 @@ pub const CODEX_OAUTH_NAMESPACE: &str = "codex-oauth";
 /// Hardcoded ChatGPT Codex backend — deliberately NOT read from config/env.
 const CODEX_API_BASE: &str = "https://chatgpt.com/backend-api/codex";
 
+// `gpt-5.4-mini` is the lowest-cost Codex model, but its HTTP quota headers can describe the
+// mini tier rather than the account's shared Codex allowance (observed as 0% while the normal
+// Codex route reported the actual weekly usage). Luna's normal WebSocket route emits the shared
+// `codex.rate_limits` frame, so it is the smallest reliable account-wide probe despite not being
+// the cheapest model. The prompt still makes this one short completion every freshness interval.
+const QUOTA_PROBE_MODEL: &str = "codex-oauth::gpt-5.6-luna";
+const QUOTA_PROBE_PROMPT: &str = "Reply only with .";
+
 /// Parameters the generic Responses builder emits that `chatgpt.com/backend-api/codex/responses`
 /// rejects outright (verified live: `max_output_tokens` → 400 "Unsupported parameter"). The real
 /// Codex CLI sends neither. Stripped codex-side so the shared builder stays correct for xAI.
@@ -634,45 +642,24 @@ pub async fn probe_entitlement(
     })
 }
 
-/// Read the active ChatGPT subscription's current Codex quota with the smallest supported
-/// request. The backend exposes quota only on a Responses call: it has no quota-only endpoint.
+/// Read the active ChatGPT subscription's current Codex quota with the smallest reliable request.
+/// The backend exposes quota only while completing: it has no quota-only endpoint.
 ///
-/// The probe deliberately uses the cheapest Codex model, no tools, no storage, no streaming, and
-/// a one-character response request. Callers must gate it on a short freshness interval; the
-/// response headers are account-wide and apply equally to `codex-oauth` and `codex-cli`.
+/// The probe deliberately uses the normal Luna route because it returns the authoritative shared
+/// rate-limit frame; mini can return a distinct zeroed tier. It has no tools, a tiny prompt, and
+/// is gated by a short freshness interval. Its quota is account-wide and applies equally to
+/// `codex-oauth` and `codex-cli`.
 pub async fn probe_quota() -> Result<Vec<QuotaHint>, ProviderError> {
     let provider = CodexOauthProvider::new();
-    let pool = provider.account_pool();
-    let (_account_id, token, chatgpt_account_id) = provider.pick_access_token(&pool).await?;
-    let body = serde_json::json!({
-        "model": "gpt-5.4-mini",
-        "input": [{"role": "user", "content": "Reply with a single period."}],
-        "stream": false,
-        "store": false,
-    });
-    let resp = tokio::time::timeout(
+    let messages = [Message::user(QUOTA_PROBE_PROMPT)];
+    let mut sink = |_: crate::StreamEvent| {};
+    let response = tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        provider
-            .http
-            .post(responses_url())
-            .bearer_auth(token)
-            .header("ChatGPT-Account-Id", chatgpt_account_id)
-            .json(&body)
-            .send(),
+        provider.complete(QUOTA_PROBE_MODEL, &messages, &[], &mut sink),
     )
     .await
-    .map_err(|_| ProviderError::Unavailable("Codex quota probe timed out connecting".into()))?
-    .map_err(|e| ProviderError::Unavailable(e.to_string()))?;
-    let status = resp.status();
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(classify_codex_status(status.as_u16(), &text, None));
-    }
-    let quotas = parse_codex_quota_headers(resp.headers());
-    // Consume the tiny body before releasing the connection. Quota comes exclusively from the
-    // headers, so malformed body content cannot invalidate a real quota observation.
-    let _ = resp.bytes().await;
-    Ok(quotas)
+    .map_err(|_| ProviderError::Unavailable("Codex quota probe timed out".into()))??;
+    Ok(response.quotas)
 }
 
 /// Codex-only request-body shape: the ChatGPT backend rejects requests unless store=false
@@ -1322,6 +1309,12 @@ mod tests {
     fn quota_headers_empty_without_any_codex_headers() {
         let headers = header_map(&[]);
         assert!(parse_codex_quota_headers(&headers).is_empty());
+    }
+
+    #[test]
+    fn quota_probe_uses_the_shared_meter_route_with_a_tiny_prompt() {
+        assert_eq!(QUOTA_PROBE_MODEL, "codex-oauth::gpt-5.6-luna");
+        assert_eq!(QUOTA_PROBE_PROMPT, "Reply only with .");
     }
 
     #[tokio::test]
