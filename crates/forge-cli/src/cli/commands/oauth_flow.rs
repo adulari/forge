@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
-use std::io::{IsTerminal, Read};
+use std::io::{self, IsTerminal};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,8 +42,8 @@ pub fn select_login_flow(
 /// Read a pasted redirect or authorization code without echoing an extra prompt.
 pub fn read_pasted_redirect_from_stdin() -> Result<String> {
     let mut input = String::new();
-    std::io::stdin()
-        .read_to_string(&mut input)
+    io::stdin()
+        .read_line(&mut input)
         .context("reading pasted OAuth redirect")?;
     if input.trim().is_empty() {
         bail!("no redirect URL or authorization code provided")
