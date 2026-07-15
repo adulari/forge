@@ -86,6 +86,13 @@ jobs:
         if: steps.guard.outputs.safe == 'true'
         run: npm ci
 
+      # Xcode Cloud runs this same prebuild before compiling the installed binary. The checked-in
+      # ios/ directory is only a stale project-discovery bootstrap; fingerprinting it directly
+      # produces a runtimeVersion that no installed Xcode Cloud build can match.
+      - name: Regenerate iOS project for runtime fingerprint
+        if: steps.guard.outputs.safe == 'true'
+        run: npx expo prebuild -p ios --no-install --clean
+
       - name: Publish EAS Update (production channel, iOS only)
         if: steps.guard.outputs.safe == 'true'
         run: |

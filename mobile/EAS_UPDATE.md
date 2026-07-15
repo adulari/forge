@@ -83,8 +83,14 @@ changes native/config inputs or shared code together with JavaScript.
 When the guard passes, it publishes to the `production` channel with:
 
 ```
+npx expo prebuild -p ios --no-install --clean
 npx eas-cli@latest update --channel production --environment production --platform ios --message "<commit SHA> <commit subject>" --non-interactive
 ```
+
+The prebuild is mandatory. Xcode Cloud regenerates `mobile/ios/` from `app.config.ts` before every
+binary build, while the committed iOS project is only a project-discovery bootstrap and may be
+stale. EAS must fingerprint the same regenerated native tree; otherwise it publishes a valid OTA
+under a runtime version that no installed Xcode Cloud binary will ever request.
 
 ### `--platform ios` is required
 
