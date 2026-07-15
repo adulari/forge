@@ -323,12 +323,13 @@ Still inside `route_score` (`catalog.rs:386-391`): a subscription whose provider
 (effectively last). Applied in the *score*, not as a post-sort, so non-subscription alternatives
 make it into any truncated shortlist.
 
-### 4.8 OAuth supersedes bridge: per-model demotion
+### 4.8 OAuth supersedes bridge: per-model preference and suppression
 
 Native OAuth (`codex-oauth::`) runs Forge's own harness against the provider directly; the CLI
 bridge (`codex-cli::`) shells out to the vendor CLI's own agent loop instead. Once an OAuth
-surface can dispatch a given model, it is structurally the better surface for that model — so the
-mesh prefers it, per model, without dropping the bridge as a fallback.
+surface can dispatch a given model, it is structurally the better surface for that model. The mesh
+therefore removes its CLI bridge twin from normal routing candidates and from the inspector when
+that OAuth twin passes every eligibility check for the current turn.
 
 **The pair list** — `OAUTH_SUPERSEDES` (`crates/forge-mesh/src/catalog.rs:314`):
 `&[("codex-oauth", "codex-cli")]`, `(oauth, bridge)`. As of #586, `codex-oauth` dispatches every
@@ -347,18 +348,19 @@ model already implies a live OAuth session — discovery is gated on `has_codex_
 forge-cli — so `superseded_bridge_ids` does no session-probing of its own; it is a pure function
 of the catalog's model ids.
 
-**Why a flat penalty, not removal.** With both twins present they otherwise score identically:
+**Why score then suppress.** With both twins present they otherwise score identically:
 same bare model name → same `capability_score_b` (§4.1), same `cost_class`/`cost_pref` (§4.2–4.3,
 both class 1 subscription), same `code_prior` (§4.4, now tied by the `codex-oauth` addition
 above), the same burn weight (`bench::tokens` matches both ids to the same family, §4.6), and the
 same account-wide quota reading (store layer — §5.3). A flat 1.0 penalty is large enough to
 guarantee the OAuth twin outranks the bridge twin at every tier (Trivial/Standard/Complex all
 compare on the same `route_score`, so a fixed additive penalty wins regardless of tier weighting)
-while small enough that the bridge stays in the ranked chain immediately behind — it is never
-excluded, only demoted. This is what makes it a *failover* rule rather than a removal: if OAuth
-errors mid-dispatch, the bridge is the very next candidate the mesh tries, implementing "prefer
-OAuth, use the bridge only when OAuth is unavailable" through ranking order rather than by hiding
-the bridge from the catalog.
+before the final eligibility pass. Then `ordered_usable_for_tier` compares each bridge with its
+paired OAuth twin via `oauth_twin_for_bridge`: if the OAuth model is available, enabled, healthy,
+within quota, context-compatible, and permitted by credit mode, the bridge is removed from the
+normal route, fallback chain, and `forge mesh` candidate table. This is generic over
+`OAUTH_SUPERSEDES`, not Codex-specific. If any of those OAuth checks fails, the bridge remains
+routable; on a later turn an OAuth dispatch failure is benched and the bridge becomes eligible.
 
 **Pins bypass this entirely.** An explicit `--model codex-cli::gpt-5.6-sol` pin (§9) never goes
 through `route_score` — `decide`'s pin branch dispatches the pinned id directly if it's usable. The

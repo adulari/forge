@@ -151,8 +151,26 @@ impl HeuristicRouter {
         // it as `usable: true` here made the real pick (further down the list, first genuinely
         // eligible row) look inconsistent with the table, when the pick was correct all along.
         let min_context = crate::effective_min_context(budget.min_context_tokens, effort);
+        let visible_models: std::collections::HashSet<String> = self
+            .ordered_usable_for_tier(
+                routed_tier,
+                health,
+                hints,
+                quota,
+                effort,
+                budget.min_context_tokens,
+                false,
+            )
+            .into_iter()
+            .collect();
         let candidates = rows
             .into_iter()
+            // Keep unavailable rows visible for diagnosis, but never present an available CLI
+            // bridge as a normal choice when its paired OAuth surface is usable this turn.
+            .filter(|row| {
+                catalog::oauth_twin_for_bridge(&row.model)
+                    .is_none_or(|oauth_twin| !visible_models.contains(&oauth_twin))
+            })
             .enumerate()
             .map(|(i, row)| CandidateRow {
                 rank: i + 1,
@@ -324,6 +342,39 @@ mod tests {
         assert!(selected.usable);
         assert_eq!(selected.row.model, e.pick);
         assert_eq!(e.pick, "groq::llama-3.3-70b-versatile");
+    }
+
+    #[test]
+    fn explanation_hides_a_cli_bridge_when_its_oauth_twin_is_usable() {
+        // The inspector is a contract: it must show the same candidates the router may actually
+        // use. A live OAuth twin makes the CLI bridge redundant for this turn, so presenting both
+        // as normal ranked choices misrepresents the routing policy.
+        let r = HeuristicRouter::new(Config::default())
+            .with_availability(|_| true)
+            .with_catalog(ModelCatalog::new(vec![
+                "codex-oauth::gpt-5.6-luna".into(),
+                "codex-cli::gpt-5.6-luna".into(),
+                "groq::llama-3.3-70b-versatile".into(),
+            ]));
+        let e = r.explain(
+            "design and prove correct a lock-free queue",
+            BudgetState::default(),
+            &ModelHealth::default(),
+            &SubscriptionQuota::default(),
+            None,
+            &ProjectContext::default(),
+        );
+
+        assert!(
+            !e.candidates
+                .iter()
+                .any(|candidate| candidate.row.model == "codex-cli::gpt-5.6-luna"),
+            "OAuth-active mesh output must not rank the redundant CLI bridge: {:?}",
+            e.candidates
+                .iter()
+                .map(|candidate| &candidate.row.model)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
