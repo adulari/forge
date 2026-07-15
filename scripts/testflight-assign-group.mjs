@@ -66,6 +66,7 @@ const {
   UPLOADED_AFTER = "",
   POLL_TIMEOUT_SEC = "2700",
   POLL_INTERVAL_SEC = "60",
+  XCODE_WORKFLOW_ID = "C68BAA13-19B5-4C45-B4D7-C947DB601DB6",
 } = process.env;
 
 function die(msg) {
@@ -173,6 +174,30 @@ async function main() {
     `build: ${build.attributes?.version} (${build.id}), uploaded ${build.attributes?.uploadedDate ?? "unknown"}` +
       ` — assigning to: ${groups.map((g) => g.name).join(", ")}`,
   );
+
+  // Best-effort provenance for diagnosing whether an installed TestFlight build predates a
+  // native capability such as EAS Update. This is read-only and never starts an Xcode build.
+  try {
+    const runs = await api(
+      "GET",
+      `/v1/ciBuildRuns?filter[workflow]=${encodeURIComponent(XCODE_WORKFLOW_ID)}` +
+        "&include=sourceCommit,builds&sort=-number&limit=200",
+    );
+    const run = (runs.data || []).find((candidate) =>
+      candidate.relationships?.builds?.data?.some((related) => related.id === build.id),
+    );
+    const commitId = run?.relationships?.sourceCommit?.data?.id;
+    const commit = (runs.included || []).find(
+      (included) => included.type === "scmGitReferences" && included.id === commitId,
+    ) ?? (runs.included || []).find((included) => included.id === commitId);
+    console.log(
+      run
+        ? `xcode run: ${run.attributes?.number ?? "?"}, source ${commit?.attributes?.canonicalName ?? commit?.attributes?.commitSha ?? commitId ?? "unknown"}`
+        : `xcode run: no run found for TestFlight build ${build.id}`,
+    );
+  } catch (error) {
+    console.log(`xcode run provenance unavailable (non-fatal): ${error.message}`);
+  }
 
   // 4. Assign the build to each group (idempotent: a 409/"already added" is fine).
   for (const g of groups) {
