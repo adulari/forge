@@ -285,6 +285,8 @@ pub(crate) async fn auth_codex_oauth(
     _replace: bool,
     account: Option<String>,
     switch: bool,
+    force_device: bool,
+    paste: Option<String>,
 ) -> Result<()> {
     use forge_config::provider_oauth::{
         self, CODEX_OAUTH_CALLBACK_PORT, CODEX_OAUTH_KEYRING_PROVIDER,
@@ -394,19 +396,38 @@ pub(crate) async fn auth_codex_oauth(
         return Ok(());
     }
 
-    // PKCE + loopback on the official Codex callback port.
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", CODEX_OAUTH_CALLBACK_PORT))
-        .await
-        .with_context(|| {
-            format!(
-                "could not bind 127.0.0.1:{CODEX_OAUTH_CALLBACK_PORT} — free the port (another \
-                 Codex/Forge auth may be running) and retry"
-            )
-        })?;
+    let flow = crate::cli::commands::oauth_flow::select_login_flow(
+        force_device,
+        paste.is_some(),
+        false,
+        crate::cli::commands::oauth_flow::is_headless(),
+    );
+    if matches!(flow, crate::cli::commands::oauth_flow::LoginFlow::Device) {
+        anyhow::bail!(
+            "Codex OAuth does not advertise an RFC 8628 device-authorization endpoint; use \
+             `--paste` (or run from a browser-capable terminal) instead"
+        );
+    }
 
+    // PKCE is used by both loopback and pasted redirect completion. The listener is only bound
+    // for the loopback flow, so headless hosts do not need an SSH-forwarded callback port.
     let pkce = forge_config::Pkce::generate();
     let state = forge_config::random_state();
     let auth_url = codex_authorize_url(&state, &pkce.challenge);
+    let listener = if matches!(flow, crate::cli::commands::oauth_flow::LoginFlow::Loopback) {
+        Some(
+            tokio::net::TcpListener::bind(("127.0.0.1", CODEX_OAUTH_CALLBACK_PORT))
+                .await
+                .with_context(|| {
+                    format!(
+                        "could not bind 127.0.0.1:{CODEX_OAUTH_CALLBACK_PORT} — free the port \
+                         (another Codex/Forge auth may be running) and retry"
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
 
     let no_browser = std::env::var("FORGE_NO_BROWSER").as_deref() == Ok("1") || {
         use std::io::IsTerminal;
@@ -415,7 +436,12 @@ pub(crate) async fn auth_codex_oauth(
 
     println!("To sign in to ChatGPT (Plus/Pro) with OAuth, open:\n");
     println!("    {auth_url}\n");
-    if no_browser {
+    if matches!(flow, crate::cli::commands::oauth_flow::LoginFlow::Paste) {
+        println!(
+            "Headless paste flow: authorize on any device, then paste the complete redirect URL \
+             (including the state parameter) here. A bare code is also accepted."
+        );
+    } else if no_browser {
         println!(
             "(headless / FORGE_NO_BROWSER=1 — open the URL on a machine that can reach this host's \
              port {CODEX_OAUTH_CALLBACK_PORT})"
@@ -423,13 +449,36 @@ pub(crate) async fn auth_codex_oauth(
     } else if let Err(e) = crate::cli::commands::mcp::open_browser(&auth_url) {
         println!("(could not open browser automatically: {e} — open the URL manually)");
     }
-    println!(
-        "Waiting for approval on 127.0.0.1:{CODEX_OAUTH_CALLBACK_PORT}… press Ctrl-C to cancel."
-    );
-
-    let (code, returned_state) = wait_for_oauth_callback(listener)
-        .await
-        .context("waiting for OAuth callback")?;
+    let (code, returned_state) = if let Some(listener) = listener {
+        println!(
+            "Waiting for approval on 127.0.0.1:{CODEX_OAUTH_CALLBACK_PORT}… press Ctrl-C to cancel."
+        );
+        wait_for_oauth_callback(listener)
+            .await
+            .context("waiting for OAuth callback")?
+    } else {
+        let input = if let Some(value) = paste {
+            if value.is_empty() {
+                tokio::task::spawn_blocking(
+                    crate::cli::commands::oauth_flow::read_pasted_redirect_from_stdin,
+                )
+                .await
+                .context("reading pasted OAuth redirect")??
+            } else {
+                value
+            }
+        } else {
+            tokio::task::spawn_blocking(
+                crate::cli::commands::oauth_flow::read_pasted_redirect_from_stdin,
+            )
+            .await
+            .context("reading pasted OAuth redirect")??
+        };
+        (
+            crate::cli::commands::oauth_flow::parse_pasted_redirect(&input, &state)?,
+            state.clone(),
+        )
+    };
     if returned_state != state {
         anyhow::bail!("OAuth state mismatch — possible CSRF; try again");
     }

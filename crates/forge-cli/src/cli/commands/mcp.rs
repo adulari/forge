@@ -12,7 +12,11 @@ pub(crate) async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
             return crate::mcp_agent::run(session, cwd).await;
         }
         Some(McpCmd::Import { path }) => return mcp_import(path),
-        Some(McpCmd::Login { server }) => return mcp_login(&server).await,
+        Some(McpCmd::Login {
+            server,
+            device,
+            paste,
+        }) => return mcp_login(&server, device, paste).await,
         Some(McpCmd::Logout { server, account }) => return mcp_logout(&server, account.as_deref()),
         Some(McpCmd::Add {
             name,
@@ -288,7 +292,11 @@ pub(crate) fn mcp_logout(server: &str, account: Option<&str>) -> Result<()> {
 /// Interactive OAuth 2.0 login for an OAuth-protected MCP server (`forge mcp login <server>`).
 /// Opens the authorization URL in the user's browser, starts a loopback listener for the
 /// redirect, exchanges the code for tokens, and stores them in the OS keyring (ADR-0007).
-pub(crate) async fn mcp_login(server: &str) -> Result<()> {
+pub(crate) async fn mcp_login(
+    server: &str,
+    force_device: bool,
+    paste: Option<String>,
+) -> Result<()> {
     forge_config::inject_provider_keys();
     let config = forge_config::load().unwrap_or_default();
 
@@ -341,6 +349,78 @@ pub(crate) async fn mcp_login(server: &str) -> Result<()> {
     let as_meta = forge_mcp::oauth::fetch_auth_server_metadata(&http, &issuer)
         .await
         .map_err(|e| anyhow::anyhow!("fetching auth server metadata from {issuer}: {e}"))?;
+
+    let flow = crate::cli::commands::oauth_flow::select_login_flow(
+        force_device,
+        paste.is_some(),
+        as_meta.device_authorization_endpoint.is_some(),
+        crate::cli::commands::oauth_flow::is_headless(),
+    );
+
+    if matches!(flow, crate::cli::commands::oauth_flow::LoginFlow::Device) {
+        let device_url = as_meta
+            .device_authorization_endpoint
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "this MCP authorization server does not advertise an RFC 8628 \
+                 device_authorization_endpoint"
+                )
+            })?;
+        let registered = forge_mcp::oauth::load_registered_client(server);
+        let client_id = oauth_cfg
+            .client_id
+            .clone()
+            .or_else(|| registered.as_ref().map(|client| client.client_id.clone()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "device login needs an OAuth client_id in .forge/mcp.toml or a prior \
+                     browser login that registered one"
+                )
+            })?;
+        let scope = if oauth_cfg.scopes.is_empty() {
+            "mcp offline_access".to_string()
+        } else {
+            oauth_cfg.scopes.join(" ")
+        };
+        let device =
+            crate::cli::commands::oauth_flow::request_device_code(device_url, &client_id, &scope)
+                .await?;
+        println!(
+            "Open {} and enter the displayed user code.",
+            device.verification_uri
+        );
+        println!("User code: {}", device.user_code);
+        if let Some(uri) = device.verification_uri_complete.as_deref() {
+            println!("Or open the complete verification URL: {uri}");
+        }
+        let device_tokens = crate::cli::commands::oauth_flow::poll_device_token(
+            &as_meta.token_endpoint,
+            &client_id,
+            &device,
+        )
+        .await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0);
+        let tokens = forge_config::OAuthTokens {
+            access_token: device_tokens.access_token,
+            refresh_token: device_tokens.refresh_token,
+            expires_at: device_tokens
+                .expires_in
+                .map(|expires| now + expires as i64)
+                .unwrap_or(0),
+            token_endpoint: as_meta.token_endpoint.clone(),
+            client_id,
+            scopes: oauth_cfg.scopes.clone(),
+        };
+        let account_id = forge_config::next_oauth_account_id(server);
+        forge_config::add_oauth_account(server, &account_id, &tokens)
+            .context("storing OAuth tokens in keyring")?;
+        println!("✓ OAuth tokens stored for '{server}' (account '{account_id}').");
+        return Ok(());
+    }
 
     // Bind a loopback listener to get the redirect port.
     let redirect_port = oauth_cfg.redirect_port.unwrap_or(0);
@@ -408,23 +488,49 @@ pub(crate) async fn mcp_login(server: &str) -> Result<()> {
 
     // Wait for the redirect callback on the loopback listener.
     println!("Waiting for authorization callback on http://127.0.0.1:{bound_port}/callback …");
-    let (mut stream, _) =
-        tokio::time::timeout(std::time::Duration::from_secs(120), listener.accept())
-            .await
-            .context("timed out waiting for OAuth callback (120 s)")?
-            .context("accepting callback connection")?;
-
-    // Read the HTTP request line to extract `code` and `state`.
-    let (code, returned_state) = read_callback_params(&mut stream).await?;
-
-    // Send a minimal HTTP 200 response so the browser doesn't show an error.
-    let _ = tokio::io::AsyncWriteExt::write_all(
-        &mut stream,
-        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
-          <html><body><h2>Authorization complete. You can close this tab.</h2></body></html>",
-    )
-    .await;
-    drop(stream);
+    let (code, returned_state) =
+        if matches!(flow, crate::cli::commands::oauth_flow::LoginFlow::Paste) {
+            println!(
+                "Paste the complete redirect URL (including the state parameter) here; a bare \
+             authorization code is also accepted."
+            );
+            let input = if let Some(value) = paste {
+                if value.is_empty() {
+                    tokio::task::spawn_blocking(
+                        crate::cli::commands::oauth_flow::read_pasted_redirect_from_stdin,
+                    )
+                    .await
+                    .context("reading pasted OAuth redirect")??
+                } else {
+                    value
+                }
+            } else {
+                tokio::task::spawn_blocking(
+                    crate::cli::commands::oauth_flow::read_pasted_redirect_from_stdin,
+                )
+                .await
+                .context("reading pasted OAuth redirect")??
+            };
+            (
+                crate::cli::commands::oauth_flow::parse_pasted_redirect(&input, &state)?,
+                state.clone(),
+            )
+        } else {
+            let (mut stream, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(120), listener.accept())
+                    .await
+                    .context("timed out waiting for OAuth callback (120 s)")?
+                    .context("accepting callback connection")?;
+            let result = read_callback_params(&mut stream).await?;
+            let _ = tokio::io::AsyncWriteExt::write_all(
+                &mut stream,
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+              <html><body><h2>Authorization complete. You can close this tab.</h2></body></html>",
+            )
+            .await;
+            drop(stream);
+            result
+        };
 
     // CSRF check.
     if returned_state != state {

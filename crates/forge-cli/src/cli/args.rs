@@ -578,6 +578,12 @@ pub(crate) enum Command {
         /// Ignored for OAuth providers.
         #[arg(long)]
         replace: bool,
+        /// OAuth providers only: force RFC 8628 device authorization when advertised.
+        #[arg(long)]
+        device: bool,
+        /// OAuth providers only: use pasted redirect (or read it from stdin when no value is given).
+        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "REDIRECT")]
+        paste: Option<String>,
         /// OAuth providers only: target account id for `--switch` / `--remove`.
         #[arg(long)]
         account: Option<String>,
@@ -1225,10 +1231,16 @@ pub(crate) enum McpCmd {
         /// Path to the `.mcp.json` (default: `./.mcp.json`).
         path: Option<String>,
     },
-    /// Obtain OAuth tokens for an OAuth-protected HTTP MCP server (browser-based flow).
+    /// Obtain OAuth tokens for an OAuth-protected HTTP MCP server.
     Login {
         /// Server name (as declared in `.forge/mcp.toml`).
         server: String,
+        /// Force RFC 8628 device authorization when advertised.
+        #[arg(long)]
+        device: bool,
+        /// Use pasted redirect (or read it from stdin when no value is given).
+        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "REDIRECT")]
+        paste: Option<String>,
     },
     /// Remove stored OAuth tokens for a server (`forge mcp logout <server>`). Bare removes every
     /// account; `--account <id>` removes just one.
