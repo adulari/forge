@@ -343,6 +343,17 @@ fn subscription_burn_penalty(
 /// Documented in docs/features/mesh-routing.md.
 pub(crate) const OAUTH_SUPERSEDES: &[(&str, &str)] = &[("codex-oauth", "codex-cli")];
 
+/// Return the native OAuth id for a CLI-bridge model when both providers are an explicitly
+/// equivalent pair. The pair registry, rather than a provider-name convention, is deliberately
+/// authoritative: a future CLI and OAuth surface may not share a simple provider stem.
+pub(crate) fn oauth_twin_for_bridge(bridge_model: &str) -> Option<String> {
+    let (bridge_provider, bare_model) = bridge_model.split_once("::")?;
+    let (oauth_provider, _) = OAUTH_SUPERSEDES
+        .iter()
+        .find(|(_, bridge)| *bridge == bridge_provider)?;
+    Some(format!("{oauth_provider}::{bare_model}"))
+}
+
 /// Fixed score penalty applied to a bridge model id when its OAuth twin is present in the catalog
 /// ([`OAUTH_SUPERSEDES`], via [`superseded_bridge_ids`]). The twins otherwise score identically —
 /// same bare model name → same capability, burn weight, and cost class, `code_prior` tied (Fix 2

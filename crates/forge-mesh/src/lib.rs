@@ -836,6 +836,19 @@ impl HeuristicRouter {
         catalog::is_subscription(m) || catalog::is_free(m, self.pricing.estimated_cost(m), false)
     }
 
+    /// Drop a CLI bridge when its explicitly-paired OAuth twin passed every routing eligibility
+    /// gate for this turn. This is intentionally later than catalog scoring: an OAuth model that
+    /// is disabled, benched, quota-exhausted, context-incompatible, or unavailable must leave its
+    /// bridge routable as the recovery surface. The pair registry in `catalog` makes this apply to
+    /// every supported OAuth/CLI pair rather than to Codex-specific code.
+    fn suppress_usable_oauth_superseded_bridges(models: &mut Vec<String>) {
+        let usable: std::collections::HashSet<String> = models.iter().cloned().collect();
+        models.retain(|model| {
+            catalog::oauth_twin_for_bridge(model)
+                .is_none_or(|oauth_twin| !usable.contains(&oauth_twin))
+        });
+    }
+
     /// Pick the cheapest *usable* model from `candidates` (L1). Ranking key:
     /// `(prefer_subscription && subscription ? 0 : 1, estimated_cost, config_order)` — so a
     /// paid subscription (the $0 CLI bridges) wins when preferred, then lowest est. cost, then
@@ -899,6 +912,7 @@ impl HeuristicRouter {
                 usable = vision_only;
             }
         }
+        Self::suppress_usable_oauth_superseded_bridges(&mut usable);
         if !self.auto_active() {
             // Configured path: cost-aware order (auto path keeps the ranked order verbatim).
             usable.sort_by_key(|m| self.cost_rank(m));
@@ -956,6 +970,10 @@ impl HeuristicRouter {
                 }
             }
         }
+        // A twin can appear in a different tier's configured list. Apply the same rule across
+        // the completed chain so a cross-tier fallback never reintroduces a bridge that has a
+        // usable OAuth surface elsewhere in this turn.
+        Self::suppress_usable_oauth_superseded_bridges(&mut chain);
         chain
     }
 }
@@ -1473,6 +1491,70 @@ mod tests {
             chain, ranked_usable,
             "failover order must equal mesh rank order with no provider interleaving"
         );
+    }
+
+    #[tokio::test]
+    async fn usable_oauth_twin_removes_cli_bridge_from_routing_and_failover() {
+        // A bridge is only a recovery path when its native OAuth twin is unavailable. Keeping
+        // both in an otherwise healthy chain makes the mesh present duplicate providers and can
+        // retry the same account through a less reliable surface in the same turn.
+        let r = HeuristicRouter::new(list_config(
+            "complex",
+            &[
+                "codex-oauth::gpt-5.6-luna",
+                "codex-cli::gpt-5.6-luna",
+                "groq::llama-3.3-70b-versatile",
+            ],
+        ))
+        .with_availability(|_| true);
+        let d = r
+            .route(
+                "design and architect a complex concurrency refactor across modules",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+
+        assert_eq!(d.model, "codex-oauth::gpt-5.6-luna");
+        assert!(
+            !d.fallbacks
+                .iter()
+                .any(|model| model == "codex-cli::gpt-5.6-luna"),
+            "a usable OAuth twin must suppress its CLI bridge: {:?}",
+            d.fallbacks
+        );
+    }
+
+    #[tokio::test]
+    async fn unavailable_oauth_twin_keeps_cli_bridge_routable() {
+        // Suppression must not sacrifice resilience: if OAuth cannot dispatch, the bridge is the
+        // legitimate recovery surface and must remain eligible.
+        let r = HeuristicRouter::new(list_config(
+            "complex",
+            &[
+                "codex-oauth::gpt-5.6-luna",
+                "codex-cli::gpt-5.6-luna",
+                "groq::llama-3.3-70b-versatile",
+            ],
+        ))
+        .with_availability(|model| !model.starts_with("codex-oauth::"));
+        let d = r
+            .route(
+                "design and architect a complex concurrency refactor across modules",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+
+        assert_eq!(d.model, "codex-cli::gpt-5.6-luna");
     }
 
     fn router() -> HeuristicRouter {
