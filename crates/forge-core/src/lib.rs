@@ -1039,6 +1039,7 @@ struct TaskScope {
 }
 
 impl TaskScope {
+    #[allow(clippy::too_many_arguments)]
     fn for_turn(
         task: &str,
         intent: TaskIntent,
