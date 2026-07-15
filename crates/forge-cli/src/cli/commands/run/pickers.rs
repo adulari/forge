@@ -277,10 +277,10 @@ pub(crate) async fn open_model_pin_picker(
     query: &str,
 ) -> Result<()> {
     let store = open_store()?;
-    let benched = store.current_benched().unwrap_or_default();
     let ctx = store.all_model_contexts().unwrap_or_default();
     let rows_opt: Option<Vec<forge_tui::PickerRow>> = {
         let s = session.lock().await;
+        let benched = s.provider_readiness().health;
         s.catalog().map(|cat| {
             let pricing = s.pricing();
             // Collect all models flat from all providers.
@@ -389,9 +389,9 @@ pub(crate) async fn open_models_root(
     session: &Arc<tokio::sync::Mutex<Session>>,
     app: &mut forge_tui::App,
 ) -> Result<()> {
-    let benched = open_store()?.current_benched().unwrap_or_default();
     let view = {
         let s = session.lock().await;
+        let benched = s.provider_readiness().health;
         s.catalog()
             .map(|c| models_provider_view(c, s.pricing(), &benched))
     };
@@ -418,10 +418,10 @@ pub(crate) async fn open_models_provider(
     provider: &str,
 ) -> Result<()> {
     let store = open_store()?;
-    let benched = store.current_benched().unwrap_or_default();
     let ctx = store.all_model_contexts().unwrap_or_default();
     let view = {
         let s = session.lock().await;
+        let benched = s.provider_readiness().health;
         s.catalog()
             .map(|c| models_for_provider(c, s.pricing(), &benched, &ctx, provider))
     };

@@ -93,13 +93,9 @@ pub async fn run(
         return Err(CoreError::Internal("duel needs a git repo".to_string()));
     }
 
-    let health = ctx.store.current_benched().unwrap_or_default();
-    let quota = ctx
-        .store
-        .current_quota()
-        .unwrap_or_default()
-        .with_plans(crate::resolved_subscription_plans(&ctx.config))
-        .with_conserve(ctx.config.mesh.subscription_conserve);
+    let readiness = crate::readiness::ProviderReadiness::snapshot(&ctx.config, &ctx.store);
+    let health = readiness.health;
+    let quota = readiness.quota;
     let project = crate::project_context::compute(&ctx.repo_root);
     let decisions = ctx
         .router

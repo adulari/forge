@@ -479,7 +479,7 @@ pub(crate) async fn skill_from_session(
             "no models available — set a provider key (`forge auth <provider>`) or run ollama"
         );
     }
-    let benched = store.current_benched().unwrap_or_default();
+    let benched = forge_core::readiness::ProviderReadiness::snapshot(&config, &store).health;
     let mut trivial_models: Vec<String> = cat
         .ranked_for(forge_types::TaskTier::Trivial, &pricing, 5)
         .into_iter()

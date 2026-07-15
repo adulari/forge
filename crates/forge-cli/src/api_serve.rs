@@ -32,7 +32,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use forge_mesh::{BudgetState, Router as MeshRouter};
 use forge_provider::{CompletionOptions, Provider, ResponseFormat, StreamEvent, ToolSpec};
-use forge_types::{EffortLevel, Message, ModelHealth, ProjectContext, Role, SubscriptionQuota};
+use forge_types::{EffortLevel, Message, ProjectContext, Role};
 use serde::Deserialize;
 
 /// Default listen port for `forge api`. Distinct from `forge serve`'s 7420 so both can run at once.
@@ -43,12 +43,22 @@ struct ApiState {
     provider: Arc<dyn Provider>,
     router: Arc<dyn MeshRouter>,
     pricing: forge_mesh::pricing::Pricing,
-    /// Currently-benched models (skipped by routing); empty in `--mock`.
-    health: ModelHealth,
+    /// Shared local state for a fresh health/quota snapshot on every auto-routed request.
+    readiness_store: Option<Arc<forge_store::Store>>,
+    config: forge_config::Config,
     /// Models advertised by `GET /v1/models` (catalog when discovered, else configured candidates).
     models: Vec<String>,
     /// When `Some`, requests must present this as a bearer token.
     api_key: Option<String>,
+}
+
+impl ApiState {
+    fn readiness(&self) -> forge_core::readiness::ProviderReadiness {
+        self.readiness_store
+            .as_deref()
+            .map(|store| forge_core::readiness::ProviderReadiness::snapshot(&self.config, store))
+            .unwrap_or_default()
+    }
 }
 
 pub(crate) async fn api_serve_cmd(
@@ -91,21 +101,18 @@ pub(crate) async fn api_serve_cmd(
         std::collections::HashMap::new(),
     );
 
-    let health = if mock {
-        ModelHealth::default()
-    } else {
-        crate::open_store()
-            .ok()
-            .and_then(|s| s.current_benched().ok())
-            .unwrap_or_default()
-    };
+    let readiness_store = (!mock)
+        .then(crate::open_store)
+        .and_then(Result::ok)
+        .map(Arc::new);
 
     let models = advertised_models(&config, catalog.as_ref());
     let state = Arc::new(ApiState {
         provider,
         router,
         pricing: forge_mesh::pricing::Pricing::from_config(&config),
-        health,
+        readiness_store,
+        config: config.clone(),
         models,
         api_key: api_key.clone(),
     });
@@ -522,6 +529,7 @@ async fn chat_completions(
         // Unpinned ("auto"): ask the mesh which model to use and its ordered failover chain.
         None => {
             let prompt = routing_prompt(&messages);
+            let readiness = state.readiness();
             let router = state
                 .router
                 .route(
@@ -530,8 +538,8 @@ async fn chat_completions(
                     // (`to_forge_messages` is text-only), so there's no image signal to pass.
                     false,
                     BudgetState::default(),
-                    &state.health,
-                    &SubscriptionQuota::default(),
+                    &readiness.health,
+                    &readiness.quota,
                     effort,
                     &ProjectContext::default(),
                 )
@@ -878,7 +886,8 @@ mod tests {
             provider,
             router,
             pricing: forge_mesh::pricing::Pricing::from_config(&config),
-            health: ModelHealth::default(),
+            readiness_store: None,
+            config: config.clone(),
             models: advertised_models(&config, None),
             api_key: None,
         })

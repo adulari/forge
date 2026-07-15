@@ -470,7 +470,9 @@ impl ServerHandler for ForgeAgentServer {
                 }
                 let store_for_health = crate::open_store()
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                let benched = store_for_health.current_benched().unwrap_or_default();
+                let benched =
+                    forge_core::readiness::ProviderReadiness::snapshot(&config, &store_for_health)
+                        .health;
                 let chain = |tier| {
                     let mut models: Vec<String> = cat
                         .ranked_for(tier, &pricing, 8)
