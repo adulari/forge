@@ -15,8 +15,9 @@ use crate::*;
 /// the `mcp-serve` CLI-bridge path (`crate::mcp_serve::run`) so the two entry points can't drift —
 /// a bridged claude/codex agent gets the same compile-check carve-out as a direct `forge run`
 /// session.
-pub(crate) fn sandboxed_shell_tool(
+pub(crate) fn sandboxed_shell_tool_in(
     config: &forge_config::Config,
+    workspace: &std::path::Path,
 ) -> Option<forge_tools::ShellTool> {
     if !(config.shell.sandbox || config.shell.scoped_cargo_target) {
         return None;
@@ -35,13 +36,22 @@ pub(crate) fn sandboxed_shell_tool(
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::env::temp_dir().join("forge-cargo-target"))
     });
-    Some(forge_tools::ShellTool {
-        policy: forge_tools::SandboxPolicy {
+    Some(forge_tools::ShellTool::with_policy_in_workspace(
+        forge_tools::SandboxPolicy {
             enabled: config.shell.sandbox,
             writable,
             cargo_target_base,
         },
-    })
+        workspace,
+    ))
+}
+
+#[allow(dead_code)]
+pub(crate) fn sandboxed_shell_tool(
+    config: &forge_config::Config,
+) -> Option<forge_tools::ShellTool> {
+    let workspace = std::env::current_dir().ok()?;
+    sandboxed_shell_tool_in(config, &workspace)
 }
 
 /// A finished `/duel` result: the comparable report plus the still-alive worktree guards for
@@ -331,11 +341,24 @@ pub(crate) async fn build_session_with_self_mcp(
         .ok()
         .and_then(|s| s.all_model_contexts().ok())
         .unwrap_or_default();
-    // Per-repo routing-learning boosts from past `/duel` outcomes (docs/features/duel.md) — same
-    // repo-key convention as `Session::run_duel`'s recording side (the cwd's display string).
-    let repo_key = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+    let workspace_root = match session_cwd {
+        Some(cwd) => std::path::PathBuf::from(cwd)
+            .canonicalize()
+            .with_context(|| format!("resolving session workspace {cwd}"))?,
+        None if resume.is_some() => {
+            let prefix = resume.as_deref().expect("resume checked above");
+            let full = resolve_session(&store, prefix)?;
+            let cwd = store
+                .session_cwd(&full)?
+                .ok_or_else(|| anyhow::anyhow!("resumed session has no workspace"))?;
+            std::path::PathBuf::from(cwd)
+                .canonicalize()
+                .context("resumed session workspace is unavailable")?
+        }
+        None => std::env::current_dir()?,
+    };
+    let workspace_cwd = workspace_root.display().to_string();
+    let repo_key = workspace_cwd.clone();
     let repo_boosts = crate::open_store()
         .ok()
         .and_then(|s| s.duel_boosts(&repo_key).ok())
@@ -353,16 +376,16 @@ pub(crate) async fn build_session_with_self_mcp(
     // `lattice` tool and the turn's auto-injection (code-intelligence.md). Cheap to construct; it
     // reads whatever `forge lattice update` last persisted.
     let lattice = (!mock && lattice_enabled).then(|| {
-        let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let root = workspace_root.clone();
         Arc::new(forge_index::Lattice::new(store_for_lattice, &root))
     });
-    let mut tools = ToolRegistry::with_core_tools();
+    let mut tools = ToolRegistry::with_core_tools_in(&workspace_root);
     // Opt-in OS sandbox and/or scoped build-target dir: replace the default shell tool with one
     // that confines filesystem writes to the workspace via Landlock (Linux; no-op elsewhere) and/or
     // relocates cargo's CARGO_TARGET_DIR outside the (possibly read-only) workspace so a
     // bypass-mode agent can compile-check its own edits under confinement. Shared with the
     // `mcp-serve` bridge path via `sandboxed_shell_tool` so the two can't drift.
-    if let Some(shell_tool) = sandboxed_shell_tool(&config) {
+    if let Some(shell_tool) = sandboxed_shell_tool_in(&config, &workspace_root) {
         tools.register(Box::new(shell_tool));
     }
     if let Some(lat) = &lattice {
@@ -399,16 +422,16 @@ pub(crate) async fn build_session_with_self_mcp(
             Session::resume(store, provider, router, tools, presenter, config, &full)
                 .with_context(|| format!("resuming session {full}"))?
         }
-        None => {
-            // `forge serve` drives sessions in per-session directories (worktrees) — the
-            // process cwd is only the default.
-            let cwd = match session_cwd {
-                Some(c) => c.to_string(),
-                None => std::env::current_dir()?.display().to_string(),
-            };
-            Session::start(store, provider, router, tools, presenter, config, &cwd)
-                .context("starting session")?
-        }
+        None => Session::start(
+            store,
+            provider,
+            router,
+            tools,
+            presenter,
+            config,
+            &workspace_cwd,
+        )
+        .context("starting session")?,
     };
     session.set_catalog(catalog);
     // Seed the effort pin from config if set (`mesh.default_effort`).
@@ -422,7 +445,7 @@ pub(crate) async fn build_session_with_self_mcp(
     // Also start the background watcher so external editor edits reindex automatically.
     if let Some(lat) = &lattice {
         if config_lattice_watch {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let cwd = workspace_root.clone();
             // Scope the recursive watch to the nearest PROJECT ROOT, and refuse to watch all of
             // $HOME (pathological: pulls in .cargo / cloned .git trees / caches → thousands of
             // inotify watches + a slow initial walk). `None` ⇒ no sensible root → skip the watcher.
@@ -874,8 +897,14 @@ pub(crate) async fn chat(
     {
         let sid = session.session_id().to_string();
         let hooks = session.hooks().to_vec();
-        forge_core::hooks::run_session_hooks(&hooks, forge_config::HookEvent::SessionStart, &sid)
-            .await;
+        let workspace = session.workspace_root().to_path_buf();
+        forge_core::hooks::run_session_hooks_in(
+            &hooks,
+            forge_config::HookEvent::SessionStart,
+            &sid,
+            Some(&workspace),
+        )
+        .await;
     }
     while let Some(line) = session.read_line() {
         match chat_action(&line) {
@@ -883,7 +912,14 @@ pub(crate) async fn chat(
             ChatAction::Skip => continue,
             ChatAction::Run(task) => {
                 let hooks = session.hooks().to_vec();
-                let task = match forge_core::hooks::run_prompt_hooks(&hooks, &task).await {
+                let hook_workspace = session.workspace_root().to_path_buf();
+                let task = match forge_core::hooks::run_prompt_hooks_in(
+                    &hooks,
+                    &task,
+                    Some(&hook_workspace),
+                )
+                .await
+                {
                     Ok(t) => t,
                     Err(reason) => {
                         eprintln!("⎇ prompt blocked by hook: {reason}");
@@ -900,8 +936,14 @@ pub(crate) async fn chat(
     {
         let sid = session.session_id().to_string();
         let hooks = session.hooks().to_vec();
-        forge_core::hooks::run_session_hooks(&hooks, forge_config::HookEvent::SessionEnd, &sid)
-            .await;
+        let workspace = session.workspace_root().to_path_buf();
+        forge_core::hooks::run_session_hooks_in(
+            &hooks,
+            forge_config::HookEvent::SessionEnd,
+            &sid,
+            Some(&workspace),
+        )
+        .await;
     }
     Ok(())
 }
@@ -1140,8 +1182,11 @@ pub(crate) async fn run_chat_tui(
     // Wire statusline config from the loaded config.
     app.statusline_config = tui_config.statusline.clone();
     app.keybinds = tui_config.keybinds.clone();
-    // Fetch current git branch for the GitBranch statusline widget (best-effort, non-fatal).
+    let session_workspace = session.lock().await.workspace_root().to_path_buf();
+    // Statusline metadata must describe the resumed session workspace, not the
+    // directory from which the launcher happened to start.
     app.git_branch = std::process::Command::new("git")
+        .current_dir(&session_workspace)
         .args(["branch", "--show-current"])
         .output()
         .ok()
@@ -1158,6 +1203,7 @@ pub(crate) async fn run_chat_tui(
     // Repo/project name for the RepoName widget: the git top-level directory's name, falling back
     // to the cwd's name outside a git repo (so the widget is still useful there).
     app.repo_name = std::process::Command::new("git")
+        .current_dir(&session_workspace)
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .ok()
@@ -1170,11 +1216,7 @@ pub(crate) async fn run_chat_tui(
                 None
             }
         })
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|p| p.to_string_lossy().into_owned())
-        })
+        .or_else(|| Some(session_workspace.display().to_string()))
         .and_then(|p| {
             std::path::Path::new(&p)
                 .file_name()
@@ -1186,9 +1228,7 @@ pub(crate) async fn run_chat_tui(
         let banner = banner_lines(tui.width());
         app.push_scrollback(banner);
     }
-    let project = forge_config::project_initialization(
-        &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
-    );
+    let project = forge_config::project_initialization(&session_workspace);
     if !project.initialized {
         app.apply(forge_tui::PresenterEvent::Warning(
             "This project isn't set up for Forge — no project guidance or custom agents. Run /init to set it up for me.".to_string(),
@@ -1234,12 +1274,21 @@ pub(crate) async fn run_chat_tui(
         maybe_install_git_hook(&tui_config);
     }
     {
-        let (hooks, sid) = {
+        let (hooks, sid, workspace) = {
             let s = session.lock().await;
-            (s.hooks().to_vec(), s.session_id().to_string())
+            (
+                s.hooks().to_vec(),
+                s.session_id().to_string(),
+                s.workspace_root().to_path_buf(),
+            )
         };
-        forge_core::hooks::run_session_hooks(&hooks, forge_config::HookEvent::SessionStart, &sid)
-            .await;
+        forge_core::hooks::run_session_hooks_in(
+            &hooks,
+            forge_config::HookEvent::SessionStart,
+            &sid,
+            Some(&workspace),
+        )
+        .await;
     }
 
     // On a resumed session (`--continue` / `--resume <id>`): render the FULL prior transcript into
@@ -1307,7 +1356,7 @@ pub(crate) async fn run_chat_tui(
     // speed independent of the loop frequency (one frame per 60ms, exactly as before).
     let mut busy_since = Instant::now();
 
-    let project_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let project_cwd = session_workspace.clone();
     if tui_config.project.auto_initialize
         && !forge_config::project_initialization(&project_cwd).initialized
         && !forge_config::project_auto_setup_attempted(&project_cwd)
@@ -1464,13 +1513,9 @@ pub(crate) async fn run_chat_tui(
     }
     let mut observer: Option<ObserverState> = None;
 
-    // The cwd is stable for remote snapshots (captured once, cheap to clone each frame instead of
-    // a syscall in the hot render path). The session id is NOT stable — `/new` and the "observe a
-    // live session" picker mutate it in place via `reset_fresh`/`reset_resumed` without restarting
-    // this loop — so it's re-read from the session at snapshot-build time instead of cached here.
-    let remote_cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+    // Session workspace is a live binding: `/new` and `/resume` retarget it in place while this
+    // render loop and any remote clients remain alive.
+    let remote_workspace = session.lock().await.workspace_binding();
 
     // Draw the first frame before the (possibly slow) auto-start below, so `[remote] auto =
     // "anywhere"` — which waits on a public tunnel to come up — doesn't leave the terminal blank.
@@ -1486,6 +1531,7 @@ pub(crate) async fn run_chat_tui(
             auto.into(),
             &tui_config.remote,
             remote_history.clone(),
+            &remote_workspace,
         )
         .await?;
         // A (re)started server begins from a fresh watch channel — drop the dedup state so the
@@ -2451,6 +2497,7 @@ pub(crate) async fn run_chat_tui(
                                     exposure,
                                     &tui_config.remote,
                                     remote_history.clone(),
+                                    &remote_workspace,
                                 )
                                 .await?;
                                 // Fresh server, fresh watch channel — reset the change-only
@@ -2804,8 +2851,7 @@ pub(crate) async fn run_chat_tui(
                                 // favors it, then drop every guard (removes every worktree+branch —
                                 // the winner's diff is already applied, so its branch isn't needed).
                                 if let Some((report, guards)) = duel_state.take() {
-                                    let repo_root = std::env::current_dir()
-                                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                    let repo_root = session_workspace.clone();
                                     let repo_key = repo_root.display().to_string();
                                     let winner_branch = row.id.clone();
                                     let merge_note = match forge_core::duel::merge_winner(
@@ -3348,9 +3394,18 @@ pub(crate) async fn run_chat_tui(
                         // `//foo` escapes to a literal prompt `/foo`; a bare `/cmd` typed without
                         // the palette still dispatches as a command; everything else is a prompt.
                         if let Some(rest) = line.strip_prefix("//") {
-                            let hooks = session.lock().await.hooks().to_vec();
+                            let (hooks, hook_workspace) = {
+                                let s = session.lock().await;
+                                (s.hooks().to_vec(), s.workspace_root().to_path_buf())
+                            };
                             let escaped = format!("/{rest}");
-                            match forge_core::hooks::run_prompt_hooks(&hooks, &escaped).await {
+                            match forge_core::hooks::run_prompt_hooks_in(
+                                &hooks,
+                                &escaped,
+                                Some(&hook_workspace),
+                            )
+                            .await
+                            {
                                 Err(reason) => {
                                     app.note(&format!("⎇ prompt blocked by hook: {reason}"));
                                 }
@@ -3517,6 +3572,7 @@ pub(crate) async fn run_chat_tui(
                                         exposure,
                                         &tui_config.remote,
                                         remote_history.clone(),
+                                        &remote_workspace,
                                     )
                                     .await?;
                                     // Fresh server, fresh watch channel — reset the change-only
@@ -3535,8 +3591,17 @@ pub(crate) async fn run_chat_tui(
                                 }
                             }
                         } else {
-                            let hooks = session.lock().await.hooks().to_vec();
-                            match forge_core::hooks::run_prompt_hooks(&hooks, &line).await {
+                            let (hooks, hook_workspace) = {
+                                let s = session.lock().await;
+                                (s.hooks().to_vec(), s.workspace_root().to_path_buf())
+                            };
+                            match forge_core::hooks::run_prompt_hooks_in(
+                                &hooks,
+                                &line,
+                                Some(&hook_workspace),
+                            )
+                            .await
+                            {
                                 Err(reason) => {
                                     app.note(&format!("⎇ prompt blocked by hook: {reason}"));
                                 }
@@ -3688,6 +3753,10 @@ pub(crate) async fn run_chat_tui(
                         if has_explicit_attachments {
                             remote_attach_mentions.clear();
                         }
+                        let remote_cwd = remote_workspace
+                            .read()
+                            .map(|cwd| cwd.display().to_string())
+                            .unwrap_or_default();
                         let mut explicit_mentions = resolve_prompt_attachments(
                             &session,
                             &mut app,
@@ -3732,10 +3801,17 @@ pub(crate) async fn run_chat_tui(
                                 ));
                             }
                         } else if let Some(rest) = text.strip_prefix("//") {
-                            let hooks = session.lock().await.hooks().to_vec();
+                            let (hooks, hook_workspace) = {
+                                let s = session.lock().await;
+                                (s.hooks().to_vec(), s.workspace_root().to_path_buf())
+                            };
                             let escaped = format!("/{rest}");
-                            if let Ok(prompt) =
-                                forge_core::hooks::run_prompt_hooks(&hooks, &escaped).await
+                            if let Ok(prompt) = forge_core::hooks::run_prompt_hooks_in(
+                                &hooks,
+                                &escaped,
+                                Some(&hook_workspace),
+                            )
+                            .await
                             {
                                 turn_gen += 1;
                                 turn_handle = Some(spawn_turn(
@@ -3927,9 +4003,16 @@ pub(crate) async fn run_chat_tui(
                             } else {
                                 prepend_attach_mentions(&mut remote_attach_mentions, text)
                             };
-                            let hooks = session.lock().await.hooks().to_vec();
-                            if let Ok(prompt) =
-                                forge_core::hooks::run_prompt_hooks(&hooks, &text).await
+                            let (hooks, hook_workspace) = {
+                                let s = session.lock().await;
+                                (s.hooks().to_vec(), s.workspace_root().to_path_buf())
+                            };
+                            if let Ok(prompt) = forge_core::hooks::run_prompt_hooks_in(
+                                &hooks,
+                                &text,
+                                Some(&hook_workspace),
+                            )
+                            .await
                             {
                                 // Expand `@path` mentions exactly like the local submit path
                                 // (the remote prompt used to skip this — uploads made the gap
@@ -3969,6 +4052,10 @@ pub(crate) async fn run_chat_tui(
                         }
                     }
                     remote::RemoteInput::Attach { path, image } => {
+                        let remote_cwd = remote_workspace
+                            .read()
+                            .map(|cwd| cwd.display().to_string())
+                            .unwrap_or_default();
                         handle_remote_attach(
                             &session,
                             &mut app,
@@ -4633,6 +4720,10 @@ pub(crate) async fn run_chat_tui(
                 if let Ok(s) = session.try_lock() {
                     cached_session_id = s.session_id().to_string();
                 }
+                let remote_cwd = remote_workspace
+                    .read()
+                    .map(|cwd| cwd.display().to_string())
+                    .unwrap_or_default();
                 let project =
                     forge_config::project_initialization(std::path::Path::new(&remote_cwd));
                 let mut snap = build_snapshot_frame(
@@ -4682,16 +4773,25 @@ pub(crate) async fn run_chat_tui(
         tokio::time::sleep(Duration::from_millis(if snappy { 3 } else { 16 })).await;
     }
     {
-        let (hooks, sid) = {
+        let (hooks, sid, workspace) = {
             let s = session.lock().await;
             // Save the final view on clean exit so resuming this session restores the screen.
             if let Some(json) = app.view_snapshot_json() {
                 s.save_view_snapshot(&json);
             }
-            (s.hooks().to_vec(), s.session_id().to_string())
+            (
+                s.hooks().to_vec(),
+                s.session_id().to_string(),
+                s.workspace_root().to_path_buf(),
+            )
         };
-        forge_core::hooks::run_session_hooks(&hooks, forge_config::HookEvent::SessionEnd, &sid)
-            .await;
+        forge_core::hooks::run_session_hooks_in(
+            &hooks,
+            forge_config::HookEvent::SessionEnd,
+            &sid,
+            Some(&workspace),
+        )
+        .await;
     }
     Ok(())
 }
@@ -5584,6 +5684,7 @@ pub(crate) async fn toggle_remote(
     exposure: remote::Exposure,
     remote_cfg: &forge_config::RemoteConfig,
     history: remote::HistoryProvider,
+    workspace: &std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>,
 ) -> Result<()> {
     if let Some(rc) = remote.take() {
         // Turning it off: the handle's Drop aborts the server task + tunnel and sends a `closed`
@@ -5597,9 +5698,17 @@ pub(crate) async fn toggle_remote(
     if anywhere {
         app.note("◉ remote control — opening a public tunnel (this can take a few seconds)…");
     }
+    let workspace = workspace.clone();
     let started = match exposure {
-        remote::Exposure::Anywhere => remote::start_anywhere(Some(history), remote_cfg).await,
-        other => remote::start(other, remote_cfg.host.as_deref(), Some(history)),
+        remote::Exposure::Anywhere => {
+            remote::start_anywhere(Some(history), remote_cfg, Some(&workspace)).await
+        }
+        other => remote::start(
+            other,
+            remote_cfg.host.as_deref(),
+            Some(history),
+            Some(&workspace),
+        ),
     };
     match started {
         Ok(rc) => {

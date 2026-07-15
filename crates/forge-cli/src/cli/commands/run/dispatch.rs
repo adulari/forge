@@ -258,7 +258,7 @@ pub(crate) async fn dispatch_command(
             app.note("— screen cleared —");
         }
         CommandAction::New => {
-            let cwd = std::env::current_dir()?.display().to_string();
+            let cwd = session.lock().await.workspace_scope();
             {
                 let mut s = session.lock().await;
                 s.reset_fresh(&cwd).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -890,9 +890,7 @@ and keep going."
             if text.is_empty() {
                 app.note("usage: /remember <text>");
             } else {
-                let scope = std::env::current_dir()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "global".to_string());
+                let scope = session.lock().await.workspace_scope();
                 let session_id = {
                     let s = session.lock().await;
                     s.id().to_string()
@@ -906,9 +904,7 @@ and keep going."
         }
         // `/memories` — list this project's memories.
         CommandAction::Memories => {
-            let scope = std::env::current_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "global".to_string());
+            let scope = session.lock().await.workspace_scope();
             let s = session.lock().await;
             match s.store.list_memories(&scope) {
                 Ok(mems) if mems.is_empty() => app.note("no memories yet"),
@@ -1133,8 +1129,7 @@ script with `return <final result>` so the run yields a relayable answer.\n\nGoa
                     });
                 }
                 WorkflowAction::List => {
-                    let repo_root =
-                        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let repo_root = session.lock().await.workspace_root().to_path_buf();
                     let workflows_dir = repo_root.join(".forge").join("workflows");
                     let names = forge_core::workflow::list_saved(&workflows_dir).await;
                     if names.is_empty() {

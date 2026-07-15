@@ -93,8 +93,15 @@ fn parse_hook_directive(stdout: &str, event: HookEvent) -> HookDirective {
 fn to_cc_payload(forge_payload: &str, event: HookEvent, session_id: &str) -> String {
     let v: serde_json::Value =
         serde_json::from_str(forge_payload).unwrap_or(serde_json::Value::Null);
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
+    let cwd = v
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string())
+        })
         .unwrap_or_default();
     let mut obj = serde_json::Map::new();
     obj.insert("session_id".into(), session_id.into());
@@ -116,7 +123,7 @@ fn to_cc_payload(forge_payload: &str, event: HookEvent, session_id: &str) -> Str
     // Carry through any extra lifecycle fields (message, trigger, …) the caller already put in.
     if let Some(map) = v.as_object() {
         for (k, val) in map {
-            if !["tool", "args", "result", "ok", "prompt", "event"].contains(&k.as_str()) {
+            if !["tool", "args", "result", "ok", "prompt", "event", "cwd"].contains(&k.as_str()) {
                 obj.entry(k.clone()).or_insert_with(|| val.clone());
             }
         }
@@ -232,14 +239,15 @@ pub async fn run_hooks(
     payload: &str,
 ) -> HookOutcome {
     let mut outcome = HookOutcome::default();
+    let payload = payload.to_string();
     for h in hooks.iter().filter(|h| h.event == event && h.matches(tool)) {
         if h.cc_compat {
-            if run_cc_hook(h, event, payload, &mut outcome).await {
+            if run_cc_hook(h, event, &payload, &mut outcome).await {
                 break;
             }
             continue;
         }
-        match run_one(h, payload).await {
+        match run_one(h, &payload).await {
             Ok((code, stdout, stderr)) => {
                 let trimmed = stdout.trim();
                 if event == HookEvent::PreToolUse && code != 0 {
@@ -288,11 +296,16 @@ pub async fn run_hooks(
 /// Returns `Ok(prompt)` where `prompt` is either the original (no hook rewrote it) or the
 /// stdout from the first hook that exited 0 and produced non-empty output.
 /// Returns `Err(reason)` if any hook exits non-zero — the turn should be blocked.
-pub async fn run_prompt_hooks(hooks: &[HookConfig], prompt: &str) -> Result<String, String> {
-    let payload = format!(
-        "{{\"prompt\":{}}}",
-        serde_json::to_string(prompt).unwrap_or_default()
-    );
+pub async fn run_prompt_hooks_in(
+    hooks: &[HookConfig],
+    prompt: &str,
+    cwd: Option<&std::path::Path>,
+) -> Result<String, String> {
+    let payload = serde_json::json!({
+        "prompt": prompt,
+        "cwd": cwd.map(|cwd| cwd.display().to_string()),
+    })
+    .to_string();
     let mut current = prompt.to_string();
     for h in hooks
         .iter()
@@ -341,9 +354,18 @@ pub async fn run_prompt_hooks(hooks: &[HookConfig], prompt: &str) -> Result<Stri
     Ok(current)
 }
 
+pub async fn run_prompt_hooks(hooks: &[HookConfig], prompt: &str) -> Result<String, String> {
+    run_prompt_hooks_in(hooks, prompt, None).await
+}
+
 /// Run session lifecycle hooks (`session_start` / `session_end`). Observe-only — exit code
 /// is advisory, output is printed to stderr as a note.
-pub async fn run_session_hooks(hooks: &[HookConfig], event: HookEvent, session_id: &str) {
+pub async fn run_session_hooks_in(
+    hooks: &[HookConfig],
+    event: HookEvent,
+    session_id: &str,
+    cwd: Option<&std::path::Path>,
+) {
     debug_assert!(
         matches!(event, HookEvent::SessionStart | HookEvent::SessionEnd),
         "run_session_hooks called with non-session event"
@@ -353,11 +375,12 @@ pub async fn run_session_hooks(hooks: &[HookConfig], event: HookEvent, session_i
         HookEvent::SessionEnd => "session_end",
         _ => return,
     };
-    let payload = format!(
-        "{{\"session_id\":{},\"event\":{}}}",
-        serde_json::to_string(session_id).unwrap_or_default(),
-        serde_json::to_string(event_str).unwrap_or_default()
-    );
+    let payload = serde_json::json!({
+        "session_id": session_id,
+        "event": event_str,
+        "cwd": cwd.map(|cwd| cwd.display().to_string()),
+    })
+    .to_string();
     for h in hooks.iter().filter(|h| h.event == event) {
         match run_one(h, &payload).await {
             Ok((_, stdout, _)) => {
@@ -438,6 +461,10 @@ fn hook_shell() -> (&'static str, &'static str) {
     ("sh", "-c")
 }
 
+pub async fn run_session_hooks(hooks: &[HookConfig], event: HookEvent, session_id: &str) {
+    run_session_hooks_in(hooks, event, session_id, None).await;
+}
+
 async fn run_one(h: &HookConfig, payload: &str) -> Result<(i32, String, String), String> {
     let (sh, sh_flag) = hook_shell();
     let mut child = tokio::process::Command::new(sh)
@@ -497,9 +524,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cc_payload_prefers_explicit_workspace_cwd() {
+        let payload = to_cc_payload(
+            r#"{"tool":"shell","args":{},"cwd":"/workspace-b"}"#,
+            HookEvent::PreToolUse,
+            "session-b",
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["cwd"], "/workspace-b");
+        assert_eq!(parsed["session_id"], "session-b");
+    }
+
     #[tokio::test]
     async fn pretooluse_nonzero_exit_blocks_with_stderr_reason() {
-        // sh uses `;` as separator; cmd uses `&` and needs `exit /b` for subprocess exit.
         #[cfg(not(windows))]
         let cmd = "echo nope 1>&2; exit 1";
         #[cfg(windows)]
@@ -574,6 +612,51 @@ mod tests {
         let result = run_prompt_hooks(&hooks, "hello").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("blocked reason"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompt_and_session_hooks_preserve_explicit_workspace_cwd() {
+        let base =
+            std::env::temp_dir().join(format!("forge-prompt-hook-cwd-{}", std::process::id()));
+        let workspace = base.join("workspace");
+        let sentinel = base.join("sentinel");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&sentinel).unwrap();
+        let _cwd_guard = crate::test_cwd_guard(&sentinel);
+
+        for (cc_compat, capture) in [
+            (false, base.join("native-prompt.json")),
+            (true, base.join("cc-prompt.json")),
+        ] {
+            let mut prompt_hook = hook(
+                HookEvent::UserPromptSubmit,
+                &format!("cat > {}", capture.display()),
+            );
+            prompt_hook.cc_compat = cc_compat;
+            let _ = run_prompt_hooks_in(&[prompt_hook], "hello", Some(&workspace))
+                .await
+                .unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&capture).unwrap()).unwrap();
+            assert_eq!(payload["cwd"], workspace.to_string_lossy().as_ref());
+        }
+
+        for event in [HookEvent::SessionStart, HookEvent::SessionEnd] {
+            for (cc_compat, capture) in [
+                (false, base.join(format!("native-{event:?}.json"))),
+                (true, base.join(format!("cc-{event:?}.json"))),
+            ] {
+                let mut session_hook = hook(event, &format!("cat > {}", capture.display()));
+                session_hook.cc_compat = cc_compat;
+                run_session_hooks_in(&[session_hook], event, "session-b", Some(&workspace)).await;
+                let payload: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&capture).unwrap()).unwrap();
+                assert_eq!(payload["cwd"], workspace.to_string_lossy().as_ref());
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[tokio::test]

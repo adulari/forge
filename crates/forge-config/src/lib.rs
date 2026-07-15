@@ -4167,6 +4167,29 @@ pub fn inject_provider_keys() {
 mod tests {
     use super::*;
 
+    static TEST_CWD_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+    struct TestCwdGuard {
+        prior: std::path::PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for TestCwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.prior);
+        }
+    }
+
+    fn test_cwd_guard(target: &std::path::Path) -> TestCwdGuard {
+        let lock = TEST_CWD_MUTEX
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("locking config test cwd mutex");
+        let prior = std::env::current_dir().expect("reading config test process cwd");
+        std::env::set_current_dir(target).expect("entering guarded config test cwd");
+        TestCwdGuard { prior, _lock: lock }
+    }
+
     #[test]
     fn remote_config_defaults_to_off() {
         let c = RemoteConfig::default();
@@ -4907,8 +4930,7 @@ reason = "no privilege escalation"
     #[test]
     fn append_allow_rule_creates_valid_toml_entry() {
         let dir = tempfile::tempdir().unwrap();
-        let orig = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&dir).unwrap();
+        let _cwd_guard = test_cwd_guard(dir.path());
         std::fs::create_dir_all(".forge").unwrap();
 
         append_allow_rule("shell").unwrap();
@@ -4933,8 +4955,6 @@ reason = "no privilege escalation"
         assert!(rules
             .iter()
             .any(|r| r.tool == "write_file" && r.decision == PermissionDecision::Allow));
-
-        std::env::set_current_dir(orig).unwrap();
     }
 
     #[test]

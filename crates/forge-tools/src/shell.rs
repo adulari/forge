@@ -61,6 +61,30 @@ const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Default)]
 pub struct ShellTool {
     pub policy: SandboxPolicy,
+    workspace: Option<std::path::PathBuf>,
+}
+
+impl ShellTool {
+    pub fn with_policy(policy: SandboxPolicy) -> Self {
+        Self {
+            policy,
+            workspace: None,
+        }
+    }
+
+    pub fn with_policy_in_workspace(policy: SandboxPolicy, workspace: &std::path::Path) -> Self {
+        Self {
+            policy,
+            workspace: Some(workspace.to_path_buf()),
+        }
+    }
+
+    pub fn in_workspace(workspace: &std::path::Path) -> Self {
+        Self {
+            policy: SandboxPolicy::default(),
+            workspace: Some(workspace.to_path_buf()),
+        }
+    }
 }
 
 #[async_trait]
@@ -99,7 +123,32 @@ impl Tool for ShellTool {
     }
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
         let command = str_arg(args, "command")?;
-        let cwd = args.get("cwd").and_then(Value::as_str).unwrap_or(".");
+        let cwd = args
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                self.workspace
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+            });
+        let cwd = if cwd.is_absolute() {
+            cwd
+        } else if let Some(workspace) = &self.workspace {
+            workspace.join(cwd)
+        } else {
+            cwd
+        };
+        if let Some(workspace) = &self.workspace {
+            let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+            if !canonical.starts_with(workspace) {
+                return Err(ToolError::Failed(format!(
+                    "cwd '{}' resolves outside the session workspace",
+                    cwd.display()
+                )));
+            }
+        }
+        let cwd = cwd.display().to_string();
         let timeout_secs = args
             .get("timeout_secs")
             .and_then(Value::as_u64)
@@ -133,12 +182,12 @@ impl Tool for ShellTool {
                 .unwrap_or(DEFAULT_POLL_INTERVAL_SECS)
                 .clamp(1, 60);
             let budget = timeout_secs.min(POLL_MAX_BUDGET_SECS);
-            return Ok(run_poll(command, cwd, budget, interval, &self.policy).await);
+            return Ok(run_poll(command, &cwd, budget, interval, &self.policy).await);
         }
         if use_pty {
-            Ok(run_command_pty(command, cwd, timeout_secs).await)
+            Ok(run_command_pty(command, &cwd, timeout_secs).await)
         } else {
-            Ok(run_command(command, cwd, timeout_secs, &self.policy).await)
+            Ok(run_command(command, &cwd, timeout_secs, &self.policy).await)
         }
     }
 }
@@ -829,6 +878,70 @@ fn floor_boundary_back(s: &str, len: usize) -> usize {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_shell_defaults_to_its_own_root() {
+        let root =
+            std::env::temp_dir().join(format!("forge-shell-workspace-{}", std::process::id()));
+        let peer = std::env::temp_dir().join(format!("forge-shell-peer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&peer);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&peer).unwrap();
+        let tool = ShellTool::in_workspace(&root);
+        let output = tool
+            .run(&serde_json::json!({ "command": "pwd" }))
+            .await
+            .unwrap();
+        assert!(output.contains(root.canonicalize().unwrap().to_string_lossy().as_ref()));
+        let escaped = tool
+            .run(&serde_json::json!({ "command": "pwd", "cwd": peer }))
+            .await
+            .unwrap_err();
+        assert!(escaped
+            .to_string()
+            .contains("outside the session workspace"));
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(peer);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_workspace_shells_do_not_cross_contaminate() {
+        let base =
+            std::env::temp_dir().join(format!("forge-shell-concurrent-{}", std::process::id()));
+        let first = base.join("first");
+        let second = base.join("second");
+        let sentinel = base.join("sentinel");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::create_dir_all(&sentinel).unwrap();
+
+        let first_tool = ShellTool::in_workspace(&first);
+        let second_tool = ShellTool::in_workspace(&second);
+        let first_args = serde_json::json!({ "command": "printf first > marker; pwd" });
+        let second_args = serde_json::json!({ "command": "printf second > marker; pwd" });
+        let (first_out, second_out) =
+            tokio::join!(first_tool.run(&first_args), second_tool.run(&second_args),);
+        assert!(first_out
+            .unwrap()
+            .contains(first.canonicalize().unwrap().to_string_lossy().as_ref()));
+        assert!(second_out
+            .unwrap()
+            .contains(second.canonicalize().unwrap().to_string_lossy().as_ref()));
+        assert_eq!(
+            std::fs::read_to_string(first.join("marker")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            std::fs::read_to_string(second.join("marker")).unwrap(),
+            "second"
+        );
+        assert!(!sentinel.join("marker").exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[test]
     fn strip_ansi_removes_color_codes() {
         let colored = "\x1b[31mred\x1b[0m plain";
@@ -1099,6 +1212,7 @@ mod tests {
                     writable: vec![],
                     cargo_target_base: None,
                 },
+                workspace: None,
             };
             let out = tool
                 .run(&serde_json::json!({"command": "echo hi", "pty": true}))

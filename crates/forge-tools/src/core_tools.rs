@@ -28,12 +28,19 @@ use crate::{str_arg, Tool, ToolError};
 
 /// The roots an in-process file op is allowed to touch (workspace cwd + system temp), canonicalized.
 fn workspace_roots() -> Vec<PathBuf> {
+    let scoped = crate::SESSION_WORKSPACE.try_with(Clone::clone).ok();
     let mut roots = Vec::new();
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Some(cwd) = scoped {
+        roots.push(cwd.canonicalize().unwrap_or(cwd));
+    } else if let Ok(cwd) = std::env::current_dir() {
         roots.push(cwd.canonicalize().unwrap_or(cwd));
     }
-    let tmp = std::env::temp_dir();
-    roots.push(tmp.canonicalize().unwrap_or(tmp));
+    // Scratch access is a standalone compatibility behavior. A scoped session may
+    // only access its immutable workspace; otherwise sibling temp workspaces leak.
+    if crate::SESSION_WORKSPACE.try_with(Clone::clone).is_err() {
+        let tmp = std::env::temp_dir();
+        roots.push(tmp.canonicalize().unwrap_or(tmp));
+    }
     roots
 }
 
@@ -61,7 +68,9 @@ fn resolve_target(path: &Path) -> PathBuf {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()
+        crate::SESSION_WORKSPACE
+            .try_with(Clone::clone)
+            .or_else(|_| std::env::current_dir())
             .map(|c| c.join(path))
             .unwrap_or_else(|_| path.to_path_buf())
     };
@@ -86,6 +95,10 @@ fn resolve_target(path: &Path) -> PathBuf {
             None => return cleaned,
         }
     }
+}
+
+pub(crate) fn normalize_target(path: &Path) -> PathBuf {
+    resolve_target(path)
 }
 
 /// Refuse a path that resolves outside the allowed workspace roots. Returns the resolved path on

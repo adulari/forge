@@ -308,6 +308,8 @@ pub enum CoreError {
     Json(#[from] serde_json::Error),
     #[error("session not found: {0}")]
     SessionNotFound(String),
+    #[error("invalid session workspace: {0}")]
+    Workspace(String),
     #[error("no healthy model available: every routed/fallback model is rate-limited or down")]
     NoHealthyModel,
     /// The auto-review gate found findings at/above the configured severity and `gate_mode =
@@ -373,10 +375,39 @@ fn sanitize_suggestion(content: &str, prev_prompt: &str) -> Option<String> {
 
 /// Scope key for auto-memory: the current project directory's absolute path (memories are
 /// per-project). Matches the `forge memory` CLI so both see the same store.
-fn memory_scope() -> String {
-    std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "global".to_string())
+fn memory_scope_at(root: &std::path::Path) -> String {
+    root.display().to_string()
+}
+
+/// Immutable filesystem identity for one session. A daemon may host sessions from
+/// different worktrees concurrently, so this must never be inferred from process cwd.
+#[derive(Debug, Clone)]
+pub struct WorkspaceContext {
+    root: std::path::PathBuf,
+}
+
+impl WorkspaceContext {
+    pub fn new(root: impl AsRef<std::path::Path>) -> Result<Self, CoreError> {
+        let requested = root.as_ref();
+        let root = requested
+            .canonicalize()
+            .map_err(|error| CoreError::Workspace(error.to_string()))?;
+        if !root.is_dir() {
+            return Err(CoreError::Workspace(format!(
+                "not a directory: {}",
+                root.display()
+            )));
+        }
+        Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    fn display(&self) -> String {
+        self.root.display().to_string()
+    }
 }
 
 /// Max same-model retries for a TRANSIENT provider failure (5xx / dropped stream / network blip)
@@ -1167,6 +1198,7 @@ pub struct Session {
     seq: i64,
     /// Where code shadow-snapshots live (RFC PR3); defaults to `.forge/checkpoints`.
     checkpoint_root: std::path::PathBuf,
+    checkpoint_root_custom: bool,
     /// The seq that began the current turn (its user message), keying this turn's snapshot dir.
     current_turn_seq: i64,
     /// The discovered model catalog (auto-discovery mesh), kept so the TUI `/models` browser can
@@ -1190,6 +1222,8 @@ pub struct Session {
     /// Receiver dropped → channel + watcher drop → watching stops). Per-session ownership so repeated
     /// `build_session` calls (bench, replay) don't leak watcher threads.
     lattice_watcher: Option<std::sync::mpsc::Receiver<forge_index::LatticeWatcher>>,
+    /// Whether a workspace transition must recreate the lattice watcher.
+    lattice_watch_enabled: bool,
     /// LSP registry for live diagnostics after writes. `None` when lsp.enabled = false.
     lsp: Option<Arc<forge_lsp::LspRegistry>>,
     /// The discovered command/skill catalog, so the model can find + load Forge's own skills via
@@ -1219,11 +1253,10 @@ pub struct Session {
     /// per-turn `tier_override` (a command/skill `tier:` hint) is passed, which still wins. `None`
     /// = normal classification.
     pinned_tier: Option<TaskTier>,
-    /// Per-session working-directory root (`forge serve`): when set, every tool call's relative
-    /// `path`/`cwd` args are rooted here (the same audited rewrite subagent worktree isolation
-    /// uses), so a daemon session whose cwd differs from the process cwd — e.g. an isolated
-    /// worktree — operates on ITS OWN tree, not the daemon's. `None` = process cwd (unchanged).
-    work_root: Option<std::path::PathBuf>,
+    /// Per-session immutable workspace root. Every runtime filesystem operation must
+    /// use this instead of the daemon's process working directory.
+    workspace: WorkspaceContext,
+    workspace_binding: Arc<std::sync::RwLock<std::path::PathBuf>>,
     /// System hints queued by side-call diagnostics (e.g. shell error interceptor) to be injected
     /// into the transcript immediately after the tool result that triggered them. Cleared each time.
     pending_hints: Vec<String>,
@@ -1293,8 +1326,8 @@ fn parse_git_head(head: &str) -> Option<String> {
 
 /// Read + parse the current git branch synchronously. Used only at session construction (one-time
 /// setup, not on the async turn path); the hot path refreshes the cache via `tokio::fs`.
-fn current_git_branch() -> Option<String> {
-    std::fs::read_to_string(".git/HEAD")
+fn current_git_branch(root: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(root.join(".git/HEAD"))
         .ok()
         .as_deref()
         .and_then(parse_git_head)
@@ -1303,8 +1336,8 @@ fn current_git_branch() -> Option<String> {
 /// Read the project `AGENTS.md` synchronously (`.forge/AGENTS.md`, then `AGENTS.md`), returning the
 /// first non-empty body. Used only at session construction (one-time setup, not on the async turn
 /// path) so the first-turn injection site stays await-free + syscall-free.
-fn read_project_agents_md() -> Option<String> {
-    for path in [".forge/AGENTS.md", "AGENTS.md"] {
+fn read_project_agents_md(root: &std::path::Path) -> Option<String> {
+    for path in [root.join(".forge/AGENTS.md"), root.join("AGENTS.md")] {
         if let Ok(body) = std::fs::read_to_string(path) {
             if !body.trim().is_empty() {
                 return Some(body);
@@ -1407,6 +1440,84 @@ mod subscription_plan_merge_tests {
     }
 }
 
+fn add_workspace_default_path(
+    tool_name: &str,
+    args: serde_json::Value,
+    workspace: &std::path::Path,
+) -> serde_json::Value {
+    if !matches!(tool_name, "list_dir" | "search" | "glob" | "apply_patch") {
+        return args;
+    }
+    let Some(mut object) = args.as_object().cloned() else {
+        return args;
+    };
+    if !object.contains_key("path") && !object.contains_key("cwd") {
+        let key = if tool_name == "apply_patch" {
+            "cwd"
+        } else {
+            "path"
+        };
+        object.insert(
+            key.to_string(),
+            serde_json::Value::String(workspace.display().to_string()),
+        );
+    }
+    serde_json::Value::Object(object)
+}
+
+fn normalize_workspace_target(path: &std::path::Path) -> std::path::PathBuf {
+    let absolute = path.to_path_buf();
+    let mut prefix = absolute.as_path();
+    let mut tail = Vec::new();
+    loop {
+        if let Ok(real) = prefix.canonicalize() {
+            let mut target = real;
+            for component in tail.iter().rev() {
+                target.push(component);
+            }
+            return target;
+        }
+        match prefix.parent() {
+            Some(parent) => {
+                if let Some(name) = prefix.file_name() {
+                    tail.push(name.to_os_string());
+                }
+                prefix = parent;
+            }
+            None => return absolute,
+        }
+    }
+}
+
+fn validate_workspace_args(
+    args: &serde_json::Value,
+    workspace: &WorkspaceContext,
+) -> Result<(), CoreError> {
+    for key in ["path", "cwd"] {
+        let Some(value) = args.get(key).and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let target = normalize_workspace_target(std::path::Path::new(value));
+        if !target.starts_with(workspace.root()) {
+            return Err(CoreError::Workspace(format!(
+                "{key} escapes session workspace: {value}"
+            )));
+        }
+    }
+    if let Some(paths) = args.get("paths").and_then(serde_json::Value::as_array) {
+        for value in paths.iter().filter_map(serde_json::Value::as_str) {
+            let target = normalize_workspace_target(std::path::Path::new(value));
+            if !target.starts_with(workspace.root()) {
+                return Err(CoreError::Workspace(format!(
+                    "path escapes session workspace: {}",
+                    target.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Session {
     pub fn start(
         store: Arc<Store>,
@@ -1417,8 +1528,9 @@ impl Session {
         config: Config,
         cwd: &str,
     ) -> Result<Self, CoreError> {
+        let workspace = WorkspaceContext::new(cwd)?;
         let mode = config.permission_mode;
-        let id = store.create_session(cwd, format!("{mode:?}").as_str())?;
+        let id = store.create_session(&workspace.display(), format!("{mode:?}").as_str())?;
         Ok(Self::build(
             id,
             store,
@@ -1427,6 +1539,7 @@ impl Session {
             tools,
             presenter,
             config,
+            workspace,
             Vec::new(),
             0,
         ))
@@ -1451,6 +1564,10 @@ impl Session {
         // `load_messages` returns only the active tail (+ summary), so its length is far below the
         // real max. Using the count would reuse low seqs and make `/undo` wipe pre-compaction history.
         let seq = store.next_seq_for_session(session_id)?;
+        let cwd = store
+            .session_cwd(session_id)?
+            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))?;
+        let workspace = WorkspaceContext::new(cwd)?;
         let transcript = stored
             .into_iter()
             .map(|m| Message {
@@ -1484,6 +1601,7 @@ impl Session {
             tools,
             presenter,
             config,
+            workspace,
             transcript,
             seq,
         ))
@@ -1498,6 +1616,7 @@ impl Session {
         tools: ToolRegistry,
         presenter: Box<dyn Presenter>,
         config: Config,
+        workspace: WorkspaceContext,
         transcript: Vec<Message>,
         seq: i64,
     ) -> Self {
@@ -1512,6 +1631,14 @@ impl Session {
         let tasks = store.tasks(&id).unwrap_or_default();
         // Resumed sessions already have AGENTS.md in the stored transcript; don't re-inject.
         let project_prompt_injected = !transcript.is_empty();
+        let checkpoint_root = workspace.root().join(".forge/checkpoints");
+        let cached_git_branch = current_git_branch(workspace.root());
+        let cached_agents_md = if project_prompt_injected {
+            None
+        } else {
+            read_project_agents_md(workspace.root())
+        };
+        let project = crate::project_context::compute(workspace.root());
         let mut s = Self {
             id,
             store,
@@ -1525,7 +1652,8 @@ impl Session {
             rules,
             transcript,
             seq,
-            checkpoint_root: std::path::PathBuf::from(".forge/checkpoints"),
+            checkpoint_root,
+            checkpoint_root_custom: false,
             current_turn_seq: -1,
             catalog: None,
             tasks,
@@ -1533,6 +1661,7 @@ impl Session {
             mcp: None,
             lattice: None,
             lattice_watcher: None,
+            lattice_watch_enabled: false,
             lsp: None,
             skills: None,
             pinned_model: None,
@@ -1540,7 +1669,8 @@ impl Session {
             overflow_window_cap: None,
             whitehot_guidance_injected: false,
             pinned_tier: None,
-            work_root: None,
+            workspace_binding: Arc::new(std::sync::RwLock::new(workspace.root().to_path_buf())),
+            workspace,
             pending_hints: vec![],
             always_compact_on_switch: false,
             project_prompt_injected,
@@ -1552,17 +1682,11 @@ impl Session {
             deadline_reconciled: false,
             env_fight: EnvFightTracker::default(),
             failure_tracker: ToolFailureTracker::new(),
-            cached_git_branch: current_git_branch(),
+            cached_git_branch,
             // Read AGENTS.md eagerly (sync, off the async path) only when it will actually be
             // injected — i.e. a fresh session. A resumed session already has it in the transcript.
-            cached_agents_md: if project_prompt_injected {
-                None
-            } else {
-                read_project_agents_md()
-            },
-            project: std::env::current_dir()
-                .map(|cwd| crate::project_context::compute(&cwd))
-                .unwrap_or_default(),
+            cached_agents_md,
+            project,
         };
         let id = s.id.clone();
         s.presenter.emit(PresenterEvent::SessionStarted { id });
@@ -1571,6 +1695,26 @@ impl Session {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub fn workspace_root(&self) -> &std::path::Path {
+        self.workspace.root()
+    }
+
+    pub fn workspace_binding(&self) -> Arc<std::sync::RwLock<std::path::PathBuf>> {
+        Arc::clone(&self.workspace_binding)
+    }
+
+    pub fn workspace_scope(&self) -> String {
+        self.workspace.display()
+    }
+
+    pub fn lattice_root(&self) -> Option<&str> {
+        self.lattice.as_deref().map(Lattice::repo_root)
+    }
+
+    pub fn cached_agents_md(&self) -> Option<&str> {
+        self.cached_agents_md.as_deref()
     }
 
     /// Queue images to attach to the next user turn (vision input). Consumed when that turn's user
@@ -1585,13 +1729,6 @@ impl Session {
     /// upload must not leak into it (or any future turn).
     pub fn take_pending_images(&mut self) -> Vec<forge_types::ImageAttachment> {
         std::mem::take(&mut self.pending_images)
-    }
-
-    /// Root every tool call's relative `path`/`cwd` args at `root` (see the `work_root` field).
-    /// Set by the `forge serve` driver for sessions whose working directory differs from the
-    /// daemon process's cwd (per-session dirs, isolated worktrees). `None` restores the default.
-    pub fn set_work_root(&mut self, root: Option<std::path::PathBuf>) {
-        self.work_root = root;
     }
 
     /// Whether project-scope (`./.forge/`) commands/skills run without a first-use confirmation.
@@ -1720,7 +1857,32 @@ impl Session {
         &mut self,
         rx: Option<std::sync::mpsc::Receiver<forge_index::LatticeWatcher>>,
     ) {
+        self.lattice_watch_enabled = rx.is_some();
         self.lattice_watcher = rx;
+    }
+
+    /// Recreate the background lattice watcher for the current workspace without blocking the
+    /// caller on filesystem watcher setup.
+    pub fn install_lattice_watcher(&mut self) {
+        let Some(lattice) = self.lattice.as_ref().map(Arc::clone) else {
+            return;
+        };
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let Some(root) = forge_index::resolve_watch_root(self.workspace.root(), home.as_deref())
+        else {
+            self.lattice_watch_enabled = false;
+            return;
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            if let Ok(watcher) =
+                forge_index::spawn_watcher(lattice, &root, std::time::Duration::from_millis(400))
+            {
+                let _ = tx.send(watcher);
+            }
+        });
+        self.lattice_watch_enabled = true;
+        self.lattice_watcher = Some(rx);
     }
 
     /// Attach the LSP registry (composition root). No-op when `lsp.enabled = false`.
@@ -1815,10 +1977,20 @@ impl Session {
         &self.pricing
     }
 
+    pub fn checkpoint_root(&self) -> &std::path::Path {
+        &self.checkpoint_root
+    }
+
     /// Override where code shadow-snapshots are stored (default `.forge/checkpoints`). Used by the
     /// composition root to anchor them under the project `.forge/`, and by tests for isolation.
     pub fn set_checkpoint_root(&mut self, root: impl Into<std::path::PathBuf>) {
-        self.checkpoint_root = root.into();
+        let root = root.into();
+        self.checkpoint_root = if root.is_absolute() {
+            root
+        } else {
+            self.workspace.root().join(root)
+        };
+        self.checkpoint_root_custom = true;
     }
 
     /// Rewind the conversation to a transcript boundary (`seq`): soft-delete the messages at/after
@@ -2014,18 +2186,60 @@ impl Session {
         Ok(())
     }
 
+    fn transition_workspace(&mut self, workspace: WorkspaceContext) -> Result<(), CoreError> {
+        if self.tools.rebind_workspace(workspace.root()).is_err() {
+            self.tools.bind_workspace(workspace.root());
+        }
+        self.workspace = workspace;
+        *self
+            .workspace_binding
+            .write()
+            .map_err(|_| CoreError::Internal("session workspace binding poisoned".to_string()))? =
+            self.workspace.root().to_path_buf();
+        if !self.checkpoint_root_custom {
+            self.checkpoint_root = self.workspace.root().join(".forge/checkpoints");
+        }
+        self.cached_git_branch = current_git_branch(self.workspace.root());
+        self.cached_agents_md = if self.project_prompt_injected {
+            None
+        } else {
+            read_project_agents_md(self.workspace.root())
+        };
+        self.project = crate::project_context::compute(self.workspace.root());
+        // Lattice instances and their tool capture a root at construction. Recreate the index
+        // for B and drop A's watcher; watcher composition is rebuilt by the CLI owner.
+        let had_lattice = self.lattice.is_some();
+        self.lattice_watcher = None;
+        self.tools.remove("lattice");
+        self.lattice = had_lattice.then(|| {
+            let lattice = Arc::new(Lattice::new(Arc::clone(&self.store), self.workspace.root()));
+            self.tools
+                .register(Box::new(forge_tools::LatticeTool::new(Arc::clone(
+                    &lattice,
+                ))));
+            lattice
+        });
+        if self.lattice_watch_enabled {
+            self.install_lattice_watcher();
+        }
+        Ok(())
+    }
+
     /// Reconfigure this session in place as a **fresh** one (new id, empty transcript), keeping
     /// the same backends + live presenter so events keep flowing to the running TUI. Powers
     /// `/new` — no process restart, no Session move (it lives behind the loop's `Mutex`).
     pub fn reset_fresh(&mut self, cwd: &str) -> Result<(), CoreError> {
+        let workspace = WorkspaceContext::new(cwd)?;
         let id = self
             .store
-            .create_session(cwd, format!("{:?}", self.mode).as_str())?;
+            .create_session(&workspace.display(), format!("{:?}", self.mode).as_str())?;
+        self.transition_workspace(workspace)?;
         self.id = id.clone();
         self.transcript.clear();
         self.seq = 0;
         self.tasks.clear();
         self.project_prompt_injected = false;
+        self.cached_agents_md = read_project_agents_md(self.workspace.root());
         self.presenter.emit(PresenterEvent::SessionStarted { id });
         Ok(())
     }
@@ -2036,6 +2250,11 @@ impl Session {
         if !self.store.session_exists(session_id)? {
             return Err(CoreError::SessionNotFound(session_id.to_string()));
         }
+        let cwd = self
+            .store
+            .session_cwd(session_id)?
+            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))?;
+        let workspace = WorkspaceContext::new(cwd)?;
         let stored = self.store.load_messages(session_id)?;
         // MAX(seq)+1, not the loaded count — see Session::resume (compaction makes them differ, and
         // the mismatch lets `/undo` deactivate pre-compaction survivors).
@@ -2051,6 +2270,7 @@ impl Session {
                 visibility: m.visibility,
             })
             .collect();
+        self.transition_workspace(workspace)?;
         self.id = session_id.to_string();
         self.tasks = self.store.tasks(session_id).unwrap_or_default();
         self.project_prompt_injected = true;
@@ -2099,6 +2319,13 @@ impl Session {
         if self.config.hooks.is_empty() {
             return hooks::LifecycleOutcome::default();
         }
+        let fields = match fields {
+            serde_json::Value::Object(mut fields) => {
+                fields.insert("cwd".to_string(), self.workspace.display().into());
+                serde_json::Value::Object(fields)
+            }
+            other => serde_json::json!({ "cwd": self.workspace.display(), "fields": other }),
+        };
         let outcome = hooks::run_lifecycle_hooks(&self.config.hooks, event, &self.id, fields).await;
         for n in &outcome.notes {
             self.presenter.emit(PresenterEvent::Warning(n.clone()));
@@ -2714,9 +2941,7 @@ impl Session {
     /// branch). Recomputed each call so it's always current, and placed first so the provider's
     /// cache breakpoint anchors on this stable prefix.
     fn system_preamble(&self) -> Vec<Message> {
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| ".".to_string());
+        let cwd = self.workspace.display();
         let os = std::env::consts::OS;
         // No blocking syscall here: this hot per-request helper is `&self` (sync), and making it
         // `async` to read `.git/HEAD` would hold a `&Session` across an `.await` inside the spawned
@@ -3345,6 +3570,7 @@ prompt text, nothing else.";
         let project = self.project.clone();
         let user_snippet: String = prompt.chars().take(500).collect();
         let assistant_snippet: String = final_text.chars().take(1200).collect();
+        let workspace = self.workspace.clone();
         Some(tokio::spawn(async move {
             let decision = router
                 .route_hinted(
@@ -3372,7 +3598,7 @@ prompt text, nothing else.";
                 return;
             };
             let _ = store.record_side_call_usage(&id, "memory", &r.usage);
-            let scope = memory_scope();
+            let scope = memory_scope_at(workspace.root());
             // Collect lines into owned Strings before the per-line await to avoid holding
             // a borrow across the embed_one await point.
             let lines: Vec<String> = r.content.lines().take(3).map(str::to_string).collect();
@@ -5311,7 +5537,7 @@ prompt text, nothing else.";
             // dump-everything memory file: only the RELEVANT memories are injected, ranked by the
             // prompt then salience + recency. Once per session, like AGENTS.md.
             if self.config.mesh.auto_memory {
-                let scope = memory_scope();
+                let scope = memory_scope_at(self.workspace.root());
                 let recalled = match embed_one(&self.config.lattice.embeddings, prompt).await {
                     Some(qemb) => self.store.recall_semantic(&scope, &qemb, 6),
                     None => self.store.recall_memories(&scope, prompt, 6),
@@ -5402,7 +5628,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // message is persisted — so this await cannot reopen the abort-before-persist window the
         // synchronous-read invariant protects; `system_preamble` (called per model-loop step below)
         // then reads the cached field with no syscall and no `.await`, staying `Send`.
-        self.cached_git_branch = tokio::fs::read_to_string(".git/HEAD")
+        self.cached_git_branch = tokio::fs::read_to_string(self.workspace.root().join(".git/HEAD"))
             .await
             .ok()
             .as_deref()
@@ -5603,7 +5829,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     break;
                 }
                 // Bridge-aware progress: the working tree reflects direct-path AND bridge edits.
-                let made_progress = !working_tree_unchanged(self.work_root.as_deref());
+                let made_progress = !working_tree_unchanged(Some(self.workspace.root()));
                 let window = self.effective_context_window(&active_model).max(1) as f64;
                 let budget_used = context_tokens as f64 / window;
                 match continuation_decision(
@@ -5684,8 +5910,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             && self.expect_code_change
             && !self.past_turn_deadline()
         {
-            let test_edits = modified_test_files_in_tree(self.work_root.as_deref());
-            if !test_edits.is_empty() && stash_paths(self.work_root.as_deref(), &test_edits) {
+            let test_edits = modified_test_files_in_tree(Some(self.workspace.root()));
+            if !test_edits.is_empty() && stash_paths(Some(self.workspace.root()), &test_edits) {
                 self.presenter.emit(PresenterEvent::Warning(format!(
                     "code-change turn modified {} existing test file(s) — stashed the test edits \
                      and pushing back once: hidden evaluation runs the ORIGINAL tests",
@@ -5736,7 +5962,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 forge_provider::is_cli_bridge(&active_model),
                 saw_mcp_unavailable,
                 turn_tools_ran,
-                working_tree_unchanged(self.work_root.as_deref()),
+                working_tree_unchanged(Some(self.workspace.root())),
             );
         if self.tools_unavailable_run {
             self.presenter.emit(PresenterEvent::Warning(
@@ -5782,7 +6008,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // Auto-detect: fill in lint_cmd (and optionally test_cmd) from project structure when the
         // user hasn't configured them. Activates on edits so there's no cost on read-only turns.
         if af.auto_detect && self.edits_this_turn > 0 && af.lint_cmd.is_empty() {
-            if let Some((lint, test)) = Self::detect_project_commands() {
+            if let Some((lint, test)) = Self::detect_project_commands(self.workspace.root()) {
                 self.presenter.emit(PresenterEvent::Warning(format!(
                     "autofix: auto-detected lint command from project structure: {lint}"
                 )));
@@ -6153,25 +6379,23 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
     /// Checks the current working directory — the project root where `forge chat` launched.
     /// Returns `(lint_cmd, test_cmd)` when a known project type is found; `test_cmd` is `None`
     /// when the project type has no obvious cheap test command.
-    fn detect_project_commands() -> Option<(String, Option<String>)> {
-        if std::path::Path::new("Cargo.toml").exists() {
+    fn detect_project_commands(root: &std::path::Path) -> Option<(String, Option<String>)> {
+        if root.join("Cargo.toml").exists() {
             return Some((
                 "cargo check --all-targets 2>&1".to_string(),
                 Some("cargo test --workspace 2>&1".to_string()),
             ));
         }
-        if std::path::Path::new("package.json").exists() {
+        if root.join("package.json").exists() {
             return Some((
                 "npm run lint 2>&1".to_string(),
                 Some("npm test 2>&1".to_string()),
             ));
         }
-        if std::path::Path::new("pyproject.toml").exists()
-            || std::path::Path::new("setup.py").exists()
-        {
+        if root.join("pyproject.toml").exists() || root.join("requirements.txt").exists() {
             return Some(("python -m pytest --tb=short -q 2>&1".to_string(), None));
         }
-        if std::path::Path::new("go.mod").exists() {
+        if root.join("go.mod").exists() {
             return Some((
                 "go build ./... 2>&1".to_string(),
                 Some("go test ./... 2>&1".to_string()),
@@ -6190,13 +6414,23 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let mut failures = Vec::new();
 
         if af.auto_lint && !af.lint_cmd.is_empty() {
-            let out = forge_tools::run_shell_command(&af.lint_cmd, ".", AUTOFIX_TIMEOUT_SECS).await;
+            let out = forge_tools::run_shell_command(
+                &af.lint_cmd,
+                &self.workspace.display(),
+                AUTOFIX_TIMEOUT_SECS,
+            )
+            .await;
             if shell_command_failed(&out) {
                 failures.push(format!("[lint: {}]\n{}", af.lint_cmd, out));
             }
         }
         if af.auto_test && !af.test_cmd.is_empty() {
-            let out = forge_tools::run_shell_command(&af.test_cmd, ".", AUTOFIX_TIMEOUT_SECS).await;
+            let out = forge_tools::run_shell_command(
+                &af.test_cmd,
+                &self.workspace.display(),
+                AUTOFIX_TIMEOUT_SECS,
+            )
+            .await;
             if shell_command_failed(&out) {
                 failures.push(format!("[test: {}]\n{}", af.test_cmd, out));
             }
@@ -6348,6 +6582,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         msg_id: &str,
         call: &forge_types::ToolCall,
     ) -> Result<String, CoreError> {
+        // Snapshot args before hooks so the audit row preserves exactly what the model requested.
         let call_args_json = serde_json::to_string(&call.args)?;
         if let Some(warning) = self
             .failure_tracker
@@ -6403,16 +6638,15 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             return self.invoke_mcp(msg_id, call).await;
         }
 
-        let mut args_json = call_args_json;
-        // `effective_args` may be replaced by a PreToolUse hook that rewrites the args.
         let mut effective_args = call.args.clone();
-        // Per-session working-directory rooting (`forge serve`): rewrite relative `path`/`cwd`
-        // args under the session's work root — the same audited primitive subagent worktree
-        // isolation uses — so a daemon session operates on its own tree, not the process cwd.
-        if let Some(root) = &self.work_root {
-            effective_args = subagent::rewrite_args_for_worktree(&effective_args, root);
-            args_json = serde_json::to_string(&effective_args)?;
-        }
+        // Session workspace rooting is unconditional: all relative paths and omitted shell
+        // cwd values resolve within this immutable session workspace.
+        effective_args =
+            subagent::rewrite_args_for_worktree(&effective_args, self.workspace.root());
+        effective_args =
+            add_workspace_default_path(&call.name, effective_args, self.workspace.root());
+        validate_workspace_args(&effective_args, &self.workspace)?;
+        let mut args_json = serde_json::to_string(&effective_args)?;
 
         let Some(tool) = self.tools.get(&call.name) else {
             // Name the valid tools so the model can recover instead of guessing again.
@@ -6449,7 +6683,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // blocks the call (the hook's output is the reason the model sees). Exit 0 + JSON object
         // on stdout rewrites the args before the tool runs. Inert when no hooks configured.
         if !self.config.hooks.is_empty() {
-            let payload = serde_json::json!({ "tool": call.name, "args": call.args }).to_string();
+            let payload = serde_json::json!({
+                "tool": call.name, "args": effective_args, "cwd": self.workspace.display()
+            })
+            .to_string();
             let outcome = hooks::run_hooks(
                 &self.config.hooks,
                 forge_config::HookEvent::PreToolUse,
@@ -6478,8 +6715,12 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 return Ok(result);
             }
             if let Some(new_args) = outcome.rewritten_args {
-                args_json = serde_json::to_string(&new_args).unwrap_or_default();
-                effective_args = new_args;
+                effective_args =
+                    subagent::rewrite_args_for_worktree(&new_args, self.workspace.root());
+                effective_args =
+                    add_workspace_default_path(&call.name, effective_args, self.workspace.root());
+                validate_workspace_args(&effective_args, &self.workspace)?;
+                args_json = serde_json::to_string(&effective_args).unwrap_or_default();
             }
         }
 
@@ -6654,7 +6895,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // tool result is already final; post hooks only surface notes, they don't change it.
         if !self.config.hooks.is_empty() {
             let payload =
-                serde_json::json!({ "tool": call.name, "args": call.args, "result": result, "ok": ok })
+                serde_json::json!({ "tool": call.name, "args": call.args, "result": result, "ok": ok, "cwd": self.workspace.display() })
                     .to_string();
             let outcome = hooks::run_hooks(
                 &self.config.hooks,
@@ -6712,7 +6953,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
 
         // PreToolUse hooks: same semantics as native tools — block, observe, or rewrite args.
         if !self.config.hooks.is_empty() {
-            let payload = serde_json::json!({ "tool": call.name, "args": call.args }).to_string();
+            let payload = serde_json::json!({
+                "tool": call.name, "args": effective_args, "cwd": self.workspace.display()
+            })
+            .to_string();
             let outcome = hooks::run_hooks(
                 &self.config.hooks,
                 forge_config::HookEvent::PreToolUse,
@@ -6851,7 +7095,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // PostToolUse hooks: observe only — notes surfaced, result unchanged.
         if !self.config.hooks.is_empty() {
             let payload = serde_json::json!({
-                "tool": call.name, "args": effective_args, "result": result, "ok": ok
+                "tool": call.name, "args": effective_args, "result": result, "ok": ok, "cwd": self.workspace.display()
             })
             .to_string();
             let outcome = hooks::run_hooks(
@@ -6913,7 +7157,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
             &self.config.mesh.subagents.agents_dir,
         )));
-        let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
             provider: Arc::clone(&self.provider),
             router: Arc::clone(&self.router),
@@ -7082,7 +7326,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             warn_fraction: self.config.mesh.warn_threshold,
             min_context_tokens: None,
         };
-        let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
             provider: Arc::clone(&self.provider),
             router: Arc::clone(&self.router),
@@ -7175,7 +7419,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
             &self.config.mesh.subagents.agents_dir,
         )));
-        let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
             provider: Arc::clone(&self.provider),
             router: Arc::clone(&self.router),
@@ -7280,7 +7524,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
             &self.config.mesh.subagents.agents_dir,
         )));
-        let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
             provider: Arc::clone(&self.provider),
             router: Arc::clone(&self.router),
@@ -7382,7 +7626,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
             &self.config.mesh.subagents.agents_dir,
         )));
-        let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
             provider: Arc::clone(&self.provider),
             router: Arc::clone(&self.router),
@@ -7674,7 +7918,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 false,
             )
         } else {
-            let scope = memory_scope();
+            let scope = memory_scope_at(self.workspace.root());
             let cfg = self.config.lattice.embeddings.clone();
             match embed_one(&cfg, &text).await {
                 Some(emb) => {
@@ -8219,6 +8463,29 @@ fn summarize(s: &str) -> String {
     } else {
         first.to_string()
     }
+}
+
+pub static TEST_CWD_MUTEX: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+pub struct TestCwdGuard {
+    prior: std::path::PathBuf,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for TestCwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.prior);
+    }
+}
+
+pub fn test_cwd_guard(target: &std::path::Path) -> TestCwdGuard {
+    let lock = TEST_CWD_MUTEX
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("locking test cwd mutex");
+    let prior = std::env::current_dir().expect("reading test process cwd");
+    std::env::set_current_dir(target).expect("entering guarded test cwd");
+    TestCwdGuard { prior, _lock: lock }
 }
 
 #[cfg(test)]
@@ -11062,6 +11329,7 @@ mod tests {
             .join(format!("forge-autoedit-{}.txt", forge_types::new_id()))
             .to_string_lossy()
             .to_string();
+        let workspace = std::path::Path::new(&path).parent().unwrap().to_path_buf();
         let config = Config {
             permission_mode: forge_types::PermissionMode::AcceptEdits,
             ..Config::default()
@@ -11070,10 +11338,10 @@ mod tests {
             Arc::new(Store::open_in_memory().unwrap()),
             Arc::new(WriteFileProvider { path: path.clone() }),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(&workspace),
             Box::new(CapturePresenter::default()),
             config,
-            ".",
+            workspace.to_str().unwrap(),
         )
         .unwrap();
 
@@ -13165,7 +13433,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
@@ -13195,7 +13463,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -13222,7 +13490,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         session.config.mesh.nudge_empty_diff = false;
         let answer = session.run_turn("fix the bug").await.unwrap();
@@ -13315,7 +13583,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
@@ -13355,7 +13623,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
@@ -13389,7 +13657,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
@@ -13421,7 +13689,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
@@ -13504,7 +13772,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         session.run_turn("fix the bug").await.unwrap();
         assert!(
@@ -13533,7 +13801,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         session.run_turn("fix the bug").await.unwrap();
         assert!(
@@ -13559,7 +13827,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         session.config.mesh.bridge_require_tools = false;
         session.run_turn("fix the bug").await.unwrap();
@@ -13658,7 +13926,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
@@ -13708,7 +13976,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
@@ -13744,7 +14012,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
@@ -13771,7 +14039,7 @@ mod tests {
         session.config.recap.enabled = false;
         session.config.suggest.enabled = false;
         session.config.mesh.auto_memory = false;
-        session.work_root = Some(dir.clone());
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
         session.set_expect_code_change(true);
         session.config.mesh.guard_test_edits = false;
         let answer = session.run_turn("fix the bug").await.unwrap();
@@ -14957,10 +15225,10 @@ mod tests {
                 content: "X".into(),
             }),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(&dir),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            dir.to_str().unwrap(),
         )
         .unwrap();
         assert_eq!(session.temper(), PermissionMode::Default);
@@ -15011,10 +15279,10 @@ mod tests {
                 content: "MODEL-EDIT".into(),
             }),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(&dir),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            dir.to_str().unwrap(),
         )
         .unwrap();
         session.set_checkpoint_root(dir.join("snaps"));
@@ -15058,10 +15326,10 @@ mod tests {
                 content: "the model overwrote this".into(),
             }),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(&dir),
             Box::new(HeadlessPresenter::new(false)),
             config,
-            ".",
+            dir.to_str().unwrap(),
         )
         .unwrap();
         session.set_checkpoint_root(dir.join("snaps"));
@@ -15112,12 +15380,12 @@ mod tests {
                 content: "model wrote this".into(),
             }),
             Arc::new(HeuristicRouter::new(config.clone())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(&dir),
             Box::new(CapturePresenter {
                 events: events.clone(),
             }),
             config,
-            ".",
+            dir.to_str().unwrap(),
         )
         .unwrap();
         session.set_checkpoint_root(blocker.join("snaps"));
@@ -15469,10 +15737,10 @@ mod tests {
                 path: path.to_string_lossy().into_owned(),
             }),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(&dir),
             Box::new(capture),
             config,
-            ".",
+            dir.to_str().unwrap(),
         )
         .unwrap();
 
@@ -15525,10 +15793,10 @@ mod tests {
                 path: path.to_string_lossy().into_owned(),
             }),
             Arc::new(HeuristicRouter::new(Config::default())),
-            ToolRegistry::with_core_tools(),
+            ToolRegistry::with_core_tools_in(&dir),
             Box::new(capture),
             config,
-            ".",
+            dir.to_str().unwrap(),
         )
         .unwrap();
 
@@ -15600,6 +15868,165 @@ mod tests {
     }
 
     // ── Auto-review gate tests ────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn serve_style_sessions_keep_distinct_workspace_metadata() {
+        let base =
+            std::env::temp_dir().join(format!("forge-workspace-session-{}", std::process::id()));
+        let first = base.join("first");
+        let second = base.join("second");
+        let sentinel = base.join("sentinel");
+        let _ = std::fs::remove_dir_all(&base);
+        for root in [&first, &second, &sentinel] {
+            std::fs::create_dir_all(root).unwrap();
+            std::fs::write(
+                root.join("AGENTS.md"),
+                root.file_name().unwrap().to_string_lossy().as_bytes(),
+            )
+            .unwrap();
+        }
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let make = |root: &std::path::Path| {
+            Session::start(
+                Arc::clone(&store),
+                Arc::new(MockProvider),
+                Arc::new(HeuristicRouter::new(Config::default())),
+                ToolRegistry::with_core_tools_in(root),
+                Box::new(CapturePresenter::default()),
+                Config::default(),
+                root.to_str().unwrap(),
+            )
+            .unwrap()
+        };
+        let (first_session, second_session) =
+            tokio::join!(async { make(&first) }, async { make(&second) },);
+        assert!(first_session.system_preamble()[1]
+            .content
+            .contains(first.to_string_lossy().as_ref()));
+        assert!(second_session.system_preamble()[1]
+            .content
+            .contains(second.to_string_lossy().as_ref()));
+        assert_eq!(
+            store
+                .session_cwd(first_session.session_id())
+                .unwrap()
+                .unwrap(),
+            first.canonicalize().unwrap().display().to_string()
+        );
+        assert_eq!(
+            store
+                .session_cwd(second_session.session_id())
+                .unwrap()
+                .unwrap(),
+            second.canonicalize().unwrap().display().to_string()
+        );
+        assert!(!sentinel.join("marker").exists());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cc_pre_and_post_tool_hooks_receive_explicit_workspace_cwd() {
+        let base = std::env::temp_dir().join(format!("forge-hook-cwd-{}", forge_types::new_id()));
+        let workspace = base.join("workspace");
+        let sentinel = base.join("sentinel");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&sentinel).unwrap();
+        let capture = base.join("hook-cwds.txt");
+        let _cwd_guard = test_cwd_guard(&sentinel);
+        let command = format!(
+            "read line; printf '%s\\n' \"$line\" >> {}",
+            capture.display()
+        );
+        let config = Config {
+            permission_mode: forge_types::PermissionMode::Bypass,
+            hooks: vec![
+                forge_config::HookConfig {
+                    event: forge_config::HookEvent::PreToolUse,
+                    matcher: Some("list_dir".into()),
+                    command: command.clone(),
+                    timeout_secs: 10,
+                    cc_compat: false,
+                },
+                forge_config::HookConfig {
+                    event: forge_config::HookEvent::PostToolUse,
+                    matcher: Some("list_dir".into()),
+                    command,
+                    timeout_secs: 10,
+                    cc_compat: false,
+                },
+            ],
+            ..Config::default()
+        };
+        let mut session = Session::start(
+            Arc::new(Store::open_in_memory().unwrap()),
+            Arc::new(MockProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(&workspace),
+            Box::new(CapturePresenter::default()),
+            config,
+            workspace.to_str().unwrap(),
+        )
+        .unwrap();
+        let call = forge_types::ToolCall {
+            id: "list".into(),
+            name: "list_dir".into(),
+            args: serde_json::json!({}),
+        };
+        let session_id = session.session_id().to_string();
+        let msg_id = session
+            .store
+            .add_message(&session_id, 0, Role::User, "hook", None)
+            .unwrap();
+        session.invoke_tool(&msg_id, &call).await.unwrap();
+        let lines = std::fs::read_to_string(&capture).unwrap();
+        let expected = workspace.canonicalize().unwrap().display().to_string();
+        let payloads: Vec<serde_json::Value> = lines
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(payloads.len(), 2);
+        for payload in payloads {
+            assert_eq!(payload["cwd"], expected);
+        }
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn workspace_validation_rejects_peer_repository_paths() {
+        let root = std::env::temp_dir().join(format!("forge-workspace-a-{}", std::process::id()));
+        let peer = std::env::temp_dir().join(format!("forge-workspace-b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&peer);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&peer).unwrap();
+        let rooted = subagent::rewrite_args_for_worktree(
+            &serde_json::json!({ "path": "only-a.txt", "paths": ["also-a.txt"] }),
+            &root,
+        );
+        let workspace = WorkspaceContext::new(&root).unwrap();
+        validate_workspace_args(&rooted, &workspace).unwrap();
+        assert!(validate_workspace_args(
+            &serde_json::json!({ "path": root.join("../forge-workspace-b-").join(std::process::id().to_string()).join("peer.txt") }),
+            &workspace,
+        )
+        .is_err());
+        assert!(validate_workspace_args(
+            &serde_json::json!({ "path": "/opt/forge-peer/peer.txt" }),
+            &workspace,
+        )
+        .is_err());
+        assert!(
+            validate_workspace_args(
+                &serde_json::json!({ "path": std::env::temp_dir().join("forge-peer/peer.txt") }),
+                &workspace,
+            )
+            .is_err(),
+            "a temporary workspace must not authorize every sibling temporary path"
+        );
+        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(peer);
+    }
 
     #[test]
     fn tool_batch_signature_distinguishes_calls() {

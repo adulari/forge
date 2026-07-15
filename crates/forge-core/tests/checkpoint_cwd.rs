@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use forge_config::{Config, OneOrMany, PriceOverride};
-use forge_core::Session;
+use forge_core::{test_cwd_guard, Session};
 use forge_mesh::HeuristicRouter;
 use forge_provider::{EventSink, ModelResponse, Provider, ProviderError, ToolSpec};
 use forge_store::Store;
@@ -54,7 +54,7 @@ async fn undo_reverts_files_with_the_default_relative_checkpoint_root() {
     // exactly as in production (this test owns the process cwd; it's the only one here).
     let dir = std::env::temp_dir().join(format!("forge-cwd-{}", forge_types::new_id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::env::set_current_dir(&dir).unwrap();
+    let _cwd_guard = test_cwd_guard(&dir);
 
     std::fs::write("notes.txt", "ORIGINAL").unwrap();
 
@@ -106,6 +106,6 @@ async fn undo_reverts_files_with_the_default_relative_checkpoint_root() {
         "undo reverts the file with the default relative checkpoint root"
     );
 
-    std::env::set_current_dir(std::env::temp_dir()).ok();
+    drop(_cwd_guard);
     std::fs::remove_dir_all(&dir).ok();
 }
