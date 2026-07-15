@@ -980,6 +980,20 @@ fn quota_status_from(
     QuotaStatus::Ok
 }
 
+/// Whether a Codex rollout `rate_limits` object describes the account-wide ChatGPT Codex quota.
+///
+/// Recent Codex builds also emit model-specific limits such as `codex_bengalfox` for
+/// GPT-5.3-Codex-Spark. Those values are real, but they are not interchangeable with the shared
+/// Codex allowance used to route `codex-cli` and `codex-oauth`, so they must never update that
+/// bucket. Older rollout records omitted `limit_id`; retain them as a backward-compatible
+/// account-wide observation.
+pub fn codex_rollout_is_account_wide(rate_limits: &Value) -> bool {
+    rate_limits
+        .get("limit_id")
+        .and_then(Value::as_str)
+        .is_none_or(|id| id.trim().eq_ignore_ascii_case("codex"))
+}
+
 /// Build [`QuotaHint`]s for ALL non-stale windows from a Codex session rollout JSONL.
 /// Returns one entry per window (primary = 5h, secondary = weekly) that is still active.
 fn codex_quota_from_rollout(jsonl: &str, provider: &str) -> Vec<forge_types::QuotaHint> {
@@ -989,7 +1003,8 @@ fn codex_quota_from_rollout(jsonl: &str, provider: &str) -> Vec<forge_types::Quo
         if p.get("type").and_then(Value::as_str) != Some("token_count") {
             return None;
         }
-        p.get("rate_limits").filter(|r| r.is_object()).cloned()
+        let rate_limits = p.get("rate_limits").filter(|r| r.is_object())?;
+        codex_rollout_is_account_wide(rate_limits).then(|| rate_limits.clone())
     });
     let Some(rl) = rl else {
         return Vec::new();
@@ -3888,6 +3903,18 @@ mod tests {
         for h in &hints {
             assert_eq!(h.status, QuotaStatus::Ok);
         }
+    }
+
+    #[test]
+    fn codex_rollout_quota_ignores_model_specific_limit() {
+        // A current GPT-5.3-Codex-Spark allowance is distinct from the account-wide Codex quota.
+        // The later zero-percent sub-limit must not overwrite the shared subscription bucket.
+        let jsonl = r#"{"payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":31.0,"window_minutes":10080,"resets_at":9999999999}}}}
+{"payload":{"type":"token_count","rate_limits":{"limit_id":"codex_bengalfox","limit_name":"GPT-5.3-Codex-Spark","primary":{"used_percent":0.0,"window_minutes":10080,"resets_at":9999999999}}}}"#;
+        let hints = codex_quota_from_rollout(jsonl, "codex-cli");
+        assert_eq!(hints.len(), 1, "only the account-wide window survives");
+        assert_eq!(hints[0].window, "weekly");
+        assert_eq!(hints[0].fraction_used, Some(0.31));
     }
 
     /// Serializes tests that mutate the process-global `CODEX_HOME` env var (`cargo test` runs

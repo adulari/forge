@@ -170,6 +170,9 @@ fn fetch_codex(stats: &mut BridgeStats, home: &Path) {
             }
             let observed_at = codex_line_observed_at(&v, &path);
             let rl = &v["payload"]["rate_limits"];
+            if !forge_provider::codex_rollout_is_account_wide(rl) {
+                continue;
+            }
             if let Some(plan) = rl["plan_type"]
                 .as_str()
                 .filter(|plan| !plan.trim().is_empty())
@@ -371,7 +374,7 @@ mod tests {
     use super::*;
 
     /// Write a rollout file under `<home>/.codex/sessions/<today>/` and return its path.
-    fn write_rollout(home: &Path, lines: &str) -> PathBuf {
+    fn write_named_rollout(home: &Path, name: &str, lines: &str) -> PathBuf {
         let now = Local::now();
         let dir = home
             .join(".codex/sessions")
@@ -379,9 +382,13 @@ mod tests {
             .join(format!("{:02}", now.month()))
             .join(format!("{:02}", now.day()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("rollout-test.jsonl");
+        let path = dir.join(name);
         std::fs::write(&path, lines).unwrap();
         path
+    }
+
+    fn write_rollout(home: &Path, lines: &str) -> PathBuf {
+        write_named_rollout(home, "rollout-test.jsonl", lines)
     }
 
     fn token_count_line(timestamp: Option<&str>, p_resets: i64, s_resets: i64) -> String {
@@ -463,6 +470,44 @@ mod tests {
         fetch_codex(&mut stats, home.path());
         assert_eq!(stats.codex_5h_pct, None);
         assert_eq!(stats.codex_weekly_pct, Some(27.0));
+    }
+
+    #[test]
+    fn fetch_codex_ignores_model_specific_limit_snapshots() {
+        let home = tempfile::tempdir().unwrap();
+        let now = now_epoch();
+        // The official CLI can append a fresh zero-percent *model-specific* limit (for example
+        // `codex_bengalfox`) after an older account-wide `codex` observation. It must not replace
+        // the ChatGPT account's weekly allowance used by Mesh.
+        let account = serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "rate_limits": {
+                    "limit_id": "codex",
+                    "primary": {"used_percent": 31.0, "window_minutes": 10080, "resets_at": now + 86400},
+                    "secondary": null,
+                }
+            }
+        });
+        let model = serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "rate_limits": {
+                    "limit_id": "codex_bengalfox",
+                    "limit_name": "GPT-5.3-Codex-Spark",
+                    "primary": {"used_percent": 0.0, "window_minutes": 10080, "resets_at": now + 86400},
+                    "secondary": null,
+                }
+            }
+        });
+        write_named_rollout(home.path(), "rollout-account.jsonl", &account.to_string());
+        write_named_rollout(home.path(), "rollout-model.jsonl", &model.to_string());
+
+        let mut stats = BridgeStats::default();
+        fetch_codex(&mut stats, home.path());
+        assert_eq!(stats.codex_weekly_pct, Some(31.0));
     }
 
     #[test]
