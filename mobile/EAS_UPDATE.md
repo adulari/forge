@@ -37,20 +37,53 @@ Any change to the **native** layer forces a **new binary build** (Xcode Cloud / 
 - changing `ios.*` / `android.*` native config in `app.config.ts`.
 
 **An OTA update must NEVER be shipped to a binary whose `runtimeVersion` doesn't match.**
-If it were, the mismatched update simply wouldn't be offered to that binary — but more
-importantly, any JS that calls a newly-added native API would **silently no-op** (the
-native module isn't present), so the feature would appear broken with no error. The
-fingerprint policy makes this a hard gate: bump the native layer → fingerprint changes →
-OTA updates for the old fingerprint stop being served → you must ship a new binary.
+If an update is published with a different fingerprint, EAS does not offer it to the binary, so
+the binary remains on its last compatible bundle. The new behavior is unavailable until a binary
+with the matching native fingerprint is built. The fingerprint policy makes this a hard gate:
+bump the native layer → fingerprint changes → OTA updates for the old fingerprint stop being
+served → you must ship a new binary.
+
+## Production channel and the one-time native bootstrap
+
+The app config embeds both the EAS Updates URL and the production channel header:
+
+```ts
+updates: {
+  requestHeaders: { "expo-channel-name": "production" },
+  // ...
+}
+```
+
+This header is required because Forge's production iOS binary is built by Xcode Cloud rather
+than EAS Build. A binary built before `expo-updates` and this channel configuration was added
+cannot receive OTA updates. Trigger one signed Xcode Cloud/TestFlight build manually after the
+configuration is merged, and verify that the processed build includes the update URL, production
+channel header, and fingerprint runtime version before publishing a production update.
+
+After that bootstrap, pushes containing only `mobile/src/**` or `mobile/assets/**` use OTA by
+default. Changes to native dependencies, Expo/RN versions, config plugins, entitlements,
+permissions, iOS/Android native files, widgets, Live Activities, or any other path in the same
+push require another manual native build or a follow-up OTA-safe push. The fingerprint policy
+prevents an update from being offered to an incompatible binary, while the workflow guard prevents
+an unsafe publication attempt in the first place.
+
+To verify a TestFlight binary without publishing an update, inspect its embedded `Expo.plist` for
+`EXUpdatesURL`, `EXUpdatesRequestHeaders` with `expo-channel-name=production`, and
+`EXUpdatesRuntimeVersion`; then launch it twice after a known compatible update exists and confirm
+the app reports the new bundle. Do not use this verification procedure to trigger a build or
+publish an update automatically.
 
 ## CI workflow
 
-`.github/workflows/eas-update.yml` runs on every push to `main` that touches app source
-(`mobile/src/**`, `mobile/app.config.ts`, `mobile/package.json`, `mobile/assets/**`).
-It publishes to the `production` channel with:
+`.github/workflows/eas-update.yml` runs on pushes to `main` that touch OTA-safe app source
+(`mobile/src/**` or `mobile/assets/**`). It also compares the complete push range and skips
+publication if the same push contains any other path. This protects against a mixed commit that
+changes native/config inputs or shared code together with JavaScript.
+
+When the guard passes, it publishes to the `production` channel with:
 
 ```
-npx eas-cli@latest update --channel production --environment production --platform ios --message "<commit subject>" --non-interactive
+npx eas-cli@latest update --channel production --environment production --platform ios --message "<commit SHA> <commit subject>" --non-interactive
 ```
 
 ### `--platform ios` is required
@@ -71,5 +104,12 @@ will fail at the `eas update` step.
 ## Channels & branches
 
 - `production` channel ← `main` branch (this workflow).
-- Installed production binaries are subscribed to the `production` channel and receive
-  these updates automatically.
+- Installed production binaries built with the bootstrap configuration are subscribed to the
+  `production` channel and receive compatible updates automatically.
+
+## Versioning across release surfaces
+
+The mobile native marketing/build version is independent from Forge's CLI/desktop version. An
+OTA can be labeled with the Forge release it carries (for example, `Forge v2.6.3`) while targeting
+the currently installed mobile fingerprint. Bump the mobile native version and run Xcode Cloud
+only when the native layer changes; do not force a native build for every CLI/desktop release.
