@@ -67,6 +67,8 @@ const {
   POLL_TIMEOUT_SEC = "2700",
   POLL_INTERVAL_SEC = "60",
   XCODE_WORKFLOW_ID = "C68BAA13-19B5-4C45-B4D7-C947DB601DB6",
+  XCODE_BUILD_RUN_ID = "",
+  XCODE_BUILD_ACTION_ID = "",
 } = process.env;
 
 function die(msg) {
@@ -131,6 +133,29 @@ function api(method, path, body) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
+  // Optional read-only diagnostics for an already-completed Xcode Cloud archive. Never create a
+  // run here: these IDs come from the Xcode Cloud GitHub check's details URL.
+  for (const [label, path] of [
+    ["run", XCODE_BUILD_RUN_ID && `/v1/ciBuildRuns/${encodeURIComponent(XCODE_BUILD_RUN_ID)}`],
+    ["actions", XCODE_BUILD_RUN_ID && `/v1/ciBuildRuns/${encodeURIComponent(XCODE_BUILD_RUN_ID)}/actions`],
+    ["artifacts", XCODE_BUILD_ACTION_ID && `/v1/ciBuildActions/${encodeURIComponent(XCODE_BUILD_ACTION_ID)}/artifacts`],
+  ]) {
+    if (!path) continue;
+    try {
+      const response = await api("GET", path);
+      const summary = (response.data ? (Array.isArray(response.data) ? response.data : [response.data]) : []).map((item) => ({
+        type: item.type,
+        id: item.id,
+        attributes: Object.fromEntries(
+          Object.entries(item.attributes || {}).filter(([key]) => !/(url|token|credential)/i.test(key)),
+        ),
+      }));
+      console.log(`xcode ${label}: ${JSON.stringify(summary)}`);
+    } catch (error) {
+      console.log(`xcode ${label} unavailable (non-fatal): ${error.message}`);
+    }
+  }
+
   // 1. Resolve the app by bundle id.
   const apps = await api("GET", `/v1/apps?filter[bundleId]=${encodeURIComponent(BUNDLE_ID)}&limit=1`);
   const app = apps.data?.[0];

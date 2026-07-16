@@ -24,6 +24,14 @@ on:
         description: "Override beta group name(s), comma-separated"
         required: false
         type: string
+      ci_run_id:
+        description: "Read-only Xcode Cloud run ID to inspect"
+        required: false
+        type: string
+      ci_action_id:
+        description: "Read-only Xcode Cloud action ID to inspect"
+        required: false
+        type: string
 
 concurrency:
   group: testflight-autogroup
@@ -84,4 +92,6 @@ jobs:
           TESTFLIGHT_GROUPS: ${{ github.event.inputs.groups || vars.TESTFLIGHT_GROUPS }}
           APP_VERSION: ${{ steps.meta.outputs.version }}
           UPLOADED_AFTER: ${{ steps.meta.outputs.after }}
+          XCODE_BUILD_RUN_ID: ${{ github.event.inputs.ci_run_id }}
+          XCODE_BUILD_ACTION_ID: ${{ github.event.inputs.ci_action_id }}
         run: node scripts/testflight-assign-group.mjs
