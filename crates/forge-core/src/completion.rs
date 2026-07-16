@@ -50,6 +50,10 @@ impl CompletionContract {
         Self::with_observation_budget(2)
     }
 
+    pub(crate) const fn max_observation_requests(self) -> usize {
+        self.max_observation_requests
+    }
+
     /// Decide whether completion is credible from the observed evidence.
     pub(crate) fn decide(
         self,

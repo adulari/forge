@@ -248,10 +248,11 @@ fn agent_host_fn(state: Arc<WorkflowState>) -> forge_workflow::HostFunction {
             let resolved = subagent::resolve(&req, &state.ctx.agents);
 
             let mode_label = format!("{:?}", state.ctx.mode);
+            let child_cwd = state.ctx.repo_root.to_string_lossy();
             let child_id = state
                 .ctx
                 .store
-                .create_child_session(".", &mode_label, &state.parent_id)
+                .create_child_session(&child_cwd, &mode_label, &state.parent_id)
                 .map_err(|e| format!("failed to create child session: {e}"))?;
 
             let decision = subagent::route_child(&state.ctx, &resolved, state.budget).await;
@@ -774,6 +775,25 @@ mod tests {
         assert_eq!(evs.len(), 2, "one Start + one Done event");
         assert!(matches!(evs[0], WorkflowEvent::AgentStart { .. }));
         assert!(matches!(evs[1], WorkflowEvent::AgentDone { ok: true, .. }));
+    }
+
+    #[tokio::test]
+    async fn workflow_child_inherits_the_parent_session_workspace() {
+        let mut ctx = ctx_with(Arc::new(EchoProvider), "openai::gpt-test");
+        let expected = std::path::PathBuf::from("/tmp/forge-workflow-session-root");
+        ctx.repo_root = expected.clone();
+        let store = Arc::clone(&ctx.store);
+
+        let (_value, ok, _events) =
+            run_test_workflow_with(ctx, r#"return await agent("inspect alpha.txt");"#).await;
+
+        assert!(ok);
+        let children = store.named_child_sessions("parent").unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(
+            store.session_cwd(&children[0].0).unwrap(),
+            Some(expected.display().to_string())
+        );
     }
 
     #[tokio::test]

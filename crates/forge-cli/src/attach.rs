@@ -67,6 +67,10 @@ struct ClientSnapshot {
     prompt_seq: u64,
     #[serde(default)]
     notes: Vec<String>,
+    /// Monotonic server snapshot revision. Replayed frames can race a live broadcast during the
+    /// WebSocket handshake, so the client must discard duplicate/out-of-order revisions.
+    #[serde(default)]
+    revision: Option<u64>,
     #[serde(default)]
     closed: bool,
 }
@@ -243,8 +247,8 @@ async fn run_attach(base: &str, token: &str, id: &str) -> Result<()> {
             msg = ws_rx.next() => {
                 match msg {
                     Some(Ok(Message::Text(t))) => {
-                        match serde_json::from_str::<ClientSnapshot>(&t) {
-                            Ok(snap) => {
+                        match decode_snapshot_frame(&t) {
+                            Ok(Some(snap)) => {
                                 if snap.closed {
                                     renderer.render(&snap, &mut pending);
                                     println!("\n⚒ session closed by the daemon — detaching.");
@@ -252,6 +256,7 @@ async fn run_attach(base: &str, token: &str, id: &str) -> Result<()> {
                                 }
                                 renderer.render(&snap, &mut pending);
                             }
+                            Ok(None) => {} // application keepalive / future control frame
                             Err(e) => eprintln!("⚠ skipped an unparseable frame: {e}"),
                         }
                     }
@@ -299,6 +304,17 @@ async fn run_attach(base: &str, token: &str, id: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Decode a server-to-client data frame without mistaking JSON control messages for snapshots.
+///
+/// Snapshot fields intentionally default so this client can attach to older daemons. That also
+/// means `{"keepalive":true}` would deserialize as an empty, idle snapshot, falsely announcing a
+/// completed turn and resetting transcript de-duplication every 20 seconds. A real daemon
+/// snapshot always carries its session identity, including protocol versions before revisions.
+fn decode_snapshot_frame(text: &str) -> serde_json::Result<Option<ClientSnapshot>> {
+    let snapshot = serde_json::from_str::<ClientSnapshot>(text)?;
+    Ok((!snapshot.session_id.is_empty()).then_some(snapshot))
 }
 
 async fn read_line(
@@ -360,6 +376,7 @@ fn interpret_input(line: &str, pending: &Pending) -> Option<Action> {
 #[derive(Default)]
 struct Renderer {
     header_shown: bool,
+    last_revision: Option<u64>,
     printed_transcript: Vec<String>,
     printed_notes: Vec<String>,
     shown_prompt_seq: Option<u64>,
@@ -368,6 +385,18 @@ struct Renderer {
 
 impl Renderer {
     fn render(&mut self, snap: &ClientSnapshot, pending: &mut Pending) {
+        // `revision` is optional for compatibility with older daemons. When present, it is the
+        // authoritative ordering key; when absent, the overlap renderer below still de-duplicates.
+        if let Some(next_revision) = snap.revision {
+            if self
+                .last_revision
+                .is_some_and(|revision| next_revision <= revision)
+            {
+                return;
+            }
+            self.last_revision = Some(next_revision);
+        }
+
         if !self.header_shown {
             let title = if snap.title.is_empty() {
                 "(untitled)"
@@ -429,16 +458,19 @@ impl Renderer {
 }
 
 /// The lines of `next` that follow everything already printed. Because the transcript/notes are a
-/// bounded window that slides, alignment is by the last-printed line's most recent position in the
-/// new window; if it slid off entirely, print the whole new window.
+/// bounded window that slides, alignment uses the longest suffix/prefix overlap. Anchoring on only
+/// the last line is incorrect when common lines repeat (for example `— turn complete —`): it can
+/// match the wrong occurrence and replay a large block.
 fn new_suffix(prev: &[String], next: &[String]) -> Vec<String> {
-    let Some(last) = prev.last() else {
+    if prev.is_empty() {
         return next.to_vec();
-    };
-    match next.iter().rposition(|l| l == last) {
-        Some(pos) => next[pos + 1..].to_vec(),
-        None => next.to_vec(),
     }
+    let max_overlap = prev.len().min(next.len());
+    let overlap = (1..=max_overlap)
+        .rev()
+        .find(|&len| prev[prev.len() - len..] == next[..len])
+        .unwrap_or(0);
+    next[overlap..].to_vec()
 }
 
 /// Turn a WS handshake failure into an operator-facing message (unknown session / bad token vs.
@@ -550,6 +582,7 @@ mod tests {
             Some("run write_file on src/x.rs?")
         );
         assert_eq!(snap.prompt_seq, 4);
+        assert_eq!(snap.revision, Some(12));
         assert!(!snap.closed);
     }
 
@@ -570,6 +603,82 @@ mod tests {
         assert_eq!(new_suffix(&prev, &next3), next3);
         // Nothing printed yet: everything is new.
         assert_eq!(new_suffix(&[], &next), next);
+    }
+
+    #[test]
+    fn new_suffix_uses_full_overlap_when_lines_repeat() {
+        let prev = vec![
+            "assistant: done".to_string(),
+            "— turn complete —".to_string(),
+            "assistant: done".to_string(),
+        ];
+        let next = vec![
+            "— turn complete —".to_string(),
+            "assistant: done".to_string(),
+            "user: next task".to_string(),
+        ];
+        assert_eq!(new_suffix(&prev, &next), vec!["user: next task"]);
+    }
+
+    #[test]
+    fn renderer_rejects_duplicate_and_out_of_order_revisions() {
+        let mut renderer = Renderer::default();
+        let mut pending = Pending::None;
+        let frame = |revision, transcript: &[&str]| ClientSnapshot {
+            revision: Some(revision),
+            transcript: transcript.iter().map(|line| (*line).to_string()).collect(),
+            ..ClientSnapshot::default()
+        };
+
+        renderer.render(&frame(8, &["new"]), &mut pending);
+        renderer.render(&frame(7, &["old", "new"]), &mut pending);
+        assert_eq!(renderer.last_revision, Some(8));
+        assert_eq!(renderer.printed_transcript, vec!["new"]);
+
+        renderer.render(&frame(8, &["duplicate"]), &mut pending);
+        assert_eq!(renderer.printed_transcript, vec!["new"]);
+
+        renderer.render(&frame(9, &["new", "tail"]), &mut pending);
+        assert_eq!(renderer.last_revision, Some(9));
+        assert_eq!(renderer.printed_transcript, vec!["new", "tail"]);
+    }
+
+    #[test]
+    fn renderer_remains_compatible_with_daemons_without_revisions() {
+        let mut renderer = Renderer::default();
+        let mut pending = Pending::None;
+        renderer.render(
+            &ClientSnapshot {
+                transcript: vec!["first".into()],
+                ..ClientSnapshot::default()
+            },
+            &mut pending,
+        );
+        renderer.render(
+            &ClientSnapshot {
+                transcript: vec!["first".into(), "second".into()],
+                ..ClientSnapshot::default()
+            },
+            &mut pending,
+        );
+        assert_eq!(renderer.last_revision, None);
+        assert_eq!(renderer.printed_transcript, vec!["first", "second"]);
+    }
+
+    #[test]
+    fn keepalive_is_not_decoded_as_an_idle_snapshot() {
+        assert!(decode_snapshot_frame(r#"{"keepalive":true}"#)
+            .unwrap()
+            .is_none());
+
+        let legacy = decode_snapshot_frame(
+            r#"{"session_id":"session-1","busy":true,"transcript":["working"]}"#,
+        )
+        .unwrap()
+        .expect("a pre-revision daemon snapshot remains supported");
+        assert_eq!(legacy.session_id, "session-1");
+        assert!(legacy.busy);
+        assert_eq!(legacy.revision, None);
     }
 
     #[test]
