@@ -31,7 +31,7 @@ concurrency:
 jobs:
   update:
     name: eas update (production / ios)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     defaults:
       run:
         working-directory: mobile

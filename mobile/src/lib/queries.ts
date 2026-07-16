@@ -64,7 +64,9 @@ import {
   updateLiveActivity,
 } from "../../modules/live-activity";
 
-const SESSIONS_POLL_MS = 3000;
+// FleetWatcher receives immediate daemon invalidations over /ws/fleet. This slow poll is only a
+// recovery net for proxies/platforms that cannot keep a WebSocket alive.
+const SESSIONS_RECOVERY_POLL_MS = 60_000;
 const SERVER_FLEET_POLL_MS = 5000;
 const SERVER_FLEET_BACKOFF_MS = 15000;
 const PAST_PAGE_SIZE = 50;
@@ -87,7 +89,7 @@ function keys(baseUrl: string | null) {
   };
 }
 
-/** Live fleet list. Polls every 3s while the screen is focused (UI_RULES.md perf budget). */
+/** Live fleet list. Event-driven while connected, with a slow focused recovery poll. */
 export function useSessions() {
   const { baseUrl } = useAuth();
   const isFocused = useIsFocused();
@@ -95,7 +97,7 @@ export function useSessions() {
     queryKey: keys(baseUrl).sessions,
     queryFn: () => getSessions(baseUrl as string),
     enabled: baseUrl != null,
-    refetchInterval: isFocused ? SESSIONS_POLL_MS : false,
+    refetchInterval: isFocused ? SESSIONS_RECOVERY_POLL_MS : false,
     refetchIntervalInBackground: false,
     refetchOnMount: "always",
     refetchOnWindowFocus: true,

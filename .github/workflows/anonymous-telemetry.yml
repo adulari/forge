@@ -11,7 +11,7 @@ permissions:
 jobs:
   downloads:
     if: ${{ vars.POSTHOG_PROJECT_KEY != '' }}
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
       - name: Send aggregate public download counts

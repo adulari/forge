@@ -12,6 +12,7 @@
 //! - `GET  /`                         control page (session list + the live session UI)
 //! - `GET  /app.js|styles.css|manifest.webmanifest|sw.js|icon.svg`  PWA assets
 //! - `WS   /ws?session=<id>&rev=<n>`  per-session stream with replay-from-rev
+//! - `WS   /ws/fleet`                 low-bandwidth invalidation stream for fleet clients
 //! - `GET  /api/sessions`             running sessions (id, title, cwd, busy, cost, activity)
 //! - `GET  /api/sessions/past?limit=&before=`  persisted sessions NOT currently running — the
 //!   resurrection browser's data; `resume` one with `POST /api/sessions {resume:<id>}`
@@ -42,7 +43,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use axum::extract::ws::WebSocketUpgrade;
+use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Json, Path as AxumPath, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -50,6 +51,9 @@ use axum::Router;
 
 use crate::cli::commands::run::{spawn_session_driver, DriverSpec, SessionDriverHandle};
 use crate::remote;
+
+/// Fleet rows may change on every streaming snapshot, but clients only need human-scale refreshes.
+const FLEET_INVALIDATION_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// How long an archive waits for the driver task to wind down before letting go.
 const ARCHIVE_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -180,21 +184,47 @@ fn remove_state() {
 /// LocalSessionManager pattern (one task per session, addressed by id).
 pub(crate) struct SessionRegistry {
     sessions: tokio::sync::Mutex<std::collections::HashMap<String, Arc<SessionDriverHandle>>>,
+    fleet_tx: tokio::sync::watch::Sender<u64>,
 }
 
 impl SessionRegistry {
     pub(crate) fn new() -> Self {
         Self {
             sessions: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            fleet_tx: tokio::sync::watch::channel(0).0,
         }
+    }
+
+    fn notify_fleet(&self) {
+        let next = self.fleet_tx.borrow().wrapping_add(1);
+        self.fleet_tx.send_replace(next);
+    }
+
+    fn subscribe_fleet(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.fleet_tx.subscribe()
     }
 
     pub(crate) async fn insert(&self, handle: SessionDriverHandle) -> Arc<SessionDriverHandle> {
         let handle = Arc::new(handle);
+        let mut snapshot_rx = handle.snapshot_rx.clone();
+        let fleet_tx = self.fleet_tx.clone();
+        tokio::spawn(async move {
+            let mut next_allowed = tokio::time::Instant::now();
+            while snapshot_rx.changed().await.is_ok() {
+                // Snapshot frames can change every ~30 ms while text streams. Coalesce bursts
+                // once here for every fleet adapter instead of making each client defend itself.
+                snapshot_rx.borrow_and_update();
+                tokio::time::sleep_until(next_allowed).await;
+                let next = fleet_tx.borrow().wrapping_add(1);
+                fleet_tx.send_replace(next);
+                next_allowed = tokio::time::Instant::now() + FLEET_INVALIDATION_MIN_INTERVAL;
+            }
+        });
         self.sessions
             .lock()
             .await
             .insert(handle.session_id.clone(), handle.clone());
+        self.notify_fleet();
         handle
     }
 
@@ -203,7 +233,11 @@ impl SessionRegistry {
     }
 
     pub(crate) async fn remove(&self, id: &str) -> Option<Arc<SessionDriverHandle>> {
-        self.sessions.lock().await.remove(id)
+        let removed = self.sessions.lock().await.remove(id);
+        if removed.is_some() {
+            self.notify_fleet();
+        }
+        removed
     }
 
     pub(crate) async fn all(&self) -> Vec<Arc<SessionDriverHandle>> {
@@ -552,6 +586,7 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(&base, get(page))
         .route(&format!("{base}/"), get(page))
         .route(&format!("{base}/ws"), get(ws_handler))
+        .route(&format!("{base}/ws/fleet"), get(fleet_ws_handler))
         .route(
             &format!("{base}/api/sessions"),
             get(list_sessions).post(create_session),
@@ -1443,6 +1478,41 @@ async fn ws_handler(
         let _attached = WsClientGuard::attach(clients);
         remote::pump_ws(socket, snapshot_rx, events, input_tx, params.rev).await;
     })
+}
+
+async fn fleet_ws_handler(State(state): State<Arc<DaemonState>>, ws: WebSocketUpgrade) -> Response {
+    let fleet_rx = state.registry.subscribe_fleet();
+    ws.on_upgrade(move |socket| pump_fleet_ws(socket, fleet_rx))
+}
+
+async fn pump_fleet_ws(mut socket: WebSocket, mut fleet_rx: tokio::sync::watch::Receiver<u64>) {
+    let initial = *fleet_rx.borrow();
+    if socket
+        .send(WsMessage::Text(
+            serde_json::json!({ "kind": "fleet_changed", "revision": initial })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(25));
+    keepalive.tick().await;
+    loop {
+        tokio::select! {
+            changed = fleet_rx.changed() => {
+                if changed.is_err() { break; }
+                let revision = *fleet_rx.borrow_and_update();
+                let frame = serde_json::json!({ "kind": "fleet_changed", "revision": revision }).to_string();
+                if socket.send(WsMessage::Text(frame.into())).await.is_err() { break; }
+            }
+            _ = keepalive.tick() => {
+                if socket.send(WsMessage::Ping(Vec::new().into())).await.is_err() { break; }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2640,6 +2710,19 @@ mod tests {
         assert_eq!(parsed["base_url"], "http://127.0.0.1:7420/abc123");
         assert_eq!(parsed["token"], "abc123");
         assert_eq!(parsed["started_at"], 1_700_000_000);
+    }
+
+    #[tokio::test]
+    async fn fleet_subscribers_observe_registry_invalidations() {
+        let registry = SessionRegistry::new();
+        let mut subscriber = registry.subscribe_fleet();
+        assert_eq!(*subscriber.borrow(), 0);
+        registry.notify_fleet();
+        subscriber.changed().await.unwrap();
+        assert_eq!(*subscriber.borrow_and_update(), 1);
+        registry.notify_fleet();
+        subscriber.changed().await.unwrap();
+        assert_eq!(*subscriber.borrow_and_update(), 2);
     }
 
     #[test]

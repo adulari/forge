@@ -347,6 +347,7 @@ death timeout, and per-session URLs.
    GET  /<t>/                     control page (session list + live UI)
    GET  /<t>/manifest|sw|icon|…   PWA assets (stable scope → install survives)
    WS   /<t>/ws?session=<id>&rev=<n>   per-session stream + replay-from-rev
+   WS   /<t>/ws/fleet                   fleet revision invalidations
    GET  /<t>/api/sessions         list (id, title, cwd, busy, cost, activity)
    POST /<t>/api/sessions         create {cwd, worktree, title?, model?, resume?}
    POST /<t>/api/sessions/{id}/archive

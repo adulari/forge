@@ -13,8 +13,6 @@
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-opener": "^2.5.4",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.9.0",
-    "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "@tauri-apps/plugin-websocket": "^2.4.2",
     "expo": "^57",
@@ -55,7 +53,8 @@
     "eas-cli": "^20.5.1",
     "eslint": "^9.39.4",
     "eslint-config-expo": "^57.0.0",
-    "typescript": "~6.0.3"
+    "typescript": "~6.0.3",
+    "vitest": "^4.0.18"
   },
   "overrides": {
     "tar": ">=7.5.16 <8.0.0",
@@ -72,6 +71,8 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "lint": "expo lint",
+    "test": "vitest run",
+    "check": "npm run lint -- --max-warnings=0 && npx tsc --noEmit && npm test",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

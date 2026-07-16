@@ -507,7 +507,7 @@ export default function SettingsScreen() {
           <KeyValueRow label="Version" value={appVersion} />
           <KeyValueRow label="Protocol" value="v7" />
           <KeyValueRow label="Active server" value={host ? `${host} · ${maskToken(activeToken)}` : "none"} />
-          {isTauri ? <ListRow title={desktopUpdate ? `Update available: ${desktopUpdate.version}` : "Check for updates"} subtitle={desktopUpdate ? "Install and relaunch Forge" : "Desktop releases are checked in the background"} onPress={desktopUpdate ? installDesktopUpdate : checkDesktopUpdate} showSeparator={false} /> : null}
+          {isTauri ? <ListRow title={updateBusy ? "Checking for updates…" : desktopUpdate ? `Update available: ${desktopUpdate.version}` : "Check for updates"} subtitle={desktopUpdate ? "Install and relaunch Forge" : "Desktop releases are checked in the background"} onPress={updateBusy ? undefined : desktopUpdate ? installDesktopUpdate : checkDesktopUpdate} showSeparator={false} /> : null}
         </Card>
       </View>
 

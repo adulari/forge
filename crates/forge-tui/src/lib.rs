@@ -5,17 +5,8 @@
 
 use std::io::{IsTerminal, Write};
 
-use forge_types::{SideEffect, StopReason};
-
-/// One choice in an [`Presenter::ask`] question (AskUserQuestion). `description` may be empty.
-#[derive(Debug, Clone)]
-pub struct QChoice {
-    pub label: String,
-    pub description: String,
-}
-
-/// Sentinel returned when a question can't be answered interactively (piped / no tty).
-pub const NO_ANSWER: &str = "(no answer — non-interactive)";
+use forge_types::SideEffect;
+pub use forge_types::{ConfirmOutcome, Presenter, PresenterEvent, QChoice, ReplayItem, NO_ANSWER};
 
 /// Resolve a typed answer line against the options: a number `1..=N` picks that option's label;
 /// otherwise, if `allow_other`, the trimmed line is a free-text answer. `None` = invalid input
@@ -52,7 +43,7 @@ pub use app::{
     picker_kind_wire, print_banner_direct, render_mesh_overlay, render_usage_overlay,
     render_voice_overlay, ActivityKind, ActivityStatus, App, DiffFileSnapshot, DiffHunkSnapshot,
     DiffSnapshot, InputOutcome, KeyKind, MeshCandRow, MeshOverlay, MeshQuotaRow,
-    OverlayRowSnapshot, OverlaySnapshot, RemoteSnapshot, ReplayItem, TranscriptView, UsageOverlay,
+    OverlayRowSnapshot, OverlaySnapshot, RemoteSnapshot, TranscriptView, UsageOverlay,
     VoiceOverlay, VoicePhase,
 };
 pub use commands::{
@@ -73,7 +64,7 @@ pub use transcript::{run_transcript_viewer, transcript_lines};
 pub use tui::TuiPresenter;
 pub use workflow_view::{WfPhase, WfRow, WfZoom, WorkflowView};
 
-// `QChoice`, `resolve_answer`, `NO_ANSWER` are defined above and re-exported at crate root.
+// The interaction contracts are owned by `forge-types`; this crate provides surface adapters.
 
 #[cfg(test)]
 mod ask_tests {
@@ -124,226 +115,6 @@ mod ask_tests {
     fn non_interactive_headless_returns_the_sentinel() {
         let mut p = HeadlessPresenter::new(false);
         assert_eq!(p.ask("which db?", &opts(), true), NO_ANSWER);
-    }
-}
-
-/// Things the core wants to show the user as a turn progresses.
-#[derive(Debug, Clone)]
-pub enum PresenterEvent {
-    SessionStarted {
-        id: String,
-    },
-    Routing {
-        tier: String,
-        model: String,
-        rationale: String,
-    },
-    AssistantText(String),
-    /// A streamed fragment of the assistant's reply (tokens as they arrive).
-    AssistantDelta(String),
-    /// A streamed fragment of the model's reasoning/thinking (shown live, dim; not the answer).
-    Reasoning(String),
-    /// The assistant's streamed reply for this step is complete.
-    AssistantDone,
-    /// A non-fatal advisory (e.g. budget threshold reached).
-    Warning(String),
-    /// A genuine failure (failed turn, provider hard-fail) — rendered distinctly from a benign
-    /// [`Warning`](PresenterEvent::Warning) so users can tell an error from an advisory.
-    Error(String),
-    /// A model attempt failed and the mesh is recovering: when `retrying` is false a replacement
-    /// model is being tried (failover); when true the SAME model is being retried after a
-    /// transient failure or rate-limit backoff (a pin must pin — no switch happens). Drives a
-    /// single animated status indicator instead of one scrollback warning per hop — cleared
-    /// automatically when real output (assistant text / a tool call) begins.
-    ModelSearch {
-        model: String,
-        retrying: bool,
-    },
-    ToolStart {
-        name: String,
-        args: String,
-    },
-    ToolResult {
-        name: String,
-        ok: bool,
-        summary: String,
-    },
-    Cost {
-        session_total_usd: f64,
-        /// Session-total input/output tokens (live counter).
-        session_in: u64,
-        session_out: u64,
-        /// Tokens in the current live context (≈ the last call's input size).
-        context_tokens: u64,
-        /// The active model's context-window limit, if known (`None` → no gauge denominator).
-        context_limit: Option<u32>,
-    },
-    /// A subagent (child agent) was spawned for a subtask (RFC subagent-orchestration).
-    SubagentStart {
-        id: String,
-        agent: String,
-        task: String,
-        /// The model the child routed to, when known up front (native path). `None` on the
-        /// provider-stream path where the model isn't surfaced.
-        model: Option<String>,
-        /// A workflow-script `phase()` label, if any (docs/rfcs/forge-workflow.md) — groups
-        /// related rows together in the activity panel. `None` for a plain `spawn_agents` batch.
-        phase: Option<String>,
-    },
-    /// A live activity snippet from a still-running subagent (streamed text/reasoning).
-    SubagentProgress {
-        id: String,
-        snippet: String,
-    },
-    /// A subagent finished, with its one-line result summary and its cost.
-    SubagentResult {
-        id: String,
-        agent: String,
-        ok: bool,
-        summary: String,
-        cost_usd: f64,
-    },
-    /// A proposed file change, emitted by core BEFORE the write is confirmed/applied so the
-    /// user reviews the diff before answering the permission prompt.
-    Diff(forge_types::FileDiff),
-    /// Live Assay progress (started / other top-level events) — shown in scrollback.
-    AssayProgress(String),
-    /// Structured per-critic status update for the live assay panel in the TUI.
-    AssayCriticRow(forge_types::AssayCriticRow),
-    /// Verification phase started — shown in the assay panel header, not in scrollback.
-    AssayVerifying {
-        candidates: usize,
-    },
-    /// A finished Assay analysis report, for inline rendering (docs/features/analysis-mode.md).
-    AssayReport(forge_types::AssayReport),
-    /// The agent's task list changed (`update_tasks`); render the checklist into scrollback.
-    Tasks(Vec<forge_types::TodoItem>),
-    /// MCP server connection status changed / was requested (`/mcp`); render the listing.
-    McpStatus(Vec<forge_types::McpServerLine>),
-    /// Lattice auto-retrieval injected relevant code ahead of the model call (code-intelligence.md).
-    ContextInjected {
-        symbols: usize,
-        files: usize,
-        tokens: usize,
-    },
-    /// A one-line AI-generated recap of what was accomplished this turn, shown in scrollback.
-    Recap {
-        text: String,
-    },
-    /// An AI-predicted next prompt, ready to show as dim ghost text in an empty, idle input box
-    /// (Tab accepts it into the input — editable, never auto-sent).
-    SuggestionReady {
-        text: String,
-    },
-    /// A failed shell command was auto-diagnosed by the model (shell-error-interceptor.md):
-    /// a short likely-cause + suggested fix, surfaced alongside the tool result.
-    ShellDiagnosis {
-        command: String,
-        diagnosis: String,
-        /// A concrete shell command that fixes the failure, if the model identified one.
-        /// The TUI shows "press F to populate fix" and pressing F inserts it into the input.
-        fix: Option<String>,
-    },
-    Done {
-        final_text: String,
-        stop_reason: StopReason,
-    },
-    /// A subscription quota observation arrived this turn (rate_limit_event / Codex rollout).
-    /// Used to update the /usage overlay in real-time without waiting for the DB refresh cycle.
-    QuotaUpdate {
-        provider: String,
-        window: String,
-        fraction: f64,
-    },
-    /// A pace/projection was derived for one subscription window from its usage history
-    /// (mesh-routing.md, `forge_types::compute_quota_pace`). Drives the statusline pace
-    /// meter; only emitted once there's enough history to project (never a guess from one point).
-    QuotaPace {
-        provider: String,
-        window: String,
-        /// Fraction of the window consumed per hour, at the observed rate.
-        rate_per_hour: f64,
-        /// Fraction of the window projected to be used AT its reset time, if known.
-        projected_fraction_at_reset: Option<f64>,
-        /// True when the projected usage would exceed the window before it resets.
-        exhaustion_warning: bool,
-    },
-    /// A shell-backed `Custom` statusline widget's periodic refresh completed. `id` is the
-    /// command string itself (see `StatuslineWidget::Custom`); `text` is its trimmed stdout.
-    CustomWidgetOutput {
-        id: String,
-        text: String,
-    },
-    /// Compaction (summarizing older messages) started — drives the animated progress band in the
-    /// TUI. `auto` distinguishes a silent auto-compact from an explicit `/compact`.
-    CompactionStarted {
-        auto: bool,
-    },
-    /// Compaction finished, with the message counts before/after — clears the progress band.
-    CompactionFinished {
-        before: usize,
-        after: usize,
-    },
-    /// The agent proposed a plan (`present_plan`) in planning mode. The TUI renders the plan card;
-    /// the interactive approve/revise/cancel prompt follows as a normal [`Presenter::ask`].
-    PlanProposed(forge_types::PlanProposal),
-    /// The operating temper (permission mode) changed mid-turn — e.g. plan approval flipped the
-    /// session into Auto-edit to build. Updates the statusline label live.
-    Temper(String),
-    /// The active reasoning-effort pin changed. `None` means provider default.
-    Effort(Option<forge_types::EffortLevel>),
-    /// A workflow script started executing (docs/rfcs/forge-workflow.md). Brackets the run: until
-    /// [`WorkflowFinished`](PresenterEvent::WorkflowFinished) arrives, `Subagent*` events belong
-    /// to the workflow and render in the dedicated full-screen workflow view, not the sticky
-    /// subagent activity panel.
-    WorkflowStarted {
-        /// The saved script's name (`/workflow run <name>`); `None` for a model-authored script.
-        name: Option<String>,
-    },
-    /// A workflow `phase(title)` transition — opens a new group in the view's phase tree.
-    WorkflowPhase {
-        title: String,
-    },
-    /// A workflow `log(message)` narration line (raw message; presenters style it).
-    WorkflowLog(String),
-    /// The workflow script finished. `ok` is false when the script errored or any `agent()` failed.
-    WorkflowFinished {
-        ok: bool,
-        summary: String,
-    },
-}
-
-/// The outcome of a permission confirmation prompt. Returned by [`Presenter::confirm`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ConfirmOutcome {
-    /// Allowed for this call only.
-    Allow,
-    /// Allowed, and add a session-level rule so this tool is auto-allowed for the rest of the session.
-    AlwaysAllow,
-    /// Denied.
-    Deny,
-}
-
-/// A rendering + interaction surface. Implementors decide how to display events and how
-/// to obtain a permission decision from the user.
-pub trait Presenter: Send {
-    fn emit(&mut self, event: PresenterEvent);
-    /// Ask the user to confirm a side-effecting tool.
-    fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> ConfirmOutcome;
-    /// Ask the user a question with suggested `options` (AskUserQuestion). Returns the chosen
-    /// option's label, or — when `allow_other` — a free-text answer; [`NO_ANSWER`] if it can't
-    /// be asked interactively.
-    fn ask(&mut self, question: &str, options: &[QChoice], allow_other: bool) -> String;
-    /// Read the next prompt line from the user. `None` means quit / end-of-input.
-    fn read_line(&mut self) -> Option<String>;
-    /// An owned, `Send` handle for emitting a late event from a detached task (the end-of-turn
-    /// recap), or `None` if this presenter can't be cloned onto a task. Channel-backed presenters
-    /// return a clone of their sender so the recap can run AFTER the turn returns — the spinner
-    /// stops and input frees the instant the response is done, and the recap streams in later
-    /// without blocking. Synchronous presenters (terminal/headless/tests) return `None`, so the
-    /// recap runs inline as before.
-    fn recap_sink(&self) -> Option<Box<dyn Presenter>> {
-        None
     }
 }
 
@@ -805,7 +576,7 @@ mod stream_json_tests {
         });
         p.emit(PresenterEvent::Done {
             final_text: "done".into(),
-            stop_reason: StopReason::FinalAnswer,
+            stop_reason: forge_types::StopReason::FinalAnswer,
         });
 
         let raw = String::from_utf8(buf.lock().unwrap().clone()).unwrap();

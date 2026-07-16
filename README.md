@@ -442,10 +442,11 @@ Unsigned iOS sideload builds and their SideStore manifests are published under `
 Releases; the stable GitHub Pages source requires the one-time Pages setup documented in the
 sideload guide and is not assumed to be live. Native TestFlight/App Store distribution is managed
 separately because native capabilities and OTA runtime compatibility must stay aligned. Android can
-use the installable PWA today; native store packaging remains separate from the cross-platform app
-source. See
+use the installable PWA or the native Expo build: the `mobile-android` workflow produces an internal
+APK or production AAB and can submit production builds to Google Play internal testing. See
 [`docs/mobile/SIDELOAD.md`](docs/mobile/SIDELOAD.md) and the
-[`App Store checklist`](docs/mobile/APP_STORE_CHECKLIST.md).
+[`App Store checklist`](docs/mobile/APP_STORE_CHECKLIST.md), plus the
+[`Android release guide`](docs/mobile/ANDROID.md).
 
 ### 🪟 Windows (PowerShell)
 

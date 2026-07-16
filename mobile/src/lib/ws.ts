@@ -1,4 +1,4 @@
-// WebSocket client for the Forge daemon session protocol v7. See BUILD_PLAN.md §1.3.
+// WebSocket client for the Forge daemon session protocol v8. See protocol/remote-v8.json.
 //
 // One `Snapshot` frame per server message (full state, not a delta). Client tracks the
 // last-seen `revision` and reconnects with `?rev=<revision>` for replay; `resync:true`
@@ -8,8 +8,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, type AppStateStatus, Platform } from "react-native";
 
 import { TWebSocket } from "./transport";
-
-export const PROTOCOL_VERSION = 8;
+import { decideSnapshotRevision } from "./sessionReconciler";
+import { isValidSnapshotFrame as isValidSnapshotIdentity } from "./remoteProtocol";
+export { PROTOCOL_VERSION } from "./remoteProtocol";
 
 // ---------------------------------------------------------------------------
 // Wire types (verbatim field names, §1.3)
@@ -125,6 +126,11 @@ export interface Snapshot {
   closed: boolean;
 }
 
+/** Protocol identity guard narrowed to the full snapshot contract used by this adapter. */
+export function isValidSnapshotFrame(value: unknown): value is Snapshot {
+  return isValidSnapshotIdentity(value);
+}
+
 export type RemoteInput =
   | {
       kind: "prompt";
@@ -163,21 +169,6 @@ const BACKOFF_MS = [500, 1000, 2000, 4000, 8000, 15000];
 // instead of leaving the user staring at a soft, indefinite "reconnecting…" forever.
 const UNREACHABLE_AFTER_ATTEMPTS = 5;
 const LIVENESS_TIMEOUT_MS = 35_000;
-
-/** Minimal structural guard for untrusted WebSocket frames. Protocol mismatches remain valid
- * snapshots so the session shell can render its existing mismatch banner. */
-export function isValidSnapshotFrame(value: unknown): value is Snapshot {
-  if (value == null || typeof value !== "object") return false;
-  const frame = value as Record<string, unknown>;
-  return (
-    typeof frame.protocol === "number" &&
-    typeof frame.session_id === "string" &&
-    typeof frame.revision === "number" &&
-    Number.isFinite(frame.revision) &&
-    typeof frame.resync === "boolean" &&
-    typeof frame.closed === "boolean"
-  );
-}
 
 function wsUrl(baseUrl: string, sessionId: string, rev: number): string {
   const u = new URL(`${baseUrl}/ws`);
@@ -300,11 +291,8 @@ export function useSessionSocket(
         return;
       }
       if (data.revision != null) {
-        if (
-          !data.resync &&
-          revRef.current !== 0 &&
-          data.revision > revRef.current + 1
-        ) {
+        const revisionDecision = decideSnapshotRevision(revRef.current, data);
+        if (revisionDecision === "replay") {
           // A non-contiguous frame means replay/watch coalescing skipped state. Reconnect
           // from the last known-good revision so the server can replay or explicitly resync.
           // This is a transient gap, not a failed connection — flag it so onclose reconnects
@@ -314,9 +302,7 @@ export function useSessionSocket(
           return;
         }
         // Dedupe on revision, but always accept resync frames (revision may jump).
-        if (!data.resync && data.revision <= revRef.current && revRef.current !== 0) {
-          return;
-        }
+        if (revisionDecision === "duplicate") return;
         revRef.current = data.revision;
       }
       setSnapshot(data);

@@ -7,6 +7,7 @@ on:
   pull_request:
     paths:
       - "mobile/**"
+      - "protocol/**"
   workflow_dispatch:
 
 concurrency:
@@ -17,9 +18,9 @@ permissions:
   contents: read
 
 jobs:
-  tsc:
-    name: tsc --noEmit
-    runs-on: ubuntu-latest
+  app:
+    name: lint, typecheck, and tests
+    runs-on: [self-hosted, linux, x64]
     defaults:
       run:
         working-directory: mobile
@@ -35,5 +36,27 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Type-check (tsc --noEmit)
-        run: npx tsc --noEmit
+      - name: Check app
+        run: npm run check
+      - name: Export web app
+        run: npx expo export -p web
+
+  tauri:
+    name: Tauri tests, clippy, and audit
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Ensure cargo-audit is installed
+        run: |
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+          cargo audit --version 2>/dev/null | grep -q '0.22.2' || cargo install --locked cargo-audit --version 0.22.2
+      - run: cargo test --locked --manifest-path mobile/src-tauri/Cargo.toml
+      - run: cargo clippy --locked --manifest-path mobile/src-tauri/Cargo.toml --all-targets -- -D warnings
+      # Tauri's current Linux webview stack still pins gtk-rs/glib 0.18. RUSTSEC-2024-0429
+      # concerns VariantStrIter, which Forge never calls; keep every other vulnerability blocking
+      # while upstream completes its GTK dependency migration. Unmaintained GTK3 warnings remain
+      # visible without failing because Tauri/Wry still require that stack on Linux.
+      - run: cargo audit --file mobile/src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429

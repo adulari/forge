@@ -13,15 +13,14 @@ import React, {
 
 import { probeConnection } from "./api";
 import { deleteSecureItem, getSecureItem, setSecureItem } from "./secureStore";
+import { parseConnectUrl } from "./connectUrl";
+export { parseConnectUrl, type ParsedConnectUrl } from "./connectUrl";
 
 // Legacy single-server key from before multi-server support; migrated into `forge.servers`
 // on first load, then deleted.
 const LEGACY_STORAGE_KEY = "forge.connectUrl";
 const SERVERS_KEY = "forge.servers";
 const ACTIVE_SERVER_KEY = "forge.activeServerId";
-
-// 32-char hex accepted 16-64 per BUILD_PLAN §1.1.
-const TOKEN_RE = /^[0-9a-f]{16,64}$/i;
 
 export type ConnectTestState =
   | "idle"
@@ -30,35 +29,6 @@ export type ConnectTestState =
   | "bad-token"
   | "unreachable"
   | "server-error";
-
-export interface ParsedConnectUrl {
-  baseUrl: string; // e.g. https://host:port/<token> (no trailing slash)
-  token: string;
-  host: string;
-}
-
-/** Parses a `connect:` URL (or a plain http(s) URL) of shape `{scheme}://{host}:{port}/{token}`. */
-export function parseConnectUrl(input: string): ParsedConnectUrl | null {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-
-  // `forge serve` prints a `connect:` scheme; normalize to http(s) for parsing.
-  const normalized = trimmed.replace(/^connect:/i, "https:");
-
-  let url: URL;
-  try {
-    url = new URL(normalized);
-  } catch {
-    return null;
-  }
-
-  const segments = url.pathname.split("/").filter(Boolean);
-  const token = segments[segments.length - 1];
-  if (!token || !TOKEN_RE.test(token)) return null;
-
-  const baseUrl = `${url.protocol}//${url.host}/${segments.join("/")}`.replace(/\/$/, "");
-  return { baseUrl, token, host: url.host };
-}
 
 export interface StoredServer {
   id: string;

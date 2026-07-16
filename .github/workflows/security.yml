@@ -26,9 +26,12 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit
+      # install-action's checksum metadata can briefly lag a binary release. Compile the pinned
+      # tool once per persistent Arch runner instead of trusting that external file every run.
+      - name: Ensure cargo-audit is installed
+        run: |
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+          cargo audit --version 2>/dev/null | grep -q '0.22.2' || cargo install --locked cargo-audit --version 0.22.2
       # Fail on any vulnerability OR any unmaintained/unsound/yanked warning (--deny warnings),
       # EXCEPT the documented advisories below (kept in sync with deny.toml
       # [advisories].ignore). Real vulnerabilities are FIXED via lockfile bumps whenever a bump
@@ -53,9 +56,10 @@ jobs:
       - uses: actions/checkout@v7
       # Need a real toolchain: `cargo deny check` runs `cargo metadata` under the hood.
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny
+      - name: Ensure cargo-deny is installed
+        run: |
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+          cargo deny --version 2>/dev/null | grep -q '0.20.2' || cargo install --locked cargo-deny --version 0.20.2
       # Plain `cargo deny check` runs all four checks (advisories + bans + licenses + sources)
       # against the committed deny.toml. Driven directly (not via cargo-deny-action) so the CLI
       # surface matches what we validate locally — the action puts `arguments` BEFORE the

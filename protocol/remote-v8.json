@@ -1,0 +1,47 @@
+{
+  "protocol": 8,
+  "required_snapshot_fields": [
+    "protocol",
+    "session_id",
+    "revision",
+    "resync",
+    "closed",
+    "busy",
+    "queued",
+    "prompt_seq"
+  ],
+  "frames": [
+    {
+      "protocol": 8,
+      "session_id": "golden-session",
+      "revision": 1,
+      "resync": false,
+      "closed": false,
+      "busy": false,
+      "queued": [],
+      "prompt_seq": 0
+    },
+    {
+      "protocol": 8,
+      "session_id": "golden-session",
+      "revision": 9,
+      "resync": true,
+      "closed": false,
+      "busy": true,
+      "queued": ["second prompt"],
+      "prompt_seq": 2
+    }
+  ],
+  "inputs": [
+    { "kind": "prompt", "text": "hello" },
+    { "kind": "allow", "yes": true, "seq": 2 },
+    { "kind": "answer", "text": "SQLite", "seq": 3 },
+    { "kind": "interrupt" },
+    { "kind": "dequeue", "index": 0, "text": "second prompt" },
+    { "kind": "key", "key": "Enter" },
+    { "kind": "overlay_select", "id": "model:fast" },
+    { "kind": "overlay_nav", "delta": 1 },
+    { "kind": "overlay_filter", "text": "fast" },
+    { "kind": "overlay_cancel" }
+  ]
+}

@@ -66,7 +66,10 @@ h1 { font-size: 16px; margin: 0; color: var(--acc); font-weight: 700; letter-spa
 .bar { display: flex; gap: 8px; margin: 8px 0 4px; flex-wrap: wrap; }
 button, input[type=text], .btn { font: inherit; border: none; border-radius: 8px; padding: 11px 16px; cursor: pointer; }
 input[type=text] { flex: 1 1 200px; background: var(--panel); color: #fff; border: 1px solid #33333c; min-width: 0; }
-input[type=text]:focus { outline: 2px solid var(--acc); }
+button:focus-visible, input[type=text]:focus-visible, .btn:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
+}
 .send { background: var(--acc); color: #1c1c22; font-weight: 700; }
 .y { background: var(--ok); color: #1c1c22; font-weight: 700; }
 .n { background: var(--no); color: #1c1c22; font-weight: 700; }
@@ -211,3 +214,11 @@ footer { font-size: 11px; color: #4a4a54; text-align: center; padding: 4px 0 2px
 .barbtn { border: 1px solid #33333c; border-radius: 8px; background: var(--panel);
   padding: 9px 12px; flex: 0 0 auto; }
 #mic.rec { border-color: var(--no); background: #3a1c1c; animation: pulse 1s infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

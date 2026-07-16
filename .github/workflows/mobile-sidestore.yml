@@ -115,7 +115,7 @@ jobs:
   release:
     name: publish release + source manifest
     needs: build-ipa
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     outputs:
       manifest-generated: ${{ steps.manifest.outcome }}
     steps:
@@ -203,7 +203,7 @@ jobs:
   deploy-pages:
     name: publish stable add-source URL
     needs: release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
