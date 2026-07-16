@@ -20,8 +20,11 @@
 //   POLL_INTERVAL_SEC   seconds between polls               (default 60)
 
 import { createSign } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { request } from "node:https";
-import { readFileSync } from "node:fs";
+import { createWriteStream, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Pull the `## [version]` section out of CHANGELOG.md and flatten it to the plaintext TestFlight
 // accepts (no markdown rendering, 4000-char cap). Keeps the same note the GitHub Release shows, so
@@ -69,6 +72,7 @@ const {
   XCODE_WORKFLOW_ID = "C68BAA13-19B5-4C45-B4D7-C947DB601DB6",
   XCODE_BUILD_RUN_ID = "",
   XCODE_BUILD_ACTION_ID = "",
+  XCODE_ARTIFACT_ID = "",
 } = process.env;
 
 function die(msg) {
@@ -132,6 +136,40 @@ function api(method, path, body) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+function download(url, destination, redirects = 0) {
+  if (redirects > 5) return Promise.reject(new Error("too many artifact download redirects"));
+  return new Promise((resolve, reject) => {
+    const req = request(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        resolve(download(new URL(res.headers.location, url), destination, redirects + 1));
+        return;
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`artifact download -> ${res.statusCode}`));
+        return;
+      }
+      const output = createWriteStream(destination);
+      res.pipe(output);
+      output.on("finish", () => output.close(resolve));
+      output.on("error", reject);
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+function walk(root) {
+  const files = [];
+  for (const entry of readdirSync(root)) {
+    const path = join(root, entry);
+    if (statSync(path).isDirectory()) files.push(...walk(path));
+    else files.push(path);
+  }
+  return files;
+}
+
 async function main() {
   // Optional read-only diagnostics for an already-completed Xcode Cloud archive. Never create a
   // run here: these IDs come from the Xcode Cloud GitHub check's details URL.
@@ -153,6 +191,33 @@ async function main() {
       console.log(`xcode ${label}: ${JSON.stringify(summary)}`);
     } catch (error) {
       console.log(`xcode ${label} unavailable (non-fatal): ${error.message}`);
+    }
+  }
+
+  if (XCODE_ARTIFACT_ID) {
+    try {
+      const artifact = await api("GET", `/v1/ciArtifacts/${encodeURIComponent(XCODE_ARTIFACT_ID)}`);
+      const downloadUrl = artifact.data?.attributes?.downloadUrl;
+      if (!downloadUrl) throw new Error("archive metadata has no download URL");
+      const directory = mkdtempSync(join(tmpdir(), "forge-xcarchive-"));
+      const archive = join(directory, "archive.zip");
+      const expanded = join(directory, "expanded");
+      await download(downloadUrl, archive);
+      execFileSync("unzip", ["-q", archive, "-d", expanded]);
+      for (const file of walk(expanded)) {
+        if (file.endsWith("/fingerprint")) {
+          const value = readFileSync(file, "utf8").trim();
+          console.log(`embedded fingerprint: ${value}`);
+        }
+        if (file.endsWith("/Expo.plist")) {
+          const value = readFileSync(file);
+          const printable = value.toString("utf8");
+          const settings = [...printable.matchAll(/EXUpdates(?:Enabled|URL|RuntimeVersion|RequestHeaders)|https:\/\/u\.expo\.dev\/[a-f0-9-]+|production|file:fingerprint/g)].map((match) => match[0]);
+          console.log(`embedded Expo.plist markers: ${[...new Set(settings)].join(",")}`);
+        }
+      }
+    } catch (error) {
+      console.log(`xcode archive inspection unavailable (non-fatal): ${error.message}`);
     }
   }
 

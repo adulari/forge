@@ -32,6 +32,10 @@ on:
         description: "Read-only Xcode Cloud action ID to inspect"
         required: false
         type: string
+      ci_artifact_id:
+        description: "Read-only Xcode Cloud archive artifact ID to inspect"
+        required: false
+        type: string
 
 concurrency:
   group: testflight-autogroup
@@ -94,4 +98,5 @@ jobs:
           UPLOADED_AFTER: ${{ steps.meta.outputs.after }}
           XCODE_BUILD_RUN_ID: ${{ github.event.inputs.ci_run_id }}
           XCODE_BUILD_ACTION_ID: ${{ github.event.inputs.ci_action_id }}
+          XCODE_ARTIFACT_ID: ${{ github.event.inputs.ci_artifact_id }}
         run: node scripts/testflight-assign-group.mjs
