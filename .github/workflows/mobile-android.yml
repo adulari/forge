@@ -30,7 +30,7 @@ permissions:
 jobs:
   build:
     name: EAS Android build
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     defaults:
       run:
         working-directory: mobile

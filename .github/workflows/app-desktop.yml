@@ -20,7 +20,7 @@ permissions:
 jobs:
   preflight:
     name: app preflight
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     defaults:
       run:
         working-directory: mobile
@@ -41,7 +41,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: [self-hosted, linux, x64, heavy]
             name: linux-x86_64
           - os: ubuntu-24.04-arm
             name: linux-aarch64
@@ -58,7 +58,7 @@ jobs:
       # Tauri v2 Linux prerequisites (webkit2gtk + appindicator + rsvg + patchelf for
       # AppImage bundling). macOS (WKWebView) and Windows (WebView2) runners need nothing extra.
       - name: Install Linux webview deps
-        if: runner.os == 'Linux'
+        if: matrix.name == 'linux-aarch64'
         run: |
           # ports.ubuntu.com occasionally drops ARM runner connections. Apt's bounded retry and
           # IPv4 fallback keep a transient mirror failure from invalidating an otherwise healthy
@@ -77,12 +77,19 @@ jobs:
             libssl-dev \
             xdg-utils
 
+      - name: Verify Arch Linux webview deps
+        if: matrix.name == 'linux-x86_64'
+        run: |
+          pkg-config --exists webkit2gtk-4.1 ayatana-appindicator3-0.1 librsvg-2.0
+          command -v patchelf >/dev/null || sudo pacman -S --needed --noconfirm patchelf
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.name == 'macos-x86_64' && 'x86_64-apple-darwin' || '' }}
 
-      - uses: Swatinem/rust-cache@v2
+      - if: matrix.name != 'linux-x86_64'
+        uses: Swatinem/rust-cache@v2
         with:
           workspaces: "mobile/src-tauri -> target"
           key: ${{ matrix.os }}
@@ -151,7 +158,7 @@ jobs:
     # Run even when a matrix adapter failed so the release gets one explicit transactional
     # verdict instead of silently skipping latest.json after partially publishing bundles.
     if: always() && startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/download-artifact@v8
         with:

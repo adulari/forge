@@ -20,7 +20,7 @@ permissions:
 jobs:
   app:
     name: lint, typecheck, and tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     defaults:
       run:
         working-directory: mobile
@@ -43,21 +43,16 @@ jobs:
 
   tauri:
     name: Tauri tests, clippy, and audit
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v7
-      - name: Install Linux webview dependencies
-        run: |
-          sudo apt-get -o Acquire::Retries=4 -o Acquire::ForceIPv4=true update
-          sudo apt-get -o Acquire::Retries=4 -o Acquire::ForceIPv4=true install -y \
-            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-            libxdo-dev libssl-dev build-essential pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit
+      - name: Ensure cargo-audit is installed
+        run: |
+          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
+          cargo audit --version 2>/dev/null | grep -q '0.22.2' || cargo install --locked cargo-audit --version 0.22.2
       - run: cargo test --locked --manifest-path mobile/src-tauri/Cargo.toml
       - run: cargo clippy --locked --manifest-path mobile/src-tauri/Cargo.toml --all-targets -- -D warnings
       # Tauri's current Linux webview stack still pins gtk-rs/glib 0.18. RUSTSEC-2024-0429
