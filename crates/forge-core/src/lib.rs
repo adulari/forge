@@ -13,11 +13,11 @@ use forge_mesh::{BudgetState, BudgetStatus, HeuristicRouter, ModelCatalog, Route
 use forge_provider::{CompletionOptions, Provider, StreamEvent, ToolSpec};
 use forge_store::{MeshOutcome, Store};
 use forge_tools::ToolRegistry;
-use forge_tui::{Presenter, PresenterEvent};
 use forge_types::{
     EffortLevel, LoopOutcome, Message, ModelHealth, PermissionDecision, PermissionMode,
     PermissionRule, ProjectContext, Role, StopReason, SubscriptionQuota, TaskTier,
 };
+use forge_types::{Presenter, PresenterEvent};
 
 pub mod assay;
 pub(crate) mod completion;
@@ -828,12 +828,12 @@ fn classify_tools_unavailable(
     expect_code_change && is_bridge && mcp_startup_failed && forge_tools_ran == 0 && tree_unchanged
 }
 
-/// Render a sequence of messages into TUI [`ReplayItem`](forge_tui::ReplayItem)s — user prompts,
+/// Render a sequence of messages into surface-independent [`ReplayItem`](forge_types::ReplayItem)s — user prompts,
 /// assistant text, tool calls (with args), tool results (matched to their call's name via
 /// `tool_call_id`), and the compaction marker. Shared by the model-facing replay
 /// ([`Session::replay_items`]) and the full-history replay ([`Session::replay_items_full`]).
-fn messages_to_replay_items(msgs: &[Message]) -> Vec<forge_tui::ReplayItem> {
-    use forge_tui::ReplayItem;
+fn messages_to_replay_items(msgs: &[Message]) -> Vec<forge_types::ReplayItem> {
+    use forge_types::ReplayItem;
     let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut out = Vec::new();
     for m in msgs {
@@ -2383,12 +2383,12 @@ impl Session {
             .collect()
     }
 
-    /// The full rehydrated transcript as renderable [`ReplayItem`](forge_tui::ReplayItem)s for the
+    /// The full rehydrated transcript as renderable [`ReplayItem`](forge_types::ReplayItem)s for the
     /// TUI to redraw on resume — user prompts, assistant text, AND the tool calls/results between
     /// them, so a resumed agentic session reappears faithfully instead of as a sparse user-only
     /// echo (the old [`history`](Self::history) dropped every tool-only assistant turn). Tool
     /// results are matched back to their call's name via the `tool_call_id`.
-    pub fn replay_items(&self) -> Vec<forge_tui::ReplayItem> {
+    pub fn replay_items(&self) -> Vec<forge_types::ReplayItem> {
         messages_to_replay_items(&self.transcript)
     }
 
@@ -2397,7 +2397,7 @@ impl Session {
     /// model-facing in-memory transcript. This is what lets the USER scroll back through the entire
     /// untouched conversation after a resume, even though the model only ever saw the compacted
     /// view. Falls back to the in-memory transcript if the store read fails.
-    pub fn replay_items_full(&self) -> Vec<forge_tui::ReplayItem> {
+    pub fn replay_items_full(&self) -> Vec<forge_types::ReplayItem> {
         match self.store.load_all_messages(&self.id) {
             Ok(stored) => {
                 let msgs: Vec<Message> = stored
@@ -2751,7 +2751,7 @@ impl Session {
         let Some(pace) = forge_types::compute_quota_pace(&history, hint.resets_at, now) else {
             return;
         };
-        self.presenter.emit(forge_tui::PresenterEvent::QuotaPace {
+        self.presenter.emit(forge_types::PresenterEvent::QuotaPace {
             provider: hint.provider.clone(),
             window: hint.window.clone(),
             rate_per_hour: pace.rate_per_hour,
@@ -3586,15 +3586,15 @@ Rules:\n\
                  Compact (summarize older messages) and continue on it?"
             );
             let opts = [
-                forge_tui::QChoice {
+                forge_types::QChoice {
                     label: "Yes".into(),
                     description: "Compact now and continue on this model".into(),
                 },
-                forge_tui::QChoice {
+                forge_types::QChoice {
                     label: "No".into(),
                     description: "Skip it — try the next model that fits".into(),
                 },
-                forge_tui::QChoice {
+                forge_types::QChoice {
                     label: "Always".into(),
                     description: "Compact on every such switch for the rest of this session".into(),
                 },
@@ -5157,11 +5157,12 @@ prompt text, nothing else.";
                     let _ = self.store.record_quota(hint);
                     // Push to the TUI so the /usage overlay updates in real-time.
                     if let Some(f) = hint.fraction_used {
-                        self.presenter.emit(forge_tui::PresenterEvent::QuotaUpdate {
-                            provider: hint.provider.clone(),
-                            window: hint.window.clone(),
-                            fraction: f,
-                        });
+                        self.presenter
+                            .emit(forge_types::PresenterEvent::QuotaUpdate {
+                                provider: hint.provider.clone(),
+                                window: hint.window.clone(),
+                                fraction: f,
+                            });
                     }
                     self.emit_quota_pace(hint);
                 }
@@ -7282,7 +7283,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             PermissionDecision::Allow => true,
             PermissionDecision::Deny => false,
             PermissionDecision::Ask => match self.presenter.confirm(&call.name, side_effect) {
-                forge_tui::ConfirmOutcome::AlwaysAllow => {
+                forge_types::ConfirmOutcome::AlwaysAllow => {
                     self.rules.push(forge_types::PermissionRule {
                         tool: call.name.clone(),
                         patterns: vec![],
@@ -7292,8 +7293,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     });
                     true
                 }
-                forge_tui::ConfirmOutcome::Allow => true,
-                forge_tui::ConfirmOutcome::Deny => false,
+                forge_types::ConfirmOutcome::Allow => true,
+                forge_types::ConfirmOutcome::Deny => false,
             },
         };
         let permission_label = if allowed { "allowed" } else { "denied" };
@@ -7507,7 +7508,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             PermissionDecision::Allow => true,
             PermissionDecision::Deny => false,
             PermissionDecision::Ask => match self.presenter.confirm(&call.name, side_effect) {
-                forge_tui::ConfirmOutcome::AlwaysAllow => {
+                forge_types::ConfirmOutcome::AlwaysAllow => {
                     self.rules.push(forge_types::PermissionRule {
                         tool: call.name.clone(),
                         patterns: vec![],
@@ -7517,8 +7518,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     });
                     true
                 }
-                forge_tui::ConfirmOutcome::Allow => true,
-                forge_tui::ConfirmOutcome::Deny => false,
+                forge_types::ConfirmOutcome::Allow => true,
+                forge_types::ConfirmOutcome::Deny => false,
             },
         };
         // When the model routes an MCP server tool via the mcp_call meta-wrapper, also gate the
@@ -7553,7 +7554,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         .presenter
                         .confirm(inner_name, forge_types::SideEffect::External)
                     {
-                        forge_tui::ConfirmOutcome::AlwaysAllow => {
+                        forge_types::ConfirmOutcome::AlwaysAllow => {
                             self.rules.push(forge_types::PermissionRule {
                                 tool: inner_name.to_string(),
                                 patterns: vec![],
@@ -7563,8 +7564,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                             });
                             true
                         }
-                        forge_tui::ConfirmOutcome::Allow => true,
-                        forge_tui::ConfirmOutcome::Deny => false,
+                        forge_types::ConfirmOutcome::Allow => true,
+                        forge_types::ConfirmOutcome::Deny => false,
                     },
                 }
             }
@@ -8266,7 +8267,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 .record_tool_call(msg_id, &call.name, &args_json, &result, "allowed", "error")?;
             return Ok(result);
         }
-        let options: Vec<forge_tui::QChoice> = call
+        let options: Vec<forge_types::QChoice> = call
             .args
             .get("options")
             .and_then(|o| o.as_array())
@@ -8274,7 +8275,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 arr.iter()
                     .filter_map(|o| {
                         let label = o.get("label").and_then(|l| l.as_str())?;
-                        Some(forge_tui::QChoice {
+                        Some(forge_types::QChoice {
                             label: label.to_string(),
                             description: o
                                 .get("description")
@@ -8375,11 +8376,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             if n == 1 { "" } else { "s" }
         );
         let opts = [
-            forge_tui::QChoice {
+            forge_types::QChoice {
                 label: "Build it".into(),
                 description: "Switch to Auto-edit and implement the plan now".into(),
             },
-            forge_tui::QChoice {
+            forge_types::QChoice {
                 label: "Cancel".into(),
                 description: "Discard the plan; stay in planning mode".into(),
             },
@@ -8398,7 +8399,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             ));
             Some(PLAN_BUILD_PROMPT.to_string())
         } else if a.is_empty()
-            || a == forge_tui::NO_ANSWER
+            || a == forge_types::NO_ANSWER
             || a.eq_ignore_ascii_case("Cancel")
             || a.eq_ignore_ascii_case("no")
         {
@@ -9605,10 +9606,19 @@ mod tests {
         fn emit(&mut self, event: PresenterEvent) {
             self.events.lock().unwrap().push(event);
         }
-        fn confirm(&mut self, _tool: &str, _side_effect: SideEffect) -> forge_tui::ConfirmOutcome {
-            forge_tui::ConfirmOutcome::Deny
+        fn confirm(
+            &mut self,
+            _tool: &str,
+            _side_effect: SideEffect,
+        ) -> forge_types::ConfirmOutcome {
+            forge_types::ConfirmOutcome::Deny
         }
-        fn ask(&mut self, _q: &str, options: &[forge_tui::QChoice], _allow_other: bool) -> String {
+        fn ask(
+            &mut self,
+            _q: &str,
+            options: &[forge_types::QChoice],
+            _allow_other: bool,
+        ) -> String {
             // Deterministic: pick the first option (or empty) so tests don't block on input.
             options.first().map(|o| o.label.clone()).unwrap_or_default()
         }
@@ -9626,10 +9636,19 @@ mod tests {
     }
     impl Presenter for ScriptedPresenter {
         fn emit(&mut self, _event: PresenterEvent) {}
-        fn confirm(&mut self, _tool: &str, _side_effect: SideEffect) -> forge_tui::ConfirmOutcome {
-            forge_tui::ConfirmOutcome::Allow
+        fn confirm(
+            &mut self,
+            _tool: &str,
+            _side_effect: SideEffect,
+        ) -> forge_types::ConfirmOutcome {
+            forge_types::ConfirmOutcome::Allow
         }
-        fn ask(&mut self, _q: &str, _options: &[forge_tui::QChoice], _allow_other: bool) -> String {
+        fn ask(
+            &mut self,
+            _q: &str,
+            _options: &[forge_types::QChoice],
+            _allow_other: bool,
+        ) -> String {
             *self.asks.lock().unwrap() += 1;
             self.answer.clone()
         }
@@ -12259,7 +12278,7 @@ mod tests {
         let full_users = session
             .replay_items_full()
             .into_iter()
-            .filter(|i| matches!(i, forge_tui::ReplayItem::User(_)))
+            .filter(|i| matches!(i, forge_types::ReplayItem::User(_)))
             .count();
         assert_eq!(full_users, 10, "full replay shows every original user turn");
         assert!(session.was_compacted());
@@ -15715,7 +15734,7 @@ mod tests {
 
     #[test]
     fn replay_items_reconstructs_text_and_tool_activity() {
-        use forge_tui::ReplayItem;
+        use forge_types::ReplayItem;
         let (_store, mut session) = fixed_session(
             Arc::new(FlakyProvider {
                 bad: std::collections::HashSet::new(),

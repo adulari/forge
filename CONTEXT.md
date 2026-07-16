@@ -1,14 +1,30 @@
-# Session Context
+# Forge Domain Context
 
-## Current Task
-Mesh-dogfood batch: 6 UI/OAuth fixes + mesh classifier bug. **See HANDOFF.md for full state** — every branch, SHA, gotcha, and the integration procedure.
+Forge is a local-first coding harness. One session core drives terminal, headless, remote web,
+mobile, and desktop surfaces while the Model Mesh chooses providers and the Store persists the
+audit trail.
 
-## Key Decisions
-- Merged to origin/main (e237301c): #760 (init banner below tabs), #761 (mesh classifier — code tasks never route trivial + classify with capable free models).
-- Remaining work is on pushed branches `handoff/{autocomplete,header,liveactivity,eas,oauth-wip}` — rebase each onto origin/main, verify, PR + automerge. header `_layout.tsx` conflicts with #760 (resolve). oauth-wip is incomplete (re-dispatch).
-- No releases until user says so. Daemon (pid 3202498) still on v2.6.2 — rebuild+restart after integration.
+## Domain language
 
-## Next Steps
-- Integrate the handoff/* branches per HANDOFF.md (autocomplete, eas, liveactivity, then header).
-- Ask user how to fix mesh parallel-collision-on-free-models (options in HANDOFF.md); user must set EXPO_TOKEN secret.
-- Re-dispatch headless OAuth (brief in /tmp/forge-scratch/); native re-test header + live activity.
+- **Session** — one persisted conversation and agent loop, scoped to one workspace.
+- **Turn** — one user prompt and its bounded model/tool continuation until a final outcome.
+- **Interaction** — surface-independent events, questions, confirmations, and replay items emitted
+  by the session core. TUI, headless, and remote presenters are adapters.
+- **Remote session protocol** — the versioned snapshot/input contract used by `forge serve`, the
+  companion app, the legacy PWA, and `forge attach`.
+- **Fleet** — the live set of daemon-hosted sessions, ordered to surface sessions waiting on a
+  human before busy and idle work.
+- **Temper** — the session's permission posture: Read-only, Ask, Auto-edit, or Full.
+- **Model Mesh** — deterministic task classification, provider ranking, budget pressure, health,
+  and failover that choose a model and record the rationale.
+- **Lattice** — the local code-intelligence graph and retrieval index.
+- **Assay** — parallel analysis/review with critic and verification phases.
+- **Workflow** — a saved or model-authored script that sequences phases and agent calls.
+
+## Load-bearing decisions
+
+- Preserve the modular monolith and single-binary delivery (ADR-0002).
+- The session core owns the Interaction interface; renderers stay adapters (ADR-0004).
+- SQLite access remains encapsulated in the Store (ADR-0005).
+- Side effects always cross the permission broker (ADR-0008).
+- Native iOS push may use the disclosed, opt-out hosted APNs relay (ADR-0012).

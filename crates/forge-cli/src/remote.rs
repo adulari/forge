@@ -2905,6 +2905,32 @@ mod tests {
     }
 
     #[test]
+    fn every_remote_adapter_shares_the_golden_protocol_contract() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol/remote-v8.json"))
+                .expect("golden remote protocol fixture is valid JSON");
+        assert_eq!(fixture["protocol"], PROTOCOL_VERSION);
+
+        let snapshot = serde_json::to_value(Snapshot::default()).expect("snapshot serializes");
+        for field in fixture["required_snapshot_fields"]
+            .as_array()
+            .expect("required fields are an array")
+        {
+            let field = field.as_str().expect("required field is a string");
+            assert!(
+                snapshot.get(field).is_some(),
+                "Snapshot lost required field {field}"
+            );
+        }
+
+        for input in fixture["inputs"].as_array().expect("inputs are an array") {
+            serde_json::from_value::<RemoteInput>(input.clone()).unwrap_or_else(|error| {
+                panic!("golden RemoteInput {input} no longer parses: {error}")
+            });
+        }
+    }
+
+    #[test]
     fn page_reconnects_with_its_last_seen_revision() {
         // v5 reconnect/replay: the page must send `?rev=<last seen>` on every (re)connect,
         // persist the revision across reloads, dedupe the replay/live overlap, and honor

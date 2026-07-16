@@ -18,8 +18,25 @@ permissions:
   contents: write
 
 jobs:
+  preflight:
+    name: app preflight
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
+      - run: npm run check
+
   build:
     name: build (${{ matrix.os }})
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -43,8 +60,11 @@ jobs:
       - name: Install Linux webview deps
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          # ports.ubuntu.com occasionally drops ARM runner connections. Apt's bounded retry and
+          # IPv4 fallback keep a transient mirror failure from invalidating an otherwise healthy
+          # five-platform release (v2.6.4 lost latest.json this way).
+          sudo apt-get -o Acquire::Retries=4 -o Acquire::ForceIPv4=true update
+          sudo apt-get -o Acquire::Retries=4 -o Acquire::ForceIPv4=true install -y \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
@@ -86,7 +106,8 @@ jobs:
         working-directory: mobile
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${GITHUB_REF_NAME#app-v}"
+          VERSION="${VERSION#v}"
           node -e "const fs=require('fs'),f='src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(f,'utf8'));j.version=process.argv[1];fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n')" "$VERSION"
           echo "desktop app version stamped to $VERSION"
 
@@ -124,17 +145,12 @@ jobs:
           path: mobile/release-assets/**
           if-no-files-found: error
 
-      - name: Publish tagged desktop bundles
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v3
-        with:
-          files: mobile/release-assets/*
-          fail_on_unmatched_files: false
-
   updater:
-    name: assemble updater manifest
+    name: validate and publish desktop release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    # Run even when a matrix adapter failed so the release gets one explicit transactional
+    # verdict instead of silently skipping latest.json after partially publishing bundles.
+    if: always() && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -158,18 +174,43 @@ jobs:
             'windows-x86_64': 'Forge-desktop-windows-x86_64.nsis.exe',
           }
           platforms = {}
+          missing = []
           for platform, filename in names.items():
             path = root / filename
             sig = pathlib.Path(str(path) + '.sig')
+            if not path.is_file() or not sig.is_file() or not sig.read_text().strip():
+              missing.append(f'{platform}: {filename} + signature')
+              continue
             platforms[platform] = {
               'url': f"https://github.com/{os.environ['REPO']}/releases/download/{os.environ['VERSION']}/{filename}",
               'signature': sig.read_text().strip(),
             }
-          manifest = {'version': os.environ['VERSION'].lstrip('v'), 'notes': 'Forge desktop update', 'pub_date': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'platforms': platforms}
+          if missing:
+            raise SystemExit('desktop publication aborted; incomplete signed platform set:\n- ' + '\n- '.join(missing))
+          tag = os.environ['VERSION']
+          version = tag.removeprefix('app-v').removeprefix('v')
+          manifest = {'version': version, 'notes': 'Forge desktop update', 'pub_date': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'platforms': platforms}
           pathlib.Path('latest.json').write_text(json.dumps(manifest, indent=2) + '\n')
           PY
-      - name: Publish latest.json
+      - name: Publish complete desktop release
         uses: softprops/action-gh-release@v3
         with:
-          files: latest.json
+          files: |
+            assets/*
+            latest.json
           fail_on_unmatched_files: true
+      - name: Verify updater is publicly readable
+        env:
+          VERSION: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          url="https://github.com/${REPO}/releases/download/${VERSION}/latest.json"
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent --show-error --location "$url" -o published-latest.json; then
+              python -c 'import json; p=json.load(open("published-latest.json")); assert len(p["platforms"]) == 5'
+              exit 0
+            fi
+            sleep $((attempt * 2))
+          done
+          echo "updater health check failed: $url" >&2
+          exit 1

@@ -1119,15 +1119,34 @@ document.addEventListener("keydown", (e) => {
   if (named) { e.preventDefault(); send({ kind: "key", key: named }); }
 });
 
-// Tabs
-document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
-  document.querySelectorAll(".tab").forEach(x => x.classList.remove("on"));
+// Tabs — keep visual state, keyboard focus, and the accessibility tree in lockstep.
+function activateTab(b) {
+  document.querySelectorAll(".tab").forEach(x => {
+    x.classList.remove("on");
+    x.setAttribute("aria-selected", "false");
+    x.tabIndex = -1;
+  });
   b.classList.add("on");
+  b.setAttribute("aria-selected", "true");
+  b.tabIndex = 0;
   const which = b.dataset.tab;
   $("sessions").hidden = true;
   $("transcript").hidden = which !== "chat";
   $("tasks").hidden = which !== "tasks";
   $("agents").hidden = which !== "agents";
+}
+document.querySelectorAll(".tab").forEach(b => {
+  b.onclick = () => activateTab(b);
+  b.onkeydown = e => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    e.preventDefault();
+    const tabs = [...document.querySelectorAll(".tab")];
+    const current = tabs.indexOf(b);
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1 :
+      (current + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    activateTab(tabs[next]);
+    tabs[next].focus();
+  };
 });
 
 // Notifications (live, while the page/PWA is open in the background)

@@ -8,6 +8,7 @@ import { Linking, Platform, StyleSheet, Text, View, type StyleProp, type TextSty
 import type { ColorTokens } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
 import { useTheme } from "../../theme/ThemeProvider";
+import { safeExternalHref } from "../../lib/linkSafety";
 import { CodeBlock } from "./CodeBlock";
 
 // ---------------------------------------------------------------------------
@@ -132,17 +133,19 @@ function parseInline(text: string): InlineNode[] {
 
 function MarkdownLink({ href, tokens, children }: { href: string; tokens: ColorTokens; children: string }) {
   const linkStyle = { color: tokens.ink, textDecorationLine: "underline" as const };
+  const safeHref = safeExternalHref(href);
+  if (!safeHref) return <Text>{children}</Text>;
   if (Platform.OS === "web") {
     // RN-Web renders a plain DOM anchor; kept out of JSX.IntrinsicElements via createElement
     // so it type-checks the same on native and web builds.
-    return React.createElement("a", { href, target: "_blank", rel: "noopener noreferrer", style: linkStyle }, children);
+    return React.createElement("a", { href: safeHref, target: "_blank", rel: "noopener noreferrer", style: linkStyle }, children);
   }
   return (
     <Text
       accessibilityRole="link"
       style={linkStyle}
       onPress={() => {
-        Linking.openURL(href).catch(() => {});
+        Linking.openURL(safeHref).catch(() => {});
       }}
     >
       {children}

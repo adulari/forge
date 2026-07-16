@@ -6,6 +6,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod interaction;
+pub use interaction::{ConfirmOutcome, Presenter, PresenterEvent, QChoice, ReplayItem, NO_ANSWER};
+
 /// Who produced a message in a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

@@ -41,7 +41,12 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
         <View style={styles.container}>
           <Text style={styles.title}>something went wrong</Text>
           <Text style={styles.message}>{this.state.error?.message ?? "unknown error"}</Text>
-          <Pressable style={styles.button} onPress={this.reset}>
+          <Pressable
+            style={styles.button}
+            onPress={this.reset}
+            accessibilityRole="button"
+            accessibilityLabel="Try loading Forge again"
+          >
             <Text style={styles.buttonText}>Try again</Text>
           </Pressable>
         </View>
@@ -75,11 +80,13 @@ const styles = StyleSheet.create({
     marginBottom: 24,
   },
   button: {
+    minHeight: 44,
     borderWidth: 1,
     borderColor: "#dddddd",
     borderRadius: 8,
     paddingHorizontal: 20,
     paddingVertical: 10,
+    justifyContent: "center",
   },
   buttonText: {
     color: "#dddddd",

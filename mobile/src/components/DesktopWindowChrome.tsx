@@ -46,18 +46,17 @@ export function DesktopWindowChrome() {
       dataSet={{ tauriDragRegion: "" }}
       onDoubleClick={() => void toggleMaximize()}
       style={[styles.bar, { backgroundColor: tokens.bg1, borderBottomColor: tokens.border }, isMacOS && styles.macos]}
-      accessibilityElementsHidden
-      importantForAccessibility="no-hide-descendants"
+      accessible={false}
     >
       {!isMacOS ? (
         <WebView style={styles.controls} dataSet={{ tauriDragRegion: "false" }}>
-          <Pressable onPress={() => void windowControls?.minimize()} style={styles.control} accessibilityLabel="Minimize window">
+          <Pressable onPress={() => void windowControls?.minimize()} style={styles.control} accessibilityRole="button" accessibilityLabel="Minimize window">
             <Minus size={16} color={tokens.ink2} />
           </Pressable>
-          <Pressable onPress={() => void toggleMaximize()} style={styles.control} accessibilityLabel="Maximize window">
+          <Pressable onPress={() => void toggleMaximize()} style={styles.control} accessibilityRole="button" accessibilityLabel="Maximize or restore window">
             <Square size={14} color={tokens.ink2} />
           </Pressable>
-          <Pressable onPress={() => void windowControls?.close()} style={styles.control} accessibilityLabel="Close window">
+          <Pressable onPress={() => void windowControls?.close()} style={styles.control} accessibilityRole="button" accessibilityLabel="Close window">
             <X size={16} color={tokens.ink2} />
           </Pressable>
         </WebView>

@@ -1,7 +1,7 @@
 // Fleet — the app home + most-used surface (FEATURES.md §5 "Live fleet dashboard header").
 // Aggregate header (Σ cost / waiting / busy) + live list, waiting-first because the SERVER
-// already sorts it that way (never re-sort here) — polled every 3s while focused via
-// useSessions. Forgeline entrance is a first-mount-only side effect of stable row keys +
+// already sorts it that way (never re-sort here) — refreshed by fleet events with a slow
+// recovery poll. Forgeline entrance is a first-mount-only side effect of stable row keys +
 // stable indices across polls (see theme/motion.ts useForgeline) — nothing extra to wire here.
 import { router } from "expo-router";
 import { Flame, Plus } from "lucide-react-native";
@@ -22,11 +22,10 @@ import { ApiError, type SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { useServerFleets, useSessions } from "../../lib/queries";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
+import { buildFleetDeck, type FleetDeckItem } from "../../lib/fleetRows";
 import { depthDark, depthLight, radii, shadowStyle, space } from "../../theme/tokens";
 import { tabularNums, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
-
-type FleetDeckItem = { type: "session"; row: SessionRow } | { type: "label"; label: string };
 
 // DESIGN_ELEVATION.md Move 3 — the one identity moment: the ⚒ mark beside the Fleet title.
 function FleetTitle() {
@@ -174,10 +173,9 @@ export default function FleetScreen() {
   const query = useSessions();
   const listRef = React.useRef<FlatList<FleetDeckItem>>(null);
 
-  // `useSessions` polls every few seconds while focused (module doc above) — react-query's own
-  // `isRefetching` flips true on THAT background poll too, not just a manual pull, so wiring it
-  // straight into `refreshing` made the pull-to-refresh spinner fire on its own every poll tick.
-  // Track only the pull-triggered refetch instead.
+  // `useSessions` still has a slow recovery poll in addition to fleet events. React Query's
+  // `isRefetching` covers those automatic refreshes too, so track only pull-triggered refreshes
+  // here and never animate the spinner without a gesture.
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [search, setSearch] = useState("");
   const [needsYouOnly, setNeedsYouOnly] = useState(false);
@@ -197,23 +195,13 @@ export default function FleetScreen() {
       return [row.title, row.cwd, status].some((value) => value.toLowerCase().includes(needle));
     });
   }, [data, search, needsYouOnly]);
-  const deckRows = useMemo(() => {
-    const rows: FleetDeckItem[] = [];
-    let previous: string | null = null;
-    for (const row of filteredData) {
-      const group = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
-      if (group !== previous) rows.push({ type: "label", label: group === "waiting" ? "NEEDS YOU" : group === "busy" ? "FORGING" : "COOL" });
-      rows.push({ type: "session", row });
-      previous = group;
-    }
-    return rows;
-  }, [filteredData]);
+  const deckRows = useMemo(() => buildFleetDeck(filteredData, data), [filteredData, data]);
   const hasData = data.length > 0;
   const isFirstLoad = query.isLoading && !hasData;
 
   const renderItem = useCallback(
-    ({ item }: { item: (typeof deckRows)[number] }) => item.type === "label" ? <Text style={[typeScale.section, styles.groupLabel, { color: item.label === "NEEDS YOU" ? tokens.danger : tokens.ink3 }]}>{item.label}</Text> : <SessionCard row={item.row} index={data.indexOf(item.row)} />,
-    [data, tokens.danger, tokens.ink3],
+    ({ item }: { item: FleetDeckItem }) => item.type === "label" ? <Text style={[typeScale.section, styles.groupLabel, { color: item.label === "NEEDS YOU" ? tokens.danger : tokens.ink3 }]}>{item.label}</Text> : <SessionCard row={item.row} index={item.sourceIndex} />,
+    [tokens.danger, tokens.ink3],
   );
   const keyExtractor = useCallback((item: (typeof deckRows)[number]) => item.type === "label" ? `label:${item.label}` : item.row.id, []);
 
@@ -223,7 +211,7 @@ export default function FleetScreen() {
         <EmptyState
           icon={Flame}
           message={query.error instanceof ApiError ? query.error.message : "server unreachable"}
-          action={<Button label="Retry" variant="secondary" onPress={() => void query.refetch()} />}
+          action={<Button label="Retry" variant="secondary" onPress={() => void refetch()} />}
         />
       );
     }
@@ -239,7 +227,7 @@ export default function FleetScreen() {
         />
       </View>
     );
-  }, [query.isError, query.error, search]);
+  }, [query.isError, query.error, refetch, search, tokens.ink4]);
 
   // T5.1 (fixed): expanded's MasterDetail rail already renders the live session list —
   // this screen fills the detail pane's `<Slot/>` in that layout (see (tabs)/_layout.tsx),

@@ -18,8 +18,8 @@
 <div id="banner"></div>
 <header>
   <h1>⚒ Forge</h1>
-  <button class="iconbtn" id="btnSessions" title="sessions" hidden>☰</button>
-  <button class="iconbtn" id="bell" title="notifications">🔕</button>
+  <button class="iconbtn" id="btnSessions" title="sessions" aria-label="Open sessions" hidden>☰</button>
+  <button class="iconbtn" id="bell" title="notifications" aria-label="Configure notifications">🔕</button>
 </header>
 <div class="meta">
   <span class="badge" id="expo">—</span>
@@ -52,16 +52,16 @@
   <span class="tier" id="tier">—</span><span id="model">—</span>
   <span class="cost" id="cost">$0.0000</span><span class="ctx" id="ctx"></span>
   <span class="ctx" id="temper"></span></div>
-<div class="tabs">
-  <button class="tab on" data-tab="chat" id="tab-chat">Chat</button>
-  <button class="tab" data-tab="tasks" id="tab-tasks">Tasks <span class="n" id="tc"></span></button>
-  <button class="tab" data-tab="agents" id="tab-agents">Agents <span class="n" id="ac"></span></button>
+<div class="tabs" role="tablist" aria-label="Session views">
+  <button class="tab on" data-tab="chat" id="tab-chat" role="tab" aria-selected="true" aria-controls="transcript">Chat</button>
+  <button class="tab" data-tab="tasks" id="tab-tasks" role="tab" aria-selected="false" aria-controls="tasks" tabindex="-1">Tasks <span class="n" id="tc"></span></button>
+  <button class="tab" data-tab="agents" id="tab-agents" role="tab" aria-selected="false" aria-controls="agents" tabindex="-1">Agents <span class="n" id="ac"></span></button>
 </div>
-<div class="panel" id="transcript"><div id="histload" hidden>loading earlier messages…</div><div id="hist"></div><div id="tail"></div></div>
-<div class="panel" id="tasks" hidden></div>
-<div class="panel" id="agents" hidden></div>
+<div class="panel" id="transcript" role="tabpanel" aria-labelledby="tab-chat"><div id="histload" hidden>loading earlier messages…</div><div id="hist"></div><div id="tail"></div></div>
+<div class="panel" id="tasks" role="tabpanel" aria-labelledby="tab-tasks" hidden></div>
+<div class="panel" id="agents" role="tabpanel" aria-labelledby="tab-agents" hidden></div>
 <div class="overlaybox" id="overlay" hidden>
-  <div class="ohead"><span id="otitle">—</span><button class="ox" id="ocancel" title="close (Esc)">✕</button></div>
+  <div class="ohead"><span id="otitle">—</span><button class="ox" id="ocancel" title="close (Esc)" aria-label="Close overlay">✕</button></div>
   <input type="text" id="ofilter" placeholder="type to filter…" autocomplete="off"
     autocapitalize="off" autocorrect="off" spellcheck="false" hidden>
   <div class="orows" id="orows"></div>
@@ -103,8 +103,8 @@
   <button class="chip" data-cmd="/help">/help</button>
 </div>
 <div class="bar">
-  <button class="iconbtn barbtn" id="attach" title="attach a file or image">📎</button>
-  <button class="iconbtn barbtn" id="mic" title="voice input" hidden>🎤</button>
+  <button class="iconbtn barbtn" id="attach" title="attach a file or image" aria-label="Attach a file or image">📎</button>
+  <button class="iconbtn barbtn" id="mic" title="voice input" aria-label="Start voice input" hidden>🎤</button>
   <input type="file" id="file" multiple accept="image/*,text/*,.md,.txt,.log,.json,.yaml,.yml,.toml,.csv,.patch,.diff" hidden>
   <input type="text" id="prompt" placeholder="type a task or /command…" autocomplete="off"
     autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="send">

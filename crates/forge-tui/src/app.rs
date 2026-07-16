@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 use serde::{Deserialize, Serialize};
 
-use crate::{surface, PresenterEvent, QChoice};
+use crate::{surface, PresenterEvent, QChoice, ReplayItem};
 
 // ── Palette ──────────────────────────────────────────────────────────────────
 // Kept as imports here for readability; values and surface treatment are shared by every view.
@@ -3431,27 +3431,6 @@ fn plan_card_lines(plan: &forge_types::PlanProposal) -> Vec<TextLine<'static>> {
     )));
     out.push(TextLine::default());
     out
-}
-
-/// One renderable item of a resumed session's transcript. Built by the core from the rehydrated
-/// messages and replayed by [`App::replay_history`] so a resumed session shows the full
-/// conversation — text *and* tool activity — exactly as it looked live (not a user-only echo).
-#[derive(Debug, Clone)]
-pub enum ReplayItem {
-    /// A user prompt.
-    User(String),
-    /// Assistant answer text (markdown).
-    Assistant(String),
-    /// A tool the assistant invoked, with its (compacted) arguments.
-    Tool { name: String, args: String },
-    /// A tool's result line.
-    ToolResult {
-        name: String,
-        ok: bool,
-        summary: String,
-    },
-    /// A dim advisory (e.g. the "earlier conversation summarized" compaction marker).
-    Note(String),
 }
 
 fn warning_line(msg: &str) -> TextLine<'static> {

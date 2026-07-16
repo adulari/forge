@@ -117,7 +117,9 @@ REST (all verified in serve.rs):
 - `POST /api/answer` `{session, seq, allow}` — HTTP twin of WS `allow` (notification actions)
 - `GET  /api/push/key`, `POST /api/push/subscribe|unsubscribe` — Web Push (VAPID), web target only
 
-WS `/ws?session=<id>&rev=<n>`: one full-state `Snapshot` JSON per frame, `PROTOCOL_VERSION = 7`.
+WS `/ws?session=<id>&rev=<n>`: one full-state `Snapshot` JSON per frame, `PROTOCOL_VERSION = 8`.
+The canonical cross-client fixture is `protocol/remote-v8.json`. WS `/ws/fleet` emits lightweight
+revision invalidations so fleet screens refresh immediately without a hot REST poll.
 Reconnect protocol: track `revision`, reconnect with `?rev=`, accept `resync:true` frames,
 stop on `closed:true`, dedupe on `revision`. Client→server `RemoteInput` (snake_case `kind` tag):
 `prompt`, `allow{yes,seq}`, `answer{text,seq}`, `interrupt`, `key{key}`, `overlay_select{id}`,
@@ -148,7 +150,7 @@ The current app's data layer is correct and verified against the daemon — it i
 
 - `src/lib/api.ts` — typed fetch client, wire-verbatim types, `ApiError` with 404→"pairing invalid" mapping.
 - `src/lib/ws.ts` — `useSessionSocket`: rev-replay reconnect, backoff, resync/closed handling, AppState pause/resume.
-- `src/lib/queries.ts` — `useSessions` (3s focused poll), `usePastSessions`/`useHistory` (infinite cursors), all mutations, baseUrl-namespaced keys.
+- `src/lib/queries.ts` — `useSessions` (fleet-event driven with a 60s recovery poll), `usePastSessions`/`useHistory` (infinite cursors), all mutations, baseUrl-namespaced keys.
 - `src/lib/auth.tsx` — `parseConnectUrl` (`connect:` scheme normalization, 16–64 hex token), pair/forget/testConnection.
 - `src/lib/sessionContext.tsx` — one socket per session shell, context to segments.
 - `src/lib/secureStore.ts` / `.web.ts`.
@@ -289,7 +291,7 @@ Guideline 4.2 (minimum functionality / "app-like") defenses, all real:
 | Target | Build | Distribution |
 |---|---|---|
 | iOS | `eas build -p ios --profile preview/production` (SDK 57; `ios.appleTeamId` still TODO until Apple approval) | TestFlight → App Store; interim: unsigned IPA CI (`mobile-ipa.yml`, exists) → SideStore source JSON (keep the 9a pipeline from BUILD_PLAN) |
-| Android | `eas build -p android` (APK for sideload, AAB for Play) | GitHub Releases APK now; Play later |
+| Android | `mobile-android` Actions workflow / `eas build -p android` | Internal APK artifact, tagged AAB release, optional Play internal-track submission |
 | Web | `npx expo export -p web` → `dist/` | Any static host; version-stamped; served over HTTPS |
 | Windows | `npm run tauri build` on windows runner → NSIS `.exe` | GitHub Releases |
 | macOS | tauri build → `.dmg` (unsigned initially; notarization when the Apple account lands) | GitHub Releases |

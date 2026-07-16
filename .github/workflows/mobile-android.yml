@@ -1,0 +1,94 @@
+name: mobile-android
+
+# Native Android distribution for the shared Expo app. Manual runs produce an installable APK
+# (preview) or Play-ready AAB (production); android-v* tags publish the artifact to GitHub too.
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Build profile
+        required: true
+        default: preview
+        type: choice
+        options: [preview, production]
+      submit_to_play:
+        description: Submit a production build to Google Play internal testing
+        required: true
+        default: false
+        type: boolean
+  push:
+    tags:
+      - "android-v*"
+
+concurrency:
+  group: mobile-android-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: EAS Android build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      EXPO_PUBLIC_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
+      EXPO_PUBLIC_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
+      PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'production' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
+      - name: Verify app before native build
+        run: npm run check
+      - name: Queue and wait for EAS build
+        id: eas
+        run: |
+          npx eas-cli build --platform android --profile "$PROFILE" --non-interactive --wait --json > build.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const raw = JSON.parse(fs.readFileSync('build.json', 'utf8'));
+          const build = Array.isArray(raw) ? raw[0] : raw;
+          const url = build?.artifacts?.buildUrl;
+          const id = build?.id;
+          if (!url || !id) throw new Error('EAS response did not contain build id/artifact URL');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `id=${id}\nurl=${url}\n`);
+          NODE
+      - name: Download native artifact
+        run: |
+          ext=apk
+          [ "$PROFILE" = production ] && ext=aab
+          curl --fail --location --retry 4 "${{ steps.eas.outputs.url }}" -o "Forge-android-${PROFILE}.${ext}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: forge-android-${{ env.PROFILE }}
+          path: mobile/Forge-android-*.*
+          if-no-files-found: error
+      - name: Publish tagged Android artifact
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: mobile/Forge-android-*.*
+          fail_on_unmatched_files: true
+      - name: Configure Google Play credentials
+        if: github.event_name == 'workflow_dispatch' && inputs.submit_to_play
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY_JSON }}
+        run: |
+          test "$PROFILE" = production || { echo 'Play submission requires the production profile' >&2; exit 1; }
+          test -n "$GOOGLE_SERVICE_ACCOUNT_KEY_JSON" || { echo 'GOOGLE_SERVICE_ACCOUNT_KEY_JSON is not configured' >&2; exit 1; }
+          printf '%s' "$GOOGLE_SERVICE_ACCOUNT_KEY_JSON" > google-service-account.json
+      - name: Submit to Google Play internal testing
+        if: github.event_name == 'workflow_dispatch' && inputs.submit_to_play
+        run: npx eas-cli submit --platform android --profile production --id "${{ steps.eas.outputs.id }}" --non-interactive
+      - name: Remove Google Play credentials
+        if: always()
+        run: rm -f google-service-account.json

@@ -44,6 +44,8 @@ import { EmptyState } from "../../../components/ds/EmptyState";
 import { Screen } from "../../../components/ds/Screen";
 import { useToast } from "../../../components/ds/ToastHost";
 import { type HistoryRow } from "../../../lib/api";
+import { reconcilePendingMessages } from "../../../lib/sessionReconciler";
+import { OFFLINE_QUEUE_CAP, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
 import { haptics } from "../../../lib/haptics";
 import { useHistory } from "../../../lib/queries";
 import { parseReasoning } from "../../../lib/reasoning";
@@ -56,38 +58,10 @@ import { type as typeScale } from "../../../theme/typography";
 // T3.3's CardSlot.tsx landed during this task (was a HANDOFF stub) — wired in directly above.
 
 const OFFLINE_QUEUE_PREFIX = "forge.offlineQueue";
-const OFFLINE_QUEUE_CAP = 20;
 const JUMP_THRESHOLD_PX = 240;
 
 function offlineQueueKey(baseUrl: string | null, sessionId: string): string {
   return `${OFFLINE_QUEUE_PREFIX}:${baseUrl ?? "unknown"}:${sessionId}`;
-}
-
-// A prompt held for the offline queue, carrying the wire-form (path-bearing) attachments that
-// rode it so the flush can replay them instead of silently dropping them to text-only.
-interface QueuedPrompt {
-  text: string;
-  attachments: { path: string; image: boolean }[];
-}
-
-// Older builds persisted the queue as a bare `string[]`. Coerce both that legacy shape and the
-// current object shape into `QueuedPrompt[]`, tolerating anything malformed.
-function parseOfflineQueue(raw: string | null): QueuedPrompt[] {
-  if (!raw) return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map((entry) => {
-      if (typeof entry === "string") return { text: entry, attachments: [] };
-      const e = entry as Partial<QueuedPrompt>;
-      return {
-        text: typeof e.text === "string" ? e.text : "",
-        attachments: Array.isArray(e.attachments) ? e.attachments : [],
-      };
-    });
-  } catch {
-    return [];
-  }
 }
 
 type TimelineItem =
@@ -302,7 +276,7 @@ export default function SessionChat() {
       }
     }
     if (offlineQueue.length > 0) {
-      for (const q of offlineQueue) send({ kind: "prompt", text: q.text, attachments: q.attachments });
+      for (const input of queuedPromptInputs(offlineQueue)) send(input);
       setOfflineQueue([]);
     }
     // The pending interrupt is edge-only: it means "Stop pressed while offline", so it fires on the
@@ -390,15 +364,7 @@ export default function SessionChat() {
   // §4.1.4 invalidation). Clearing on ANY history advance (an unrelated note row, a concurrent
   // turn) would drop the optimistic bubble before its real row exists, flashing the message out.
   useEffect(() => {
-    if (pendingSent.length === 0) return;
-    setPendingSent((prev) =>
-      prev.filter(
-        (p) =>
-          !historyRows.some(
-            (row) => row.seq > p.baselineSeq && row.role === "user" && row.content === p.text,
-          ),
-      ),
-    );
+    setPendingSent((prev) => reconcilePendingMessages(prev, historyRows));
   }, [historyRows]);
 
   // Safety net: never let a pendingSent bubble linger forever if history never advances for it
@@ -513,11 +479,6 @@ export default function SessionChat() {
   // while busy keeps the just-streamed answer on screen through those frames instead of blanking
   // it back to the "thinking…" indicator, then `finalizing` carries it across the busy->false
   // edge until the history row lands. No frame ever renders the answer absent.
-  const latestAssistantModel = useMemo(
-    () => historyRows.find((row) => row.role === "assistant" && row.model)?.model ?? null,
-    [historyRows],
-  );
-
   const displayText =
     streamingText || (busy ? track.retainedText : "") || (finalizingActive ? finalizing!.text : "");
 
@@ -687,7 +648,7 @@ export default function SessionChat() {
           );
       }
     },
-    [tokens.ink2, tokens.ink3, tokens.accent, toolActivity, onMessageLongPress],
+    [tokens.ink2, tokens.ink3, toolActivity, toolLedger, onMessageLongPress],
   );
 
   const keyExtractor = useCallback((item: TimelineItem) => item.id, []);

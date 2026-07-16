@@ -34,7 +34,6 @@ export function SystemOutput({ content }: SystemOutputProps) {
     [],
   );
 
-  const visible = expanded ? content : lines.slice(0, COLLAPSE_LINES).join("\n");
   const hiddenCount = lines.length - COLLAPSE_LINES;
   const first = lines.find((line) => line.trim()) ?? "output";
   const label = first.match(/↳\s*([^\s]+)/)?.[1] ?? first.split(/\s+/)[0] ?? "output";
