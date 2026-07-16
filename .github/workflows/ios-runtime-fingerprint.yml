@@ -1,0 +1,52 @@
+name: ios-runtime-fingerprint
+
+# Read-only diagnostic for reconstructing the runtime embedded in an existing TestFlight build.
+# It prepares native files exactly like Xcode Cloud but never invokes xcodebuild or uploads a
+# binary. Keep workflow_dispatch for future OTA recovery; the PR trigger below is limited to this
+# workflow file so ordinary pull requests do not consume a macOS runner.
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Git commit used by the TestFlight build
+        required: true
+      build_number:
+        description: TestFlight CFBundleVersion
+        required: true
+  pull_request:
+    paths:
+      - ".github/workflows/ios-runtime-fingerprint.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  fingerprint:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref || '3e84d8cec6d7e8316361647cf6e404c766ec20b8' }}
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Reproduce Xcode Cloud native preparation
+        working-directory: mobile
+        env:
+          BUILD_NUMBER: ${{ inputs.build_number || '74' }}
+        run: |
+          npm ci --prefer-offline --no-audit --no-fund
+          npx expo prebuild -p ios --no-install
+          sed -i '' "s/CURRENT_PROJECT_VERSION = 1;/CURRENT_PROJECT_VERSION = ${BUILD_NUMBER};/g" ios/Forge.xcodeproj/project.pbxproj
+          cd ios
+          pod install
+
+      - name: Print embedded Expo runtime fingerprint
+        working-directory: mobile
+        run: |
+          npx expo-updates fingerprint:generate --platform ios > "$RUNNER_TEMP/fingerprint.json"
+          node -e "const value=require(process.env.RUNNER_TEMP + '/fingerprint.json'); console.log('RUNTIME_VERSION=' + value.hash)"

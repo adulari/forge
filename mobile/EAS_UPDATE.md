@@ -83,14 +83,15 @@ changes native/config inputs or shared code together with JavaScript.
 When the guard passes, it publishes to the `production` channel with:
 
 ```
-npx expo prebuild -p ios --no-install --clean
+npx expo prebuild -p ios --no-install
+cd ios && pod install && cd ..
 npx eas-cli@latest update --channel production --environment production --platform ios --message "<commit SHA> <commit subject>" --non-interactive
 ```
 
-The prebuild is mandatory. Xcode Cloud regenerates `mobile/ios/` from `app.config.ts` before every
-binary build, while the committed iOS project is only a project-discovery bootstrap and may be
-stale. EAS must fingerprint the same regenerated native tree; otherwise it publishes a valid OTA
-under a runtime version that no installed Xcode Cloud binary will ever request.
+Prebuild and CocoaPods are both mandatory. Xcode Cloud calculates the embedded fingerprint after
+`pod install`, and Expo's generic-project algorithm hashes the resulting native iOS directory.
+Fingerprinting after prebuild but before CocoaPods omits that resolved native state and publishes
+a valid OTA under a runtime version no installed Xcode Cloud binary will request.
 
 ### `--platform ios` is required
 
