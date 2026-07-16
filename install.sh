@@ -140,7 +140,7 @@ if [ "${FORGE_DESKTOP:-}" = 1 ]; then
   sh -c "$(fetch https://raw.githubusercontent.com/$REPO/main/install-desktop.sh)"
 elif [ "${FORGE_DESKTOP:-}" = 0 ]; then
   :
-elif [ -r /dev/tty ]; then
+elif ( : </dev/tty ) 2>/dev/null; then
   printf 'Also install the Forge desktop app? [Y/n] ' >&2
   read answer </dev/tty || answer=""
   case "$answer" in n|N|no|NO) ;; *) sh -c "$(fetch https://raw.githubusercontent.com/$REPO/main/install-desktop.sh)" ;; esac
