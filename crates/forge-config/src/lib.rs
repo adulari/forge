@@ -172,6 +172,12 @@ pub struct RemoteConfig {
     /// (`ngrok http --domain=<hostname> <port>`, needs a domain reserved on the ngrok account).
     #[serde(default)]
     pub tunnel_hostname: Option<String>,
+    /// Directories the remote project browser may enumerate. Paths are canonicalized at daemon
+    /// startup; missing/unreadable entries are ignored. The daemon working directory is always
+    /// included even when this list is empty. Use this to expose a parent such as `~/Projects`
+    /// without exposing the rest of the host filesystem.
+    #[serde(default)]
+    pub project_roots: Vec<String>,
 }
 
 /// The default `forge serve` port when `[remote] port` is unset (see [`RemoteConfig::port`]).
@@ -4288,6 +4294,17 @@ tunnel_hostname = "forge.example.com"
         .unwrap();
         assert_eq!(c.tunnel_name.as_deref(), Some("forge"));
         assert_eq!(c.tunnel_hostname.as_deref(), Some("forge.example.com"));
+    }
+
+    #[test]
+    fn remote_config_parses_project_browse_roots() {
+        let c: RemoteConfig = toml::from_str(
+            r#"
+project_roots = ["~/Projects", "/srv/work"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.project_roots, ["~/Projects", "/srv/work"]);
     }
 
     #[test]

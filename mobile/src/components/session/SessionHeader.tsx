@@ -12,6 +12,7 @@ import {
   Microscope,
   MoreHorizontal,
   Network,
+  Plus,
   Search,
   Swords,
 } from "lucide-react-native";
@@ -32,6 +33,8 @@ export interface SessionHeaderProps {
   worktree: string | null;
   exposure: string;
   onBack: () => void;
+  showBack?: boolean;
+  onNewHere: () => void;
   onPalette: () => void;
   onDuel: () => void;
   onReplay: () => void;
@@ -59,7 +62,7 @@ export function SessionHeader(props: SessionHeaderProps) {
   return (
     <View style={styles.wrap}>
       <View style={styles.row}>
-        <IconButton icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onBack} accessibilityLabel="Back" />
+        {props.showBack !== false ? <IconButton icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onBack} accessibilityLabel="Back" /> : null}
         <Text style={[typeScale.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>{props.title}</Text>
         <IconButton icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onPalette} accessibilityLabel="Open command palette" />
         <IconButton icon={<MoreHorizontal size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={() => setActionsVisible(true)} accessibilityLabel="Session actions" />
@@ -72,6 +75,7 @@ export function SessionHeader(props: SessionHeaderProps) {
       <Sheet visible={actionsVisible} onClose={closeActions} accessibilityLabel="Session actions" snapPoints={[0.8]}>
         <ScrollView contentContainerStyle={styles.actions} keyboardShouldPersistTaps="handled">
           <Text style={[typeScale.heading, { color: tokens.ink }]}>Session actions</Text>
+          <ListRow title="Start another session here" leading={<Plus size={20} color={tokens.ink2} />} onPress={() => run(props.onNewHere)} />
           <ListRow title="Start model duel" leading={<Swords size={20} color={tokens.ink2} />} onPress={() => run(props.onDuel)} />
           <ListRow title="Open session replay" leading={<History size={20} color={tokens.ink2} />} onPress={() => run(props.onReplay)} />
           <ListRow title="Create implementation plan" leading={<Map size={20} color={tokens.ink2} />} onPress={() => run(props.onPlan)} />

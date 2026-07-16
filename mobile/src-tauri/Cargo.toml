@@ -30,6 +30,7 @@ tauri-plugin-opener = "2"
 # `@tauri-apps/plugin-http` and `@tauri-apps/plugin-websocket`; both need their Rust-side
 # plugin registered here too, or the JS calls fail at runtime with "plugin not found".
 tauri-plugin-http = "2"
+tauri-plugin-dialog = "2"
 tauri-plugin-websocket = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"

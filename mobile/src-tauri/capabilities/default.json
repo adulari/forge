@@ -13,6 +13,7 @@
     "updater:default",
     "process:allow-restart",
     "websocket:default",
+    "dialog:allow-open",
     {
       "identifier": "http:default",
       "allow": [{ "url": "http://*/*" }, { "url": "https://*/*" }]

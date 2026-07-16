@@ -352,8 +352,11 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
 - Companion app from the same TypeScript/React Native codebase for iOS, Android, Web, Windows, macOS,
   and Linux; fleet/home/inbox/history, plans/tasks/agents/review, replay/tree, usage, models, hooks,
   skills, MCP, and configuration are native screens rather than a thin chat wrapper
-- New-session catalog picker ranks healthy models while keeping automatic mesh routing and offline
-  manual IDs; desktop auto-discovers Forge from Cargo/Homebrew/user-local installs and starts it
+- New sessions default to the daemon's project, remember the last project per server, offer recent
+  projects plus an allowlisted server-side folder browser, and keep manual paths as an advanced
+  fallback; the desktop app also has a native folder picker. The model catalog ranks healthy models
+  while keeping automatic mesh routing and offline manual IDs; desktop auto-discovers Forge from
+  Cargo/Homebrew/user-local installs and starts it
 - Actionable push notifications, iOS Live Activities/Dynamic Island status, signed desktop updates,
   production iOS OTA updates, offline prompt queueing, and reconnect replay
 - `--inline` for native scrollback; `--mock` offline deterministic provider (no key needed)
@@ -417,7 +420,8 @@ curl -fsSL https://raw.githubusercontent.com/Adulari/forge/main/install-desktop.
 The installer selects the matching release bundle: macOS Apple Silicon or Intel, and Linux
 x86-64 or ARM64 AppImage. Desktop bundles are published by the desktop release workflow (alongside
 Windows x86-64 NSIS builds). The Tauri desktop app connects to `forge serve`, supports the same remote
-control UI as the web/mobile app, and checks for signed updates automatically. On Linux it installs
+control UI as the web/mobile app, keeps the Fleet session rail beside the active chat on larger
+windows, and checks for signed updates automatically. On Linux it installs
 an AppImage and desktop entry; on macOS it installs `Forge.app` to `/Applications` (or
 `~/Applications`).
 
@@ -616,8 +620,10 @@ One headless process hosting any number of concurrent sessions, all driveable fr
 phone/browser PWA at a **stable origin** — fixed port (`[remote] port`, default 7420) + a
 persisted daemon token — so the installed home-screen app keeps working forever. Sessions keep
 running when you disconnect; reconnects replay exactly what you missed. From the page: list
-sessions (busy dot, cost, last activity), create new ones (any directory, optional **isolated
-git worktree**), switch with a tap, archive when done.
+sessions (busy dot, cost, last activity), create new ones in the daemon's current project with one
+tap, switch projects from recent choices or a safe folder browser, optionally use an **isolated git
+worktree**, switch sessions with a tap, and archive when done. On desktop/web windows at least 1024px
+wide, the Fleet stays visible beside the active chat; mobile keeps focused full-screen navigation.
 
 ```bash
 forge serve                  # LAN, self-signed HTTPS (default)
@@ -625,6 +631,15 @@ forge serve --local          # loopback only
 forge serve --anywhere       # public tunnel via cloudflared/ngrok
 forge serve --port 9000      # override the stable port
 forge serve --rotate-token   # revoke: mint a new daemon token (old links/PWAs die)
+```
+
+The remote folder browser exposes the daemon's working directory by default. Add other safe parent
+directories in your Forge config when you want to browse them from mobile; explicit known paths can
+still be entered under the advanced fallback:
+
+```toml
+[remote]
+project_roots = ["~/Projects", "/srv/work"]
 ```
 
 Connecting a phone: open the printed URL (or scan the QR in the terminal), pick or create a

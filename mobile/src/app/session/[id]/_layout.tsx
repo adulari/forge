@@ -78,7 +78,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const tokens = useTokens();
   const toast = useToast();
   const pathname = usePathname();
-  const { isCompact } = useBreakpoint();
+  const { isCompact, isExpanded } = useBreakpoint();
   const { snapshot, connectionState, send, setHeaderHeight, baseUrl, focusComposer } = useSessionCtx();
   const [duelVisible, setDuelVisible] = useState(false);
   const [planVisible, setPlanVisible] = useState(false);
@@ -270,6 +270,8 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             worktree={snapshot?.worktree ?? null}
             exposure={snapshot?.exposure ?? "loopback"}
             onBack={() => goBackOr("/(tabs)")}
+            showBack={!isExpanded}
+            onNewHere={() => router.push({ pathname: "/new-session", params: { cwd: snapshot?.cwd ?? "" } })}
             onPalette={openPalette}
             onDuel={() => setDuelVisible(true)}
             onReplay={() => router.push(`/session/${sessionId}/replay`)}

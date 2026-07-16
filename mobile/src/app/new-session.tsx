@@ -5,9 +5,9 @@
 // Owns its own themed header (mirrors SessionHeader.tsx's back-control + title pattern)
 // instead of expo-router's default unthemed header — see _layout.tsx's Stack.Screen for
 // this route (headerShown: false).
-import { router } from "expo-router";
-import { X } from "lucide-react-native";
-import React, { useCallback, useEffect, useState } from "react";
+import { router, useLocalSearchParams } from "expo-router";
+import { ChevronDown, ChevronUp, X } from "lucide-react-native";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
@@ -19,9 +19,13 @@ import { Input } from "../components/ds/Input";
 import { Screen } from "../components/ds/Screen";
 import { Segmented } from "../components/ds/Segmented";
 import { ModelPicker } from "../components/session/ModelPicker";
+import { ProjectPicker } from "../components/session/ProjectPicker";
 import { ApiError } from "../lib/api";
+import { useAuth } from "../lib/auth";
 import { goBackOr } from "../lib/nav";
-import { useCreateSession } from "../lib/queries";
+import { lastProjectStorageKey } from "../lib/projectSelection";
+import { useCreateSession, useProjects } from "../lib/queries";
+import { getSecureItem, setSecureItem } from "../lib/secureStore";
 import { useTokens } from "../theme/ThemeProvider";
 import { gutter, space } from "../theme/tokens";
 import { type as typeScale } from "../theme/typography";
@@ -32,25 +36,55 @@ const FORM_MAX_WIDTH = 560;
 export default function NewSessionScreen() {
   const tokens = useTokens();
   const { isCompact } = useBreakpoint();
-  const [cwd, setCwd] = useState("");
+  const params = useLocalSearchParams<{ cwd?: string | string[] }>();
+  const requestedCwd = Array.isArray(params.cwd) ? params.cwd[0] : params.cwd;
+  const { activeServerId } = useAuth();
+  const projects = useProjects();
+  const initializedProjectKey = useRef<string | null>(null);
+  const projectSelectionRevision = useRef(0);
+  const [cwd, setCwd] = useState(requestedCwd ?? "");
   const [title, setTitle] = useState("");
   const [model, setModel] = useState("");
   const [worktree, setWorktree] = useState(false);
   const [temper, setTemper] = useState<"Read-only" | "Ask" | "Auto-edit" | "Full">("Ask");
-  const [validationError, setValidationError] = useState<string | null>(null);
+  const [advancedVisible, setAdvancedVisible] = useState(false);
   const create = useCreateSession();
+
+  useEffect(() => {
+    if (!activeServerId || !projects.data) return;
+    const initializationKey = `${activeServerId}:${requestedCwd ?? ""}`;
+    if (initializedProjectKey.current === initializationKey) return;
+    initializedProjectKey.current = initializationKey;
+    if (requestedCwd) {
+      setCwd(requestedCwd);
+      return;
+    }
+    const revision = projectSelectionRevision.current;
+    setCwd(projects.data.default_cwd);
+    let cancelled = false;
+    void getSecureItem(lastProjectStorageKey(activeServerId)).then((remembered) => {
+      if (!cancelled && remembered && projectSelectionRevision.current === revision) {
+        setCwd(remembered);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeServerId, projects.data, requestedCwd]);
+
+  const rememberProject = useCallback((path: string) => {
+    projectSelectionRevision.current += 1;
+    setCwd(path);
+    if (create.isError) create.reset();
+    if (activeServerId && path) void setSecureItem(lastProjectStorageKey(activeServerId), path);
+  }, [activeServerId, create]);
 
   const handleSubmit = useCallback(() => {
     if (create.isPending) return;
     const trimmedCwd = cwd.trim();
-    if (!trimmedCwd) {
-      setValidationError("working directory is required");
-      return;
-    }
-    setValidationError(null);
     create.mutate(
       {
-        cwd: trimmedCwd,
+        cwd: trimmedCwd || undefined,
         title: title.trim() || undefined,
         model: model.trim() || undefined,
         worktree,
@@ -58,11 +92,12 @@ export default function NewSessionScreen() {
       },
       {
         onSuccess: (res) => {
+          if (activeServerId) void setSecureItem(lastProjectStorageKey(activeServerId), res.cwd);
           router.replace(`/session/${res.id}`);
         },
       },
     );
-  }, [cwd, title, model, worktree, temper, create]);
+  }, [cwd, title, model, worktree, temper, create, activeServerId]);
 
   const onClose = useCallback(() => goBackOr("/(tabs)"), []);
 
@@ -109,27 +144,11 @@ export default function NewSessionScreen() {
       >
         <Card style={[styles.card, isCompact ? undefined : styles.cardWide]}>
           <View style={styles.intro}>
-            <Text style={[typeScale.heading, styles.formTitle, { color: tokens.ink }]}>Start somewhere clear</Text>
-            <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Choose a git project. You can change the other settings later.</Text>
+            <Text style={[typeScale.heading, styles.formTitle, { color: tokens.ink }]}>Start a new session</Text>
+            <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Your current project is ready. Change it only when you need another workspace.</Text>
           </View>
-          <View style={styles.field}>
-            <Input
-              label="Working directory"
-              error={validationError ?? undefined}
-              mono
-              value={cwd}
-              onChangeText={(t) => {
-                setCwd(t);
-                if (validationError) setValidationError(null);
-                if (create.isError) create.reset();
-              }}
-              placeholder="/path/to/project"
-              autoCapitalize="none"
-              autoCorrect={false}
-              returnKeyType="next"
-            />
-            <Text style={[typeScale.sub, { color: tokens.ink3 }]}>absolute path to a git repo</Text>
-          </View>
+
+          <ProjectPicker value={cwd} onChange={rememberProject} />
 
           <Input
             label="Title (optional)"
@@ -139,23 +158,33 @@ export default function NewSessionScreen() {
             returnKeyType="next"
           />
 
-          <ModelPicker value={model} onChange={setModel} />
+          <Button
+            label={advancedVisible ? "Hide advanced options" : "Show advanced options"}
+            variant="ghost"
+            icon={advancedVisible ? <ChevronUp size={18} color={tokens.ink2} /> : <ChevronDown size={18} color={tokens.ink2} />}
+            onPress={() => setAdvancedVisible((visible) => !visible)}
+            accessibilityLabel={advancedVisible ? "Hide advanced session options" : "Show advanced session options"}
+          />
 
-          <View style={styles.worktreeBlock}>
-            <Text style={[typeScale.body, { color: tokens.ink }]}>Run mode</Text>
-            <Segmented options={[{ value: "Read-only", label: "Read" }, { value: "Ask", label: "Ask" }, { value: "Auto-edit", label: "Edit" }, { value: "Full", label: "Full" }]} value={temper} onChange={setTemper} />
-            <Text style={[typeScale.sub, { color: tokens.ink3 }]}>{temper === "Read-only" ? "inspect without making changes" : temper === "Ask" ? "ask before edits and commands" : temper === "Auto-edit" ? "apply edits automatically; ask for risky commands" : "full autonomy — use only in trusted projects"}</Text>
-          </View>
+          {advancedVisible ? (
+            <View style={styles.advanced}>
+              <ModelPicker value={model} onChange={setModel} />
 
-          <View style={styles.worktreeBlock}>
-            <View style={styles.worktreeRow}>
-              <Checkbox value={worktree} onValueChange={setWorktree} accessibilityLabel="Isolated git worktree" />
-              <Text style={[typeScale.body, { color: tokens.ink }]}>Isolated git worktree</Text>
+              <View style={styles.worktreeBlock}>
+                <Text style={[typeScale.body, { color: tokens.ink }]}>Run mode</Text>
+                <Segmented options={[{ value: "Read-only", label: "Read" }, { value: "Ask", label: "Ask" }, { value: "Auto-edit", label: "Edit" }, { value: "Full", label: "Full" }]} value={temper} onChange={setTemper} />
+                <Text style={[typeScale.sub, { color: tokens.ink3 }]}>{temper === "Read-only" ? "inspect without making changes" : temper === "Ask" ? "ask before edits and commands" : temper === "Auto-edit" ? "apply edits automatically; ask for risky commands" : "full autonomy, use only in trusted projects"}</Text>
+              </View>
+
+              <View style={styles.worktreeBlock}>
+                <View style={styles.worktreeRow}>
+                  <Checkbox value={worktree} onValueChange={setWorktree} accessibilityLabel="Isolated git worktree" />
+                  <Text style={[typeScale.body, { color: tokens.ink }]}>Isolated git worktree</Text>
+                </View>
+                <Text style={[typeScale.sub, styles.worktreeHint, { color: tokens.ink3 }]}>run in an isolated branch/worktree</Text>
+              </View>
             </View>
-            <Text style={[typeScale.sub, styles.worktreeHint, { color: tokens.ink3 }]}>
-              run in an isolated branch/worktree
-            </Text>
-          </View>
+          ) : null}
 
           {serverError ? <Text accessibilityRole="alert" style={[typeScale.sub, { color: tokens.danger }]}>{serverError}</Text> : null}
 
@@ -180,7 +209,7 @@ const styles = StyleSheet.create({
   cardWide: { maxWidth: FORM_MAX_WIDTH },
   intro: { gap: space.space4 },
   formTitle: { marginBottom: space.space4 },
-  field: { gap: space.space4 },
+  advanced: { gap: space.space16 },
   worktreeBlock: { gap: space.space4 },
   worktreeRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   worktreeHint: { paddingLeft: 22 + space.space8 },

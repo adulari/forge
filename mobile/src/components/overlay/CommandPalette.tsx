@@ -81,6 +81,7 @@ import { StatusDot } from "../ds/StatusDot";
 import { useToast } from "../ds/ToastHost";
 
 import { BUILTIN_COMMANDS, useSkillCommands } from "../../lib/commands";
+import { mergeCommandSources } from "../../lib/commandSources";
 const TRANSIENT_SEND_TIMEOUT_MS = 5000;
 const PANEL_WIDTH = 560;
 const ICON_SIZE = 18;
@@ -344,10 +345,7 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
       },
     });
 
-    const allCommands: { name: string; description?: string }[] = [
-      ...BUILTIN_COMMANDS.map((name) => ({ name })),
-      ...skillCommands,
-    ];
+    const allCommands = mergeCommandSources(BUILTIN_COMMANDS, skillCommands);
     for (const cmd of allCommands) {
       items.push({
         id: `action:cmd:${cmd.name}`,

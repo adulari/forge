@@ -45,6 +45,10 @@ import {
   type UsageResponse,
   getPastSessions,
   getSessions,
+  getProjects,
+  browseProjects,
+  type ProjectCatalog,
+  type BrowseProjectsResponse,
   type HistoryRow,
   mergeSession,
   type PastSessionRow,
@@ -76,6 +80,8 @@ const baselines = new Map<string, number>();
 function keys(baseUrl: string | null) {
   return {
     sessions: ["sessions", baseUrl] as const,
+    projects: ["projects", baseUrl] as const,
+    projectBrowse: (path?: string) => ["projects", "browse", baseUrl, path ?? "default"] as const,
     sessionTree: ["sessions", "tree", baseUrl] as const,
     pastSessions: ["sessions", "past", baseUrl] as const,
     history: (sessionId: string) => ["history", baseUrl, sessionId] as const,
@@ -87,6 +93,25 @@ function keys(baseUrl: string | null) {
 
     mcp: ["mcp", baseUrl] as const,
   };
+}
+
+export function useProjects() {
+  const { baseUrl } = useAuth();
+  return useQuery<ProjectCatalog>({
+    queryKey: keys(baseUrl).projects,
+    queryFn: () => getProjects(baseUrl as string),
+    enabled: baseUrl != null,
+    staleTime: 30_000,
+  });
+}
+
+export function useBrowseProjects(path?: string, enabled = true) {
+  const { baseUrl } = useAuth();
+  return useQuery<BrowseProjectsResponse>({
+    queryKey: keys(baseUrl).projectBrowse(path),
+    queryFn: () => browseProjects(baseUrl as string, path),
+    enabled: enabled && baseUrl != null,
+  });
 }
 
 /** Live fleet list. Event-driven while connected, with a slow focused recovery poll. */
