@@ -16,6 +16,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
 import { BUILTIN_COMMANDS, isKnownCommand, useSkillCommands } from "../../lib/commands";
+import { mergeCommandSources } from "../../lib/commandSources";
 import { clearDraft, getDraft, setDraft } from "../../lib/drafts";
 import { isMacOS } from "../../lib/platform";
 import { useUpload } from "../../lib/queries";
@@ -153,7 +154,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const sendIconStyle = useAnimatedStyle(() => ({ opacity: 1 - actionProgress.value, transform: [{ scale: 1 - actionProgress.value * 0.2 }] }));
 
   const skillCommands = useSkillCommands();
-  const allCommands = [...BUILTIN_COMMANDS, ...skillCommands.map((s) => s.name)];
+  const allCommands = mergeCommandSources(BUILTIN_COMMANDS, skillCommands).map((command) => command.name);
   const commandHints = allCommands.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase()));
   const leadingCommand = text.match(/^\/(\S*)/)?.[0].toLowerCase();
   const recognizedCommand = leadingCommand != null && isKnownCommand(leadingCommand, skillCommands.map((s) => s.name));

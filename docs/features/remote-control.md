@@ -275,6 +275,26 @@ auto = "lan"          # session is reachable from a phone the moment chat starts
 host = "192.168.1.5"  # optional: advertise this interface instead of the discovered one
 ```
 
+### Project browser roots
+
+New daemon sessions use the directory where `forge serve` started when no project is selected. The
+companion app remembers the last project separately for each paired server and offers recent
+non-worktree projects. Its server-side folder browser is intentionally narrower than session
+control: it can enumerate only the daemon working directory and configured `[remote]
+project_roots`, with canonical-path containment checks that reject `..` and symlink escapes.
+Hidden directories are omitted. This limits passive filesystem disclosure when someone is choosing
+a project from a phone.
+
+```toml
+[remote]
+project_roots = ["~/Projects", "/srv/work"]
+```
+
+The desktop app can use the operating system folder picker when connected to a loopback daemon.
+Mobile and remote browsers browse the allowlisted server roots. A manually entered absolute path
+remains available as an advanced fallback because the daemon token already grants full agent
+control; `project_roots` limits browsing, not explicit session creation.
+
 ### Stable tunnel URL
 
 By default `--anywhere` opens an ephemeral **quick tunnel**: a new random
@@ -374,7 +394,10 @@ death timeout, and per-session URLs.
   `watch<Snapshot>` + `EventLog` whether or not anyone is connected; the WS route is just
   `pump_ws` (shared with the single-session server) pointed at a registry entry. Disconnect,
   come back an hour later, and `?rev=` replays what you missed (or resyncs).
-- **Per-session working directories + worktrees.** New sessions take any `cwd`; with
+- **Per-session working directories + worktrees.** An omitted `cwd` defaults to the daemon's
+  canonical startup directory. `GET /api/projects` supplies that default plus recent durable
+  projects and browse roots; `GET /api/projects/browse?path=...` provides the canonicalized,
+  allowlisted directory browser used by the companion apps. With
   `worktree: true` the daemon creates `.forge/worktrees/<id>` branched from HEAD (the audited
   `WorktreeGuard` creation, minus its drop-side removal — the worktree must outlive the
   process) and the session runs inside it. `Session::set_work_root` roots every tool call's
@@ -580,10 +603,10 @@ available?") rather than a bare exit code.
 |---|---|
 | `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (7), `SnapOverlay`/`SnapRow` + `named_key`, v5 `EventLog` + `?rev=` replay + `Snapshot.resync`, `GET /api/history` (`HistoryRow`/`HistoryProvider` seam), v7 `SnapDiff`/`SnapPlan` + `RemoteInput::Attach` + `POST /api/upload` (`store_upload`/`sanitize_upload_name`, 10 MB cap), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
 | `forge-cli/src/remote_assets/` | The control page split into `page.html` / `app.js` / `styles.css` / `sw.js` (served via `include_str!` as token-scoped routes; enables the no-`unsafe-inline` CSP); the page's generic overlay renderer + copy-here button; v5: `?rev=` reconnect + sessionStorage revision + replay dedup, scroll-up history pagination (`#hist` above the live `#tail`), markdown renderer + syntax highlighter + fenced-block copy buttons; v7: fleet dashboard (waiting-first list, needs-decision badge, token gauge), plan + diff cards, 📎 upload button + paste-an-image + chips, 🎤 voice input |
-| `forge-config/src/lib.rs` | `[remote]` block: `RemoteConfig` (`auto`, `host`) + `RemoteAuto` + `startup_exposure()` |
+| `forge-config/src/lib.rs` | `[remote]` block: exposure/tunnel settings plus `project_roots` for the remote folder-browser allowlist |
 | `forge-store/src/lib.rs` | v5: `Store::load_history_page` + `HistoryRow` (user-facing transcript pages, newest first, `before`/`limit` windowed); Phase 5: `PushSubscription` + `upsert/delete/list_push_subscriptions` (endpoint-deduped) |
 | `forge-cli/src/push.rs` | Phase 5: VAPID keypair (persist 0600, ES256 JWTs), RFC 8291 `aes128gcm` encryption (verified against the §5 test vector), `PushNotifier` (fire-and-forget delivery, 404/410 pruning), pure `detect_trigger`/`should_push` decision fns |
-| `forge-cli/src/serve.rs` | Phase 5: `/api/push/key\|subscribe\|unsubscribe`, `/api/answer` (seq-validated HTTP answer), per-session WS client counting (the push debounce signal); v7: `SessionRow.waiting/context_tokens/context_limit` + waiting-first `sort_session_rows`, session-addressed `POST /api/upload` |
+| `forge-cli/src/serve.rs` | Multi-session daemon routes including project catalog/browser, push subscriptions and answers, per-session WS client counting, waiting-first fleet ordering, and session-addressed uploads |
 | `forge-tui/src/app.rs` | `App.remote_active`, `question_prompt`, `recent_transcript` ring, `drain_flush_remote`, `remote_snapshot` (tasks/subagents/queued/question options), `remote_overlay()` + `OverlaySnapshot`/`OverlayRowSnapshot` + `picker_kind_wire`, `print_lines`, statusline `◉ remote` segment; v7: `pending_diff`/`turn_diffs` lifecycle (Diff → ToolResult), retained `plan`, `DiffSnapshot` types + `render::diff_file_snapshot` |
 | `forge-tui/src/commands.rs` | `CommandAction::Remote { mode }`, `/remote` (alias `/rc`) parse + registry entry |
 | `forge-cli/src/cli/commands/run.rs` | `DispatchOutcome::ToggleRemote`, `toggle_remote`, `[remote] auto` startup, remote input draining + full-state snapshot broadcast in `run_chat_tui`; v4: `next_input_event` (remote keys join the local key loop), `apply_overlay_input` + `RemoteOverlayOp`, `/keys` host-only note, `remote_copy_text`; v5: `RemoteControl::broadcast` (frame → event log + watch), the `HistoryProvider` closure over the session's store |

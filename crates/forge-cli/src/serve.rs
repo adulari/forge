@@ -19,6 +19,8 @@
 //! - `POST /api/sessions`             create ({cwd, worktree, title?, model?, resume?, temper?})
 //!   — `temper` starts the session in a given permission mode (case-insensitive: `Read-only`,
 //!   `Ask`, `Auto-edit`, `Full`; unknown values are a `400`, never a silent default)
+//! - `GET  /api/projects`             daemon default + recent project directories + browse roots
+//! - `GET  /api/projects/browse?path=` allowlisted server-side directory browser
 //! - `POST /api/sessions/{id}/archive` stop + hide a session (history kept; worktree kept)
 //! - `POST /api/sessions/{id}/merge`   stop, snapshot the worktree, and merge its branch back
 //!   into the base repo (3-way patch; conflicts are reported, never auto-resolved)
@@ -40,6 +42,7 @@
 //! (cloudflared named tunnel) or `tunnel_hostname` alone (ngrok reserved domain) for a stable URL
 //! across restarts (see [`remote::resolve_tunnel_kind`]).
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -255,6 +258,10 @@ struct DaemonState {
     mock: bool,
     /// The daemon process's cwd — the default for new sessions.
     default_cwd: String,
+    /// Canonical directories the remote project browser may enumerate. The create-session API
+    /// still accepts any explicit directory because possession of the daemon token already grants
+    /// full agent control; this list limits passive filesystem disclosure through browsing.
+    project_roots: Vec<PathBuf>,
     /// The Web Push sender (`None` when the VAPID key couldn't be loaded/minted — the push
     /// routes then answer 503 and everything else works normally).
     push: Option<Arc<crate::push::PushNotifier>>,
@@ -385,6 +392,35 @@ struct CreateSessionReq {
     temper: Option<String>,
 }
 
+#[derive(Clone, serde::Serialize)]
+struct ProjectRow {
+    path: String,
+    name: String,
+    is_git_repo: bool,
+    last_activity: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+struct ProjectCatalog {
+    default_cwd: String,
+    recent: Vec<ProjectRow>,
+    roots: Vec<ProjectRow>,
+}
+
+#[derive(serde::Deserialize)]
+struct BrowseProjectsQuery {
+    path: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct BrowseProjectsResponse {
+    path: String,
+    parent: Option<String>,
+    entries: Vec<ProjectRow>,
+    roots: Vec<ProjectRow>,
+    truncated: bool,
+}
+
 pub(crate) async fn serve_cmd(
     local: bool,
     anywhere: bool,
@@ -406,6 +442,8 @@ pub(crate) async fn serve_cmd(
         .context("resolving daemon workspace cwd")?
         .display()
         .to_string();
+    let project_roots =
+        resolve_project_roots(Path::new(&default_cwd), &config.remote.project_roots);
     let base = format!("/{token}");
     // Web Push: best-effort. A missing/broken VAPID key disables push (503 on its routes) but
     // must never take the daemon down with it.
@@ -458,6 +496,7 @@ pub(crate) async fn serve_cmd(
         base: base.clone(),
         mock,
         default_cwd,
+        project_roots,
         push,
         apns,
         voice: crate::voice::VoiceState::new(),
@@ -591,6 +630,8 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
             &format!("{base}/api/sessions"),
             get(list_sessions).post(create_session),
         )
+        .route(&format!("{base}/api/projects"), get(project_catalog))
+        .route(&format!("{base}/api/projects/browse"), get(browse_projects))
         .route(&format!("{base}/api/sessions/past"), get(past_sessions))
         .route(&format!("{base}/api/sessions/tree"), get(session_tree))
         .route(
@@ -748,6 +789,220 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
     }
     sort_session_rows(&mut rows);
     json_response(&rows)
+}
+
+fn expand_project_root(raw: &str) -> PathBuf {
+    if raw == "~" {
+        return std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(raw));
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(raw)
+}
+
+fn resolve_project_roots(default_cwd: &Path, configured: &[String]) -> Vec<PathBuf> {
+    let mut roots = Vec::with_capacity(configured.len() + 1);
+    for candidate in std::iter::once(default_cwd.to_path_buf())
+        .chain(configured.iter().map(|raw| expand_project_root(raw)))
+    {
+        match candidate.canonicalize() {
+            Ok(path) if path.is_dir() => {
+                if !roots.contains(&path) {
+                    roots.push(path);
+                }
+            }
+            Ok(_) => eprintln!(
+                "⚠ remote project root is not a directory: {}",
+                candidate.display()
+            ),
+            Err(error) => eprintln!(
+                "⚠ remote project root is unavailable ({}): {error}",
+                candidate.display()
+            ),
+        }
+    }
+    roots
+}
+
+fn project_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn project_row(path: &Path, last_activity: Option<i64>) -> ProjectRow {
+    ProjectRow {
+        path: path.display().to_string(),
+        name: project_name(path),
+        is_git_repo: path.join(".git").exists(),
+        last_activity,
+    }
+}
+
+fn path_is_browsable(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+fn browse_project_directory(
+    requested: PathBuf,
+    roots: Vec<PathBuf>,
+) -> std::result::Result<BrowseProjectsResponse, String> {
+    let path = requested
+        .canonicalize()
+        .map_err(|error| format!("project directory is unavailable: {error}"))?;
+    if !path.is_dir() {
+        return Err("project path is not a directory".to_string());
+    }
+    if !path_is_browsable(&path, &roots) {
+        return Err("project path is outside the configured browse roots".to_string());
+    }
+
+    let mut entries = std::fs::read_dir(&path)
+        .map_err(|error| format!("project directory cannot be read: {error}"))?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if !file_type.is_dir() {
+                return None;
+            }
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with('.') {
+                return None;
+            }
+            let canonical = entry.path().canonicalize().ok()?;
+            path_is_browsable(&canonical, &roots).then(|| project_row(&canonical, None))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|a, b| {
+        b.is_git_repo
+            .cmp(&a.is_git_repo)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    let truncated = entries.len() > 200;
+    entries.truncate(200);
+    let parent = path
+        .parent()
+        .filter(|parent| path_is_browsable(parent, &roots))
+        .map(|parent| parent.display().to_string());
+    let root_rows = roots.iter().map(|root| project_row(root, None)).collect();
+    Ok(BrowseProjectsResponse {
+        path: path.display().to_string(),
+        parent,
+        entries,
+        roots: root_rows,
+        truncated,
+    })
+}
+
+/// `GET /api/projects` — the zero-input default plus MRU project choices. Worktree sessions are
+/// intentionally excluded: their generated directories are implementation details, not durable
+/// projects a person should be encouraged to pick again.
+async fn project_catalog(State(state): State<Arc<DaemonState>>) -> Response {
+    let mut candidates: Vec<(String, i64)> = state
+        .registry
+        .all()
+        .await
+        .into_iter()
+        .filter(|handle| handle.worktree.is_none())
+        .map(|handle| {
+            (
+                handle.cwd.clone(),
+                handle
+                    .last_activity
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+        })
+        .collect();
+
+    let store = state.store.clone();
+    let past = match tokio::task::spawn_blocking(move || store.list_sessions_for_resume()).await {
+        Ok(Ok(rows)) => rows,
+        Ok(Err(error)) => {
+            return err_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("listing recent projects failed: {error}"),
+            )
+        }
+        Err(error) => {
+            return err_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("listing recent projects task failed: {error}"),
+            )
+        }
+    };
+    candidates.extend(
+        past.into_iter()
+            .filter(|session| session.worktree_path.is_none())
+            .map(|session| (session.cwd, session.last_activity)),
+    );
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
+
+    let default_path = PathBuf::from(&state.default_cwd);
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(default_path.clone());
+    let recent = candidates
+        .into_iter()
+        .filter_map(|(raw, last_activity)| {
+            let path = PathBuf::from(raw).canonicalize().ok()?;
+            if !path.is_dir() || !seen.insert(path.clone()) {
+                return None;
+            }
+            Some(project_row(&path, Some(last_activity)))
+        })
+        .take(8)
+        .collect();
+    let roots = state
+        .project_roots
+        .iter()
+        .map(|root| project_row(root, None))
+        .collect();
+
+    json_response(&ProjectCatalog {
+        default_cwd: state.default_cwd.clone(),
+        recent,
+        roots,
+    })
+}
+
+/// `GET /api/projects/browse?path=` — enumerate only canonical descendants of the daemon's
+/// configured roots. Canonicalizing before the containment check blocks both `..` traversal and
+/// symlink escapes.
+async fn browse_projects(
+    State(state): State<Arc<DaemonState>>,
+    Query(query): Query<BrowseProjectsQuery>,
+) -> Response {
+    let roots = state.project_roots.clone();
+    let requested = query
+        .path
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| roots.first().cloned());
+    let Some(requested) = requested else {
+        return err_response(
+            axum::http::StatusCode::NOT_FOUND,
+            "no project roots are available",
+        );
+    };
+
+    let result =
+        tokio::task::spawn_blocking(move || browse_project_directory(requested, roots)).await;
+
+    match result {
+        Ok(Ok(response)) => json_response(&response),
+        Ok(Err(message)) => err_response(axum::http::StatusCode::BAD_REQUEST, &message),
+        Err(error) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("browsing project directory failed: {error}"),
+        ),
+    }
 }
 
 /// `POST /api/sessions` — create (optionally in a fresh isolated worktree) and start driving.
@@ -2638,6 +2893,93 @@ mod tests {
     use super::*;
 
     #[test]
+    fn project_roots_are_canonical_deduplicated_and_default_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let default = temp.path().join("default");
+        let extra = temp.path().join("extra");
+        std::fs::create_dir_all(&default).unwrap();
+        std::fs::create_dir_all(&extra).unwrap();
+
+        let roots = resolve_project_roots(
+            &default,
+            &[
+                default.join(".").display().to_string(),
+                extra.display().to_string(),
+                extra.join("..").join("extra").display().to_string(),
+            ],
+        );
+
+        assert_eq!(
+            roots,
+            vec![
+                default.canonicalize().unwrap(),
+                extra.canonicalize().unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn project_browser_stays_inside_roots_and_prioritizes_git_projects() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let ordinary = root.path().join("alpha");
+        let git = root.path().join("zeta-git");
+        std::fs::create_dir_all(&ordinary).unwrap();
+        std::fs::create_dir_all(git.join(".git")).unwrap();
+        std::fs::create_dir_all(root.path().join(".hidden")).unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+
+        let result =
+            browse_project_directory(canonical_root.clone(), vec![canonical_root.clone()]).unwrap();
+        assert_eq!(result.path, canonical_root.display().to_string());
+        assert!(
+            result.parent.is_none(),
+            "the browse root cannot navigate upward"
+        );
+        assert_eq!(
+            result
+                .entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["zeta-git", "alpha"]
+        );
+        assert!(result.entries[0].is_git_repo);
+
+        let error = browse_project_directory(outside.path().to_path_buf(), vec![canonical_root])
+            .err()
+            .expect("outside path must be rejected");
+        assert!(
+            error.contains("outside the configured browse roots"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_browser_rejects_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let escape = root.path().join("escape");
+        symlink(outside.path(), &escape).unwrap();
+        let canonical_root = root.path().canonicalize().unwrap();
+
+        let listing =
+            browse_project_directory(canonical_root.clone(), vec![canonical_root.clone()]).unwrap();
+        assert!(listing.entries.iter().all(|entry| entry.name != "escape"));
+
+        let error = browse_project_directory(escape, vec![canonical_root])
+            .err()
+            .expect("symlink escape must be rejected");
+        assert!(
+            error.contains("outside the configured browse roots"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn parse_temper_accepts_every_picker_name_case_insensitively() {
         use forge_types::PermissionMode;
         for (raw, expect) in [
@@ -3113,6 +3455,7 @@ mod tests {
             base: "/tok".into(),
             mock: true,
             default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
@@ -3211,6 +3554,7 @@ mod tests {
             base: "/tok".into(),
             mock: true,
             default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
@@ -3281,6 +3625,7 @@ mod tests {
             base: "/tok".into(),
             mock: true,
             default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
@@ -3336,6 +3681,7 @@ mod tests {
             base: "/tok".into(),
             mock: true,
             default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
@@ -3434,6 +3780,7 @@ mod tests {
             base: "/tok".into(),
             mock: true,
             default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
@@ -3533,6 +3880,7 @@ mod tests {
             base: "/tok".into(),
             mock: true,
             default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
@@ -3607,6 +3955,7 @@ mod tests {
             base: "/tok".into(),
             mock: true,
             default_cwd: ".".into(),
+            project_roots: Vec::new(),
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
@@ -3637,6 +3986,7 @@ mod tests {
             base: "/tok".into(),
             mock: true,
             default_cwd: ".".into(),
+            project_roots: Vec::new(),
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
@@ -3700,6 +4050,7 @@ mod tests {
             base: "/tok".into(),
             mock: true,
             default_cwd: ".".into(),
+            project_roots: Vec::new(),
             push: None,
             apns: Some(apns),
             voice: crate::voice::VoiceState::new(),
@@ -3801,6 +4152,7 @@ mod tests {
             base: "/tok".into(),
             mock: true,
             default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
@@ -3954,6 +4306,7 @@ mod tests {
             base: "/tok".into(),
             mock: true,
             default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
             push: Some(notifier),
             apns: None,
             voice: crate::voice::VoiceState::new(),
@@ -4316,6 +4669,7 @@ mod tests {
             base: "/tok".into(),
             mock: true,
             default_cwd: dir.display().to_string(),
+            project_roots: Vec::new(),
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),

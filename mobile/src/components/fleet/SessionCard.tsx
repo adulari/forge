@@ -42,13 +42,15 @@ export interface SessionCardProps {
   row: SessionRow;
   /** Position in the (server-sorted) list — drives Forgeline stagger, nothing else. */
   index: number;
+  /** Highlights the session currently rendered in an expanded detail pane. */
+  selected?: boolean;
 }
 
 const ACTION_WIDTH = 64;
 const ICON_SIZE = 20;
 const ICON_STROKE = 1.75;
 
-function SessionCardBase({ row, index }: SessionCardProps) {
+function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const tokens = useTokens();
   const toast = useToast();
   const reduced = useReducedMotion();
@@ -219,9 +221,10 @@ function SessionCardBase({ row, index }: SessionCardProps) {
                 onLongPress={openActions}
                 accessibilityRole={Platform.OS === "web" ? undefined : "button"}
                 accessibilityLabel={`${title}, ${state}, ${row.cwd}`}
+                accessibilityState={{ selected }}
               >
                 <View
-                  style={[styles.rowBg, { backgroundColor: row.waiting ? tokens.selection : tokens.bg1 }]}
+                  style={[styles.rowBg, { backgroundColor: row.waiting || selected ? tokens.selection : tokens.bg1 }]}
                 >
                   <HeatEdge state={row.waiting ? "waiting" : row.busy ? "busy" : false} />
                   <View style={styles.inner}>
@@ -365,6 +368,7 @@ export const SessionCard = React.memo(SessionCardBase, (prev, next) => {
   const b = next.row;
   return (
     prev.index === next.index &&
+    prev.selected === next.selected &&
     a.id === b.id &&
     a.title === b.title &&
     a.cwd === b.cwd &&

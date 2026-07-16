@@ -132,6 +132,27 @@ export interface CreateSessionResponse {
   worktree: string | null;
 }
 
+export interface ProjectRow {
+  path: string;
+  name: string;
+  is_git_repo: boolean;
+  last_activity: number | null;
+}
+
+export interface ProjectCatalog {
+  default_cwd: string;
+  recent: ProjectRow[];
+  roots: ProjectRow[];
+}
+
+export interface BrowseProjectsResponse {
+  path: string;
+  parent: string | null;
+  entries: ProjectRow[];
+  roots: ProjectRow[];
+  truncated: boolean;
+}
+
 export interface OkResponse {
   ok: true;
 }
@@ -343,6 +364,14 @@ export function forkSession(baseUrl: string, id: string, body: ForkSessionReques
 
 export function getSessions(baseUrl: string): Promise<SessionRow[]> {
   return request(baseUrl, "/api/sessions");
+}
+
+export function getProjects(baseUrl: string): Promise<ProjectCatalog> {
+  return request(baseUrl, "/api/projects");
+}
+
+export function browseProjects(baseUrl: string, path?: string): Promise<BrowseProjectsResponse> {
+  return request(baseUrl, `/api/projects/browse${qs({ path })}`);
 }
 
 export function createSession(

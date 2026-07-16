@@ -24,7 +24,9 @@ import { AnonymousTelemetry } from "../components/AnonymousTelemetry";
 import { DesktopWindowChrome, DESKTOP_WINDOW_CHROME_HEIGHT } from "../components/DesktopWindowChrome";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Screen } from "../components/ds/Screen";
+import { MasterDetail } from "../components/ds/MasterDetail";
 import { ToastHost } from "../components/ds/ToastHost";
+import { ExpandedFleetRail } from "../components/fleet/DesktopDrillDown";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { AuthProvider, useAuth } from "../lib/auth";
 import { initHaptics } from "../lib/haptics";
@@ -34,6 +36,7 @@ import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { useGlobalShortcuts } from "../lib/shortcuts";
 import { ThemeProvider, useTokens } from "../theme/ThemeProvider";
 import { monoFamily } from "../theme/typography";
+import { useBreakpoint } from "../theme/useBreakpoint";
 
 // Keep the native splash up until pairing state resolves (avoids a flash of the
 // "unpaired" redirect before AuthProvider finishes its one AsyncStorage/secure-store read).
@@ -59,6 +62,7 @@ const asyncStoragePersister = createAsyncStoragePersister({
 function RootNavigator() {
   const { isLoading, isPaired } = useAuth();
   const tokens = useTokens();
+  const { isExpanded } = useBreakpoint();
 
   useEffect(() => {
     if (!isLoading) {
@@ -76,9 +80,8 @@ function RootNavigator() {
     );
   }
 
-  return (
-    <>
-      <Stack
+  const appStack = (
+    <Stack
         screenOptions={{
           headerShown: false,
           contentStyle: { backgroundColor: tokens.bg1 },
@@ -101,7 +104,16 @@ function RootNavigator() {
           // every other screen instead of expo-router's default unthemed white bar).
           options={{ headerShown: false, presentation: "modal" }}
         />
-      </Stack>
+    </Stack>
+  );
+
+  return (
+    <>
+      {isPaired && isExpanded ? (
+        <MasterDetail master={<ExpandedFleetRail />} detail={appStack} />
+      ) : (
+        appStack
+      )}
       {/* Declarative redirect (rather than Stack.Protected) per T2.1 spec: whatever route
           expo-router resolved on cold start/deep-link, bounce to /connect once we know
           there's no active server. */}
