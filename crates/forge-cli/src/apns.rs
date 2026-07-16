@@ -90,7 +90,7 @@ impl ApnsConfig {
 
 /// The default hosted relay (ADR-0012) — used when no local Apple key is configured and the
 /// operator hasn't overridden `FORGE_APNS_RELAY_URL` or opted out entirely.
-const DEFAULT_RELAY_URL: &str = "https://relay.adulari.dev";
+const DEFAULT_RELAY_URL: &str = "https://forge.adulari.dev/relay";
 
 /// Which `ApnsNotifier` construction path `serve_cmd` should take, given the environment. A
 /// pure function (no I/O beyond env var reads) purely so this precedence decision has a unit

@@ -42,14 +42,16 @@ fly secrets set --config crates/forge-relay/fly.toml \
 fly deploy --config crates/forge-relay/fly.toml
 ```
 
-Put a domain in front via Cloudflare (recommended — free-tier CDN/TLS/edge-rate-limiting as
-defense-in-depth on top of this service's own limiter): point `relay.adulari.dev` at the Fly.io
-app's IPv4/IPv6 (`fly ips list`), proxied (orange-cloud) through Cloudflare.
+The production relay is currently self-hosted behind nginx at
+`https://forge.adulari.dev/relay` (clients default to that URL). If deploying to Fly.io
+instead, put a domain in front via Cloudflare (recommended — free-tier CDN/TLS/edge-rate-limiting
+as defense-in-depth on top of this service's own limiter): point the relay hostname at the
+Fly.io app's IPv4/IPv6 (`fly ips list`), proxied (orange-cloud) through Cloudflare.
 
 ## Health check
 
 ```sh
-curl https://relay.adulari.dev/health
+curl https://forge.adulari.dev/relay/health
 # {"ok":true,"daily_sent":0}
 ```
 
