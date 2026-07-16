@@ -8,6 +8,10 @@
 harness that routes every task to the cheapest capable model, fails over across providers when one
 is down, and is *measurably* more reliable than the raw vendor CLIs.**
 
+Use it in the full-screen or inline **terminal UI**, as a one-shot/headless CLI, through the native
+**desktop app**, from the **iOS/Android/Web companion app**, or as an OpenAI-compatible local API.
+Every surface drives the same sessions, mesh, permissions, tools, plans, usage, and audit trail.
+
 [![CI](https://github.com/Adulari/forge/actions/workflows/ci.yml/badge.svg)](https://github.com/Adulari/forge/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Adulari/forge?color=orange)](https://github.com/Adulari/forge/releases)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](./LICENSE)
@@ -285,8 +289,14 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
 - Prompt caching, per-model pricing fetched from OpenRouter, persistent cross-restart usage store
 
 **🤖 Agentic Coding**
-- Objective, tool-grounded completion gate — never reports a phantom success
-- Doom-loop + repeated-failure guards; recovery of tool calls written as prose
+- Explicit turn contracts + objective, tool-grounded completion checks — change requests cannot
+  report success without a real artifact and verification evidence
+- Shared provider-readiness snapshots, bounded retries, doom-loop/repeated-failure guards, recovery
+  of orphaned/prose tool calls, and scoped post-checks that cannot leak across sessions
+- Structured `ask_user` questions and live `update_tasks` plans; decisions and task state survive
+  resume and render consistently in TUI, desktop, mobile, and headless output
+- A staged context pipeline: project guidance, relevant memories, Lattice retrieval, task/goal state,
+  and recent transcript; automatic pruning/compaction keeps long sessions inside the model window
 - Lattice code intelligence: tree-sitter symbol graph (9 languages), blast-radius, call-chains,
   semantic embeddings, auto-injected before each turn
 - Planning mode (`/plan` read-only → `/execute`); Architect mode (strong planner + cheap editor)
@@ -303,12 +313,20 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
 - Assay: parallel adversarial critic crew with ranked, refuter-verified findings + CI gate
 - Cross-session auto-memory: typed durable facts, relevance-ranked recall
 - Vision input (`/image` or paste); `@file` context injection
+- Shell error interception explains failed commands and proposes a repair without hiding the real
+  exit status; `web_fetch` and `web_search` are permission-gated and SSRF-protected
 
 **🔌 Ecosystem / Interop**
 - 17+ providers including Anthropic, OpenAI, Ollama, Groq, Gemini, DeepSeek, OpenRouter, NVIDIA NIM,
   SambaNova, Mistral, Cohere, xAI, Cerebras — any OpenAI-compatible endpoint in one config row
 - Subscription bridges: Claude Code CLI, Codex CLI, Antigravity CLI (free Gemini)
+- Persistent Claude bridge transport keeps re-drives warm; unsupported bridge CLIs fall back to the
+  safe one-process-per-turn path without double-executing tools
+- Headless OAuth support for Codex (paste redirect or RFC 8628 device flow) and xAI OAuth, with
+  state/PKCE verification and secrets stored in the OS keyring
 - MCP client (stdio + HTTP/SSE, OAuth 2.0 + PKCE) **and** MCP server (expose Forge to other tools)
+- `forge api`: an opt-in OpenAI-compatible `/v1/chat/completions` + `/v1/models` server that puts
+  existing SDKs behind the mesh, including streaming, tool calls, JSON schemas, and routing/cost data
 - Skills + commands (Claude Code format compatible); `forge import` / `forge skill export` round-trip
 - `forge migrate` packs a whole install (config + skills + MCP + hooks) into a `.tar.gz` to move to another machine — imported skills auto-normalized (claude/codex → forge paths)
 - `forge skill install owner/repo[@ref]` from GitHub; `forge plugin install/add/list/remove` for plugin/skill-packs
@@ -332,7 +350,12 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
   and actionable web push (approve/deny from the lock screen)
 - Local Whisper voice input in the TUI and companion app, plus desktop voice shortcut support
 - Companion app from the same TypeScript/React Native codebase for iOS, Android, Web, Windows, macOS,
-  and Linux; Tauri desktop builds include signed updates and an in-app update check
+  and Linux; fleet/home/inbox/history, plans/tasks/agents/review, replay/tree, usage, models, hooks,
+  skills, MCP, and configuration are native screens rather than a thin chat wrapper
+- New-session catalog picker ranks healthy models while keeping automatic mesh routing and offline
+  manual IDs; desktop auto-discovers Forge from Cargo/Homebrew/user-local installs and starts it
+- Actionable push notifications, iOS Live Activities/Dynamic Island status, signed desktop updates,
+  production iOS OTA updates, offline prompt queueing, and reconnect replay
 - `--inline` for native scrollback; `--mock` offline deterministic provider (no key needed)
 
 **🔒 Safety**
@@ -341,7 +364,17 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
 - Answering `a` (always) at a prompt persists for the rest of the session — that tool won't prompt again until restart — and is saved to config
 - Diff preview before every write; shadow file snapshots; `/undo` with file restore
 - Per-turn checkpoints; full audit trail of tool calls, routing, and permission outcomes
+- Workspace isolation binds every session, provider bridge, tool, checkpoint, and post-check to the
+  correct repository; optional Landlock confinement prevents writes outside approved roots
 - Unoverridable denylist; opt-in OS shell sandbox (Linux Landlock)
+
+**🕊️ Privacy & anonymous telemetry**
+- No prompts, responses, file contents, paths, repository names, API keys, account IDs, IP-derived
+  location, or stable device/user identifiers are collected
+- Best-effort anonymous counters cover install/launch/activity, platform/version/distribution,
+  success/failure outcomes, coarse latency/cost/token buckets, and public release downloads
+- Telemetry never blocks Forge and is easy to disable everywhere with
+  `[telemetry] enabled = false`; the complete event contract is in [`docs/telemetry.md`](docs/telemetry.md)
 
 > **Why a harness, not just a CLI?** Forge can run the *same* model you'd run with `claude`/`codex`
 > directly — so the harness is the only difference. Real models loop, write tool calls as prose that
@@ -396,6 +429,23 @@ irm https://raw.githubusercontent.com/Adulari/forge/main/install-desktop.ps1 | i
 
 This downloads and silently installs the Windows x86-64 desktop bundle. The CLI installer remains
 available separately via `install.ps1` below.
+
+### 📱 Mobile / web companion
+
+The fastest mobile install is the PWA served by `forge serve`: open or scan its URL, then use
+**Add to Home Screen** on iOS Safari or Android Chrome. The native Expo app adds camera QR pairing,
+secure token storage, attachment and voice capture, actionable push notifications, and iOS
+Live Activities/Dynamic Island. It receives compatible JavaScript fixes through the signed
+production OTA channel without replacing the native binary.
+
+Unsigned iOS sideload builds and their SideStore manifests are published under `mobile-v*` GitHub
+Releases; the stable GitHub Pages source requires the one-time Pages setup documented in the
+sideload guide and is not assumed to be live. Native TestFlight/App Store distribution is managed
+separately because native capabilities and OTA runtime compatibility must stay aligned. Android can
+use the installable PWA today; native store packaging remains separate from the cross-platform app
+source. See
+[`docs/mobile/SIDELOAD.md`](docs/mobile/SIDELOAD.md) and the
+[`App Store checklist`](docs/mobile/APP_STORE_CHECKLIST.md).
 
 ### 🪟 Windows (PowerShell)
 
@@ -516,8 +566,12 @@ viewer (main chat + subagents + critics).
 | `/lattice <symbol>` · `/image <path>` · `/thinking` | Query code intel · attach image · toggle reasoning blocks |
 | `/remember <text>` · `/memories` | Save a memory · list what Forge knows |
 | `/remote [--lan\|--local\|--anywhere]` | Toggle browser remote control |
+| `/self-mcp [enable\|disable]` | Let the session call a sub-Forge through `forge_chat` / `forge_assay` MCP tools |
+| `/voice` | Record and locally transcribe speech into the draft; never auto-sends |
 | `/config` | Dynamic settings editor — fuzzy-search + edit any setting (and API keys) |
 | `/statusline [layout\|toggle <widget>\|reset\|edit]` | Manage the statusline — toggle/reorder widgets, or reset to default |
+| `/copy [N]` · `/clear` | Copy a recent assistant reply · clear the screen without clearing the session |
+| `/help` · `/keys` · `/quit` | Command reference · keyboard reference · exit Forge |
 | `/` | Open command palette (fuzzy-find skills + commands) |
 
 **Keyboard shortcuts:** `SHIFT+TAB`/`Alt+T` cycle temper · `Ctrl+K` mid-turn — abort + retry the same
@@ -535,6 +589,25 @@ forge run "add tests for the payment service"
 forge run --tui "debug the startup crash"      # with live TUI
 forge run --mode bypass "apply all the diffs"  # no prompts
 ```
+
+### Complete command map
+
+`forge <command> --help` is the source of truth for flags. This index covers every shipped
+top-level command so older, less-visible capabilities are still discoverable:
+
+| Area | Commands | Purpose |
+|------|----------|---------|
+| Work | `run`, `chat`, `nl`, `tour` | One turn, interactive TUI, natural-language shell, guided offline demo |
+| Remote/apps | `serve`, `attach`, `service`, `api` | Multi-session daemon, terminal attachment, always-on OS service, OpenAI-compatible mesh API |
+| Sessions | `sessions`, `replay`, `fork`, `tree`, `blame` | Browse, reconstruct/diff/rerun, counterfactual branch, lineage, per-line provenance |
+| Quality | `assay`, `bench` | Adversarial code-quality gate and SWE-bench/harness evaluation runner |
+| Models | `models`, `mesh`, `benchmarks`, `local`, `scoreboard` | Catalog/health, route explanation, capability data, Ollama, learned duel/queue outcomes |
+| Setup | `setup`/`init`, `doctor`, `update`, `auth`, `provider` | Guided setup, diagnosis, self-update, keyring secrets/OAuth, custom endpoints |
+| Knowledge | `memory`, `lattice`, `commands` | Durable project facts, code graph/retrieval, discovered command + skill catalog |
+| Integrations | `mcp`, `self`, `git`, `voice` | MCP client/self-server, model-aware git hooks, local Whisper transcription |
+| Extensions | `skill`, `plugin`, `import`, `migrate` | Author/install packs, import other CLIs, move a Forge installation |
+| Automation | `schedule`, `queue` | Native recurring timers and isolated overnight autopilot |
+| Utility | `help` | Command and flag reference |
 
 ### 📡 `forge serve` — multi-session daemon (remote control HQ)
 
@@ -563,6 +636,42 @@ connection replays exactly the frames you missed.
 
 The in-chat `/remote` still works as the zero-setup single-session mode; `forge serve` is the
 always-on fleet. See `docs/features/remote-control.md`.
+
+Use `forge attach [session-id] [--url <daemon>]` to drive a running daemon session from a terminal, or install
+the daemon as a login service with `forge service install --local` and manage it with
+`forge service status|start|stop|restart|uninstall`.
+
+### 🔌 `forge api` — put any OpenAI client behind the mesh
+
+```bash
+forge api                            # http://127.0.0.1:8787/v1
+forge api --port 9000
+forge api --host 0.0.0.0 --api-key "$FORGE_API_KEY"
+```
+
+Point an OpenAI-compatible SDK at Forge and use model `auto`/`mesh` to classify and route each
+request, or pin an ID returned by `GET /v1/models`. `POST /v1/chat/completions` supports streaming,
+tool calls, temperature/reasoning effort, JSON object/schema output, and includes `x_forge`
+routing/cost metadata. Concrete pins remain within their provider rather than silently switching
+families. This server is opt-in and independent of the companion-app daemon. See
+[`docs/features/embed-ai-backend.md`](docs/features/embed-ai-backend.md).
+
+### 🌳 Sessions, replay, and counterfactual forks
+
+```bash
+forge sessions                              # flat history
+forge replay abc123                         # transcript; --json to export
+forge replay abc123 def456                  # aligned turn-by-turn diff
+forge replay abc123 --rerun                 # rerun with today's mesh
+forge fork abc123 --turn 2 --rerun          # hold prefix fixed, re-ask one turn
+forge fork abc123 --turn 2 --model <id> --rerun
+forge tree                                  # fork families and lineage
+forge blame src/auth.rs --line 42           # prompt/reasoning provenance
+```
+
+Forks are ordinary resumable sessions. They copy conversation state, not historical files; use a
+checkpoint rewind first when filesystem state matters. `replay --rerun` asks whether the whole
+session still behaves the same, while `fork --turn N` isolates one changed variable.
 
 ### 🩺 Setup, health, models, memory
 
@@ -628,6 +737,18 @@ forge schedule remove <id-prefix>    # uninstall the OS timer + delete
 
 Each tick fires `forge run` via a native OS timer — systemd `--user` on Linux, launchd on macOS,
 Task Scheduler on Windows. The headless analog to `/loop`/`/goal`.
+
+For one long-lived remote-control daemon instead of one-shot timers:
+
+```bash
+forge service install --local       # install + start forge serve at login
+forge service status
+forge service restart
+forge service uninstall
+```
+
+The service uses systemd `--user`, launchd, or Windows Task Scheduler, restarts after failure, and
+shares the same exposure/port options as `forge serve`.
 
 ### 🌙 `forge queue` — the overnight autopilot
 
@@ -725,11 +846,14 @@ Layered config — defaults → user → project → env vars:
 
 Key sections: `[mesh]` (routing, budget, conservation, failover), `[permissions]` (per-tool rules),
 `[lattice]` (indexing + embeddings), `[shell]` (sandbox + error interceptor), `[[hooks]]`, `[mcp]`,
-`[git]`, `[assay]`, `[statusline]` (widget layout), `[local]`, and `[project]`.
+`[git]`, `[assay]`, `[statusline]` (widget layout), `[local]`, `[telemetry]`, and `[project]`.
 
 ```toml
 [project]
 auto_initialize = true # model-backed tailored setup for new, uninitialized projects
+
+[telemetry]
+enabled = false        # opt out of anonymous product-count telemetry; no functionality changes
 ```
 
 When enabled, Forge runs the same safe setup as `/init` once per uninitialized project: it inspects
@@ -791,6 +915,11 @@ command = "bash -c 'jq .args <<< $FORGE_TOOL_INPUT >> audit.log'"
 | [**Benchmark results**](./docs/benchmarks/results.md) | Measured SWE-bench numbers, method, and honest caveats |
 | [`docs/benchmarks/swe-bench.md`](./docs/benchmarks/swe-bench.md) | Reproduce the benchmark yourself (`forge bench swe`) |
 | [`docs/architecture/02-architecture.md`](./docs/architecture/02-architecture.md) | System design with C4 diagrams |
+| [OpenAI-compatible API](./docs/features/embed-ai-backend.md) | Use the Forge mesh as an existing app's AI backend |
+| [Remote control + companion apps](./docs/features/remote-control.md) | Daemon, protocol, fleet UI, push, offline/reconnect behavior |
+| [Context pipeline](./docs/features/context-pipeline.md) | Guidance, retrieval, task state, memories, and compaction order |
+| [Anonymous telemetry contract](./docs/telemetry.md) | Exact events, excluded data, opt-out, and PostHog dashboard setup |
+| [Mobile App Store checklist](./docs/mobile/APP_STORE_CHECKLIST.md) | iOS privacy, OTA/runtime, TestFlight, and submission status |
 | [`docs/features/`](./docs/features/) | Per-feature design docs |
 | [`CONTRIBUTING.md`](./CONTRIBUTING.md) | How to build, test, and contribute |
 
@@ -802,17 +931,27 @@ command = "bash -c 'jq .args <<< $FORGE_TOOL_INPUT >> audit.log'"
 crates/
 ├── forge-cli        # binary, clap commands, init wizard, TUI render loop
 ├── forge-core       # agent loop, session lifecycle, permission broker
+├── forge-config     # layered config + OS keyring secret resolution
+├── forge-types      # shared domain types and protocol contracts
 ├── forge-mesh       # model router — classification, ranking, health, failover, budget
 ├── forge-provider   # provider trait — Anthropic, OpenAI, Ollama, CLI bridges
 ├── forge-tools      # tool registry — read, write, edit, shell, search, web
 ├── forge-store      # SQLite persistence — sessions, messages, usage, pricing, tasks
 ├── forge-tui        # ratatui renderer + headless presenter
-├── forge-config     # layered config + OS keyring secret resolution
 ├── forge-index      # Lattice — tree-sitter extraction, graph, embeddings
 ├── forge-lsp        # language server client — live diagnostics fed back after edits
 ├── forge-mcp        # MCP client — rmcp, meta-tools, allowlist, OAuth
 ├── forge-skills     # skills + commands catalog, CC-format reader
-└── forge-types      # shared domain types
+├── forge-voice      # local whisper.cpp audio decoding, recording, transcription
+├── forge-workflow   # sandboxed JavaScript multi-agent workflow runtime
+├── forge-relay      # optional APNs relay for mobile push + Live Activities
+└── xtasks           # release assets, shell completions, man-page generation
+
+mobile/
+├── src              # Expo Router React Native app shared by iOS, Android, Web, and desktop UI
+├── src-tauri        # signed Tauri v2 desktop shell for macOS, Linux, and Windows
+├── modules          # native Expo modules, including iOS Live Activities
+└── targets          # widget / Dynamic Island extension
 ```
 
 ---
