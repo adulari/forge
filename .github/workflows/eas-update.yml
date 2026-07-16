@@ -54,14 +54,13 @@ jobs:
             BEFORE="$(git rev-parse "$AFTER^" 2>/dev/null || printf '%s' "$AFTER")"
           fi
 
-          mapfile -t changed_paths < <(git diff --name-only "$BEFORE" "$AFTER")
           unsafe=()
-          for path in "${changed_paths[@]}"; do
+          while IFS= read -r path; do
             case "$path" in
               mobile/src/*|mobile/assets/*) ;;
               *) unsafe+=("$path") ;;
             esac
-          done
+          done <<< "$(git diff --name-only "$BEFORE" "$AFTER")"
 
           if ((${#unsafe[@]})); then
             echo "safe=false" >> "$GITHUB_OUTPUT"
@@ -86,6 +85,12 @@ jobs:
         if: steps.guard.outputs.safe == 'true'
         run: npm ci
 
+      - name: Require the installed archive runtime
+        if: steps.guard.outputs.safe == 'true'
+        env:
+          RUNTIME: ${{ vars.IOS_OTA_RUNTIME_VERSION }}
+        run: test -n "$RUNTIME" || { echo 'Set the IOS_OTA_RUNTIME_VERSION repository variable from the installed Xcode archive fingerprint.'; exit 1; }
+
       - name: Publish EAS Update (production channel, iOS only)
         if: steps.guard.outputs.safe == 'true'
         run: |
@@ -99,3 +104,4 @@ jobs:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           EXPO_PUBLIC_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
           EXPO_PUBLIC_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
+          EXPO_RUNTIME_VERSION_OVERRIDE: ${{ vars.IOS_OTA_RUNTIME_VERSION }}

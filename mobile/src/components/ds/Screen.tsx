@@ -101,13 +101,18 @@ function ForgeWash({ tokens }: { tokens: ColorTokens }) {
   }
 
   return (
-    <LinearGradient
-      pointerEvents="none"
-      colors={[tokens.accent, tokens.accentTransparent]}
-      start={{ x: 0.5, y: 0 }}
-      end={{ x: 0.5, y: 1 }}
-      style={[styles.wash, { opacity: tokens.forgeWashOpacity }]}
-    />
+    // Native views do not clip absolutely positioned children by default. The wash starts
+    // above its Screen (`top: -80`) to soften the gradient, so without this local clipping
+    // layer it escapes into earlier siblings such as the session header. Web uses an
+    // absolute-fill CSS background and never takes this path.
+    <View pointerEvents="none" style={styles.washClip}>
+      <LinearGradient
+        colors={[tokens.accent, tokens.accentTransparent]}
+        start={{ x: 0.5, y: 0 }}
+        end={{ x: 0.5, y: 1 }}
+        style={[styles.nativeWash, { opacity: tokens.forgeWashOpacity }]}
+      />
+    </View>
   );
 }
 
@@ -118,7 +123,15 @@ const webScrollContain = { overscrollBehavior: "contain" };
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  wash: {
+  washClip: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    overflow: "hidden",
+  },
+  nativeWash: {
     position: "absolute",
     top: -80,
     left: "-20%",
