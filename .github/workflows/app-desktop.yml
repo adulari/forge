@@ -89,7 +89,7 @@ jobs:
           # The runner account deliberately has no passwordless sudo. Keep heavyweight system
           # libraries in the runner image, and fetch the two leaf build tools into RUNNER_TEMP
           # when absent instead of making release builds depend on interactive root access.
-          for package in pkgconf webkit2gtk-4.1 libayatana-appindicator librsvg base-devel curl wget file openssl; do
+          for package in pkgconf webkit2gtk-4.1 libayatana-appindicator librsvg base-devel curl wget file openssl squashfs-tools; do
             pacman -Q "$package" >/dev/null || {
               echo "missing required runner package: $package" >&2
               exit 1
@@ -127,6 +127,54 @@ jobs:
           done
           command -v patchelf >/dev/null
           pkg-config --exists libxdo
+
+          # AppImageLauncher registers a host-wide binfmt handler that breaks linuxdeploy's
+          # nested appimage output plugin on this headless runner (its mounted AppRun vanishes
+          # with exit 127). Pre-extract that plugin and leave a script at the cache path Tauri
+          # expects, so linuxdeploy invokes the extracted AppRun without touching binfmt/FUSE.
+          tauri_cache="${XDG_CACHE_HOME:-$HOME/.cache}/tauri"
+          plugin="$tauri_cache/linuxdeploy-plugin-appimage.AppImage"
+          plugin_root="$tauri_cache/linuxdeploy-plugin-appimage-root"
+          plugin_download="$RUNNER_TEMP/linuxdeploy-plugin-appimage.AppImage"
+          mkdir -p "$tauri_cache"
+          curl --fail --silent --show-error --location \
+            'https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage' \
+            --output "$plugin_download"
+          mapfile -t squashfs_offsets < <(python3 - "$plugin_download" <<'PY'
+          from pathlib import Path
+          import sys
+
+          data = Path(sys.argv[1]).read_bytes()
+          start = 0
+          while (offset := data.find(b"hsqs", start)) >= 0:
+              print(offset)
+              start = offset + 1
+          PY
+          )
+          squashfs_offset=""
+          for candidate in "${squashfs_offsets[@]}"; do
+            if unsquashfs -s -o "$candidate" "$plugin_download" >/dev/null 2>&1; then
+              squashfs_offset="$candidate"
+              break
+            fi
+          done
+          [[ -n "$squashfs_offset" ]] || {
+            echo 'could not locate appimage plugin squashfs payload' >&2
+            exit 1
+          }
+          rm -rf "$plugin_root"
+          unsquashfs -q -f -d "$plugin_root" -o "$squashfs_offset" "$plugin_download"
+          cat > "$plugin" <<'SH'
+          #!/usr/bin/env bash
+          exec "${FORGE_LINUXDEPLOY_PLUGIN_ROOT:?}/AppRun" "$@"
+          SH
+          chmod 0755 "$plugin"
+          echo "FORGE_LINUXDEPLOY_PLUGIN_ROOT=$plugin_root" >> "$GITHUB_ENV"
+
+          # linuxdeploy bundles an older strip that cannot parse Arch's modern .relr.dyn
+          # sections. Forge itself is already stripped; dependency stripping is optional.
+          echo 'NO_STRIP=1' >> "$GITHUB_ENV"
+          FORGE_LINUXDEPLOY_PLUGIN_ROOT="$plugin_root" "$plugin" --plugin-api-version >/dev/null
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
