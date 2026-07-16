@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Live E2E: prove the one-liner installer can be re-run to update/reinstall on any platform WITHOUT
 # resetting the user's config, sessions, or API keys. Seeds a fake XDG config+data tree, runs
-# install.sh twice into an isolated prefix, and asserts the seeded files are byte-for-byte untouched.
+# install.sh twice into an isolated prefix, asserts the seeded files are byte-for-byte untouched,
+# and proves a headless install does not accidentally opt into the desktop download.
 #
 #   scripts/test-installer-config-safe.sh            # uses latest release
 #   FORGE_VERSION=v0.3.0 scripts/test-installer-config-safe.sh
@@ -49,4 +50,5 @@ fail=0
 [ "$before_cfg" = "$after_cfg" ] && echo "✓ config.toml preserved" || { echo "✗ config.toml CHANGED"; fail=1; }
 [ "$before_key" = "$after_key" ] && echo "✓ secret.key preserved" || { echo "✗ secret.key CHANGED"; fail=1; }
 [ "$before_db"  = "$after_db"  ] && echo "✓ forge.db preserved"   || { echo "✗ forge.db CHANGED"; fail=1; }
+[ ! -e "$BIN/forge-desktop" ] && echo "✓ headless install skipped desktop" || { echo "✗ headless install unexpectedly installed desktop"; fail=1; }
 exit "$fail"

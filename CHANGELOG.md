@@ -6,6 +6,40 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.6.5] - 2026-07-16
+
+Release, remote-session, and shared-app hardening from full Serve Anywhere and Claude/Sonnet
+dogfooding.
+
+### Added
+- **Project-first session creation** (#799): new sessions default to the daemon directory, remember
+  recent projects, support a safe server-side directory browser and native desktop folder picker,
+  and keep the Fleet rail beside chats on expanded desktop/web layouts.
+- **Android distribution** (#797): native APK/AAB builds, tagged artifacts, and optional Google
+  Play internal-track submission complete the shared app's Android release path.
+- **Release upgrade E2E**: the release gate now installs the previous public binary in an isolated
+  home, creates real history and daemon sessions, upgrades and resumes them, rolls back, and checks
+  config, secret, telemetry, and SQLite integrity before a tag can ship.
+
+### Fixed
+- **Serve Anywhere correctness** (#796): workflow/subagent workspace ownership, empty-response
+  recovery, ordered reconnect output, mutating-turn re-drives, saved-workflow replay, FIFO queueing,
+  interruption, `/loop`, and `/goal` persistence are reliable across disconnects and restarts.
+- **Claude/Sonnet bridge reliability** (#801): Forge waits for the persistent control protocol and
+  MCP readiness, uses each session's real workspace and isolated store, merges partial task updates,
+  bounds keyring calls, and avoids heavyweight bridge processes for optional post-turn side calls.
+- **Shared app and protocol robustness** (#797-#800): transactional desktop publication, protocol-v8
+  conformance, WebSocket fleet invalidation, offline FIFO reconciliation, hardened links/CSP,
+  accessible navigation, stable session-picker states, valid History DOM, and deduplicated slash
+  commands eliminate the latest mobile, desktop, and web regressions.
+- **Package-manager publication**: Homebrew, AUR, and Scoop manifests now update together from the
+  just-published release checksums; the release bot can create its synchronization PR instead of
+  silently leaving placeholder hashes or stale versions behind.
+- **Release archive permissions**: Linux/macOS tarballs restore Forge's executable mode after the
+  artifact handoff, so manual extraction works without an extra `chmod`.
+- **Headless installer behavior**: a detached `/dev/tty` no longer turns a failed desktop-app prompt
+  into an implicit “yes”; non-interactive installs remain CLI-only unless `FORGE_DESKTOP=1` is set.
+
 ## [2.6.4] - 2026-07-16
 
 Core reliability and app activation improvements across Forge TUI, desktop, and mobile.
@@ -2573,7 +2607,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.6.4...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.6.5...HEAD
+[2.6.5]: https://github.com/Adulari/forge/compare/v2.6.4...v2.6.5
 [2.6.4]: https://github.com/Adulari/forge/compare/v2.6.3...v2.6.4
 [2.6.3]: https://github.com/Adulari/forge/compare/v2.6.2...v2.6.3
 [2.5.8]: https://github.com/Adulari/forge/compare/v2.5.7...v2.5.8

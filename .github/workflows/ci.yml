@@ -10,9 +10,8 @@ on:
   # release.yml can manually dispatch a real "CI" run against its bot-opened brew-formula PR
   # branch — that PR's own `pull_request` event never fires one, since it's opened with GITHUB_TOKEN.
   workflow_dispatch:
-  # macOS/Windows legs of `test` only run off-PR (cost gate, see below) — this keeps their
-  # coverage from going stale between PRs. Staggered an hour after e2e.yml/security.yml's
-  # Monday cron so the three weekly workflows don't all hit the runner at once.
+  # Weekly full verification stays on the self-hosted Arch Linux runner. Cross-platform release
+  # compilation remains in the tag workflows, where those platform-native runners are required.
   schedule:
     - cron: "0 8 * * 1"
 
@@ -50,11 +49,8 @@ jobs:
       # `--locked` (cost us a failed v0.4.42 release). Catch the drift here, on every PR.
       - run: cargo clippy --locked --all-targets --all-features
 
-  # PR path: only the (now self-hosted) Linux leg runs, to keep macOS/Windows minutes off the
-  # per-PR cost. Full 3-OS coverage still runs on workflow_dispatch/schedule via `test-full` below.
   test:
-    name: test (ubuntu-latest)
-    if: github.event_name == 'pull_request'
+    name: test (archlinux)
     # 'heavy' = archlinux-1 only: workspace-wide compiles are the box's big memory consumers —
     # serializing them on one 12G-capped runner keeps concurrent PRs from OOMing the host
     # (30G machine; three 8G runners compiling at once repeatedly killed all runner services).
@@ -62,33 +58,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all --all-features
-      # No release build in CI: tests already compile the whole workspace (debug), and the
-      # `lto = "thin"` release profile is slow to link. Release binaries are built on demand
-      # (tags / manual), not on every PR.
-
-  # Off-PR path: full 3-OS matrix, so macOS/Windows coverage doesn't go stale between PRs.
-  test-full:
-    name: test (${{ matrix.label }})
-    if: github.event_name != 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: [self-hosted, linux, x64, heavy]
-            label: ubuntu-latest
-          - os: macos-latest
-            label: macos-latest
-          - os: windows-latest
-            label: windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      # macOS/Windows legs are ephemeral GitHub-hosted runners — no warm local target/, so the
-      # cache action earns its keep there. The self-hosted Linux leg skips it (see clippy above).
-      - if: matrix.label != 'ubuntu-latest'
-        uses: Swatinem/rust-cache@v2
       - run: cargo test --all --all-features
 
   # Release-profile + `--locked` smoke on one platform. The release workflow builds with
@@ -102,9 +71,13 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release --locked --bin forge
+      - name: Verify upgrade, reconnect, and rollback from latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/release-upgrade-e2e.sh "" target/release/forge
 
   CI:
-    needs: [fmt, clippy, test, test-full, release-build]
+    needs: [fmt, clippy, test, release-build]
     if: always()
     runs-on: [self-hosted, linux, x64]
     steps:
