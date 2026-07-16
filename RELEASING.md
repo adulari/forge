@@ -82,6 +82,9 @@ gh pr list --state all --head dist/vX.Y.Z
 
 If manifest automation needs manual recovery, run
 `scripts/update-package-manifests.sh X.Y.Z`, then open one PR with its three changed manifests.
+If the desktop matrix needs repair after a tag was created, merge the workflow fix and run
+`gh workflow run app-desktop.yml --ref main -f release_tag=vX.Y.Z`; this rebuilds from `main` but
+stamps and transactionally publishes to the existing release tag.
 
 ## 7. Verify
 

@@ -23,14 +23,67 @@ BASE_TAG="${1:-}"
   exit 2
 }
 
-if [[ -z "$BASE_TAG" ]]; then
+latest_public_release_tag() {
+  local tag=""
+
   if command -v gh >/dev/null 2>&1; then
-    BASE_TAG="$(gh release view --repo Adulari/forge --json tagName --jq .tagName)"
-  else
-    BASE_TAG="$(curl --fail --silent --show-error --location --output /dev/null \
-      --write-out '%{url_effective}' https://github.com/Adulari/forge/releases/latest)"
-    BASE_TAG="${BASE_TAG##*/}"
+    tag="$(gh release view --repo Adulari/forge --json tagName --jq .tagName 2>/dev/null || true)"
+    if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      printf '%s\n' "$tag"
+      return 0
+    fi
+    echo "release-upgrade-e2e: authenticated release lookup failed; trying public API" >&2
   fi
+
+  tag="$(
+    curl --fail --silent --show-error --location \
+      --header 'Accept: application/vnd.github+json' \
+      --header 'User-Agent: forge-release-upgrade-e2e' \
+      https://api.github.com/repos/Adulari/forge/releases/latest \
+      | python3 -c 'import json, sys; print(json.load(sys.stdin).get("tag_name", ""))'
+  )" || return 1
+  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  printf '%s\n' "$tag"
+}
+
+public_release_tags() {
+  local tags=""
+
+  if command -v gh >/dev/null 2>&1; then
+    tags="$(
+      gh release list --repo Adulari/forge --limit 50 --json tagName,isDraft,isPrerelease \
+        --jq '.[] | select(.isDraft == false and .isPrerelease == false) | .tagName' \
+        2>/dev/null || true
+    )"
+    if grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' <<<"$tags"; then
+      grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<<"$tags"
+      return 0
+    fi
+    echo "release-upgrade-e2e: authenticated release list failed; trying public API" >&2
+  fi
+
+  tags="$(
+    curl --fail --silent --show-error --location \
+      --header 'Accept: application/vnd.github+json' \
+      --header 'User-Agent: forge-release-upgrade-e2e' \
+      'https://api.github.com/repos/Adulari/forge/releases?per_page=50' \
+      | python3 -c '
+import json, re, sys
+for release in json.load(sys.stdin):
+    tag = release.get("tag_name", "")
+    if not release.get("draft") and not release.get("prerelease") and re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+        print(tag)
+'
+  )" || return 1
+  [[ -n "$tags" ]] || return 1
+  printf '%s\n' "$tags"
+}
+
+if [[ -z "$BASE_TAG" ]]; then
+  BASE_TAG="$(latest_public_release_tag)" || {
+    echo "release-upgrade-e2e: could not discover the latest public release" >&2
+    exit 1
+  }
 fi
 [[ "$BASE_TAG" == v* ]] || BASE_TAG="v$BASE_TAG"
 
@@ -178,37 +231,35 @@ SECRET_SHA="$(sha256sum "$CFG/secret.key" | awk '{print $1}')"
 # release -> current public base. The unreleased candidate itself is swapped in below because it
 # does not have a downloadable GitHub asset yet.
 SELF_UPDATE_VERIFIED=0
-if command -v gh >/dev/null 2>&1; then
-  mapfile -t RELEASE_TAGS < <(
-    gh release list --repo Adulari/forge --limit 50 --json tagName,isDraft,isPrerelease \
-      --jq '.[] | select(.isDraft == false and .isPrerelease == false) | .tagName' \
-      | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'
-  )
-  PREVIOUS_TAG=""
-  for ((i = 0; i + 1 < ${#RELEASE_TAGS[@]}; i++)); do
-    if [[ "${RELEASE_TAGS[$i]}" == "$BASE_TAG" ]]; then
-      PREVIOUS_TAG="${RELEASE_TAGS[$((i + 1))]}"
-      break
-    fi
-  done
-  if [[ -n "$PREVIOUS_TAG" ]]; then
-    PREVIOUS_DIR="$DOWNLOAD/previous"
-    mkdir -p "$PREVIOUS_DIR"
-    curl --fail --silent --show-error --location \
-      "https://github.com/Adulari/forge/releases/download/$PREVIOUS_TAG/$ASSET" \
-      --output "$PREVIOUS_DIR/$ASSET"
-    curl --fail --silent --show-error --location \
-      "https://github.com/Adulari/forge/releases/download/$PREVIOUS_TAG/checksums.txt" \
-      --output "$PREVIOUS_DIR/checksums.txt"
-    PREVIOUS_SHA="$(awk -v asset="$ASSET" '$2 == asset { print $1 }' "$PREVIOUS_DIR/checksums.txt")"
-    [[ -n "$PREVIOUS_SHA" ]]
-    printf '%s  %s\n' "$PREVIOUS_SHA" "$PREVIOUS_DIR/$ASSET" | sha256sum --check --status
-    tar -xzf "$PREVIOUS_DIR/$ASSET" -C "$PREVIOUS_DIR"
-    install -m 0755 "$PREVIOUS_DIR/forge-x86_64-unknown-linux-gnu/forge" "$BIN/self-update-forge"
-    forge_env "$BIN/self-update-forge" update > "$ROOT/self-update.log" 2>&1
-    [[ "$(forge_env "$BIN/self-update-forge" --version | awk '{print $NF}')" == "${BASE_TAG#v}" ]]
-    SELF_UPDATE_VERIFIED=1
+RELEASE_TAGS_OUTPUT="$(public_release_tags)" || {
+  echo "release-upgrade-e2e: could not discover public releases" >&2
+  exit 1
+}
+mapfile -t RELEASE_TAGS <<<"$RELEASE_TAGS_OUTPUT"
+PREVIOUS_TAG=""
+for ((i = 0; i + 1 < ${#RELEASE_TAGS[@]}; i++)); do
+  if [[ "${RELEASE_TAGS[$i]}" == "$BASE_TAG" ]]; then
+    PREVIOUS_TAG="${RELEASE_TAGS[$((i + 1))]}"
+    break
   fi
+done
+if [[ -n "$PREVIOUS_TAG" ]]; then
+  PREVIOUS_DIR="$DOWNLOAD/previous"
+  mkdir -p "$PREVIOUS_DIR"
+  curl --fail --silent --show-error --location \
+    "https://github.com/Adulari/forge/releases/download/$PREVIOUS_TAG/$ASSET" \
+    --output "$PREVIOUS_DIR/$ASSET"
+  curl --fail --silent --show-error --location \
+    "https://github.com/Adulari/forge/releases/download/$PREVIOUS_TAG/checksums.txt" \
+    --output "$PREVIOUS_DIR/checksums.txt"
+  PREVIOUS_SHA="$(awk -v asset="$ASSET" '$2 == asset { print $1 }' "$PREVIOUS_DIR/checksums.txt")"
+  [[ -n "$PREVIOUS_SHA" ]]
+  printf '%s  %s\n' "$PREVIOUS_SHA" "$PREVIOUS_DIR/$ASSET" | sha256sum --check --status
+  tar -xzf "$PREVIOUS_DIR/$ASSET" -C "$PREVIOUS_DIR"
+  install -m 0755 "$PREVIOUS_DIR/forge-x86_64-unknown-linux-gnu/forge" "$BIN/self-update-forge"
+  forge_env "$BIN/self-update-forge" update > "$ROOT/self-update.log" 2>&1
+  [[ "$(forge_env "$BIN/self-update-forge" --version | awk '{print $NF}')" == "${BASE_TAG#v}" ]]
+  SELF_UPDATE_VERIFIED=1
 fi
 
 install -m 0755 "$OLD" "$BIN/forge"
