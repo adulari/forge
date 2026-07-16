@@ -25,7 +25,10 @@ All in `forge-core` `run_model_loop` (the `is_cli_bridge` arm) + the `cli_provid
 1. **Task-driven re-drive.** While tracked tasks are unfinished, Forge re-invokes the bridge with a
    continue instruction (a clean new process — exactly what a user typing `continue` does). Tasks are
    reloaded from the store each time (the bridge's `update_tasks` runs in the separate `mcp-serve`
-   process). Bounded by `MAX_BRIDGE_CONTINUE_NUDGES`.
+   process). Bounded by `MAX_BRIDGE_CONTINUE_NUDGES`. Although the tool contract asks for the full
+   ordered list, Forge defensively merges a shorter status-only payload when every supplied title
+   matches the existing plan; a bridge cannot accidentally erase the unfinished tail by updating
+   only the item it just completed. An explicit empty list still clears the tracker.
 2. **Progress gate (anti-spiral).** A re-run must make *progress* — start at least one tool
    (counted in the stream sink via `tools_ran`) **or** close a task — or the turn **HALTS loudly**
    instead of re-driving. A bridge that just re-narrates without acting therefore cannot loop. This is
@@ -53,6 +56,11 @@ All in `forge-core` `run_model_loop` (the `is_cli_bridge` arm) + the `cli_provid
    artifacts)" note instead of UNVERIFIED.
 5. **Preamble mandate** (`HARNESS_TOOL_PREAMBLE`): complete the whole task and **WAIT** for any async
    job you launch (release build, CI) — "launched" ≠ "done".
+6. **No post-completion bridge launches.** Recap, next-prompt suggestion, memory capture, and shell
+   diagnosis are optional side work. Forge never starts another full Claude/Codex CLI agent + MCP
+   handshake for them after the primary bridge turn. A changed, fully-completed task list gets a
+   deterministic Forge-grounded recap; other optional calls use a lightweight routed model when one
+   is available or are skipped. This keeps `forge run` from lingering after the real work is done.
 
 ### The invariant
 
@@ -97,17 +105,18 @@ log**. Each scenario forces a different bad path:
 | Case | Forced condition | What it proves |
 | --- | --- | --- |
 | **V** verify-confirms | normal multi-file plan | verification gate fires + confirms with a real check |
-| **A** async-not-done | launch a job that writes a file after ~7s | Forge doesn't finish before the async result exists (the original bug) |
+| **A** async-not-done | an external harness-owned job writes after ~7s | Forge doesn't finish before the async result exists (the original bug) |
 | **D** planted-defect | pre-seed a **WRONG** file | verification reads it, catches it, fixes it |
 | **R** re-drive | "create ONE file per turn, then stop" | Forge re-drives (`continuing the plan`) to completion |
 | **P** no-phantom | model told to mark done without doing the work | Forge never silently succeeds (file made / flagged / model refuses) |
 
 Run it:
 ```bash
-cargo build --release -p forge-cli
+cargo build --release -p forge-agent
 scripts/bridge-e2e.sh                 # claude-cli::haiku (cheapest)
 scripts/bridge-e2e.sh --both          # also codex-cli::gpt-5.4-mini
 BRIDGE_MODEL=codex-cli::gpt-5.4-mini scripts/bridge-e2e.sh
+BRIDGE_MODEL=claude-cli::sonnet scripts/bridge-e2e.sh
 ```
 
 ### 3c. Principles that make the live tests trustworthy
@@ -125,6 +134,14 @@ BRIDGE_MODEL=codex-cli::gpt-5.4-mini scripts/bridge-e2e.sh
   `bridge_completion_flagged_unverified_when_model_never_inspects`.
 - **`--mode bypass`, isolated workdir, real subscription bridge.** No mock can substitute — the failure
   is in the subprocess lifecycle, so the test must spawn the real CLI.
+- **Isolated store.** The harness sets `FORGE_DB` to its temporary root and the bridge forwards that
+  override to `mcp-serve`. Tests therefore cannot contend with or mutate the operator's live history,
+  model benches, task lists, or active Serve Anywhere daemon.
+- **Async case A is genuinely external.** Forge's shell intentionally kills background descendants
+  when the tool call exits, even if they use `setsid`/`nohup`; leaked jobs must not retain processes
+  or output pipes. The harness therefore owns the delayed writer as a sibling of Forge (modeling an
+  external CI/release service), while the bridge polls it with a bounded 15-second budget and reads
+  the resulting file before reporting completion.
 - **Cheapest model only.** haiku / `*-mini`. The scenarios are tiny; cost is subscription, not API.
 
 ### What "done" looks like

@@ -671,6 +671,9 @@ pub struct CheckpointContext {
     pub seq: i64,
     /// Absolute checkpoint root the child snapshots into (`FORGE_CHECKPOINT_ROOT`).
     pub root: String,
+    /// Absolute workspace cwd for this session. CLI bridges and their `forge mcp-serve` children
+    /// must run here rather than inheriting a multi-session daemon's process cwd.
+    pub workspace: String,
     /// Parent's live permission temper key (`FORGE_PERMISSION_MODE`).
     pub mode: String,
 }

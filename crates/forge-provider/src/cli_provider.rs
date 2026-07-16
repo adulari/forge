@@ -530,6 +530,8 @@ fn bridge_permission_mode(raw: &str) -> PermissionMode {
 /// the parent threaded through (so the parent never mutates its process-global env); when absent
 /// (the base `complete` path) they fall back to this process's inherited env for legacy callers.
 /// `FORGE_SUBAGENT_DEPTH` is an independent recursion bound that is always legitimately inherited.
+/// `FORGE_DB` must also cross this boundary when set: otherwise a bridge parent using an isolated
+/// or operator-selected store persists tasks in one database while its MCP child writes another.
 /// Key names mirror `forge_core::snapshot::ENV_*` (stable cross-process contract strings;
 /// forge-provider can't depend on that crate).
 fn bridge_mcp_env(
@@ -566,8 +568,10 @@ fn bridge_mcp_env(
             }
         }
     }
-    if let Ok(val) = std::env::var("FORGE_SUBAGENT_DEPTH") {
-        env.push(("FORGE_SUBAGENT_DEPTH".to_string(), val));
+    for key in ["FORGE_SUBAGENT_DEPTH", "FORGE_DB"] {
+        if let Ok(val) = std::env::var(key) {
+            env.push((key.to_string(), val));
+        }
     }
     env
 }
@@ -1627,6 +1631,9 @@ impl CliProvider {
         );
 
         let mut cmd = bridge_command(&self.binary, &args);
+        if let Some(context) = checkpoint {
+            cmd.current_dir(&context.workspace);
+        }
         // The prompt is written to stdin (not argv) to avoid `ARG_MAX` on big transcripts.
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -2165,6 +2172,125 @@ struct LiveSession {
 }
 
 impl LiveSession {
+    async fn write_control_request(
+        &mut self,
+        request_id: &str,
+        request: Value,
+    ) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let line = serde_json::json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": request,
+        })
+        .to_string();
+        self.stdin.write_all(line.as_bytes()).await?;
+        self.stdin.write_all(b"\n").await?;
+        self.stdin.flush().await
+    }
+
+    async fn read_control_response(
+        &mut self,
+        request_id: &str,
+        deadline: tokio::time::Instant,
+    ) -> std::io::Result<Value> {
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Claude control request timed out during Forge MCP startup",
+                ));
+            }
+            let line = tokio::time::timeout(remaining, self.lines.next_line())
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Claude control request timed out during Forge MCP startup",
+                    )
+                })??
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "Claude exited before connecting the Forge MCP server",
+                    )
+                })?;
+
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if event.get("type").and_then(Value::as_str) != Some("control_response")
+                || event
+                    .get("response")
+                    .and_then(|response| response.get("request_id"))
+                    .and_then(Value::as_str)
+                    != Some(request_id)
+            {
+                continue;
+            }
+            let response = &event["response"];
+            if response.get("subtype").and_then(Value::as_str) != Some("success") {
+                return Err(std::io::Error::other(format!(
+                    "Claude rejected Forge MCP startup control request: {}",
+                    response
+                )));
+            }
+            return Ok(response.get("response").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    /// Initialize Claude's streaming control protocol and poll its MCP status before sending the
+    /// first user turn. Claude Code 2.1.210 may otherwise start Sonnet while Forge is still
+    /// `pending`, leaving the model with no tools and turning tool calls into inert prose.
+    async fn initialize_forge_mcp(&mut self, timeout: Duration) -> std::io::Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        self.write_control_request(
+            "forge-init",
+            serde_json::json!({"subtype": "initialize", "hooks": {}, "sdkMcpServers": []}),
+        )
+        .await?;
+        self.read_control_response("forge-init", deadline).await?;
+
+        let mut attempt = 0u32;
+        loop {
+            let request_id = format!("forge-mcp-status-{attempt}");
+            self.write_control_request(&request_id, serde_json::json!({"subtype": "mcp_status"}))
+                .await?;
+            let response = self.read_control_response(&request_id, deadline).await?;
+            let Some(server) = response
+                .get("mcpServers")
+                .and_then(Value::as_array)
+                .and_then(|servers| {
+                    servers
+                        .iter()
+                        .find(|server| server.get("name").and_then(Value::as_str) == Some("forge"))
+                })
+            else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Claude initialized without the Forge MCP server",
+                ));
+            };
+            match server
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+            {
+                "connected" => return Ok(()),
+                "pending" => {
+                    attempt = attempt.saturating_add(1);
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                other => {
+                    return Err(std::io::Error::other(format!(
+                        "Claude could not connect the Forge MCP server (status: {other})"
+                    )));
+                }
+            }
+        }
+    }
+
     /// Write one user turn to the live process's stdin (kept open afterwards).
     async fn write_user(&mut self, payload: &str) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
@@ -2351,6 +2477,9 @@ impl CliProvider {
         args.push("stream-json".into());
 
         let mut cmd = bridge_command(&self.binary, &args);
+        if let Some(context) = checkpoint {
+            cmd.current_dir(&context.workspace);
+        }
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -2449,6 +2578,21 @@ impl CliProvider {
         };
 
         let first_turn = sess.sent == 0;
+        if first_turn && self.harness {
+            // Bound startup independently from a potentially long model turn. Respect a shorter
+            // provider timeout in tests/operator overrides, but never spend more than 30 seconds
+            // waiting for a local stdio MCP process to initialize.
+            let startup_timeout = self.timeout.min(Duration::from_secs(30));
+            if let Err(e) = sess.initialize_forge_mcp(startup_timeout).await {
+                if let Some(old) = guard.take() {
+                    old.teardown().await;
+                }
+                return Err(PersistentTurn::Failed(ProviderError::Unavailable(format!(
+                    "`{}` Forge MCP startup failed: {e}",
+                    self.binary
+                ))));
+            }
+        }
         // Mark mid-turn BEFORE the writes/reads that can span minutes, so a cancelled caller leaves
         // this flag set and the next call refuses to reuse the session (see `turn_in_flight`).
         sess.turn_in_flight = true;
@@ -3429,6 +3573,7 @@ mod tests {
             session: "full-session".to_string(),
             seq: 7,
             root: "/tmp/checkpoints".to_string(),
+            workspace: "/tmp/workspace".to_string(),
             mode: PermissionMode::Bypass.label().to_string(),
         };
         let env = bridge_mcp_env(None, Some(&ctx));
@@ -3460,6 +3605,7 @@ mod tests {
             session: "explicit-sess".to_string(),
             seq: 42,
             root: "/abs/checkpoints".to_string(),
+            workspace: "/abs/workspace".to_string(),
             mode: "accept-edits".to_string(),
         };
         let sink = std::path::PathBuf::from("/tmp/sink.jsonl");
@@ -3490,6 +3636,7 @@ mod tests {
                 session: "s".to_string(),
                 seq: 1,
                 root: "/tmp/checkpoints".to_string(),
+                workspace: "/tmp/workspace".to_string(),
                 mode: mode.to_string(),
             };
             let env = bridge_mcp_env(None, Some(&ctx));
@@ -3507,6 +3654,7 @@ mod tests {
             session: "s".to_string(),
             seq: 1,
             root: "/tmp/checkpoints".to_string(),
+            workspace: "/tmp/workspace".to_string(),
             mode: "yolo".to_string(),
         };
         let env = bridge_mcp_env(None, Some(&invalid));
@@ -4100,7 +4248,9 @@ mod tests {
 {"type":"assistant","message":{"content":[{"type":"text","text":"the answer"}]}}
 {"type":"result","is_error":false,"result":"the answer","usage":{"input_tokens":5,"output_tokens":3}}"#,
         );
-        let provider = CliProvider::claude_code().with_binary(&fake);
+        let provider = CliProvider::claude_code()
+            .with_persistent(false)
+            .with_binary(&fake);
         let mut events: Vec<StreamEvent> = Vec::new();
         let mut on_event = |ev: StreamEvent| events.push(ev);
         let res = provider
@@ -4138,7 +4288,9 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Let me read them.\n<function_calls>\n<invoke name=\"mcp__forge__read_file\">\n<parameter name=\"paths\">[\"a.py\",\"b.py\"]</parameter>\n</invoke>\n</function_calls>"}]}}
 {"type":"result","is_error":false,"result":"","usage":{"input_tokens":5,"output_tokens":3}}"#,
         );
-        let provider = CliProvider::claude_code().with_binary(&fake);
+        let provider = CliProvider::claude_code()
+            .with_persistent(false)
+            .with_binary(&fake);
         let mut on_event = |_: StreamEvent| {};
         let res = provider
             .complete(
@@ -4309,6 +4461,92 @@ mod tests {
             }
         }
         path.to_string_lossy().into_owned()
+    }
+
+    /// A fake persistent Claude process that exposes the startup race from the real CLI: if Forge
+    /// writes the first user turn before completing `initialize` + `mcp_status`, the turn completes
+    /// without tools. Once Forge performs the control handshake, the same process returns `ready`.
+    #[cfg(unix)]
+    fn make_fake_delayed_mcp_cli() -> String {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("forge-fake-mcp-race-{}-{n}", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "#!/usr/bin/env bash").unwrap();
+        writeln!(f, "IFS= read -r line").unwrap();
+        writeln!(
+            f,
+            "if [[ \"$line\" != *'\"subtype\":\"initialize\"'* ]]; then"
+        )
+        .unwrap();
+        let prompt_before_ready = r#"  printf '{"type":"result","is_error":false,"result":"prompt-before-ready","usage":{"input_tokens":1,"output_tokens":1}}\n'"#;
+        writeln!(f, "{prompt_before_ready}").unwrap();
+        writeln!(f, "  exit 0").unwrap();
+        writeln!(f, "fi").unwrap();
+        let init_response = r#"printf '{"type":"control_response","response":{"subtype":"success","request_id":"forge-init","response":{}}}\n'"#;
+        writeln!(f, "{init_response}").unwrap();
+        writeln!(f, "IFS= read -r line").unwrap();
+        let pending_response = r#"printf '{"type":"control_response","response":{"subtype":"success","request_id":"forge-mcp-status-0","response":{"mcpServers":[{"name":"forge","status":"pending"}]}}}\n'"#;
+        writeln!(f, "{pending_response}").unwrap();
+        writeln!(f, "IFS= read -r line").unwrap();
+        let connected_response = r#"printf '{"type":"control_response","response":{"subtype":"success","request_id":"forge-mcp-status-1","response":{"mcpServers":[{"name":"forge","status":"connected"}]}}}\n'"#;
+        writeln!(f, "{connected_response}").unwrap();
+        writeln!(f, "IFS= read -r line").unwrap();
+        let ready_response = r#"printf '{"type":"result","is_error":false,"result":"ready:%s","usage":{"input_tokens":1,"output_tokens":1}}\n' "$PWD""#;
+        writeln!(f, "{ready_response}").unwrap();
+        f.sync_all().unwrap();
+        drop(f);
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn persistent_harness_waits_for_forge_mcp_before_first_prompt() {
+        let fake = make_fake_delayed_mcp_cli();
+        let workspace = tempfile::tempdir().expect("session workspace");
+        let provider = CliProvider::claude_code()
+            .with_harness(true)
+            .with_persistent(true)
+            .with_binary(&fake)
+            .with_timeout(Duration::from_secs(2));
+        let mut sink = |_e: StreamEvent| {};
+
+        let options = CompletionOptions {
+            checkpoint: Some(CheckpointContext {
+                session: "workspace-session".to_string(),
+                seq: 1,
+                root: workspace
+                    .path()
+                    .join(".forge/checkpoints")
+                    .display()
+                    .to_string(),
+                workspace: workspace.path().display().to_string(),
+                mode: "bypass".to_string(),
+            }),
+            ..CompletionOptions::default()
+        };
+        let response = provider
+            .complete_with(
+                "claude-cli::sonnet",
+                &[Message::user("use a Forge tool")],
+                &[],
+                &options,
+                &mut sink,
+            )
+            .await
+            .expect("persistent bridge turn should complete");
+
+        assert_eq!(
+            response.content.trim(),
+            format!("ready:{}", workspace.path().display()),
+            "the first prompt must wait for Forge MCP and run in the session workspace"
+        );
     }
 
     /// A fake persistent claude whose FIRST turn replies normally but whose SECOND turn reads the
@@ -4513,7 +4751,9 @@ mod tests {
              {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"after\"}]}}\n\
              {\"type\":\"result\",\"is_error\":false,\"result\":\"\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}",
         );
-        let provider = CliProvider::claude_code().with_binary(&fake);
+        let provider = CliProvider::claude_code()
+            .with_persistent(false)
+            .with_binary(&fake);
         let mut on_event = |_: StreamEvent| {};
         let res = provider
             .complete(
@@ -4538,7 +4778,9 @@ mod tests {
              {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"done\"}]}}\n\
              {\"type\":\"result\",\"is_error\":false,\"result\":\"done\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}",
         );
-        let provider = CliProvider::claude_code().with_binary(&fake);
+        let provider = CliProvider::claude_code()
+            .with_persistent(false)
+            .with_binary(&fake);
         let mut on_event = |_: StreamEvent| {};
         let res = provider
             .complete(
@@ -4570,7 +4812,9 @@ mod tests {
 {"type":"assistant","message":{"content":[{"type":"text","text":"ran it: <function=shell>{\"command\":\"rm -rf /\"}</function>"}]}}
 {"type":"result","is_error":false,"result":"","usage":{"input_tokens":5,"output_tokens":3}}"#,
         );
-        let provider = CliProvider::claude_code().with_binary(&fake);
+        let provider = CliProvider::claude_code()
+            .with_persistent(false)
+            .with_binary(&fake);
         let mut events: Vec<StreamEvent> = Vec::new();
         let mut on_event = |ev: StreamEvent| events.push(ev);
         let res = provider
@@ -4605,7 +4849,9 @@ mod tests {
         let fake = make_fake_cli(
             r#"{"type":"result","is_error":true,"api_error_status":"rate_limit_error"}"#,
         );
-        let provider = CliProvider::claude_code().with_binary(&fake);
+        let provider = CliProvider::claude_code()
+            .with_persistent(false)
+            .with_binary(&fake);
         let mut on_event = |_: StreamEvent| {};
         let err = provider
             .complete(
@@ -4633,7 +4879,9 @@ mod tests {
         // not a hard `Request` that ends the turn. (Earlier the classifier only caught rate/auth.)
         let fake =
             make_fake_cli(r#"{"type":"result","is_error":true,"api_error_status":"overloaded"}"#);
-        let provider = CliProvider::claude_code().with_binary(&fake);
+        let provider = CliProvider::claude_code()
+            .with_persistent(false)
+            .with_binary(&fake);
         let mut on_event = |_: StreamEvent| {};
         let err = provider
             .complete(

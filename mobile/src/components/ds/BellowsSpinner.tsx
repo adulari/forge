@@ -15,7 +15,7 @@ import { StyleSheet, View } from "react-native";
 import Svg, { Circle } from "react-native-svg";
 import Animated, {
   cancelAnimation,
-  useAnimatedProps,
+  useAnimatedStyle,
   useReducedMotion,
   useSharedValue,
   withRepeat,
@@ -24,8 +24,6 @@ import Animated, {
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { easings } from "../../theme/motion";
-
-const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 
 const SIZE = 22;
 const STROKE = 2.5;
@@ -56,11 +54,12 @@ export function BellowsSpinner({ active }: BellowsSpinnerProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, reduced]);
 
-  // react-native-svg's shape components take rotation as a plain numeric prop (degrees,
-  // around `origin`) rather than a CSS-style transform string — simplest reliable way to
-  // drive it from a Reanimated shared value via useAnimatedProps.
-  const animatedProps = useAnimatedProps(() => ({
-    rotation: rotation.value,
+  // Rotate the SVG's centered box instead of setting react-native-svg's `origin` prop on a shape.
+  // On web, react-native-svg 15.15 converts that prop to the invalid React DOM property
+  // `transform-origin`, which emits a warning under React 19. A View transform has the same visual
+  // centre on every platform and stays entirely within React Native's supported style surface.
+  const spinStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${rotation.value}deg` }],
   }));
 
   if (!active) return null;
@@ -71,25 +70,29 @@ export function BellowsSpinner({ active }: BellowsSpinnerProps) {
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
     >
-      <Svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`}>
-        <AnimatedCircle
-          cx={SIZE / 2}
-          cy={SIZE / 2}
-          r={RADIUS}
-          stroke={tokens.accent}
-          strokeWidth={STROKE}
-          strokeLinecap="round"
-          strokeDasharray={`${CIRCUMFERENCE * ARC_FRACTION} ${CIRCUMFERENCE}`}
-          fill="none"
-          origin={`${SIZE / 2}, ${SIZE / 2}`}
-          animatedProps={animatedProps}
-        />
-      </Svg>
+      <Animated.View style={[styles.spinner, spinStyle]}>
+        <Svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`}>
+          <Circle
+            cx={SIZE / 2}
+            cy={SIZE / 2}
+            r={RADIUS}
+            stroke={tokens.accent}
+            strokeWidth={STROKE}
+            strokeLinecap="round"
+            strokeDasharray={`${CIRCUMFERENCE * ARC_FRACTION} ${CIRCUMFERENCE}`}
+            fill="none"
+          />
+        </Svg>
+      </Animated.View>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  spinner: {
+    width: SIZE,
+    height: SIZE,
+  },
   wrap: {
     position: "absolute",
     top: 10,
