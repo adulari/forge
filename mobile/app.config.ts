@@ -10,7 +10,9 @@ const config: ExpoConfig = {
   slug: "forge",
   scheme: "forge",
   version: "1.0.1",
-  runtimeVersion: { policy: "fingerprint" },
+  // Native archives calculate their own fingerprint. OTA publishing supplies the exact
+  // fingerprint extracted from the installed Xcode Cloud archive through this override.
+  runtimeVersion: process.env.EXPO_RUNTIME_VERSION_OVERRIDE ?? { policy: "fingerprint" },
   updates: {
     url: "https://u.expo.dev/e1d145b5-344e-4147-ba35-5f0b993b4c8c",
     requestHeaders: {

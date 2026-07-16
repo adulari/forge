@@ -83,15 +83,15 @@ changes native/config inputs or shared code together with JavaScript.
 When the guard passes, it publishes to the `production` channel with:
 
 ```
-npx expo prebuild -p ios --no-install
-cd ios && pod install && cd ..
-npx eas-cli@latest update --channel production --environment production --platform ios --message "<commit SHA> <commit subject>" --non-interactive
+EXPO_RUNTIME_VERSION_OVERRIDE="<installed archive fingerprint>" npx eas-cli@latest update --channel production --environment production --platform ios --message "<commit SHA> <commit subject>" --non-interactive
 ```
 
-Prebuild and CocoaPods are both mandatory. Xcode Cloud calculates the embedded fingerprint after
-`pod install`, and Expo's generic-project algorithm hashes the resulting native iOS directory.
-Fingerprinting after prebuild but before CocoaPods omits that resolved native state and publishes
-a valid OTA under a runtime version no installed Xcode Cloud binary will request.
+The workflow reads that value from the `IOS_OTA_RUNTIME_VERSION` GitHub repository variable.
+It must be the fingerprint stored inside the installed Xcode Cloud `.xcarchive`, not a locally
+recalculated fingerprint. Expo fingerprints include generated native state and can differ between
+Apple's archive environment and another macOS runner even from the same source commit. Update this
+variable after promoting a new native build to TestFlight; the workflow fails closed when it is
+missing.
 
 ### `--platform ios` is required
 
