@@ -773,15 +773,26 @@ fn stash_paths(root: Option<&std::path::Path>, paths: &[String]) -> bool {
 /// the same hole `bench swe`'s patch extraction plugs with `git add -A`). Any git failure (not
 /// a repo, git missing) counts as "changed" so the empty-diff nudge can never fire outside a
 /// real repository.
-fn working_tree_unchanged(root: Option<&std::path::Path>) -> bool {
+fn working_tree_status(root: Option<&std::path::Path>) -> Option<Vec<u8>> {
     let mut cmd = std::process::Command::new("git");
     cmd.args(["status", "--porcelain"]);
     if let Some(r) = root {
         cmd.current_dir(r);
     }
-    match cmd.output() {
-        Ok(out) if out.status.success() => out.stdout.iter().all(u8::is_ascii_whitespace),
-        _ => false,
+    cmd.output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| out.stdout)
+}
+
+/// Whether the repository status changed during this turn. Comparing against the turn baseline
+/// matters for serve worktrees: Forge intentionally creates an untracked `.cargo/config.toml`
+/// before the turn starts, which is not task progress and must not suppress the empty-diff guard.
+/// Outside a git repository, conservatively report changed so code-change nudges never fire.
+fn working_tree_changed_since(root: Option<&std::path::Path>, baseline: Option<&[u8]>) -> bool {
+    match (baseline, working_tree_status(root)) {
+        (Some(before), Some(after)) => before != after,
+        _ => true,
     }
 }
 
@@ -1154,7 +1165,7 @@ const CONTINUATION_BUDGET_CEILING: f64 = 0.90;
 ///   nothing external to verify). A verified goal is never nudged.
 /// * `made_progress`      — BRIDGE-AWARE: this turn started ≥1 tool (direct calls AND bridge-sink
 ///   `StreamEvent::ToolStarted`) or changed the working tree / closed a task. Real progress is
-///   never nudged — the caller derives this from `working_tree_unchanged` + the sink tool counter,
+///   never nudged — the caller derives this from the turn's git-status baseline + sink tool count,
 ///   both of which reflect a CLI bridge's activity, not just the direct `resp.tool_calls` path.
 /// * `budget_used`        — this turn's input tokens / model context window (≈0.0..=1.0). Only
 ///   nudge below [`CONTINUATION_BUDGET_CEILING`].
@@ -4283,7 +4294,7 @@ prompt text, nothing else.";
         no_change_required: bool,
         inspected_this_turn: bool,
     ) -> PostCheckDecision {
-        const MAX_VERIFY_ATTEMPTS: usize = 1;
+        let max_verify_attempts = CompletionContract::production().max_observation_requests();
         // Tool-name-neutral so the SAME nudge works for the bridge (tools are `mcp__forge__*`) and
         // the direct path (`shell`/`read_file`) — the model maps "run a shell command / read a file"
         // to whichever names its toolset exposes.
@@ -4311,8 +4322,8 @@ prompt text, nothing else.";
             PostCheckDecision::RequestObservation => {
                 *verify_attempts += 1;
                 self.presenter.emit(PresenterEvent::Warning(format!(
-                    "all tasks reported done — verifying with a real state check before finishing ({}/{MAX_VERIFY_ATTEMPTS})",
-                    *verify_attempts
+                    "all tasks reported done — verifying with a real state check before finishing ({}/{max_verify_attempts})",
+                    *verify_attempts,
                 )));
                 let nseq = self.next_seq();
                 let _ = self
@@ -5198,10 +5209,13 @@ prompt text, nothing else.";
                                      tool to make progress, or state your final answer. Do not reply \
                                      with an empty message.";
                         let nseq = self.next_seq();
+                        // Provider chat APIs require a continuation request to end in a user
+                        // message. Appending this as System after the empty Assistant response made
+                        // the recovery request invalid (`last message role must be 'user'`).
                         let _ = self
                             .store
-                            .add_message(&self.id, nseq, Role::System, nudge, None);
-                        self.transcript.push(Message::system(nudge));
+                            .add_message(&self.id, nseq, Role::User, nudge, None);
+                        self.transcript.push(Message::user(nudge));
                         continue;
                     }
                     // Nudges exhausted. An empty-responding model (e.g. some NIM models that stream
@@ -5797,6 +5811,7 @@ prompt text, nothing else.";
         let mode = format!("{:?}", self.mode);
         self.store
             .ensure_session(&self.id, &self.workspace.display(), &mode)?;
+        let working_tree_baseline = working_tree_status(Some(self.workspace.root()));
         self.last_context_pack = context_pack::ContextPack::default();
         let mut context_pack = context_pack::ContextPack::default();
         // 1. Route the task (deterministic, no model call) and record why. The budget is
@@ -6266,19 +6281,18 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // nothing (`< CONTINUATION_DIMINISHING_TOKEN_FLOOR` tokens of growth), or hits the absolute
         // `CONTINUATION_MAX` ceiling — an honest surfaced halt, never an infinite loop.
         //
-        // BRIDGE-AWARE progress: the predicate is `working_tree_unchanged` (the real git tree, which
-        // reflects a CLI bridge's `mcp-serve` edits, not just direct `resp.tool_calls`). A bridge
-        // that actually edited a file leaves the tree changed → `made_progress` → accepted without a
-        // nudge; a bridge that only described leaves it clean → nudged. The entry gate reuses the
-        // wave-6 relaxation (`turn_tools_ran > 0 || is_cli_bridge`) — `turn_tools_ran` counts sink
-        // `StreamEvent::ToolStarted`, so a bridge that surfaced NO parseable tool event is still
-        // covered via the `is_cli_bridge` arm. Pairs with compaction: each nudge compacts first if
-        // the transcript is near the window, so the re-drive has room to work. Runs BEFORE
+        // BRIDGE-AWARE progress compares the real git tree with the start-of-turn baseline, which
+        // reflects a CLI bridge's `mcp-serve` edits without counting Forge's pre-existing worktree
+        // scaffolding. A bridge that edited a file is accepted; one that only described is nudged.
+        // old wave-6 gate counted sink `StreamEvent::ToolStarted`, but explicit mutating contracts
+        // now cover even a zero-tool plan-only response. Pairs with compaction: each nudge compacts
+        // first if the transcript is near the window, so the re-drive has room to work. Runs BEFORE
         // self-review/autofix so any edits it produces are still lint/test-checked.
-        // `mesh.nudge_empty_diff = false` disables it wholesale.
+        // A direct model that only emits a plan has `turn_tools_ran == 0`; that is still an empty
+        // implementation for an explicit mutating contract and must be re-driven. The contract is
+        // the safety gate, not prior tool activity. `mesh.nudge_empty_diff = false` disables it.
         if self.config.mesh.nudge_empty_diff
             && (self.expect_code_change || self.last_turn_contract.requires_changed_artifact())
-            && (turn_tools_ran > 0 || forge_provider::is_cli_bridge(&active_model))
             && self.edits_this_turn == 0
         {
             let mut continuation_count = 0usize;
@@ -6292,7 +6306,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                     break;
                 }
                 // Bridge-aware progress: the working tree reflects direct-path AND bridge edits.
-                let made_progress = !working_tree_unchanged(Some(self.workspace.root()));
+                let made_progress = working_tree_changed_since(
+                    Some(self.workspace.root()),
+                    working_tree_baseline.as_deref(),
+                );
                 let window = self.effective_context_window(&active_model).max(1) as f64;
                 let budget_used = context_tokens as f64 / window;
                 match continuation_decision(
@@ -6425,7 +6442,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 forge_provider::is_cli_bridge(&active_model),
                 saw_mcp_unavailable,
                 turn_tools_ran,
-                working_tree_unchanged(Some(self.workspace.root())),
+                !working_tree_changed_since(
+                    Some(self.workspace.root()),
+                    working_tree_baseline.as_deref(),
+                ),
             );
         if self.tools_unavailable_run {
             self.presenter.emit(PresenterEvent::Warning(
@@ -7125,8 +7145,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let mut effective_args = call.args.clone();
         // Session workspace rooting is unconditional: all relative paths and omitted shell
         // cwd values resolve within this immutable session workspace.
-        effective_args =
-            subagent::rewrite_args_for_worktree(&effective_args, self.workspace.root());
+        effective_args = subagent::rewrite_args_for_root(&effective_args, self.workspace.root());
         effective_args =
             add_workspace_default_path(&call.name, effective_args, self.workspace.root());
         validate_workspace_args(&effective_args, &self.workspace)?;
@@ -7199,8 +7218,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 return Ok(result);
             }
             if let Some(new_args) = outcome.rewritten_args {
-                effective_args =
-                    subagent::rewrite_args_for_worktree(&new_args, self.workspace.root());
+                effective_args = subagent::rewrite_args_for_root(&new_args, self.workspace.root());
                 effective_args =
                     add_workspace_default_path(&call.name, effective_args, self.workspace.root());
                 validate_workspace_args(&effective_args, &self.workspace)?;
@@ -8004,6 +8022,17 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         name: &str,
         args: serde_json::Value,
     ) -> Result<String, CoreError> {
+        // Slash commands bypass `run_turn`, so without explicit persistence a completed saved
+        // workflow replay contained no prompt and none of its phases/results. Record the command
+        // plus a compact audit transcript on the parent session.
+        let command = match args.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => format!("/workflow run {name} {raw}"),
+            None => format!("/workflow run {name}"),
+        };
+        let command_seq = self.next_seq();
+        self.store
+            .add_ui_note(&self.id, command_seq, Role::User, &command)?;
+
         let budget = self.budget_snapshot();
         let agents = Arc::new(forge_config::load_agents(std::path::Path::new(
             &self.config.mesh.subagents.agents_dir,
@@ -8029,21 +8058,31 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.presenter.emit(PresenterEvent::WorkflowStarted {
             name: Some(name.to_string()),
         });
+        let audit = Arc::new(std::sync::Mutex::new(vec![format!(
+            "⛓ workflow '{name}' started"
+        )]));
+        let audit_events = Arc::clone(&audit);
         let presenter = &mut self.presenter;
-        let on_event = |ev: workflow::WorkflowEvent| match ev {
+        let on_event = move |ev: workflow::WorkflowEvent| match ev {
             workflow::WorkflowEvent::AgentStart {
                 id,
                 agent,
                 task,
                 model,
                 phase,
-            } => presenter.emit(PresenterEvent::SubagentStart {
-                id,
-                agent,
-                task,
-                model: Some(model),
-                phase,
-            }),
+            } => {
+                audit_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("├─ [{agent}] started: {task}"));
+                presenter.emit(PresenterEvent::SubagentStart {
+                    id,
+                    agent,
+                    task,
+                    model: Some(model),
+                    phase,
+                });
+            }
             workflow::WorkflowEvent::AgentProgress { id, snippet } => {
                 presenter.emit(PresenterEvent::SubagentProgress { id, snippet })
             }
@@ -8053,20 +8092,33 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 ok,
                 summary,
                 cost_usd,
-            } => presenter.emit(PresenterEvent::SubagentResult {
-                id,
-                agent,
-                ok,
-                summary,
-                cost_usd,
-            }),
+            } => {
+                audit_events.lock().unwrap().push(format!(
+                    "├─ {} [{agent}] {summary}",
+                    if ok { "✓" } else { "✗" }
+                ));
+                presenter.emit(PresenterEvent::SubagentResult {
+                    id,
+                    agent,
+                    ok,
+                    summary,
+                    cost_usd,
+                });
+            }
             workflow::WorkflowEvent::Phase(title) => {
+                audit_events
+                    .lock()
+                    .unwrap()
+                    .push(format!("▶ phase: {title}"));
                 presenter.emit(PresenterEvent::WorkflowPhase { title })
             }
-            workflow::WorkflowEvent::Log(msg) => presenter.emit(PresenterEvent::WorkflowLog(msg)),
+            workflow::WorkflowEvent::Log(msg) => {
+                audit_events.lock().unwrap().push(format!("💬 {msg}"));
+                presenter.emit(PresenterEvent::WorkflowLog(msg));
+            }
         };
 
-        let (value, all_ok) = workflow::run_saved(
+        let run_result = workflow::run_saved(
             ctx,
             self.id.clone(),
             budget,
@@ -8078,8 +8130,27 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             args,
             on_event,
         )
-        .await
-        .map_err(CoreError::Internal)?;
+        .await;
+
+        let (value, all_ok) = match run_result {
+            Ok(result) => result,
+            Err(error) => {
+                let summary = format!("'{name}': {error}");
+                self.presenter.emit(PresenterEvent::WorkflowFinished {
+                    ok: false,
+                    summary: summary.clone(),
+                });
+                audit
+                    .lock()
+                    .unwrap()
+                    .push(format!("⛓ ✗ workflow failed: {summary}"));
+                let text = audit.lock().unwrap().join("\n");
+                let seq = self.next_seq();
+                self.store
+                    .add_ui_note(&self.id, seq, Role::Assistant, &text)?;
+                return Err(CoreError::Internal(error));
+            }
+        };
 
         let combined = match value {
             serde_json::Value::String(s) => s,
@@ -8092,6 +8163,15 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             ok: all_ok,
             summary: format!("'{name}': {}", workflow::summary(&combined)),
         });
+        audit.lock().unwrap().push(format!(
+            "⛓ {} workflow finished: '{name}': {}",
+            if all_ok { "✓" } else { "✗" },
+            workflow::summary(&combined)
+        ));
+        let audit_text = audit.lock().unwrap().join("\n");
+        let audit_seq = self.next_seq();
+        self.store
+            .add_ui_note(&self.id, audit_seq, Role::Assistant, &audit_text)?;
         Ok(combined)
     }
 
@@ -8980,6 +9060,50 @@ mod tests {
     use forge_tui::HeadlessPresenter;
     use forge_types::SideEffect;
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn saved_workflow_persists_a_parent_replay_audit() {
+        let dir =
+            std::env::temp_dir().join(format!("forge-workflow-replay-{}", forge_types::new_id()));
+        let workflows = dir.join(".forge").join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(
+            workflows.join("audit.js"),
+            r#"await phase("scan"); await log("checked fixture"); return "AUDIT_OK";"#,
+        )
+        .unwrap();
+
+        let router = Arc::new(FixedRouter {
+            model: "m::unused".into(),
+            fallbacks: vec![],
+        });
+        let (store, mut session) = fixed_session(Arc::new(PanicProvider), router);
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
+
+        let result = session
+            .run_saved_workflow("audit", serde_json::Value::Null)
+            .await
+            .unwrap();
+        assert_eq!(result, "AUDIT_OK");
+
+        let replay = store.load_replay(&session.id).unwrap();
+        assert!(replay
+            .iter()
+            .any(|entry| { entry.role == Role::User && entry.content == "/workflow run audit" }));
+        let audit = replay
+            .iter()
+            .find(|entry| {
+                entry.role == Role::Assistant && entry.content.contains("workflow 'audit' started")
+            })
+            .expect("saved workflow audit transcript");
+        assert!(audit.content.contains("▶ phase: scan"));
+        assert!(audit.content.contains("💬 checked fixture"));
+        assert!(audit
+            .content
+            .contains("⛓ ✓ workflow finished: 'audit': AUDIT_OK"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     // ── Next-prompt suggestion sanitizer ────────────────────────────────────────────────────────
     #[test]
@@ -11203,6 +11327,58 @@ mod tests {
             warnings.iter().any(|w| w.contains("stopping the turn")),
             "after the bounded nudges, an endlessly-empty model must stop; warnings: {warnings:?}"
         );
+    }
+
+    struct EmptyThenRoleStrictProvider {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for EmptyThenRoleStrictProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call > 0 && messages.last().map(|m| m.role) != Some(Role::User) {
+                return Err(forge_provider::ProviderError::Request(
+                    "last message role must be 'user'".into(),
+                ));
+            }
+            Ok(forge_provider::ModelResponse {
+                content: if call == 0 {
+                    String::new()
+                } else {
+                    "recovered after empty response".into()
+                },
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_response_recovery_ends_with_a_user_message() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut session = Session::start(
+            store,
+            Arc::new(EmptyThenRoleStrictProvider {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            Config::default(),
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        let answer = session.run_turn("do something").await.unwrap();
+        assert_eq!(answer, "recovered after empty response");
     }
 
     /// Empty (no text/tool) for the `bad` models, echoes the model id otherwise — to prove an
@@ -13975,8 +14151,8 @@ mod tests {
     }
 
     /// A throwaway git repo with one committed file and a CLEAN tree, so
-    /// `working_tree_unchanged` is deterministically true regardless of the checkout state of
-    /// the repo the tests happen to run in.
+    /// the turn baseline is deterministic regardless of the checkout state of the repo the tests
+    /// happen to run in.
     fn clean_git_repo() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("forge-nudge-{}", forge_types::new_id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -14005,6 +14181,21 @@ mod tests {
         git(&["add", "-A"]);
         git(&["commit", "-qm", "seed"]);
         dir
+    }
+
+    #[test]
+    fn turn_progress_ignores_preexisting_untracked_worktree_scaffolding() {
+        let dir = clean_git_repo();
+        std::fs::create_dir_all(dir.join(".cargo")).unwrap();
+        std::fs::write(dir.join(".cargo/config.toml"), "[build]\n").unwrap();
+        let baseline = working_tree_status(Some(&dir)).unwrap();
+
+        assert!(String::from_utf8_lossy(&baseline).contains(".cargo/"));
+        assert!(!working_tree_changed_since(Some(&dir), Some(&baseline)));
+
+        std::fs::write(dir.join("f.txt"), "task edit").unwrap();
+        assert!(working_tree_changed_since(Some(&dir), Some(&baseline)));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -14240,8 +14431,8 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_that_edited_files_is_not_nudged() {
-        // The counterpart guard: a bridge turn that DID change the tree (non-empty diff) must NOT be
-        // nudged — `working_tree_unchanged` is false — so a real fix is never second-guessed.
+        // The counterpart guard: a bridge turn that DID change the tree (non-empty diff) must NOT
+        // be nudged, so a real fix is never second-guessed.
         let dir = clean_git_repo();
         let provider = Arc::new(BridgeDescribeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -14304,10 +14495,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_empty_diff_with_no_tools_is_not_nudged() {
-        // The regression that keeps the wave-6 relaxation bridge-ONLY: a DIRECT-path turn that ran
-        // no tools (`tools_ran == 0`) and is NOT a CLI bridge must NOT be nudged — direct-path
-        // semantics are unchanged (the nudge still means "you worked but changed nothing").
+    async fn direct_mutating_turn_that_only_plans_is_nudged() {
+        // Live serve regression: a Full-mode worktree task returned only a three-step plan and no
+        // tool calls. An explicit implementation contract must re-drive that zero-diff turn too;
+        // requiring prior tool activity silently accepted the stall.
         let dir = clean_git_repo();
         let provider = Arc::new(BridgeDescribeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -14328,10 +14519,10 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "a direct turn that ran no tools must not be nudged (unchanged behavior)"
+            1 + CONTINUATION_DIMINISHING_MIN,
+            "a direct mutating turn that only planned must be pushed to execute"
         );
-        assert_eq!(answer, "explored the repo — here is how you would fix it");
+        assert_eq!(answer, "still only describing after the nudge");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -14565,8 +14756,9 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            3,
-            "explore + describe (2 completions), then exactly ONE guard re-drive"
+            3 + CONTINUATION_DIMINISHING_MIN,
+            "explore + describe, three bounded empty-diff continuations, then exactly ONE \
+             pristine-test guard re-drive"
         );
         assert_eq!(answer, "still only describing");
         // The pristine test was restored (the stash took the rewritten expectations with it)…
@@ -14615,8 +14807,9 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "bridge yields in ONE completion, then exactly ONE guard re-drive"
+            2 + CONTINUATION_DIMINISHING_MIN,
+            "bridge completion, three bounded empty-diff continuations, then exactly ONE \
+             pristine-test guard re-drive"
         );
         assert_eq!(answer, "still only describing after the nudge");
         assert_eq!(
@@ -14651,15 +14844,19 @@ mod tests {
         let answer = session.run_turn("fix the bug").await.unwrap();
         assert_eq!(
             calls.calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "an untracked new test file must not fire the guard"
+            2 + CONTINUATION_DIMINISHING_MIN,
+            "an untracked new test file must not fire the pristine-test guard; only the bounded \
+             empty-diff continuations run"
         );
-        assert_eq!(answer, "here is how you would fix it");
+        assert_eq!(answer, "still only describing");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_edit_guard_respects_the_config_gate() {
+        // Disabling the test-edit guard leaves the model's rewritten test in place. The separate
+        // empty-diff completion guard still performs its bounded recovery continuations because
+        // no production artifact changed; this gate must not silently disable that safety net.
         let dir = repo_with_modified_test();
         let provider = Arc::new(DescribeOnlyProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -14677,8 +14874,11 @@ mod tests {
         session.set_expect_code_change(true);
         session.config.mesh.guard_test_edits = false;
         let answer = session.run_turn("fix the bug").await.unwrap();
-        assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
-        assert_eq!(answer, "here is how you would fix it");
+        assert_eq!(
+            calls.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2 + CONTINUATION_DIMINISHING_MIN
+        );
+        assert_eq!(answer, "still only describing");
         // The rewritten test is left exactly as the model wrote it.
         assert_eq!(
             std::fs::read_to_string(dir.join("tests/test_foo.py")).unwrap(),
@@ -16722,7 +16922,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&peer);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::create_dir_all(&peer).unwrap();
-        let rooted = subagent::rewrite_args_for_worktree(
+        let rooted = subagent::rewrite_args_for_root(
             &serde_json::json!({ "path": "only-a.txt", "paths": ["also-a.txt"] }),
             &root,
         );

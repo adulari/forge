@@ -256,11 +256,13 @@ pub fn is_write_capable(agent: &ResolvedAgent, registry: &ToolRegistry) -> bool 
     })
 }
 
-/// Rewrite tool call arguments so that relative or absent paths/cwd are rooted inside the
-/// isolated `worktree_root`. Absolute paths that already point outside the root are left alone.
-/// - For `path` args: if the value is relative, make it absolute under `worktree_root`.
-/// - For `cwd` args on shell calls: if absent or relative, set it to `worktree_root`.
-pub fn rewrite_args_for_worktree(args: &Value, worktree_root: &Path) -> Value {
+/// Rewrite tool call arguments so that relative or absent paths/cwd are rooted inside `root`.
+/// This is used for every child tool call: read-only children use the parent session's repository
+/// root, while isolated write-capable children use their dedicated worktree. Absolute paths are
+/// left alone.
+/// - For `path` args: if the value is relative, make it absolute under `root`.
+/// - For `cwd` args on shell calls: if absent or relative, set it to `root`.
+pub fn rewrite_args_for_root(args: &Value, root: &Path) -> Value {
     let Some(map) = args.as_object() else {
         return args.clone();
     };
@@ -270,7 +272,7 @@ pub fn rewrite_args_for_worktree(args: &Value, worktree_root: &Path) -> Value {
     if let Some(Value::String(p)) = out.get("path") {
         let pb = Path::new(p);
         if pb.is_relative() {
-            let abs = worktree_root.join(pb);
+            let abs = root.join(pb);
             out.insert(
                 "path".into(),
                 Value::String(abs.to_string_lossy().into_owned()),
@@ -284,7 +286,7 @@ pub fn rewrite_args_for_worktree(args: &Value, worktree_root: &Path) -> Value {
             if let Value::String(path) = path {
                 let pb = Path::new(path);
                 if pb.is_relative() {
-                    *path = worktree_root.join(pb).display().to_string();
+                    *path = root.join(pb).display().to_string();
                 }
             }
         }
@@ -295,11 +297,11 @@ pub fn rewrite_args_for_worktree(args: &Value, worktree_root: &Path) -> Value {
         None => {
             out.insert(
                 "cwd".into(),
-                Value::String(worktree_root.to_string_lossy().into_owned()),
+                Value::String(root.to_string_lossy().into_owned()),
             );
         }
         Some(Value::String(cwd)) if Path::new(cwd).is_relative() => {
-            let abs = worktree_root.join(cwd);
+            let abs = root.join(cwd);
             out.insert(
                 "cwd".into(),
                 Value::String(abs.to_string_lossy().into_owned()),
@@ -570,7 +572,7 @@ async fn run_agent_loop(
             // workflow run: an agent's first read_file errored on a bad path, it recovered by
             // reading the right file and answering well — the old latch still marked it ✗, while
             // siblings that failed without ever touching a tool showed ✓.)
-            ok = !(result.starts_with("error:") || result.starts_with("permission denied"));
+            ok = !tool_result_failed(&result);
             ctx.store.add_message_full(
                 child_id,
                 next_seq(),
@@ -760,7 +762,11 @@ pub async fn orchestrate(
         // A `?` here would abort the whole function — dropping `rx` and silently discarding the
         // results (and spend) of every sibling child already `tokio::spawn`ed above. Skip just
         // this request instead so the rest of the batch still runs and reports.
-        let child_id = match ctx.store.create_child_session(".", &mode_label, parent_id) {
+        let child_cwd = ctx.repo_root.to_string_lossy();
+        let child_id = match ctx
+            .store
+            .create_child_session(&child_cwd, &mode_label, parent_id)
+        {
             Ok(id) => id,
             Err(e) => {
                 tracing::warn!(
@@ -1015,17 +1021,11 @@ async fn execute_tool(
             PermissionDecision::Deny | PermissionDecision::Ask => false,
         };
     let (result, status) = if allowed {
-        // When this child has an isolated worktree, rewrite path/cwd args for write/shell tools
-        // so the child's operations stay inside its worktree rather than touching the shared tree.
-        let effective_args = if let Some(root) = &ctx.worktree_root {
-            if matches!(side_effect, SideEffect::Write | SideEffect::Shell) {
-                rewrite_args_for_worktree(&call.args, root)
-            } else {
-                call.args.clone()
-            }
-        } else {
-            call.args.clone()
-        };
+        // A daemon may host sessions rooted anywhere. Never let a child's relative path fall back
+        // to the daemon process cwd: read-only children use the session repo, isolated writers use
+        // their worktree, and shell receives an explicit cwd in both cases.
+        let root = ctx.worktree_root.as_deref().unwrap_or(&ctx.repo_root);
+        let effective_args = rewrite_args_for_root(&call.args, root);
         match tool.run(&effective_args).await {
             Ok(out) => (out, "ok"),
             Err(e) => (format!("error: {e}"), "error"),
@@ -1042,6 +1042,18 @@ async fn execute_tool(
         status,
     )?;
     Ok(result)
+}
+
+/// Child tools normally return failures as `error: ...`, but batched `read_file` preserves a
+/// labelled per-file result (`===== file =====\n[error: ...]`). Treat both wire shapes as failed
+/// so a workflow cannot paint a child green after its only read actually failed.
+fn tool_result_failed(result: &str) -> bool {
+    let lower = result.to_ascii_lowercase();
+    lower.starts_with("error:")
+        || lower.starts_with("permission denied")
+        || lower
+            .lines()
+            .any(|line| line.trim_start().starts_with("[error:"))
 }
 
 /// Sum the token/cost usage of a list of usages (helper for rollups).
@@ -1419,7 +1431,7 @@ mod tests {
     fn rewrite_args_for_worktree_rewrites_relative_path() {
         let root = std::path::Path::new("/work/tree");
         let args = json!({"path": "src/main.rs", "content": "fn main() {}"});
-        let rewritten = rewrite_args_for_worktree(&args, root);
+        let rewritten = rewrite_args_for_root(&args, root);
         // Compute the expected path the same way the impl joins it, so the assertion holds on both
         // unix ("/work/tree/src/main.rs") and Windows (backslash separators).
         let expected = root.join("src/main.rs").to_string_lossy().into_owned();
@@ -1432,7 +1444,7 @@ mod tests {
     fn rewrite_args_for_worktree_leaves_absolute_path_alone() {
         let root = std::path::Path::new("/work/tree");
         let args = json!({"path": "/absolute/path/file.rs"});
-        let rewritten = rewrite_args_for_worktree(&args, root);
+        let rewritten = rewrite_args_for_root(&args, root);
         assert_eq!(
             rewritten["path"].as_str().unwrap(),
             "/absolute/path/file.rs"
@@ -1443,7 +1455,7 @@ mod tests {
     fn rewrite_args_for_worktree_injects_cwd_when_absent() {
         let root = std::path::Path::new("/work/tree");
         let args = json!({"cmd": "cargo test"});
-        let rewritten = rewrite_args_for_worktree(&args, root);
+        let rewritten = rewrite_args_for_root(&args, root);
         assert_eq!(rewritten["cwd"].as_str().unwrap(), "/work/tree");
     }
 
@@ -1451,7 +1463,7 @@ mod tests {
     fn rewrite_args_for_worktree_rewrites_relative_cwd() {
         let root = std::path::Path::new("/work/tree");
         let args = json!({"cmd": "ls", "cwd": "subdir"});
-        let rewritten = rewrite_args_for_worktree(&args, root);
+        let rewritten = rewrite_args_for_root(&args, root);
         let expected = root.join("subdir").to_string_lossy().into_owned();
         assert_eq!(rewritten["cwd"].as_str().unwrap(), expected);
     }
@@ -1460,8 +1472,34 @@ mod tests {
     fn rewrite_args_for_worktree_leaves_absolute_cwd_alone() {
         let root = std::path::Path::new("/work/tree");
         let args = json!({"cmd": "ls", "cwd": "/other/dir"});
-        let rewritten = rewrite_args_for_worktree(&args, root);
+        let rewritten = rewrite_args_for_root(&args, root);
         assert_eq!(rewritten["cwd"].as_str().unwrap(), "/other/dir");
+    }
+
+    #[test]
+    fn child_tool_args_are_rooted_even_without_worktree_isolation() {
+        let root = std::path::Path::new("/session/repo");
+        let args = json!({"path": "alpha.txt", "paths": ["beta.txt"]});
+        let rewritten = rewrite_args_for_root(&args, root);
+        assert_eq!(
+            rewritten["path"].as_str().unwrap(),
+            root.join("alpha.txt").to_string_lossy()
+        );
+        assert_eq!(
+            rewritten["paths"][0].as_str().unwrap(),
+            root.join("beta.txt").to_string_lossy()
+        );
+        assert_eq!(rewritten["cwd"].as_str().unwrap(), root.to_string_lossy());
+    }
+
+    #[test]
+    fn labelled_batched_read_error_is_a_failed_tool_result() {
+        assert!(tool_result_failed(
+            "===== alpha.txt =====\n[error: io error: No such file or directory]"
+        ));
+        assert!(!tool_result_failed(
+            "===== alpha.txt =====\nalpha has three words"
+        ));
     }
 
     // --- Provider-aware fan-out cap (competitor-gap #5): a burst of children all routed to ONE
