@@ -82,29 +82,51 @@ jobs:
             libssl-dev \
             xdg-utils
 
-      - name: Install Arch Linux webview deps
+      - name: Prepare Arch Linux webview deps
         if: matrix.name == 'linux-x86_64'
         run: |
-          # Self-hosted images drift. Install the declared build contract instead of merely
-          # asserting yesterday's image still has it (which blocked the v2.6.5 desktop release).
-          sudo pacman -S --needed --noconfirm \
-            pkgconf \
-            webkit2gtk-4.1 \
-            libayatana-appindicator \
-            librsvg \
-            patchelf \
-            base-devel \
-            curl \
-            wget \
-            file \
-            openssl \
-            xdotool
+          set -euo pipefail
+          # The runner account deliberately has no passwordless sudo. Keep heavyweight system
+          # libraries in the runner image, and fetch the two leaf build tools into RUNNER_TEMP
+          # when absent instead of making release builds depend on interactive root access.
+          for package in pkgconf webkit2gtk-4.1 libayatana-appindicator librsvg base-devel curl wget file openssl; do
+            pacman -Q "$package" >/dev/null || {
+              echo "missing required runner package: $package" >&2
+              exit 1
+            }
+          done
+
+          tool_root="$RUNNER_TEMP/forge-arch-tools"
+          rm -rf "$tool_root"
+          mkdir -p "$tool_root"
+          for package in patchelf xdotool; do
+            pacman -Q "$package" >/dev/null 2>&1 && continue
+            curl --fail --silent --show-error --location \
+              "https://archlinux.org/packages/extra/x86_64/$package/download/" \
+              | bsdtar -x -C "$tool_root" -f -
+          done
+
+          # Relocate libxdo's absolute system paths to the temporary package root.
+          if [ -f "$tool_root/usr/lib/pkgconfig/libxdo.pc" ]; then
+            sed -i \
+              -e "s|^libdir=/usr/lib$|libdir=$tool_root/usr/lib|" \
+              -e "s|^includedir=/usr/include$|includedir=$tool_root/usr/include|" \
+              "$tool_root/usr/lib/pkgconfig/libxdo.pc"
+          fi
+          echo "$tool_root/usr/bin" >> "$GITHUB_PATH"
+          echo "PKG_CONFIG_PATH=$tool_root/usr/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$tool_root/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+          export PATH="$tool_root/usr/bin:$PATH"
+          export PKG_CONFIG_PATH="$tool_root/usr/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
           for package in webkit2gtk-4.1 ayatana-appindicator3-0.1 librsvg-2.0; do
             pkg-config --exists "$package" || {
               echo "missing required pkg-config module: $package" >&2
               exit 1
             }
           done
+          command -v patchelf >/dev/null
+          pkg-config --exists libxdo
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
