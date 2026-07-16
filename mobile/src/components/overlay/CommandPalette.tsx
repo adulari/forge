@@ -186,6 +186,7 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
 
   const { data: sessions } = useSessions();
   const archiveSession = useArchiveSession();
+  const skillCommands = useSkillCommands();
 
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -343,7 +344,6 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
       },
     });
 
-    const skillCommands = useSkillCommands();
     const allCommands: { name: string; description?: string }[] = [
       ...BUILTIN_COMMANDS.map((name) => ({ name })),
       ...skillCommands,
@@ -362,7 +362,7 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
     }
 
     return items;
-  }, [tokens, activeSessionId, scheme, setScheme, close, archiveSession, toast, runSlashCommand]);
+  }, [tokens, activeSessionId, scheme, setScheme, close, archiveSession, toast, runSlashCommand, skillCommands]);
 
   const navigationItems = useMemo<PaletteItem[]>(
     () => [
