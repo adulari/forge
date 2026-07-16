@@ -108,9 +108,14 @@ export default function NewSessionScreen() {
         contentContainerStyle={styles.content}
       >
         <Card style={[styles.card, isCompact ? undefined : styles.cardWide]}>
+          <View style={styles.intro}>
+            <Text style={[typeScale.heading, styles.formTitle, { color: tokens.ink }]}>Start somewhere clear</Text>
+            <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Choose a git project. You can change the other settings later.</Text>
+          </View>
           <View style={styles.field}>
             <Input
-              label="Working directory (required)"
+              label="Working directory"
+              error={validationError ?? undefined}
               mono
               value={cwd}
               onChangeText={(t) => {
@@ -152,12 +157,9 @@ export default function NewSessionScreen() {
             </Text>
           </View>
 
-          {validationError ? (
-            <Text style={[typeScale.sub, { color: tokens.danger }]}>{validationError}</Text>
-          ) : null}
-          {serverError ? <Text style={[typeScale.sub, { color: tokens.danger }]}>{serverError}</Text> : null}
+          {serverError ? <Text accessibilityRole="alert" style={[typeScale.sub, { color: tokens.danger }]}>{serverError}</Text> : null}
 
-          <Button label="Create session" onPress={handleSubmit} loading={create.isPending} fullWidth />
+          <Button label="Create session" onPress={handleSubmit} loading={create.isPending} fullWidth accessibilityLabel="Create session" accessibilityHint="Creates a session in the selected working directory" />
         </Card>
       </Screen>
     </View>
@@ -176,6 +178,8 @@ const styles = StyleSheet.create({
   content: { paddingVertical: space.space16, alignItems: "center" },
   card: { gap: space.space16, width: "100%" },
   cardWide: { maxWidth: FORM_MAX_WIDTH },
+  intro: { gap: space.space4 },
+  formTitle: { marginBottom: space.space4 },
   field: { gap: space.space4 },
   worktreeBlock: { gap: space.space4 },
   worktreeRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },

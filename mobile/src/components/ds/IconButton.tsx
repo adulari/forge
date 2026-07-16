@@ -14,6 +14,7 @@ export interface IconButtonProps {
   disabled?: boolean;
   badge?: boolean;
   accessibilityLabel: string;
+  accessibilityHint?: string;
   testID?: string;
   style?: StyleProp<ViewStyle>;
 }
@@ -24,6 +25,7 @@ export function IconButton({
   disabled = false,
   badge = false,
   accessibilityLabel,
+  accessibilityHint,
   testID,
   style,
 }: IconButtonProps) {
@@ -46,6 +48,7 @@ export function IconButton({
         testID={testID}
         accessibilityRole="button"
         accessibilityLabel={accessibilityLabel}
+        accessibilityHint={accessibilityHint}
         accessibilityState={{ disabled }}
         style={[
           styles.base,

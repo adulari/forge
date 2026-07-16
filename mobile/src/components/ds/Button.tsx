@@ -22,6 +22,7 @@ export interface ButtonProps {
   icon?: React.ReactNode;
   testID?: string;
   accessibilityLabel?: string;
+  accessibilityHint?: string;
   style?: StyleProp<ViewStyle>;
 }
 
@@ -35,6 +36,7 @@ export function Button({
   icon,
   testID,
   accessibilityLabel,
+  accessibilityHint,
   style,
 }: ButtonProps) {
   const tokens = useTokens();
@@ -93,6 +95,7 @@ export function Button({
         testID={testID}
         accessibilityRole="button"
         accessibilityLabel={accessibilityLabel ?? label}
+        accessibilityHint={accessibilityHint}
         accessibilityState={{ disabled: isDisabled, busy: loading }}
         style={[
           styles.base,
