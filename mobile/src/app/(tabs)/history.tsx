@@ -86,19 +86,21 @@ function HistoryRowBase({ row, index, onPress, onArchive }: HistoryRowProps) {
   const strike = useStrike();
   const entrance = useForgeline(index);
   const title = row.title || `#${row.id.slice(0, 8)}`;
+  const resumeRow = useCallback(() => onPress(row), [onPress, row]);
 
   return (
     <Animated.View style={entrance}>
       <Animated.View style={strike.style}>
-        <Pressable
-          onPress={() => onPress(row)}
-          onPressIn={strike.onPressIn}
-          onPressOut={strike.onPressOut}
-          accessibilityRole="button"
-          accessibilityLabel={`Resume ${title}`}
-        >
-          {/* DESIGN_ELEVATION.md Move 2 — de-boxed row: past sessions are cool, no heat edge. */}
-          <View style={[styles.rowBg, { backgroundColor: tokens.bg1 }]}>
+        {/* Keep Resume and Archive as sibling controls. Nesting the archive Pressable inside the
+            row Pressable renders <button><button /></button> on web and breaks hydration. */}
+        <View style={[styles.rowBg, { backgroundColor: tokens.bg1 }]}>
+          <Pressable
+            onPress={resumeRow}
+            onPressIn={strike.onPressIn}
+            onPressOut={strike.onPressOut}
+            accessibilityRole="button"
+            accessibilityLabel={`Resume ${title}`}
+          >
             <View style={styles.inner}>
               <View style={styles.headerRow}>
                 <Text style={[type.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
@@ -118,17 +120,17 @@ function HistoryRowBase({ row, index, onPress, onArchive }: HistoryRowProps) {
                   {stripLeadingAttachMentions(row.preview)}
                 </Text>
               ) : null}
-              <View style={styles.footerRow}>
+              <View style={[styles.footerRow, !row.archived ? styles.footerWithArchive : undefined]}>
                 <RelativeTime timestampMs={row.last_activity * 1000} />
                 <View style={styles.metaRight}>
                   <Text style={[type.meta, { color: tokens.ink3 }]}>{row.message_count} msgs</Text>
                   {row.cost_usd > 0 ? <Text style={[type.meta, { color: tokens.success }]}>{formatCost(row.cost_usd)}</Text> : null}
-                  {!row.archived ? <Pressable onPress={(event) => { event.stopPropagation(); onArchive(row); }} accessibilityRole="button" accessibilityLabel={`Archive ${title}`} hitSlop={space.space8}><Archive size={16} strokeWidth={1.75} color={tokens.ink3} /></Pressable> : null}
                 </View>
               </View>
             </View>
-          </View>
-        </Pressable>
+          </Pressable>
+          {!row.archived ? <Pressable style={styles.archiveButton} onPress={() => onArchive(row)} accessibilityRole="button" accessibilityLabel={`Archive ${title}`} hitSlop={space.space8}><Archive size={16} strokeWidth={1.75} color={tokens.ink3} /></Pressable> : null}
+        </View>
       </Animated.View>
       <View style={[styles.separator, { backgroundColor: tokens.border }]} />
     </Animated.View>
@@ -355,7 +357,9 @@ const styles = StyleSheet.create({
   title: { flex: 1 },
   cwd: {},
   footerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  footerWithArchive: { paddingRight: space.space32 },
   metaRight: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  archiveButton: { position: "absolute", right: space.space16, bottom: space.space16 },
   skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonGap: { marginTop: space.space8 },
   resumeOverlay: { alignItems: "center", justifyContent: "center" },
