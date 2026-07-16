@@ -7,6 +7,8 @@
 // `crates/forge-skills/src/lib.rs::insert_builtin_commands`). Skills served by the daemon at
 // `GET /api/skills` are merged in dynamically via `useSkillCommands()` so external/project
 // skills autocomplete and highlight too.
+import { useMemo } from "react";
+
 import { useSkills } from "./queries";
 
 /**
@@ -81,7 +83,10 @@ export interface SkillCommand {
  */
 export function useSkillCommands(): SkillCommand[] {
   const { data } = useSkills();
-  return (data ?? []).map((s: { name: string; description: string }) => ({ name: `/${s.name}`, description: s.description }));
+  return useMemo(
+    () => (data ?? []).map((s: { name: string; description: string }) => ({ name: `/${s.name}`, description: s.description })),
+    [data],
+  );
 }
 
 /**

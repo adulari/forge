@@ -18,6 +18,7 @@ import { IconButton } from "../components/ds/IconButton";
 import { Input } from "../components/ds/Input";
 import { Screen } from "../components/ds/Screen";
 import { Segmented } from "../components/ds/Segmented";
+import { ModelPicker } from "../components/session/ModelPicker";
 import { ApiError } from "../lib/api";
 import { goBackOr } from "../lib/nav";
 import { useCreateSession } from "../lib/queries";
@@ -133,17 +134,7 @@ export default function NewSessionScreen() {
             returnKeyType="next"
           />
 
-          <Input
-            label="Model (optional)"
-            mono
-            value={model}
-            onChangeText={setModel}
-            placeholder="e.g. claude-sonnet-5"
-            autoCapitalize="none"
-            autoCorrect={false}
-            returnKeyType="done"
-            onSubmitEditing={handleSubmit}
-          />
+          <ModelPicker value={model} onChange={setModel} />
 
           <View style={styles.worktreeBlock}>
             <Text style={[typeScale.body, { color: tokens.ink }]}>Run mode</Text>

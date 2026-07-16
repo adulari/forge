@@ -15,6 +15,7 @@ import { Image, Platform, ScrollView, StyleSheet, Text, TextInput, View } from "
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
+import { BUILTIN_COMMANDS, isKnownCommand, useSkillCommands } from "../../lib/commands";
 import { clearDraft, getDraft, setDraft } from "../../lib/drafts";
 import { isMacOS } from "../../lib/platform";
 import { useUpload } from "../../lib/queries";
@@ -47,7 +48,6 @@ const MAX_LINES = 8;
 const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
 const MIN_HEIGHT = 44;
 const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES + space.space8;
-import { BUILTIN_COMMANDS, isKnownCommand, useSkillCommands } from "../../lib/commands";
 
 export interface ComposerProps {
   sessionId: string;
@@ -73,6 +73,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   // negative margin so the panel itself bleeds edge-to-edge; `styles.wrap`'s own
   // paddingHorizontal keeps the icons/input/send button reasonably inset from that edge.
   const screenGutter = isCompact ? gutter.compact : gutter.medium;
+  const [commandFocusSignal, setCommandFocusSignal] = useState(0);
 
   // Draft (text + attachments) lives in SessionContext, not local state: the session shell
   // (`session/[id]/_layout.tsx`) mounts one SessionProvider per session and `router.replace`s
@@ -135,6 +136,11 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     inputRef.current?.focus();
   }, [composerFocusSignal]);
 
+  useEffect(() => {
+    if (commandFocusSignal === 0) return;
+    inputRef.current?.focus();
+  }, [commandFocusSignal]);
+
   const canSend = text.trim().length > 0 && !attachments.some((a) => a.state === "uploading");
   const action = busy ? "stop" : online ? "send" : "queue";
   const reduced = useReducedMotion();
@@ -151,6 +157,10 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const commandHints = allCommands.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase()));
   const leadingCommand = text.match(/^\/(\S*)/)?.[0].toLowerCase();
   const recognizedCommand = leadingCommand != null && isKnownCommand(leadingCommand, skillCommands.map((s) => s.name));
+  const insertCommand = (command: string) => {
+    setText(command);
+    setCommandFocusSignal((signal) => signal + 1);
+  };
 
   // `suggestedPrompt` keeps echoing the STALE pre-send value for a beat after a send clears the
   // draft (the daemon hasn't refreshed it yet) — `suppressedSuggestion` (SessionContext, set in
@@ -433,7 +443,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.commandScroll} contentContainerStyle={styles.chipsRow} keyboardShouldPersistTaps="handled">
           {text.length === 0 ? <Chip label="goal" icon={<Sparkles size={14} strokeWidth={1.75} color={tokens.ink3} />} onPress={() => setGoalVisible(true)} testID="chip-goal" /> : null}
           {text.length === 0 || text.startsWith("/") ? commandHints.map((cmd) => (
-            <Chip key={cmd} label={cmd} onPress={() => { setText(cmd); requestAnimationFrame(() => inputRef.current?.focus()); }} testID={`chip-${cmd}`} />
+            <Chip key={cmd} label={cmd} onPress={() => insertCommand(cmd)} testID={`chip-${cmd}`} />
           )) : null}
           {lastPrompt ? (
             <Chip

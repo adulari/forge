@@ -75,6 +75,8 @@ class TauriAwareWebSocket {
   private nativeWs: WebSocket | null = null;
   private pluginWs: import("@tauri-apps/plugin-websocket").default | null = null;
   private disposed = false;
+  private fallbackStarted = false;
+  private closeNotified = false;
 
   constructor(url: string) {
     if (url.startsWith("wss:")) {
@@ -100,14 +102,14 @@ class TauriAwareWebSocket {
       if (allowFallback && !opened) {
         // Likely a mixed-content block before the socket ever opened — fall back to
         // the Rust-side client, which is immune to WebView content policy.
-        this.fallbackToPlugin(url);
+        void this.fallbackToPlugin(url);
         return;
       }
       this.onerror?.(ev);
     };
     native.onclose = (ev) => {
       if (allowFallback && !opened && !this.disposed) {
-        this.fallbackToPlugin(url);
+        void this.fallbackToPlugin(url);
         return;
       }
       this.readyState = TauriAwareWebSocket.CLOSED;
@@ -116,7 +118,15 @@ class TauriAwareWebSocket {
   }
 
   private async fallbackToPlugin(url: string): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || this.fallbackStarted) return;
+    this.fallbackStarted = true;
+    if (this.nativeWs) {
+      this.nativeWs.onopen = null;
+      this.nativeWs.onmessage = null;
+      this.nativeWs.onerror = null;
+      this.nativeWs.onclose = null;
+      this.nativeWs.close();
+    }
     this.nativeWs = null;
 
     try {
@@ -137,8 +147,7 @@ class TauriAwareWebSocket {
         if (msg.type === "Text") {
           this.onmessage?.({ data: msg.data } as MessageEvent);
         } else if (msg.type === "Close") {
-          this.readyState = TauriAwareWebSocket.CLOSED;
-          this.onclose?.({
+          this.emitClose({
             code: msg.data?.code ?? 1000,
             reason: msg.data?.reason ?? "",
           } as CloseEvent);
@@ -146,21 +155,39 @@ class TauriAwareWebSocket {
         // Binary/Ping/Pong: the Forge WS protocol (ARCHITECTURE §3) is text-JSON only.
       });
     } catch (err) {
-      this.readyState = TauriAwareWebSocket.CLOSED;
-      this.onerror?.(err as Event);
-      this.onclose?.({ code: 1006, reason: "tauri websocket connect failed" } as CloseEvent);
+      this.terminateWithError(err, "tauri websocket connect failed");
     }
+  }
+
+  private emitClose(event: CloseEvent): void {
+    if (this.closeNotified) return;
+    this.closeNotified = true;
+    this.readyState = TauriAwareWebSocket.CLOSED;
+    this.onclose?.(event);
+  }
+
+  private terminateWithError(error: unknown, reason: string): void {
+    if (this.disposed || this.closeNotified) return;
+    this.disposed = true;
+    const sock = this.pluginWs;
+    this.pluginWs = null;
+    if (sock) void sock.disconnect().catch(() => {});
+    this.onerror?.(error as Event);
+    this.emitClose({ code: 1006, reason } as CloseEvent);
   }
 
   send(data: string): void {
     if (this.pluginWs) {
-      this.pluginWs.send(data).catch(() => {});
+      this.pluginWs.send(data).catch((err) => {
+        this.terminateWithError(err, "tauri websocket send failed");
+      });
     } else {
       this.nativeWs?.send(data);
     }
   }
 
   close(): void {
+    if (this.disposed) return;
     this.disposed = true;
     this.readyState = TauriAwareWebSocket.CLOSED;
     if (this.pluginWs) {

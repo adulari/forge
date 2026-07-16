@@ -84,22 +84,66 @@ fn forge_exe_name() -> &'static str {
     }
 }
 
+fn is_executable_file(path: &std::path::Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return path
+            .metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+    }
+    #[cfg(not(unix))]
+    true
+}
+
 /// [`find_forge_binary`] against an explicit `PATH` value (unit-testable without mutating the
 /// process-wide environment).
 fn find_forge_binary_in(path_var: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
     let exe_name = forge_exe_name();
     std::env::split_paths(path_var).find_map(|dir| {
         let candidate = dir.join(exe_name);
-        candidate.is_file().then_some(candidate)
+        is_executable_file(&candidate).then_some(candidate)
     })
 }
 
-/// `which`-style PATH scan: the first `PATH` entry containing an executable named `forge`
-/// (`forge.exe` on Windows). No permission-bit check on unix — a non-executable file named
-/// `forge` on PATH is rare enough that `start_forge_serve`'s spawn failure is an acceptable
-/// fallback for that edge case, and avoids pulling in a dedicated PATH-search crate.
+fn common_forge_binary_candidates(home: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(home) = home {
+        candidates.push(home.join(".cargo/bin").join(forge_exe_name()));
+        candidates.push(home.join(".local/bin").join(forge_exe_name()));
+    }
+    #[cfg(unix)]
+    {
+        candidates.extend(
+            [
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/home/linuxbrew/.linuxbrew/bin",
+            ]
+            .into_iter()
+            .map(|dir| std::path::Path::new(dir).join(forge_exe_name())),
+        );
+    }
+    candidates
+}
+
+/// GUI apps inherit a minimal `PATH` on macOS and Linux, so search both that path and the
+/// standard Cargo, user-local, and Homebrew install locations.
 fn find_forge_binary() -> Option<std::path::PathBuf> {
-    find_forge_binary_in(&std::env::var_os("PATH")?)
+    if let Some(path_var) = std::env::var_os("PATH") {
+        if let Some(binary) = find_forge_binary_in(&path_var) {
+            return Some(binary);
+        }
+    }
+
+    let user_dirs = directories::UserDirs::new();
+    common_forge_binary_candidates(user_dirs.as_ref().map(directories::UserDirs::home_dir))
+        .into_iter()
+        .find(|candidate| is_executable_file(candidate))
 }
 
 #[tauri::command]
@@ -115,7 +159,9 @@ pub fn forge_binary_available() -> bool {
 /// me" click.
 #[tauri::command]
 pub fn start_forge_serve() -> Result<(), String> {
-    let mut cmd = std::process::Command::new("forge");
+    let forge_binary = find_forge_binary()
+        .ok_or_else(|| "forge executable was not found in common install locations".to_string())?;
+    let mut cmd = std::process::Command::new(&forge_binary);
     cmd.args(["serve", "--local"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -126,8 +172,12 @@ pub fn start_forge_serve() -> Result<(), String> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    cmd.spawn()
-        .map_err(|e| format!("failed to start `forge serve --local`: {e}"))?;
+    cmd.spawn().map_err(|e| {
+        format!(
+            "failed to start `{}` serve --local: {e}",
+            forge_binary.display()
+        )
+    })?;
     Ok(())
 }
 
@@ -162,7 +212,8 @@ mod tests {
 
     #[test]
     fn read_and_validate_rejects_a_dead_pid() {
-        let dir = std::env::temp_dir().join(format!("forge-desktop-detect2-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("forge-desktop-detect2-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // A pid vanishingly unlikely to be alive, paired with a port nothing listens on either
         // — both liveness checks must independently reject this, so pick a value that fails the
@@ -197,8 +248,36 @@ mod tests {
 
     #[test]
     fn find_forge_binary_returns_none_when_no_path_entry_has_it() {
-        let dir = std::env::temp_dir().join(format!("forge-desktop-which-empty-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("forge-desktop-which-empty-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        let path_var = std::env::join_paths([dir.clone()]).unwrap();
+        assert_eq!(find_forge_binary_in(&path_var), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn common_candidates_include_cargo_and_user_local_bins() {
+        let home = std::path::Path::new("/tmp/forge-test-home");
+        let candidates = common_forge_binary_candidates(Some(home));
+        assert!(candidates.contains(&home.join(".cargo/bin").join(forge_exe_name())));
+        assert!(candidates.contains(&home.join(".local/bin").join(forge_exe_name())));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn find_forge_binary_ignores_non_executable_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "forge-desktop-which-not-executable-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join(forge_exe_name());
+        std::fs::write(&exe, b"").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o644)).unwrap();
+
         let path_var = std::env::join_paths([dir.clone()]).unwrap();
         assert_eq!(find_forge_binary_in(&path_var), None);
         let _ = std::fs::remove_dir_all(&dir);

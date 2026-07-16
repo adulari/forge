@@ -241,15 +241,33 @@ export type PushUnsubscribeRequest =
 // Fetch wrapper
 // ---------------------------------------------------------------------------
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const LARGE_UPLOAD_TIMEOUT_MS = 120_000;
+
 async function request<T>(
   baseUrl: string,
   path: string,
   init?: RequestInit,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 ): Promise<T> {
+  const controller = new AbortController();
+  const callerSignal = init?.signal;
+  let timedOut = false;
+
+  const abortFromCaller = () => controller.abort(callerSignal?.reason);
+  if (callerSignal?.aborted) abortFromCaller();
+  else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error(`request timed out after ${timeoutMs}ms`));
+  }, timeoutMs);
+
   let res: Response;
   try {
     res = await tFetch(`${baseUrl}${path}`, {
       ...init,
+      signal: controller.signal,
       headers: {
         Accept: "application/json",
         ...(init?.body && !(init.body instanceof FormData)
@@ -259,35 +277,52 @@ async function request<T>(
       },
     });
   } catch (err) {
+    if (timedOut) {
+      clearTimeout(timeout);
+      callerSignal?.removeEventListener("abort", abortFromCaller);
+      throw new ApiError(0, `request timed out after ${Math.round(timeoutMs / 1000)}s`, err);
+    }
+    clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
     throw new ApiError(0, `server unreachable (${(err as Error)?.message ?? "network error"})`, err);
   }
 
-  if (res.status === 404) {
-    // Deliberately unrevealing per §1.1 — could be wrong token OR a real 404 route.
-    let body: unknown;
-    try {
-      body = await res.json();
-    } catch {
-      // no body
+  try {
+    if (res.status === 404) {
+      // Deliberately unrevealing per §1.1 — could be wrong token OR a real 404 route.
+      let body: unknown;
+      try {
+        body = await res.json();
+      } catch {
+        // no body
+      }
+      throw new ApiError(404, "pairing invalid, re-scan", body);
     }
-    throw new ApiError(404, "pairing invalid, re-scan", body);
-  }
 
-  if (!res.ok) {
-    let body: ErrorBody | undefined;
-    try {
-      body = (await res.json()) as ErrorBody;
-    } catch {
-      // no body
+    if (!res.ok) {
+      let body: ErrorBody | undefined;
+      try {
+        body = (await res.json()) as ErrorBody;
+      } catch {
+        // no body
+      }
+      throw new ApiError(res.status, body?.error ?? `request failed (${res.status})`, body);
     }
-    throw new ApiError(res.status, body?.error ?? `request failed (${res.status})`, body);
-  }
 
-  if (res.status === 204) {
-    return undefined as T;
-  }
+    if (res.status === 204) {
+      return undefined as T;
+    }
 
-  return (await res.json()) as T;
+    return (await res.json()) as T;
+  } catch (err) {
+    if (timedOut) {
+      throw new ApiError(0, `request timed out after ${Math.round(timeoutMs / 1000)}s`, err);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
+  }
 }
 
 function qs(params: Record<string, string | number | undefined>): string {
@@ -397,10 +432,12 @@ export function uploadFile(
   sessionId: string,
   form: FormData,
 ): Promise<UploadResponse> {
-  return request(baseUrl, `/api/upload${qs({ session: sessionId })}`, {
-    method: "POST",
-    body: form,
-  });
+  return request(
+    baseUrl,
+    `/api/upload${qs({ session: sessionId })}`,
+    { method: "POST", body: form },
+    LARGE_UPLOAD_TIMEOUT_MS,
+  );
 }
 
 export function transcribeAudio(
@@ -408,10 +445,12 @@ export function transcribeAudio(
   form: FormData,
   language?: string,
 ): Promise<TranscribeResponse> {
-  return request(baseUrl, `/api/voice/transcribe${qs({ language })}`, {
-    method: "POST",
-    body: form,
-  });
+  return request(
+    baseUrl,
+    `/api/voice/transcribe${qs({ language })}`,
+    { method: "POST", body: form },
+    LARGE_UPLOAD_TIMEOUT_MS,
+  );
 }
 
 export function answer(baseUrl: string, body: AnswerRequest): Promise<OkResponse> {
