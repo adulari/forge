@@ -74,12 +74,18 @@ pub fn delete(key: &str) -> Result<bool, ConfigError> {
 #[cfg(not(feature = "test-secrets"))]
 pub fn set(key: &str, value: &str) -> Result<(), ConfigError> {
     refuse_if_test_binary();
-    if keyring_available()
-        && keyring::Entry::new(KEYRING_SERVICE, key)
-            .and_then(|e| e.set_password(value))
-            .is_ok()
-    {
-        return Ok(());
+    if keyring_available() {
+        let key = key.to_string();
+        let value = value.to_string();
+        if matches!(
+            keyring_call("write", move || {
+                keyring::Entry::new(KEYRING_SERVICE, &key)
+                    .and_then(|entry| entry.set_password(&value))
+            }),
+            Some(Ok(()))
+        ) {
+            return Ok(());
+        }
     }
     file_set(key, value)
 }
@@ -89,7 +95,10 @@ pub fn set(key: &str, value: &str) -> Result<(), ConfigError> {
 pub fn get(key: &str) -> Option<String> {
     refuse_if_test_binary();
     if keyring_available() {
-        if let Ok(v) = keyring::Entry::new(KEYRING_SERVICE, key).and_then(|e| e.get_password()) {
+        let key = key.to_string();
+        if let Some(Ok(v)) = keyring_call("read", move || {
+            keyring::Entry::new(KEYRING_SERVICE, &key).and_then(|entry| entry.get_password())
+        }) {
             if !v.is_empty() {
                 return Some(v);
             }
@@ -105,10 +114,13 @@ pub fn delete(key: &str) -> Result<bool, ConfigError> {
     refuse_if_test_binary();
     let mut removed = false;
     if keyring_available() {
-        match keyring::Entry::new(KEYRING_SERVICE, key).and_then(|e| e.delete_credential()) {
-            Ok(()) => removed = true,
-            Err(keyring::Error::NoEntry) => {}
-            Err(_) => {} // keyring unreachable — fall through to the file store
+        let key = key.to_string();
+        match keyring_call("delete", move || {
+            keyring::Entry::new(KEYRING_SERVICE, &key).and_then(|entry| entry.delete_credential())
+        }) {
+            Some(Ok(())) => removed = true,
+            Some(Err(keyring::Error::NoEntry)) => {}
+            Some(Err(_)) | None => {} // unreachable/timed out — fall through to the file store
         }
     }
     removed |= file_delete(key)?;
@@ -204,6 +216,40 @@ fn refuse_if_test_binary() {
 #[cfg(not(feature = "test-secrets"))]
 const KEYRING_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(800);
 
+#[cfg(any(not(feature = "test-secrets"), test))]
+fn call_with_timeout<T: Send + 'static>(
+    timeout: std::time::Duration,
+    call: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(call());
+    });
+    rx.recv_timeout(timeout).ok()
+}
+
+#[cfg(not(feature = "test-secrets"))]
+static KEYRING_TIMED_OUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Run every real keyring operation under the same bound as the availability probe. A Secret
+/// Service can answer the initial probe and still wedge a later credential lookup; after the first
+/// such timeout, disable it for this process so bulk provider-key injection leaks at most one
+/// blocked worker and immediately falls back to the encrypted file store.
+#[cfg(not(feature = "test-secrets"))]
+fn keyring_call<T: Send + 'static>(
+    operation: &str,
+    call: impl FnOnce() -> Result<T, keyring::Error> + Send + 'static,
+) -> Option<Result<T, keyring::Error>> {
+    let result = call_with_timeout(KEYRING_PROBE_TIMEOUT, call);
+    if result.is_none() && !KEYRING_TIMED_OUT.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!(
+            "OS keyring {operation} did not respond within {}ms — disabling it for this session",
+            KEYRING_PROBE_TIMEOUT.as_millis()
+        );
+    }
+    result
+}
+
 /// Whether the OS keyring backend is reachable — probed ONCE, with a timeout, and cached for the
 /// process. This exists because on some boxes (WSL / headless Linux with an activatable-but-dead
 /// `org.freedesktop.secrets`) a keyring call **blocks forever** instead of returning an error,
@@ -213,21 +259,21 @@ const KEYRING_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_mil
 /// live keyring answers in milliseconds, so this is invisible there.
 #[cfg(not(feature = "test-secrets"))]
 fn keyring_available() -> bool {
+    if KEYRING_TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
     static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+    let available = *AVAILABLE.get_or_init(|| {
+        match call_with_timeout(KEYRING_PROBE_TIMEOUT, || {
             // Any return (Ok OR Err) means the backend ANSWERED within the window — real calls will
             // then also return promptly (and fall back to the file on their own Err). Only a true
             // hang never sends, tripping the recv timeout below. The detached thread is left to
             // unblock on its own rather than wedging the main path.
-            let _ =
-                keyring::Entry::new(KEYRING_SERVICE, "__forge_probe__").map(|e| e.get_password());
-            let _ = tx.send(());
-        });
-        match rx.recv_timeout(KEYRING_PROBE_TIMEOUT) {
-            Ok(()) => true,
-            Err(_) => {
+            keyring::Entry::new(KEYRING_SERVICE, "__forge_probe__")
+                .map(|entry| entry.get_password())
+        }) {
+            Some(_) => true,
+            None => {
                 tracing::warn!(
                     "OS keyring did not respond within {}ms — using the encrypted file store for \
                      this session (secrets are still durable)",
@@ -236,7 +282,8 @@ fn keyring_available() -> bool {
                 false
             }
         }
-    })
+    });
+    available && !KEYRING_TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 // --- encrypted file fallback ------------------------------------------------------------------
@@ -360,6 +407,21 @@ fn file_delete(key: &str) -> Result<bool, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_call_returns_prompt_results_and_times_out_stalls() {
+        assert_eq!(
+            call_with_timeout(std::time::Duration::from_millis(100), || 42),
+            Some(42)
+        );
+        assert_eq!(
+            call_with_timeout(std::time::Duration::from_millis(5), || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                42
+            }),
+            None
+        );
+    }
 
     #[test]
     fn tripwire_detects_cargo_test_deps_paths() {

@@ -360,6 +360,67 @@ fn recap_line(content: &str) -> Option<String> {
     Some(line.chars().take(240).collect())
 }
 
+/// Produce a recap from Forge's own task state when this turn moved a tracked plan to fully done.
+/// This is deliberately deterministic: an auxiliary summarizer once inverted an explicit
+/// "confirmed complete" response into "tasks were not completed". Only use the task state when it
+/// changed during this turn and the final answer independently reports completion, preventing an
+/// unrelated follow-up from inheriting a stale completed plan's recap.
+fn completed_tasks_recap(
+    before: &[forge_types::TodoItem],
+    after: &[forge_types::TodoItem],
+    final_text: &str,
+) -> Option<String> {
+    if after.is_empty()
+        || before == after
+        || after
+            .iter()
+            .any(|task| task.status != forge_types::TodoStatus::Done)
+    {
+        return None;
+    }
+
+    let final_lower = final_text.to_ascii_lowercase();
+    const NEGATIVE_COMPLETION: &[&str] = &[
+        "not complete",
+        "not completed",
+        "did not complete",
+        "didn't complete",
+        "could not complete",
+        "couldn't complete",
+        "failed to complete",
+        "unable to complete",
+        "incomplete",
+        "unfinished",
+    ];
+    if NEGATIVE_COMPLETION
+        .iter()
+        .any(|marker| final_lower.contains(marker))
+    {
+        return None;
+    }
+    const POSITIVE_COMPLETION: &[&str] = &[
+        "confirmed complete",
+        "successfully completed",
+        "completed all",
+        "all done",
+        "tasks complete",
+        "task complete",
+        "tasks done",
+        "task done",
+    ];
+    if !POSITIVE_COMPLETION
+        .iter()
+        .any(|marker| final_lower.contains(marker))
+    {
+        return None;
+    }
+
+    Some(match after.len() {
+        1 => "Completed the tracked task".to_string(),
+        count => format!("Completed all {count} tracked tasks"),
+    })
+}
+
 /// Reduce a next-prompt-suggestion completion to a clean ghost-text candidate: the first
 /// non-empty line, with quote/backtick characters and any embedded newlines stripped, capped at
 /// 160 chars. `None` when the result is empty, or when it's just the prompt that was already run
@@ -2356,6 +2417,7 @@ impl Session {
             session: self.id.clone(),
             seq: self.current_turn_seq,
             root: root.to_string_lossy().into_owned(),
+            workspace: self.workspace.root().to_string_lossy().into_owned(),
             mode: self.temper().key().to_string(),
         }
     }
@@ -3409,6 +3471,15 @@ Rules:\n\
         }
     }
 
+    /// Subscription CLI bridges start a full external agent process and MCP handshake. They are
+    /// appropriate for the primary coding turn, but not for best-effort recap/suggestion/error
+    /// side calls: three extra bridge launches made a completed `forge run` linger until its outer
+    /// timeout. Prefer a lightweight routed model when available; otherwise omit the optional call.
+    fn post_turn_auxiliary_model(&self, routed: &forge_mesh::RoutingDecision) -> Option<String> {
+        let model = self.auxiliary_model(routed);
+        (!forge_provider::is_cli_bridge(&model)).then_some(model)
+    }
+
     /// Run the PLAN phase of the architect pipeline.
     ///
     /// Calls the planner model with the current transcript and NO tools advertised, streams its
@@ -3940,6 +4011,9 @@ prompt text, nothing else.";
                     &project,
                 )
                 .await;
+            if forge_provider::is_cli_bridge(&decision.model) {
+                return;
+            }
             let messages = vec![
                 Message::system(Session::MEMORY_CAPTURE_SYSTEM),
                 Message::user(format!(
@@ -3984,7 +4058,12 @@ prompt text, nothing else.";
         }))
     }
 
-    async fn generate_recap(&mut self, prompt: &str, final_text: &str) {
+    async fn generate_recap(
+        &mut self,
+        prompt: &str,
+        final_text: &str,
+        tasks_before: &[forge_types::TodoItem],
+    ) {
         if !self.config.recap.enabled {
             return;
         }
@@ -3993,6 +4072,10 @@ prompt text, nothing else.";
         // the trivial-tier summarizer lean on the *request* and invent success ("Fixed the bug…")
         // for a turn that accomplished nothing — so skip it outright.
         if final_text.trim().is_empty() {
+            return;
+        }
+        if let Some(text) = completed_tasks_recap(tasks_before, &self.tasks, final_text) {
+            self.presenter.emit(PresenterEvent::Recap { text });
             return;
         }
         let budget = BudgetState {
@@ -4024,7 +4107,9 @@ prompt text, nothing else.";
                 &self.project,
             )
             .await;
-        let model = self.auxiliary_model(&decision);
+        let Some(model) = self.post_turn_auxiliary_model(&decision) else {
+            return;
+        };
         let user_snippet: String = prompt.chars().take(400).collect();
         let assistant_snippet: String = final_text.chars().take(800).collect();
         let messages = vec![
@@ -4112,7 +4197,9 @@ prompt text, nothing else.";
                 &self.project,
             )
             .await;
-        let model = self.auxiliary_model(&decision);
+        let Some(model) = self.post_turn_auxiliary_model(&decision) else {
+            return;
+        };
         let user_snippet: String = prompt.chars().take(400).collect();
         // The TAIL of the response (not the head, unlike the recap's snippet) is what best
         // predicts a likely follow-up — it's what the user is looking at right now.
@@ -4208,7 +4295,9 @@ prompt text, nothing else.";
                 &self.project,
             )
             .await;
-        let model = self.auxiliary_model(&decision);
+        let Some(model) = self.post_turn_auxiliary_model(&decision) else {
+            return;
+        };
         let messages = [
             Message::system(SHELL_DIAGNOSE_SYSTEM),
             Message::user(format!("Command:\n{command}\n\nResult:\n{result}")),
@@ -5812,6 +5901,7 @@ prompt text, nothing else.";
         let mode = format!("{:?}", self.mode);
         self.store
             .ensure_session(&self.id, &self.workspace.display(), &mode)?;
+        let recap_tasks_before = self.tasks.clone();
         let working_tree_baseline = working_tree_status(Some(self.workspace.root()));
         self.last_context_pack = context_pack::ContextPack::default();
         let mut context_pack = context_pack::ContextPack::default();
@@ -6680,7 +6770,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 StopReason::FinalAnswer
             },
         });
-        self.generate_recap(prompt, &final_text).await;
+        self.generate_recap(prompt, &final_text, &recap_tasks_before)
+            .await;
         self.generate_suggestion(prompt, &final_text).await;
         // Await the handle so one-shot (forge run) exits only after capture completes. In
         // interactive mode the spinner is already cleared and this is a brief background wait.
@@ -8310,7 +8401,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
     ) -> Result<String, CoreError> {
         use forge_types::TodoStatus;
         let args_json = serde_json::to_string(&call.args)?;
-        self.tasks = parse_tasks(&call.args);
+        self.tasks = merge_task_update(&self.tasks, parse_tasks(&call.args));
         self.persist_tasks();
         self.presenter
             .emit(PresenterEvent::Tasks(self.tasks.clone()));
@@ -8674,7 +8765,13 @@ pub fn parse_tasks(args: &serde_json::Value) -> Vec<forge_types::TodoItem> {
         .map(|arr| {
             arr.iter()
                 .filter_map(|t| {
-                    let title = t.get("title").and_then(|v| v.as_str())?.trim();
+                    // Claude/Codex task tools use a few equivalent field names. Accept their
+                    // native shapes at this compatibility boundary so a bridge cannot silently
+                    // replace a non-empty task list with zero parsed tasks.
+                    let title = ["title", "content", "description"]
+                        .into_iter()
+                        .find_map(|key| t.get(key).and_then(|v| v.as_str()))?
+                        .trim();
                     (!title.is_empty()).then(|| TodoItem {
                         title: title.to_string(),
                         status: t
@@ -8687,6 +8784,34 @@ pub fn parse_tasks(args: &serde_json::Value) -> Vec<forge_types::TodoItem> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Apply an `update_tasks` payload without letting a bridge's status-only subset silently delete
+/// the rest of the plan. The advertised contract remains a full ordered replacement, but Claude
+/// occasionally sends only the item whose status changed. When every item in a shorter payload
+/// matches an existing title, treat it as a patch; a full/new list still replaces, and `[]` still
+/// explicitly clears the tracker.
+pub fn merge_task_update(
+    existing: &[forge_types::TodoItem],
+    incoming: Vec<forge_types::TodoItem>,
+) -> Vec<forge_types::TodoItem> {
+    if incoming.is_empty() || existing.is_empty() || incoming.len() >= existing.len() {
+        return incoming;
+    }
+    if !incoming
+        .iter()
+        .all(|update| existing.iter().any(|task| task.title == update.title))
+    {
+        return incoming;
+    }
+
+    let mut merged = existing.to_vec();
+    for update in incoming {
+        if let Some(task) = merged.iter_mut().find(|task| task.title == update.title) {
+            task.status = update.status;
+        }
+    }
+    merged
 }
 
 /// The `ToolSpec` advertised to the model for [`UPDATE_TASKS_TOOL`].
@@ -10661,6 +10786,22 @@ mod tests {
         };
         assert_eq!(session.auxiliary_model(&pinned), "ollama::qwen3:4b");
         assert_eq!(session.auxiliary_model(&routed), "codex-oauth::gpt-5.6-sol");
+        assert_eq!(
+            session.post_turn_auxiliary_model(&pinned).as_deref(),
+            Some("ollama::qwen3:4b"),
+            "a lightweight configured model remains suitable for optional side calls"
+        );
+
+        let claude_bridge = forge_mesh::RoutingDecision {
+            model: "claude-cli::sonnet".into(),
+            pinned: false,
+            ..pinned
+        };
+        assert_eq!(
+            session.post_turn_auxiliary_model(&claude_bridge),
+            None,
+            "a completed turn must not launch another full CLI agent for optional side work"
+        );
     }
 
     #[test]
@@ -11543,6 +11684,58 @@ mod tests {
         assert_eq!(empty.title, "Plan");
         assert!(empty.steps.is_empty());
         assert!(empty.notes.is_none());
+    }
+
+    #[test]
+    fn parse_tasks_accepts_bridge_title_aliases_and_preserves_explicit_clear() {
+        let tasks = parse_tasks(&serde_json::json!({
+            "tasks": [
+                {"title": "  canonical  ", "status": "pending"},
+                {"content": "Codex shape", "status": "in_progress"},
+                {"description": "Claude shape", "status": "completed"},
+                {"title": "   ", "description": "title takes precedence"}
+            ]
+        }));
+
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(tasks[0].title, "canonical");
+        assert_eq!(tasks[0].status, forge_types::TodoStatus::Pending);
+        assert_eq!(tasks[1].title, "Codex shape");
+        assert_eq!(tasks[1].status, forge_types::TodoStatus::InProgress);
+        assert_eq!(tasks[2].title, "Claude shape");
+        assert_eq!(tasks[2].status, forge_types::TodoStatus::Done);
+        assert!(parse_tasks(&serde_json::json!({"tasks": []})).is_empty());
+    }
+
+    #[test]
+    fn partial_task_status_update_preserves_omitted_bridge_tasks() {
+        let existing = parse_tasks(&serde_json::json!({
+            "tasks": [
+                {"description": "Create p1.txt", "status": "in_progress"},
+                {"description": "Create p2.txt", "status": "pending"},
+                {"description": "Create p3.txt", "status": "pending"},
+                {"description": "Create p4.txt", "status": "pending"},
+                {"description": "Create p5.txt", "status": "pending"}
+            ]
+        }));
+        let partial = parse_tasks(&serde_json::json!({
+            "tasks": [{"description": "Create p1.txt", "status": "done"}]
+        }));
+        let merged = merge_task_update(&existing, partial);
+        assert_eq!(
+            merged.len(),
+            5,
+            "a partial status call must not erase p2-p5"
+        );
+        assert_eq!(merged[0].status, forge_types::TodoStatus::Done);
+        assert!(merged[1..]
+            .iter()
+            .all(|task| task.status == forge_types::TodoStatus::Pending));
+
+        assert!(
+            merge_task_update(&existing, Vec::new()).is_empty(),
+            "an explicit empty list still clears the tracker"
+        );
     }
 
     fn one_step_plan() -> forge_types::PlanProposal {
@@ -12698,9 +12891,9 @@ mod tests {
             test_workspace().to_str().expect("workspace path is UTF-8"),
         )
         .unwrap();
-        s.generate_recap("Fix buggy.py so average([]) returns 0.0", "")
+        s.generate_recap("Fix buggy.py so average([]) returns 0.0", "", &[])
             .await;
-        s.generate_recap("Fix buggy.py", "   \n\t ").await;
+        s.generate_recap("Fix buggy.py", "   \n\t ", &[]).await;
         let recaps = events
             .lock()
             .unwrap()
@@ -12708,6 +12901,61 @@ mod tests {
             .filter(|e| matches!(e, PresenterEvent::Recap { .. }))
             .count();
         assert_eq!(recaps, 0, "empty/whitespace turn must not be recapped");
+    }
+
+    #[test]
+    fn completed_task_recap_is_grounded_in_this_turns_state_change() {
+        let before = vec![forge_types::TodoItem {
+            title: "Write alpha.txt containing ALPHA".to_string(),
+            status: forge_types::TodoStatus::InProgress,
+        }];
+        let after = vec![forge_types::TodoItem {
+            title: "Write alpha.txt containing ALPHA".to_string(),
+            status: forge_types::TodoStatus::Done,
+        }];
+        assert_eq!(
+            completed_tasks_recap(
+                &before,
+                &after,
+                "Verified alpha.txt contains ALPHA. The task is confirmed complete."
+            )
+            .as_deref(),
+            Some("Completed the tracked task")
+        );
+
+        let three_done = (1..=3)
+            .map(|i| forge_types::TodoItem {
+                title: format!("Task {i}"),
+                status: forge_types::TodoStatus::Done,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            completed_tasks_recap(
+                &[],
+                &three_done,
+                "All 3 tasks confirmed complete after verification."
+            )
+            .as_deref(),
+            Some("Completed all 3 tracked tasks")
+        );
+    }
+
+    #[test]
+    fn completed_task_recap_does_not_reuse_stale_or_unconfirmed_tasks() {
+        let done = vec![forge_types::TodoItem {
+            title: "Old task".to_string(),
+            status: forge_types::TodoStatus::Done,
+        }];
+        assert_eq!(
+            completed_tasks_recap(&done, &done, "Answered the unrelated follow-up"),
+            None,
+            "an unchanged task list belongs to an earlier turn"
+        );
+        assert_eq!(
+            completed_tasks_recap(&[], &done, "I could not complete the task"),
+            None,
+            "a negative final answer must not be rewritten as success"
+        );
     }
 
     #[test]

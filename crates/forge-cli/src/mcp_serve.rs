@@ -232,6 +232,19 @@ struct ForgeMcp {
     lean: bool,
 }
 
+fn parse_bridge_tasks(args: &Value) -> Result<Vec<forge_types::TodoItem>, &'static str> {
+    let tasks = forge_core::parse_tasks(args);
+    let input_count = args
+        .get("tasks")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if input_count > 0 && tasks.is_empty() {
+        Err("error: no valid tasks found; each task needs a non-empty title, content, or description")
+    } else {
+        Ok(tasks)
+    }
+}
+
 impl ServerHandler for ForgeMcp {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
@@ -278,14 +291,21 @@ impl ServerHandler for ForgeMcp {
         // parent's run_turn reloads it. Also report it to the out-of-band sink so the parent TUI's
         // sticky task panel updates LIVE during the bridge turn (not just on completion).
         if name == forge_core::UPDATE_TASKS_TOOL {
-            let tasks = forge_core::parse_tasks(&args);
+            let mut tasks = match parse_bridge_tasks(&args) {
+                Ok(tasks) => tasks,
+                Err(error) => {
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(error)]));
+                }
+            };
+            if let Ok(session_id) = std::env::var(forge_core::snapshot::ENV_SESSION) {
+                let existing = self.tasks_store.tasks(&session_id).unwrap_or_default();
+                tasks = forge_core::merge_task_update(&existing, tasks);
+                let _ = self.tasks_store.set_tasks(&session_id, &tasks);
+            }
             let done = tasks
                 .iter()
                 .filter(|t| t.status == forge_types::TodoStatus::Done)
                 .count();
-            if let Ok(session_id) = std::env::var(forge_core::snapshot::ENV_SESSION) {
-                let _ = self.tasks_store.set_tasks(&session_id, &tasks);
-            }
             report_to_sink(serde_json::json!({ "k": "tasks", "tasks": tasks }));
             return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                 "task list updated: {} task(s) — {done} done",
@@ -1014,6 +1034,19 @@ fn bearer_ok(header: Option<&str>, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_tasks_reject_nonempty_unparseable_lists_but_allow_clear() {
+        let error = parse_bridge_tasks(&serde_json::json!({
+            "tasks": [{"unexpected": "silently dropped before"}]
+        }))
+        .expect_err("a malformed non-empty list must fail loudly");
+        assert!(error.contains("no valid tasks"));
+
+        assert!(parse_bridge_tasks(&serde_json::json!({"tasks": []}))
+            .expect("an explicit empty list intentionally clears tasks")
+            .is_empty());
+    }
 
     #[test]
     fn cap_bridge_result_passes_small_and_uncapped_tools_through() {

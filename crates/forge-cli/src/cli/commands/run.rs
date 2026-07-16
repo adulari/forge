@@ -141,6 +141,18 @@ pub(crate) fn sync_palette_to_slash_token(app: &mut forge_tui::App) {
     }
 }
 
+fn should_refresh_codex_quota(mock: bool, pin: Option<&str>) -> bool {
+    if mock {
+        return false;
+    }
+    match pin.map(forge_config::provider_of) {
+        // Unpinned/bare ids may route through Codex, so preserve the routing-pressure refresh.
+        None | Some("") | Some("codex-cli" | "codex-oauth") => true,
+        // A fully-qualified non-Codex pin cannot use Codex during this session.
+        Some(_) => false,
+    }
+}
+
 pub(crate) async fn build_session_with(
     presenter: Box<dyn Presenter>,
     mock: bool,
@@ -246,11 +258,17 @@ pub(crate) async fn build_session_with_self_mcp(
     let config_lattice_watch = config.lattice.watch;
     let config_default_effort = config.mesh.default_effort.clone();
 
+    // Normalize before any provider-specific startup work so a pinned session only initializes
+    // the provider it can actually use.
+    let pin = pin.map(|p| forge_provider::normalize_model_id(&p).into_owned());
+
     let store = Arc::new(open_store()?);
     // Never construct a session router from an expired Codex pressure reading. The helper uses a
     // fresh CLI rollout when available, otherwise performs one bounded minimal OAuth probe; it
     // updates the shared codex-oauth/codex-cli quota bucket before this session's first route.
-    if !mock {
+    // A pinned non-Codex model never routes to Codex, so probing its keyring/quota is irrelevant
+    // startup work and can block the requested provider behind an unavailable Secret Service.
+    if should_refresh_codex_quota(mock, pin.as_deref()) {
         crate::cli::commands::models::refresh_codex_quota(&store).await;
     }
     let store_for_lattice = Arc::clone(&store);
@@ -265,10 +283,6 @@ pub(crate) async fn build_session_with_self_mcp(
             )));
         }
     }
-
-    // Normalize legacy underscore-prefix aliases (codex_cli:: → codex-cli::) so that
-    // `--model codex_cli::gpt-5.4-mini` works identically to the canonical hyphen form.
-    let pin = pin.map(|p| forge_provider::normalize_model_id(&p).into_owned());
 
     // Auto-discovery: build a live model catalog so the mesh routes to the best usable model
     // (docs/features/mesh-routing.md). Skipped for the offline mock and when disabled.
@@ -5870,6 +5884,26 @@ fn find_starting_event_id(store: &forge_store::Store, session_id: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_quota_refresh_only_runs_when_the_session_can_use_codex() {
+        assert!(should_refresh_codex_quota(false, None));
+        assert!(should_refresh_codex_quota(false, Some("bare-model")));
+        assert!(should_refresh_codex_quota(
+            false,
+            Some("codex-cli::gpt-5.4-mini")
+        ));
+        assert!(should_refresh_codex_quota(
+            false,
+            Some("codex-oauth::gpt-5.6-luna")
+        ));
+        assert!(!should_refresh_codex_quota(
+            false,
+            Some("claude-cli::sonnet")
+        ));
+        assert!(!should_refresh_codex_quota(false, Some("openai::gpt-5.4")));
+        assert!(!should_refresh_codex_quota(true, None));
+    }
 
     fn picker_rows(ids: &[&str]) -> Vec<forge_tui::PickerRow> {
         ids.iter()
