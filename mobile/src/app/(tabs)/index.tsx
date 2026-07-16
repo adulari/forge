@@ -23,6 +23,7 @@ import { useAuth } from "../../lib/auth";
 import { useServerFleets, useSessions } from "../../lib/queries";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { buildFleetDeck, type FleetDeckItem } from "../../lib/fleetRows";
+import { filterSessions, isOfflineError, sessionPickerState } from "../../lib/sessionPicker";
 import { depthDark, depthLight, radii, shadowStyle, space } from "../../theme/tokens";
 import { tabularNums, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
@@ -186,18 +187,11 @@ export default function FleetScreen() {
   }, [refetch]);
 
   const data = useMemo(() => query.data ?? [], [query.data]);
-  const filteredData = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return data.filter((row) => {
-      if (needsYouOnly && !row.waiting) return false;
-      if (!needle) return true;
-      const status = row.waiting ? "waiting" : row.busy ? "busy" : "idle";
-      return [row.title, row.cwd, status].some((value) => value.toLowerCase().includes(needle));
-    });
-  }, [data, search, needsYouOnly]);
+  const filteredData = useMemo(() => filterSessions(data, search, needsYouOnly), [data, search, needsYouOnly]);
   const deckRows = useMemo(() => buildFleetDeck(filteredData, data), [filteredData, data]);
   const hasData = data.length > 0;
   const isFirstLoad = query.isLoading && !hasData;
+  const pickerState = sessionPickerState({ isLoading: isFirstLoad, isError: query.isError, visibleCount: filteredData.length });
 
   const renderItem = useCallback(
     ({ item }: { item: FleetDeckItem }) => item.type === "label" ? <Text style={[typeScale.section, styles.groupLabel, { color: item.label === "NEEDS YOU" ? tokens.danger : tokens.ink3 }]}>{item.label}</Text> : <SessionCard row={item.row} index={item.sourceIndex} />,
@@ -210,8 +204,8 @@ export default function FleetScreen() {
       return (
         <EmptyState
           icon={Flame}
-          message={query.error instanceof ApiError ? query.error.message : "server unreachable"}
-          action={<Button label="Retry" variant="secondary" onPress={() => void refetch()} />}
+          message={isOfflineError(query.error) ? "Forge is offline. Check the server connection and try again." : query.error instanceof ApiError ? query.error.message : "Unable to load sessions."}
+          action={<Button label="Retry" variant="secondary" onPress={() => void refetch()} accessibilityLabel="Retry loading sessions" />}
         />
       );
     }
@@ -222,8 +216,8 @@ export default function FleetScreen() {
         </View>
         <EmptyState
           icon={Flame}
-          message={search.trim() ? "no sessions match that search" : "no live sessions — start one"}
-          action={search.trim() ? <Button label="Clear search" variant="secondary" onPress={() => setSearch("")} /> : <Button label="New session" variant="secondary" onPress={() => router.push("/new-session")} />}
+          message={search.trim() ? "No sessions match this search." : "No sessions yet. Start with a working directory."}
+          action={search.trim() ? <Button label="Clear search" variant="secondary" onPress={() => setSearch("")} accessibilityLabel="Clear session search" /> : <Button label="Create your first session" variant="primary" onPress={() => router.push("/new-session")} accessibilityLabel="Create your first session" />}
         />
       </View>
     );
@@ -254,7 +248,7 @@ export default function FleetScreen() {
         autoCorrect={false}
         containerStyle={styles.search}
       />
-      {hasData ? <><FleetHeader sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /><SessionJumpStrip sessions={filteredData} onPress={(sessionId) => { const target = deckRows.findIndex((item) => item.type === "session" && item.row.id === sessionId); if (target >= 0) listRef.current?.scrollToIndex({ index: target, animated: true }); }} /></> : null}
+      {pickerState === "ready" ? <><FleetHeader sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /><SessionJumpStrip sessions={filteredData} onPress={(sessionId) => { const target = deckRows.findIndex((item) => item.type === "session" && item.row.id === sessionId); if (target >= 0) listRef.current?.scrollToIndex({ index: target, animated: true }); }} /></> : null}
       {isFirstLoad ? (
         <View style={styles.list}>
           {[0, 1, 2, 3].map((i) => (
@@ -275,9 +269,10 @@ export default function FleetScreen() {
       )}
 
       <IconButton
+        accessibilityLabel="Create a new session"
+        accessibilityHint="Opens the session setup form"
         icon={<Plus size={24} strokeWidth={1.75} color={tokens.onAccent} />}
         onPress={() => router.push("/new-session")}
-        accessibilityLabel="New session"
         style={[
           styles.fab,
           { backgroundColor: tokens.accent },

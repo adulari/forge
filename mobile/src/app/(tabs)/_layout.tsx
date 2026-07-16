@@ -23,6 +23,7 @@ import Animated, {
 import { Chip } from "../../components/ds/Chip";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { IconButton } from "../../components/ds/IconButton";
+import { SearchField } from "../../components/ds/SearchField";
 import { MasterDetail } from "../../components/ds/MasterDetail";
 import { SessionCard } from "../../components/fleet/SessionCard";
 import { useSessions } from "../../lib/queries";
@@ -208,7 +209,11 @@ function ExpandedRail() {
   const rows = useMemo(() => sessions ?? [], [sessions]);
   const waitingCount = useMemo(() => rows.filter((s) => s.waiting).length, [rows]);
   const showingInbox = pathname === "/inbox";
-  const visibleRows = showingInbox ? rows.filter((s) => s.waiting) : rows;
+  const [search, setSearch] = React.useState("");
+  const visibleRows = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return (showingInbox ? rows.filter((s) => s.waiting) : rows).filter((row) => !needle || [row.title, row.cwd, row.waiting ? "waiting" : row.busy ? "busy" : "idle"].some((value) => value.toLowerCase().includes(needle)));
+  }, [rows, search, showingInbox]);
 
   return (
     <View style={styles.rail}>
@@ -227,11 +232,13 @@ function ExpandedRail() {
         <RailPill href="/inbox" label="Waiting" count={waitingCount} />
       </View>
 
+      <SearchField value={search} onChangeText={setSearch} placeholder="Search sessions" accessibilityLabel="Search sessions" containerStyle={styles.railSearch} />
       <ScrollView style={styles.railList} contentContainerStyle={styles.railListContent}>
         {visibleRows.length === 0 ? (
           <EmptyState
             icon={Flame}
-            message={showingInbox ? "nothing needs you right now." : "no live sessions — start one"}
+            message={showingInbox ? "Nothing needs you right now." : search ? "No sessions match this search." : "No sessions yet. Start one."}
+            action={!showingInbox && !search ? <Chip label="Create your first session" selected onPress={() => router.push("/new-session")} /> : search ? <Chip label="Clear search" onPress={() => setSearch("")} /> : undefined}
           />
         ) : (
           visibleRows.map((row, i) => <SessionCard key={row.id} row={row} index={i} />)
@@ -286,6 +293,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   pillsRow: { flexDirection: "row", gap: space.space8, paddingHorizontal: space.space16, paddingVertical: space.space12 },
+  railSearch: { marginHorizontal: space.space16, marginBottom: space.space8 },
   railList: { flex: 1 },
   railListContent: { paddingBottom: space.space16 },
   railFooter: {
