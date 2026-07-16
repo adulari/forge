@@ -6,6 +6,29 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.6.4] - 2026-07-16
+
+Core reliability and app activation improvements across Forge TUI, desktop, and mobile.
+
+### Added
+- **Anonymous product telemetry and dashboard** (#791, #792): lightweight opt-out usage signals
+  and aggregate release-download metrics make installs, active use, retention, and failures
+  visible without collecting prompts, paths, file content, or personal identifiers.
+- **New-session model picker** (#794): desktop and mobile now expose the discovered model catalog,
+  prioritize healthy models, preserve automatic mesh routing, and retain manual IDs offline.
+
+### Fixed
+- **Mesh completion and recovery** (#783-#790): explicit turn contracts, readiness checks,
+  workspace-scoped verification, cleaner bridge startup, and quota-aware routing reduce false
+  completion, cross-session leakage, redundant providers, and stalled recovery.
+- **Desktop activation and connectivity** (#794): the app finds Forge in Cargo, Homebrew,
+  Linuxbrew, and user-local installs, bounds HTTP waits, and makes WebSocket fallback one-shot and
+  recoverable instead of hanging or silently losing sends.
+- **Mobile presentation and live state** (#782, #793): Live Activity fields stay synchronized and
+  the iOS header uses one stable elevated surface without the ambient background wash.
+- **Command surfaces** (#794): command palette hooks and Composer focus now obey React lifecycle
+  rules, eliminating command-center crash and compiler-error paths.
+
 ## [2.6.3] - 2026-07-15
 
 Mesh reliability and release-surface hardening from continued dogfooding.
@@ -2550,7 +2573,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.6.3...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.6.4...HEAD
+[2.6.4]: https://github.com/Adulari/forge/compare/v2.6.3...v2.6.4
 [2.6.3]: https://github.com/Adulari/forge/compare/v2.6.2...v2.6.3
 [2.5.8]: https://github.com/Adulari/forge/compare/v2.5.7...v2.5.8
 [2.5.7]: https://github.com/Adulari/forge/compare/v2.5.6...v2.5.7
