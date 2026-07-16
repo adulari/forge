@@ -9,6 +9,11 @@ on:
       - "app-v*"
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to repair/publish (leave blank for an artifact-only build)
+        required: false
+        type: string
 
 concurrency:
   group: app-desktop-${{ github.ref }}
@@ -77,11 +82,29 @@ jobs:
             libssl-dev \
             xdg-utils
 
-      - name: Verify Arch Linux webview deps
+      - name: Install Arch Linux webview deps
         if: matrix.name == 'linux-x86_64'
         run: |
-          pkg-config --exists webkit2gtk-4.1 ayatana-appindicator3-0.1 librsvg-2.0
-          command -v patchelf >/dev/null || sudo pacman -S --needed --noconfirm patchelf
+          # Self-hosted images drift. Install the declared build contract instead of merely
+          # asserting yesterday's image still has it (which blocked the v2.6.5 desktop release).
+          sudo pacman -S --needed --noconfirm \
+            pkgconf \
+            webkit2gtk-4.1 \
+            libayatana-appindicator \
+            librsvg \
+            patchelf \
+            base-devel \
+            curl \
+            wget \
+            file \
+            openssl \
+            xdotool
+          for package in webkit2gtk-4.1 ayatana-appindicator3-0.1 librsvg-2.0; do
+            pkg-config --exists "$package" || {
+              echo "missing required pkg-config module: $package" >&2
+              exit 1
+            }
+          done
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -109,11 +132,17 @@ jobs:
       # update is perpetually available, "updates" to a bundle that still reports the old version,
       # and loops. On a tag build, stamp the app version to the tag so built == manifest.
       - name: Sync desktop app version to release tag
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         working-directory: mobile
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
-          VERSION="${GITHUB_REF_NAME#app-v}"
+          [[ "$RELEASE_TAG" =~ ^(app-)?v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "release_tag must look like v2.6.5 or app-v2.6.5" >&2
+            exit 1
+          }
+          VERSION="${RELEASE_TAG#app-v}"
           VERSION="${VERSION#v}"
           node -e "const fs=require('fs'),f='src-tauri/tauri.conf.json';const j=JSON.parse(fs.readFileSync(f,'utf8'));j.version=process.argv[1];fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n')" "$VERSION"
           echo "desktop app version stamped to $VERSION"
@@ -157,7 +186,7 @@ jobs:
     needs: build
     # Run even when a matrix adapter failed so the release gets one explicit transactional
     # verdict instead of silently skipping latest.json after partially publishing bundles.
-    if: always() && startsWith(github.ref, 'refs/tags/')
+    if: always() && (startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '')
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/download-artifact@v8
@@ -167,7 +196,7 @@ jobs:
           merge-multiple: true
       - name: Generate latest.json
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ inputs.release_tag || github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
           python - <<'PY'
@@ -202,13 +231,14 @@ jobs:
       - name: Publish complete desktop release
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: |
             assets/*
             latest.json
           fail_on_unmatched_files: true
       - name: Verify updater is publicly readable
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ inputs.release_tag || github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
           url="https://github.com/${REPO}/releases/download/${VERSION}/latest.json"
