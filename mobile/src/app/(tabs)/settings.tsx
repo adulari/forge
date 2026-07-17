@@ -262,7 +262,7 @@ function NavListRow({ label, meta, onPress, showSeparator = true }: { label: str
         </View>
       }
     >
-      <Text style={[type.body, { color: tokens.ink }]} numberOfLines={1}>
+      <Text style={[type.bodyBold, styles.navLabel, { color: tokens.ink }]} numberOfLines={1}>
         {label}
       </Text>
     </DenseRow>
@@ -602,9 +602,9 @@ export default function SettingsScreen() {
         </View>
 
         <View style={styles.footerRow}>
-          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4 }]}>{`v${appVersion} · protocol v7`}</Text>
+          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 0 }]}>{`v${appVersion} · protocol v7`}</Text>
           <View style={styles.footerFill} />
-          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>
+          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 1 }]} numberOfLines={1}>
             {host ? `${host} · ${maskToken(activeToken)}` : "not connected"}
           </Text>
         </View>
@@ -707,7 +707,8 @@ const styles = StyleSheet.create({
   content: { paddingTop: space.space16, paddingBottom: space.space48 },
   pageTitle: { paddingHorizontal: space.space4 },
   footerRow: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space16, paddingTop: space.space16 },
-  footerFill: { flex: 1 },
+  footerFill: { flex: 1, minWidth: space.space8 },
+  navLabel: { letterSpacing: -0.2 },
 });
 
 const railStyles = StyleSheet.create({
