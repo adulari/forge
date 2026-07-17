@@ -8,6 +8,10 @@ Cargo.lock.orig
 *.env
 .env
 .env.*
+*.p8
+*.pem
+*.key
+*.p12
 /.forge
 forge.db
 forge.db-*

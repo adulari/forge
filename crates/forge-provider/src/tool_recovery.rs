@@ -700,7 +700,7 @@ mod tests {
             for _ in 0..pieces {
                 let frag = FRAGMENTS[next() % FRAGMENTS.len()];
                 // Occasionally blow a fragment up to stress length/repeat handling.
-                if next() % 17 == 0 {
+                if next().is_multiple_of(17) {
                     s.push_str(&frag.repeat(1 + next() % 50));
                 } else {
                     s.push_str(frag);

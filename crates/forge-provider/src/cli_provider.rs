@@ -5118,7 +5118,7 @@ mod tests {
             let mut line = String::new();
             for _ in 0..pieces {
                 let frag = FRAGMENTS[next() % FRAGMENTS.len()];
-                if next() % 19 == 0 {
+                if next().is_multiple_of(19) {
                     line.push_str(&frag.repeat(1 + next() % 40));
                 } else {
                     line.push_str(frag);

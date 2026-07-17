@@ -4177,7 +4177,7 @@ impl Store {
         let n = self
             .live_event_writes
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if n % LIVE_EVENT_PRUNE_EVERY == 0 {
+        if n.is_multiple_of(LIVE_EVENT_PRUNE_EVERY) {
             conn.execute(
                 "DELETE FROM live_event WHERE session_id = ?1 AND id <= (
                     SELECT id FROM live_event WHERE session_id = ?1 ORDER BY id DESC LIMIT 1 OFFSET ?2
@@ -4905,8 +4905,8 @@ mod tests {
         // the remote history page) still shows them.
         let store = Store::open_in_memory().unwrap();
         let sid = store.create_session("/x", "default").unwrap();
-        for i in 0..6 {
-            let role = if i % 2 == 0 {
+        for i in 0_i64..6 {
+            let role = if i.rem_euclid(2) == 0 {
                 Role::User
             } else {
                 Role::Assistant
@@ -4990,8 +4990,8 @@ mod tests {
     fn load_all_messages_keeps_compacted_away_history_for_the_user() {
         let store = Store::open_in_memory().unwrap();
         let sid = store.create_session("/x", "default").unwrap();
-        for i in 0..10 {
-            let role = if i % 2 == 0 {
+        for i in 0_i64..10 {
+            let role = if i.rem_euclid(2) == 0 {
                 Role::User
             } else {
                 Role::Assistant
@@ -5025,8 +5025,8 @@ mod tests {
     fn uncompact_session_store_reactivates_messages_and_drops_the_summary() {
         let store = Store::open_in_memory().unwrap();
         let sid = store.create_session("/x", "default").unwrap();
-        for i in 0..10 {
-            let role = if i % 2 == 0 {
+        for i in 0_i64..10 {
+            let role = if i.rem_euclid(2) == 0 {
                 Role::User
             } else {
                 Role::Assistant
@@ -5057,8 +5057,8 @@ mod tests {
         // rows /compact removed, never the ones /undo removed.
         let store = Store::open_in_memory().unwrap();
         let sid = store.create_session("/x", "default").unwrap();
-        for i in 0..10 {
-            let role = if i % 2 == 0 {
+        for i in 0_i64..10 {
+            let role = if i.rem_euclid(2) == 0 {
                 Role::User
             } else {
                 Role::Assistant
@@ -6683,7 +6683,7 @@ mod tests {
         const PER: usize = 40;
         let mut handles = Vec::new();
         for t in 0..THREADS {
-            let store = if t % 2 == 0 {
+            let store = if t.is_multiple_of(2) {
                 std::sync::Arc::clone(&store_a)
             } else {
                 std::sync::Arc::clone(&store_b)
@@ -6766,7 +6766,7 @@ mod tests {
         const PER: usize = 20;
         let mut handles = Vec::new();
         for t in 0..THREADS {
-            let store = if t % 2 == 0 {
+            let store = if t.is_multiple_of(2) {
                 std::sync::Arc::clone(&store_a)
             } else {
                 std::sync::Arc::clone(&store_b)

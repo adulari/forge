@@ -1,6 +1,8 @@
 //! Relay configuration, loaded once at startup from the environment (Fly.io secrets/env vars
 //! land here the same way `crate::apns::ApnsConfig::from_env` reads them in `forge-cli`).
 
+use std::net::IpAddr;
+
 /// Default allowlisted topics if `FORGE_RELAY_ALLOWED_TOPICS` is unset — the one app this relay
 /// exists for today, plus its Live Activity variant (see `crates/forge-cli/src/apns.rs`'s
 /// `APNS_BUNDLE_ID` + `dispatch_live_activity`'s `{bundle}.push-type.liveactivity` topic).
@@ -12,6 +14,10 @@ pub(crate) struct RelayConfig {
     pub(crate) key_pem: String,
     pub(crate) allowed_topics: Vec<String>,
     pub(crate) relay_token: Option<String>,
+    pub(crate) bind_addr: IpAddr,
+    /// Trust proxy-provided client-IP headers. This is deliberately off by default: enabling it
+    /// is safe only when the relay is private-bound behind a proxy that overwrites them.
+    pub(crate) trust_proxy_headers: bool,
     pub(crate) port: u16,
     /// Per-device-token / per-IP send budget within `rate_window_secs` (see `ratelimit.rs`).
     pub(crate) rate_limit_per_window: u32,
@@ -53,6 +59,24 @@ impl RelayConfig {
         let relay_token = std::env::var("FORGE_RELAY_TOKEN")
             .ok()
             .filter(|token| !token.is_empty());
+        // Loopback is the secure default for the documented nginx deployment. Container
+        // platforms that require a wildcard listener must opt in explicitly.
+        let bind_addr = std::env::var("FORGE_RELAY_BIND_ADDR")
+            .unwrap_or_else(|_| "127.0.0.1".to_string())
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid FORGE_RELAY_BIND_ADDR: {e}"))?;
+        let trust_proxy_headers = match std::env::var("FORGE_RELAY_TRUST_PROXY_HEADERS") {
+            Err(_) => false,
+            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" => true,
+                "0" | "false" | "no" => false,
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "FORGE_RELAY_TRUST_PROXY_HEADERS must be true/false"
+                    ));
+                }
+            },
+        };
         let port = std::env::var("PORT")
             .ok()
             .and_then(|p| p.parse().ok())
@@ -76,6 +100,8 @@ impl RelayConfig {
             key_pem,
             allowed_topics,
             relay_token,
+            bind_addr,
+            trust_proxy_headers,
             port,
             rate_limit_per_window,
             rate_window_secs,

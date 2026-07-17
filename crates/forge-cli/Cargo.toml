@@ -72,7 +72,7 @@ hkdf = "0.13"
 sha2 = "0.11"
 aes-gcm = "0.11"
 sysinfo = { workspace = true }
-self_update = { version = "0.44.0", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "reqwest", "rustls"] }
+self_update = { version = "1.0.0-rc.6", default-features = false, features = ["archive-tar", "archive-zip", "compression-tar-gz", "compression-zip-deflate", "github", "reqwest", "rustls"] }
 tower-http = { version = "0.7", features = ["cors"] }
 
 [dev-dependencies]

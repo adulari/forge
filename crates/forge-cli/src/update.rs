@@ -84,7 +84,7 @@ fn latest_release_tag() -> Result<Option<String>> {
         .context("configuring release lookup")?
         .fetch()
         .context("fetching releases")?;
-    Ok(releases.first().map(|r| r.version.clone()))
+    Ok(releases.latest().map(|r| r.version().to_string()))
 }
 
 /// Download the latest GitHub release asset for this target and replace the running binary. No-op
@@ -105,7 +105,7 @@ fn self_replace() -> Result<()> {
         .context("configuring the updater")?
         .update()
         .context("downloading/applying the update")?;
-    if status.updated() {
+    if status.is_updated() {
         println!("✔ updated forge {CURRENT} → {}", status.version());
         println!("  restart forge to use the new version.");
     } else {

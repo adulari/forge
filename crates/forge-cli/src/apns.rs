@@ -354,7 +354,8 @@ impl ApnsNotifier {
                             .await;
                 }
                 Ok(_) => {}
-                Err(e) => tracing::debug!("apns alert to {} failed: {e}", sub.device_token),
+                // Device tokens are bearer-like routing secrets; never retain them in logs.
+                Err(e) => tracing::debug!("apns alert delivery failed: {e}"),
             }
         }
     }
@@ -446,10 +447,13 @@ impl ApnsNotifier {
                 base_url,
                 relay_token,
             } => {
-                let url = format!("{base_url}/3/device/{device_token}");
+                // Keep the opaque device token out of CDN/proxy path analytics. The hosted relay
+                // still accepts the legacy path-token shape for older Forge versions.
+                let url = format!("{base_url}/3/device");
                 let mut req = self
                     .client
                     .post(&url)
+                    .header("x-forge-device-token", device_token)
                     .header("apns-topic", topic)
                     .header("apns-push-type", push_type)
                     .header("apns-priority", "10")
@@ -460,7 +464,13 @@ impl ApnsNotifier {
                 req
             }
         };
-        let resp = req.json(payload).send().await?;
+        // The device token lives in the URL. Strip it from any reqwest error before callers log
+        // the error, otherwise a transport failure would persist that bearer-like token.
+        let resp = req
+            .json(payload)
+            .send()
+            .await
+            .map_err(reqwest::Error::without_url)?;
         Ok(resp.status().as_u16())
     }
 }
@@ -706,6 +716,11 @@ mod tests {
         assert!(
             !captured.to_lowercase().contains("authorization:"),
             "relay mode must never send an Apple bearer JWT: {captured}"
+        );
+        assert!(
+            captured.starts_with("POST /3/device HTTP/1.1")
+                && captured.contains(&format!("x-forge-device-token: {}", "a".repeat(64))),
+            "relay mode must keep the token out of the URL: {captured}"
         );
     }
 

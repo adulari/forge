@@ -25,17 +25,6 @@ ignore = [
   # `bincode` 1.3.3 — upstream permanently ceased development (deemed complete). Pulled by
   # syntect 5.3 (dump load/store). No CVE; no safe upgrade. Revisit on the next syntect bump.
   "RUSTSEC-2025-0141",
-  # `async-std` discontinued. DEV-ONLY: pulled by httpmock 0.7 (test mocks in forge-provider),
-  # never in the shipped binary. No CVE; no safe upgrade until httpmock drops it.
-  "RUSTSEC-2025-0052",
-  # `quick-xml` <0.41 DoS pair (quadratic duplicate-attribute check / unbounded NsReader
-  # namespace allocation, both 2026-06-29). Pulled ONLY transitively: self_update 0.44 (latest
-  # stable; parses GitHub's release feed during an explicit `forge update` check) and
-  # syntect 5.3 via plist 1.9 (latest; parses bundled/local theme files, not remote input).
-  # Neither parent has a release on quick-xml >=0.41 yet. DoS-only, low exposure. Revisit on
-  # the next self_update/syntect/plist bumps.
-  "RUSTSEC-2026-0194",
-  "RUSTSEC-2026-0195",
 ]
 
 [licenses]

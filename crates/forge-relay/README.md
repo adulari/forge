@@ -24,6 +24,9 @@ if manual deploys become frequent enough to be annoying.
 | `FORGE_APNS_KEY_PEM` | one of this or `_KEY_PATH` | The `.p8` file's contents, set directly as a secret — preferred, since the key never touches the container filesystem |
 | `FORGE_APNS_KEY_PATH` | one of this or `_KEY_PEM` | Path to a mounted `.p8` file, if you'd rather not put the PEM in an env var |
 | `FORGE_RELAY_ALLOWED_TOPICS` | no | Comma-separated allowlist. Default: `dev.adulari.forge,dev.adulari.forge.push-type.liveactivity` |
+| `FORGE_RELAY_TOKEN` | no | Optional private-relay bearer token; callers supply the same value as `FORGE_APNS_RELAY_TOKEN` |
+| `FORGE_RELAY_BIND_ADDR` | no | Listener address. Secure default: `127.0.0.1`; container platforms must explicitly use `0.0.0.0` |
+| `FORGE_RELAY_TRUST_PROXY_HEADERS` | no | Default `false`. Enable only behind a trusted proxy that overwrites `X-Real-IP`/`CF-Connecting-IP` |
 | `PORT` | no | Default `8787` |
 | `FORGE_RELAY_RATE_LIMIT` | no | Requests per window, per IP and per device token. Default `30` |
 | `FORGE_RELAY_RATE_WINDOW_SECS` | no | Window length in seconds. Default `60` |
@@ -48,6 +51,24 @@ instead, put a domain in front via Cloudflare (recommended — free-tier CDN/TLS
 as defense-in-depth on top of this service's own limiter): point the relay hostname at the
 Fly.io app's IPv4/IPv6 (`fly ips list`), proxied (orange-cloud) through Cloudflare.
 
+## Deploy (systemd + nginx)
+
+Hardened reference files live in [`deploy/`](deploy/). The important invariants are:
+
+- keep the relay bound to `127.0.0.1`; only nginx is public;
+- store the key as a systemd credential (`LoadCredential`), never in a command line or
+  world-readable environment file;
+- let nginx overwrite the trusted client-IP header and enable
+  `FORGE_RELAY_TRUST_PROXY_HEADERS=true` only in that topology;
+- disable access logging on the token-bearing `/3/device/{token}` route;
+- cap request bodies at Apple's 4 KiB payload limit;
+- if Cloudflare fronts the hostname, restrict ports 80/443 at the host firewall to Cloudflare's
+  published networks so the origin and its edge controls cannot be bypassed.
+
+Before restart, validate with `nginx -t` and `systemd-analyze verify forge-relay.service`. After
+restart, confirm the backend is not public (`curl http://ORIGIN_IP:8787/health` must fail) while
+`curl https://forge.adulari.dev/relay/health` succeeds.
+
 ## Health check
 
 ```sh
@@ -64,11 +85,16 @@ fly deploy --config crates/forge-relay/fly.toml --image <previous-image-ref>
 
 ## Monitoring
 
-Watch `fly logs --config crates/forge-relay/fly.toml` for `rejected disallowed topic` (someone
+Watch service logs for `rejected disallowed topic` (someone
 probing with the wrong bundle id) and `rate limited` warnings. A daily-cap trip logs loudly
 (`daily send cap reset (was N/CAP)`) rather than silently dropping — if `N` is ever close to
 `CAP`, that's the signal to investigate before the cap becomes a real availability problem for
 legitimate users.
+
+Device tokens and payload bodies are intentionally never logged. Preserve that property in the
+front proxy too. Current clients put the token in `X-Forge-Device-Token` on the fixed
+`POST /3/device` route; the legacy `/3/device/{token}` route remains only for compatibility and
+must have access logging disabled.
 
 ## Testing locally
 
