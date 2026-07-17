@@ -503,6 +503,33 @@ pub(crate) async fn serve_cmd(
     });
     let app = daemon_router(state);
 
+    // Forge Anywhere gets a private loopback copy of the SAME router. The public LAN/local/tunnel
+    // listener below is unchanged, while the connector never needs to upload the daemon token or
+    // trust a self-signed LAN certificate. Both background tasks are best-effort: managed-service
+    // failures must never prevent local Forge from starting or staying available.
+    let mut anywhere_tasks = Vec::new();
+    if config.anywhere.enabled {
+        match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await {
+            Ok(anywhere_listener) => {
+                let anywhere_addr = anywhere_listener.local_addr()?;
+                let anywhere_app = app.clone();
+                anywhere_tasks.push(tokio::spawn(async move {
+                    if let Err(error) = axum::serve(anywhere_listener, anywhere_app).await {
+                        eprintln!(
+                            "⚠ Forge Anywhere local bridge stopped — local/direct Forge is unaffected: {error}"
+                        );
+                    }
+                }));
+                let local_base_url =
+                    format!("http://127.0.0.1:{}/{token}", anywhere_addr.port());
+                anywhere_tasks.push(crate::anywhere::spawn_connector(local_base_url));
+            }
+            Err(error) => eprintln!(
+                "⚠ Forge Anywhere connector disabled for this run — local/direct Forge is unaffected: {error}"
+            ),
+        }
+    }
+
     // Bind + expose, mirroring `/remote`: LAN = 0.0.0.0 + self-signed HTTPS; local/anywhere =
     // loopback plain HTTP (a tunnel terminates TLS at the provider).
     let bind_ip: std::net::IpAddr = if local || anywhere {
@@ -600,8 +627,8 @@ pub(crate) async fn serve_cmd(
         }
         Ok::<(), anyhow::Error>(())
     };
-    tokio::select! {
-        r = server => r?,
+    let serve_result = tokio::select! {
+        r = server => r,
         _ = tokio::signal::ctrl_c() => {
             println!("\n⚒ shutting down — stopping sessions…");
             for handle in registry.all().await {
@@ -610,10 +637,14 @@ pub(crate) async fn serve_cmd(
             // Bounded: a wedged driver must not hold the daemon's exit hostage.
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             remove_state();
+            Ok(())
         }
+    };
+    for task in anywhere_tasks {
+        task.abort();
     }
     drop(tunnel_child); // kill_on_drop tears the tunnel down with the daemon
-    Ok(())
+    serve_result
 }
 
 /// The daemon's full route table over `state.base` — extracted from [`serve_cmd`] so tests can

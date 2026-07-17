@@ -24,6 +24,8 @@ default = []
 microphone = ["forge-voice/microphone"]
 
 [dependencies]
+forge-anywhere-protocol.workspace = true
+fs2 = "0.4"
 forge-types.workspace = true
 forge-config.workspace = true
 forge-core.workspace = true
@@ -62,6 +64,10 @@ axum = { workspace = true }
 tokio-tungstenite = { workspace = true }
 qrcode = { workspace = true }
 base64 = "0.22"
+hex = "0.4"
+rpassword = "7"
+ed25519-dalek.workspace = true
+x25519-dalek.workspace = true
 arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }

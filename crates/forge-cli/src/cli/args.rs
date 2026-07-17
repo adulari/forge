@@ -277,6 +277,57 @@ pub(crate) enum AssayCmd {
     },
 }
 
+/// Managed Forge Anywhere account and host operations.
+#[derive(Subcommand)]
+pub(crate) enum AnywhereCmd {
+    /// Sign in with GitHub's device flow and enroll this controller device.
+    Login,
+    /// Register this machine as a managed host and enable its connector.
+    Enable {
+        /// Stable name shown in the host fleet.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+    },
+    /// Show local enrollment plus live entitlement, connection, and quota state.
+    Status,
+    /// Move a paused session and its workspace capsule to another host.
+    Handoff {
+        /// Session id or unique prefix.
+        session: String,
+        /// Destination host id or unique name.
+        #[arg(long, value_name = "HOST")]
+        to: String,
+    },
+    /// Create an end-to-end encrypted replay link.
+    Share {
+        /// Session id or unique prefix.
+        session: String,
+        /// Link lifetime, capped at 30 days.
+        #[arg(long, value_enum, default_value_t = ShareExpiry::Hours24)]
+        expires: ShareExpiry,
+    },
+    /// List enrolled devices, or atomically revoke one and rotate the data-key epoch.
+    Devices {
+        /// Device id to revoke. Omit to list devices.
+        #[arg(long, value_name = "DEVICE")]
+        revoke: Option<String>,
+    },
+    /// Revoke this host and stop its managed connector. Local Forge is unchanged.
+    Disable,
+    /// Revoke local account tokens while preserving local Forge and encrypted history.
+    Logout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ShareExpiry {
+    #[value(name = "24h")]
+    Hours24,
+    #[value(name = "7d")]
+    Days7,
+    #[value(name = "30d")]
+    Days30,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum Command {
     /// Run a single agent turn against your prompt.
@@ -379,6 +430,11 @@ pub(crate) enum Command {
         /// New sessions use the offline deterministic mock provider (testing).
         #[arg(long)]
         mock: bool,
+    },
+    /// Securely reach Forge through the optional managed Anywhere companion.
+    Anywhere {
+        #[command(subcommand)]
+        cmd: AnywhereCmd,
     },
     /// Attach a thin terminal client to a running `forge serve` daemon: watch a live session's
     /// stream (assistant output, tool activity, turn boundaries) and drive it — submit prompts and

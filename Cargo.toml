@@ -34,6 +34,7 @@ forge-tools = { package = "forge-agent-tools", path = "crates/forge-tools", vers
 forge-tui = { package = "forge-agent-tui", path = "crates/forge-tui", version = "2.6.6" }
 forge-voice = { package = "forge-agent-voice", path = "crates/forge-voice", version = "2.6.6" }
 forge-workflow = { package = "forge-agent-workflow", path = "crates/forge-workflow", version = "2.6.6" }
+forge-anywhere-protocol = { package = "forge-agent-anywhere-protocol", path = "crates/forge-anywhere-protocol", version = "2.6.6" }
 
 # External (pinned to current stable as of 2026-06; see ADRs)
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "fs", "process", "io-util", "time", "net", "signal"] }
@@ -91,6 +92,15 @@ qrcode = "0.14"
 # 0.39 raised its MSRV to Rust 1.95. Keep this on the newest line that honors
 # the workspace's documented Rust 1.88 MSRV.
 sysinfo = { version = "0.38", default-features = false, features = ["system"] }
+# Forge Anywhere's public, audited end-to-end encryption stack. These primitives are kept in the
+# protocol crate so the hosted service can independently implement the published wire format.
+chacha20poly1305 = "0.11"
+ed25519-dalek = "2.2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hkdf = "0.13"
+sha2 = "0.11"
+zeroize = { version = "1", features = ["derive"] }
+bip39 = "2"
 
 [profile.release]
 lto = "thin"

@@ -323,4 +323,89 @@ CREATE TABLE IF NOT EXISTS queue_task (
     gate        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_queue_task_status ON queue_task(status);
+
+-- Forge Anywhere local sync outbox. Payload snapshots remain local plaintext until the worker
+-- encrypts them; provider credentials and other excluded record classes never enter this table.
+-- `uploaded_at IS NULL` is the durable worker cursor.
+CREATE TABLE IF NOT EXISTS anywhere_sync_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    enabled   INTEGER NOT NULL CHECK (enabled IN (0, 1))
+);
+INSERT OR IGNORE INTO anywhere_sync_state (singleton, enabled) VALUES (1, 0);
+
+CREATE TABLE IF NOT EXISTS sync_journal (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_kind   TEXT NOT NULL,
+    stable_id     TEXT NOT NULL,
+    operation     TEXT NOT NULL CHECK (operation IN ('upsert', 'tombstone')),
+    revision      INTEGER NOT NULL,
+    logical_clock INTEGER NOT NULL,
+    content_hash  BLOB NOT NULL,
+    payload       BLOB NOT NULL,
+    created_at    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    uploaded_at   INTEGER,
+    UNIQUE(record_kind, stable_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_sync_journal_pending ON sync_journal(id) WHERE uploaded_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS anywhere_sync_upload (
+    journal_id        INTEGER PRIMARY KEY REFERENCES sync_journal(id) ON DELETE CASCADE,
+    envelope          BLOB NOT NULL,
+    ciphertext_sha256 BLOB NOT NULL CHECK (length(ciphertext_sha256) = 32),
+    created_at        INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+
+CREATE TABLE IF NOT EXISTS anywhere_sync_cursor (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    cursor    INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO anywhere_sync_cursor (singleton, cursor) VALUES (1, 0);
+
+CREATE TABLE IF NOT EXISTS anywhere_sync_remote (
+    cursor           INTEGER PRIMARY KEY,
+    sender_device_id BLOB NOT NULL CHECK (length(sender_device_id) = 16),
+    record_kind      TEXT NOT NULL,
+    stable_id        TEXT NOT NULL,
+    operation        TEXT NOT NULL CHECK (operation IN ('upsert', 'tombstone')),
+    revision         INTEGER NOT NULL,
+    logical_clock    INTEGER NOT NULL,
+    base_hash        BLOB,
+    content_hash     BLOB NOT NULL CHECK (length(content_hash) = 32),
+    payload          BLOB NOT NULL,
+    received_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE(record_kind, stable_id, revision)
+);
+
+-- Terminal application outcomes stay separate from the download cursor: staging a verified
+-- record must never imply that conflict policy has mutated a primary domain table.
+CREATE TABLE IF NOT EXISTS anywhere_sync_apply (
+    cursor       INTEGER PRIMARY KEY REFERENCES anywhere_sync_remote(cursor) ON DELETE CASCADE,
+    state        TEXT NOT NULL CHECK (state IN ('applied', 'superseded', 'conflict')),
+    detail       TEXT,
+    applied_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+
+-- Last remote mutable-record winner. Local journal clocks are compared separately using this
+-- host's device id, preserving deterministic (logical_clock, device_id) ordering across restarts.
+CREATE TABLE IF NOT EXISTS anywhere_sync_materialized (
+    record_kind      TEXT NOT NULL,
+    stable_id        TEXT NOT NULL,
+    operation        TEXT NOT NULL CHECK (operation IN ('upsert', 'tombstone')),
+    logical_clock    INTEGER NOT NULL,
+    sender_device_id BLOB NOT NULL CHECK (length(sender_device_id) = 16),
+    content_hash     BLOB NOT NULL CHECK (length(content_hash) = 32),
+    PRIMARY KEY(record_kind, stable_id)
+);
+
+-- Provenance for a session restored through a handoff capsule. The destination session id may be
+-- remapped on collision; source identity remains immutable for sync/idempotency.
+CREATE TABLE IF NOT EXISTS imported_session (
+    session_id        TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE,
+    source_session_id TEXT NOT NULL,
+    source_device_id  BLOB NOT NULL CHECK (length(source_device_id) = 16),
+    capsule_id        TEXT NOT NULL UNIQUE,
+    base_commit       TEXT NOT NULL,
+    worktree_path     TEXT NOT NULL,
+    imported_at       INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
 "#;

@@ -172,7 +172,7 @@ const LIVENESS_TIMEOUT_MS = 35_000;
 
 function wsUrl(baseUrl: string, sessionId: string, rev: number): string {
   const u = new URL(`${baseUrl}/ws`);
-  u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+  u.protocol = u.protocol === "fany:" ? "fany-ws:" : u.protocol === "https:" ? "wss:" : "ws:";
   u.searchParams.set("session", sessionId);
   u.searchParams.set("rev", String(rev));
   return u.toString();
