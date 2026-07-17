@@ -5312,11 +5312,14 @@ pub(crate) fn build_snapshot_frame(
             .subagents
             .iter()
             .map(|s| remote::SnapSubagent {
+                id: s.id.clone(),
                 agent: s.agent.clone(),
                 task: s.task.clone(),
                 model: s.model.clone(),
+                phase: s.phase.clone(),
                 last: s.last.clone(),
                 done: s.done,
+                ok: s.ok,
                 cost: s.cost,
             })
             .collect(),
@@ -5347,6 +5350,14 @@ pub(crate) fn build_snapshot_frame(
                 })
                 .collect(),
             notes: p.notes,
+        }),
+        workflow: view.workflow.map(|w| remote::SnapWorkflow {
+            active: w.active,
+            name: w.name,
+            phases: w.phases,
+            logs: w.logs,
+            finished_ok: w.finished_ok,
+            summary: w.summary,
         }),
         suggested_prompt: view.suggested_prompt,
         copy_text,

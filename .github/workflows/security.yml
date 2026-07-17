@@ -25,7 +25,7 @@ jobs:
     name: cargo audit (RUSTSEC)
     runs-on: [self-hosted, linux, x64]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       # install-action's checksum metadata can briefly lag a binary release. Compile the pinned
       # tool once per persistent Arch runner instead of trusting that external file every run.
       - name: Ensure cargo-audit is installed
@@ -48,9 +48,9 @@ jobs:
     name: cargo deny (licenses + bans + advisories)
     runs-on: [self-hosted, linux, x64]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
       # Need a real toolchain: `cargo deny check` runs `cargo metadata` under the hood.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - name: Ensure cargo-deny is installed
         run: |
           echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"

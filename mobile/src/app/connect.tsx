@@ -1,22 +1,21 @@
 // Pairing screen (ARCHITECTURE.md §3 "the daemon contract", §7 App Store review
-// posture; FEATURES.md §1.1/§4; DESIGN_SYSTEM.md §4 microcopy). Stands alone for
-// an App Store reviewer with no daemon running — explains what Forge is with a
-// bundled, no-network "how it works" note before any pairing UI. QR scan is the
-// primary path (native camera / web "scan on your phone" hint via the
-// `QRScan.native`/`.web` Metro split); a mono URL field covers paste + manual
-// entry; `?url=` deep links prefill the field.
+// posture; FEATURES.md §1.1/§4). Hearth (mobile.dc.html:1181, desktop.dc.html:1105,
+// web.dc.html:430): hero + numbered steps, no cards — the QR reticle and the mono
+// connect-URL field are the only bordered boxes on this screen. Stands alone for an
+// App Store reviewer with no daemon running — explains what Forge is with a bundled,
+// no-network "how it works" note before any pairing UI. QR scan is the primary path
+// (native camera / web "scan on your phone" hint via the `QRScan.native`/`.web` Metro
+// split); a mono URL field covers paste + manual entry; `?url=` deep links prefill it.
 import { router, useLocalSearchParams } from "expo-router";
-import { X } from "lucide-react-native";
+import { Flame, X } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { Banner } from "../components/ds/Banner";
 import { Button } from "../components/ds/Button";
-import { Card } from "../components/ds/Card";
 import { IconButton } from "../components/ds/IconButton";
 import { Input } from "../components/ds/Input";
 import { Screen } from "../components/ds/Screen";
-import { SectionHeader } from "../components/ds/SectionHeader";
 import { StatusDot } from "../components/ds/StatusDot";
 import { useToast } from "../components/ds/ToastHost";
 import { QRScan } from "../components/pairing/QRScan";
@@ -33,7 +32,8 @@ import { goBackOr } from "../lib/nav";
 import { isTauri } from "../lib/platform";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
-import { type } from "../theme/typography";
+import { type as typeScale } from "../theme/typography";
+import { useBreakpoint } from "../theme/useBreakpoint";
 
 // DESIGN_SYSTEM §4 voice: lowercase-calm, says what happened + what to do.
 // The unreachable copy carries the TLS guidance verbatim (FEATURES §3 /
@@ -44,6 +44,12 @@ const STATE_COPY: Record<Exclude<ConnectTestState, "idle" | "testing" | "ok">, s
     "server unreachable — is `forge serve` running? default `--lan` uses a self-signed certificate that native networking, browsers, and Tauri's WebView all reject. use `--anywhere` for a public tunnel with real TLS, or `--local` plus Tailscale/VPN to reach it directly.",
   "server-error": "the server returned an error — check the `forge serve` logs on the host.",
 };
+
+const STEPS: { key: string; text: string }[] = [
+  { key: "1", text: "run forge serve where your code lives" },
+  { key: "2", text: "scan the qr code it prints, or paste the connect url" },
+  { key: "3", text: "answer, review and forge from anywhere" },
+];
 
 function decodeParam(raw: string): string {
   try {
@@ -72,6 +78,7 @@ function errorMessage(err: unknown): string {
 
 export default function ConnectScreen() {
   const tokens = useTokens();
+  const { isCompact } = useBreakpoint();
   const { addServer, testConnection, servers } = useAuth();
   const toast = useToast();
   const params = useLocalSearchParams<{ url?: string }>();
@@ -216,7 +223,11 @@ export default function ConnectScreen() {
   const onConnectPress = () => attemptConnect(url);
 
   return (
-    <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
+    <Screen
+      scroll
+      keyboardAvoiding
+      contentContainerStyle={isCompact ? styles.content : { ...styles.content, ...styles.contentWide }}
+    >
       {/* Only the pushed "Add server" flow (Settings) has anywhere to go back to — first-run
           pairing has no back stack, and Tauri has no browser chrome to fall back on either. */}
       {canClose ? (
@@ -228,94 +239,83 @@ export default function ConnectScreen() {
           />
         </View>
       ) : null}
+
       <View style={styles.hero}>
-        <Text style={[type.display, styles.heroTitle, { color: tokens.ink }]}>Forge</Text>
-        <Text style={[type.body, { color: tokens.ink2 }]}>
-          Forge is a control surface for a fleet of AI coding agents. Connect to a{" "}
-          <Text style={{ fontWeight: "600" }}>forge serve</Text> daemon on your machine or server
-          to create sessions, review diffs, answer permission prompts, and keep tabs on every
-          agent at once.
+        <View style={styles.heroTitleRow}>
+          <Flame size={isCompact ? 26 : 28} strokeWidth={1.75} color={tokens.accent} />
+          <Text style={[typeScale.display, { color: tokens.ink }]}>Forge</Text>
+        </View>
+        <Text style={[typeScale.body, { color: tokens.ink2 }]}>
+          A control surface for your fleet of coding agents. Connect to a{" "}
+          <Text style={[typeScale.codeSmall, { color: tokens.ink }]}>forge serve</Text> daemon —
+          this app is just the window; your sessions stay on that machine.
         </Text>
       </View>
 
+      <View style={styles.steps}>
+        {STEPS.map((step) => (
+          <View key={step.key} style={styles.stepRow}>
+            <Text style={[typeScale.monoMeta, styles.stepIndex, { color: tokens.accent }]}>{step.key}</Text>
+            <Text style={[typeScale.sub, styles.stepText, { color: tokens.ink2 }]}>{step.text}</Text>
+          </View>
+        ))}
+      </View>
+
       {desktopState.kind === "found" ? (
-        <Card variant="feature" style={styles.gapCard}>
-          <SectionHeader>This machine</SectionHeader>
-          <Text style={[type.sub, { color: tokens.ink2 }]}>
-            found forge running on this machine, port {desktopState.state.port}.
+        <View style={styles.autoRow}>
+          <StatusDot state="idle" />
+          <Text style={[typeScale.monoMeta, styles.autoText, { color: tokens.ink4 }]}>
+            found on this machine: forge serve, port {desktopState.state.port} ·{" "}
+            <Text onPress={onFoundConnectPress} style={{ color: tokens.accent }}>
+              connect
+            </Text>
           </Text>
-          <Button label="Connect" onPress={onFoundConnectPress} loading={busy} disabled={busy} fullWidth />
-        </Card>
+        </View>
       ) : null}
 
       {desktopState.kind === "found-lan" ? (
-        <Card variant="feature" style={styles.gapCard}>
-          <SectionHeader>This machine</SectionHeader>
-          <Text style={[type.sub, { color: tokens.ink2 }]}>
-            forge is running on this machine over <Text style={{ fontWeight: "600" }}>--lan</Text>, but its
-            self-signed certificate isn&apos;t trusted here — restart it with{" "}
-            <Text style={{ fontWeight: "600" }}>forge serve --local</Text> or{" "}
-            <Text style={{ fontWeight: "600" }}>forge serve --anywhere</Text> to connect from this app.
-          </Text>
-        </Card>
+        <Text style={[typeScale.sub, styles.autoHint, { color: tokens.ink2 }]}>
+          forge is running on this machine over <Text style={{ fontWeight: "600" }}>--lan</Text>, but its
+          self-signed certificate isn&apos;t trusted here — restart it with{" "}
+          <Text style={{ fontWeight: "600" }}>forge serve --local</Text> or{" "}
+          <Text style={{ fontWeight: "600" }}>forge serve --anywhere</Text> to connect from this app.
+        </Text>
       ) : null}
 
       {desktopState.kind === "offer-start" ? (
-        <Card variant="feature" style={styles.gapCard}>
-          <SectionHeader>This machine</SectionHeader>
-          <Text style={[type.sub, { color: tokens.ink2 }]}>
-            forge is installed on this machine — start a local server?
-          </Text>
-          <Button label="Start server" onPress={() => void onStartServerPress()} fullWidth />
-        </Card>
+        <View style={styles.autoBlock}>
+          <Text style={[typeScale.sub, { color: tokens.ink2 }]}>forge is installed on this machine — start a local server?</Text>
+          <Button label="Start server" onPress={() => void onStartServerPress()} />
+        </View>
       ) : null}
 
       {desktopState.kind === "starting" ? (
-        <Card variant="feature" style={styles.gapCard}>
-          <SectionHeader>This machine</SectionHeader>
-          <View style={styles.startingRow}>
-            <StatusDot state="busy" />
-            <Text style={[type.sub, { color: tokens.ink2 }]}>starting your local forge server…</Text>
-          </View>
-        </Card>
+        <View style={styles.autoRow}>
+          <StatusDot state="busy" />
+          <Text style={[typeScale.sub, { color: tokens.ink2 }]}>starting your local forge server…</Text>
+        </View>
       ) : null}
 
       {desktopState.kind === "start-failed" ? (
-        <Card variant="feature" style={styles.gapCard}>
-          <SectionHeader>This machine</SectionHeader>
-          <Text style={[type.sub, { color: tokens.danger }]}>{desktopState.message}</Text>
-          <Button
-            label="Try again"
-            variant="secondary"
-            onPress={() => void onStartServerPress()}
-            fullWidth
-          />
-        </Card>
+        <View style={styles.autoBlock}>
+          <Text style={[typeScale.sub, { color: tokens.danger }]}>{desktopState.message}</Text>
+          <Button label="Try again" variant="secondary" onPress={() => void onStartServerPress()} />
+        </View>
       ) : null}
 
-      <Card style={styles.gapCard}>
-        <SectionHeader>How it works</SectionHeader>
-        <View style={styles.howItWorksBody}>
-          <Text style={[type.sub, { color: tokens.ink2 }]}>
-            1. run <Text style={{ fontWeight: "600" }}>forge serve</Text> on the machine where
-            your code lives.
-          </Text>
-          <Text style={[type.sub, { color: tokens.ink2 }]}>
-            2. scan the qr code it prints, or paste the connect url below.
-          </Text>
-          <Text style={[type.sub, { color: tokens.ink2 }]}>
-            3. this app is just the window — your session state stays on that machine.
-          </Text>
-        </View>
-      </Card>
-
-      <Card variant="feature" style={styles.gapCard}>
-        <SectionHeader>Scan to connect</SectionHeader>
+      <View style={[styles.qrWrap, !isCompact && styles.qrWrapWide]}>
         <QRScan onScanned={onScanned} enabled={scanEnabled} paused={busy} />
-        <Button label={scanEnabled ? "Stop scanning" : "Scan QR code"} variant="secondary" onPress={() => setScanEnabled((enabled) => !enabled)} fullWidth />
-      </Card>
+        <Pressable
+          onPress={() => setScanEnabled((enabled) => !enabled)}
+          accessibilityRole="button"
+          accessibilityLabel={scanEnabled ? "Stop scanning" : "Scan QR code"}
+          style={styles.scanLink}
+        >
+          <Text style={[typeScale.bodyBold, { color: tokens.accent }]}>{scanEnabled ? "Stop scanning" : "Scan QR code"}</Text>
+        </Pressable>
+      </View>
 
-      <Card style={styles.gapCard}>
+      <View style={[styles.urlBlock, !isCompact && styles.urlBlockWide]}>
         <Input
           label="Connect URL"
           mono
@@ -339,15 +339,16 @@ export default function ConnectScreen() {
           loading={busy}
           disabled={busy || url.trim().length === 0}
           fullWidth
+          style={styles.connectButton}
         />
-      </Card>
+      </View>
 
       {testState !== "idle" && testState !== "testing" && testState !== "ok" ? (
         <Banner tone="danger" message={STATE_COPY[testState]} />
       ) : null}
 
       {testState === "ok" ? (
-        <Text style={[type.body, styles.successText, { color: tokens.success }]}>
+        <Text style={[typeScale.body, styles.successText, { color: tokens.success }]}>
           connected — opening forge…
         </Text>
       ) : null}
@@ -356,12 +357,24 @@ export default function ConnectScreen() {
 }
 
 const styles = StyleSheet.create({
-  content: { paddingTop: space.space24, paddingBottom: space.space32, gap: space.space16 },
-  closeRow: { flexDirection: "row", justifyContent: "flex-end" },
-  hero: { gap: space.space8 },
-  heroTitle: { letterSpacing: -0.4 },
-  gapCard: { gap: space.space12 },
-  howItWorksBody: { gap: space.space8, paddingBottom: space.space4 },
-  startingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  content: { paddingTop: space.space24, paddingBottom: space.space32, gap: space.space20 },
+  contentWide: { alignItems: "center" },
+  closeRow: { flexDirection: "row", justifyContent: "flex-end", width: "100%" },
+  hero: { gap: space.space12, maxWidth: 480, width: "100%" },
+  heroTitleRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  steps: { gap: space.space8, maxWidth: 480, width: "100%" },
+  stepRow: { flexDirection: "row", gap: space.space8 },
+  stepIndex: { width: 14 },
+  stepText: { flex: 1 },
+  autoRow: { flexDirection: "row", alignItems: "center", gap: space.space8, maxWidth: 480, width: "100%" },
+  autoText: { flex: 1 },
+  autoHint: { maxWidth: 480, width: "100%" },
+  autoBlock: { gap: space.space8, maxWidth: 480, width: "100%" },
+  qrWrap: { alignItems: "center", gap: space.space12, width: "100%" },
+  qrWrapWide: { maxWidth: 480 },
+  scanLink: { minHeight: 44, alignItems: "center", justifyContent: "center", paddingHorizontal: space.space16 },
+  urlBlock: { gap: space.space4, width: "100%" },
+  urlBlockWide: { maxWidth: 480 },
+  connectButton: { marginTop: space.space8 },
   successText: { textAlign: "center" },
 });

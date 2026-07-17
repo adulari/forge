@@ -23,12 +23,22 @@ function row(index: number, state: "waiting" | "busy" | "idle"): SessionRow {
 describe("fleet deck", () => {
   it("groups rows and carries stable source indices without render-time searches", () => {
     const all = [row(0, "waiting"), row(1, "busy"), row(2, "idle")];
+    // Hearth: waiting rows render as their own decision card — no "NEEDS YOU" label.
     expect(buildFleetDeck(all, all)).toEqual([
-      { type: "label", label: "NEEDS YOU" },
       { type: "session", row: all[0], sourceIndex: 0 },
       { type: "label", label: "FORGING" },
       { type: "session", row: all[1], sourceIndex: 1 },
       { type: "label", label: "COOL" },
+      { type: "session", row: all[2], sourceIndex: 2 },
+    ]);
+  });
+
+  it("stacks consecutive waiting rows with no label between them", () => {
+    const all = [row(0, "waiting"), row(1, "waiting"), row(2, "busy")];
+    expect(buildFleetDeck(all, all)).toEqual([
+      { type: "session", row: all[0], sourceIndex: 0 },
+      { type: "session", row: all[1], sourceIndex: 1 },
+      { type: "label", label: "FORGING" },
       { type: "session", row: all[2], sourceIndex: 2 },
     ]);
   });

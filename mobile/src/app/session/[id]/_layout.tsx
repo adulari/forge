@@ -15,16 +15,18 @@ import { router, Slot, useLocalSearchParams, usePathname } from "expo-router";
 import { ArrowLeft } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from "react-native-reanimated";
-import { StyleSheet, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { Banner } from "../../../components/ds/Banner";
 import { IconButton } from "../../../components/ds/IconButton";
-import { Segmented, type SegmentedOption } from "../../../components/ds/Segmented";
+import { TabStrip, type TabStripOption } from "../../../components/ds/TabStrip";
 import { useToast } from "../../../components/ds/ToastHost";
 import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { usePalette } from "../../../components/overlay/CommandPalette";
 import { SessionHeader } from "../../../components/session/SessionHeader";
+import { GoalBanner } from "../../../components/session/GoalBanner";
+import { StatusDot } from "../../../components/ds/StatusDot";
 import { DuelSheet } from "../../../components/session/DuelSheet";
 import { PlanSheet } from "../../../components/session/PlanSheet";
 
@@ -50,12 +52,13 @@ import { LatticeSheet } from "../../../components/session/LatticeSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
-import { useHistory, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
+import { useHistory, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
 import { durations, easings } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
-import { space, type StatusDotState } from "../../../theme/tokens";
+import { radii, space, type StatusDotState } from "../../../theme/tokens";
+import { type as typeScale } from "../../../theme/typography";
 import { useBreakpoint } from "../../../theme/useBreakpoint";
 
 type SegmentValue = "chat" | "tasks" | "agents" | "review";
@@ -176,7 +179,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
   const activeSegment = segmentFromPathname(pathname);
 
-  const segmentOptions = useMemo<SegmentedOption<SegmentValue>[]>(() => {
+  const segmentOptions = useMemo<TabStripOption<SegmentValue>[]>(() => {
     const taskCount = snapshot?.tasks.length ?? 0;
     const agentCount = snapshot?.subagents.length ?? 0;
     const reviewPending = snapshot?.plan != null || snapshot?.diff != null;
@@ -231,7 +234,15 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const protocolMismatch = snapshot != null && snapshot.protocol !== PROTOCOL_VERSION;
   const publicExposure = (snapshot?.exposure ?? "").startsWith("public");
   const reconnecting = connectionState === "reconnecting";
-  const unreachable = connectionState === "unreachable";
+  // "Unreachable" is only honest when the daemon itself is gone. If the fleet list still
+  // answers but no longer contains this session, the session ENDED (archived/discarded) —
+  // scary "can't reach forge serve" for a normally-ended session reads as an outage. The
+  // check applies from the first reconnect attempt so the ended state lands immediately
+  // instead of after the full unreachable backoff.
+  const { data: fleetRows } = useSessions();
+  const wsDown = connectionState === "reconnecting" || connectionState === "unreachable";
+  const sessionEnded = wsDown && fleetRows != null && !fleetRows.some((row) => row.id === sessionId);
+  const unreachable = connectionState === "unreachable" && !sessionEnded;
   const projectNeedsInitialization = snapshot?.project_initialized === false && !projectWarningDismissed;
 
   const statusState: StatusDotState =
@@ -266,8 +277,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           <View style={gutter}>
           <SessionHeader
             title={snapshot?.title || `session ${sessionId.slice(0, 8)}`}
-            cwd={snapshot?.cwd ?? sessionId}
-            worktree={snapshot?.worktree ?? null}
+            state={statusState}
             exposure={snapshot?.exposure ?? "loopback"}
             onBack={() => goBackOr("/(tabs)")}
             showBack={!isExpanded}
@@ -276,6 +286,8 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             onDuel={() => setDuelVisible(true)}
             onReplay={() => router.push(`/session/${sessionId}/replay`)}
             onPlan={() => setPlanVisible(true)}
+
+            onWorkflows={() => router.push(`/session/${sessionId}/workflows`)}
 
             onFork={() => setForkVisible(true)}
 
@@ -297,6 +309,33 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
             onLattice={() => setLatticeVisible(true)}
           />
+          <StatusStrip
+            state={statusState}
+            tier={snapshot?.tier ?? null}
+            model={snapshot?.model && snapshot.model !== "—" ? snapshot.model : latestAssistantModel ?? "—"}
+            temper={snapshot?.temper ?? "—"}
+            effort={snapshot?.effort}
+            send={send}
+            costUsd={snapshot?.cost_usd ?? 0}
+            contextTokens={snapshot?.context_tokens ?? 0}
+            contextLimit={snapshot?.context_limit ?? null}
+            weekly={weekly.mode === "subscription" ? { provider: weekly.provider, deltaPct: weekly.deltaPct } : null}
+            cwd={snapshot?.cwd ?? sessionId}
+            worktree={snapshot?.worktree ?? null}
+            reconnecting={reconnecting && !sessionEnded}
+          />
+          {snapshot?.workflow ? (
+            <Pressable
+              onPress={() => router.push(`/session/${sessionId}/workflow`)}
+              accessibilityRole="button"
+              accessibilityLabel={`${snapshot.workflow.active ? "Live" : "Finished"} workflow ${snapshot.workflow.name ?? "run"}`}
+              style={{ flexDirection: "row", alignItems: "center", gap: space.space8, marginTop: space.space8, marginBottom: space.space8, minHeight: 40, paddingHorizontal: space.space12, borderRadius: radii.radiusPill, borderWidth: StyleSheet.hairlineWidth, borderColor: snapshot.workflow.active ? tokens.accent : tokens.border, backgroundColor: snapshot.workflow.active ? tokens.selection : tokens.bg2 }}
+            >
+              <StatusDot state={snapshot.workflow.active ? "busy" : "done"} />
+              <Text style={[typeScale.monoMeta, { flex: 1, color: tokens.ink2 }]} numberOfLines={1}>{`${snapshot.workflow.name ?? "workflow"} · ${snapshot.workflow.active ? "running" : "finished"}`}</Text>
+              <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>{snapshot.workflow.active ? "view run" : "view result"}</Text>
+            </Pressable>
+          ) : null}
           </View>
 
         <DuelSheet visible={duelVisible} onClose={() => setDuelVisible(false)} send={sendWithFeedback} />
@@ -331,39 +370,25 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             message={`exposure: ${snapshot?.exposure} — anyone with this link can drive this session`}
           />
         ) : null}
-        {closed ? <Banner tone="danger" message="session ended — see History to review it" /> : null}
+        {closed || sessionEnded ? (
+          <Banner tone="neutral" compact message="session ended — read-only. see History to review it" />
+        ) : null}
+        {/* A soft reconnect blip renders inline in the StatusStrip meta line (calmer than a
+            full-width banner); only the hard unreachable state still earns a Banner. */}
         {unreachable ? (
           <Banner
             tone="danger"
             compact
             message="can't reach forge serve — check it's running. will keep retrying automatically."
           />
-        ) : reconnecting ? (
-          <Banner tone="neutral" compact message="reconnecting…" />
         ) : null}
 
-        <View style={gutter}>
-          <StatusStrip
-            state={statusState}
-            tier={snapshot?.tier ?? null}
-            model={snapshot?.model && snapshot.model !== "—" ? snapshot.model : latestAssistantModel ?? "—"}
-            temper={snapshot?.temper ?? "—"}
-            effort={snapshot?.effort}
-            send={send}
-            costUsd={snapshot?.cost_usd ?? 0}
-            contextTokens={snapshot?.context_tokens ?? 0}
-            contextLimit={snapshot?.context_limit ?? null}
-            weekly={weekly.mode === "subscription" ? { provider: weekly.provider, deltaPct: weekly.deltaPct } : null}
-          />
-        </View>
-
           <View style={[gutter, styles.segmentedWrap]}>
-            <Segmented
+            <TabStrip
               options={segmentOptions}
               value={activeSegment}
               onChange={onSegmentChange}
               testID="session-segmented"
-              flush
             />
           </View>
           {projectNeedsInitialization ? (
@@ -379,6 +404,10 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           ) : null}
         </View>
       </SafeAreaView>
+
+      <View style={gutter}>
+        <GoalBanner snapshot={snapshot} send={sendWithFeedback} />
+      </View>
 
       <Animated.View key={activeSegment} style={[styles.flex, segmentStyle]}>
         <Slot />

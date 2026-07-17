@@ -44,13 +44,13 @@ jobs:
       OPENROUTER_API_KEY: ${{ secrets.OPEN_ROUTER_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       # Ephemeral GitHub-hosted legs have no warm target/ dir, so the cache earns its keep.
       # The self-hosted ubuntu leg skips it: target/ already persists on that box's local disk
       # between runs, so a network cache round-trip would be pure overhead on top of that.
       - if: matrix.label != 'ubuntu-latest'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build forge
         run: cargo build --release --bin forge
@@ -78,7 +78,7 @@ jobs:
 
       - name: upload logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: e2e-${{ matrix.label }}
           path: |

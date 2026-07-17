@@ -678,16 +678,17 @@ impl App {
             streaming: self.streaming.clone(),
             transcript: self.recent_transcript.iter().cloned().collect(),
             tasks: self.tasks.clone(),
-            // `id`/`log` are left empty — the remote wire type (`remote::SnapSubagent`) never
-            // reads either, so cloning the real (unbounded-growing) log buffer here on every
-            // dirty/busy frame would be pure waste. `ViewSnapshot` (the OTHER consumer of this
-            // same `SubagentSnapshot` type, for session-resume persistence) still gets the real
-            // values via its own construction path below.
+            // `log` is left empty — the remote wire type (`remote::SnapSubagent`) never reads
+            // it, so cloning the real (unbounded-growing) log buffer here on every dirty/busy
+            // frame would be pure waste. `ViewSnapshot` (the OTHER consumer of this same
+            // `SubagentSnapshot` type, for session-resume persistence) still gets the real
+            // values via its own construction path below. `id` IS cloned (v8.1): clients key
+            // drill-ins on it.
             subagents: self
                 .subagents
                 .iter()
                 .map(|r| SubagentSnapshot {
-                    id: String::new(),
+                    id: r.id.clone(),
                     agent: r.agent.clone(),
                     task: r.task.clone(),
                     model: r.model.clone(),
@@ -701,7 +702,7 @@ impl App {
                 // Workflow rows live in the dedicated view, not `subagents` — the phone still
                 // wants to see them, so they ride along in the same wire shape, phase attached.
                 .chain(self.workflow.rows.iter().map(|r| SubagentSnapshot {
-                    id: String::new(),
+                    id: r.id.clone(),
                     agent: r.agent.clone(),
                     task: r.task.clone(),
                     model: r.model.clone(),
@@ -713,6 +714,27 @@ impl App {
                     cost: r.cost,
                 }))
                 .collect(),
+            workflow: self.workflow.exists().then(|| WorkflowRemote {
+                active: self.workflow.active,
+                name: self.workflow.name.clone(),
+                phases: self
+                    .workflow
+                    .phases
+                    .iter()
+                    .map(|p| p.title.clone())
+                    .collect(),
+                logs: self
+                    .workflow
+                    .logs
+                    .iter()
+                    .rev()
+                    .take(WORKFLOW_REMOTE_LOG_TAIL)
+                    .rev()
+                    .cloned()
+                    .collect(),
+                finished_ok: self.workflow.finished.as_ref().map(|(ok, _)| *ok),
+                summary: self.workflow.finished.as_ref().map(|(_, s)| s.clone()),
+            }),
             queued: self.queued.clone(),
             // A pending AskUserQuestion also arms `self.prompt` (the input-line hint text, e.g.
             // "type a number, or your own answer"), but on the wire `permission_prompt` means
@@ -1275,7 +1297,27 @@ pub struct RemoteSnapshot {
     pub plan: Option<forge_types::PlanProposal>,
     /// The predicted next prompt (v8), if any — the page shows it as the composer's placeholder.
     pub suggested_prompt: Option<String>,
+    /// The live (or just-finished) workflow run this turn (v8.1) — see [`WorkflowRemote`].
+    pub workflow: Option<WorkflowRemote>,
 }
+
+/// Remote projection of the dedicated workflow view (v8.1): phases + narration + finish state.
+/// Agent rows ride in [`RemoteSnapshot::subagents`] with `phase` attached, so this stays a
+/// cheap clone per frame (no per-row transcript).
+#[derive(Debug, Clone, Default)]
+pub struct WorkflowRemote {
+    pub active: bool,
+    pub name: Option<String>,
+    pub phases: Vec<String>,
+    /// Tail of the script's `log()` narration (bounded to [`WORKFLOW_REMOTE_LOG_TAIL`]).
+    pub logs: Vec<String>,
+    pub finished_ok: Option<bool>,
+    pub summary: Option<String>,
+}
+
+/// How many trailing `log()` lines ride in each remote frame — enough for a live narration
+/// feed without recloning the whole bounded buffer every broadcast.
+const WORKFLOW_REMOTE_LOG_TAIL: usize = 30;
 
 /// One subagent's live row in the TUI.
 #[derive(Debug, Clone)]

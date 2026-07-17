@@ -392,8 +392,9 @@ pub struct CliProvider {
     persistent: bool,
     /// The live persistent session, if one is running (claude only). A `tokio` mutex because the
     /// guard is held across the turn's stdout read (an `.await`); one turn at a time per provider,
-    /// which matches the single underlying process.
-    live: tokio::sync::Mutex<Option<LiveSession>>,
+    /// which matches the single underlying process. `Arc` so the idle reaper task can outlive a
+    /// borrow of `self` (see [`arm_live_idle_reaper`]).
+    live: std::sync::Arc<tokio::sync::Mutex<Option<LiveSession>>>,
 }
 
 impl CliProvider {
@@ -411,7 +412,7 @@ impl CliProvider {
             // On by default for claude; the env var is the operator escape hatch.
             persistent: kind == CliKind::ClaudeCode
                 && std::env::var("FORGE_PERSISTENT_BRIDGE").as_deref() != Ok("0"),
-            live: tokio::sync::Mutex::new(None),
+            live: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -2169,6 +2170,35 @@ struct LiveSession {
     /// here forces the NEXT call to tear down and respawn instead of reusing a session whose
     /// stdout stream position is ambiguous, which would otherwise let two turns' events interleave.
     turn_in_flight: bool,
+    /// When the session was last parked idle (spawn or turn completion). The idle reaper compares
+    /// against this so a reuse between arm and wake-up cancels the older reaper's claim.
+    parked_at: std::time::Instant,
+}
+
+/// How long a parked live bridge process may sit idle before being reaped. Each parked session is
+/// a full `claude` process plus its served `forge mcp-serve` child (~300–500 MB resident); without
+/// a reaper an idle daemon session holds that memory for its whole lifetime — observed as multiple
+/// idle bridge trees compounding into machine-wide memory pressure.
+const LIVE_IDLE_TTL: Duration = Duration::from_secs(300);
+
+/// Tear down the parked live session once it has sat idle for [`LIVE_IDLE_TTL`]. Armed after every
+/// turn that parks a session; `pid` pins the claim so a session reused (and re-parked, re-armed) or
+/// respawned in the meantime is left alone — its own newer reaper covers it.
+fn arm_live_idle_reaper(
+    live: std::sync::Arc<tokio::sync::Mutex<Option<LiveSession>>>,
+    pid: Option<u32>,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep(LIVE_IDLE_TTL + Duration::from_secs(1)).await;
+        let mut guard = live.lock().await;
+        let expired = matches!(&*guard, Some(s)
+            if s.child.id() == pid && !s.turn_in_flight && s.parked_at.elapsed() >= LIVE_IDLE_TTL);
+        if expired {
+            if let Some(s) = guard.take() {
+                s.teardown().await;
+            }
+        }
+    });
 }
 
 impl LiveSession {
@@ -2520,6 +2550,7 @@ impl CliProvider {
             sub_rx,
             tailer,
             turn_in_flight: false,
+            parked_at: std::time::Instant::now(),
         })
     }
 
@@ -2629,8 +2660,13 @@ impl CliProvider {
             Ok(turn) => {
                 sess.sent = messages.len();
                 sess.turn_in_flight = false;
+                sess.parked_at = std::time::Instant::now();
+                let live_pid = sess.child.id();
                 match finish_persistent_turn(&self.binary, turn) {
-                    Ok(resp) => Ok(resp),
+                    Ok(resp) => {
+                        arm_live_idle_reaper(std::sync::Arc::clone(&self.live), live_pid);
+                        Ok(resp)
+                    }
                     Err(e) => {
                         if let Some(old) = guard.take() {
                             old.teardown().await;

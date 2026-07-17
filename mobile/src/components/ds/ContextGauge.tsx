@@ -14,11 +14,14 @@ export interface ContextGaugeProps {
   used: number;
   total: number;
   compact?: boolean;
+  /** Hearth core rule 7 ("context as % in glanceable chrome"): append " ctx" after the
+   * compact percentage (`22% ctx`). Default false — existing bare "NN%" callers unaffected. */
+  ctxLabel?: boolean;
 }
 
 const TRACK_HEIGHT = 4;
 
-export function ContextGauge({ used, total, compact = false }: ContextGaugeProps) {
+export function ContextGauge({ used, total, compact = false, ctxLabel = false }: ContextGaugeProps) {
   const tokens = useTokens();
   const rawPct = total > 0 && Number.isFinite(used) ? (used / total) * 100 : 0;
   const pct = Math.max(0, Math.min(100, rawPct));
@@ -54,7 +57,7 @@ export function ContextGauge({ used, total, compact = false }: ContextGaugeProps
         </Animated.View>
       </View>
       <Text style={[typeScale.meta, tabularNums, { color: pct > 70 ? fillColor : tokens.ink3 }]} numberOfLines={1}>
-        {compact ? `${Math.round(pct)}%` : formatTokenPair(used, total)}
+        {compact ? `${Math.round(pct)}%${ctxLabel ? " ctx" : ""}` : formatTokenPair(used, total)}
       </Text>
     </View>
   );

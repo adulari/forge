@@ -7,7 +7,7 @@
 // archive/merge/discard actions — merge 409s and discard warnings never render as a generic
 // toast (FEATURES.md §1.1), they get their own result sheet.
 import { router } from "expo-router";
-import { Archive, Ellipsis, GitMerge, Trash2 } from "lucide-react-native";
+import { Archive, GitMerge, Trash2 } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
@@ -24,12 +24,8 @@ import { useArchiveSession, useDiscardSession, useMergeSession } from "../../lib
 import { useTokens } from "../../theme/ThemeProvider";
 import { springs, useForgeline, useSettle } from "../../theme/motion";
 import { space, type StatusDotState } from "../../theme/tokens";
-import { formatCwd, monoFamily, type as typeScale } from "../../theme/typography";
-import { Chip } from "../ds/Chip";
-import { Badge } from "../ds/Badge";
+import { formatCost, formatCwd, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { ConfirmDialog } from "../ds/ConfirmDialog";
-import { ContextGauge } from "../ds/ContextGauge";
-import { CostMetric } from "../ds/CostMetric";
 import { HeatEdge } from "../ds/HeatEdge";
 import { IconButton } from "../ds/IconButton";
 import { ListRow } from "../ds/ListRow";
@@ -37,6 +33,34 @@ import { RelativeTime } from "../ds/RelativeTime";
 import { Sheet } from "../ds/Sheet";
 import { StatusDot } from "../ds/StatusDot";
 import { useToast } from "../ds/ToastHost";
+
+// Hearth "ONE right-aligned mono metric" (HANDOFF Fleet rows): cost while forging,
+// relative time while cool, elapsed while waiting — never stacked, never with CostMetric's
+// fixed success-green (the prototype renders this metric ink2/ink3/ink4, not success).
+function SessionMetric({ row, state }: { row: SessionRow; state: StatusDotState }) {
+  const tokens = useTokens();
+  if (state === "waiting") {
+    return (
+      <RelativeTime
+        timestampMs={row.last_activity * 1000}
+        style={{ ...tabularNums, fontFamily: monoFamily.regular, fontSize: 11, lineHeight: 15, color: tokens.ink3 }}
+      />
+    );
+  }
+  if (state === "busy") {
+    return (
+      <Text style={[styles.metric, tabularNums, { fontFamily: monoFamily.regular, color: tokens.ink2 }]} numberOfLines={1}>
+        {formatCost(row.cost_usd)}
+      </Text>
+    );
+  }
+  return (
+    <RelativeTime
+      timestampMs={row.last_activity * 1000}
+      style={{ ...tabularNums, fontFamily: monoFamily.regular, fontSize: 10.5, lineHeight: 14, color: tokens.ink4 }}
+    />
+  );
+}
 
 export interface SessionCardProps {
   row: SessionRow;
@@ -227,48 +251,40 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                   style={[styles.rowBg, { backgroundColor: row.waiting || selected ? tokens.selection : tokens.bg1 }]}
                 >
                   <HeatEdge state={row.waiting ? "waiting" : row.busy ? "busy" : false} />
-                  <View style={styles.inner}>
+                  <View style={[styles.inner, { minHeight: state === "idle" ? 54 : 62 }]}>
                     <View style={styles.row1}>
-                      <StatusDot state={state} />
-                      <Text style={[typeScale.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
-                        {title}
-                      </Text>
-                      {row.waiting ? (
-                        <Chip label="Respond" selected onPress={goToSession} />
-                      ) : null}
-                      {hasWorktree ? <Badge label="worktree" tone="outline" /> : null}
-                      <CostMetric valueUsd={row.cost_usd} />
-                      <IconButton
-                        icon={<Ellipsis size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink3} />}
-                        onPress={openActions}
-                        accessibilityLabel="Session actions"
-                      />
-                    </View>
-
-                    <View style={styles.row2}>
+                      <StatusDot state={state} size={state === "idle" ? 7 : 8} />
                       <Text
                         style={[
-                          typeScale.sub,
-                          styles.cwd,
-                          { color: tokens.ink2, fontFamily: monoFamily.regular },
+                          styles.title,
+                          {
+                            fontSize: state === "idle" ? 13.5 : 14.5,
+                            lineHeight: state === "idle" ? 19 : 20,
+                            color: state === "idle" ? tokens.ink2 : tokens.ink,
+                          },
                         ]}
                         numberOfLines={1}
-                        ellipsizeMode="head"
-                        accessibilityLabel={`path: ${row.cwd}`}
                       >
-                        {cwdLabel}
+                        {title}
                       </Text>
-                      <Text style={[typeScale.sub, { color: tokens.ink3 }]} numberOfLines={1}>
-                        {row.model}
-                      </Text>
-                      <RelativeTime timestampMs={row.last_activity * 1000} />
+                      <SessionMetric row={row} state={state} />
                     </View>
 
-                    <View style={styles.row3}>
-                      {row.context_limit != null ? (
-                        <ContextGauge used={row.context_tokens} total={row.context_limit} />
-                      ) : null}
-                    </View>
+                    <Text
+                      style={[
+                        styles.meta,
+                        {
+                          fontSize: state === "idle" ? 11 : 11.5,
+                          color: state === "waiting" ? tokens.ink2 : state === "busy" ? tokens.ink3 : tokens.ink4,
+                          fontFamily: monoFamily.regular,
+                        },
+                      ]}
+                      numberOfLines={1}
+                      ellipsizeMode={row.waiting ? "tail" : "head"}
+                      accessibilityLabel={row.waiting ? undefined : `path: ${row.cwd}`}
+                    >
+                      {row.waiting ? "needs a decision" : `${cwdLabel} · ${row.model}`}
+                    </Text>
                   </View>
                 </View>
               </Pressable>
@@ -376,8 +392,6 @@ export const SessionCard = React.memo(SessionCardBase, (prev, next) => {
     a.busy === b.busy &&
     a.waiting === b.waiting &&
     a.cost_usd === b.cost_usd &&
-    a.context_tokens === b.context_tokens &&
-    a.context_limit === b.context_limit &&
     a.model === b.model &&
     a.last_activity === b.last_activity
   );
@@ -392,17 +406,14 @@ const styles = StyleSheet.create({
   rowBg: { position: "relative" },
   heatEdgeWrap: { position: "absolute", left: 0, top: 0, bottom: 0 },
   inner: {
-    minHeight: 72,
     justifyContent: "center",
     paddingHorizontal: space.space16,
-    paddingVertical: space.space16,
-    gap: space.space16,
+    paddingVertical: 10,
   },
-  row1: { flexDirection: "row", alignItems: "center", gap: space.space8 },
-  title: { flex: 1 },
-  row2: { flexDirection: "row", alignItems: "center", gap: space.space8 },
-  cwd: { flex: 1 },
-  row3: { width: "100%" },
+  row1: { flexDirection: "row", alignItems: "center", gap: 9 },
+  title: { flex: 1, fontWeight: "600" },
+  meta: { marginTop: 2 },
+  metric: { fontSize: 11, lineHeight: 15 },
   separator: { height: StyleSheet.hairlineWidth, marginLeft: space.space16 },
   sheetBody: { paddingHorizontal: space.space4, paddingBottom: space.space16, gap: space.space4 },
   fileRow: { paddingHorizontal: space.space16 },

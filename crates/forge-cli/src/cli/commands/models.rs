@@ -205,7 +205,24 @@ pub(crate) fn load_cached_catalog() -> Option<ModelCatalog> {
 }
 
 /// Persist `catalog` to disk for the next startup to load instantly.
+///
+/// Clobber guard: a refresh that lost most of the catalog — a daemon spawned without the
+/// provider env keys in scope, an offline moment, several providers timing out at once —
+/// must not overwrite a healthy recent cache with its degraded view. That exact failure
+/// shrank a 259-model cache to 21 and every surface's model list with it. A genuinely
+/// smaller catalog (keys removed on purpose) still wins once the cache ages past its TTL.
 pub(crate) fn save_catalog(catalog: &ModelCatalog) {
+    if let Some(existing) = load_cached_catalog() {
+        if catalog.models().len() * 2 < existing.models().len() {
+            tracing::warn!(
+                "model discovery found {} models but the cache holds {} — keeping the \
+                 cache (degraded discovery: missing keys / offline / provider timeouts?)",
+                catalog.models().len(),
+                existing.models().len()
+            );
+            return;
+        }
+    }
     let Some(path) = catalog_cache_path() else {
         return;
     };
@@ -559,6 +576,9 @@ pub(crate) async fn models(probe: bool, probe_all: bool, clear: bool) -> Result<
         );
         return Ok(());
     }
+    // An explicit `forge models` runs with the user's full key environment — persist what it
+    // found so the daemon's /api/models (which serves this cache) reflects it immediately.
+    save_catalog(&cat);
     let store = open_store()?;
 
     if probe {

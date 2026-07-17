@@ -15,6 +15,7 @@ import React, { useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
+import { Card } from "../ds/Card";
 import { IconButton } from "../ds/IconButton";
 import { Input } from "../ds/Input";
 import { useToast } from "../ds/ToastHost";
@@ -63,7 +64,7 @@ export function QuestionCard({ question, options, allowOther, promptSeq, send, o
   const showFreeText = allowOther || options.length === 0;
 
   return (
-    <View style={styles.container}>
+    <Card variant="feature" heatEdge="waiting" style={styles.container}>
       <Text style={[typeScale.body, { color: tokens.ink }, styles.question]}>{question}</Text>
       {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
 
@@ -91,7 +92,7 @@ export function QuestionCard({ question, options, allowOther, promptSeq, send, o
           />
         </View>
       ) : null}
-    </View>
+    </Card>
   );
 }
 

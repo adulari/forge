@@ -49,7 +49,7 @@ jobs:
       ipa-version: ${{ steps.meta.outputs.version }}
       ipa-size: ${{ steps.package.outputs.size }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       # Expo SDK 57 / RN 0.86 Podfile requires Xcode 16+. The macos runner's default
       # Xcode can be older (macos-14 defaulted to 15.4 → `pod install` fails with
@@ -61,7 +61,7 @@ jobs:
           sudo xcode-select -s "$XC/Contents/Developer"
           xcodebuild -version
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "20"
           cache: npm
@@ -106,7 +106,7 @@ jobs:
           echo "size=$(stat -f%z build/Forge.ipa)" >> "$GITHUB_OUTPUT"
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: forge-ipa
           path: mobile/build/Forge.ipa
@@ -119,15 +119,15 @@ jobs:
     outputs:
       manifest-generated: ${{ steps.manifest.outcome }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: forge-ipa
           path: dist
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: ${{ github.ref_name }}
           name: "Forge iOS ${{ needs.build-ipa.outputs.ipa-version }} (sideload)"
@@ -190,13 +190,13 @@ jobs:
           cat site/forge-source.json
 
       - name: Upload manifest as release asset
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: ${{ github.ref_name }}
           files: site/forge-source.json
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
         with:
           path: site
 
@@ -210,4 +210,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

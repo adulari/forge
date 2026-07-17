@@ -12,7 +12,7 @@ module.exports = (config) => ({
     // Emberline theme's ember500 (mobile/src/theme/tokens.ts) — the app's accent color.
     $accent: "#F5761A",
   },
-  frameworks: ["SwiftUI", "WidgetKit", "ActivityKit"],
+  frameworks: ["SwiftUI", "WidgetKit", "ActivityKit", "AppIntents"],
   entitlements: {
     "com.apple.security.application-groups":
       config.ios.entitlements["com.apple.security.application-groups"],

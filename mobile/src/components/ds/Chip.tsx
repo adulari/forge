@@ -1,5 +1,7 @@
-// DESIGN_SYSTEM.md §6 Chip — pill radius 999, bg3, meta text; selectable state
-// (selection bg + ember/accent text); used for command chips + filters.
+// DESIGN_SYSTEM.md §6 Chip — pill radius 999, meta text; selectable state
+// (selection bg + ember/accent text); used for command chips + filters. Hearth:
+// unselected chips are bg2 with a visible 1px border (the command-chip strip in
+// Session Chat), not a borderless bg3 fill.
 import React, { useState } from "react";
 import { Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import Animated from "react-native-reanimated";
@@ -44,11 +46,17 @@ export function Chip({ label, selected = false, onPress, disabled = false, icon,
         style={[
           styles.base,
           {
-            backgroundColor: selected ? tokens.selection : tokens.bg3,
+            backgroundColor: selected ? tokens.selection : tokens.bg2,
             borderRadius: radii.radiusPill,
             opacity: disabled ? 0.4 : 1,
             borderWidth: 2,
-            borderColor: focused ? tokens.accent : hovered && !disabled ? tokens.borderStrong : "transparent",
+            borderColor: focused
+              ? tokens.accent
+              : selected
+                ? "transparent"
+                : hovered && !disabled
+                  ? tokens.borderStrong
+                  : tokens.border,
           },
           style,
         ]}

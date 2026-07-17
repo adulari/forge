@@ -36,7 +36,7 @@ jobs:
       run:
         working-directory: mobile
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           # The guard compares the complete push range so a commit that mixes OTA-safe
           # files with native/config files cannot publish an incompatible update.
@@ -74,7 +74,7 @@ jobs:
         if: steps.guard.outputs.safe != 'true'
         run: echo 'Skipped; run the required native Xcode Cloud build before publishing an update.'
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         if: steps.guard.outputs.safe == 'true'
         with:
           node-version: "20"

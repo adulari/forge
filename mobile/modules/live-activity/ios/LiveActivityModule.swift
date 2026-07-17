@@ -5,6 +5,45 @@ import ActivityKit
 import ExpoModulesCore
 import OSLog
 
+/// Mirrors `ForgeSessionActivityAttributes`'s stored properties for the JS boundary — kept as a
+/// separate `Record` (rather than reusing `ContentState`/`Attributes` directly) because Expo's
+/// `Record` property-wrapper conformance and ActivityKit's `Codable, Hashable` conformance don't
+/// mix, and because it lets JS omit fields it doesn't know yet (defaults below).
+struct ForgeLiveActivityAttributesInput: Record {
+    @Field var sessionId: String = ""
+    @Field var title: String = ""
+    @Field var baseUrl: String = ""
+    @Field var agentLabel: String = ""
+}
+
+struct ForgeLiveActivityStateInput: Record {
+    @Field var busy: Bool = false
+    @Field var waiting: Bool = false
+    @Field var costUsd: Double = 0
+    @Field var contextTokens: Int = 0
+    @Field var contextLimit: Int = 0
+    @Field var question: String? = nil
+    @Field var promptSeq: Int? = nil
+    @Field var tasksDone: Int? = nil
+    @Field var tasksTotal: Int? = nil
+    @Field var stateSinceEpoch: Double? = nil
+
+    func toContentState() -> ForgeSessionActivityAttributes.ContentState {
+        ForgeSessionActivityAttributes.ContentState(
+            busy: busy,
+            waiting: waiting,
+            costUsd: costUsd,
+            contextTokens: contextTokens,
+            contextLimit: contextLimit,
+            question: question,
+            promptSeq: promptSeq,
+            tasksDone: tasksDone,
+            tasksTotal: tasksTotal,
+            stateSinceEpoch: stateSinceEpoch
+        )
+    }
+}
+
 public class LiveActivityModule: Module {
     private let logger = Logger(subsystem: "dev.adulari.forge", category: "LiveActivity")
 
@@ -20,51 +59,50 @@ public class LiveActivityModule: Module {
         }
 
         AsyncFunction("start") {
-            (sessionId: String, title: String, busy: Bool, waiting: Bool, costUsd: Double, contextTokens: Int, contextLimit: Int) throws -> [String: String?] in
+            (attributes: ForgeLiveActivityAttributesInput, state: ForgeLiveActivityStateInput) throws -> [String: String?] in
             guard #available(iOS 16.1, *) else {
                 return ["activityId": nil, "pushToken": nil]
             }
             guard ActivityAuthorizationInfo().areActivitiesEnabled else {
-                self.logger.notice("Live Activities are disabled for session \(sessionId, privacy: .public)")
+                self.logger.notice("Live Activities are disabled for session \(attributes.sessionId, privacy: .public)")
                 return ["activityId": nil, "pushToken": nil]
             }
 
             if let existing = Activity<ForgeSessionActivityAttributes>.activities.first(where: {
-                $0.attributes.sessionId == sessionId
+                $0.attributes.sessionId == attributes.sessionId
             }) {
                 self.observePushTokens(for: existing)
                 return ["activityId": existing.id, "pushToken": nil]
             }
 
-            let attributes = ForgeSessionActivityAttributes(sessionId: sessionId, title: title)
-            let state = ForgeSessionActivityAttributes.ContentState(
-                busy: busy, waiting: waiting, costUsd: costUsd, contextTokens: contextTokens, contextLimit: contextLimit
+            let activityAttributes = ForgeSessionActivityAttributes(
+                sessionId: attributes.sessionId,
+                title: attributes.title,
+                baseUrl: attributes.baseUrl,
+                agentLabel: attributes.agentLabel
             )
             do {
                 let activity = try Activity.request(
-                    attributes: attributes,
-                    content: .init(state: state, staleDate: nil),
+                    attributes: activityAttributes,
+                    content: .init(state: state.toContentState(), staleDate: nil),
                     pushType: .token
                 )
-                self.logger.info("Started Live Activity \(activity.id, privacy: .public) for session \(sessionId, privacy: .public)")
+                self.logger.info("Started Live Activity \(activity.id, privacy: .public) for session \(attributes.sessionId, privacy: .public)")
                 self.observePushTokens(for: activity)
                 return ["activityId": activity.id, "pushToken": nil]
             } catch {
-                self.logger.error("Failed to start Live Activity for session \(sessionId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                self.logger.error("Failed to start Live Activity for session \(attributes.sessionId, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 throw error
             }
         }
 
         AsyncFunction("update") {
-            (activityId: String, busy: Bool, waiting: Bool, costUsd: Double, contextTokens: Int, contextLimit: Int) async throws in
+            (activityId: String, state: ForgeLiveActivityStateInput) async throws in
             guard #available(iOS 16.1, *) else { return }
             guard let activity = Activity<ForgeSessionActivityAttributes>.activities.first(where: { $0.id == activityId }) else {
                 throw LiveActivityError.activityNotFound(activityId)
             }
-            let state = ForgeSessionActivityAttributes.ContentState(
-                busy: busy, waiting: waiting, costUsd: costUsd, contextTokens: contextTokens, contextLimit: contextLimit
-            )
-            await activity.update(.init(state: state, staleDate: nil))
+            await activity.update(.init(state: state.toContentState(), staleDate: nil))
         }
 
         AsyncFunction("end") { (activityId: String) async throws in

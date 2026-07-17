@@ -30,8 +30,8 @@ jobs:
       run:
         working-directory: mobile
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "20"
           cache: npm
@@ -58,7 +58,7 @@ jobs:
             name: windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       # Tauri v2 Linux prerequisites (webkit2gtk + appindicator + rsvg + patchelf for
       # AppImage bundling). macOS (WKWebView) and Windows (WebView2) runners need nothing extra.
@@ -177,17 +177,17 @@ jobs:
           FORGE_LINUXDEPLOY_PLUGIN_ROOT="$plugin_root" "$plugin" --plugin-api-version >/dev/null
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.name == 'macos-x86_64' && 'x86_64-apple-darwin' || '' }}
 
       - if: matrix.name != 'linux-x86_64'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: "mobile/src-tauri -> target"
           key: ${{ matrix.os }}
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "20"
           cache: npm
@@ -245,7 +245,7 @@ jobs:
           esac
 
       - name: Upload bundle artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: forge-desktop-${{ matrix.name }}
           path: mobile/release-assets/**
@@ -259,7 +259,7 @@ jobs:
     if: always() && (startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '')
     runs-on: [self-hosted, linux, x64]
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: forge-desktop-*
           path: assets
@@ -299,7 +299,7 @@ jobs:
           pathlib.Path('latest.json').write_text(json.dumps(manifest, indent=2) + '\n')
           PY
       - name: Publish complete desktop release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: |

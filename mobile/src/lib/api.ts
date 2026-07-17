@@ -50,6 +50,7 @@ export interface UpdateConfigRequest {
 }
 
 export interface SkillRow { name: string; description: string; scope: "builtin" | "user" | "project"; tier: string | null; resources: number; }
+export interface WorkflowRow { name: string; description: string; when_to_use: string | null; phases: string[]; }
 export interface HookRow { event: string; matcher: string | null; command: string; timeout_secs: number; cc_compat: boolean; }
 export interface ModelsResponse { catalog: "available" | "unavailable"; providers: ModelProvider[]; }
 export interface ModelProvider { provider: string; models: ModelRow[]; }
@@ -421,6 +422,10 @@ export function discardSession(
 
 export function getSkills(baseUrl: string): Promise<SkillRow[]> {
   return request(baseUrl, "/api/skills");
+}
+
+export function getWorkflows(baseUrl: string, session?: string): Promise<WorkflowRow[]> {
+  return request(baseUrl, `/api/workflows${qs({ session })}`);
 }
 
 export function getModels(baseUrl: string): Promise<ModelsResponse> {

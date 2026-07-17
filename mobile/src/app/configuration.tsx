@@ -4,7 +4,6 @@ import { Pressable, RefreshControl, StyleSheet, Text, View } from "react-native"
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { BackLink } from "../components/ds/BackLink";
 import { Button } from "../components/ds/Button";
-import { Card } from "../components/ds/Card";
 import { Input } from "../components/ds/Input";
 import { ListRow } from "../components/ds/ListRow";
 import { Screen } from "../components/ds/Screen";
@@ -17,6 +16,7 @@ import { useConfig, useUpdateConfig } from "../lib/queries";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { type } from "../theme/typography";
+import { SettingsShell } from "./(tabs)/settings";
 
 type Scope = "user" | "project";
 
@@ -30,7 +30,7 @@ function grouped(fields: ConfigField[]) {
   return [...result.entries()];
 }
 
-function ConfigFieldRow({ field, scope }: { field: ConfigField; scope: Scope }) {
+function ConfigFieldRow({ field, scope, showSeparator }: { field: ConfigField; scope: Scope; showSeparator: boolean }) {
   const tokens = useTokens();
   const mutation = useUpdateConfig();
   const [draft, setDraft] = useState(field.value);
@@ -72,8 +72,9 @@ function ConfigFieldRow({ field, scope }: { field: ConfigField; scope: Scope }) 
 
   const subtitle = error ?? (saved ? "Saved" : field.help ?? `${field.key} · ${field.source}`);
   if (field.field_type === "bool") {
-    return <ListRow title={field.label} subtitle={subtitle} trailing={<Switch value={draft === "true"} onValueChange={(value) => { setDraft(String(value)); save(String(value)); }} accessibilityLabel={field.label} disabled={mutation.isPending} />} hasInteractiveTrailing />;
+    return <ListRow title={field.label} subtitle={subtitle} trailing={<Switch value={draft === "true"} onValueChange={(value) => { setDraft(String(value)); save(String(value)); }} accessibilityLabel={field.label} disabled={mutation.isPending} />} hasInteractiveTrailing showSeparator={showSeparator} />;
   }
+  const fieldStyle = [styles.field, showSeparator ? { borderBottomColor: tokens.hairline, borderBottomWidth: StyleSheet.hairlineWidth } : null];
   if (field.field_type === "list") {
     const values = (() => {
       try {
@@ -82,18 +83,18 @@ function ConfigFieldRow({ field, scope }: { field: ConfigField; scope: Scope }) 
         return [];
       }
     })();
-    return <View style={styles.field}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text>{values.map((value, index) => <View key={`${field.key}-${index}`} style={styles.listItem}><Input containerStyle={styles.listInput} value={value} onChangeText={(next) => { const updated = [...values]; updated[index] = next; setDraft(JSON.stringify(updated)); }} onEndEditing={(event) => { const updated = [...values]; updated[index] = event.nativeEvent.text; save(JSON.stringify(updated)); }} accessibilityLabel={`${field.label} item ${index + 1}`} autoCapitalize="none" autoCorrect={false} /><Pressable onPress={() => { const next = JSON.stringify(values.filter((_, itemIndex) => itemIndex !== index)); setDraft(next); save(next); }} accessibilityRole="button" accessibilityLabel={`Remove ${field.label} item ${index + 1}`}><Text style={[styles.reset, { color: tokens.danger }]}>Remove</Text></Pressable></View>)}<Pressable onPress={() => { const next = JSON.stringify([...values, ""]); setDraft(next); }} accessibilityRole="button" accessibilityLabel={`Add ${field.label} item`}><Text style={[styles.reset, { color: tokens.accent }]}>Add item</Text></Pressable></View>;
+    return <View style={fieldStyle}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text>{values.map((value, index) => <View key={`${field.key}-${index}`} style={styles.listItem}><Input containerStyle={styles.listInput} value={value} onChangeText={(next) => { const updated = [...values]; updated[index] = next; setDraft(JSON.stringify(updated)); }} onEndEditing={(event) => { const updated = [...values]; updated[index] = event.nativeEvent.text; save(JSON.stringify(updated)); }} accessibilityLabel={`${field.label} item ${index + 1}`} autoCapitalize="none" autoCorrect={false} /><Pressable onPress={() => { const next = JSON.stringify(values.filter((_, itemIndex) => itemIndex !== index)); setDraft(next); save(next); }} accessibilityRole="button" accessibilityLabel={`Remove ${field.label} item ${index + 1}`}><Text style={[styles.reset, { color: tokens.danger }]}>Remove</Text></Pressable></View>)}<Pressable onPress={() => { const next = JSON.stringify([...values, ""]); setDraft(next); }} accessibilityRole="button" accessibilityLabel={`Add ${field.label} item`}><Text style={[styles.reset, { color: tokens.accent }]}>Add item</Text></Pressable></View>;
   }
   if (field.field_type === "json") {
-    return <View style={styles.field}><Input label={field.label} value={draft} onChangeText={setDraft} multiline numberOfLines={8} autoCapitalize="none" autoCorrect={false} mono error={error ?? undefined} accessibilityLabel={field.label} /><Button label="Save" variant="secondary" onPress={() => save(draft)} disabled={mutation.isPending || draft === field.value} loading={mutation.isPending} /><Text style={[type.sub, { color: tokens.ink3 }]}>{field.help ?? `${field.key} · ${field.source}`}</Text></View>;
+    return <View style={fieldStyle}><Input label={field.label} value={draft} onChangeText={setDraft} multiline numberOfLines={8} autoCapitalize="none" autoCorrect={false} mono error={error ?? undefined} accessibilityLabel={field.label} /><Button label="Save" variant="secondary" onPress={() => save(draft)} disabled={mutation.isPending || draft === field.value} loading={mutation.isPending} /><Text style={[type.sub, { color: tokens.ink3 }]}>{field.help ?? `${field.key} · ${field.source}`}</Text></View>;
   }
   if (field.field_type === "enum") {
-    return <View style={styles.field}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text><Segmented options={field.options.map((option) => ({ value: option, label: option }))} value={draft} onChange={(value) => { setDraft(value); save(value); }} /></View>;
+    return <View style={fieldStyle}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text><Segmented options={field.options.map((option) => ({ value: option, label: option }))} value={draft} onChange={(value) => { setDraft(value); save(value); }} /></View>;
   }
-  return <View style={styles.field}><Input label={field.label} value={draft} onChangeText={setDraft}  keyboardType={field.field_type === "int" || field.field_type === "float" ? "decimal-pad" : "default"} autoCapitalize="none" autoCorrect={false} error={error ?? undefined} accessibilityLabel={field.label} /><Button label="Save" variant="secondary" onPress={() => save(draft)} disabled={mutation.isPending || draft === field.value} loading={mutation.isPending} /><Text style={[type.sub, { color: tokens.ink3 }]}>{field.help ?? `${field.key} · ${field.source}`}</Text>{field.modified ? <Pressable onPress={() => save(undefined)} accessibilityRole="button" accessibilityLabel={`Reset ${field.label}`}><Text style={[styles.reset, { color: tokens.accent }]}>Reset to default ({field.default || "empty"})</Text></Pressable> : null}</View>;
+  return <View style={fieldStyle}><Input label={field.label} value={draft} onChangeText={setDraft}  keyboardType={field.field_type === "int" || field.field_type === "float" ? "decimal-pad" : "default"} autoCapitalize="none" autoCorrect={false} error={error ?? undefined} accessibilityLabel={field.label} /><Button label="Save" variant="secondary" onPress={() => save(draft)} disabled={mutation.isPending || draft === field.value} loading={mutation.isPending} /><Text style={[type.sub, { color: tokens.ink3 }]}>{field.help ?? `${field.key} · ${field.source}`}</Text>{field.modified ? <Pressable onPress={() => save(undefined)} accessibilityRole="button" accessibilityLabel={`Reset ${field.label}`}><Text style={[styles.reset, { color: tokens.accent }]}>Reset to default ({field.default || "empty"})</Text></Pressable> : null}</View>;
 }
 
-export default function ConfigurationScreen() {
+function ConfigurationScreenBody() {
   const tokens = useTokens();
   const query = useConfig();
   const [scope, setScope] = useState<Scope>("user");
@@ -104,18 +105,22 @@ export default function ConfigurationScreen() {
   }, [query.data?.fields, search]);
   const groups = useMemo(() => grouped(fields), [fields]);
 
-  return <DesktopDrillDown><Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
+  return <Screen scroll refreshControl={<RefreshControl refreshing={query.isFetching} onRefresh={() => void query.refetch()} />} contentContainerStyle={styles.content}>
     <BackLink />
     <Text style={[type.title, { color: tokens.ink }]}>Configuration</Text>
     <Text style={[type.sub, { color: tokens.ink3 }]}>Tune Forge’s effective settings. Choose where edits are saved.</Text>
     <Segmented options={[{ value: "user", label: "Save everywhere" }, { value: "project", label: "Save in project" }]} value={scope} onChange={(value) => setScope(value as Scope)} />
     <SearchField value={search} onChangeText={setSearch} placeholder="Search settings" accessibilityLabel="Search settings" />
-    <Card><Text style={[type.sub, { color: tokens.ink2 }]}>Saved settings apply to new Forge sessions. Restart forge serve to reload daemon-wide behavior.</Text></Card>
-    {query.isError ? <Card><Text style={[type.body, { color: tokens.danger }]}>Could not load configuration. Pull to retry.</Text></Card> : null}
-    {query.isLoading ? <Card><Text style={[type.body, { color: tokens.ink3 }]}>Loading your effective configuration…</Text></Card> : null}
-    {!query.isLoading && !query.isError && fields.length === 0 ? <Card><Text style={[type.body, { color: tokens.ink3 }]}>No settings match that search.</Text></Card> : null}
-    {groups.map(([group, fields]) => <View key={group}><SectionHeader>{group}</SectionHeader><Card padded={false}>{fields.map((field, index) => <ConfigFieldRow key={field.key} field={field} scope={scope} />)}</Card></View>)}
-  </Screen></DesktopDrillDown>;
+    <Text style={[type.sub, { color: tokens.ink4 }]}>Saved settings apply to new Forge sessions. Restart forge serve to reload daemon-wide behavior.</Text>
+    {query.isError ? <Text style={[type.body, { color: tokens.danger }]}>Could not load configuration. Pull to retry.</Text> : null}
+    {query.isLoading ? <Text style={[type.body, { color: tokens.ink3 }]}>Loading your effective configuration…</Text> : null}
+    {!query.isLoading && !query.isError && fields.length === 0 ? <Text style={[type.body, { color: tokens.ink3 }]}>No settings match that search.</Text> : null}
+    {groups.map(([group, fields]) => <View key={group}><SectionHeader>{group}</SectionHeader>{fields.map((field, index) => <ConfigFieldRow key={field.key} field={field} scope={scope} showSeparator={index < fields.length - 1} />)}</View>)}
+  </Screen>;
+}
+
+export default function ConfigurationScreen() {
+  return <DesktopDrillDown><SettingsShell active="configuration"><ConfigurationScreenBody /></SettingsShell></DesktopDrillDown>;
 }
 
 const styles = StyleSheet.create({

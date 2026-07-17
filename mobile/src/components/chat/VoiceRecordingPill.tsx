@@ -13,12 +13,19 @@ import { voice } from "../../lib/voice/voice";
 import { useThermalPulse } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, tapTarget } from "../../theme/tokens";
-import { tabularNums, type } from "../../theme/typography";
+import { monoFamily, tabularNums, type } from "../../theme/typography";
 import { IconButton } from "../ds/IconButton";
 import { StatusDot } from "../ds/StatusDot";
 
-const BAR_COUNT = 24;
-const BAR_MAX_HEIGHT = 22;
+// Waveform geometry: fixed bar width/gap, the COUNT adapts to the measured track width —
+// a fixed count stretched by `space-between` left huge uneven gaps and floating dots on
+// wide desktop pills (the reported "glitched" look).
+const BAR_WIDTH = 3;
+const BAR_GAP = 3;
+const BAR_MAX_HEIGHT = 24;
+const BAR_MIN_HEIGHT = 4;
+const MIN_BAR_COUNT = 16;
+const MAX_BAR_COUNT = 160;
 const SHAKE_DISTANCE = 6;
 const ERROR_CLEAR_MS = 2600;
 
@@ -40,7 +47,7 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
   const reduced = useReducedMotion();
   const transcribe = useTranscribe();
   const [phase, setPhase] = useState<"recording" | "transcribing" | "error">("recording");
-  const [levels, setLevels] = useState<number[]>(() => Array(BAR_COUNT).fill(0));
+  const [levels, setLevels] = useState<number[]>(() => Array(MIN_BAR_COUNT).fill(0));
   const [elapsed, setElapsed] = useState(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const startedAt = useRef(0);
@@ -190,7 +197,13 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
   }, [phase]);
 
   return (
-    <Animated.View style={[styles.wrap, { backgroundColor: tokens.bg3, borderRadius: radii.radius12 }, shakeStyle]}>
+    <Animated.View
+      style={[
+        styles.wrap,
+        { backgroundColor: tokens.bg2, borderColor: tokens.borderStrong, borderRadius: radii.radius12 + 2 },
+        shakeStyle,
+      ]}
+    >
       {phase === "error" ? (
         <Text style={[type.meta, styles.errorText, { color: tokens.danger }]} numberOfLines={1}>
           {errorMsg ?? "something went wrong"}
@@ -203,20 +216,33 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
             accessibilityLabel={phase === "recording" ? "recording" : "transcribing"}
           />
           {phase === "recording" ? (
-            <View style={styles.bars}>
-              {levels.map((lvl, i) => (
-                <View
-                  key={i}
-                  style={[styles.bar, { height: Math.max(3, lvl * BAR_MAX_HEIGHT), backgroundColor: tokens.accent }]}
-                />
-              ))}
+            <View
+              style={styles.bars}
+              onLayout={(e) => {
+                const width = e.nativeEvent.layout.width;
+                const next = Math.max(MIN_BAR_COUNT, Math.min(MAX_BAR_COUNT, Math.floor((width + BAR_GAP) / (BAR_WIDTH + BAR_GAP))));
+                setLevels((prev) => (prev.length === next ? prev : [...Array(Math.max(0, next - prev.length)).fill(0), ...prev.slice(-next)]));
+              }}
+            >
+              {levels.map((lvl, i) => {
+                // sqrt lifts quiet speech out of the dot zone; bars grow from the center.
+                const height = BAR_MIN_HEIGHT + Math.sqrt(Math.max(0, Math.min(1, lvl))) * (BAR_MAX_HEIGHT - BAR_MIN_HEIGHT);
+                return (
+                  <View
+                    key={i}
+                    style={[styles.bar, { height, backgroundColor: tokens.accent, opacity: 0.45 + 0.55 * Math.min(1, lvl * 2) }]}
+                  />
+                );
+              })}
             </View>
           ) : (
             <Animated.Text style={[type.meta, styles.bars, transcribingPulse, { color: tokens.ink2 }]}>
               transcribing…
             </Animated.Text>
           )}
-          <Text style={[type.meta, tabularNums, { color: tokens.ink3 }]}>{formatElapsed(elapsed)}</Text>
+          <Text style={[type.meta, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>
+            {formatElapsed(elapsed)}
+          </Text>
           {phase === "recording" ? (
             <>
               <IconButton
@@ -241,21 +267,27 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
 }
 
 const styles = StyleSheet.create({
+  // Matches the composer row it morphs from: same radius, border, and 52px silhouette,
+  // so the swap reads as the same pill changing mode rather than a different widget.
   wrap: {
     flexDirection: "row",
     alignItems: "center",
-    height: tapTarget,
-    paddingHorizontal: space.space12,
+    height: tapTarget + space.space8,
+    paddingLeft: space.space12,
+    paddingRight: space.space4,
     gap: space.space8,
+    borderWidth: 1,
   },
   bars: {
     flex: 1,
     flexDirection: "row",
-    alignItems: "flex-end",
-    justifyContent: "space-between",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: BAR_GAP,
     height: BAR_MAX_HEIGHT,
+    overflow: "hidden",
   },
-  bar: { width: 2, borderRadius: 1 },
+  bar: { width: BAR_WIDTH, borderRadius: radii.radiusPill },
   errorText: { flex: 1 },
   accept: { borderRadius: radii.radiusPill, width: tapTarget, height: tapTarget },
 });

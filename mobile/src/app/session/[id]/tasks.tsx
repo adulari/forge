@@ -44,7 +44,7 @@ export default function SessionTasks() {
   const keyExtractor = useCallback((item: SnapshotTask, index: number) => `${index}-${item.title}`, []);
 
   return (
-    <Screen edges={["left", "right", "bottom"]} scroll={false}>
+    <Screen edges={["left", "right", "bottom"]} scroll={false} contentContainerStyle={styles.sessionColumn}>
       {snapshot == null && snapshotTimedOut ? (
         <EmptyState icon={WifiOff} message="can't reach this session — it may not exist, or the server is unreachable" />
       ) : snapshot == null ? (
@@ -62,6 +62,9 @@ export default function SessionTasks() {
 }
 
 const styles = StyleSheet.create({
+  // Hearth desktop/web: the session sub-screens share the chat column's 760px cap,
+  // centered in the remaining Fleet+Session pane — a no-op at mobile widths.
+  sessionColumn: { width: "100%", maxWidth: 760, alignSelf: "center" },
   skeletonWrap: { paddingTop: space.space12, gap: space.space16 },
   skeletonRow: {
     flexDirection: "row",

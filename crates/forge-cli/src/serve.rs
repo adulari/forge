@@ -654,6 +654,7 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         .route(&format!("{base}/api/usage"), get(usage_page))
         .route(&format!("{base}/api/hooks"), get(hooks_page))
         .route(&format!("{base}/api/skills"), get(skills_page))
+        .route(&format!("{base}/api/workflows"), get(workflows_page))
         .route(&format!("{base}/api/models"), get(models_page))
         .route(&format!("{base}/api/plans"), get(plans_page))
         .route(
@@ -2385,6 +2386,153 @@ async fn skills_page() -> Response {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct WorkflowsParams {
+    #[serde(default)]
+    session: String,
+}
+
+#[derive(serde::Serialize)]
+struct WorkflowRow {
+    name: String,
+    description: String,
+    when_to_use: Option<String>,
+    phases: Vec<String>,
+}
+
+/// Pull a string field (`description: '…'` / `"…"`) out of a workflow script's `meta` literal.
+/// The meta block is a pure literal by contract (forge-core's authoring guidance), so a
+/// lightweight scan is faithful enough for a library listing — no JS engine needed.
+fn meta_string_field(meta: &str, field: &str) -> Option<String> {
+    let idx = meta.find(&format!("{field}:"))?;
+    let rest = &meta[idx + field.len() + 1..];
+    let rest = rest.trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '\'' && quote != '"' && quote != '`' {
+        return None;
+    }
+    let body = &rest[1..];
+    let mut out = String::new();
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(escaped) = chars.next() {
+                out.push(escaped);
+            }
+        } else if c == quote {
+            return Some(out);
+        } else {
+            out.push(c);
+        }
+    }
+    None
+}
+
+/// Extract the `export const meta = {…}` literal (balanced braces, quote-aware).
+fn meta_literal(script: &str) -> Option<&str> {
+    let start = script.find("export const meta")?;
+    let open = script[start..].find('{')? + start;
+    let mut depth = 0usize;
+    let mut in_str: Option<char> = None;
+    let mut prev_backslash = false;
+    for (i, c) in script[open..].char_indices() {
+        if let Some(q) = in_str {
+            if prev_backslash {
+                prev_backslash = false;
+            } else if c == '\\' {
+                prev_backslash = true;
+            } else if c == q {
+                in_str = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => in_str = Some(c),
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&script[open..=open + i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Phase titles from the meta literal's `phases: [{ title: '…' }, …]` array, in order.
+fn meta_phase_titles(meta: &str) -> Vec<String> {
+    let Some(idx) = meta.find("phases:") else {
+        return Vec::new();
+    };
+    let Some(tail) = meta.get(idx..) else {
+        return Vec::new();
+    };
+    let Some(end) = tail.find(']') else {
+        return Vec::new();
+    };
+    let mut titles = Vec::new();
+    let mut rest = &tail[..end];
+    while let Some(t) = meta_string_field(rest, "title") {
+        let consumed = rest.find("title:").unwrap_or(0) + "title:".len() + t.len() + 2;
+        titles.push(t);
+        rest = rest.get(consumed..).unwrap_or("");
+    }
+    titles
+}
+
+/// `GET /api/workflows?session=<id>` — the saved-workflow library for the session's project
+/// (`.forge/workflows/*.js`), with `meta` description/whenToUse/phases parsed out for the
+/// app's library screen. Falls back to the daemon's default cwd when no session is given.
+async fn workflows_page(
+    State(state): State<Arc<DaemonState>>,
+    Query(params): Query<WorkflowsParams>,
+) -> Response {
+    let cwd = if params.session.is_empty() {
+        state.default_cwd.clone()
+    } else {
+        match state.registry.get(&params.session).await {
+            Some(handle) => handle.cwd.clone(),
+            None => state.default_cwd.clone(),
+        }
+    };
+    let rows = tokio::task::spawn_blocking(move || {
+        let dir = std::path::Path::new(&cwd).join(".forge").join("workflows");
+        let mut rows: Vec<WorkflowRow> = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return rows;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("js") {
+                continue;
+            }
+            let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let script = std::fs::read_to_string(&path).unwrap_or_default();
+            let meta = meta_literal(&script).unwrap_or("");
+            rows.push(WorkflowRow {
+                name: name.to_string(),
+                description: meta_string_field(meta, "description").unwrap_or_default(),
+                when_to_use: meta_string_field(meta, "whenToUse"),
+                phases: meta_phase_titles(meta),
+            });
+        }
+        rows.sort_by(|a, b| a.name.cmp(&b.name));
+        rows
+    })
+    .await;
+    match rows {
+        Ok(rows) => json_response(&rows),
+        Err(_) => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "could not read workflows",
+        ),
+    }
+}
+
 #[derive(serde::Serialize)]
 struct ModelsResponse {
     catalog: &'static str,
@@ -2915,6 +3063,54 @@ mod tests {
                 default.canonicalize().unwrap(),
                 extra.canonicalize().unwrap()
             ]
+        );
+    }
+
+    #[test]
+    fn workflow_meta_parsers_extract_library_fields() {
+        // A realistic authored workflow: `export const meta = {…}` with a brace and a
+        // matching quote inside a string value (must not break literal balancing or field
+        // extraction), plus an escaped apostrophe in whenToUse.
+        let script = r#"
+export const meta = {
+  name: 'code-review',
+  description: 'Review a diff { and } braces',
+  whenToUse: 'When you\'re unsure it is right',
+  phases: [
+    { title: 'Scan', prompt: 'p1' },
+    { title: 'Verify', prompt: 'p2' },
+    { title: 'Report', prompt: 'p3' },
+  ],
+};
+
+export async function run() {}
+"#;
+        let meta = meta_literal(script).expect("meta literal");
+        assert!(meta.starts_with('{') && meta.ends_with('}'));
+        assert!(meta.contains("phases:"));
+        assert!(!meta.contains("export async function"));
+
+        assert_eq!(
+            meta_string_field(meta, "description").as_deref(),
+            Some("Review a diff { and } braces")
+        );
+        assert_eq!(
+            meta_string_field(meta, "whenToUse").as_deref(),
+            Some("When you're unsure it is right")
+        );
+        assert_eq!(
+            meta_phase_titles(meta),
+            vec![
+                "Scan".to_string(),
+                "Verify".to_string(),
+                "Report".to_string()
+            ]
+        );
+
+        assert!(meta_literal("no meta here").is_none());
+        assert_eq!(
+            meta_phase_titles("{ description: 'x' }"),
+            Vec::<String>::new()
         );
     }
 

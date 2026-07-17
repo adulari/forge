@@ -427,7 +427,9 @@ async fn drive_session(
             st.on_turn_done(g).await;
         }
         // 5. Background overlay loads (/mesh, /usage).
-        st.poll_overlay_loads();
+        if st.poll_overlay_loads() {
+            dirty = true;
+        }
         // 6. Fold finalized lines into the transcript ring (there is no terminal to print to)
         //    and broadcast a snapshot when anything changed. Change-only, like the TUI loop.
         let _ = st.app.drain_flush_remote();
@@ -484,6 +486,17 @@ async fn drive_session(
                                     cost_usd: snap.cost_usd,
                                     context_tokens: snap.context_tokens,
                                     context_limit: snap.context_limit.unwrap_or(200_000) as u64,
+                                    question: snap
+                                        .permission_prompt
+                                        .clone()
+                                        .or_else(|| snap.question.clone()),
+                                    prompt_seq: Some(snap.prompt_seq),
+                                    tasks_done: Some(
+                                        snap.tasks.iter().filter(|t| t.status == "done").count()
+                                            as u64,
+                                    ),
+                                    tasks_total: Some(snap.tasks.len() as u64),
+                                    state_since: Some(now_secs().max(0) as u64),
                                 },
                             );
                             notifier.dispatch_alert(msg.clone());
@@ -1575,7 +1588,11 @@ impl DriverState {
     }
 
     /// Poll the background overlay loads (/mesh, /usage) — same as the TUI's per-frame polls.
-    fn poll_overlay_loads(&mut self) {
+    /// Returns true when a load resolved: the idle loop only broadcasts snapshots on dirty
+    /// frames, so an unreported resolution here would leave every remote client staring at the
+    /// loading spinner until some unrelated input arrived.
+    fn poll_overlay_loads(&mut self) -> bool {
+        let mut changed = false;
         if let Some(rx) = &mut self.mesh_load_rx {
             match rx.try_recv() {
                 Ok(Some(overlay)) => {
@@ -1583,6 +1600,7 @@ impl DriverState {
                     self.app.mesh_overlay = overlay;
                     self.app.mesh_overlay.anim_tick = tick;
                     self.mesh_load_rx = None;
+                    changed = true;
                 }
                 Ok(None) => {
                     self.app.mesh_overlay.open = false;
@@ -1590,11 +1608,13 @@ impl DriverState {
                     self.app.push_scrollback_text(
                         "mesh: auto-discovery routing is off (no model catalog) — nothing to inspect",
                     );
+                    changed = true;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                     self.app.mesh_overlay.open = false;
                     self.mesh_load_rx = None;
+                    changed = true;
                 }
             }
         }
@@ -1620,14 +1640,17 @@ impl DriverState {
                     );
                     self.app.usage_overlay.loading = false;
                     self.usage_load_rx = None;
+                    changed = true;
                 }
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                     self.app.usage_overlay.loading = false;
                     self.usage_load_rx = None;
+                    changed = true;
                 }
             }
         }
+        changed
     }
 }
 
@@ -1697,6 +1720,32 @@ mod tests {
         assert!(state.busy);
         assert_eq!(state.turn_gen, 12);
         state.turn_handle.take().unwrap().abort();
+    }
+
+    // Regression: the idle loop only broadcasts dirty frames, so a /mesh load resolving without
+    // reporting a change left remote clients on the loading spinner until an unrelated input.
+    #[tokio::test]
+    async fn mesh_overlay_resolution_reports_a_dirty_frame() {
+        let mut state = test_driver_state().await;
+        state.app.mesh_overlay.open = true;
+        state.app.mesh_overlay.loading = true;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state.mesh_load_rx = Some(rx);
+
+        assert!(!state.poll_overlay_loads(), "pending load is not a change");
+
+        tx.send(Some(forge_tui::MeshOverlay {
+            open: true,
+            loading: false,
+            ..Default::default()
+        }))
+        .unwrap();
+        assert!(
+            state.poll_overlay_loads(),
+            "resolution must dirty the frame"
+        );
+        assert!(!state.app.mesh_overlay.loading);
+        assert!(state.mesh_load_rx.is_none());
     }
 
     #[tokio::test]
