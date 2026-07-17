@@ -63,7 +63,11 @@ html, body, #root {
 body { overscroll-behavior: none; -webkit-overflow-scrolling: touch; touch-action: manipulation; }
 * { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; }
 :focus { outline: none; }
-:focus-visible { outline: 2px solid var(--forge-focus, currentColor); outline-offset: 2px; }
+/* Keyboard-focus ring: thin, tight, low-alpha ember — the old 2px currentColor ring with
+   a 2px offset drew a fat white/orange box around anything you tabbed to. Follows the
+   element's own border-radius. */
+:root { --forge-focus: rgba(255, 145, 60, 0.5); }
+:focus-visible { outline: 1px solid var(--forge-focus); outline-offset: 0px; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 `;
 

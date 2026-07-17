@@ -57,6 +57,8 @@ function makeTabIcon(Icon: LucideIcon) {
 
     return (
       <View style={styles.iconWrap}>
+        {/* DESIGN_ELEVATION.md Move 3 — active tab's 2px ember heat underline. */}
+        <Animated.View style={[styles.underline, pillStyle, { backgroundColor: tokens.accent }]} />
         <Animated.View
           style={[styles.pill, pillStyle, { backgroundColor: tokens.bg3, borderRadius: radii.radius12 }]}
         />
@@ -172,6 +174,7 @@ export default function TabsLayout() {
 const styles = StyleSheet.create({
   iconWrap: { alignItems: "center", justifyContent: "center", width: 40, height: 32 },
   pill: { position: "absolute", width: 40, height: 32 },
+  underline: { position: "absolute", top: -8, alignSelf: "center", width: 24, height: 2, borderRadius: 1 },
   dot: {
     position: "absolute",
     top: 3,
