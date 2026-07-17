@@ -46,6 +46,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Text,
   useWindowDimensions,
   View,
 } from "react-native";
@@ -68,6 +69,7 @@ import { useSessionSocket } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, space, type StatusDotState } from "../../theme/tokens";
+import { type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 import { DecisionPeek } from "../cards/DecisionPeek";
 import { Badge } from "../ds/Badge";
@@ -83,9 +85,20 @@ import { useToast } from "../ds/ToastHost";
 import { BUILTIN_COMMANDS, useSkillCommands } from "../../lib/commands";
 import { mergeCommandSources } from "../../lib/commandSources";
 const TRANSIENT_SEND_TIMEOUT_MS = 5000;
-const PANEL_WIDTH = 560;
+const PANEL_WIDTH = 580;
 const ICON_SIZE = 18;
 const ICON_STROKE = 1.75;
+
+/** Prototype's mono keycap hint (`esc`, `⌘N`) — bordered, ink4, monoMeta. Web/desktop only;
+ * keyboard hints have no meaning on a touch sheet. */
+function KeyHint({ label }: { label: string }) {
+  const tokens = useTokens();
+  return (
+    <View style={[styles.keyHint, { borderColor: tokens.border }]}>
+      <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>{label}</Text>
+    </View>
+  );
+}
 
 function activeSessionIdFromPathname(pathname: string): string | null {
   const match = /^\/session\/([^/]+)/.exec(pathname);
@@ -111,7 +124,7 @@ interface PaletteItem {
 const GROUP_LABELS: Record<PaletteGroupKey, string> = {
   sessions: "Sessions",
   actions: "Actions",
-  navigation: "Navigation",
+  navigation: "Go to",
 };
 const GROUP_ORDER: PaletteGroupKey[] = ["sessions", "actions", "navigation"];
 
@@ -294,9 +307,10 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
       {
         id: "action:new-session",
         group: "actions",
-        title: "New session",
-        keywords: "new session create start",
+        title: "Forge a session",
+        keywords: "new session create start forge task",
         leading: <Plus size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+        trailing: !isCompact ? <KeyHint label="⌘N" /> : undefined,
         onSelect: () => {
           close();
           router.push("/new-session");
@@ -360,7 +374,7 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
     }
 
     return items;
-  }, [tokens, activeSessionId, scheme, setScheme, close, archiveSession, toast, runSlashCommand, skillCommands]);
+  }, [tokens, activeSessionId, scheme, setScheme, close, archiveSession, toast, runSlashCommand, skillCommands, isCompact]);
 
   const navigationItems = useMemo<PaletteItem[]>(
     () => [
@@ -549,14 +563,17 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
   const body = (
     <View style={[styles.body, { paddingTop: Math.max(12, insets.top) }]}>
       <View style={styles.searchWrap}>
-        <SearchField
-          value={query}
-          onChangeText={setQuery}
-          placeholder="jump to a session, run a command…"
-          showCancel={false}
-          autoFocus={visible}
-          accessibilityLabel="Command palette search"
-        />
+        <View style={styles.searchField}>
+          <SearchField
+            value={query}
+            onChangeText={setQuery}
+            placeholder="jump to a session, run a command…"
+            showCancel={false}
+            autoFocus={visible}
+            accessibilityLabel="Command palette search"
+          />
+        </View>
+        {!isCompact ? <KeyHint label="esc" /> : null}
       </View>
       <ScrollView
         style={styles.scroll}
@@ -577,6 +594,11 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
         ) : (
           <EmptyState icon={Search} message="no matches for that search" />
         )}
+        {!isCompact && hasResults ? (
+          <View style={[styles.footerRow, { borderTopColor: tokens.border }]}>
+            <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>↑↓ navigate · ↵ select</Text>
+          </View>
+        ) : null}
       </ScrollView>
     </View>
   );
@@ -670,10 +692,27 @@ function PaletteRow({ item, selected }: { item: PaletteItem; selected: boolean }
 
 const styles = StyleSheet.create({
   body: { flex: 1 },
-  searchWrap: { paddingHorizontal: space.space16, paddingBottom: space.space8 },
+  searchWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space8,
+    paddingHorizontal: space.space16,
+    paddingBottom: space.space8,
+  },
+  searchField: { flex: 1 },
   scroll: { flex: 1 },
   scrollContent: { paddingBottom: space.space24 },
   trailingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   centerWrap: { flex: 1, alignItems: "center", justifyContent: "center", padding: space.space32 },
   centeredPanel: { overflow: "hidden" },
+  keyHint: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius4, paddingHorizontal: space.space4, paddingVertical: 1 },
+  footerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    paddingHorizontal: space.space16,
+    paddingTop: space.space12,
+    marginTop: space.space8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
 });

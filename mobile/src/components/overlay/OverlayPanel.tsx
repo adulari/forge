@@ -131,7 +131,7 @@ export function OverlayPanel({ overlay, visible, send, onClose }: OverlayPanelPr
   const content = (
     <View style={styles.container}>
       <View style={styles.titleRow}>
-        <Text style={[typeScale.heading, { color: tokens.ink }]} numberOfLines={1}>
+        <Text style={[typeScale.headingBold, { color: tokens.ink }]} numberOfLines={1}>
           {overlay.title}
         </Text>
         <IconButton
