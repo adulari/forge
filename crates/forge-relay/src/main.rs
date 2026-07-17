@@ -280,8 +280,8 @@ async fn send_push(
     // --- abuse prevention ---
     let ip = client_ip(&headers, &connect_info, state.trust_proxy_headers);
     if let Err(reason) = state.limiters.check_and_reserve(&ip, &device_token) {
-        // APNs device tokens are bearer-like routing secrets. Never retain one in logs.
-        tracing::warn!("rate limited ({reason:?}) ip={ip}");
+        // Client IPs and APNs device tokens are identifiers. Never retain either in logs.
+        tracing::warn!("rate limited ({reason:?})");
         return (StatusCode::TOO_MANY_REQUESTS, format!("{reason:?}")).into_response();
     }
 

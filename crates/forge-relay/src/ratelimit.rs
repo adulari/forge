@@ -5,14 +5,15 @@
 //! allowlisted topic, never reach arbitrary devices or see any session/code/account data.
 
 use governor::{Quota, RateLimiter};
+use std::hash::{BuildHasher, RandomState};
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 type KeyedLimiter = RateLimiter<
-    String,
-    governor::state::keyed::DefaultKeyedStateStore<String>,
+    u64,
+    governor::state::keyed::DefaultKeyedStateStore<u64>,
     governor::clock::DefaultClock,
 >;
 
@@ -21,6 +22,7 @@ type KeyedLimiter = RateLimiter<
 pub(crate) struct RateLimiters {
     per_ip: KeyedLimiter,
     per_token: KeyedLimiter,
+    key_hasher: RandomState,
     daily_sent: AtomicU64,
     daily_cap: u64,
 }
@@ -48,6 +50,9 @@ impl RateLimiters {
         Self {
             per_ip: RateLimiter::keyed(quota),
             per_token: RateLimiter::keyed(quota),
+            // RandomState is independently salted on each process start. Limiter state therefore
+            // retains only ephemeral pseudonymous keys, never raw client IPs or device tokens.
+            key_hasher: RandomState::new(),
             daily_sent: AtomicU64::new(0),
             daily_cap,
         }
@@ -62,10 +67,12 @@ impl RateLimiters {
         ip: &str,
         device_token: &str,
     ) -> Result<(), RejectReason> {
-        if self.per_ip.check_key(&ip.to_string()).is_err() {
+        let ip_key = self.key_hasher.hash_one(("ip", ip));
+        let token_key = self.key_hasher.hash_one(("device-token", device_token));
+        if self.per_ip.check_key(&ip_key).is_err() {
             return Err(RejectReason::Ip);
         }
-        if self.per_token.check_key(&device_token.to_string()).is_err() {
+        if self.per_token.check_key(&token_key).is_err() {
             return Err(RejectReason::DeviceToken);
         }
         self.daily_sent
