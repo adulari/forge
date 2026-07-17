@@ -293,10 +293,13 @@ pub struct Store {
 /// SQL fragment: derives a usage row's provider from its message model (aliased `m`).
 ///
 /// Ordinary completions retain their routed model. Synthetic side-call messages (compact,
-/// diagnose) have no model, so inherit the nearest routed model in their session instead of
-/// appearing in a misleading shared `other` bucket. A session containing no routed model at all
-/// still falls back to `other`.
-const USAGE_PROVIDER_EXPR: &str = "COALESCE(NULLIF(CASE WHEN instr(m.model, '::') > 0 THEN substr(m.model, 1, instr(m.model, '::') - 1) ELSE m.model END, ''), (SELECT CASE WHEN instr(pm.model, '::') > 0 THEN substr(pm.model, 1, instr(pm.model, '::') - 1) ELSE pm.model END FROM message pm WHERE pm.session_id = m.session_id AND pm.model IS NOT NULL ORDER BY ABS(pm.seq - m.seq), pm.seq DESC LIMIT 1), 'other')";
+/// diagnose) have no model, so inherit the most recent routed model in their session instead of
+/// appearing in a misleading shared `other` bucket. The earliest following model covers legacy
+/// rows that precede every routed turn; a session with no routed model still falls back to `other`.
+///
+/// Keep outer-row references in each subquery's `WHERE` clause. SQLite 3.51 rejects a correlated
+/// outer column used directly by a scalar subquery's `ORDER BY` (`no such column: m.seq`).
+const USAGE_PROVIDER_EXPR: &str = "COALESCE(NULLIF(CASE WHEN instr(m.model, '::') > 0 THEN substr(m.model, 1, instr(m.model, '::') - 1) ELSE m.model END, ''), (SELECT CASE WHEN instr(pm.model, '::') > 0 THEN substr(pm.model, 1, instr(pm.model, '::') - 1) ELSE pm.model END FROM message pm WHERE pm.session_id = m.session_id AND pm.model IS NOT NULL AND pm.seq <= m.seq ORDER BY pm.seq DESC LIMIT 1), (SELECT CASE WHEN instr(pm.model, '::') > 0 THEN substr(pm.model, 1, instr(pm.model, '::') - 1) ELSE pm.model END FROM message pm WHERE pm.session_id = m.session_id AND pm.model IS NOT NULL AND pm.seq > m.seq ORDER BY pm.seq ASC LIMIT 1), 'other')";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderUsage {

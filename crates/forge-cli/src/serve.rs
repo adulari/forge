@@ -1874,10 +1874,16 @@ async fn push_subscribe(
                     "native push is unavailable (no APNs key configured)",
                 );
             }
-            if push_token.is_empty() || push_token.len() > 512 || session_id.is_empty() {
+            if session_id.is_empty() {
                 return err_response(
                     axum::http::StatusCode::BAD_REQUEST,
-                    "session_id and push_token must be non-empty and reasonably sized",
+                    "session_id must be non-empty",
+                );
+            }
+            if !crate::apns::is_valid_token(&push_token) {
+                return err_response(
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "push_token must be 64 lowercase hexadecimal characters",
                 );
             }
             let environment = normalize_apns_environment(&environment).to_string();
@@ -1904,10 +1910,10 @@ async fn push_subscribe(
                     "native push is unavailable (no APNs key configured)",
                 );
             }
-            if device_token.is_empty() || device_token.len() > 512 {
+            if !crate::apns::is_valid_token(&device_token) {
                 return err_response(
                     axum::http::StatusCode::BAD_REQUEST,
-                    "device_token must be non-empty and reasonably sized",
+                    "device_token must be 64 lowercase hexadecimal characters",
                 );
             }
             let environment = normalize_apns_environment(&environment).to_string();
@@ -4063,12 +4069,34 @@ mod tests {
                 .unwrap()
         };
 
+        for invalid_body in [
+            serde_json::json!({ "device_token": "not-an-apns-token", "environment": "production" }),
+            serde_json::json!({
+                "session_id": "sess-invalid",
+                "push_token": "not-a-live-activity-token",
+                "environment": "sandbox"
+            }),
+        ] {
+            let resp = router
+                .clone()
+                .oneshot(post_json("/api/push/subscribe", invalid_body.to_string()))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        }
+        assert!(store.list_apns_subscriptions().unwrap().is_empty());
+        assert!(store
+            .get_live_activity_token("sess-invalid")
+            .unwrap()
+            .is_none());
+
         // APNs device token: subscribe stores it, unsubscribe removes it.
+        let device_token = "a0".repeat(32);
         let resp = router
             .clone()
             .oneshot(post_json(
                 "/api/push/subscribe",
-                serde_json::json!({ "device_token": "devtok1", "environment": "production" })
+                serde_json::json!({ "device_token": device_token, "environment": "production" })
                     .to_string(),
             ))
             .await
@@ -4079,7 +4107,7 @@ mod tests {
             .clone()
             .oneshot(post_json(
                 "/api/push/unsubscribe",
-                serde_json::json!({ "device_token": "devtok1" }).to_string(),
+                serde_json::json!({ "device_token": device_token }).to_string(),
             ))
             .await
             .unwrap();
@@ -4087,12 +4115,13 @@ mod tests {
         assert!(store.list_apns_subscriptions().unwrap().is_empty());
 
         // Live Activity token: subscribe stores it keyed by session, unsubscribe removes it.
+        let activity_token = "b1".repeat(32);
         let resp = router
             .clone()
             .oneshot(post_json(
                 "/api/push/subscribe",
                 serde_json::json!({
-                    "session_id": "sess-1", "push_token": "activity-tok", "environment": "sandbox"
+                    "session_id": "sess-1", "push_token": activity_token, "environment": "sandbox"
                 })
                 .to_string(),
             ))
@@ -4105,14 +4134,14 @@ mod tests {
                 .unwrap()
                 .expect("stored")
                 .push_token,
-            "activity-tok"
+            activity_token
         );
         let resp = router
             .clone()
             .oneshot(post_json(
                 "/api/push/unsubscribe",
                 serde_json::json!({
-                    "session_id": "sess-1", "push_token": "activity-tok"
+                    "session_id": "sess-1", "push_token": activity_token
                 })
                 .to_string(),
             ))

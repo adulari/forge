@@ -10,7 +10,7 @@
 > live notifications, and a **PWA** (token-scoped manifest + service worker + icon) so it
 > adds to a phone home screen and runs standalone; a `◉ remote` statusline segment; a QR
 > code printed into the TUI scrollback. The wire is a versioned `Snapshot`/`RemoteInput`
-> protocol (`PROTOCOL_VERSION`, currently **7**); the page shows a "refresh to update" banner
+> protocol (`PROTOCOL_VERSION`, currently **8**); the page shows a "refresh to update" banner
 > on a mismatch. Auto-start is configurable (`[remote] auto`). The server reuses the running
 > session's presenter channel — no second process, no IPC, no keys to configure.
 >
@@ -50,11 +50,10 @@
 > **voice input** mic button (Web Speech API, transcribe-never-send, hidden where
 > unsupported). See §2e.
 >
-> **Deferred (what actually remains):** a `forge attach <id>` thin TUI client (drive a
-> daemon session from another terminal), an end-to-end-encrypted tunnel channel (today a
-> tunnel provider terminates TLS and could observe traffic; E2E would blind it), cross-host
-> session handoff/teleport, and native mobile apps (Watch/Live Activities included) — the
-> installed PWA is deliberately the only client.
+> **What remains:** an end-to-end-encrypted tunnel channel (today a tunnel provider terminates TLS
+> and could observe traffic; E2E would blind it), cross-host session handoff/teleport, and an Apple
+> Watch client. The `forge attach <id>` thin TUI client and native iOS/Android companion apps,
+> including iOS Live Activities, have shipped.
 
 > A new control surface layered onto the existing `run_chat_tui` loop. It adds *how a user
 > can drive a session* (a browser anywhere on the LAN, or loopback for a single machine) and
@@ -409,9 +408,9 @@ death timeout, and per-session URLs.
   pre-created `push_subscription` table so the upcoming actionable-web-push phase needs no
   migration.
 - **Coexistence.** `forge chat`'s in-process `/remote` is untouched (own ephemeral server);
-  the one control page serves both worlds by probing `/api/sessions`. Registering a live chat
-  session into a running daemon, and a `forge attach <id>` TUI thin client, are follow-ups on
-  the same seam.
+  the one control page serves both worlds by probing `/api/sessions`. Registering an already-live
+  in-process chat session into a running daemon remains future work; `forge attach <id>` already
+  drives daemon sessions from another terminal.
 
 ## 2d. Actionable Web Push + offline input queue (Phase 5)
 
@@ -543,7 +542,7 @@ design rationale.
 between them automatically:
 
 - **Bring your own Apple key** — set `FORGE_APNS_TEAM_ID`/`FORGE_APNS_KEY_ID`/
-  `FORGE_APNS_KEY_PATH` (an Apple Developer APNs Auth Key `.p8` you generate yourself in App
+  `FORGE_APNS_KEY_PATH` (an Apple Developer APNs Auth Key `.p8` you generate yourself in Apple
   Developer → Certificates, Identifiers & Profiles). Fully local, exactly the same "no relay"
   posture as Web Push above: the
   daemon signs its own ES256 JWT and POSTs straight to `api(.sandbox).push.apple.com`. Always
@@ -554,12 +553,20 @@ between them automatically:
   native push work out of the box for a typical self-hoster, without requiring everyone to
   personally enroll in the Apple Developer Program just to receive notifications.
 
-**What crosses the relay, precisely** (don't understate this): an opaque device token, an
-environment string (`sandbox`/`production`), and the notification payload itself — title/body
-text for alerts, and `busy`/`waiting`/`cost_usd`/`context_tokens` for Live Activity updates.
-It does **not** see session content, source code, credentials, or your daemon's own auth
-token. The relay's only gate is a topic allowlist scoped to this app's bundle id — it cannot
-be used to reach devices or apps outside that.
+**What crosses the relay, precisely:** an opaque device token, an environment string
+(`sandbox`/`production`), and the notification payload itself. Updated stock clients send only a
+static alert ("Forge — Open Forge to view an update") with fixed routing placeholders. The public
+server independently replaces every alert again before APNs. An older daemon can still transmit a
+rich alert to the relay during the upgrade window, but the public service does not log or forward
+that text. Live Activity payloads still contain the deliberately small
+`busy`/`waiting`/`cost_usd`/`context_tokens`/`context_limit` status object, but not the session ID
+used for the local lookup. Forge also does not send the daemon auth token, transcript, or source
+files. An explicitly configured private relay retains rich alert text for operators who control
+that relay; a local Apple key bypasses every relay. The public service accepts only Forge's app and
+Live Activity topics,
+validates the narrow Forge notification schemas and Apple's 4 KiB payload ceiling, applies
+per-client/per-device and global daily caps, and keeps raw client IPs/device tokens out of its
+in-memory limiter state and origin logs. It cannot reach devices or apps outside Forge's bundle IDs.
 
 **Opting out.** `FORGE_APNS_DISABLE_RELAY=1` turns native push off entirely rather than
 silently falling back to some other behavior — an explicit choice, not a silent downgrade.
@@ -573,6 +580,11 @@ A private relay may set `FORGE_RELAY_TOKEN` server-side and the same value as
 embed a shared token—an open-source client secret would be extractable—so it instead enforces the
 app-topic/payload allowlist, per-client and per-device limits, a hard daily cap, and edge/origin
 network controls described in ADR-0012.
+
+**Token lifecycle.** Registration accepts only Apple's 64-character lowercase-hex device and Live
+Activity token shape. Before delivery the daemon removes malformed legacy rows. It also removes the
+specific subscription after Apple's `410 Unregistered` response or a reason-qualified
+`400 BadDeviceToken`/`DeviceTokenNotForTopic`, while preserving it for unrelated 400 responses.
 
 ## 2g. Run as a background service — `forge service`
 
@@ -608,7 +620,7 @@ available?") rather than a bare exit code.
 
 | Layer | Change |
 |---|---|
-| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (7), `SnapOverlay`/`SnapRow` + `named_key`, v5 `EventLog` + `?rev=` replay + `Snapshot.resync`, `GET /api/history` (`HistoryRow`/`HistoryProvider` seam), v7 `SnapDiff`/`SnapPlan` + `RemoteInput::Attach` + `POST /api/upload` (`store_upload`/`sanitize_upload_name`, 10 MB cap), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
+| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (8), `SnapOverlay`/`SnapRow` + `named_key`, v5 `EventLog` + `?rev=` replay + `Snapshot.resync`, `GET /api/history` (`HistoryRow`/`HistoryProvider` seam), v7 `SnapDiff`/`SnapPlan` + `RemoteInput::Attach` + `POST /api/upload` (`store_upload`/`sanitize_upload_name`, 10 MB cap), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
 | `forge-cli/src/remote_assets/` | The control page split into `page.html` / `app.js` / `styles.css` / `sw.js` (served via `include_str!` as token-scoped routes; enables the no-`unsafe-inline` CSP); the page's generic overlay renderer + copy-here button; v5: `?rev=` reconnect + sessionStorage revision + replay dedup, scroll-up history pagination (`#hist` above the live `#tail`), markdown renderer + syntax highlighter + fenced-block copy buttons; v7: fleet dashboard (waiting-first list, needs-decision badge, token gauge), plan + diff cards, 📎 upload button + paste-an-image + chips, 🎤 voice input |
 | `forge-config/src/lib.rs` | `[remote]` block: exposure/tunnel settings plus `project_roots` for the remote folder-browser allowlist |
 | `forge-store/src/lib.rs` | v5: `Store::load_history_page` + `HistoryRow` (user-facing transcript pages, newest first, `before`/`limit` windowed); Phase 5: `PushSubscription` + `upsert/delete/list_push_subscriptions` (endpoint-deduped) |

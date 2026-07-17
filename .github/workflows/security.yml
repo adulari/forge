@@ -25,7 +25,7 @@ jobs:
     name: cargo audit (RUSTSEC)
     runs-on: [self-hosted, linux, x64]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
       # install-action's checksum metadata can briefly lag a binary release. Compile the pinned
       # tool once per persistent Arch runner instead of trusting that external file every run.
       - name: Ensure cargo-audit is installed
@@ -43,14 +43,16 @@ jobs:
             --ignore RUSTSEC-2024-0436 \
             --ignore RUSTSEC-2024-0320 \
             --ignore RUSTSEC-2025-0141
+          cargo audit --file vendor/genai-0.6.5/Cargo.lock --deny warnings \
+            --ignore RUSTSEC-2024-0436
 
   deny:
     name: cargo deny (licenses + bans + advisories)
     runs-on: [self-hosted, linux, x64]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
       # Need a real toolchain: `cargo deny check` runs `cargo metadata` under the hood.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       - name: Ensure cargo-deny is installed
         run: |
           echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
@@ -60,3 +62,4 @@ jobs:
       # surface matches what we validate locally — the action puts `arguments` BEFORE the
       # subcommand, which broke `cargo deny check all` ("unrecognized subcommand 'all'").
       - run: cargo deny check
+      - run: cargo deny --manifest-path vendor/genai-0.6.5/Cargo.toml check

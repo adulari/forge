@@ -34,7 +34,9 @@ permissions:
 
 jobs:
   guard:
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [release, linux, x64]
+    timeout-minutes: 5
+    environment: app-store
     outputs:
       ready: ${{ steps.check.outputs.ready }}
     steps:
@@ -55,11 +57,13 @@ jobs:
   assign:
     needs: guard
     if: needs.guard.outputs.ready == 'true'
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [release, linux, x64]
+    timeout-minutes: 60
+    environment: app-store
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: "20"
 

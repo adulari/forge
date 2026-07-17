@@ -17,10 +17,20 @@ $InstallDir = if ($env:FORGE_INSTALL_DIR) { $env:FORGE_INSTALL_DIR } else { Join
 
 function Die($msg) { Write-Error "install: $msg"; exit 1 }
 
+# GitHub release text assets are served as application/octet-stream. Windows PowerShell 5 returns
+# Invoke-WebRequest.Content as text, while PowerShell 7 can return the same body as Byte[]. Decode
+# both shapes explicitly so checksum verification works in either shell.
+function Get-ResponseText($response) {
+    if ($response.Content -is [byte[]]) {
+        return [Text.Encoding]::UTF8.GetString($response.Content)
+    }
+    return [string]$response.Content
+}
+
 # Only an x86_64 Windows binary is published.
 $arch = $env:PROCESSOR_ARCHITECTURE
 if ($arch -ne 'AMD64') {
-    Die "unsupported Windows arch: $arch (prebuilt binary: x86_64/AMD64). Build from source: cargo install --git https://github.com/$Repo forge-cli"
+    Die "unsupported Windows arch: $arch (prebuilt binary: x86_64/AMD64). Build from source: cargo install --git https://github.com/$Repo forge-agent"
 }
 $target = 'x86_64-pc-windows-msvc'
 
@@ -47,17 +57,21 @@ try {
     try { Invoke-WebRequest -Uri "$base/$asset" -OutFile $zip -Headers $headers }
     catch { Die "download failed: $base/$asset ($($_.Exception.Message))" }
 
-    # Verify against checksums.txt if present (best-effort).
+    # Verify against the release checksum manifest. Never install an unverified archive.
     try {
         $sums = Invoke-WebRequest -Uri "$base/checksums.txt" -Headers $headers -UseBasicParsing
-        $line = ($sums.Content -split "`n" | Where-Object { $_ -match [regex]::Escape($asset) } | Select-Object -First 1)
-        if ($line) {
-            $want = ($line -split '\s+')[0].ToLower()
-            $got  = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
-            if ($want -ne $got) { Die "checksum mismatch for $asset" }
-            Write-Host 'install: checksum ok'
-        }
-    } catch { Write-Host 'install: checksums.txt unavailable, skipping verification' }
+    } catch { Die "could not download checksums.txt for $version ($($_.Exception.Message))" }
+    $checksumText = Get-ResponseText $sums
+    $line = ($checksumText -split "`r?`n" | Where-Object {
+        $parts = $_.Trim() -split '\s+'
+        $parts.Count -eq 2 -and $parts[1].TrimStart('*') -eq $asset
+    } | Select-Object -First 1)
+    if (-not $line) { Die "checksums.txt has no entry for $asset" }
+    $want = ($line.Trim() -split '\s+')[0].ToLower()
+    if ($want -notmatch '^[0-9a-f]{64}$') { Die "checksums.txt has an invalid SHA-256 for $asset" }
+    $got = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
+    if ($want -ne $got) { Die "checksum mismatch for $asset" }
+    Write-Host 'install: checksum ok'
 
     Expand-Archive -Path $zip -DestinationPath $tmp -Force
     $exe = Join-Path $tmp "forge-$target\forge.exe"

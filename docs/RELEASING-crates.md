@@ -10,6 +10,10 @@ true` dependency key still works with zero source changes. The binary crate publ
 cargo install forge-agent      # builds + installs the `forge` binary from crates.io
 ```
 
+On Linux this default install deliberately omits CPAL/ALSA so Forge starts without an audio
+runtime. File/upload transcription remains available. Users who want TUI microphone capture can
+install ALSA development headers and run `cargo install forge-agent --features microphone`.
+
 > **Naming note.** The package/lib split is intentional. Dependency KEYS in
 > `[workspace.dependencies]` stay `forge-X` (with `package = "forge-agent-X"`) so dependents and source
 > imports are untouched; only the published crate names change. The binary crate keeps
@@ -29,21 +33,29 @@ Crates must be published leaf-first: a crate can only be published once every cr
 already on crates.io at the matching version. The valid topological order for this workspace (package
 names):
 
-1. `forge-agent-types`
-2. `forge-agent-skills`
-3. `forge-agent-store`
-4. `forge-agent-config`
-5. `forge-agent-index`
-6. `forge-agent-lsp`
-7. `forge-agent-mesh`
-8. `forge-agent-mcp`
-9. `forge-agent-tui`
-10. `forge-agent-provider`
-11. `forge-agent-tools`
-12. `forge-agent-core`
-13. `forge-agent` (the binary crate, published last)
+Publish the fixed-version dependency fork first when it has not yet been indexed:
 
-(`xtasks` is `publish = false` and is never released.)
+0. `forge-agent-genai` (`0.6.5-forge.1`; published once, not once per Forge release)
+
+Then publish the versioned Forge graph:
+
+1. `forge-agent-types`
+2. `forge-agent-workflow`
+3. `forge-agent-voice`
+4. `forge-agent-skills`
+5. `forge-agent-store`
+6. `forge-agent-config`
+7. `forge-agent-lsp`
+8. `forge-agent-mcp`
+9. `forge-agent-mesh`
+10. `forge-agent-index`
+11. `forge-agent-tui`
+12. `forge-agent-provider`
+13. `forge-agent-tools`
+14. `forge-agent-core`
+15. `forge-agent` (the binary crate, published last)
+
+(`forge-relay` and `xtasks` are `publish = false` and are never released.)
 
 ## Dry run first
 
@@ -56,11 +68,9 @@ cargo publish -p forge-agent        --dry-run
 # ...etc
 ```
 
-`--dry-run` packages the crate and type-checks the packaged copy. **Only the pure leaf
-(`forge-agent-types`) dry-runs cleanly in isolation** — it has no internal deps. Every other crate
-depends on at least `forge-agent-types`, so its dry-run fails with `no matching package named
-forge-agent-...` until those deps are actually published. That failure is expected pre-publish and does
-not indicate a packaging problem; the real publish resolves each dep as it goes live in order.
+`--dry-run` packages the crate and type-checks the packaged copy. Leaf crates can dry-run before the
+rest of the graph is indexed; dependent crates may report a missing matching `forge-agent-*` package
+until their prerequisites are published. Resume in order once each dependency reaches the index.
 
 ## Publish
 
@@ -68,9 +78,12 @@ Run in the order above, waiting for each to be live (crates.io indexes within se
 next:
 
 ```bash
-for crate in forge-agent-types forge-agent-skills forge-agent-store forge-agent-config forge-agent-index \
-             forge-agent-lsp forge-agent-mesh forge-agent-mcp forge-agent-tui forge-agent-provider \
-             forge-agent-tools forge-agent-core forge-agent; do
+cargo info --registry crates-io forge-agent-genai@0.6.5-forge.1 >/dev/null 2>&1 || \
+  cargo publish --locked --manifest-path vendor/genai-0.6.5/Cargo.toml
+
+for crate in forge-agent-types forge-agent-workflow forge-agent-voice forge-agent-skills forge-agent-store \
+             forge-agent-config forge-agent-lsp forge-agent-mcp forge-agent-mesh forge-agent-index \
+             forge-agent-tui forge-agent-provider forge-agent-tools forge-agent-core forge-agent; do
   cargo publish -p "$crate" --locked
   # give the index a moment so the next crate can resolve this one
   sleep 20
@@ -83,5 +96,6 @@ be re-published at the same version (bump the patch and retry the whole set if n
 ## After publishing
 
 - `cargo install forge-agent` should now work on a clean machine (installs the `forge` binary).
-- Tag + GitHub release (handled by `.github/workflows/release.yml`) provide the prebuilt binaries,
-  Homebrew formula, AUR, and Scoop paths for users who don't build from source.
+- The already-created tag + GitHub release (handled by `.github/workflows/release.yml`) provide the
+  prebuilt binaries plus repository-backed Homebrew and Scoop manifests. AUR publication remains a
+  separate push to the AUR Git repository after the maintainer key is configured.

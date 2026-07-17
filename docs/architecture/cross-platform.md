@@ -5,15 +5,18 @@
 > with no tests is incomplete. This is a hard requirement, not an aspiration.
 
 Forge is a developer tool; its users are split across all three platforms, and the whole
-value proposition (one harness, BYOK, local-first) collapses if it's Linux-only. Treat the
-three OSes like three required CI checks — because they are (`test (ubuntu-latest)`,
-`test (macos-latest)`, `test (windows-latest)` all gate every PR).
+value proposition (one harness, BYOK, local-first) collapses if it's Linux-only. Every PR runs the
+full Rust suite on the self-hosted Arch pool. A separate scheduled/manual E2E builds Forge and runs
+a real model turn plus `forge doctor` on Arch, `windows-latest`, and `macos-latest`; the release
+matrix also builds every published OS/architecture target. Cross-platform behavior therefore has a
+real gate without spending hosted macOS/Windows capacity on every topic-branch commit.
 
 ## What this means in practice
 
 When you add or change a feature, it is not done until:
 
-- It **compiles** on all three targets (CI builds + tests on each).
+- It **compiles** on all three targets (the release matrix) and relevant behavior is exercised by
+  the cross-platform E2E before release.
 - It **behaves correctly** on all three — not just "doesn't crash". Paths, config locations,
   process spawning, terminal handling, and credential storage all differ per OS.
 - Any genuinely OS-specific behaviour is **explicit** (`#[cfg(...)]` or a per-OS branch), with
@@ -41,14 +44,13 @@ When you add or change a feature, it is not done until:
 7. **Line endings & encoding:** don't assume `\n`-only or a specific filesystem encoding when
    parsing tool output or files.
 
-## Watch-list — known non-portable spots
+## Guarded platform seams
 
-These are tracked so they aren't forgotten; see `docs/known-issues.md` for status.
-
-| Area | Issue | Plan |
-|------|-------|------|
-| Shell tool (`forge-tools::shell`) + permission shell-parsing | Runs `sh -c` and assumes POSIX command syntax. Windows has no `sh` by default. | Branch to `cmd /C` / PowerShell on Windows, or document the `sh` requirement; harden the deny-list parser per-OS. |
-| CLI bridges (`claude-cli` / `codex-cli`) | Availability detection assumes a PATH lookup that should hold on all three, but is primarily exercised on Unix. | Verify bridge spawn on Windows. |
+| Area | Current implementation | Regression gate |
+|------|------------------------|-----------------|
+| Shell tool (`forge-tools::shell`) | `sh -c` on Unix, `cmd /C` on Windows; timeouts kill the Unix process group or Windows tree (`taskkill /T`) | Unit tests plus the three-OS real-turn workflow |
+| CLI bridges (`claude-cli` / `codex-cli`) | Windows PATH lookup tries `.exe`/`.cmd`/`.bat`; npm shims launch through quoted `cmd /S /C` | Windows-specific resolver/quoting tests plus the three-OS E2E |
+| Linux release ABI | x86-64 and ARM64 build inside a digest-pinned Debian Bullseye container, not against rolling Arch libraries | glibc 2.31, GLIBCXX 3.4.28, and no-ALSA dependency gate plus distro Docker battery |
 
 The **MCP client** (this subsystem) is portable by construction: source discovery uses
 `directories::BaseDirs` (per-OS config/home dirs), tokens go to the keyring's native backend,
@@ -62,4 +64,5 @@ paths or Unix-only calls.
 - [ ] Any shell/process invocation is portable or per-OS branched.
 - [ ] Terminal interaction via crossterm/ratatui.
 - [ ] `#[cfg]`-gate anything genuinely OS-specific; handle every platform.
-- [ ] CI is green on ubuntu **and** macos **and** windows.
+- [ ] The Arch PR gates are green; run the manual three-OS E2E before release when the change
+      touches paths, process launching, terminal behavior, keyrings, bridges, or OS integration.

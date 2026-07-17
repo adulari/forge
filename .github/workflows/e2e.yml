@@ -1,20 +1,23 @@
 name: e2e
 
 # Real-turn cross-platform E2E. Runs the headless `forge run` against a real provider on
-# Windows + Ubuntu + macOS so cross-platform behaviour (bridge launch, PATH, clipboard, keyring,
+# Windows + Arch Linux + macOS so cross-platform behaviour (bridge launch, PATH, clipboard, keyring,
 # routing) is exercised on a REAL Windows box — which we can't run locally without a VM. Also runs
 # the probing `forge doctor` on each OS and uploads its output, so a maintainer with no Windows
 # machine can diagnose breakage from the logs.
 #
-# Manual (Actions tab → e2e → Run workflow), or weekly. Set:
-#   - Repo VARIABLE  E2E_MODEL   e.g. groq::llama-3.1-8b-instant   (the model to pin for the turn)
-#   - Repo SECRET    matching the provider, any of: GROQ_API_KEY / OPEN_ROUTER_API_KEY / GEMINI_API_KEY
-# A cheap free-tier key (groq/openrouter) is plenty — the turn is one tiny prompt.
+# Manual (Actions tab → e2e → Run workflow), or weekly. The default uses GitHub Models with the
+# workflow's short-lived GITHUB_TOKEN (`models: read` only), so no long-lived provider secret is
+# required. E2E_MODEL and a matching provider secret can still override it when needed.
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC — catch cross-platform drift weekly
+
+permissions:
+  contents: read
+  models: read
 
 jobs:
   realturn:
@@ -23,62 +26,68 @@ jobs:
       fail-fast: false
       matrix:
         # `label` stays a plain string for the artifact/log names below; `runner` is what
-        # actually goes to runs-on and differs for the ubuntu leg (self-hosted array vs
+        # actually goes to runs-on and differs for the Arch leg (self-hosted array vs
         # hosted string) — macOS/Windows stay on their GitHub-hosted runners.
         include:
-          - label: ubuntu-latest
-            runner: [self-hosted, linux, x64]
+          - label: archlinux
+            runner: [release, linux, x64]
           - label: windows-latest
             runner: windows-latest
           - label: macos-latest
             runner: macos-latest
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash # bash is present on the Windows runner too — one script for all OSes
     env:
-      E2E_MODEL: ${{ vars.E2E_MODEL || 'groq::llama-3.1-8b-instant' }}
-      # Provider keys (all optional — set the one matching E2E_MODEL). Forge reads these from env.
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-      OPEN_ROUTER_API_KEY: ${{ secrets.OPEN_ROUTER_API_KEY }}
-      OPENROUTER_API_KEY: ${{ secrets.OPEN_ROUTER_API_KEY }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # GitHub Models has enough context/throughput for Forge's real system prompt. The former Groq
+      # 8B default rejected the turn before inference because its TPM limit was too small.
+      E2E_MODEL: ${{ vars.E2E_MODEL || 'github_copilot::openai/gpt-4.1-mini' }}
+      # GitHub Models authentication uses only this run's short-lived, read-only workflow token.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       # Ephemeral GitHub-hosted legs have no warm target/ dir, so the cache earns its keep.
-      # The self-hosted ubuntu leg skips it: target/ already persists on that box's local disk
+      # The self-hosted Arch leg skips it: target/ already persists on that box's local disk
       # between runs, so a network cache round-trip would be pure overhead on top of that.
-      - if: matrix.label != 'ubuntu-latest'
-        uses: Swatinem/rust-cache@v2
+      - if: matrix.label != 'archlinux'
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
 
       - name: Build forge
-        run: cargo build --release --bin forge
+        run: cargo build --release --locked --bin forge
 
       - name: doctor (diagnostics — never fails the job)
         continue-on-error: true
-        run: cargo run --release -q --bin forge -- doctor 2>&1 | tee doctor-${{ matrix.label }}.txt
+        run: cargo run --release --locked -q --bin forge -- doctor 2>&1 | tee doctor-${{ matrix.label }}.txt
 
       - name: real turn
         run: |
           set -o pipefail
           echo "model: $E2E_MODEL"
-          cargo run --release -q --bin forge -- run \
+          cargo run --release --locked -q --bin forge -- run \
             "Reply with exactly the single word: PONG" --model "$E2E_MODEL" \
             2>&1 | tee turn-${{ matrix.label }}.txt
           # Fail on the cross-platform failure signatures we care about.
-          if grep -qiE "panic|Resolver error|No usable model|provider auth failed|RUST_BACKTRACE" turn-${{ matrix.label }}.txt; then
+          if grep -qiE "panic|Resolver error|No usable model|provider auth failed|RUST_BACKTRACE|UNIQUE constraint failed: lattice_node.id" turn-${{ matrix.label }}.txt; then
             echo "::error::real turn produced an error marker on ${{ matrix.label }}"
             exit 1
           fi
-          if [ -z "$(tr -d '[:space:]' < turn-${{ matrix.label }}.txt)" ]; then
-            echo "::error::real turn produced no output on ${{ matrix.label }}"
+          # Strip terminal colour/progress control sequences, then require the exact requested
+          # answer on its own line. A merely non-empty log is not a successful model turn.
+          perl -pe 's/\e\[[0-9;?]*[ -\/]*[@-~]//g; s/\r/\n/g' \
+            turn-${{ matrix.label }}.txt > turn-plain-${{ matrix.label }}.txt
+          # Forge's in-place progress spinner may share the final rendered line with the answer.
+          # Accept only a bare PONG or that exact answer immediately after the known spinner.
+          if ! grep -Eq '^(PONG|.*working…[[:space:]]*[0-9]+sPONG)$' turn-plain-${{ matrix.label }}.txt; then
+            echo "::error::real turn did not return exact PONG on ${{ matrix.label }}"
             exit 1
           fi
 
       - name: upload logs
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: e2e-${{ matrix.label }}
           path: |

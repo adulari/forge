@@ -1,13 +1,11 @@
 name: mobile-typecheck
 
-# Type-checks the unified app (mobile/) on every PR that touches it. The Rust `CI`
-# workflow never compiles the TypeScript, so without this a mobile type error ships
-# entirely unverified (which it did — see the useQueries import fix). Fast + no secrets.
+# Type-checks the unified app on every PR. Keeping these job names present on every change lets
+# branch protection require them without path-filtered PRs waiting forever for a missing check.
+# The Rust `CI` workflow never compiles TypeScript; this gate is fast and uses no secrets.
 on:
   pull_request:
-    paths:
-      - "mobile/**"
-      - "protocol/**"
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -25,9 +23,9 @@ jobs:
       run:
         working-directory: mobile
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: "20"
           cache: npm
@@ -39,14 +37,14 @@ jobs:
       - name: Check app
         run: npm run check
       - name: Export web app
-        run: npx expo export -p web
+        run: npx --no-install expo export -p web
 
   tauri:
     name: Tauri tests, clippy, and audit
     runs-on: [self-hosted, linux, x64]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: clippy
       - name: Ensure cargo-audit is installed

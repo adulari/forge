@@ -17,16 +17,25 @@ curl -fsSL https://raw.githubusercontent.com/Adulari/forge/main/install.sh | sh
 irm https://raw.githubusercontent.com/Adulari/forge/main/install.ps1 | iex
 ```
 
+**Scoop:**
+```powershell
+scoop bucket add forge https://github.com/Adulari/forge
+scoop install forge/forge
+```
+
 **Homebrew:**
 ```bash
 brew tap Adulari/forge https://github.com/Adulari/forge
-brew install forge
+brew install Adulari/forge/forge
 ```
 
 **Cargo:**
 ```bash
 cargo install forge-agent
 ```
+
+The matching crates.io package is published after the GitHub release tag. Until crates.io shows the
+same version as the Releases page, use the macOS/Linux or Windows installer above.
 
 After install, verify it works:
 ```bash
@@ -54,7 +63,7 @@ Forge works with many providers. The easiest way to get started for free:
 Run Forge on top of your existing subscription — no new key needed:
 ```bash
 forge run --model claude-cli::sonnet "hello"   # uses your Claude subscription
-forge run --model codex-cli::o4-mini "hello"   # uses your Codex subscription
+forge run --model codex-cli::gpt-5.4-mini "hello"   # uses your Codex subscription
 ```
 
 ### Option C: Run fully offline (no key, no internet)
@@ -147,6 +156,7 @@ Once you're comfortable with the basics:
 | Race models on a task, keep the winner | `/duel <task>` in chat |
 | See which model wrote a line | `forge blame <file> --line <n>` |
 | Schedule a recurring headless run | `forge schedule add "<task>" --every 30m` |
+| Control sessions from desktop/mobile/web | `forge serve --anywhere`, then open or scan its URL |
 | Import your Claude Code skills | `forge import claude` |
 | Connect MCP servers | `forge mcp add ...` or `forge mcp import` |
 | Move Forge to another machine | `forge migrate export ./bundle.tar.gz` |
@@ -174,7 +184,9 @@ Run `forge doctor` — it checks your config, keys, providers, and Ollama in one
 Forge handles this automatically (waits out the reset and retries the best model). If it keeps happening, add a second free provider: `forge auth nvidia` or `forge auth gemini`.
 
 **Permission prompts blocking everything**
-In chat, answer `a` (always) to a prompt to silence it for the session, or run with `--mode accept-edits` to auto-approve file writes.
+In chat, answer `a` (always) to allow that tool immediately and persist a project allow rule in
+`.forge/config.toml` for future turns and sessions, or run with `--mode accept-edits` to
+auto-approve file writes while continuing to ask before shell commands.
 
 ---
 

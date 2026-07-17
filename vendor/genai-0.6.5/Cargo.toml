@@ -11,15 +11,16 @@
 
 [package]
 edition = "2024"
-name = "genai"
-version = "0.6.5"
+rust-version = "1.88"
+name = "forge-agent-genai"
+version = "0.6.5-forge.1"
 build = false
 autolib = false
 autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Multi-AI Providers Library for Rust. (OpenAI, Gemini, Anthropic, Ollama, AWS Bedrock, Vertex, Groq, DeepSeek, GitHub Copilot and many more)"
+description = "Forge-maintained genai fork with lossless parallel tool-call streaming"
 homepage = "https://github.com/jeremychone/rust-genai"
 readme = "README.md"
 keywords = [
@@ -30,7 +31,8 @@ keywords = [
     "ollama",
 ]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/jeremychone/rust-genai"
+repository = "https://github.com/Adulari/forge"
+publish = ["crates-io"]
 
 [features]
 bedrock-sigv4 = [

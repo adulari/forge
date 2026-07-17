@@ -97,7 +97,7 @@ Approximate user count at launch: 1 (author) → early OSS adopters. External, o
 |-----------|----------------------|----------------|
 | Performance (startup) | CLI process start < 100 ms; TUI first paint < 150 ms | Core differentiator vs Node/Electron tools; matters for shell integration |
 | Performance (streaming) | Render model tokens to TUI with < 50 ms added latency | Responsive feel during generation |
-| Resource footprint | Idle RSS in low tens of MB; single static binary | "No runtime bloat" promise |
+| Resource footprint | Idle RSS in low tens of MB; single native binary with no language runtime | "No runtime bloat" promise |
 | Portability | One codebase builds + passes tests on Linux, macOS, Windows | Stated platform requirement |
 | Security | No plaintext secrets; tool side-effects gated by permission policy; analytics schema cannot accept user content or stable identifiers | Handles user code, shell access, and API keys |
 | Privacy | Local-first user data; default-on anonymous product counters are disclosed and instantly opt-out | Trust; code is sensitive |
@@ -124,8 +124,9 @@ Approximate user count at launch: 1 (author) → early OSS adopters. External, o
   **AGPL-3.0-only** (commit `ec20d43`, PR #408); see the root `Cargo.toml` `license` field, the
   `LICENSE` file, and README.md. No ADR records the decision. Avoid hard lock-in to any single
   provider's SDK or proprietary format.
-- **Language/runtime:** Rust (stable toolchain), async runtime. Single static binary
-  delivery; no required external runtime (Node/JVM/Python) for core features.
+- **Language/runtime:** Rust (stable toolchain), async runtime. Single native binary delivery; no
+  required external language runtime (Node/JVM/Python) for core features. Platform C/system
+  libraries remain normal dynamic dependencies; Linux release builds pin their ABI floor.
 
 ## 7. Assumptions to confirm
 

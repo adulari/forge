@@ -9,6 +9,7 @@ _*
 !**/spec/**/_*
 
 *.lock
+!Cargo.lock
 *.lockb
 *.log
 

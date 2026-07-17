@@ -14,6 +14,10 @@ pub(crate) struct RelayConfig {
     pub(crate) key_pem: String,
     pub(crate) allowed_topics: Vec<String>,
     pub(crate) relay_token: Option<String>,
+    /// Replace every alert body with Forge's static privacy-preserving notification before it is
+    /// forwarded to Apple. The public deployment enables this; private relays leave it disabled
+    /// to retain rich alerts.
+    pub(crate) generic_alerts: bool,
     pub(crate) bind_addr: IpAddr,
     /// Trust proxy-provided client-IP headers. This is deliberately off by default: enabling it
     /// is safe only when the relay is private-bound behind a proxy that overwrites them.
@@ -65,18 +69,8 @@ impl RelayConfig {
             .unwrap_or_else(|_| "127.0.0.1".to_string())
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid FORGE_RELAY_BIND_ADDR: {e}"))?;
-        let trust_proxy_headers = match std::env::var("FORGE_RELAY_TRUST_PROXY_HEADERS") {
-            Err(_) => false,
-            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" => true,
-                "0" | "false" | "no" => false,
-                _ => {
-                    return Err(anyhow::anyhow!(
-                        "FORGE_RELAY_TRUST_PROXY_HEADERS must be true/false"
-                    ));
-                }
-            },
-        };
+        let generic_alerts = env_bool("FORGE_RELAY_GENERIC_ALERTS", false)?;
+        let trust_proxy_headers = env_bool("FORGE_RELAY_TRUST_PROXY_HEADERS", false)?;
         let port = std::env::var("PORT")
             .ok()
             .and_then(|p| p.parse().ok())
@@ -100,6 +94,7 @@ impl RelayConfig {
             key_pem,
             allowed_topics,
             relay_token,
+            generic_alerts,
             bind_addr,
             trust_proxy_headers,
             port,
@@ -107,5 +102,39 @@ impl RelayConfig {
             rate_window_secs,
             daily_send_cap,
         })
+    }
+}
+
+fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
+    match std::env::var(name) {
+        Err(_) => Ok(default),
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => Ok(true),
+            "0" | "false" | "no" => Ok(false),
+            _ => Err(anyhow::anyhow!("{name} must be true/false")),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boolean_config_parser_is_strict_and_case_insensitive() {
+        let name = "FORGE_RELAY_TEST_BOOLEAN";
+        for value in ["1", "true", "TRUE", " yes "] {
+            std::env::set_var(name, value);
+            assert!(env_bool(name, false).unwrap());
+        }
+        for value in ["0", "false", "FALSE", " no "] {
+            std::env::set_var(name, value);
+            assert!(!env_bool(name, true).unwrap());
+        }
+        std::env::set_var(name, "maybe");
+        assert!(env_bool(name, false).is_err());
+        std::env::remove_var(name);
+        assert!(!env_bool(name, false).unwrap());
+        assert!(env_bool(name, true).unwrap());
     }
 }

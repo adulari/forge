@@ -24,5 +24,6 @@ Run the workflow with `production` and enable `submit_to_play`. EAS builds a sig
 auto-incremented version code, then submits that exact build to the Play internal track. A missing
 credential or a non-production profile fails loudly before submission.
 
-Tags matching `android-v*` build the production AAB and attach it to the matching GitHub Release;
-tag builds do not automatically submit to Play.
+To attach a production AAB to GitHub, create an `android-v*` tag on `main`, then dispatch the
+workflow from protected `main` with that existing tag and the `production` profile. Tagged artifact
+publication does not automatically submit to Play.

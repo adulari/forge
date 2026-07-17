@@ -1,13 +1,15 @@
 # Contributing to Forge
 
 Thanks for your interest in Forge — a fast, model-agnostic AI coding harness and CLI written in
-Rust. Forge is past 1.0 and shipping toward 2.0; this document covers the workflow, the repo
-layout, and the quality bar for contributions.
+Rust. Forge is a post-2.0 project with actively shipped CLI, TUI, desktop, mobile, and web surfaces;
+this document covers the workflow, the repo layout, and the quality bar for contributions.
 
 ## Prerequisites
 
-- **Rust** matching `rust-toolchain.toml` (currently the stable channel; MSRV `1.85`).
+- **Rust** matching `rust-toolchain.toml` (currently the stable channel; MSRV `1.88`).
 - A C toolchain (for bundled native deps like `rusqlite` and the tree-sitter grammars).
+- On Linux, `pkg-config` plus ALSA development headers are needed only for microphone-enabled or
+  `--all-features` builds. The default CLI/TUI build deliberately has no ALSA runtime dependency.
 - Git. No API keys are needed to build or run the test suite.
 
 ## Repository layout
@@ -30,6 +32,7 @@ Forge is a Cargo workspace under `crates/`:
 | `forge-core` | Session orchestrator: the agent loop + permission broker |
 | `forge-cli` | The `forge` binary (composition root + subcommands) |
 | `xtasks` | Dev tasks (benchmarks, `gen-dist` for completions/man page); not published |
+| `vendor/genai-0.6.5` | Independently publishable `forge-agent-genai` fork; excluded from the root workspace and checked with its own lockfile |
 
 Architecture decisions live in `docs/architecture/` (ADRs under `decisions/`); designs and RFCs in
 `docs/rfcs/` and `docs/features/`. Forge is design-first — substantial changes get an ADR or RFC.
@@ -49,20 +52,36 @@ Architecture decisions live in `docs/architecture/` (ADRs under `decisions/`); d
 
 - `main` — always releasable, branch-protected. Squash-merge only, linear history.
 - topic branches — short-lived, one logical change each, deleted after merge.
-- release tags — `vMAJOR.MINOR.PATCH` ([SemVer](https://semver.org/)) cut from `main`. Tagging
-  triggers `.github/workflows/release.yml`, which builds binaries for Linux (x86_64 + aarch64),
-  macOS (Apple Silicon + Intel), and Windows, and updates the Homebrew formula.
+- release tags — `vMAJOR.MINOR.PATCH` ([SemVer](https://semver.org/)) cut from `main`. A maintainer
+  dispatches `.github/workflows/release.yml` from protected `main` with that existing tag; it builds Linux (x86_64 + aarch64),
+  macOS (Apple Silicon + Intel), and Windows, then opens one checksummed manifest PR for Homebrew,
+  AUR metadata, and Scoop (`Formula/forge.rb`, `packaging/aur/PKGBUILD`, and `bucket/forge.json`). It
+  dispatches the five-target desktop and static-web release workflows against the exact tag. Matching `forge-agent*` crates are
+  then published in dependency order using [`docs/RELEASING-crates.md`](docs/RELEASING-crates.md).
 - Public-surface stability rules are in [`docs/STABILITY.md`](docs/STABILITY.md).
 
 ## Local checks (run before every push)
 
-These mirror CI (`.github/workflows/ci.yml`) exactly:
+These are the root-workspace checks run by CI:
 
 ```bash
 cargo fmt --all -- --check                                 # formatting
 cargo clippy --locked --all-targets --all-features         # lints (CI runs with -D warnings)
-cargo test --all --all-features                            # tests (no API keys required)
+cargo test --locked --all --all-features                   # tests (no API keys required)
 cargo build --release --locked --bin forge                 # release-profile smoke
+scripts/check-linux-runtime-deps.sh target/release/forge    # Linux: glibc/libstdc++ ceiling + no ALSA
+```
+
+The publishable `genai` fork is intentionally outside the root workspace, and the shared Expo/Tauri
+app has independent gates. Run them when preparing a release (and whenever that surface changes):
+
+```bash
+cargo fmt --manifest-path vendor/genai-0.6.5/Cargo.toml -- --check
+cargo clippy --locked --manifest-path vendor/genai-0.6.5/Cargo.toml --all-targets -- -D warnings
+cargo test --locked --manifest-path vendor/genai-0.6.5/Cargo.toml
+(cd mobile && npm ci && npm run check && npx --no-install expo export -p web)
+cargo test --locked --manifest-path mobile/src-tauri/Cargo.toml
+cargo clippy --locked --manifest-path mobile/src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
 CI additionally runs supply-chain checks (`.github/workflows/security.yml`): `cargo audit`
@@ -70,10 +89,19 @@ CI additionally runs supply-chain checks (`.github/workflows/security.yml`): `ca
 To run them locally:
 
 ```bash
-cargo install cargo-audit cargo-deny
-cargo audit
+cargo install --locked cargo-audit --version 0.22.2
+cargo install --locked cargo-deny --version 0.20.2
+cargo audit --deny warnings \
+  --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2024-0320 --ignore RUSTSEC-2025-0141
 cargo deny check
+cargo audit --file vendor/genai-0.6.5/Cargo.lock --deny warnings --ignore RUSTSEC-2024-0436
+cargo deny --manifest-path vendor/genai-0.6.5/Cargo.toml check
+cargo audit --file mobile/src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429
 ```
+
+Rust CodeQL, the mobile web export, Tauri checks, security checks, and the vendored fork all run on
+every PR so branch protection can require stable check names even when a change is outside their
+directory.
 
 ## Code standards
 

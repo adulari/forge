@@ -51,10 +51,28 @@ runs:
           echo "::error::forge-assay only ships an x86_64 Linux binary; runner is $(uname -m)"; exit 1
         fi
         asset="forge-x86_64-unknown-linux-gnu.tar.gz"
-        url="https://github.com/Adulari/forge/releases/download/${FORGE_VERSION}/${asset}"
-        curl -fsSL "$url" -o /tmp/forge.tar.gz
-        tar xzf /tmp/forge.tar.gz -C /tmp
-        sudo install -m0755 /tmp/forge-x86_64-unknown-linux-gnu/forge /usr/local/bin/forge
+        base_url="https://github.com/Adulari/forge/releases/download/${FORGE_VERSION}"
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "$tmp"' EXIT
+        curl -fsSL "$base_url/$asset" -o "$tmp/$asset"
+        curl -fsSL "$base_url/checksums.txt" -o "$tmp/checksums.txt"
+        [ -s "$tmp/checksums.txt" ] || {
+          echo "::error::checksums.txt for $FORGE_VERSION is empty"; exit 1;
+        }
+        expected="$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1; exit }' "$tmp/checksums.txt")"
+        case "$expected" in
+          ''|*[!0-9a-fA-F]*)
+            echo "::error::checksums.txt has no valid SHA-256 for $asset"; exit 1 ;;
+        esac
+        [ "${#expected}" -eq 64 ] || {
+          echo "::error::checksums.txt has an invalid SHA-256 for $asset"; exit 1;
+        }
+        actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
+        [ "${actual,,}" = "${expected,,}" ] || {
+          echo "::error::SHA-256 mismatch for $asset"; exit 1;
+        }
+        tar xzf "$tmp/$asset" -C "$tmp"
+        sudo install -m0755 "$tmp/forge-x86_64-unknown-linux-gnu/forge" /usr/local/bin/forge
         forge --version
 
     - name: Run Assay
@@ -84,14 +102,14 @@ runs:
 
     - name: Upload SARIF
       if: inputs.sarif == 'true'
-      uses: github/codeql-action/upload-sarif@v3
+      uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a
       with:
         sarif_file: /tmp/assay.sarif
       continue-on-error: true
 
     - name: Sticky PR comment
       if: inputs.comment == 'true' && github.event_name == 'pull_request'
-      uses: actions/github-script@v7
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
       with:
         script: |
           const body = `<!-- forge-assay -->\n## 🛡️ Forge Assay\n\n` + process.env.REPORT;

@@ -68,13 +68,13 @@ correction above).
 
 **Reproduce (deterministic, no network):**
 ```bash
-cargo test -p forge-provider resume_sends_dramatically_fewer_prompt_bytes_over_a_turn -- --nocapture
+cargo test -p forge-agent-provider resume_sends_dramatically_fewer_prompt_bytes_over_a_turn -- --nocapture
 ```
 
 **Correctness, live-verified** (real CLIs, both bridges) — resume preserves context end-to-end:
 ```bash
-cargo test -p forge-provider e2e_claude_resume_preserves_context_across_calls -- --ignored
-cargo test -p forge-provider e2e_codex_resume_preserves_context_across_calls  -- --ignored
+cargo test -p forge-agent-provider e2e_claude_resume_preserves_context_across_calls -- --ignored
+cargo test -p forge-agent-provider e2e_codex_resume_preserves_context_across_calls  -- --ignored
 ```
 Each drives two real turns; the *resumed* turn recalls a fact from turn 1 while only the delta was
 sent. (Claude `--resume <id>`, Codex `exec resume <id>`.) This is a real, working feature — it just
@@ -103,7 +103,7 @@ bug (the direct-path verification gate silently failing, fixed in v0.4.6).
 | Tool-call-as-text (**bridge**) | a bridge model that writes a tool call as prose → recovered + executed (no 553× spiral), and NOT double-executed if the CLI already ran it natively | `recovers_prose_tool_call_the_bridge_did_not_execute`, `prose_recovery_skipped_when_cli_ran_a_native_tool` |
 | Untrusted-input fuzz / no panics | adversarial model output (incl. malformed `<parameter>` tags), bridge stdout, prompt-cap never panic + hold their contracts | `recovery_never_panics_*`, `malformed_parameter_tag_does_not_panic`, `bridge_line_parsers_never_panic_*`, `clamp_to_chars_never_*` |
 
-**Reproduce:** `cargo test -p forge-core -p forge-provider` (all run in CI on every PR).
+**Reproduce:** `cargo test -p forge-agent-core -p forge-agent-provider` (all run in CI on every PR).
 
 **Why this is the differentiator.** Each row is a failure mode a real coding model produces on a real
 task (we hit the 553× prose-spiral and the malformed-`<parameter>` panic in actual SWE-bench runs).

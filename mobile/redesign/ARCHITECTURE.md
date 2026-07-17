@@ -1,13 +1,14 @@
-# Forge App — ARCHITECTURE (redesign, single source of truth)
+# Forge App — ARCHITECTURE (implemented redesign record)
 
 One TypeScript/React codebase, six targets: **iOS, Android (native RN), Web (react-native-web),
 Windows/macOS/Linux (Tauri v2 wrapping the web build)**. Mobile is the priority target; web is
-first-class; desktop is a thin shell. This document is binding — workers do not re-litigate
-choices made here. Companion docs: DESIGN_SYSTEM.md (visual/motion spec), FEATURES.md
-(capability → screen map), BUILD_ORDER.md (task batches).
+first-class; desktop is a thin shell. This was the binding redesign plan; the current code and
+[`../README.md`](../README.md) are authoritative for shipped status. Companion docs:
+DESIGN_SYSTEM.md (visual/motion spec), FEATURES.md (capability → screen map), BUILD_ORDER.md
+(completed task batches).
 
-Verified against the daemon source on 2026-07-06: `crates/forge-cli/src/serve.rs` (routes) and
-`crates/forge-cli/src/remote.rs` (`PROTOCOL_VERSION = 7`, `Snapshot`, `RemoteInput`). The app
+Verified against the daemon source and refreshed on 2026-07-17: `crates/forge-cli/src/serve.rs`
+(routes) and `crates/forge-cli/src/remote.rs` (`PROTOCOL_VERSION = 8`, `Snapshot`, `RemoteInput`). The app
 consumes ONLY this real API. No mocks, ever.
 
 ---
@@ -86,7 +87,7 @@ anything else platform-forked in a PR is a defect. Mechanisms: Metro extensions
 |---|---|---|
 | Credential storage | `lib/secureStore.ts` (expo-secure-store) / `.web.ts` (localStorage) | Keychain vs browser storage. |
 | Transport override | `lib/transport/index.ts` + runtime Tauri branch | Mixed-content: see §6.3. |
-| Web push | `lib/push/push.web.ts` / `push.ts` (native no-op returning `unsupported`) | Web Push is browser-only; APNs is a flagged backend gap (FEATURES.md §3). |
+| Push | `lib/push/push.web.ts` for Web Push; `push.ios.ts` + daemon APNs routes for native iOS | Web Push is browser-only; native iOS uses APNs and Live Activities. |
 | QR pairing | `components/pairing/QRScan.native.tsx` / `.web.tsx` (paste-only + "scan on your phone" hint) | expo-camera scanning is native; web pairing is paste/link. |
 | Haptics | `lib/haptics.ts` (Platform-gated no-op on web) | No web API. |
 | Voice input | `lib/voice/voice.ts` (native: expo-audio m4a/aac) / `.web.ts` (web + Tauri desktop: getUserMedia + WebAudio, client-side 16kHz WAV encode) — both POST to the daemon's local-whisper `/api/voice/transcribe` | Recording API differs per platform; server-side whisper (not Web Speech API) needs a real audio file upload from both. |
@@ -135,10 +136,10 @@ snapshot they rendered from; stale answers are ignored server-side / 409 on HTTP
 re-render from the next snapshot; disable the card's buttons after first tap until a new
 snapshot arrives.
 
-TLS reality (document in-app on pairing errors, unchanged from BUILD_PLAN §5): default `--lan`
-uses a self-signed cert that native fetch/WS, browsers, and Tauri's WebView all reject. Supported
-paths: `--anywhere` (tunnel, real TLS) or `--local` + Tailscale/VPN. Surface this exact guidance
-in the pairing error state.
+TLS reality (document in-app on pairing errors): default `--lan` uses a self-signed cert that native
+fetch/WS, browsers, and Tauri's WebView do not trust automatically. Use `--anywhere` for another
+device. Same-machine desktop/web clients can use loopback-only plain HTTP via `--local`; a remote
+VPN client needs an explicitly configured trusted HTTPS reverse proxy such as Tailscale Serve.
 
 ---
 
@@ -164,8 +165,8 @@ Required changes while porting (the only ones):
    servers is cache-safe by construction.
 2. **Transport seam**: `api.ts`'s `fetch` and `ws.ts`'s `new WebSocket` go through
    `lib/transport` (§6.3). Default export IS the globals — zero behavior change outside Tauri.
-3. **Protocol guard**: surface `snapshot.protocol !== 7` as a persistent banner (the web page
-   does this; the current Expo app does not — parity gap).
+3. **Protocol guard**: surface `snapshot.protocol !== 8` as a persistent banner on every app
+   target, matching the daemon page.
 4. **Chat timeline dedupe** (bug fix, FEATURES.md §2): the live `transcript` tail and the newest
    `history` page can render the same content twice. New rule: the timeline's source of truth is
    `useHistory` rows; the snapshot contributes ONLY (a) the `streaming` edge while busy and
@@ -225,22 +226,22 @@ Required changes while porting (the only ones):
 `beforeBuildCommand = "npx expo export -p web"`. Window: 1180×800 default, min 380×640,
 `titleBarStyle: "Overlay"` on macOS, background matching `tokens.bg1` per theme. One window.
 
-v1 scope (deliberately thin): window + app icons + native notifications
-(`tauri-plugin-notification`, triggered from the same code path that calls web Notification —
-feature-detected) + `tauri-plugin-opener` for external links + basic app menu (About, Quit,
-Reload, standard Edit menu so copy/paste works on macOS). NO custom Rust commands in v1.
+The shipped shell includes window/icons, native notifications, external-link opening, native folder
+selection, signed updater support, HTTP/WebSocket transport plugins, and a basic macOS app/Edit
+menu. Three narrow Rust commands detect a live local daemon, locate the Forge binary, and start
+`forge serve --local`; the webview has no general filesystem or shell capability.
 
 ### 6.2 Runtime detection
 
 `isTauri` = `"__TAURI_INTERNALS__" in window` (checked once in `lib/platform.ts`). The desktop
 app is the WEB build — `Platform.OS === "web"` everywhere; Tauri-only behavior branches on
-`isTauri` at runtime, and there are exactly three such branches: transport (§6.3),
-notifications, external-link opening.
+`isTauri` at runtime for transport, notifications, external-link opening, folder selection,
+updating, and local-daemon discovery/startup.
 
 ### 6.3 Transport escape hatch (the one real problem)
 
 On macOS/Linux the Tauri page origin is a custom scheme treated as a secure context, so calls to
-a plain-`http://` daemon (`--local` + VPN — a primary desktop use case) can be blocked as mixed
+a same-machine plain-`http://` daemon (`--local`) can be blocked as mixed
 content by the WebView. Fix: `tauri-plugin-http` (requests execute in Rust, immune to WebView
 mixed-content policy) behind the `lib/transport` seam:
 
@@ -256,12 +257,11 @@ export const TWebSocket: typeof WebSocket // default: globalThis.WebSocket
 api.ts/ws.ts import from `lib/transport` and know nothing else. This is the entire Tauri-specific
 data-path surface.
 
-### 6.4 Forward path (documented, NOT built now)
+### 6.4 Local daemon bridge and forward path
 
-Later the shell can bridge a local daemon: a Rust command that discovers/starts `forge serve`,
-reads `<config-dir>/serve-token`, and hands the app a ready-made baseUrl (zero-setup pairing on
-desktop). The `transport`/`auth` seams are already shaped for it. Tray icon + global shortcut
-(fleet glance) is the second follow-up. Both are FEATURES.md "later" rows.
+The shell now discovers a live daemon through `<config-dir>/serve-state.json`, finds Forge in
+Cargo/Homebrew/user-local locations, and can start `forge serve --local` for zero-setup desktop
+pairing. A tray/fleet-glance surface remains a possible follow-up.
 
 ---
 
@@ -277,8 +277,9 @@ Guideline 4.2 (minimum functionality / "app-like") defenses, all real:
 - Onboarding that stands alone: the Connect screen explains what Forge is and links setup docs —
   the app must not look like a blank webview to a reviewer without a daemon. Include a
   "watch how it works" static walkthrough (bundled images, not network).
-- Push: native APNs is a **flagged backend gap** (FEATURES.md §3) — do not promise notifications
-  in store copy until it exists. Web Push is web-only.
+- Push: native iOS APNs alerts and Live Activities are shipped; Web Push remains the browser/PWA
+  channel. Store privacy copy must disclose that the public relay handles opaque device tokens,
+  generic alerts, and coarse Live Activity state, while custom private relays can retain rich text.
 - Privacy manifest: keep the existing `PrivacyInfo.xcprivacy` / `ios.privacyManifests` wiring and
   usage strings from the current `app.config.ts` (camera, Face ID, photo library, documents).
 - No remote code: the app is fully bundled; daemon data is user content. Standard permission
@@ -290,16 +291,17 @@ Guideline 4.2 (minimum functionality / "app-like") defenses, all real:
 
 | Target | Build | Distribution |
 |---|---|---|
-| iOS | `eas build -p ios --profile preview/production` (SDK 57; `ios.appleTeamId` still TODO until Apple approval) | TestFlight → App Store; interim: unsigned IPA CI (`mobile-ipa.yml`, exists) → SideStore source JSON (keep the 9a pipeline from BUILD_PLAN) |
+| iOS | Xcode Cloud runs `ios/ci_scripts/ci_post_clone.sh` (`npm ci` + Expo prebuild) and archives/signs the generated project | TestFlight/App Store; `mobile-sidestore.yml` separately publishes an unsigned IPA + SideStore source |
 | Android | `mobile-android` Actions workflow / `eas build -p android` | Internal APK artifact, tagged AAB release, optional Play internal-track submission |
 | Web | `npx expo export -p web` → `dist/` | Any static host; version-stamped; served over HTTPS |
 | Windows | `npm run tauri build` on windows runner → NSIS `.exe` | GitHub Releases |
 | macOS | tauri build → `.dmg` (unsigned initially; notarization when the Apple account lands) | GitHub Releases |
 | Linux | tauri build → `.AppImage` + `.deb` | GitHub Releases |
 
-CI: one workflow matrix (3 desktop OS runners for Tauri + web export artifact) triggered on
-`app-v*` tags; EAS builds triggered manually/on tag. Workers set up skeletons in B6 —
-full release automation is post-v1.
+CI: `app-desktop.yml` transactionally publishes five desktop targets, `app-web.yml` exports the web
+artifact, `mobile-android.yml` builds APK/AAB artifacts and can submit to Play internal testing,
+`mobile-sidestore.yml` publishes unsigned iOS builds, and Xcode Cloud owns signed iOS/TestFlight
+builds. Compatible iOS JavaScript/assets ship through the production EAS Update workflow.
 
 Dev loops: `npx expo start` (native dev client / Expo Go where possible), `npx expo start --web`
 (primary inner loop against a `--local`/`--anywhere` daemon), `npm run tauri dev` (desktop).

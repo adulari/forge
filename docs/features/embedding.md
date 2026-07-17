@@ -94,7 +94,7 @@ ws(s)://<host>/<token>/ws?session=<id>&rev=<n>
 **Server → client:** each message is one JSON `Snapshot` — the entire renderable session state,
 re-sent whenever it changes. Deduplicate on `revision` (monotonic; a frame with `revision <=` your
 last is a replay overlap — drop it unless `resync` or `closed` is set). Key fields
-(`crates/forge-cli/src/remote.rs`, `PROTOCOL_VERSION = 7`):
+(`crates/forge-cli/src/remote.rs`, `PROTOCOL_VERSION = 8`):
 
 | field | meaning |
 |---|---|

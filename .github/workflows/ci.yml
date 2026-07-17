@@ -26,18 +26,20 @@ env:
 jobs:
   fmt:
     runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
   clippy:
     runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: clippy
       # No Swatinem/rust-cache here: this is a persistent self-hosted runner whose `target/`
@@ -55,10 +57,11 @@ jobs:
     # serializing them on one 12G-capped runner keeps concurrent PRs from OOMing the host
     # (30G machine; three 8G runners compiling at once repeatedly killed all runner services).
     runs-on: [self-hosted, linux, x64, heavy]
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test --all --all-features
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - run: cargo test --locked --all --all-features
 
   # Release-profile + `--locked` smoke on one platform. The release workflow builds with
   # `--release --locked`, and breakages there (LTO-only failures, a Cargo.lock that drifted from
@@ -67,24 +70,59 @@ jobs:
   release-build:
     # See `test` above: heavy jobs serialize on the one heavy runner.
     runs-on: [self-hosted, linux, x64, heavy]
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       - run: cargo build --release --locked --bin forge
       - name: Verify upgrade, reconnect, and rollback from latest release
         env:
           GH_TOKEN: ${{ github.token }}
         run: scripts/release-upgrade-e2e.sh "" target/release/forge
 
+  genai-fork:
+    name: vendored genai fork
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          components: clippy,rustfmt
+      # This publishable fork is intentionally an independent workspace with its own lockfile.
+      # Root workspace checks cannot see it, so exercise the exact crate that crates.io receives.
+      - run: cargo fmt --manifest-path vendor/genai-0.6.5/Cargo.toml -- --check
+      - run: cargo clippy --locked --manifest-path vendor/genai-0.6.5/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path vendor/genai-0.6.5/Cargo.toml
+
+  msrv:
+    name: Rust 1.88 MSRV
+    # Exercise the minimum compiler promised by every published Forge crate. This catches
+    # transitive dependency releases whose effective MSRV is newer than their metadata claims.
+    runs-on: [self-hosted, linux, x64, heavy]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.88.0
+      - run: cargo check --locked --workspace --all-targets --all-features
+
   CI:
-    needs: [fmt, clippy, test, release-build]
+    needs: [fmt, clippy, test, release-build, genai-fork, msrv]
     if: always()
     runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 5
     steps:
       - name: Check all jobs passed
         run: |
-          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
-            echo "One or more jobs failed"
+          if [[ "${{ needs.fmt.result }}" != success \
+             || "${{ needs.clippy.result }}" != success \
+             || "${{ needs.test.result }}" != success \
+             || "${{ needs.release-build.result }}" != success \
+             || "${{ needs.genai-fork.result }}" != success \
+             || "${{ needs.msrv.result }}" != success ]]; then
+            echo "One or more required jobs failed, were cancelled, or were skipped"
             exit 1
           fi
           echo "All jobs passed"

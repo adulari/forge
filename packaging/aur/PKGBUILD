@@ -7,7 +7,7 @@ pkgver=2.6.5
 pkgrel=1
 pkgdesc="Fast, model-agnostic AI coding harness and CLI in Rust (prebuilt binary)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/florisvoskamp/forge"
+url="https://github.com/Adulari/forge"
 license=('AGPL-3.0-only')
 provides=('forge')
 conflicts=('forge')
@@ -16,9 +16,8 @@ options=('!strip' '!debug')
 
 source_x86_64=("forge-${pkgver}-x86_64.tar.gz::${url}/releases/download/v${pkgver}/forge-x86_64-unknown-linux-gnu.tar.gz")
 source_aarch64=("forge-${pkgver}-aarch64.tar.gz::${url}/releases/download/v${pkgver}/forge-aarch64-unknown-linux-gnu.tar.gz")
-# Placeholders — run `updpkgsums` (pacman-contrib) against the published release to fill these,
-# or copy them from the release's checksums.txt. 'SKIP' disables verification; replace before
-# publishing to the AUR.
+# Verified against the published release's checksums.txt. Release automation replaces these hashes
+# and regenerates .SRCINFO only after every archive has been published.
 sha256sums_x86_64=('76007d37b0a87dd7fb01a0ed7ab8f480f77acde3882df1fa980c5522d817242c')
 sha256sums_aarch64=('f9c27ecf9b6f3b264f503bd117b69283f0dc96cb3ec09a8e4fe317aa3009f81c')
 

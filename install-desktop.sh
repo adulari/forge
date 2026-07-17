@@ -7,6 +7,12 @@ err() { printf 'install-desktop: %s\n' "$1" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || err "required tool not found: $1"; }
 need uname
 if command -v curl >/dev/null 2>&1; then dl() { curl -fsSL "$1" -o "$2"; }; fetch() { curl -fsSL "$1"; }; elif command -v wget >/dev/null 2>&1; then dl() { wget -qO "$2" "$1"; }; fetch() { wget -qO - "$1"; }; else err 'need curl or wget'; fi
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v gsha256sum >/dev/null 2>&1; then gsha256sum "$1" | awk '{print $1}'
+  else err 'no SHA-256 tool found (need sha256sum, shasum, or gsha256sum)'; fi
+}
 os=$(uname -s); arch=$(uname -m)
 case "$os:$arch" in
   Darwin:arm64|Darwin:aarch64) asset="Forge-desktop-macos-aarch64.dmg"; kind=mac-dmg ;;
@@ -21,6 +27,15 @@ version=${FORGE_VERSION:-}
 base="https://github.com/$REPO/releases/download/$version"; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 printf 'install-desktop: downloading %s %s...\n' "$asset" "$version" >&2
 dl "$base/$asset" "$tmp/$asset" || err "download failed: $base/$asset"
+fetch "$base/desktop-checksums.txt" > "$tmp/desktop-checksums.txt" \
+  || err "could not download desktop-checksums.txt for $version"
+[ -s "$tmp/desktop-checksums.txt" ] || err "desktop-checksums.txt for $version is empty"
+want=$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1; exit }' "$tmp/desktop-checksums.txt")
+case "$want" in ''|*[!0-9a-fA-F]*) err "desktop-checksums.txt has no valid SHA-256 for $asset" ;; esac
+[ "${#want}" -eq 64 ] || err "desktop-checksums.txt has an invalid SHA-256 for $asset"
+got=$(sha256 "$tmp/$asset")
+[ "$want" = "$got" ] || err "checksum mismatch for $asset"
+printf 'install-desktop: checksum ok\n' >&2
 case "$kind" in
   mac-dmg)
     need hdiutil
@@ -38,6 +53,8 @@ case "$kind" in
   appimage)
     dest="${FORGE_DESKTOP_DIR:-$HOME/.local/bin}"; data="${XDG_DATA_HOME:-$HOME/.local/share}"
     mkdir -p "$dest" "$data/applications" "$data/icons/hicolor/256x256/apps"
+    icon_dest="$data/icons/hicolor/256x256/apps/forge-desktop.png"
+    icon_name=applications-development
     appimg="$tmp/$asset"; chmod 0755 "$appimg"
     appdir="$data/forge-desktop"
     # Prefer running the EXTRACTED app via its AppRun rather than the AppImage directly: the
@@ -64,6 +81,16 @@ EOF
       exec_line="$dest/forge-desktop"
       # Drop any stale AppImage from an older install so it doesn't shadow the launcher.
       rm -f "$dest/forge-desktop.AppImage"
+      # The verified AppImage carries its own application icon (currently Forge.png at its root).
+      # Install that rather than depending on a companion release asset that is not published.
+      icon_src="$appdir/Forge.png"
+      if [ ! -s "$icon_src" ]; then
+        icon_src=$(find "$appdir" -type f -iname 'forge*.png' -print 2>/dev/null | head -1)
+      fi
+      if [ -n "$icon_src" ] && [ -s "$icon_src" ]; then
+        cp "$icon_src" "$icon_dest"
+        icon_name=forge-desktop
+      fi
       printf 'install-desktop: installed Forge (extracted) to %s, launcher %s\n' "$appdir" "$dest/forge-desktop" >&2
     else
       # Last resort: install the AppImage as-is (extraction unavailable, e.g. no unsquashfs).
@@ -71,14 +98,14 @@ EOF
       exec_line="$dest/forge-desktop.AppImage"
       printf 'install-desktop: installed Forge AppImage to %s (could not extract; install squashfs-tools if it will not launch)\n' "$dest/forge-desktop.AppImage" >&2
     fi
-    # The release companion icon is optional; the desktop entry remains launcher-visible without it.
-    dl "$base/Forge-desktop-linux-icon.png" "$data/icons/hicolor/256x256/apps/forge-desktop.png" 2>/dev/null || true
+    # Preserve a previously installed verified icon when a host cannot extract this AppImage.
+    [ ! -s "$icon_dest" ] || icon_name=forge-desktop
     cat > "$data/applications/forge-desktop.desktop" <<EOF
 [Desktop Entry]
 Name=Forge
 Comment=Forge desktop app
 Exec=$exec_line
-Icon=forge-desktop
+Icon=$icon_name
 Terminal=false
 Type=Application
 Categories=Development;

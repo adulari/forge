@@ -4,10 +4,6 @@ name: app-desktop
 # Bundles are uploaded to the tagged GitHub Release as well as retained as workflow artifacts.
 
 on:
-  push:
-    tags:
-      - "app-v*"
-      - "v*"
   workflow_dispatch:
     inputs:
       release_tag:
@@ -16,22 +12,60 @@ on:
         type: string
 
 concurrency:
-  group: app-desktop-${{ github.ref }}
+  group: app-desktop-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   preflight:
     name: app preflight
     runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: mobile
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.release_tag != '' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          fetch-depth: 0
+      - name: Verify release source provenance
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+        shell: bash
+        working-directory: .
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^(app-)?v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "release_tag must look like v2.6.6 or app-v2.6.6" >&2
+            exit 1
+          }
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG" || {
+            echo "release tag does not exist: $RELEASE_TAG" >&2
+            exit 1
+          }
+          tag_sha="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          head_sha="$(git rev-parse HEAD)"
+          [ "$head_sha" = "$tag_sha" ] || {
+            echo "checked-out source $head_sha does not match $RELEASE_TAG ($tag_sha)" >&2
+            exit 1
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "release tag is not reachable from origin/main" >&2
+            exit 1
+          }
+          if [[ "$RELEASE_TAG" == v* ]]; then
+            cargo_version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+            [ "$RELEASE_TAG" = "v$cargo_version" ] || {
+              echo "unified desktop tag $RELEASE_TAG does not match workspace version $cargo_version" >&2
+              exit 1
+            }
+          fi
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: "20"
           cache: npm
@@ -46,7 +80,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: [self-hosted, linux, x64, heavy]
+          - os: [release, linux, x64, heavy]
             name: linux-x86_64
           - os: ubuntu-24.04-arm
             name: linux-aarch64
@@ -57,8 +91,12 @@ jobs:
           - os: windows-latest
             name: windows-x86_64
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    environment: release
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.release_tag != '' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
 
       # Tauri v2 Linux prerequisites (webkit2gtk + appindicator + rsvg + patchelf for
       # AppImage bundling). macOS (WKWebView) and Windows (WebView2) runners need nothing extra.
@@ -99,12 +137,22 @@ jobs:
           tool_root="$RUNNER_TEMP/forge-arch-tools"
           rm -rf "$tool_root"
           mkdir -p "$tool_root"
-          for package in patchelf xdotool; do
+          # The runner image should eventually carry these two leaf tools. Until then, use immutable
+          # Arch Archive package versions and fail closed on their reviewed SHA-256 digests; never
+          # execute whatever a moving /download endpoint happens to serve.
+          while read -r package url sha256; do
             pacman -Q "$package" >/dev/null 2>&1 && continue
-            curl --fail --silent --show-error --location \
-              "https://archlinux.org/packages/extra/x86_64/$package/download/" \
-              | bsdtar -x -C "$tool_root" -f -
-          done
+            archive="$RUNNER_TEMP/${url##*/}"
+            curl --fail --silent --show-error --location "$url" --output "$archive"
+            printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status || {
+              echo "checksum mismatch for pinned Arch package: $package" >&2
+              exit 1
+            }
+            bsdtar -x -C "$tool_root" -f "$archive"
+          done <<'PACKAGES'
+          patchelf https://archive.archlinux.org/packages/p/patchelf/patchelf-0.19.1-1-x86_64.pkg.tar.zst 5efa147d88f6d8fc40cd190e367ac5ff3898e77736cbf68d8779872e4589c6a8
+          xdotool https://archive.archlinux.org/packages/x/xdotool/xdotool-4.20260303.1-1-x86_64.pkg.tar.zst e215cac06133496d8ecd3ac7e456cacffed69fc52d28485891d346f7a15edcba
+          PACKAGES
 
           # Relocate libxdo's absolute system paths to the temporary package root.
           if [ -f "$tool_root/usr/lib/pkgconfig/libxdo.pc" ]; then
@@ -140,6 +188,12 @@ jobs:
           curl --fail --silent --show-error --location \
             'https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage' \
             --output "$plugin_download"
+          printf '%s  %s\n' \
+            '1da16a46fa5e058ae740e7c35ed0d36d86cb869ac9cc8a5fd9a1847d7978d99a' \
+            "$plugin_download" | sha256sum --check --status || {
+            echo 'checksum mismatch for pinned linuxdeploy AppImage plugin' >&2
+            exit 1
+          }
           mapfile -t squashfs_offsets < <(python3 - "$plugin_download" <<'PY'
           from pathlib import Path
           import sys
@@ -177,17 +231,17 @@ jobs:
           FORGE_LINUXDEPLOY_PLUGIN_ROOT="$plugin_root" "$plugin" --plugin-api-version >/dev/null
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           targets: ${{ matrix.name == 'macos-x86_64' && 'x86_64-apple-darwin' || '' }}
 
       - if: matrix.name != 'linux-x86_64'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           workspaces: "mobile/src-tauri -> target"
           key: ${{ matrix.os }}
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: "20"
           cache: npm
@@ -226,8 +280,16 @@ jobs:
           EXPO_PUBLIC_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
           EXPO_PUBLIC_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
         run: |
-          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo 'desktop updater signing enabled'; else echo 'LOUD: TAURI signing secrets unset; building unsigned desktop bundles'; fi
-          if [ "${{ matrix.name }}" = macos-x86_64 ]; then npm run tauri:build -- --target x86_64-apple-darwin; else npm run tauri:build; fi
+          if starts_release='${{ startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '' }}'; [ "$starts_release" = true ] && [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo 'TAURI_SIGNING_PRIVATE_KEY is required for a published desktop update' >&2
+            exit 1
+          fi
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then echo 'desktop updater signing enabled'; else echo 'artifact-only desktop build without updater signing'; fi
+          if [ "${{ matrix.name }}" = macos-x86_64 ]; then
+            npm run tauri:build -- --ci --target x86_64-apple-darwin -- --locked
+          else
+            npm run tauri:build -- --ci -- --locked
+          fi
 
       - name: Normalize release asset names
         shell: bash
@@ -245,7 +307,7 @@ jobs:
           esac
 
       - name: Upload bundle artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: forge-desktop-${{ matrix.name }}
           path: mobile/release-assets/**
@@ -257,9 +319,15 @@ jobs:
     # Run even when a matrix adapter failed so the release gets one explicit transactional
     # verdict instead of silently skipping latest.json after partially publishing bundles.
     if: always() && (startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '')
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [release, linux, x64]
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           pattern: forge-desktop-*
           path: assets
@@ -298,14 +366,29 @@ jobs:
           manifest = {'version': version, 'notes': 'Forge desktop update', 'pub_date': datetime.datetime.now(datetime.timezone.utc).isoformat(), 'platforms': platforms}
           pathlib.Path('latest.json').write_text(json.dumps(manifest, indent=2) + '\n')
           PY
+      - name: Generate desktop checksums
+        run: |
+          cd assets
+          sha256sum * > ../desktop-checksums.txt
+      - name: Attest desktop release provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
+        with:
+          subject-path: |
+            assets/*
+            latest.json
+            desktop-checksums.txt
       - name: Publish complete desktop release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
         with:
           tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: |
             assets/*
             latest.json
+            desktop-checksums.txt
           fail_on_unmatched_files: true
+          # Only unified CLI + desktop v* releases own GitHub's Latest pointer. app-v* repair or
+          # preview releases must never break CLI installers or the desktop updater endpoint.
+          make_latest: ${{ startsWith(inputs.release_tag || github.ref_name, 'v') }}
       - name: Verify updater is publicly readable
         env:
           VERSION: ${{ inputs.release_tag || github.ref_name }}

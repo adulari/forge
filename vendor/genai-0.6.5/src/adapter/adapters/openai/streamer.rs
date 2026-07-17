@@ -1,3 +1,7 @@
+// FORGE MODIFICATION NOTICE:
+// Derived from genai 0.6.5 (upstream commit 660b752fa62b639311e9c89642cbd9ce90565eb7).
+// Forge fixes lossless batched/sparse tool-call streaming, empty tool-call arrays, final-content
+// delivery, and usage tails. See this repository's history for the complete modifications.
 use crate::adapter::AdapterKind;
 use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions};
 use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
@@ -70,6 +74,14 @@ fn capture_usage_tail(
 	}
 }
 
+fn take_non_empty_tool_call_deltas(first_choice: &mut Value) -> Option<Value> {
+	let tool_calls = first_choice.x_take::<Value>("/delta/tool_calls").ok()?;
+	tool_calls
+		.as_array()
+		.is_some_and(|calls| !calls.is_empty())
+		.then_some(tool_calls)
+}
+
 pub struct OpenAIStreamer {
 	inner: EventSourceStream,
 	options: StreamerOptions,
@@ -136,6 +148,27 @@ impl OpenAIStreamer {
 			calls[index] = tool_call.clone();
 			tool_call
 		}
+	}
+
+	/// Capture every call carried by one SSE delta and return the first event to emit. Capturing
+	/// the full batch before returning is essential: providers commonly put multiple parallel
+	/// calls in one delta, while the stream abstraction can emit only one event per poll.
+	fn capture_tool_call_deltas(&mut self, delta_tool_calls: &Value) -> Option<ToolCall> {
+		let mut first_tool_call_event = None;
+		for tool_call_obj_val in delta_tool_calls.as_array()? {
+			let mut tool_call_obj = tool_call_obj_val.clone();
+			if let (Ok(index), Ok(mut function)) = (
+				tool_call_obj.x_take::<u32>("index"),
+				tool_call_obj.x_take::<Value>("function"),
+			) {
+				let call_id = tool_call_obj.x_take::<String>("id").unwrap_or_else(|_| format!("call_{index}"));
+				let fn_name = function.x_take::<String>("name").unwrap_or_default();
+				let arguments = function.x_take::<String>("arguments").unwrap_or_default();
+				let tool_call = self.capture_tool_call(index as usize, call_id, fn_name, arguments);
+				first_tool_call_event.get_or_insert(tool_call);
+			}
+		}
+		first_tool_call_event
 	}
 }
 
@@ -247,30 +280,8 @@ impl futures::Stream for OpenAIStreamer {
 							// Capture tool_calls that arrive in the same chunk as finish_reason.
 							// After capturing, emit the first ToolCallChunk so downstream
 							// consumers (e.g. agent loops) see the tool call event.
-							let mut first_tool_call_event: Option<ToolCall> = None;
-							if let Ok(delta_tool_calls) = first_choice.x_take::<Value>("/delta/tool_calls")
-								&& delta_tool_calls != Value::Null
-								&& let Some(delta_tool_calls) = delta_tool_calls.as_array()
-							{
-								for tool_call_obj_val in delta_tool_calls {
-									let mut tool_call_obj = tool_call_obj_val.clone();
-									if let (Ok(index), Ok(mut function)) = (
-										tool_call_obj.x_take::<u32>("index"),
-										tool_call_obj.x_take::<Value>("function"),
-									) {
-										let call_id = tool_call_obj
-											.x_take::<String>("id")
-											.unwrap_or_else(|_| format!("call_{index}"));
-										let fn_name = function.x_take::<String>("name").unwrap_or_default();
-										let arguments = function.x_take::<String>("arguments").unwrap_or_default();
-
-										let tc = self.capture_tool_call(index as usize, call_id, fn_name, arguments);
-										if first_tool_call_event.is_none() {
-											first_tool_call_event = Some(tc);
-										}
-									}
-								}
-							}
+							let first_tool_call_event = take_non_empty_tool_call_deltas(&mut first_choice)
+								.and_then(|tool_calls| self.capture_tool_call_deltas(&tool_calls));
 
 							if let Some(usage) =
 								take_finish_reason_usage(&mut message_data, adapter_kind, self.options.capture_usage)
@@ -327,9 +338,7 @@ impl futures::Stream for OpenAIStreamer {
 						// since only the final `finish_reason` chunk's content survived via the
 						// branch above). Only take this branch when the array actually has calls;
 						// an empty/absent array falls through to the content handling below.
-						else if let Ok(delta_tool_calls) = first_choice.x_take::<Value>("/delta/tool_calls")
-							&& delta_tool_calls.as_array().is_some_and(|calls| !calls.is_empty())
-						{
+						else if let Some(delta_tool_calls) = take_non_empty_tool_call_deltas(&mut first_choice) {
 							// A single SSE delta can carry MORE THAN ONE tool-call entry — vLLM-based
 							// backends (e.g. NVIDIA NIM) commonly batch every parallel call's initial
 							// name-bearing delta into one message. Capturing only `.first()` here (the
@@ -339,31 +348,8 @@ impl futures::Stream for OpenAIStreamer {
 							// name and mid-JSON arguments — exactly the "unknown tool ''" / garbled-args
 							// failure this loop fixes. Mirrors the `finish_reason` branch above, which
 							// already looped correctly.
-							if let Some(delta_tool_calls) = delta_tool_calls.as_array() {
-								let mut first_tool_call_event: Option<ToolCall> = None;
-								for tool_call_obj_val in delta_tool_calls {
-									let mut tool_call_obj = tool_call_obj_val.clone();
-									if let (Ok(index), Ok(mut function)) = (
-										tool_call_obj.x_take::<u32>("index"),
-										tool_call_obj.x_take::<Value>("function"),
-									) {
-										let call_id = tool_call_obj
-											.x_take::<String>("id")
-											.unwrap_or_else(|_| format!("call_{index}"));
-										let fn_name = function.x_take::<String>("name").unwrap_or_default();
-										let arguments = function.x_take::<String>("arguments").unwrap_or_default();
-
-										let tool_call =
-											self.capture_tool_call(index as usize, call_id, fn_name, arguments);
-										if first_tool_call_event.is_none() {
-											first_tool_call_event = Some(tool_call);
-										}
-									}
-								}
-								if let Some(tool_call) = first_tool_call_event {
-									// Return the ToolCallChunk event
-									return Poll::Ready(Some(Ok(InterStreamEvent::ToolCallChunk(tool_call))));
-								}
+							if let Some(tool_call) = self.capture_tool_call_deltas(&delta_tool_calls) {
+								return Poll::Ready(Some(Ok(InterStreamEvent::ToolCallChunk(tool_call))));
 							}
 							// No valid tool call found, continue to next message
 							continue;
@@ -444,9 +430,80 @@ impl futures::Stream for OpenAIStreamer {
 mod tests {
 	use super::*;
 	use crate::adapter::AdapterKind;
+	use crate::chat::ChatOptions;
 
 	fn test_model() -> ModelIden {
 		ModelIden::new(AdapterKind::OpenAI, "test-model")
+	}
+
+	fn test_streamer() -> OpenAIStreamer {
+		let request = reqwest::Client::new().get("http://127.0.0.1:9/unused");
+		let inner = EventSourceStream::new(request);
+		let options = ChatOptions::default().with_capture_tool_calls(true);
+		OpenAIStreamer::new(
+			inner,
+			test_model(),
+			ChatOptionsSet::default().with_chat_options(Some(&options)),
+		)
+	}
+
+	#[test]
+	fn captures_every_parallel_tool_call_and_continuation() {
+		let mut streamer = test_streamer();
+		let initial = serde_json::json!([
+			{"index": 0, "id": "call_a", "function": {"name": "read_file", "arguments": "{\"path\":"}},
+			{"index": 1, "id": "call_b", "function": {"name": "run_command", "arguments": "{\"cmd\":"}}
+		]);
+
+		let emitted = streamer.capture_tool_call_deltas(&initial).expect("first call event");
+		assert_eq!(emitted.fn_name, "read_file");
+		streamer.capture_tool_call_deltas(&serde_json::json!([
+			{"index": 0, "function": {"arguments": "\"README.md\"}"}},
+			{"index": 1, "function": {"arguments": "\"cargo test\"}"}}
+		]));
+
+		let calls = streamer.captured_data.tool_calls.expect("captured calls");
+		assert_eq!(calls.len(), 2);
+		assert_eq!(calls[0].fn_name, "read_file");
+		assert_eq!(calls[0].fn_arguments, Value::String("{\"path\":\"README.md\"}".into()));
+		assert_eq!(calls[1].fn_name, "run_command");
+		assert_eq!(calls[1].fn_arguments, Value::String("{\"cmd\":\"cargo test\"}".into()));
+	}
+
+	#[test]
+	fn empty_tool_call_array_falls_through_to_content() {
+		let mut choice = serde_json::json!({
+			"delta": {"content": "complete answer", "tool_calls": []}
+		});
+
+		assert!(take_non_empty_tool_call_deltas(&mut choice).is_none());
+		let content = choice.x_take::<Option<String>>("/delta/content").unwrap().unwrap();
+		assert_eq!(content, "complete answer");
+	}
+
+	#[test]
+	fn sparse_out_of_order_indices_do_not_cross_contaminate_calls() {
+		let mut streamer = test_streamer();
+		streamer.capture_tool_call_deltas(&serde_json::json!([
+			{"index": 1, "id": "call_b", "function": {"name": "second", "arguments": "{\"b\":"}}
+		]));
+		streamer.capture_tool_call_deltas(&serde_json::json!([
+			{"index": 0, "id": "call_a", "function": {"name": "first", "arguments": "{\"a\":1}"}},
+			{"index": 1, "function": {"arguments": "2}"}}
+		]));
+
+		let calls = streamer.captured_data.tool_calls.expect("captured calls");
+		assert_eq!(calls.len(), 2);
+		assert_eq!(
+			(calls[0].call_id.as_str(), calls[0].fn_name.as_str()),
+			("call_a", "first")
+		);
+		assert_eq!(calls[0].fn_arguments, Value::String("{\"a\":1}".into()));
+		assert_eq!(
+			(calls[1].call_id.as_str(), calls[1].fn_name.as_str()),
+			("call_b", "second")
+		);
+		assert_eq!(calls[1].fn_arguments, Value::String("{\"b\":2}".into()));
 	}
 
 	#[test]

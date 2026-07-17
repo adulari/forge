@@ -14,6 +14,15 @@ path = "src/main.rs"
 [lib]
 name = "forge_cli"
 
+[features]
+# Linux release binaries intentionally keep CPAL/ALSA out of the default dependency graph so Forge
+# still starts on servers and minimal containers without libasound.so.2. Linux users who want TUI
+# microphone capture can build with `--features microphone`; file/upload transcription is always
+# available. CoreAudio and WASAPI are OS components, so official macOS/Windows builds enable capture
+# target-specifically below.
+default = []
+microphone = ["forge-voice/microphone"]
+
 [dependencies]
 forge-types.workspace = true
 forge-config.workspace = true
@@ -72,8 +81,11 @@ hkdf = "0.13"
 sha2 = "0.11"
 aes-gcm = "0.11"
 sysinfo = { workspace = true }
-self_update = { version = "1.0.0-rc.6", default-features = false, features = ["archive-tar", "archive-zip", "compression-tar-gz", "compression-zip-deflate", "github", "reqwest", "rustls"] }
+self_update = { version = "1.0.0-rc.6", default-features = false, features = ["archive-tar", "archive-zip", "checksums", "compression-tar-gz", "compression-zip-deflate", "github", "reqwest", "rustls"] }
 tower-http = { version = "0.7", features = ["cors"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+forge-voice = { workspace = true, features = ["microphone"] }
 
 [dev-dependencies]
 portable-pty = "0.9"

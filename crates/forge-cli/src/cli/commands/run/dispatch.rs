@@ -679,6 +679,15 @@ and keep going."
         // `app.voice` is set here so the overlay is visible the instant this returns — only the
         // real system resources are handed back through `DispatchOutcome::PendingVoice`.
         CommandAction::Voice => {
+            // A portable Linux release deliberately excludes CPAL/ALSA. Fail before resolving or
+            // downloading a Whisper model: uploaded/file transcription still works in this build,
+            // but a local recording can never start until microphone support is compiled in.
+            if !forge_voice::Recorder::is_supported() {
+                app.voice = Some(forge_tui::VoiceOverlay::error(
+                    forge_voice::VoiceError::MicrophoneUnavailable.to_string(),
+                ));
+                return Ok(DispatchOutcome::PendingVoice(VoiceStart::Error));
+            }
             let config = forge_config::load().unwrap_or_default();
             let kind: forge_voice::ModelKind = config
                 .voice

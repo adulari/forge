@@ -1,6 +1,7 @@
 # Forge v2.0.0 Roadmap — Delivery Record
 
-Every line of [`ROADMAP-v2.md`](./ROADMAP-v2.md) mapped 1:1 to the PR that delivered it.
+Every line of the v2 roadmap mapped 1:1 to the PR that delivered it; this file is the retained
+delivery record now that the working roadmap has been retired.
 Assembled `main` verified green: `cargo fmt --check` clean, `cargo clippy --workspace
 --all-targets --all-features -- -D warnings` clean, `cargo test --workspace` = 1163 passed /
 24 ignored. Every PR also passed full CI (Linux + macOS + Windows + cargo-audit + cargo-deny +

@@ -365,6 +365,9 @@ struct ResumeState {
 pub struct CliProvider {
     kind: CliKind,
     binary: String,
+    /// Explicit Forge executable used for the harness MCP child. Normal Forge binaries use the
+    /// current executable; embedders and integration tests can point at a real `forge` binary.
+    forge_binary: Option<String>,
     timeout: Duration,
     /// Harness mode (RFC cli-bridge-full-harness): the CLI runs Forge's tools via the
     /// `forge mcp-serve` MCP server under Forge's permission gate. When false, the CLI runs as
@@ -401,6 +404,7 @@ impl CliProvider {
         Self {
             kind,
             binary: kind.default_binary().to_string(),
+            forge_binary: None,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_SECS),
             harness: true,
             // Resume is a claude-only capability; the flag is harmless for the other kinds (they
@@ -482,6 +486,24 @@ impl CliProvider {
     pub fn with_binary(mut self, binary: impl Into<String>) -> Self {
         self.binary = binary.into();
         self
+    }
+
+    /// Override the Forge executable spawned as `mcp-serve` in harness mode.
+    ///
+    /// This is useful when [`CliProvider`] is embedded in a binary that is not itself Forge, and
+    /// for provider-only integration tests whose current executable is the Rust test harness.
+    pub fn with_forge_binary(mut self, binary: impl Into<String>) -> Self {
+        self.forge_binary = Some(binary.into());
+        self
+    }
+
+    fn forge_executable(&self) -> String {
+        self.forge_binary.clone().unwrap_or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|path| path.to_str().map(str::to_string))
+                .unwrap_or_else(|| "forge".to_string())
+        })
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -1596,10 +1618,7 @@ impl CliProvider {
             prompt = clamp_to_chars(&prompt, max.saturating_sub(4096));
         }
         // Path to *this* forge binary, so harness mode can spawn `forge mcp-serve`.
-        let forge_exe = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.to_str().map(str::to_string))
-            .unwrap_or_else(|| "forge".to_string());
+        let forge_exe = self.forge_executable();
         // A bridge turn (interactive OR harness) runs Forge's own tools inside `forge mcp-serve`, a
         // separate process. Give it an out-of-band JSONL sink so that process can report `update_tasks`
         // and any spawned-subagent lifecycle back to us — without it those events have nowhere to go
@@ -2449,10 +2468,7 @@ impl CliProvider {
         bare: &str,
         checkpoint: Option<&CheckpointContext>,
     ) -> std::io::Result<LiveSession> {
-        let forge_exe = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.to_str().map(str::to_string))
-            .unwrap_or_else(|| "forge".to_string());
+        let forge_exe = self.forge_executable();
         let sink_path: Option<std::path::PathBuf> = {
             static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

@@ -33,7 +33,7 @@ case "$os" in
     case "$arch" in
       x86_64|amd64) target="x86_64-unknown-linux-gnu" ;;
       arm64|aarch64) target="aarch64-unknown-linux-gnu" ;;
-      *) err "unsupported Linux arch: $arch (prebuilt binaries: x86_64, aarch64). Build from source: cargo install --path crates/forge-cli" ;;
+      *) err "unsupported Linux arch: $arch (prebuilt binaries: x86_64, aarch64). Build from source: cargo install --git https://github.com/$REPO forge-agent" ;;
     esac ;;
   Darwin)
     case "$arch" in
@@ -59,7 +59,8 @@ trap 'rm -rf "$tmp"' EXIT
 printf 'install: downloading %s %s...\n' "$asset" "$version" >&2
 dl "$url" "$tmp/$asset" || err "download failed: $url"
 
-# Verify against checksums.txt if present (best-effort).
+# Verify against the release checksum manifest. Installation fails closed if the manifest, hash,
+# or a SHA-256 implementation is unavailable.
 # Detect an available SHA-256 hasher: sha256sum (Linux/GNU), shasum -a 256 (macOS), gsha256sum (Homebrew).
 _sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -69,21 +70,20 @@ _sha256() {
   elif command -v gsha256sum >/dev/null 2>&1; then
     gsha256sum "$1" | awk '{print $1}'
   else
-    printf 'install: no sha256 tool found, skipping checksum\n' >&2
-    return 1
+    err "no SHA-256 tool found (need sha256sum, shasum, or gsha256sum)"
   fi
 }
-if fetch "https://github.com/$REPO/releases/download/$version/checksums.txt" > "$tmp/checksums.txt" 2>/dev/null \
-   && [ -s "$tmp/checksums.txt" ]; then
-  want=$(grep " $asset\$" "$tmp/checksums.txt" | awk '{print $1}' | head -1)
-  if [ -n "$want" ]; then
-    got=$(_sha256 "$tmp/$asset") || got=""
-    if [ -n "$got" ]; then
-      [ "$want" = "$got" ] || err "checksum mismatch for $asset"
-      printf 'install: checksum ok\n' >&2
-    fi
-  fi
-fi
+fetch "https://github.com/$REPO/releases/download/$version/checksums.txt" > "$tmp/checksums.txt" \
+  || err "could not download checksums.txt for $version"
+[ -s "$tmp/checksums.txt" ] || err "checksums.txt for $version is empty"
+want=$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1; exit }' "$tmp/checksums.txt")
+case "$want" in
+  ''|*[!0-9a-fA-F]*) err "checksums.txt has no valid SHA-256 for $asset" ;;
+esac
+[ "${#want}" -eq 64 ] || err "checksums.txt has an invalid SHA-256 for $asset"
+got=$(_sha256 "$tmp/$asset")
+[ "$want" = "$got" ] || err "checksum mismatch for $asset"
+printf 'install: checksum ok\n' >&2
 
 # Note the currently-installed version (if any) so we can report update-vs-fresh. This script only
 # ever writes the binary below — it never touches your config (~/.config/forge), sessions, or API
