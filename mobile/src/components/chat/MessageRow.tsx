@@ -1,8 +1,6 @@
 // DESIGN_SYSTEM.md §6 — timeline rows for user/assistant/tool (system) content: Markdown +
 // CodeBlock body for user/assistant; system rows (tool/diff-ish output) render compact mono
 // per the same materials CodeBlock uses, without a full Markdown pass over structured text.
-import * as Clipboard from "expo-clipboard";
-import { Copy, MoreHorizontal } from "lucide-react-native";
 import React, { useState } from "react";
 import { Platform, Pressable, StyleSheet, View } from "react-native";
 import Animated from "react-native-reanimated";
@@ -14,8 +12,6 @@ import { useSessionCtx } from "../../lib/sessionContext";
 import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
-import { IconButton } from "../ds/IconButton";
-import { useToast } from "../ds/ToastHost";
 import { AttachmentRow } from "./Attachments";
 import type { SentAttachment } from "./attach";
 import { Markdown } from "./Markdown";
@@ -23,15 +19,6 @@ import { ReasoningDisclosure } from "./ReasoningDisclosure";
 import { SystemOutput } from "./SystemOutput";
 
 const IS_WEB = Platform.OS === "web";
-
-// DOM hover passthrough (same cast pattern as DesktopWindowChrome's onDoubleClick):
-// react-native-web's Pressable hover events proved unreliable on a handler-less wrapper,
-// so the row listens to real mouseenter/mouseleave instead.
-type HoverViewProps = import("react-native").ViewProps & {
-  onMouseEnter?: () => void;
-  onMouseLeave?: () => void;
-};
-const HoverView = View as unknown as React.ComponentType<HoverViewProps>;
 
 export interface MessageRowProps {
   row: HistoryRow;
@@ -112,31 +99,11 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   // Lazy useState: evaluated once at mount (the sanctioned home for an impure read).
   const [isFresh] = useState(() => Date.now() / 1000 - row.created_at < 5);
   const entrance = useForgeline(Math.max(0, row.seq), isFresh);
-  const toast = useToast();
   const { baseUrl, sessionId } = useSessionCtx();
   const isUser = row.role === "user";
   const isSystem = row.role === "system";
-  // Hearth: no always-visible model attribution or copy icon on the row — copy is a
-  // long-press affordance on native (MessageActionsSheet), and on web a hover affordance
-  // scoped to the WHOLE row (a short bubble left dead zones the cursor crossed on its way
-  // to the pill, un-hovering it mid-travel) with a short grace delay before hiding.
-  const [hovered, setHovered] = useState(false);
-  const hideTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hoverIn = () => {
-    if (hideTimer.current != null) clearTimeout(hideTimer.current);
-    hideTimer.current = null;
-    setHovered(true);
-  };
-  const hoverOut = () => {
-    if (hideTimer.current != null) clearTimeout(hideTimer.current);
-    hideTimer.current = setTimeout(() => setHovered(false), 200);
-  };
-  React.useEffect(
-    () => () => {
-      if (hideTimer.current != null) clearTimeout(hideTimer.current);
-    },
-    [],
-  );
+  // Hearth: no on-row chrome at all — message actions live behind long-press (native and
+  // touch-web) and right-click (desktop/web). Hover buttons were tried and cut.
 
   // Only assistant turns carry inline `<think>` reasoning; a past turn's reasoning renders
   // collapsed here too, so scrollback isn't full of expanded thinking logs.
@@ -164,15 +131,6 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
     })),
   ];
 
-  // Per-block `selectable` Text (Markdown.tsx) can't drag-select across paragraphs, and there
-  // was no way to grab a whole reply at once — one tap/long-press now copies the full row:
-  // the parsed answer (no `<think>` block) for assistant turns, else the plain row text.
-  const copyText = displayMessageText(row);
-  const onCopyRow = async () => {
-    await Clipboard.setStringAsync(copyText);
-    toast.show("message copied");
-  };
-
   // Long-press works on native AND touch-web; desktop web additionally gets right-click.
   const handleLongPress = () => {
     if (!onLongPress) return;
@@ -194,11 +152,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
 
   return (
     <Animated.View style={entrance}>
-      <HoverView
-        onMouseEnter={IS_WEB ? hoverIn : undefined}
-        onMouseLeave={IS_WEB ? hoverOut : undefined}
-        style={[styles.row, !isUser && !isSystem && styles.assistantRow, isUser && styles.userRow]}
-      >
+      <View style={[styles.row, !isUser && !isSystem && styles.assistantRow, isUser && styles.userRow]}>
       {!isUser && !isSystem ? <View style={[styles.spine, { backgroundColor: tokens.border }]} /> : null}
       <Pressable
         onLongPress={onLongPress ? handleLongPress : undefined}
@@ -224,45 +178,8 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         ) : (
           <Markdown content={userText} />
         )}
-        {/* Always mounted, opacity-toggled, INSIDE the bubble's bounds: mounting-on-hover
-            plus a negative-offset position let the pill vanish before the cursor could
-            reach it (leaving the bubble un-hovered it). Kept in-bounds the pill is part of
-            the hover subtree, so moving onto it keeps the row hovered; opacity means zero
-            layout shift and no mount/unmount flicker. */}
-        {IS_WEB && !isSystem ? (
-          <View
-            style={[
-              styles.hoverActions,
-              webActionsTransition,
-              {
-                backgroundColor: tokens.bg2,
-                borderColor: tokens.border,
-                opacity: hovered ? 1 : 0,
-                pointerEvents: hovered ? "auto" : "none",
-              },
-            ]}
-          >
-            <IconButton
-              accessibilityLabel="copy message"
-              onPress={onCopyRow}
-              icon={<Copy size={14} strokeWidth={1.75} color={tokens.ink2} />}
-            />
-            {onLongPress ? (
-              <IconButton
-                accessibilityLabel="message actions"
-                onPress={(e?: { nativeEvent?: { pageX?: number; pageY?: number } }) =>
-                  onLongPress(row, {
-                    x: e?.nativeEvent?.pageX ?? 0,
-                    y: e?.nativeEvent?.pageY ?? 0,
-                  })
-                }
-                icon={<MoreHorizontal size={14} strokeWidth={1.75} color={tokens.ink2} />}
-              />
-            ) : null}
-          </View>
-        ) : null}
       </Pressable>
-      </HoverView>
+      </View>
     </Animated.View>
   );
 }
@@ -276,22 +193,4 @@ const styles = StyleSheet.create({
   userRow: { alignItems: "flex-end" },
   bubble: { borderRadius: 12, paddingHorizontal: space.space12, paddingVertical: space.space8 },
   userBubble: { maxWidth: "85%", borderRadius: radii.radius16, borderWidth: StyleSheet.hairlineWidth },
-  hoverActions: {
-    position: "absolute",
-    top: 4,
-    right: 4,
-    flexDirection: "row",
-    borderRadius: radii.radius8,
-    borderWidth: StyleSheet.hairlineWidth,
-    zIndex: 2,
-  },
 });
-
-// Web-only fade so the pill eases in instead of popping (same untyped-CSS cast pattern
-// as Sheet.tsx's webTransition).
-const webActionsTransition = IS_WEB
-  ? ({
-      transitionProperty: "opacity",
-      transitionDuration: "120ms",
-    } as unknown as import("react-native").ViewStyle)
-  : null;

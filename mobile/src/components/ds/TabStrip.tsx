@@ -50,7 +50,6 @@ export function TabStrip<T extends string>({ options, value, onChange, testID }:
               ) : null}
               {option.dot ? <View style={[styles.dot, { backgroundColor: tokens.danger }]} /> : null}
             </View>
-            {active ? <View style={[styles.underline, { backgroundColor: tokens.accent }]} /> : null}
           </Pressable>
         );
       })}
@@ -69,5 +68,4 @@ const styles = StyleSheet.create({
   label: { fontSize: 12.5, fontWeight: "600", letterSpacing: 0.4 },
   badge: { fontFamily: monoFamily.regular, fontSize: 11 },
   dot: { width: 5, height: 5, borderRadius: 3 },
-  underline: { position: "absolute", left: 0, right: 0, bottom: 0, height: 2 },
 });
