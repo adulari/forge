@@ -10,7 +10,6 @@ import { ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { EmptyState } from "../ds/EmptyState";
 import { IconButton } from "../ds/IconButton";
-import { SearchField } from "../ds/SearchField";
 import { TaskComposer } from "../ds/TaskComposer";
 import { SessionCard } from "./SessionCard";
 import { useAuth } from "../../lib/auth";
@@ -44,18 +43,7 @@ export function ExpandedFleetRail() {
   const totalCost = useMemo(() => rows.reduce((sum, row) => sum + row.cost_usd, 0), [rows]);
   const activeServer = servers.find((server) => server.id === activeServerId);
   const selectedSessionId = pathname.match(/^\/session\/([^/]+)/)?.[1];
-  const [search, setSearch] = useState("");
   const [composerText, setComposerText] = useState("");
-  const visibleRows = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return rows.filter(
-      (row) =>
-        !needle ||
-        [row.title, row.cwd, row.waiting ? "waiting" : row.busy ? "busy" : "idle"].some((value) =>
-          value.toLowerCase().includes(needle),
-        ),
-    );
-  }, [rows, search]);
   const onComposerSubmit = useCallback((text: string) => {
     setComposerText("");
     router.push({ pathname: "/new-session", params: { title: text } });
@@ -91,8 +79,6 @@ export function ExpandedFleetRail() {
         style={styles.composer}
         testID="rail-composer"
       />
-      <SearchField value={search} onChangeText={setSearch} placeholder="Search sessions" accessibilityLabel="Search sessions" containerStyle={styles.search} />
-
       <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
         {activeServer ? (
           <View style={styles.serverHeader}>
@@ -104,10 +90,10 @@ export function ExpandedFleetRail() {
             <View style={[styles.serverRule, { backgroundColor: tokens.hairline }]} />
           </View>
         ) : null}
-        {visibleRows.length === 0 ? (
-          <EmptyState icon={Flame} message={search ? "No sessions match this search." : "No sessions — forge one above."} />
+        {rows.length === 0 ? (
+          <EmptyState icon={Flame} message="No sessions — forge one above." />
         ) : (
-          visibleRows.map((row, index) => <SessionCard key={row.id} row={row} index={index} selected={row.id === selectedSessionId} />)
+          rows.map((row, index) => <SessionCard key={row.id} row={row} index={index} selected={row.id === selectedSessionId} />)
         )}
       </ScrollView>
 
@@ -134,7 +120,6 @@ const styles = StyleSheet.create({
   titleRow: { flexDirection: "row", alignItems: "center" },
   mark: { fontSize: 13, marginLeft: space.space8, padding: space.space4 },
   composer: { marginHorizontal: space.space12, marginTop: space.space12 },
-  search: { marginHorizontal: space.space16, marginTop: space.space12 },
   list: { flex: 1 },
   listContent: { paddingBottom: space.space16 },
   serverHeader: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space16, paddingTop: space.space12, paddingBottom: space.space8 },
