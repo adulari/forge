@@ -66,7 +66,9 @@ import {
   endLiveActivity,
   startLiveActivity,
   updateLiveActivity,
+  type LiveActivityState,
 } from "../../modules/live-activity";
+import { formatCwd } from "../theme/typography";
 
 // FleetWatcher receives immediate daemon invalidations over /ws/fleet. This slow poll is only a
 // recovery net for proxies/platforms that cannot keep a WebSocket alive.
@@ -386,6 +388,17 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
   const costUsd = snapshot?.cost_usd ?? 0;
   const contextTokens = snapshot?.context_tokens ?? 0;
   const contextLimit = snapshot?.context_limit ?? 0;
+  const question = snapshot?.permission_prompt ?? snapshot?.question ?? null;
+  const promptSeq = snapshot?.prompt_seq ?? null;
+  const tasksTotal = snapshot?.tasks.length ?? 0;
+  const tasksDone = snapshot?.tasks.filter((t) => t.status === "done").length ?? 0;
+  const agentLabel = snapshot ? formatCwd(snapshot.cwd) : "";
+
+  // Unix seconds of the last busy/waiting edge — the Live Activity's elapsed timer restarts
+  // whenever the session flips between forging and needs-you (or starts a turn). Updated only
+  // inside the effect below (never during render).
+  const stateSinceRef = useRef<number | null>(null);
+  const prevPhaseRef = useRef<string | null>(null);
 
   useEffect(() => {
     const subscription = addLiveActivityPushTokenListener(({ sessionId: tokenSessionId, pushToken }) => {
@@ -405,6 +418,24 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
     const didComplete = wasBusy === true && !busy;
     const didBegin = busy && (!activeRef.current || activitySessionIdRef.current !== sessionId);
     prevBusyRef.current = busy;
+
+    const phase = busy ? (waiting ? "waiting" : "busy") : "idle";
+    if (prevPhaseRef.current !== phase) {
+      prevPhaseRef.current = phase;
+      stateSinceRef.current = Math.floor(Date.now() / 1000);
+    }
+    const liveActivityState = (): LiveActivityState => ({
+      busy,
+      waiting,
+      costUsd,
+      contextTokens,
+      contextLimit,
+      question,
+      promptSeq,
+      tasksDone,
+      tasksTotal,
+      stateSinceEpoch: stateSinceRef.current,
+    });
     setCompleted(didComplete);
     if (didComplete && sessionId) {
       queryClient.invalidateQueries({ queryKey: keys(baseUrl).history(sessionId) });
@@ -414,7 +445,7 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
     if (didBegin) {
       activeRef.current = true;
       activitySessionIdRef.current = sessionId;
-      startLiveActivity(sessionId, title, busy, waiting, costUsd, contextTokens, contextLimit)
+      startLiveActivity({ sessionId, title, baseUrl: baseUrl ?? "", agentLabel }, liveActivityState())
         .then(({ activityId }) => {
           if (!activeRef.current || activitySessionIdRef.current !== sessionId) {
             if (activityId) endLiveActivity(activityId).catch(() => {});
@@ -422,7 +453,7 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
           }
           activityIdRef.current = activityId;
           if (activityId) {
-            updateLiveActivity(activityId, busy, waiting, costUsd, contextTokens, contextLimit).catch(() => {});
+            updateLiveActivity(activityId, liveActivityState()).catch(() => {});
           }
         })
         .catch((error) => {
@@ -441,11 +472,9 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
         unsubscribePush(baseUrl, { session_id: activeSessionId, push_token: "" }).catch(() => {});
       }
     } else if (activityIdRef.current) {
-      updateLiveActivity(activityIdRef.current, busy, waiting, costUsd, contextTokens, contextLimit).catch(
-        () => {},
-      );
+      updateLiveActivity(activityIdRef.current, liveActivityState()).catch(() => {});
     }
-  }, [busy, waiting, sessionId, title, costUsd, contextTokens, contextLimit, baseUrl, queryClient]);
+  }, [busy, waiting, sessionId, title, costUsd, contextTokens, contextLimit, question, promptSeq, tasksDone, tasksTotal, agentLabel, baseUrl, queryClient]);
 
   return completed;
 }

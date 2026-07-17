@@ -217,6 +217,19 @@ pub(crate) struct LiveActivityContentState {
     pub cost_usd: f64,
     pub context_tokens: u64,
     pub context_limit: u64,
+    // Hearth Live Activity fields (needs-you card question + forging progress). Optional on the
+    // wire so older widget builds that decode strictly still work via Swift's `String?`/`Int?`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_seq: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tasks_done: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tasks_total: Option<u64>,
+    /// Unix seconds of the last busy/waiting state transition (drives the widget's elapsed timer).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_since: Option<u64>,
 }
 
 /// The APNs `event: update` payload for one [`LiveActivityContentState`], per Apple's
@@ -566,20 +579,50 @@ mod tests {
     fn live_activity_payload_round_trips_the_content_state() {
         let content_state = LiveActivityContentState {
             busy: true,
-            waiting: false,
+            waiting: true,
             cost_usd: 1.23,
             context_tokens: 4567,
             context_limit: 200_000,
+            question: Some("allow write_file?".into()),
+            prompt_seq: Some(7),
+            tasks_done: Some(2),
+            tasks_total: Some(4),
+            state_since: Some(1_700_000_100),
         };
         let v = live_activity_payload(&content_state, 1_700_000_123);
         assert_eq!(v["aps"]["event"], "update");
         assert_eq!(v["aps"]["timestamp"], 1_700_000_123u64);
         let cs = &v["aps"]["content-state"];
         assert_eq!(cs["busy"], true);
-        assert_eq!(cs["waiting"], false);
+        assert_eq!(cs["waiting"], true);
         assert_eq!(cs["cost_usd"], 1.23);
         assert_eq!(cs["context_tokens"], 4567);
         assert_eq!(cs["context_limit"], 200_000);
+        assert_eq!(cs["question"], "allow write_file?");
+        assert_eq!(cs["prompt_seq"], 7);
+        assert_eq!(cs["tasks_done"], 2);
+        assert_eq!(cs["tasks_total"], 4);
+        assert_eq!(cs["state_since"], 1_700_000_100u64);
+    }
+
+    #[test]
+    fn live_activity_payload_omits_absent_optional_fields() {
+        let content_state = LiveActivityContentState {
+            busy: true,
+            waiting: false,
+            cost_usd: 0.0,
+            context_tokens: 0,
+            context_limit: 200_000,
+            question: None,
+            prompt_seq: None,
+            tasks_done: None,
+            tasks_total: None,
+            state_since: None,
+        };
+        let v = live_activity_payload(&content_state, 1);
+        let cs = &v["aps"]["content-state"];
+        assert!(cs.get("question").is_none());
+        assert!(cs.get("state_since").is_none());
     }
 
     /// All tests below mutate process-global env vars (`std::env::set_var`/`remove_var`) to

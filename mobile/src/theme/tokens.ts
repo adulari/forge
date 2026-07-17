@@ -155,7 +155,9 @@ export const lightTokens: ColorTokens = {
   ember: emberScale,
   heatEdgeFrom: emberScale.ember400,
   heatEdgeTo: emberScale.ember500,
-  heatGlow: "rgba(199,93,16,0.20)",
+  // Hearth light: the "Fleet · Light" prototype paints the running edge with no outward glow
+  // (paper surfaces carry no ambient ember light) — zero-alpha keeps the gradient only.
+  heatGlow: "rgba(199,93,16,0)",
   dotGlow: "rgba(199,93,16,0.16)",
   forgeWash: "radial-gradient(1100px 420px at 50% -8%, rgba(199,93,16,0.04), transparent 62%)",
   // Hearth "hairline" is already exactly this theme's `border` value — the light palette

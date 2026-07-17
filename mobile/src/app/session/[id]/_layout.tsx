@@ -20,7 +20,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { Banner } from "../../../components/ds/Banner";
 import { IconButton } from "../../../components/ds/IconButton";
-import { Segmented, type SegmentedOption } from "../../../components/ds/Segmented";
+import { TabStrip, type TabStripOption } from "../../../components/ds/TabStrip";
 import { useToast } from "../../../components/ds/ToastHost";
 import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { usePalette } from "../../../components/overlay/CommandPalette";
@@ -176,7 +176,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
   const activeSegment = segmentFromPathname(pathname);
 
-  const segmentOptions = useMemo<SegmentedOption<SegmentValue>[]>(() => {
+  const segmentOptions = useMemo<TabStripOption<SegmentValue>[]>(() => {
     const taskCount = snapshot?.tasks.length ?? 0;
     const agentCount = snapshot?.subagents.length ?? 0;
     const reviewPending = snapshot?.plan != null || snapshot?.diff != null;
@@ -356,12 +356,11 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         ) : null}
 
           <View style={[gutter, styles.segmentedWrap]}>
-            <Segmented
+            <TabStrip
               options={segmentOptions}
               value={activeSegment}
               onChange={onSegmentChange}
               testID="session-segmented"
-              flush
             />
           </View>
           {projectNeedsInitialization ? (

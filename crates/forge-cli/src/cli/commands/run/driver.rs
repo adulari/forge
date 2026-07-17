@@ -484,6 +484,17 @@ async fn drive_session(
                                     cost_usd: snap.cost_usd,
                                     context_tokens: snap.context_tokens,
                                     context_limit: snap.context_limit.unwrap_or(200_000) as u64,
+                                    question: snap
+                                        .permission_prompt
+                                        .clone()
+                                        .or_else(|| snap.question.clone()),
+                                    prompt_seq: Some(snap.prompt_seq),
+                                    tasks_done: Some(
+                                        snap.tasks.iter().filter(|t| t.status == "done").count()
+                                            as u64,
+                                    ),
+                                    tasks_total: Some(snap.tasks.len() as u64),
+                                    state_since: Some(now_secs().max(0) as u64),
                                 },
                             );
                             notifier.dispatch_alert(msg.clone());

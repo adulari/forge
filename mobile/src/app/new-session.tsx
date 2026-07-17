@@ -56,14 +56,17 @@ export default function NewSessionScreen() {
   const tokens = useTokens();
   const { scheme } = useTheme();
   const { isCompact } = useBreakpoint();
-  const params = useLocalSearchParams<{ cwd?: string | string[] }>();
+  const params = useLocalSearchParams<{ cwd?: string | string[]; title?: string | string[] }>();
   const requestedCwd = Array.isArray(params.cwd) ? params.cwd[0] : params.cwd;
+  // Fleet/rail TaskComposer hands its typed text over as ?title= — the composer IS the
+  // new-session affordance (HANDOFF rule 6), so that text must survive the navigation.
+  const requestedTitle = Array.isArray(params.title) ? params.title[0] : params.title;
   const { activeServerId } = useAuth();
   const projects = useProjects();
   const initializedProjectKey = useRef<string | null>(null);
   const projectSelectionRevision = useRef(0);
   const [cwd, setCwd] = useState(requestedCwd ?? "");
-  const [task, setTask] = useState("");
+  const [task, setTask] = useState(requestedTitle ?? "");
   const [model, setModel] = useState("");
   const [worktree, setWorktree] = useState(true);
   const [temper, setTemper] = useState<Temper>("Ask");

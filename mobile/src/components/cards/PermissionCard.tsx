@@ -21,6 +21,7 @@ import { CommitIcon } from "../ds/CommitIcon";
 import { HeatEdge } from "../ds/HeatEdge";
 import { useToast } from "../ds/ToastHost";
 import { haptics } from "../../lib/haptics";
+import { useHotkey } from "../../lib/shortcuts";
 import { type Diff, type RemoteInput } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -119,6 +120,11 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
       haptics.mergeConflict();
     }, ACK_TIMEOUT_MS);
   };
+
+  // Hearth keyboard map: bare `y`/`n` answer the pending permission on web/desktop (no-op on
+  // native, and the registry already ignores bare keys while a text field is focused).
+  useHotkey("y", () => respond(true), { meta: false });
+  useHotkey("n", () => respond(false), { meta: false });
 
   return (
     <Animated.View style={styles.wrap} exiting={reduced ? undefined : FadeOut.duration(durations.gentle)}>
