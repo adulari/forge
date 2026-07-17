@@ -408,4 +408,14 @@ CREATE TABLE IF NOT EXISTS imported_session (
     worktree_path     TEXT NOT NULL,
     imported_at       INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
+
+-- Local split-brain guard for encrypted workspace handoff. These rows are authoritative on this
+-- machine and deliberately survive ordinary archive/unarchive operations.
+CREATE TABLE IF NOT EXISTS anywhere_handoff_session_state (
+    session_id  TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE,
+    capsule_id  TEXT NOT NULL UNIQUE,
+    state       TEXT NOT NULL CHECK (state IN
+                  ('source_pending', 'source_transferred', 'destination_quarantined')),
+    updated_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
 "#;

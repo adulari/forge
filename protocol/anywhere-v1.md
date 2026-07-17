@@ -123,7 +123,9 @@ characters in JSON and URL paths.
   envelope to the device that submitted the command, or `404` while no acknowledgement exists.
 
 The complete encoded command and acknowledgement envelopes are each capped at 256 KiB; commands
-cannot use temporary relay blobs. `expires_at_ms` is exactly `created_at_ms + 86,400,000`, and the
+cannot use temporary relay blobs. V1 durable commands may dispatch allowlisted HTTP bridge routes,
+but must reject the live `WebSocket` route; live streams require the connected relay and are not
+restart-safe durable work. `expires_at_ms` is exactly `created_at_ms + 86,400,000`, and the
 command and any acknowledgement expire no later than 24 hours after command creation. Expired
 objects return `404` and cannot be recreated under the same `command_id`.
 
@@ -140,8 +142,10 @@ Both POST routes are idempotent: retrying the same account, authenticated princi
 with different bytes is a conflict. A command has at most one immutable acknowledgement, so a later
 different acknowledgement is also a conflict. The service atomically applies the envelope replay
 rule `(account_id, sender_device_id, key_epoch, sequence)` before storing either kind. Clients still
-persist sequence state and treat a fetched command or acknowledgement they have already accepted as
-a replay rather than dispatching it again.
+persist the command ID and exact `(sender_device_id, key_epoch, sequence)` tuple before dispatch and
+treat either value being reused inconsistently as a replay. Because queued commands may be fetched
+out of sequence order, clients must not reject a valid lower sequence solely through a scalar
+high-water mark.
 
 Creating new commands requires a `trialing`, `active`, or `grace` entitlement. Listing and fetching
 already queued commands, posting their acknowledgements, and fetching existing acknowledgements
@@ -151,6 +155,94 @@ The service stores and returns exact signed envelope bytes. It may inspect authe
 envelope headers, ciphertext size, timestamps, expiry, and service-assigned IDs for routing and
 policy enforcement, but it never receives payload keys and cannot read `BridgeRequest`,
 `CommandAcknowledgement`, daemon credentials, tokens, filenames, prompt content, or error detail.
+
+### Encrypted replay shares
+
+A replay share is one immutable `kind=7`, `recipient_kind=share` envelope. The controller generates
+an independent random 32-byte share key and random 16-byte `share_id`; the envelope's
+`recipient_id` is that ID and `key_epoch` is zero because the share key is not an Account Data Key.
+The normal device sequence is durably reserved before sealing. Plaintext is canonical JSON
+`{version:1,session_id,created_at_ms,expires_at_ms,replay}` where `replay` is the existing public
+Forge replay JSON export. The fixed header and plaintext expiry authenticate the selected object,
+routing ID, sender, creation time, and lifetime.
+
+The metadata-only storage API is:
+
+- Authenticated `POST /v1/shares` with `Idempotency-Key` and JSON
+  `{version:1,share_id,ciphertext_bytes,ciphertext_sha256,expires_in_seconds}` reserves the
+  client-generated ID and returns `{version:1,share_id,upload_url,expires_at_ms}`. The hash is
+  base64url without padding over the complete encoded envelope. Allowed lifetimes are exactly
+  `86400`, `604800`, or `2592000` seconds.
+- `PUT upload_url` with `Content-Type: application/vnd.forge-anywhere` uploads the exact envelope.
+  Clients retain those bytes and reuse them on retry; they never reseal an accepted share ID.
+- Authenticated `POST /v1/shares/{share_id}/complete` with `Idempotency-Key` verifies size, SHA-256,
+  signature, header identity, `kind=7`, `recipient_kind=share`, matching recipient ID, zero key
+  epoch, and sequence replay protection. It returns
+  `{version:1,share_id,url_path:"/shares/{share_id}",expires_at_ms}`. Final expiry is the
+  authenticated envelope `created_at_ms` plus the requested lifetime; creation time must be within
+  five minutes of reservation time.
+- Unauthenticated `GET /v1/shares/{share_id}` returns the exact envelope with
+  `Content-Type: application/vnd.forge-anywhere`. Authenticated
+  `DELETE /v1/shares/{share_id}` with `Idempotency-Key` revokes it.
+
+The encoded envelope is capped at 32 MiB. Reservations, completion, and revocation are idempotent:
+reusing a key with different metadata or bytes is a conflict. Shares require `trialing`, `active`,
+or `grace` entitlement to create. Retrieval and revocation remain available until expiry in
+read-only states. The service stores no plaintext and never receives the share key. The public URL
+is constructed from the validated `url_path` and appends `#key=BASE64URL_KEY`; URI fragments are
+not included in HTTP requests. Query parameters, alternate origins, and service-provided fragment
+content are rejected.
+
+### Encrypted workspace capsules
+
+A handoff capsule is one complete signed `kind=6`, `recipient_kind=host` envelope encrypted with
+the current Account Data Key epoch. Its plaintext is the gzip capsule archive: authenticated
+manifest, portable session export, `git diff --binary --full-index BASE`, and safe non-ignored
+untracked regular files. The encrypted manifest includes the base commit, source branch hint, and a
+SHA-256 fingerprint of a user/transport-independent lowercase host/path identity (HTTPS, SSH URI,
+and SCP-style remotes normalize identically, with `.git` removed); repository names,
+paths, filenames, diffs, prompts, and session contents never appear in service metadata.
+
+The metadata-only service API is:
+
+- `POST /v1/capsules` with `Idempotency-Key` and `CapsuleReserveRequest` creates a client-selected
+  32-hex `capsule_id`, reserves encrypted storage, and creates a pending authoritative session
+  lease. It returns `CapsuleReservation` with an optional presigned `upload_url` and required
+  headers. Retrying identical metadata returns the same reservation; different metadata conflicts.
+- `PUT upload_url` uploads the exact envelope. `POST /v1/capsules/{id}/complete` with
+  `Idempotency-Key` and `CapsuleCompletion` verifies its base64url SHA-256, length, signature,
+  routing header, kind, epoch, and replay tuple before making it claimable.
+- `GET /v1/capsules?destination_host_id=HOST&state=ready` returns `PendingCapsuleList` to that
+  authenticated host only. `POST /v1/capsules/{id}/claim` with `Idempotency-Key` returns a one-time
+  `CapsuleClaim` download URL; another account or host receives `404`.
+- `GET /v1/capsules/{id}` returns `CapsuleStatus` to the source device. `POST
+  /v1/capsules/{id}/acknowledge` with `Idempotency-Key` accepts only a signed, encrypted kind-6
+  `CapsuleAcknowledgement` addressed back to the source device. The response exposes the active
+  destination signing public key so the source verifies the acknowledgement before accepting it.
+  Its signed header has `flags & 0x0001 != 0` exactly for an encrypted `accepted` outcome and zero
+  for every failure. The service transfers the lease only for that authenticated flag; the source
+  decrypts the acknowledgement and rejects any flag/plaintext mismatch.
+- `DELETE /v1/capsules/{id}` atomically races cancellation against acknowledgement and returns the
+  authoritative `CapsuleStatus`: `cancelled` means the source lease did not move; `acknowledged`
+  retains the encrypted acknowledgement and must still be verified by the source. It never
+  overwrites an acknowledged result. A lost, empty, or otherwise ambiguous response is
+  indeterminate and the local source stays frozen. Completed and unconsumed capsules expire after
+  24 hours.
+
+Before its first network request, the source durably stores the exact envelope, hashes,
+destination, and stable reserve/complete/cancel idempotency keys, then marks the local session
+`source_pending`. Pending and transferred-away sessions reject resume and direct/LAN/managed input;
+a retry resumes the same capsule identity. Before creation, the source verifies the daemon session
+is idle and has a checkpoint. Active tool calls must finish or be explicitly interrupted. Unsafe
+paths, `.git`, links, devices, secret-like files, ignored caches/build output, files over 25 MiB,
+and archives over 100 MiB abort with the full visible rejection list. The destination verifies
+repository identity and base availability, makes an isolated detached worktree, applies with
+`git apply --3way --binary`, extracts without following links, and imports or remaps the session id
+into a hidden quarantine. It activates the destination only after the service accepts the
+acknowledgement. Terminal rejection or expiry rolls the quarantine back without blocking later
+capsules. Any import failure removes the new worktree/session and sends an encrypted actionable
+failure acknowledgement. The service transfers the lease only after an authenticated `accepted`
+acknowledgement; upload, claim, timeout, or failure leaves the service-side source lease unchanged.
 
 ## Cryptography and key epochs
 

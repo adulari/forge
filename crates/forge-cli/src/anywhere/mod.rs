@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use crate::{AnywhereCmd, ShareExpiry};
 
 mod connector;
+mod handoff;
+mod share;
 mod sync;
 
 pub(crate) fn spawn_connector(local_base_url: String) -> tokio::task::JoinHandle<()> {
@@ -55,9 +57,75 @@ struct LocalState {
     #[serde(default)]
     accepted_sequences: BTreeMap<String, u64>,
     #[serde(default)]
+    command_journal: BTreeMap<String, CommandJournalEntry>,
+    #[serde(default)]
+    capsule_journal: BTreeMap<String, CapsuleJournalEntry>,
+    #[serde(default)]
+    capsule_replay: BTreeMap<String, String>,
+    #[serde(default)]
+    outgoing_handoffs: BTreeMap<String, OutgoingHandoffEntry>,
+    #[serde(default)]
     refresh_lease_id: Option<String>,
     #[serde(default)]
     refresh_lease_until_ms: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct CapsuleJournalEntry {
+    acknowledgement_envelope: String,
+    idempotency_key: String,
+    #[serde(default)]
+    imported_session_id: Option<String>,
+    #[serde(default)]
+    worktree_path: Option<String>,
+    #[serde(default)]
+    acked_at_ms: Option<u64>,
+    #[serde(default)]
+    terminal_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct OutgoingHandoffEntry {
+    capsule_id: String,
+    destination_host_id: String,
+    destination_name: String,
+    envelope_path: String,
+    request: forge_anywhere_protocol::CapsuleReserveRequest,
+    reserve_idempotency_key: String,
+    complete_idempotency_key: String,
+    cancel_idempotency_key: String,
+    #[serde(default)]
+    accepted_destination_session_id: Option<String>,
+    created_at_ms: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct CommandJournalEntry {
+    sender_device_id: String,
+    key_epoch: u32,
+    sequence: u64,
+    created_at_ms: u64,
+    expires_at_ms: u64,
+    ciphertext_bytes: u64,
+    #[serde(flatten)]
+    state: CommandJournalState,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum CommandJournalState {
+    DispatchStarted {
+        worker_id: String,
+        lease_until_ms: u64,
+    },
+    AcknowledgementReady {
+        result: forge_anywhere_protocol::CommandResult,
+        envelope: String,
+        idempotency_key: String,
+    },
+    Acked {
+        acked_at_ms: u64,
+    },
 }
 
 impl LocalState {
@@ -140,7 +208,8 @@ impl StateStore {
             let _ = std::fs::remove_file(&temp);
             return Err(error).context("install Forge Anywhere state");
         }
-        set_owner_file_permissions(&self.path)
+        set_owner_file_permissions(&self.path)?;
+        sync_directory(parent).context("sync Forge Anywhere state directory")
     }
 
     fn update<F>(&self, update: F) -> Result<LocalState>
@@ -195,6 +264,16 @@ impl StateStore {
         fs2::FileExt::unlock(&lock).context("unlock Anywhere state")?;
         result
     }
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -475,6 +554,10 @@ async fn login() -> Result<()> {
         host_id: None,
         next_sequence,
         accepted_sequences: BTreeMap::new(),
+        command_journal: BTreeMap::new(),
+        capsule_journal: BTreeMap::new(),
+        capsule_replay: BTreeMap::new(),
+        outgoing_handoffs: BTreeMap::new(),
         refresh_lease_id: None,
         refresh_lease_until_ms: 0,
     };
@@ -732,12 +815,12 @@ async fn status() -> Result<()> {
     Ok(())
 }
 
-async fn share(_session: &str, _expires: ShareExpiry) -> Result<()> {
-    bail!("encrypted replay export is not enabled in this build yet; no share was created")
+async fn share(session: &str, expires: ShareExpiry) -> Result<()> {
+    share::create(session, expires).await
 }
 
-async fn handoff(_session: &str, _to: &str) -> Result<()> {
-    bail!("workspace handoff is not enabled in this build yet; no session or lease was changed")
+async fn handoff(session: &str, to: &str) -> Result<()> {
+    handoff::create(session, to).await
 }
 
 async fn devices(revoke: Option<&str>) -> Result<()> {

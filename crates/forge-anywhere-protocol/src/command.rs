@@ -11,6 +11,8 @@ pub const MAX_COMMAND_ENVELOPE_BYTES: u64 = 256 * 1024;
 
 /// Lifetime of a queued command and its acknowledgement.
 pub const COMMAND_EXPIRY_MS: u64 = 24 * 60 * 60 * 1000;
+/// Current version of the metadata-only queued command list.
+pub const COMMAND_LIST_VERSION: u8 = 1;
 
 /// Opaque service-assigned identifier for one durable command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -140,6 +142,9 @@ pub struct QueuedCommandList {
 
 impl QueuedCommandList {
     pub fn validate(&self) -> Result<(), CommandMetadataError> {
+        if self.version != COMMAND_LIST_VERSION {
+            return Err(CommandMetadataError::UnsupportedVersion(self.version));
+        }
         self.commands
             .iter()
             .try_for_each(QueuedCommandMetadata::validate)
@@ -149,6 +154,8 @@ impl QueuedCommandList {
 /// Validation failure in relay-visible queued command metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CommandMetadataError {
+    #[error("unsupported queued command list version {0}")]
+    UnsupportedVersion(u8),
     #[error("queued command expiry must be exactly 24 hours after creation")]
     InvalidExpiry,
     #[error("queued command ciphertext size {0} is outside the allowed range")]
@@ -238,6 +245,20 @@ mod tests {
         assert_eq!(
             invalid.validate(),
             Err(CommandMetadataError::InvalidCiphertextSize(0))
+        );
+    }
+
+    #[test]
+    fn queued_command_list_rejects_unsupported_version() {
+        let list = QueuedCommandList {
+            version: COMMAND_LIST_VERSION + 1,
+            commands: vec![metadata()],
+        };
+        assert_eq!(
+            list.validate(),
+            Err(CommandMetadataError::UnsupportedVersion(
+                COMMAND_LIST_VERSION + 1
+            ))
         );
     }
 

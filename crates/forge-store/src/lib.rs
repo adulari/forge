@@ -7,6 +7,7 @@ use std::path::Path;
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, TimeZone};
 use forge_types::{Role, TaskTier, ToolCall, Usage, Visibility};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 mod memory;
@@ -17,7 +18,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 21;
+const SCHEMA_VERSION: i64 = 17;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -760,101 +761,6 @@ fn migration_0017(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Forge Anywhere local sync outbox and imported-session provenance.
-fn migration_0018(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS anywhere_sync_state (
-             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-             enabled INTEGER NOT NULL CHECK (enabled IN (0, 1))
-         );
-         INSERT OR IGNORE INTO anywhere_sync_state (singleton, enabled) VALUES (1, 0);
-         CREATE TABLE IF NOT EXISTS sync_journal (
-             id INTEGER PRIMARY KEY AUTOINCREMENT,
-             record_kind TEXT NOT NULL,
-             stable_id TEXT NOT NULL,
-             operation TEXT NOT NULL CHECK (operation IN ('upsert', 'tombstone')),
-             revision INTEGER NOT NULL,
-             logical_clock INTEGER NOT NULL,
-             content_hash BLOB NOT NULL,
-             payload BLOB NOT NULL,
-             created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-             uploaded_at INTEGER,
-             UNIQUE(record_kind, stable_id, revision)
-         );
-         CREATE INDEX IF NOT EXISTS idx_sync_journal_pending
-             ON sync_journal(id) WHERE uploaded_at IS NULL;
-         CREATE TABLE IF NOT EXISTS imported_session (
-             session_id TEXT PRIMARY KEY REFERENCES session(id) ON DELETE CASCADE,
-             source_session_id TEXT NOT NULL,
-             source_device_id BLOB NOT NULL CHECK (length(source_device_id) = 16),
-             capsule_id TEXT NOT NULL UNIQUE,
-             base_commit TEXT NOT NULL,
-             worktree_path TEXT NOT NULL,
-             imported_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-         );",
-    )
-}
-
-/// Durable encrypted upload material prevents a retry from resealing one logical revision with a
-/// different nonce after the service has already reserved its object identity.
-fn migration_0019(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS anywhere_sync_upload (
-             journal_id INTEGER PRIMARY KEY REFERENCES sync_journal(id) ON DELETE CASCADE,
-             envelope BLOB NOT NULL,
-             ciphertext_sha256 BLOB NOT NULL CHECK (length(ciphertext_sha256) = 32),
-             created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-         );",
-    )
-}
-
-/// Decrypted remote records are staged transactionally with the service cursor. Applying them to
-/// primary domain tables is deliberately separate so conflict policy can never skip a cursor.
-fn migration_0020(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS anywhere_sync_cursor (
-             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-             cursor INTEGER NOT NULL
-         );
-         INSERT OR IGNORE INTO anywhere_sync_cursor (singleton, cursor) VALUES (1, 0);
-         CREATE TABLE IF NOT EXISTS anywhere_sync_remote (
-             cursor INTEGER PRIMARY KEY,
-             sender_device_id BLOB NOT NULL CHECK (length(sender_device_id) = 16),
-             record_kind TEXT NOT NULL,
-             stable_id TEXT NOT NULL,
-             operation TEXT NOT NULL CHECK (operation IN ('upsert', 'tombstone')),
-             revision INTEGER NOT NULL,
-             logical_clock INTEGER NOT NULL,
-             base_hash BLOB,
-             content_hash BLOB NOT NULL CHECK (length(content_hash) = 32),
-             payload BLOB NOT NULL,
-             received_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-             UNIQUE(record_kind, stable_id, revision)
-         );",
-    )
-}
-
-/// Durable application outcomes and last-writer metadata for staged mutable records.
-fn migration_0021(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS anywhere_sync_apply (
-             cursor INTEGER PRIMARY KEY REFERENCES anywhere_sync_remote(cursor) ON DELETE CASCADE,
-             state TEXT NOT NULL CHECK (state IN ('applied', 'superseded', 'conflict')),
-             detail TEXT,
-             applied_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-         );
-         CREATE TABLE IF NOT EXISTS anywhere_sync_materialized (
-             record_kind TEXT NOT NULL,
-             stable_id TEXT NOT NULL,
-             operation TEXT NOT NULL CHECK (operation IN ('upsert', 'tombstone')),
-             logical_clock INTEGER NOT NULL,
-             sender_device_id BLOB NOT NULL CHECK (length(sender_device_id) = 16),
-             content_hash BLOB NOT NULL CHECK (length(content_hash) = 32),
-             PRIMARY KEY(record_kind, stable_id)
-         );",
-    )
-}
-
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -875,10 +781,6 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0015,
     migration_0016,
     migration_0017,
-    migration_0018,
-    migration_0019,
-    migration_0020,
-    migration_0021,
 ];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
@@ -886,7 +788,15 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
 /// by a newer build, rather than silently misreading it.
 fn run_migrations(conn: &Connection) -> Result<()> {
     debug_assert_eq!(MIGRATIONS.len() as i64, SCHEMA_VERSION);
-    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let mut current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    // Forge Anywhere's additive tables briefly consumed versions 18-21 on its unreleased feature
+    // branch. They now live in the idempotent base schema so the previous public binary can open a
+    // database after rollback. Repair only those known pre-release markers; truly newer versions
+    // remain rejected below.
+    if (18..=21).contains(&current) {
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        current = SCHEMA_VERSION;
+    }
     if current > SCHEMA_VERSION {
         return Err(StoreError::SchemaTooNew {
             found: current,
@@ -1523,6 +1433,51 @@ pub struct ImportedSessionMetadata {
     pub capsule_id: String,
     pub base_commit: String,
     pub worktree_path: String,
+    pub imported_at: i64,
+}
+
+/// Portable session state embedded in an end-to-end encrypted handoff capsule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffSessionExport {
+    pub version: u8,
+    pub source_session_id: String,
+    pub title: Option<String>,
+    pub permission_mode: String,
+    pub messages: Vec<HandoffMessage>,
+    pub checkpoints: Vec<HandoffCheckpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffMessage {
+    pub seq: i64,
+    pub role: Role,
+    pub content: String,
+    pub model: Option<String>,
+    pub tool_calls: Vec<ToolCall>,
+    pub tool_call_id: Option<String>,
+    pub visibility: Visibility,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffCheckpoint {
+    pub label: Option<String>,
+    pub seq: i64,
+}
+
+/// Result of importing a portable handoff session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffSessionImport {
+    pub session_id: String,
+    pub remapped: bool,
+}
+
+/// Source provenance supplied while atomically importing a handoff session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffImportProvenance {
+    pub source_device_id: [u8; 16],
+    pub capsule_id: String,
+    pub base_commit: String,
     pub imported_at: i64,
 }
 
@@ -2674,6 +2629,345 @@ impl Store {
         )
         .optional()
         .map_err(StoreError::from)
+    }
+
+    /// Load handoff provenance by capsule id for crash-safe destination retries.
+    pub fn imported_session_by_capsule(
+        &self,
+        capsule_id: &str,
+    ) -> Result<Option<ImportedSessionMetadata>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT session_id, source_session_id, source_device_id, capsule_id, base_commit,
+                    worktree_path, imported_at
+             FROM imported_session WHERE capsule_id = ?1",
+            [capsule_id],
+            |row| {
+                let source_device_id: Vec<u8> = row.get(2)?;
+                let source_device_id = source_device_id.try_into().map_err(|_| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Blob,
+                        "source device id is not 16 bytes".into(),
+                    )
+                })?;
+                Ok(ImportedSessionMetadata {
+                    session_id: row.get(0)?,
+                    source_session_id: row.get(1)?,
+                    source_device_id,
+                    capsule_id: row.get(3)?,
+                    base_commit: row.get(4)?,
+                    worktree_path: row.get(5)?,
+                    imported_at: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::from)
+    }
+
+    /// Export the portable transcript and rewind points needed to resume a session after handoff.
+    /// Provider credentials, indexes, caches, schedules, and queue internals are never included.
+    pub fn export_handoff_session(&self, session_id: &str) -> Result<HandoffSessionExport> {
+        let conn = self.lock()?;
+        let (title, permission_mode) = conn
+            .query_row(
+                "SELECT title, permission_mode FROM session WHERE id = ?1",
+                [session_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::InvalidValue("handoff session does not exist".into()))?;
+        let messages = {
+            let mut statement = conn.prepare(
+                "SELECT seq, role, content, model, tool_calls_json, tool_call_id, visibility, active
+                 FROM message WHERE session_id = ?1 ORDER BY seq, created_at",
+            )?;
+            let rows = statement
+                .query_map([session_id], |row| {
+                    let role: String = row.get(1)?;
+                    let tool_calls_json: Option<String> = row.get(4)?;
+                    Ok(HandoffMessage {
+                        seq: row.get(0)?,
+                        role: Role::parse(&role).unwrap_or(Role::User),
+                        content: row.get(2)?,
+                        model: row.get(3)?,
+                        tool_calls: tool_calls_json
+                            .and_then(|json| serde_json::from_str(&json).ok())
+                            .unwrap_or_default(),
+                        tool_call_id: row.get(5)?,
+                        visibility: Visibility::parse(&row.get::<_, String>(6)?),
+                        active: row.get(7)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let checkpoints = {
+            let mut statement = conn.prepare(
+                "SELECT label, seq FROM checkpoint WHERE session_id = ?1 ORDER BY seq, created_at",
+            )?;
+            let rows = statement
+                .query_map([session_id], |row| {
+                    Ok(HandoffCheckpoint {
+                        label: row.get(0)?,
+                        seq: row.get(1)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        Ok(HandoffSessionExport {
+            version: 1,
+            source_session_id: session_id.to_owned(),
+            title,
+            permission_mode,
+            messages,
+            checkpoints,
+        })
+    }
+
+    /// Import a handoff session into `worktree_path`, remapping its id on a local collision.
+    /// The complete import is one transaction; callers record provenance before acknowledging the
+    /// remote lease and delete the session/worktree if that later step fails.
+    pub fn import_handoff_session(
+        &self,
+        export: &HandoffSessionExport,
+        worktree_path: &str,
+    ) -> Result<HandoffSessionImport> {
+        self.import_handoff_session_inner(export, worktree_path, None)
+    }
+
+    /// Atomically import a handoff session and its immutable capsule provenance.
+    pub fn import_handoff_session_with_provenance(
+        &self,
+        export: &HandoffSessionExport,
+        worktree_path: &str,
+        provenance: &HandoffImportProvenance,
+    ) -> Result<HandoffSessionImport> {
+        self.import_handoff_session_inner(export, worktree_path, Some(provenance))
+    }
+
+    fn import_handoff_session_inner(
+        &self,
+        export: &HandoffSessionExport,
+        worktree_path: &str,
+        provenance: Option<&HandoffImportProvenance>,
+    ) -> Result<HandoffSessionImport> {
+        if export.version != 1 || export.source_session_id.trim().is_empty() {
+            return Err(StoreError::InvalidValue(
+                "unsupported or invalid handoff session export".into(),
+            ));
+        }
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let collision = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session WHERE id = ?1)",
+            [&export.source_session_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let session_id = if collision {
+            forge_types::new_id()
+        } else {
+            export.source_session_id.clone()
+        };
+        transaction.execute(
+            "INSERT INTO session
+                 (id, title, cwd, permission_mode, worktree_path, archived)
+             VALUES (?1, ?2, ?3, ?4, ?3, ?5)",
+            (
+                &session_id,
+                &export.title,
+                worktree_path,
+                &export.permission_mode,
+                i64::from(provenance.is_some()),
+            ),
+        )?;
+        for message in &export.messages {
+            let id = forge_types::new_id();
+            let tool_calls_json = if message.tool_calls.is_empty() {
+                None
+            } else {
+                Some(
+                    serde_json::to_string(&message.tool_calls)
+                        .map_err(|error| StoreError::Json(error.to_string()))?,
+                )
+            };
+            transaction.execute(
+                "INSERT INTO message
+                     (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id,
+                      visibility, active)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    id,
+                    session_id,
+                    message.seq,
+                    message.role.as_str(),
+                    message.content,
+                    message.model,
+                    tool_calls_json,
+                    message.tool_call_id,
+                    message.visibility.as_str(),
+                    message.active,
+                ],
+            )?;
+        }
+        for checkpoint in &export.checkpoints {
+            transaction.execute(
+                "INSERT INTO checkpoint (id, session_id, label, seq) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    forge_types::new_id(),
+                    session_id,
+                    checkpoint.label,
+                    checkpoint.seq,
+                ],
+            )?;
+        }
+        if let Some(provenance) = provenance {
+            transaction.execute(
+                "INSERT INTO imported_session
+                     (session_id, source_session_id, source_device_id, capsule_id, base_commit,
+                      worktree_path, imported_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (
+                    &session_id,
+                    &export.source_session_id,
+                    provenance.source_device_id.as_slice(),
+                    &provenance.capsule_id,
+                    &provenance.base_commit,
+                    worktree_path,
+                    provenance.imported_at,
+                ),
+            )?;
+            transaction.execute(
+                "INSERT INTO anywhere_handoff_session_state (session_id, capsule_id, state)
+                 VALUES (?1, ?2, 'destination_quarantined')",
+                (&session_id, &provenance.capsule_id),
+            )?;
+        }
+        append_session_snapshot(&transaction, &session_id)?;
+        transaction.commit()?;
+        Ok(HandoffSessionImport {
+            session_id,
+            remapped: collision,
+        })
+    }
+
+    /// Remove a locally imported session during a failed handoff acknowledgement rollback.
+    pub fn rollback_handoff_session(&self, session_id: &str) -> Result<bool> {
+        Ok(self
+            .lock()?
+            .execute("DELETE FROM session WHERE id = ?1", [session_id])?
+            > 0)
+    }
+
+    /// Freeze a source session before any handoff network request. Repeating the exact operation
+    /// is idempotent; a different capsule cannot replace a pending or transferred operation.
+    pub fn begin_source_handoff(&self, session_id: &str, capsule_id: &str) -> Result<()> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = transaction
+            .query_row(
+                "SELECT capsule_id, state FROM anywhere_handoff_session_state WHERE session_id=?1",
+                [session_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        match existing {
+            Some((existing, state)) if existing == capsule_id && state == "source_pending" => {}
+            Some(_) => {
+                return Err(StoreError::InvalidValue(
+                    "session already has a different or terminal handoff".into(),
+                ));
+            }
+            None => {
+                let exists: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session WHERE id=?1)",
+                    [session_id],
+                    |row| row.get(0),
+                )?;
+                if !exists {
+                    return Err(StoreError::InvalidValue(
+                        "handoff session does not exist".into(),
+                    ));
+                }
+                transaction.execute(
+                    "INSERT INTO anywhere_handoff_session_state (session_id, capsule_id, state)
+                     VALUES (?1, ?2, 'source_pending')",
+                    (session_id, capsule_id),
+                )?;
+            }
+        }
+        transaction.execute("UPDATE session SET archived=1 WHERE id=?1", [session_id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Confirm that the service cancelled a pending source handoff and make it resumable again.
+    pub fn cancel_source_handoff(&self, session_id: &str, capsule_id: &str) -> Result<bool> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let removed = transaction.execute(
+            "DELETE FROM anywhere_handoff_session_state
+             WHERE session_id=?1 AND capsule_id=?2 AND state='source_pending'",
+            (session_id, capsule_id),
+        )? > 0;
+        if removed {
+            transaction.execute("UPDATE session SET archived=0 WHERE id=?1", [session_id])?;
+        }
+        transaction.commit()?;
+        Ok(removed)
+    }
+
+    /// Permanently record that this source lease moved away. Ordinary archive controls cannot
+    /// resurrect a transferred session.
+    pub fn mark_source_handoff_transferred(
+        &self,
+        session_id: &str,
+        capsule_id: &str,
+    ) -> Result<()> {
+        let changed = self.lock()?.execute(
+            "UPDATE anywhere_handoff_session_state
+             SET state='source_transferred', updated_at=strftime('%s','now')
+             WHERE session_id=?1 AND capsule_id=?2 AND state IN
+                   ('source_pending','source_transferred')",
+            (session_id, capsule_id),
+        )?;
+        if changed == 0 {
+            return Err(StoreError::InvalidValue(
+                "source handoff is not pending on this machine".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Activate a quarantined destination only after the service accepted its acknowledgement.
+    pub fn activate_destination_handoff(&self, session_id: &str, capsule_id: &str) -> Result<()> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let removed = transaction.execute(
+            "DELETE FROM anywhere_handoff_session_state
+             WHERE session_id=?1 AND capsule_id=?2 AND state='destination_quarantined'",
+            (session_id, capsule_id),
+        )?;
+        if removed == 0 {
+            return Err(StoreError::InvalidValue(
+                "destination handoff is not quarantined".into(),
+            ));
+        }
+        transaction.execute("UPDATE session SET archived=0 WHERE id=?1", [session_id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Whether local input/resume must be rejected to preserve a handoff lease invariant.
+    pub fn session_handoff_blocked(&self, session_id: &str) -> Result<bool> {
+        let blocked: bool = self.lock()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM anywhere_handoff_session_state WHERE session_id=?1)",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        Ok(blocked)
     }
 
     /// Export machine-agnostic model metadata (health cooldowns, context windows, pricing) as JSON,
@@ -4708,7 +5002,18 @@ impl Store {
     /// an explicit choice to bring it back, so it should reappear in [`Store::list_sessions`]
     /// and the fleet list once it stops running again, rather than immediately re-hiding itself.
     pub fn unarchive_session(&self, session_id: &str) -> Result<()> {
-        self.lock()?.execute(
+        let conn = self.lock()?;
+        let blocked: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM anywhere_handoff_session_state WHERE session_id=?1)",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        if blocked {
+            return Err(StoreError::InvalidValue(
+                "session is frozen by an Anywhere handoff".into(),
+            ));
+        }
+        conn.execute(
             "UPDATE session SET archived = 0 WHERE id = ?1",
             [session_id],
         )?;
@@ -9320,5 +9625,110 @@ mod tests {
                 .is_some_and(|age| age <= 1),
             "a direct header observation, not a bridge alias, owns the refresh gate"
         );
+    }
+
+    #[test]
+    fn handoff_session_import_remaps_collisions_and_rolls_back_cleanly() {
+        let source = Store::open_in_memory().unwrap();
+        let session_id = source.create_session("/source", "default").unwrap();
+        source
+            .add_message(&session_id, 0, Role::User, "portable", None)
+            .unwrap();
+        source.add_checkpoint(&session_id, Some("idle"), 0).unwrap();
+        let export = source.export_handoff_session(&session_id).unwrap();
+
+        let destination = Store::open_in_memory().unwrap();
+        destination
+            .ensure_session(&session_id, "/existing", "default")
+            .unwrap();
+        let imported = destination
+            .import_handoff_session(&export, "/handoffs/capsule")
+            .unwrap();
+        assert!(imported.remapped);
+        assert_ne!(imported.session_id, session_id);
+        assert_eq!(
+            destination.load_messages(&imported.session_id).unwrap()[0].content,
+            "portable"
+        );
+        assert_eq!(
+            destination
+                .list_checkpoints(&imported.session_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(destination
+            .rollback_handoff_session(&imported.session_id)
+            .unwrap());
+        assert!(!destination.session_exists(&imported.session_id).unwrap());
+        assert!(destination.session_exists(&session_id).unwrap());
+    }
+
+    #[test]
+    fn source_handoff_freeze_survives_archive_controls_and_transfer() {
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/repo", "default").unwrap();
+        let capsule = "ab".repeat(16);
+
+        store.begin_source_handoff(&session, &capsule).unwrap();
+        assert!(store.session_handoff_blocked(&session).unwrap());
+        assert!(store.session_archived(&session).unwrap());
+        assert!(store.unarchive_session(&session).is_err());
+        store.begin_source_handoff(&session, &capsule).unwrap();
+
+        store
+            .mark_source_handoff_transferred(&session, &capsule)
+            .unwrap();
+        assert!(!store.cancel_source_handoff(&session, &capsule).unwrap());
+        assert!(store.unarchive_session(&session).is_err());
+        assert!(store.session_archived(&session).unwrap());
+    }
+
+    #[test]
+    fn cancelled_source_handoff_becomes_resumable() {
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/repo", "default").unwrap();
+        let capsule = "cd".repeat(16);
+        store.begin_source_handoff(&session, &capsule).unwrap();
+        assert!(store.cancel_source_handoff(&session, &capsule).unwrap());
+        assert!(!store.session_handoff_blocked(&session).unwrap());
+        assert!(!store.session_archived(&session).unwrap());
+        store.unarchive_session(&session).unwrap();
+    }
+
+    #[test]
+    fn destination_import_stays_quarantined_until_explicit_activation() {
+        let source = Store::open_in_memory().unwrap();
+        let source_session = source.create_session("/source", "default").unwrap();
+        source
+            .add_message(&source_session, 0, Role::User, "portable", None)
+            .unwrap();
+        let export = source.export_handoff_session(&source_session).unwrap();
+        let destination = Store::open_in_memory().unwrap();
+        let capsule = "ef".repeat(16);
+        let imported = destination
+            .import_handoff_session_with_provenance(
+                &export,
+                "/handoffs/quarantine",
+                &HandoffImportProvenance {
+                    source_device_id: [7; 16],
+                    capsule_id: capsule.clone(),
+                    base_commit: "1".repeat(40),
+                    imported_at: 1,
+                },
+            )
+            .unwrap();
+        assert!(destination.session_archived(&imported.session_id).unwrap());
+        assert!(destination
+            .session_handoff_blocked(&imported.session_id)
+            .unwrap());
+        assert!(destination.unarchive_session(&imported.session_id).is_err());
+        destination
+            .activate_destination_handoff(&imported.session_id, &capsule)
+            .unwrap();
+        assert!(!destination.session_archived(&imported.session_id).unwrap());
+        assert!(!destination
+            .session_handoff_blocked(&imported.session_id)
+            .unwrap());
     }
 }

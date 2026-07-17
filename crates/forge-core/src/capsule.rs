@@ -45,6 +45,15 @@ pub struct CapsuleFile {
     pub sha256: String,
 }
 
+/// Encrypted repository identity used to reject importing into an unrelated checkout.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapsuleRepository {
+    /// Hash of the configured origin URL after removing URL user-info. Empty when no origin exists.
+    pub origin_fingerprint: String,
+    /// Source branch name when `HEAD` is attached. Informational; imports remain detached.
+    pub head_ref: Option<String>,
+}
+
 /// Authenticated capsule metadata. The whole archive is encrypted by the Anywhere protocol before
 /// it leaves the host; hashes additionally detect local archive corruption before import.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +61,8 @@ pub struct CapsuleManifest {
     pub version: u8,
     pub session_id: String,
     pub base_commit: String,
+    #[serde(default)]
+    pub repository: CapsuleRepository,
     pub created_at_ms: u64,
     pub session_sha256: String,
     pub patch_sha256: String,
@@ -95,6 +106,8 @@ pub enum CapsuleError {
     InvalidArchive(String),
     #[error("capsule base commit is invalid or unavailable: {0}")]
     InvalidBase(String),
+    #[error("capsule belongs to a different repository")]
+    RepositoryMismatch,
     #[error("destination worktree already exists: {0}")]
     DestinationExists(PathBuf),
     #[error("git {operation} failed: {details}")]
@@ -151,6 +164,7 @@ pub fn export_capsule(
         })?;
     let base_commit = git_text(&repo_root, &["rev-parse", "HEAD"], "resolve HEAD")?;
     validate_commit(&base_commit)?;
+    let repository = repository_metadata(&repo_root);
     let patch = git_bytes(
         &repo_root,
         &["diff", "--binary", "--full-index", "HEAD", "--"],
@@ -209,6 +223,7 @@ pub fn export_capsule(
         version: 1,
         session_id: session_id.to_owned(),
         base_commit,
+        repository,
         created_at_ms: now_ms(),
         session_sha256: hash_bytes(session_json),
         patch_sha256: hash_bytes(&patch),
@@ -259,6 +274,81 @@ pub fn export_capsule(
         manifest,
         compressed_bytes,
     })
+}
+
+/// Return the privacy-preserving repository identity used by capsule preflight and import.
+#[must_use]
+pub fn repository_metadata(repo_root: &Path) -> CapsuleRepository {
+    let origin_fingerprint = Command::new("git")
+        .current_dir(repo_root)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|origin| origin.trim().to_owned())
+        .filter(|origin| !origin.is_empty())
+        .map(|origin| hash_bytes(canonical_remote_identity(&origin).as_bytes()))
+        .unwrap_or_default();
+    let head_ref = Command::new("git")
+        .current_dir(repo_root)
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty());
+    CapsuleRepository {
+        origin_fingerprint,
+        head_ref,
+    }
+}
+
+fn strip_url_userinfo(origin: &str) -> String {
+    let Some((scheme, rest)) = origin.split_once("://") else {
+        return origin.to_owned();
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let (authority, suffix) = rest.split_at(authority_end);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{scheme}://{host}{suffix}")
+}
+
+fn canonical_remote_identity(origin: &str) -> String {
+    let stripped = strip_url_userinfo(origin.trim());
+    let (authority, path) = if let Some((_, rest)) = stripped.split_once("://") {
+        let slash = rest.find('/').unwrap_or(rest.len());
+        let (authority, path) = rest.split_at(slash);
+        (authority, path.trim_start_matches('/'))
+    } else if let Some((authority, path)) = stripped.split_once(':') {
+        // Git's SCP syntax (`git@host:owner/repo`) has no URI scheme. Do not reinterpret local
+        // Windows drive paths as remotes.
+        if authority.contains('@') || authority.contains('.') || authority == "localhost" {
+            (
+                authority
+                    .rsplit_once('@')
+                    .map_or(authority, |(_, host)| host),
+                path,
+            )
+        } else {
+            return stripped;
+        }
+    } else {
+        return stripped;
+    };
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host)
+        .trim_end_matches(['/', ':'])
+        .to_ascii_lowercase();
+    let mut path = path.trim_matches('/').to_ascii_lowercase();
+    if path.ends_with(".git") {
+        path.truncate(path.len() - 4);
+    }
+    format!("{host}/{path}")
 }
 
 /// Import a capsule into a new isolated detached worktree.
@@ -314,6 +404,13 @@ pub fn import_capsule(
             operation: "canonicalizing the destination repository",
             source,
         })?;
+    let local_repository = repository_metadata(&repo_root);
+    if !manifest.repository.origin_fingerprint.is_empty()
+        && !local_repository.origin_fingerprint.is_empty()
+        && manifest.repository.origin_fingerprint != local_repository.origin_fingerprint
+    {
+        return Err(CapsuleError::RepositoryMismatch);
+    }
     git_output(
         &repo_root,
         &[
@@ -743,30 +840,182 @@ fn install_untracked(
     for file in files {
         let relative = Path::new(&file.path);
         let source = staging.join("untracked").join(relative);
-        let target = destination.join(relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| CapsuleError::Io {
-                operation: "creating imported untracked directories",
-                source,
-            })?;
-        }
-        let mut input = File::open(&source).map_err(|source| CapsuleError::Io {
-            operation: "opening a staged untracked file",
-            source,
-        })?;
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&target)
-            .map_err(|source| CapsuleError::Io {
-                operation: "creating an imported untracked file",
-                source,
-            })?;
-        std::io::copy(&mut input, &mut output).map_err(|source| CapsuleError::Io {
-            operation: "copying an imported untracked file",
-            source,
-        })?;
+        #[cfg(unix)]
+        install_untracked_file_unix(destination, relative, &source)?;
+        #[cfg(not(unix))]
+        install_untracked_file_portable(destination, relative, &source)?;
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn install_untracked_file_unix(
+    destination: &Path,
+    relative: &Path,
+    source: &Path,
+) -> Result<(), CapsuleError> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+
+    fn component(value: &std::ffi::OsStr) -> std::io::Result<CString> {
+        CString::new(value.as_bytes())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))
+    }
+
+    fn open_directory(path: &Path) -> std::io::Result<OwnedFd> {
+        let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL")
+        })?;
+        // SAFETY: `path` is a live C string and the returned descriptor is immediately owned.
+        let fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            // SAFETY: `fd` was freshly returned by `open` and has one owner.
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    }
+
+    fn open_child_directory(parent: &OwnedFd, name: &std::ffi::OsStr) -> std::io::Result<OwnedFd> {
+        let name = component(name)?;
+        // SAFETY: `name` and `parent` remain live for the call; the returned fd is owned below.
+        let mut fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+            // SAFETY: arguments are valid and mkdirat does not retain either pointer/fd.
+            if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(error);
+                }
+            }
+            // SAFETY: same invariants as the first `openat` call.
+            fd = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+        }
+        if fd < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            // SAFETY: `fd` was freshly returned by `openat` and has one owner.
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    }
+
+    let mut directory = open_directory(destination).map_err(|source| CapsuleError::Io {
+        operation: "opening the detached worktree without following links",
+        source,
+    })?;
+    if let Some(parent) = relative.parent() {
+        for part in parent.components() {
+            let std::path::Component::Normal(name) = part else {
+                return Err(CapsuleError::InvalidArchive(
+                    "untracked path contains a non-normal component".into(),
+                ));
+            };
+            directory =
+                open_child_directory(&directory, name).map_err(|source| CapsuleError::Io {
+                    operation: "opening imported untracked directories without following links",
+                    source,
+                })?;
+        }
+    }
+    let name = relative
+        .file_name()
+        .ok_or_else(|| CapsuleError::InvalidArchive("untracked path has no file name".into()))?;
+    let name = component(name).map_err(|source| CapsuleError::Io {
+        operation: "validating an imported untracked file name",
+        source,
+    })?;
+    // SAFETY: the directory and C string remain live; O_NOFOLLOW/O_EXCL prevent link traversal
+    // and replacement of an existing patch-created path.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(CapsuleError::Io {
+            operation: "creating an imported untracked file without following links",
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    // SAFETY: `fd` was freshly returned by `openat` and has one owner.
+    let mut output = unsafe { File::from_raw_fd(fd) };
+    let mut input = open_nofollow(source).map_err(|source| CapsuleError::Io {
+        operation: "opening a staged untracked file",
+        source,
+    })?;
+    std::io::copy(&mut input, &mut output).map_err(|source| CapsuleError::Io {
+        operation: "copying an imported untracked file",
+        source,
+    })?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn install_untracked_file_portable(
+    destination: &Path,
+    relative: &Path,
+    source: &Path,
+) -> Result<(), CapsuleError> {
+    let target = destination.join(relative);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| CapsuleError::Io {
+            operation: "creating imported untracked directories",
+            source,
+        })?;
+        let mut cursor = destination.to_path_buf();
+        for component in relative.parent().into_iter().flat_map(Path::components) {
+            cursor.push(component);
+            if std::fs::symlink_metadata(&cursor)
+                .map_err(|source| CapsuleError::Io {
+                    operation: "validating imported untracked directories",
+                    source,
+                })?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(CapsuleError::InvalidArchive(
+                    "untracked parent is a symbolic link".into(),
+                ));
+            }
+        }
+    }
+    let mut input = open_nofollow(source).map_err(|source| CapsuleError::Io {
+        operation: "opening a staged untracked file",
+        source,
+    })?;
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+        .map_err(|source| CapsuleError::Io {
+            operation: "creating an imported untracked file",
+            source,
+        })?;
+    std::io::copy(&mut input, &mut output).map_err(|source| CapsuleError::Io {
+        operation: "copying an imported untracked file",
+        source,
+    })?;
     Ok(())
 }
 
@@ -1001,6 +1250,24 @@ mod tests {
         temp
     }
 
+    fn archive(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = File::create(path).expect("create test capsule");
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        for (name, bytes) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_mode(0o600);
+            header.set_size(bytes.len() as u64);
+            header.set_path(name).expect("set archive path");
+            header.set_cksum();
+            builder
+                .append(&header, *bytes)
+                .expect("append archive entry");
+        }
+        let encoder = builder.into_inner().expect("finish tar");
+        encoder.finish().expect("finish gzip");
+    }
+
     #[test]
     fn binary_patch_and_untracked_file_round_trip() {
         let repo = repository();
@@ -1092,5 +1359,160 @@ mod tests {
         .expect_err("symlink must reject export");
         assert!(matches!(error, CapsuleError::UnsafeFiles(_)));
         assert!(!capsule.exists());
+    }
+
+    #[test]
+    fn invalid_patch_removes_the_detached_worktree() {
+        let repo = repository();
+        let base_commit = git_text(repo.path(), &["rev-parse", "HEAD"], "test head").unwrap();
+        let session = br#"{"session":"portable"}"#;
+        let patch = b"this is not a git patch\n";
+        let manifest = CapsuleManifest {
+            version: 1,
+            session_id: "session-conflict".into(),
+            base_commit,
+            repository: repository_metadata(repo.path()),
+            created_at_ms: now_ms(),
+            session_sha256: hash_bytes(session),
+            patch_sha256: hash_bytes(patch),
+            untracked: Vec::new(),
+        };
+        let manifest = serde_json::to_vec(&manifest).unwrap();
+        let capsule = repo.path().join("conflict.fany");
+        archive(
+            &capsule,
+            &[
+                ("manifest.json", &manifest),
+                ("session.json", session),
+                ("workspace.patch", patch),
+            ],
+        );
+        let destination = repo.path().join("failed-import");
+        let error = import_capsule(
+            repo.path(),
+            &capsule,
+            &destination,
+            CapsuleLimits::default(),
+        )
+        .expect_err("invalid patch must fail");
+        assert!(matches!(
+            error,
+            CapsuleError::Git {
+                operation: "apply capsule patch",
+                ..
+            }
+        ));
+        assert!(!destination.exists(), "failed worktree must be rolled back");
+    }
+
+    #[test]
+    fn repository_url_credentials_are_never_preserved() {
+        assert_eq!(
+            strip_url_userinfo("https://token:secret@example.test/owner/repo.git"),
+            "https://example.test/owner/repo.git"
+        );
+        assert_eq!(
+            strip_url_userinfo("git@example.test:owner/repo.git"),
+            "git@example.test:owner/repo.git"
+        );
+        let canonical = canonical_remote_identity("https://Token@Example.Test/Owner/Repo.git/");
+        assert_eq!(canonical, "example.test/owner/repo");
+        assert_eq!(
+            canonical_remote_identity("ssh://git@example.test/owner/repo.git"),
+            canonical
+        );
+        assert_eq!(
+            canonical_remote_identity("git@EXAMPLE.TEST:OWNER/REPO.git"),
+            canonical
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn patch_created_symlink_parent_cannot_escape_worktree() {
+        use std::os::unix::fs::symlink;
+
+        let repo = repository();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), repo.path().join("link")).unwrap();
+        git(repo.path(), &["add", "link"]);
+        let patch = git_bytes(
+            repo.path(),
+            &["diff", "--cached", "--binary", "--full-index", "HEAD"],
+            "build symlink patch",
+        )
+        .unwrap();
+        git(repo.path(), &["reset", "--hard", "-q", "HEAD"]);
+        let _ = std::fs::remove_file(repo.path().join("link"));
+
+        let session = br#"{"session":"portable"}"#;
+        let payload = b"must stay contained";
+        let manifest = CapsuleManifest {
+            version: 1,
+            session_id: "session-link-escape".into(),
+            base_commit: git_text(repo.path(), &["rev-parse", "HEAD"], "test head").unwrap(),
+            repository: repository_metadata(repo.path()),
+            created_at_ms: now_ms(),
+            session_sha256: hash_bytes(session),
+            patch_sha256: hash_bytes(&patch),
+            untracked: vec![CapsuleFile {
+                path: "link/owned.txt".into(),
+                size: payload.len() as u64,
+                sha256: hash_bytes(payload),
+            }],
+        };
+        let manifest = serde_json::to_vec(&manifest).unwrap();
+        let capsule = repo.path().join("symlink-parent.fany");
+        archive(
+            &capsule,
+            &[
+                ("manifest.json", &manifest),
+                ("session.json", session),
+                ("workspace.patch", &patch),
+                ("untracked/link/owned.txt", payload),
+            ],
+        );
+        let destination = repo.path().join("symlink-parent-import");
+        import_capsule(
+            repo.path(),
+            &capsule,
+            &destination,
+            CapsuleLimits::default(),
+        )
+        .expect_err("patch-created symlink parent must be rejected");
+        assert!(!outside.path().join("owned.txt").exists());
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn traversal_archive_is_rejected_before_git_is_touched() {
+        let repo = repository();
+        let capsule = repo.path().join("traversal.fany");
+        let file = File::create(&capsule).unwrap();
+        let encoder = GzEncoder::new(file, Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o600);
+        header.set_size(1);
+        header.set_path("placeholder").unwrap();
+        let raw = header.as_mut_bytes();
+        raw[..100].fill(0);
+        raw[..9].copy_from_slice(b"../escape");
+        header.set_cksum();
+        builder.append(&header, &b"x"[..]).unwrap();
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        let destination = repo.path().join("traversal-import");
+        let error = import_capsule(
+            repo.path(),
+            &capsule,
+            &destination,
+            CapsuleLimits::default(),
+        )
+        .expect_err("traversal must fail");
+        assert!(matches!(error, CapsuleError::InvalidArchive(_)));
+        assert!(!destination.exists());
+        assert!(!repo.path().join("escape").exists());
     }
 }

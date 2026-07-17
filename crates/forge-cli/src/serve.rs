@@ -1108,6 +1108,23 @@ async fn create_session(
 
     let session_cwd = worktree.clone().unwrap_or_else(|| cwd.clone());
     let is_resume = req.resume.is_some();
+    if let Some(session_id) = req.resume.as_deref() {
+        match state.store.session_handoff_blocked(session_id) {
+            Ok(true) => {
+                return err_response(
+                    axum::http::StatusCode::CONFLICT,
+                    "session is frozen by an Anywhere handoff and cannot be resumed",
+                )
+            }
+            Err(error) => {
+                return err_response(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("handoff state check failed: {error}"),
+                )
+            }
+            Ok(false) => {}
+        }
+    }
     // Idempotent resume: if a driver for this id is ALREADY live — a double-tapped Resume, two
     // phones, or a resume racing an archive's tail flush — return the existing handle instead of
     // spawning a SECOND driver for the same id. Two drivers for one session both call
@@ -1753,6 +1770,21 @@ async fn ws_handler(
     Query(params): Query<WsParams>,
     ws: WebSocketUpgrade,
 ) -> Response {
+    match state.store.session_handoff_blocked(&params.session) {
+        Ok(true) => {
+            return err_response(
+                axum::http::StatusCode::CONFLICT,
+                "session is frozen by an Anywhere handoff",
+            )
+        }
+        Err(error) => {
+            return err_response(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("handoff state check failed: {error}"),
+            )
+        }
+        Ok(false) => {}
+    }
     let Some(handle) = state.registry.get(&params.session).await else {
         return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
     };

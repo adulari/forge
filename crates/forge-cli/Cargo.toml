@@ -73,6 +73,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 flate2 = "1.1.9"
 tar = "0.4.46"
+tempfile = "3"
 rcgen = "0.14"
 rand = "0.10"
 # Actionable Web Push (docs/features/remote-control.md §2d): RFC 8291 aes128gcm payload
@@ -95,7 +96,6 @@ forge-voice = { workspace = true, features = ["microphone"] }
 
 [dev-dependencies]
 portable-pty = "0.9"
-tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 # In-memory secret_store for tests (resolver=2: does not leak into production builds).
 forge-config = { workspace = true, features = ["test-secrets"] }
