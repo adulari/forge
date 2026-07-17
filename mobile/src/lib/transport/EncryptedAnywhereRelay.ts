@@ -29,6 +29,8 @@ export interface AnywhereRelayCredentials {
   accountId: Uint8Array;
   deviceId: Uint8Array;
   dataKey: Uint8Array;
+  /** Resolves retained historical epoch keys after account key rotation. */
+  dataKeyForEpoch?(keyEpoch: number): Promise<Uint8Array>;
   keyEpoch: number;
   signingPrivateKey: Uint8Array;
   accessToken(): Promise<string>;
@@ -305,15 +307,13 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
     if (decoded.metadata.recipientKind !== 1 || !equal(decoded.metadata.recipientId, this.credentials.deviceId)) {
       throw new Error("Anywhere relay blob is not addressed to this device");
     }
-    if (decoded.metadata.keyEpoch !== this.credentials.keyEpoch) {
-      throw new Error("Anywhere relay blob uses an unavailable key epoch");
-    }
+    const dataKey = await this.dataKeyForEpoch(decoded.metadata.keyEpoch);
     const senderId = bytesToHex(decoded.metadata.senderDeviceId);
     if (senderId !== expectedSenderId) {
       throw new Error("Anywhere relay blob sender does not match its reference envelope");
     }
     const signingKey = await this.credentials.signingPublicKey(senderId);
-    const opened = openEnvelope(envelope, this.credentials.dataKey, signingKey);
+    const opened = openEnvelope(envelope, dataKey, signingKey);
     return {
       plaintext: opened.plaintext,
       sequence: opened.metadata.sequence,
@@ -400,12 +400,10 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       if (decoded.metadata.recipientKind !== 1 || !equal(decoded.metadata.recipientId, this.credentials.deviceId)) {
         throw new Error("Anywhere response is not addressed to this device");
       }
-      if (decoded.metadata.keyEpoch !== this.credentials.keyEpoch) {
-        throw new Error("Anywhere response uses an unavailable key epoch");
-      }
+      const dataKey = await this.dataKeyForEpoch(decoded.metadata.keyEpoch);
       const senderId = bytesToHex(decoded.metadata.senderDeviceId);
       const signingKey = await this.credentials.signingPublicKey(senderId);
-      const opened = openEnvelope(bytes, this.credentials.dataKey, signingKey);
+      const opened = openEnvelope(bytes, dataKey, signingKey);
       let prepared: PreparedDelivery;
       if (opened.metadata.kind === 2) prepared = await this.prepareBridgeResponse(opened.plaintext, senderId);
       else if (opened.metadata.kind === 3) prepared = await this.prepareStreamFrame(opened.plaintext, senderId);
@@ -424,6 +422,14 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       this.connectionClosed(asError(error));
       connection?.close(1002, "invalid encrypted relay frame");
     }
+  }
+
+  private async dataKeyForEpoch(keyEpoch: number): Promise<Uint8Array> {
+    if (keyEpoch === this.credentials.keyEpoch) return this.credentials.dataKey;
+    const dataKey = await this.credentials.dataKeyForEpoch?.(keyEpoch);
+    if (!dataKey) throw new Error("Anywhere response uses an unavailable key epoch");
+    assertLength("Account Data Key", dataKey, 32);
+    return dataKey;
   }
 
   private async prepareBridgeResponse(plaintext: Uint8Array, senderId: string): Promise<PreparedDelivery> {

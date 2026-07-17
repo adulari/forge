@@ -306,6 +306,29 @@ pub(crate) enum AnywhereCmd {
         #[arg(long, value_enum, default_value_t = ShareExpiry::Hours24)]
         expires: ShareExpiry,
     },
+    /// Queue an encrypted create-session job for a host, even when its live relay is offline.
+    Job {
+        /// Destination host id, unique id prefix, or unique name.
+        #[arg(long, value_name = "HOST")]
+        to: String,
+        /// Working directory on the destination host (encrypted end to end).
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<String>,
+        /// Optional session title (encrypted end to end).
+        #[arg(long)]
+        title: Option<String>,
+        /// Optional model pin (encrypted end to end).
+        #[arg(long)]
+        model: Option<String>,
+        /// Initial permission mode.
+        #[arg(long, value_name = "MODE")]
+        temper: Option<String>,
+        /// Create the session in an isolated git worktree.
+        #[arg(long)]
+        worktree: bool,
+    },
+    /// Retry exact queued job ciphertext and poll categorical host acknowledgements.
+    Jobs,
     /// List enrolled devices, or atomically revoke one and rotate the data-key epoch.
     Devices {
         /// Device id to revoke. Omit to list devices.

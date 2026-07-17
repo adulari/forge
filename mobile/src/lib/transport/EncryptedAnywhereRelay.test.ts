@@ -14,12 +14,13 @@ afterEach(() => {
 });
 
 describe("EncryptedAnywhereRelay", () => {
-  it("tickets, encrypts a typed request, and authenticates the host response", async () => {
+  it("tickets, encrypts a typed request, and authenticates a retained-epoch host response", async () => {
     const accountId = new Uint8Array(16).fill(0x11);
     const controllerId = new Uint8Array(16).fill(0x22);
     const hostId = new Uint8Array(16).fill(0x33);
     const hostDeviceId = new Uint8Array(16).fill(0x44);
     const dataKey = new Uint8Array(32).fill(0x55);
+    const retainedDataKey = new Uint8Array(32).fill(0x56);
     const controllerSeed = new Uint8Array(32).fill(0x66);
     const hostSeed = new Uint8Array(32).fill(0x77);
     let nextSequence = 2n;
@@ -29,6 +30,10 @@ describe("EncryptedAnywhereRelay", () => {
       accountId,
       deviceId: controllerId,
       dataKey,
+      dataKeyForEpoch: async (epoch) => {
+        expect(epoch).toBe(2);
+        return retainedDataKey;
+      },
       keyEpoch: 3,
       signingPrivateKey: controllerSeed,
       accessToken: async () => "access-token",
@@ -83,7 +88,7 @@ describe("EncryptedAnywhereRelay", () => {
             senderDeviceId: hostDeviceId,
             recipientKind: 1,
             recipientId: controllerId,
-            keyEpoch: 3,
+            keyEpoch: 2,
             sequence: 9n,
             createdAtMs: 1n,
             nonce: new Uint8Array(24).fill(0x99),
@@ -94,7 +99,7 @@ describe("EncryptedAnywhereRelay", () => {
             headers: [["content-type", "application/json"]],
             body: [91, 93],
           })),
-          dataKey,
+          retainedDataKey,
           hostSeed,
         );
         expect(decodeEnvelope(response).metadata.recipientId).toEqual(controllerId);

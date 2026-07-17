@@ -111,6 +111,7 @@ struct VerifiedCommand {
 struct PendingAcknowledgement {
     envelope: Vec<u8>,
     idempotency_key: String,
+    result: CommandResult,
 }
 
 enum CommandJournalStatus {
@@ -376,9 +377,7 @@ impl DurableCommandClient<'_> {
         prune_command_journal(self.store, now)?;
         match command_journal_status(self.store, &metadata, self.worker_id, now)? {
             CommandJournalStatus::AcknowledgementReady(acknowledgement) => {
-                return self
-                    .post_and_mark_acked(metadata.command_id, &acknowledgement)
-                    .await;
+                return self.post_and_mark_acked(&metadata, &acknowledgement).await;
             }
             CommandJournalStatus::DispatchUncertain => {
                 let acknowledgement = ensure_command_acknowledgement(
@@ -389,9 +388,7 @@ impl DurableCommandClient<'_> {
                         retryable: false,
                     },
                 )?;
-                return self
-                    .post_and_mark_acked(metadata.command_id, &acknowledgement)
-                    .await;
+                return self.post_and_mark_acked(&metadata, &acknowledgement).await;
             }
             CommandJournalStatus::Busy | CommandJournalStatus::Acked => return Ok(()),
             CommandJournalStatus::Claimed => {
@@ -404,9 +401,7 @@ impl DurableCommandClient<'_> {
         let verified = verify_command_envelope(&metadata, &encoded, self.identity, self.devices)?;
         match begin_command(self.store, &metadata, &verified, self.worker_id, now_ms())? {
             CommandJournalStatus::AcknowledgementReady(acknowledgement) => {
-                return self
-                    .post_and_mark_acked(metadata.command_id, &acknowledgement)
-                    .await;
+                return self.post_and_mark_acked(&metadata, &acknowledgement).await;
             }
             CommandJournalStatus::DispatchUncertain => {
                 let acknowledgement = ensure_command_acknowledgement(
@@ -417,9 +412,7 @@ impl DurableCommandClient<'_> {
                         retryable: false,
                     },
                 )?;
-                return self
-                    .post_and_mark_acked(metadata.command_id, &acknowledgement)
-                    .await;
+                return self.post_and_mark_acked(&metadata, &acknowledgement).await;
             }
             CommandJournalStatus::Busy | CommandJournalStatus::Acked => return Ok(()),
             CommandJournalStatus::Claimed => {}
@@ -447,8 +440,7 @@ impl DurableCommandClient<'_> {
         };
         let acknowledgement =
             ensure_command_acknowledgement(self.store, metadata.command_id, result)?;
-        self.post_and_mark_acked(metadata.command_id, &acknowledgement)
-            .await
+        self.post_and_mark_acked(&metadata, &acknowledgement).await
     }
 
     async fn fetch_command(&self, metadata: &QueuedCommandMetadata) -> Result<Vec<u8>> {
@@ -526,12 +518,25 @@ impl DurableCommandClient<'_> {
 
     async fn post_and_mark_acked(
         &self,
-        command_id: CommandId,
+        metadata: &QueuedCommandMetadata,
         acknowledgement: &PendingAcknowledgement,
     ) -> Result<()> {
-        self.post_acknowledgement(command_id, acknowledgement)
+        self.post_acknowledgement(metadata.command_id, acknowledgement)
             .await?;
-        mark_command_acked(self.store, command_id, now_ms())
+        let event = match acknowledgement.result {
+            CommandResult::Success => super::push::GenericPushEvent::JobCompleted,
+            CommandResult::Error { .. } => super::push::GenericPushEvent::JobFailed,
+        };
+        super::push::request_best_effort(
+            self.http,
+            self.service_url,
+            self.access_token,
+            Some(&hex::encode(metadata.sender_device_id)),
+            event,
+            &format!("command-{}-result", metadata.command_id),
+        )
+        .await;
+        mark_command_acked(self.store, metadata.command_id, now_ms())
     }
 }
 
@@ -652,15 +657,16 @@ fn journal_entry_status(
         }
         CommandJournalState::DispatchStarted { .. } => Ok(CommandJournalStatus::DispatchUncertain),
         CommandJournalState::AcknowledgementReady {
+            result,
             envelope,
             idempotency_key,
-            ..
         } => Ok(CommandJournalStatus::AcknowledgementReady(
             PendingAcknowledgement {
                 envelope: URL_SAFE_NO_PAD
                     .decode(envelope)
                     .context("decode persisted command acknowledgement")?,
                 idempotency_key: idempotency_key.clone(),
+                result: *result,
             },
         )),
         CommandJournalState::Acked { .. } => Ok(CommandJournalStatus::Acked),
@@ -748,15 +754,16 @@ fn ensure_command_acknowledgement(
         .context("durable command is missing from its journal")?;
     match &entry.state {
         CommandJournalState::AcknowledgementReady {
+            result,
             envelope,
             idempotency_key,
-            ..
         } => {
             return Ok(PendingAcknowledgement {
                 envelope: URL_SAFE_NO_PAD
                     .decode(envelope)
                     .context("decode persisted command acknowledgement")?,
                 idempotency_key: idempotency_key.clone(),
+                result: *result,
             });
         }
         CommandJournalState::Acked { .. } => bail!("durable command is already acknowledged"),
@@ -776,6 +783,7 @@ fn ensure_command_acknowledgement(
     let pending = PendingAcknowledgement {
         envelope,
         idempotency_key: idempotency_key(),
+        result,
     };
     let mut persisted = pending.clone();
     store.update(|state| {
@@ -785,15 +793,16 @@ fn ensure_command_acknowledgement(
             .context("durable command disappeared from its journal")?;
         match &entry.state {
             CommandJournalState::AcknowledgementReady {
+                result,
                 envelope,
                 idempotency_key,
-                ..
             } => {
                 persisted = PendingAcknowledgement {
                     envelope: URL_SAFE_NO_PAD
                         .decode(envelope)
                         .context("decode persisted command acknowledgement")?,
                     idempotency_key: idempotency_key.clone(),
+                    result: *result,
                 };
             }
             CommandJournalState::DispatchStarted { .. } => {

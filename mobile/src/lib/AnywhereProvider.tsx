@@ -37,6 +37,22 @@ import {
   type PendingAnywhereKeys,
 } from "./anywhereCrypto";
 import { clearAnywhereHostCache, readAnywhereHostCache, writeAnywhereHostCache } from "./anywhereHostCache";
+import {
+  AnywhereJobClient,
+  type CreateSessionJob,
+  type PendingRemoteJob,
+} from "./anywhereJobs";
+import { anywhereJobStore } from "./anywhereJobStore";
+import {
+  promoteCurrentDeviceWrap,
+  type AnywhereCurrentDeviceWrap,
+} from "./anywhereEpochRefresh";
+import {
+  pairingDetails,
+  parsePairingChallenge,
+  preparePairingApproval,
+  submitPairingApproval,
+} from "./anywherePairing";
 import { acceptReplaySequences } from "./anywhereReplayWindow";
 import {
   clearAnywherePushState,
@@ -86,6 +102,7 @@ interface AnywhereContextValue {
   recoverySample: readonly number[];
   error: string | null;
   pushStatus: AnywherePushStatus;
+  remoteJobs: PendingRemoteJob[];
   /** Returns a fresh short-lived token for first-party Anywhere clients; never persist it. */
   accessToken(): Promise<string>;
   startLogin(): Promise<void>;
@@ -96,7 +113,10 @@ interface AnywhereContextValue {
   openBillingPortal(): Promise<void>;
   revokeDevice(deviceId: string, recoveryWords: string): Promise<void>;
   revokeHost(hostId: string): Promise<void>;
+  approvePairing(challenge: string): Promise<void>;
   selectHost(hostId: string): void;
+  queueRemoteJob(input: Omit<CreateSessionJob, "hostDeviceId">): Promise<PendingRemoteJob>;
+  refreshRemoteJobs(): Promise<void>;
   enablePush(): Promise<void>;
   disablePush(): Promise<void>;
   logout(): Promise<void>;
@@ -104,6 +124,7 @@ interface AnywhereContextValue {
 
 const AnywhereContext = createContext<AnywhereContextValue | null>(null);
 const credentialStore = anywhereCredentialStore();
+const jobStore = anywhereJobStore();
 
 export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
@@ -120,6 +141,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const [recoverySetup, setRecoverySetup] = useState<RecoverySetup | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pushStatus, setPushStatus] = useState<AnywherePushStatus>("unsubscribed");
+  const [remoteJobs, setRemoteJobs] = useState<PendingRemoteJob[]>([]);
   const mutationQueue = useRef(Promise.resolve());
   const revocationRecoveryAttempt = useRef<string | null>(null);
 
@@ -179,6 +201,15 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       accountId: bytesFromHex(credentials.accountIdHex),
       deviceId: bytesFromHex(credentials.deviceIdHex),
       dataKey: bytesFromHex(credentials.accountDataKeyHex),
+      dataKeyForEpoch: async (epoch) => {
+        const latest = credentialsRef.current;
+        if (!latest) throw new Error("Forge Anywhere is not signed in");
+        const encoded = epoch === latest.keyEpoch
+          ? latest.accountDataKeyHex
+          : latest.dataKeyEpochs?.[String(epoch)];
+        if (!encoded) throw new Error("Anywhere response uses an unavailable key epoch");
+        return bytesFromHex(encoded);
+      },
       keyEpoch: credentials.keyEpoch,
       signingPrivateKey: bytesFromHex(credentials.signingPrivateKeyHex),
       accessToken,
@@ -221,22 +252,70 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   }, [accessToken, credentials?.accountDataKeyHex, credentials?.accountIdHex, credentials?.deviceIdHex, credentials?.keyEpoch, credentials?.serviceUrl, credentials?.signingPrivateKeyHex]);
   /* eslint-enable react-hooks/refs */
 
+  const jobClient = useMemo(
+    // Runtime callbacks dereference protected credentials only when a queued operation runs.
+    // eslint-disable-next-line react-hooks/refs
+    () => runtime ? new AnywhereJobClient(runtime, jobStore) : null,
+    [runtime],
+  );
+
+  const refreshRemoteJobs = useCallback(async () => {
+    if (!jobClient) { setRemoteJobs([]); return; }
+    setRemoteJobs(await jobClient.resume());
+  }, [jobClient]);
+
+  useEffect(() => {
+    if (!jobClient || phase !== "ready") return;
+    let cancelled = false;
+    void jobClient.resume().then((jobs) => { if (!cancelled) setRemoteJobs(jobs); }).catch(() => {
+      // Exact ciphertext remains protected in the local queue for the next reconnect.
+    });
+    return () => { cancelled = true; };
+  }, [jobClient, phase]);
+
+  const queueRemoteJob = useCallback(async (
+    input: Omit<CreateSessionJob, "hostDeviceId">,
+  ): Promise<PendingRemoteJob> => {
+    if (!jobClient) throw new Error("Forge Anywhere is not signed in");
+    const host = hosts.find((candidate) => candidate.id === input.hostId);
+    if (!host) throw new Error("Select an enrolled destination host");
+    try {
+      setError(null);
+      const job = await jobClient.queueCreateSession({ ...input, hostDeviceId: host.device_id });
+      setRemoteJobs(await jobStore.load());
+      return job;
+    } catch (reason) {
+      // An offline send is still durably queued; surface that state without deleting ciphertext.
+      setRemoteJobs(await jobStore.load().catch(() => []));
+      setError(message(reason));
+      throw reason;
+    }
+  }, [hosts, jobClient]);
+
   const refresh = useCallback(async () => {
     if (!credentialsRef.current) return;
     try {
       const token = await accessToken();
       const serviceUrl = credentialsRef.current?.serviceUrl ?? SERVICE_URL;
-      const [nextAccount, nextSubscription, hostList, deviceList] = await Promise.all([
+      const [nextAccount, nextSubscription, hostList, deviceList, currentWrap] = await Promise.all([
         anywhereRequest<AnywhereAccountStatus>(serviceUrl, "/v1/me", {}, token),
         anywhereRequest<AnywhereSubscription>(serviceUrl, "/v1/billing/subscription", {}, token),
         anywhereRequest<{ hosts: AnywhereHost[] }>(serviceUrl, "/v1/hosts", {}, token),
         anywhereRequest<{ devices: AnywhereDevice[] }>(serviceUrl, "/v1/devices", {}, token),
+        anywhereRequest<AnywhereCurrentDeviceWrap>(serviceUrl, "/v1/key-epochs/current/wraps/device", {}, token),
       ]);
       const publicKeys = Object.fromEntries(deviceList.devices.map((device) => [device.id, bytesToHex(fromBase64Url(device.signing_public_key))]));
+      mutationQueue.current = mutationQueue.current.catch(() => undefined).then(async () => {
+        const before = credentialsRef.current;
+        if (!before) return;
+        // Validate a rotation against the previously trusted signer set. Only after the key is
+        // accepted do we replace the cached enrollment keys returned by the same refresh.
+        const promoted = promoteCurrentDeviceWrap(before, currentWrap);
+        const next = { ...promoted, signingPublicKeys: publicKeys };
+        if (JSON.stringify(before) !== JSON.stringify(next)) await persistCredentials(next);
+      });
+      await mutationQueue.current;
       const latest = credentialsRef.current;
-      if (latest && JSON.stringify(latest.signingPublicKeys) !== JSON.stringify(publicKeys)) {
-        await persistCredentials({ ...latest, signingPublicKeys: publicKeys });
-      }
       setAccount(nextAccount);
       setSubscription(nextSubscription);
       setHosts(hostList.hosts);
@@ -519,6 +598,28 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     }
   }, [accessToken, refresh]);
 
+  const approvePairing = useCallback(async (encodedChallenge: string) => {
+    const current = credentialsRef.current;
+    if (!current) throw new Error("Forge Anywhere is not signed in");
+    const serviceUrl = current.serviceUrl ?? SERVICE_URL;
+    const challenge = parsePairingChallenge(encodedChallenge, serviceUrl);
+    const token = await accessToken();
+    const details = await pairingDetails(serviceUrl, token, challenge);
+    let approval: ReturnType<typeof preparePairingApproval> | null = null;
+    mutationQueue.current = mutationQueue.current.catch(() => undefined).then(async () => {
+      const latest = credentialsRef.current;
+      if (!latest) throw new Error("Forge Anywhere is not signed in");
+      const sequence = BigInt(latest.nextSequence);
+      approval = preparePairingApproval(latest, challenge, details, sequence);
+      // Reserve before approval so a crash can never reuse this signed epoch/sequence tuple.
+      await persistCredentials({ ...latest, nextSequence: (sequence + 1n).toString() });
+    });
+    await mutationQueue.current;
+    if (!approval) throw new Error("Forge Anywhere pairing approval could not be prepared");
+    await submitPairingApproval(serviceUrl, token, challenge.pairing_id, approval);
+    await refresh();
+  }, [accessToken, persistCredentials, refresh]);
+
   const revokeDevice = useCallback(async (deviceId: string, recoveryWords: string) => {
     try {
       setError(null);
@@ -594,7 +695,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     });
     credentialsRef.current = null;
     setPushStatus("unsubscribed");
-    setCredentials(null); setAccount(null); setSubscription(null); setHosts([]); setDevices([]); setFlow(null); setPending(null); setRecoverySetup(null); setError(null);
+    setCredentials(null); setAccount(null); setSubscription(null); setHosts([]); setDevices([]); setRemoteJobs([]); setFlow(null); setPending(null); setRecoverySetup(null); setError(null);
     if (current) await clearAnywhereHostCache(current.accountIdHex).catch(() => {
       // Protected credentials are already cleared; stale metadata can be overwritten next login.
     });
@@ -605,9 +706,10 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const value: AnywhereContextValue = {
     phase, credentials, account, subscription, hosts, devices, flow,
     recoveryWords: recoverySetup?.words ?? null,
-    recoverySample: [3, 11, 20], error, pushStatus,
+    recoverySample: [3, 11, 20], error, pushStatus, remoteJobs,
     accessToken, startLogin, confirmNewRecovery, recoverExisting, refresh, checkout, openBillingPortal,
-    revokeDevice, revokeHost, selectHost, enablePush, disablePush, logout,
+    revokeDevice, revokeHost, selectHost, approvePairing, queueRemoteJob, refreshRemoteJobs,
+    enablePush, disablePush, logout,
   };
   return <AnywhereContext.Provider value={value}>{children}</AnywhereContext.Provider>;
 }

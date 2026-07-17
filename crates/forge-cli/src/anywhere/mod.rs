@@ -26,11 +26,44 @@ use crate::{AnywhereCmd, ShareExpiry};
 
 mod connector;
 mod handoff;
+mod jobs;
+mod push;
 mod share;
 mod sync;
 
 pub(crate) fn spawn_connector(local_base_url: String) -> tokio::task::JoinHandle<()> {
     connector::spawn(local_base_url)
+}
+
+/// Send a content-free attention hint when a daemon session first becomes blocked on a person.
+pub(crate) async fn notify_attention_required() {
+    let Ok(config) = forge_config::load() else {
+        return;
+    };
+    if !config.anywhere.enabled {
+        return;
+    }
+    let Ok(store) = StateStore::platform() else {
+        return;
+    };
+    let Ok(mut state) = store.load() else {
+        return;
+    };
+    let Ok(token) = ensure_access_token(&store, &mut state).await else {
+        return;
+    };
+    let Ok(http) = client() else {
+        return;
+    };
+    push::request_best_effort(
+        &http,
+        config.anywhere.service_url(),
+        &token,
+        None,
+        push::GenericPushEvent::AttentionRequired,
+        &format!("attention-{}", idempotency_key()),
+    )
+    .await;
 }
 
 const STATE_VERSION: u8 = 1;
@@ -64,6 +97,10 @@ struct LocalState {
     capsule_replay: BTreeMap<String, String>,
     #[serde(default)]
     outgoing_handoffs: BTreeMap<String, OutgoingHandoffEntry>,
+    /// Capsule IDs durably frozen before local export. No service request is permitted while an
+    /// entry remains here, so crash recovery can safely unfreeze it.
+    #[serde(default)]
+    preparing_handoffs: BTreeMap<String, String>,
     #[serde(default)]
     refresh_lease_id: Option<String>,
     #[serde(default)]
@@ -442,6 +479,25 @@ pub(crate) async fn anywhere_cmd(command: AnywhereCmd) -> Result<()> {
         AnywhereCmd::Status => status().await,
         AnywhereCmd::Handoff { session, to } => handoff(&session, &to).await,
         AnywhereCmd::Share { session, expires } => share(&session, expires).await,
+        AnywhereCmd::Job {
+            to,
+            cwd,
+            title,
+            model,
+            temper,
+            worktree,
+        } => {
+            jobs::queue_create_session(
+                &to,
+                cwd.as_deref(),
+                title.as_deref(),
+                model.as_deref(),
+                temper.as_deref(),
+                worktree,
+            )
+            .await
+        }
+        AnywhereCmd::Jobs => jobs::resume_pending().await,
         AnywhereCmd::Devices { revoke } => devices(revoke.as_deref()).await,
         AnywhereCmd::Disable => disable().await,
         AnywhereCmd::Logout => logout().await,
@@ -558,6 +614,7 @@ async fn login() -> Result<()> {
         capsule_journal: BTreeMap::new(),
         capsule_replay: BTreeMap::new(),
         outgoing_handoffs: BTreeMap::new(),
+        preparing_handoffs: BTreeMap::new(),
         refresh_lease_id: None,
         refresh_lease_until_ms: 0,
     };
@@ -765,11 +822,87 @@ async fn enable(name: Option<String>) -> Result<()> {
     crate::open_store()?
         .set_sync_journal_enabled(config.anywhere.sync)
         .context("enable Anywhere sync journal")?;
+    let activation = ensure_managed_connector().await?;
     println!(
-        "Forge Anywhere is enabled for host '{}'. `forge serve` will start the managed connector.",
-        name.trim()
+        "Forge Anywhere is enabled for host '{}'. {activation}",
+        name.trim(),
     );
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectorActivation {
+    Attach,
+    StartDaemon,
+}
+
+fn connector_activation(has_discovery_state: bool, probe_succeeded: bool) -> ConnectorActivation {
+    if has_discovery_state && probe_succeeded {
+        ConnectorActivation::Attach
+    } else {
+        ConnectorActivation::StartDaemon
+    }
+}
+
+async fn ensure_managed_connector() -> Result<&'static str> {
+    if let Some(serve) = crate::serve::read_state()? {
+        if serve.exposure == "lan" && serve.process_is_alive() {
+            // LAN listeners use a self-signed TLS certificate, so the local CLI intentionally
+            // does not bypass certificate validation to hit the trigger endpoint. The daemon's
+            // supervisor observes the just-written config and starts within one poll interval.
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            return Ok("Attached the managed connector to the running `forge serve` daemon.");
+        }
+        let endpoint = format!(
+            "{}/api/anywhere/enable",
+            serve.base_url.trim_end_matches('/')
+        );
+        match client()?.post(endpoint).send().await {
+            Ok(response) if response.status().is_success() => {
+                debug_assert_eq!(
+                    connector_activation(true, true),
+                    ConnectorActivation::Attach
+                );
+                return Ok("Attached the managed connector to the running `forge serve` daemon.");
+            }
+            Ok(response) => {
+                bail!(
+                    "the running forge serve daemon could not attach Anywhere (HTTP {}); restart that daemon once, then retry `forge anywhere enable`",
+                    response.status()
+                );
+            }
+            Err(error) if !error.is_connect() && !error.is_timeout() => {
+                return Err(error).context("attach Anywhere to running forge serve daemon");
+            }
+            Err(_) => {
+                // A crash may leave serve-state.json behind. Starting below refreshes discovery.
+            }
+        }
+    }
+    debug_assert_eq!(
+        connector_activation(false, false),
+        ConnectorActivation::StartDaemon
+    );
+    let executable = std::env::current_exe().context("locate the forge executable")?;
+    let mut command = std::process::Command::new(&executable);
+    command
+        .args(["serve", "--local"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command.spawn().with_context(|| {
+        format!(
+            "start managed local daemon with `{}` serve --local",
+            executable.display()
+        )
+    })?;
+    Ok("Started a local `forge serve` daemon with the managed connector.")
 }
 
 async fn status() -> Result<()> {
@@ -1078,20 +1211,38 @@ async fn disable() -> Result<()> {
 async fn logout() -> Result<()> {
     let store = StateStore::platform()?;
     let state = store.load()?;
-    if let Some(refresh_token) = state.refresh_token.as_deref() {
-        let service_url = forge_config::load()?.anywhere.service_url().to_owned();
-        let response = client()?
-            .post(format!("{service_url}/v1/auth/logout"))
-            .json(&RefreshRequest { refresh_token })
-            .send()
-            .await
-            .context("revoke Anywhere login")?;
-        require_empty_success(response).await?;
-    }
+    let refresh_token = state.refresh_token.clone();
+    let service_url = forge_config::load()
+        .ok()
+        .map(|config| config.anywhere.service_url().to_owned());
+    let remote_warning =
+        if let (Some(refresh_token), Some(service_url)) = (refresh_token.as_deref(), service_url) {
+            match client() {
+                Ok(client) => match client
+                    .post(format!("{service_url}/v1/auth/logout"))
+                    .json(&RefreshRequest { refresh_token })
+                    .send()
+                    .await
+                {
+                    Ok(response) => require_empty_success(response).await.err(),
+                    Err(error) => Some(error.into()),
+                },
+                Err(error) => Some(error),
+            }
+        } else {
+            None
+        };
+    // Local revocation is the security boundary. It is one owner-only atomic state replacement
+    // and must not depend on service reachability; encrypted history and device keys stay intact.
     let _ = store.update(|latest| {
         latest.clear_tokens();
         Ok(())
     })?;
+    if let Some(error) = remote_warning {
+        eprintln!(
+            "⚠ remote logout could not be confirmed; local credentials were cleared: {error}"
+        );
+    }
     println!("Logged out. Local data and device keys were left intact.");
     Ok(())
 }
@@ -1424,6 +1575,22 @@ mod tests {
                 .mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn enable_attaches_to_a_discovered_daemon_and_starts_one_when_absent() {
+        assert_eq!(
+            connector_activation(true, true),
+            ConnectorActivation::Attach
+        );
+        assert_eq!(
+            connector_activation(false, false),
+            ConnectorActivation::StartDaemon
+        );
+        assert_eq!(
+            connector_activation(true, false),
+            ConnectorActivation::StartDaemon
+        );
     }
 
     #[test]

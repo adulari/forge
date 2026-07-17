@@ -240,6 +240,18 @@ Account controls remain available when service is read-only or suspended:
 - Deleting the hosted account does not delete local Forge data. Uninstalling or logging out of a
   client does not delete the hosted account.
 
+## Queued remote jobs
+
+`forge anywhere job --to HOST [--cwd PATH] [--worktree]` encrypts a create-session request for an
+enrolled host. The exact ciphertext is saved locally before delivery, so an offline host or a lost
+response does not duplicate the operation. Run `forge anywhere jobs` to retry queued ciphertext and
+poll acknowledgements. Status is intentionally categorical (`completed`, `failed`, or waiting): the
+host's response body and errors stay on the host.
+
+Remote-job completion/failure and workspace-ready notifications are generic refresh hints. They
+never contain prompts, titles, paths, filenames, diffs, commands, or transcript content, and a push
+outage never changes the underlying job or handoff result.
+
 ## Troubleshooting
 
 | Symptom | Check and recovery |

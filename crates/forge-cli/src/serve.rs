@@ -130,6 +130,21 @@ impl ServeState {
     fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).expect("ServeState fields are all serializable")
     }
+
+    pub(crate) fn process_is_alive(&self) -> bool {
+        process_is_alive(self.pid)
+    }
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    // Signal zero performs permission/liveness validation without delivering a signal.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    true
 }
 
 /// [`write_state`] against an explicit path (unit-testable without touching the real config).
@@ -173,6 +188,21 @@ pub(crate) fn write_state(state: &ServeState) -> Result<()> {
     write_state_at(&dir.join(STATE_FILE), state)
 }
 
+/// Read the advisory discovery record used by local CLI commands. Callers must still probe the
+/// authenticated daemon endpoint because a crash can leave this file behind.
+pub(crate) fn read_state() -> Result<Option<ServeState>> {
+    let dir = forge_config::config_dir().context("no config directory on this platform")?;
+    let path = dir.join(STATE_FILE);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {}", path.display()))
+        .map(Some)
+}
+
 /// Remove the state file on graceful shutdown, so a dead daemon never LOOKS live to a reader
 /// that only checks file existence. The pid-liveness check on the reader side (Tauri's
 /// `detect_forge_serve`) is the belt to this suspenders — this just avoids leaving stale
@@ -213,10 +243,19 @@ impl SessionRegistry {
         let fleet_tx = self.fleet_tx.clone();
         tokio::spawn(async move {
             let mut next_allowed = tokio::time::Instant::now();
+            let mut was_waiting = false;
             while snapshot_rx.changed().await.is_ok() {
                 // Snapshot frames can change every ~30 ms while text streams. Coalesce bursts
                 // once here for every fleet adapter instead of making each client defend itself.
-                snapshot_rx.borrow_and_update();
+                let waiting = {
+                    let snapshot = snapshot_rx.borrow_and_update();
+                    snapshot.snapshot.permission_prompt.is_some()
+                        || snapshot.snapshot.question.is_some()
+                };
+                if attention_became_required(was_waiting, waiting) {
+                    tokio::spawn(crate::anywhere::notify_attention_required());
+                }
+                was_waiting = waiting;
                 tokio::time::sleep_until(next_allowed).await;
                 let next = fleet_tx.borrow().wrapping_add(1);
                 fleet_tx.send_replace(next);
@@ -248,6 +287,10 @@ impl SessionRegistry {
     }
 }
 
+fn attention_became_required(was_waiting: bool, is_waiting: bool) -> bool {
+    !was_waiting && is_waiting
+}
+
 /// Shared HTTP state for the daemon router.
 struct DaemonState {
     registry: Arc<SessionRegistry>,
@@ -271,6 +314,9 @@ struct DaemonState {
     /// Local whisper.cpp speech-to-text (`POST /api/voice/transcribe`) — caches the loaded model
     /// across requests.
     voice: crate::voice::VoiceState,
+    /// Wakes the one-shot managed connector supervisor after `forge anywhere enable` updates an
+    /// already-running daemon. Repeated notifications are harmless.
+    anywhere_enable: tokio::sync::watch::Sender<bool>,
 }
 
 #[derive(serde::Serialize)]
@@ -490,6 +536,7 @@ pub(crate) async fn serve_cmd(
         }
         crate::apns::ApnsChoice::Disabled => None,
     };
+    let (anywhere_enable, anywhere_rx) = tokio::sync::watch::channel(config.anywhere.enabled);
     let state = Arc::new(DaemonState {
         registry: registry.clone(),
         store,
@@ -500,6 +547,7 @@ pub(crate) async fn serve_cmd(
         push,
         apns,
         voice: crate::voice::VoiceState::new(),
+        anywhere_enable,
     });
     let app = daemon_router(state);
 
@@ -507,28 +555,7 @@ pub(crate) async fn serve_cmd(
     // listener below is unchanged, while the connector never needs to upload the daemon token or
     // trust a self-signed LAN certificate. Both background tasks are best-effort: managed-service
     // failures must never prevent local Forge from starting or staying available.
-    let mut anywhere_tasks = Vec::new();
-    if config.anywhere.enabled {
-        match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await {
-            Ok(anywhere_listener) => {
-                let anywhere_addr = anywhere_listener.local_addr()?;
-                let anywhere_app = app.clone();
-                anywhere_tasks.push(tokio::spawn(async move {
-                    if let Err(error) = axum::serve(anywhere_listener, anywhere_app).await {
-                        eprintln!(
-                            "⚠ Forge Anywhere local bridge stopped — local/direct Forge is unaffected: {error}"
-                        );
-                    }
-                }));
-                let local_base_url =
-                    format!("http://127.0.0.1:{}/{token}", anywhere_addr.port());
-                anywhere_tasks.push(crate::anywhere::spawn_connector(local_base_url));
-            }
-            Err(error) => eprintln!(
-                "⚠ Forge Anywhere connector disabled for this run — local/direct Forge is unaffected: {error}"
-            ),
-        }
-    }
+    let anywhere_task = tokio::spawn(anywhere_supervisor(anywhere_rx, app.clone(), token.clone()));
 
     // Bind + expose, mirroring `/remote`: LAN = 0.0.0.0 + self-signed HTTPS; local/anywhere =
     // loopback plain HTTP (a tunnel terminates TLS at the provider).
@@ -640,9 +667,7 @@ pub(crate) async fn serve_cmd(
             Ok(())
         }
     };
-    for task in anywhere_tasks {
-        task.abort();
-    }
+    anywhere_task.abort();
     drop(tunnel_child); // kill_on_drop tears the tunnel down with the daemon
     serve_result
 }
@@ -722,6 +747,10 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
             post(push_unsubscribe),
         )
         .route(&format!("{base}/api/answer"), post(answer))
+        .route(
+            &format!("{base}/api/anywhere/enable"),
+            post(enable_anywhere_connector),
+        )
         .route(&format!("{base}/app.js"), get(app_js))
         .route(&format!("{base}/styles.css"), get(styles_css))
         .route(&format!("{base}/manifest.webmanifest"), get(manifest))
@@ -733,6 +762,67 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         // authed by the URL-path token, not cookies, so a permissive policy is safe.
         .layer(CorsLayer::very_permissive())
         .with_state(state)
+}
+
+async fn enable_anywhere_connector(State(state): State<Arc<DaemonState>>) -> Response {
+    signal_anywhere_enable(&state.anywhere_enable);
+    axum::http::StatusCode::NO_CONTENT.into_response()
+}
+
+fn signal_anywhere_enable(enabled: &tokio::sync::watch::Sender<bool>) {
+    enabled.send_replace(true);
+}
+
+async fn anywhere_supervisor(
+    mut enabled: tokio::sync::watch::Receiver<bool>,
+    app: Router,
+    token: String,
+) {
+    while !*enabled.borrow() {
+        tokio::select! {
+            changed = enabled.changed() => {
+                if changed.is_err() { return; }
+            }
+            () = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                if forge_config::load().is_ok_and(|config| config.anywhere.enabled) {
+                    break;
+                }
+            }
+        }
+    }
+    match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await {
+        Ok(listener) => {
+            let port = match listener.local_addr() {
+                Ok(address) => address.port(),
+                Err(error) => {
+                    eprintln!("⚠ Forge Anywhere local bridge address unavailable: {error}");
+                    return;
+                }
+            };
+            let _bridge = AbortTask(tokio::spawn(async move {
+                if let Err(error) = axum::serve(listener, app).await {
+                    eprintln!(
+                        "⚠ Forge Anywhere local bridge stopped — local/direct Forge is unaffected: {error}"
+                    );
+                }
+            }));
+            let _connector = AbortTask(
+                crate::anywhere::spawn_connector(format!("http://127.0.0.1:{port}/{token}")),
+            );
+            std::future::pending::<()>().await;
+        }
+        Err(error) => eprintln!(
+            "⚠ Forge Anywhere connector disabled for this run — local/direct Forge is unaffected: {error}"
+        ),
+    }
+}
+
+struct AbortTask(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2962,6 +3052,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn generic_attention_push_fires_only_on_waiting_transition() {
+        assert!(attention_became_required(false, true));
+        assert!(!attention_became_required(true, true));
+        assert!(!attention_became_required(true, false));
+        assert!(!attention_became_required(false, false));
+    }
+
+    #[test]
+    fn running_pre_enable_daemon_receives_connector_activation() {
+        let (enabled, receiver) = tokio::sync::watch::channel(false);
+        signal_anywhere_enable(&enabled);
+        assert!(*receiver.borrow());
+        // Repeated enable requests attach to the same one-shot supervisor.
+        signal_anywhere_enable(&enabled);
+        assert!(*receiver.borrow());
+    }
+
+    #[test]
     fn project_roots_are_canonical_deduplicated_and_default_first() {
         let temp = tempfile::tempdir().unwrap();
         let default = temp.path().join("default");
@@ -3528,6 +3636,7 @@ mod tests {
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         let router = daemon_router(state);
         let resp = router
@@ -3627,6 +3736,7 @@ mod tests {
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         let router = daemon_router(state);
         let resp = router
@@ -3698,6 +3808,7 @@ mod tests {
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         let router = daemon_router(state);
         let resp = router
@@ -3754,6 +3865,7 @@ mod tests {
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         let router = daemon_router(state);
         let resp = router
@@ -3853,6 +3965,7 @@ mod tests {
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         let router = daemon_router(state);
         let resp = router
@@ -3953,6 +4066,7 @@ mod tests {
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         let router = daemon_router(state);
 
@@ -4028,6 +4142,7 @@ mod tests {
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         let router = daemon_router(state);
         let get_key = axum::http::Request::get("/tok/api/push/key")
@@ -4059,6 +4174,7 @@ mod tests {
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         let router = daemon_router(state);
         let post_json = |path: &str, body: String| {
@@ -4123,6 +4239,7 @@ mod tests {
             push: None,
             apns: Some(apns),
             voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         let router = daemon_router(state);
         let post_json = |path: &str, body: String| {
@@ -4248,6 +4365,7 @@ mod tests {
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         let router = daemon_router(state);
 
@@ -4402,6 +4520,7 @@ mod tests {
             push: Some(notifier),
             apns: None,
             voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         let router = daemon_router(state);
         let post_json = |path: &str, body: String| {
@@ -4765,6 +4884,7 @@ mod tests {
             push: None,
             apns: None,
             voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
         });
         let router = daemon_router(state);
         let multipart = |session: &str, filename: &str, ctype: &str, body: &[u8]| {

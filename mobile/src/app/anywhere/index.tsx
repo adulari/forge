@@ -1,6 +1,6 @@
 import { router } from "expo-router";
 import * as Linking from "expo-linking";
-import { Bell, Cloud, CreditCard, GitCompareArrows, HardDrive, History, Laptop, RefreshCw, ShieldCheck, Smartphone } from "lucide-react-native";
+import { Bell, BriefcaseBusiness, Cloud, CreditCard, GitCompareArrows, HardDrive, History, Laptop, RefreshCw, ShieldCheck, Smartphone } from "lucide-react-native";
 import React, { useMemo, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
 
@@ -127,6 +127,7 @@ export default function AnywhereAccountScreen() {
         <ListRow title="Hosts" subtitle={`${anywhere.hosts.length} of 3 enrolled`} leading={<Laptop size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/hosts")} />
         <ListRow title="Devices" subtitle={`${anywhere.devices.length} enrolled`} leading={<Smartphone size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/devices")} />
         <ListRow title="Notifications" subtitle={pushStatusLabel(anywhere.pushStatus)} leading={<Bell size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/notifications")} />
+        <ListRow title="Remote jobs" subtitle="Encrypted offline queue" leading={<BriefcaseBusiness size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/jobs")} />
         <ListRow title="Workspace handoff" subtitle="Move an idle workspace safely" leading={<GitCompareArrows size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/handoff")} />
         <ListRow title="Offline history" subtitle="Device-encrypted synced records" leading={<History size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/history")} />
         <ListRow title="Encrypted storage" subtitle={formatBytes(anywhere.account?.storage_used_bytes ?? 0)} leading={<HardDrive size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/storage")} />

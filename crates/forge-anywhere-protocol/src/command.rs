@@ -6,6 +6,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::DeviceId;
 
+/// Current version of the durable command enqueue response.
+pub const COMMAND_ENQUEUE_VERSION: u8 = 1;
+
 /// Maximum encoded size of a durable command or acknowledgement envelope.
 pub const MAX_COMMAND_ENVELOPE_BYTES: u64 = 256 * 1024;
 
@@ -13,6 +16,34 @@ pub const MAX_COMMAND_ENVELOPE_BYTES: u64 = 256 * 1024;
 pub const COMMAND_EXPIRY_MS: u64 = 24 * 60 * 60 * 1000;
 /// Current version of the metadata-only queued command list.
 pub const COMMAND_LIST_VERSION: u8 = 1;
+
+/// Metadata-only response returned after queuing an exact encrypted command envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandEnqueueResponse {
+    pub version: u8,
+    pub command_id: CommandId,
+    pub expires_at_ms: u64,
+    pub already_queued: bool,
+}
+
+impl CommandEnqueueResponse {
+    /// Validate fields that are independent from the encrypted command contents.
+    pub fn validate(&self, created_at_ms: u64) -> Result<(), CommandMetadataError> {
+        if self.version != COMMAND_ENQUEUE_VERSION {
+            return Err(CommandMetadataError::UnsupportedVersion(self.version));
+        }
+        let expected = created_at_ms
+            .checked_add(COMMAND_EXPIRY_MS)
+            .ok_or(CommandMetadataError::InvalidExpiry)?;
+        // The service computes expiry from its own clock. Allow bounded skew while still rejecting
+        // a shortened or effectively unbounded queue lifetime.
+        if self.expires_at_ms.abs_diff(expected) > 5 * 60 * 1000 {
+            return Err(CommandMetadataError::InvalidExpiry);
+        }
+        Ok(())
+    }
+}
 
 /// Opaque service-assigned identifier for one durable command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -204,6 +235,30 @@ mod tests {
             expires_at_ms: 1_750_086_400_000,
             ciphertext_bytes: 4096,
         }
+    }
+
+    #[test]
+    fn enqueue_response_requires_version_and_bounded_expiry() {
+        let response = CommandEnqueueResponse {
+            version: COMMAND_ENQUEUE_VERSION,
+            command_id: CommandId::new([0x44; 16]),
+            expires_at_ms: 1_750_086_400_000,
+            already_queued: false,
+        };
+        assert_eq!(response.validate(1_750_000_000_000), Ok(()));
+
+        let mut invalid = response.clone();
+        invalid.version = 2;
+        assert_eq!(
+            invalid.validate(1_750_000_000_000),
+            Err(CommandMetadataError::UnsupportedVersion(2))
+        );
+        invalid = response;
+        invalid.expires_at_ms += 5 * 60 * 1000 + 1;
+        assert_eq!(
+            invalid.validate(1_750_000_000_000),
+            Err(CommandMetadataError::InvalidExpiry)
+        );
     }
 
     #[test]

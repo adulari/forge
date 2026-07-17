@@ -229,11 +229,14 @@ The metadata-only service API is:
   indeterminate and the local source stays frozen. Completed and unconsumed capsules expire after
   24 hours.
 
-Before its first network request, the source durably stores the exact envelope, hashes,
-destination, and stable reserve/complete/cancel idempotency keys, then marks the local session
-`source_pending`. Pending and transferred-away sessions reject resume and direct/LAN/managed input;
-a retry resumes the same capsule identity. Before creation, the source verifies the daemon session
-is idle and has a checkpoint. Active tool calls must finish or be explicitly interrupted. Unsafe
+Before reading session or workspace export bytes, the source durably allocates its capsule id,
+marks the local session `source_pending`, stops and joins the local driver, and rechecks that a
+completed checkpoint remains. Pending and transferred-away sessions reject resume and
+direct/LAN/managed input. It then stores the exact envelope, hashes, destination, and stable
+reserve/complete/cancel idempotency keys before the first capsule-service request; a retry resumes
+the same capsule identity. A crash while the durable preparation marker exists but before that
+network-ready operation exists is provably pre-network and may safely unfreeze on recovery. Active
+tool calls must finish or be explicitly interrupted. Unsafe
 paths, `.git`, links, devices, secret-like files, ignored caches/build output, files over 25 MiB,
 and archives over 100 MiB abort with the full visible rejection list. The destination verifies
 repository identity and base availability, makes an isolated detached worktree, applies with
@@ -262,6 +265,20 @@ Revocation atomically invalidates the device's tokens, advances the epoch, and p
 for remaining devices and recovery. Old epochs remain available for decrypting retained history.
 Recovery words are displayed once; uploads remain disabled until sampled-word confirmation passes.
 
+### QR device enrollment
+
+An unenrolled device creates a ten-minute pairing with its Ed25519 and X25519 public keys and
+receives a one-time 32-byte opaque pairing token. The QR challenge contains only the service
+origin, 32-byte opaque pairing id, expiry, and claimant X25519 public key. An authenticated existing
+device fetches the pairing details, verifies that the id, expiry, and exchange key exactly match the
+scanned challenge, explicitly confirms enrollment, and uploads a signed kind-5 device wrap for the
+current Account Data Key epoch. The service never receives that key in plaintext.
+
+The claimant polls with the pairing token and, after approval, receives its device auth tokens,
+the exact wrap envelope, and the approving device's signing/exchange public keys. It verifies and
+opens the wrap before installing account credentials. Pairing tokens are single-purpose, expire
+after ten minutes, and are never placed in URLs, logs, ordinary local storage, or QR payloads.
+
 ## Encrypted payloads
 
 Bridge control payloads are UTF-8 JSON matching the public Rust/TypeScript types. A `route` is an
@@ -288,6 +305,27 @@ completed `(account, kind, stable_id, revision)` is immutable; a retry with diff
 ciphertext is a conflict. `GET /v1/sync/changes?cursor=N` returns account-scoped metadata and
 15-minute download URLs. Downloads and deletion remain available in read-only entitlement states;
 new upload reservations require `trialing`, `active`, or `grace`.
+
+### Durable remote jobs and generic push
+
+A controller seals the canonical JSON `BridgeRequest` as one `kind=9`, `recipient_kind=host`
+envelope. Before `POST /v1/hosts/{host}/commands`, it durably stores the exact envelope and a stable
+`Idempotency-Key`; retrying must resend those exact bytes. Relay-visible metadata is limited to
+routing ids, sender id, creation/expiry time, and ciphertext size. It never contains a route,
+working directory, title, prompt, filename, or command body. Commands expire after 24 hours and may
+not exceed 256 KiB encrypted.
+
+The host authenticates and decrypts the command, accepts only the explicit daemon route allowlist,
+and rejects durable WebSocket requests. It returns a signed encrypted `kind=10` acknowledgement to
+the originating device. Its plaintext contains only `command_id` and a categorical `result`:
+`success` or a stable error category with a retryable boolean. Controllers authenticate the host
+device, route, epoch, and replay tuple before displaying it. Response bodies and daemon error text
+remain on the host.
+
+Push requests are optional refresh hints. `POST /v1/push/notifications` accepts only
+`attention_required`, `job_completed`, `job_failed`, or `workspace_ready`, an optional target device
+id, and `Idempotency-Key`. Clients never add content fields. Job acknowledgement and workspace
+handoff remain successful when push is unavailable.
 
 Normative deterministic vectors live in [`fixtures/anywhere-v1`](fixtures/anywhere-v1/). Randomized
 production values must never reuse fixture keys or nonces.

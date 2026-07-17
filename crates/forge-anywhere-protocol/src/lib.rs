@@ -21,9 +21,9 @@ pub use capsule::{
     MAX_CAPSULE_ENVELOPE_BYTES,
 };
 pub use command::{
-    CommandAcknowledgement, CommandErrorCode, CommandId, CommandMetadataError, CommandResult,
-    QueuedCommandList, QueuedCommandMetadata, COMMAND_EXPIRY_MS, COMMAND_LIST_VERSION,
-    MAX_COMMAND_ENVELOPE_BYTES,
+    CommandAcknowledgement, CommandEnqueueResponse, CommandErrorCode, CommandId,
+    CommandMetadataError, CommandResult, QueuedCommandList, QueuedCommandMetadata,
+    COMMAND_ENQUEUE_VERSION, COMMAND_EXPIRY_MS, COMMAND_LIST_VERSION, MAX_COMMAND_ENVELOPE_BYTES,
 };
 pub use envelope::{
     Envelope, EnvelopeError, EnvelopeKind, EnvelopeMetadata, RecipientKind, MAGIC, VERSION,

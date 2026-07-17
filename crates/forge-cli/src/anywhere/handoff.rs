@@ -61,6 +61,7 @@ pub(super) async fn create(session: &str, destination: &str) -> Result<()> {
     let config = forge_config::load()?;
     let service_url = config.anywhere.service_url().to_owned();
     refresh_account_epoch(&state_store, &mut state, &service_url, &access_token).await?;
+    recover_abandoned_pre_network(&state_store, &mut state, session)?;
     if let Some((source_session_id, operation)) = pending_outgoing(&state, session)? {
         return resume_outgoing_handoff(
             &state_store,
@@ -98,83 +99,121 @@ pub(super) async fn create(session: &str, destination: &str) -> Result<()> {
     if destination.id == source_host_id {
         bail!("destination host is this host; choose another active host");
     }
-
-    let exported_session = store
-        .export_handoff_session(&local.id)
-        .context("export portable session")?;
-    let session_json = serde_json::to_vec(&exported_session).context("encode portable session")?;
-    let repository = repository_root(Path::new(&local.cwd))?;
-    let temporary = tempfile::tempdir().context("create handoff staging directory")?;
-    let archive_path = temporary.path().join("workspace.forge-capsule");
-    let exported = forge_core::capsule::export_capsule(
-        &repository,
-        &archive_path,
-        &local.id,
-        &session_json,
-        forge_core::capsule::CapsuleLimits::default(),
-    )
-    .map_err(|error| anyhow::anyhow!(format_capsule_error(error)))?;
-    let plaintext = std::fs::read(&exported.path).context("read staged handoff capsule")?;
-
     let identity = identity(&state)?;
-    let sequence = allocate_sequence(&state_store)?;
     let capsule_id = CapsuleId::new(rand::random());
-    let destination_id = decode_hex_array::<16>(&destination.id, "destination host id")?;
-    let envelope = Envelope::seal(
-        EnvelopeMetadata {
-            kind: EnvelopeKind::Capsule,
-            flags: 0,
-            account_id: identity.account_id,
-            sender_device_id: identity.device_id,
-            recipient_kind: RecipientKind::Host,
-            recipient_id: destination_id,
-            key_epoch: identity.key_epoch,
-            sequence,
-            created_at_ms: now_ms(),
-            nonce: rand::random(),
-        },
-        &plaintext,
-        &identity.data_key,
-        &identity.signing_key,
-    )?
-    .encode()?;
-    let ciphertext_bytes = u64::try_from(envelope.len()).context("capsule length overflow")?;
-    if ciphertext_bytes > MAX_CAPSULE_ENVELOPE_BYTES {
-        bail!("encrypted capsule exceeds the 100 MiB handoff limit");
-    }
-    let ciphertext_sha256 = URL_SAFE_NO_PAD.encode(Sha256::digest(&envelope));
-    let request = CapsuleReserveRequest {
-        version: CAPSULE_VERSION,
-        capsule_id,
-        source_session_id: local.id.clone(),
-        source_host_id,
-        destination_host_id: destination.id.clone(),
-        ciphertext_bytes,
-        ciphertext_sha256: ciphertext_sha256.clone(),
-    };
-    let envelope_path = persist_outgoing_envelope(&state_store, capsule_id, &envelope)?;
-    let operation = OutgoingHandoffEntry {
-        capsule_id: capsule_id.to_string(),
-        destination_host_id: destination.id,
-        destination_name: destination.name,
-        envelope_path: envelope_path.to_string_lossy().into_owned(),
-        request,
-        reserve_idempotency_key: capsule_id.to_string(),
-        complete_idempotency_key: format!("{capsule_id}-complete"),
-        cancel_idempotency_key: format!("{capsule_id}-cancel"),
-        accepted_destination_session_id: None,
-        created_at_ms: now_ms(),
-    };
-    state_store.update(|state| {
-        state
-            .outgoing_handoffs
-            .insert(local.id.clone(), operation.clone());
+    // The durable split-brain guard is installed before stopping the driver and before reading a
+    // single export byte. Direct/LAN sockets consult the same store row, so none can mutate the
+    // captured session after this point. No service operation has happened yet, making rollback
+    // safe if local preparation fails.
+    state_store.update(|latest| {
+        latest
+            .preparing_handoffs
+            .insert(local.id.clone(), capsule_id.to_string());
         Ok(())
     })?;
-    store
-        .begin_source_handoff(&local.id, &capsule_id.to_string())
-        .context("freeze source session for handoff")?;
-    archive_source_session(&local.id).await?;
+    if let Err(error) = store.begin_source_handoff(&local.id, &capsule_id.to_string()) {
+        state_store.update(|latest| {
+            latest.preparing_handoffs.remove(&local.id);
+            Ok(())
+        })?;
+        return Err(error).context("freeze source session for handoff");
+    }
+    let prepared = async {
+        archive_source_session(&local.id).await?;
+        let stopped_checkpoints = store
+            .list_checkpoints(&local.id)
+            .context("recheck handoff checkpoint after stopping source driver")?;
+        if stopped_checkpoints.is_empty() {
+            bail!("source session lost its completed checkpoint while stopping the driver");
+        }
+
+        let exported_session = store
+            .export_handoff_session(&local.id)
+            .context("export portable session after source driver stopped")?;
+        let session_json =
+            serde_json::to_vec(&exported_session).context("encode portable session")?;
+        let repository = repository_root(Path::new(&local.cwd))?;
+        let temporary = tempfile::tempdir().context("create handoff staging directory")?;
+        let archive_path = temporary.path().join("workspace.forge-capsule");
+        let exported = forge_core::capsule::export_capsule(
+            &repository,
+            &archive_path,
+            &local.id,
+            &session_json,
+            forge_core::capsule::CapsuleLimits::default(),
+        )
+        .map_err(|error| anyhow::anyhow!(format_capsule_error(error)))?;
+        let plaintext = std::fs::read(&exported.path).context("read staged handoff capsule")?;
+        let sequence = allocate_sequence(&state_store)?;
+        let destination_id = decode_hex_array::<16>(&destination.id, "destination host id")?;
+        let envelope = Envelope::seal(
+            EnvelopeMetadata {
+                kind: EnvelopeKind::Capsule,
+                flags: 0,
+                account_id: identity.account_id,
+                sender_device_id: identity.device_id,
+                recipient_kind: RecipientKind::Host,
+                recipient_id: destination_id,
+                key_epoch: identity.key_epoch,
+                sequence,
+                created_at_ms: now_ms(),
+                nonce: rand::random(),
+            },
+            &plaintext,
+            &identity.data_key,
+            &identity.signing_key,
+        )?
+        .encode()?;
+        let ciphertext_bytes = u64::try_from(envelope.len()).context("capsule length overflow")?;
+        if ciphertext_bytes > MAX_CAPSULE_ENVELOPE_BYTES {
+            bail!("encrypted capsule exceeds the 100 MiB handoff limit");
+        }
+        let ciphertext_sha256 = URL_SAFE_NO_PAD.encode(Sha256::digest(&envelope));
+        let request = CapsuleReserveRequest {
+            version: CAPSULE_VERSION,
+            capsule_id,
+            source_session_id: local.id.clone(),
+            source_host_id,
+            destination_host_id: destination.id.clone(),
+            ciphertext_bytes,
+            ciphertext_sha256,
+        };
+        let envelope_path = persist_outgoing_envelope(&state_store, capsule_id, &envelope)?;
+        let operation = OutgoingHandoffEntry {
+            capsule_id: capsule_id.to_string(),
+            destination_host_id: destination.id.clone(),
+            destination_name: destination.name.clone(),
+            envelope_path: envelope_path.to_string_lossy().into_owned(),
+            request,
+            reserve_idempotency_key: capsule_id.to_string(),
+            complete_idempotency_key: format!("{capsule_id}-complete"),
+            cancel_idempotency_key: format!("{capsule_id}-cancel"),
+            accepted_destination_session_id: None,
+            created_at_ms: now_ms(),
+        };
+        if let Err(error) = state_store.update(|state| {
+            state
+                .outgoing_handoffs
+                .insert(local.id.clone(), operation.clone());
+            state.preparing_handoffs.remove(&local.id);
+            Ok(())
+        }) {
+            let _ = std::fs::remove_file(&operation.envelope_path);
+            return Err(error).context("persist outgoing handoff operation");
+        }
+        Ok::<OutgoingHandoffEntry, anyhow::Error>(operation)
+    }
+    .await;
+    let operation = match prepared {
+        Ok(operation) => operation,
+        Err(error) => {
+            rollback_pre_network_handoff(&state_store, &store, &local.id, &capsule_id)
+                .context("local handoff preparation failed and rollback could not complete")?;
+            return Err(error.context(
+                "local handoff preparation failed before service reservation; source was unfrozen",
+            ));
+        }
+    };
     resume_outgoing_handoff(
         &state_store,
         &service_url,
@@ -184,6 +223,66 @@ pub(super) async fn create(session: &str, destination: &str) -> Result<()> {
         &identity,
     )
     .await
+}
+
+fn recover_abandoned_pre_network(
+    state_store: &StateStore,
+    state: &mut LocalState,
+    needle: &str,
+) -> Result<()> {
+    let matches = state
+        .preparing_handoffs
+        .iter()
+        .filter(|(session_id, _)| *session_id == needle || session_id.starts_with(needle))
+        .map(|(session_id, capsule_id)| (session_id.clone(), capsule_id.clone()))
+        .collect::<Vec<_>>();
+    let [(session_id, capsule_id)] = matches.as_slice() else {
+        if matches.is_empty() {
+            return Ok(());
+        }
+        bail!("session prefix {needle:?} matches multiple preparing handoffs");
+    };
+    if state.outgoing_handoffs.contains_key(session_id) {
+        return Ok(());
+    }
+    let store = crate::open_store()?;
+    if !store
+        .cancel_source_handoff(session_id, capsule_id)
+        .context("recover abandoned pre-network handoff freeze")?
+    {
+        bail!("abandoned pre-network handoff freeze no longer matches local state");
+    }
+    *state = state_store.update(|latest| {
+        latest.preparing_handoffs.remove(session_id);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+fn rollback_pre_network_handoff(
+    state_store: &StateStore,
+    store: &forge_store::Store,
+    source_session_id: &str,
+    capsule_id: &CapsuleId,
+) -> Result<()> {
+    if !store
+        .cancel_source_handoff(source_session_id, &capsule_id.to_string())
+        .context("remove pre-network source freeze")?
+    {
+        bail!("pre-network source freeze was no longer pending");
+    }
+    state_store.update(|state| {
+        if state
+            .outgoing_handoffs
+            .get(source_session_id)
+            .is_some_and(|entry| entry.capsule_id == capsule_id.to_string())
+        {
+            state.outgoing_handoffs.remove(source_session_id);
+        }
+        state.preparing_handoffs.remove(source_session_id);
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn pending_outgoing(
@@ -933,7 +1032,19 @@ async fn receive_capsule(
         &pending.capsule_id,
         &journal,
     )
-    .await
+    .await?;
+    if imported.is_some() {
+        super::push::request_best_effort(
+            &client()?,
+            service_url,
+            access_token,
+            Some(&pending.source_device_id),
+            super::push::GenericPushEvent::WorkspaceReady,
+            &format!("capsule-{}-workspace-ready", pending.capsule_id),
+        )
+        .await;
+    }
+    Ok(())
 }
 
 fn prune_capsule_journal(store: &StateStore) -> Result<()> {
@@ -1464,6 +1575,46 @@ mod tests {
             entry.reserve_idempotency_key
         );
         assert_eq!(std::fs::read(recovered.envelope_path).unwrap(), envelope);
+    }
+
+    #[test]
+    fn pre_network_failure_removes_durable_freeze_and_operation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_store = StateStore {
+            path: temporary.path().join("anywhere/state.json"),
+        };
+        state_store
+            .save(&LocalState {
+                version: super::super::STATE_VERSION,
+                ..LocalState::default()
+            })
+            .unwrap();
+        let store = forge_store::Store::open_in_memory().unwrap();
+        let session = store.create_session("/repo", "default").unwrap();
+        let capsule_id = CapsuleId::new([0x71; 16]);
+
+        // This is the exact ordering boundary used by create(): durable freeze first, then any
+        // driver stop/export work. A racing direct/LAN resume is rejected immediately.
+        state_store
+            .update(|state| {
+                state
+                    .preparing_handoffs
+                    .insert(session.clone(), capsule_id.to_string());
+                Ok(())
+            })
+            .unwrap();
+        store
+            .begin_source_handoff(&session, &capsule_id.to_string())
+            .unwrap();
+        assert!(store.session_handoff_blocked(&session).unwrap());
+        assert!(store.unarchive_session(&session).is_err());
+
+        rollback_pre_network_handoff(&state_store, &store, &session, &capsule_id).unwrap();
+        assert!(!store.session_handoff_blocked(&session).unwrap());
+        assert!(!store.session_archived(&session).unwrap());
+        let state = state_store.load().unwrap();
+        assert!(state.outgoing_handoffs.is_empty());
+        assert!(state.preparing_handoffs.is_empty());
     }
 
     #[test]
