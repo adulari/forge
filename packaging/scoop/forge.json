@@ -1,12 +1,12 @@
 {
-    "version": "2.6.4",
+    "version": "2.6.5",
     "description": "Fast, model-agnostic AI coding harness and CLI in Rust.",
     "homepage": "https://github.com/Adulari/forge",
     "license": "AGPL-3.0-only",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/Adulari/forge/releases/download/v2.6.4/forge-x86_64-pc-windows-msvc.zip",
-            "hash": "ee92e8b1769289f633b6373829322434c49881f3718cedf200654c6d06d60a8c",
+            "url": "https://github.com/Adulari/forge/releases/download/v2.6.5/forge-x86_64-pc-windows-msvc.zip",
+            "hash": "cbf35880b95cf754953d6fa5fd82e4c8dd78d2001b76e6773a9e19f185143cc5",
             "extract_dir": "forge-x86_64-pc-windows-msvc"
         }
     },
