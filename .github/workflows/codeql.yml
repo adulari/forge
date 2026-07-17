@@ -26,11 +26,7 @@ jobs:
         uses: github/codeql-action/init@7188fc363630916deb702c7fdcf4e481b751f97a
         with:
           languages: rust
-          build-mode: manual
-      - name: Build Rust workspace
-        run: cargo build --locked --workspace --all-targets
-      - name: Build vendored genai fork
-        run: cargo build --locked --manifest-path vendor/genai-0.6.5/Cargo.toml --all-targets
+          build-mode: none
       - name: Analyze
         uses: github/codeql-action/analyze@7188fc363630916deb702c7fdcf4e481b751f97a
         with:
