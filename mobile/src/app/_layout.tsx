@@ -102,7 +102,6 @@ function RootNavigator() {
         <Stack.Screen name="hooks" />
         <Stack.Screen name="models" />
         <Stack.Screen name="session-tree" />
-        <Stack.Screen name="plans" />
 
         <Stack.Screen name="mcp" />
         <Stack.Screen name="session/[id]" />

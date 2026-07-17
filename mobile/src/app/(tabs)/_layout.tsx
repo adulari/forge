@@ -132,6 +132,8 @@ function TabsNavigator() {
       {/* Hearth: Floor leaves the tab bar (reached via the ⚒ mark on Fleet) but stays a
           routable screen — `href: null` keeps expo-router from auto-adding a tab for it. */}
       <Tabs.Screen name="floor" options={{ href: null }} />
+      {/* Plans moved into (tabs) (redesign) but stays reached via Settings, not a 5th tab. */}
+      <Tabs.Screen name="plans" options={{ href: null }} />
       <Tabs.Screen
         name="inbox"
         options={{

@@ -14,7 +14,13 @@ import { OverlayPanel } from "./OverlayPanel";
 
 export function OverlayHost() {
   const { snapshot, send } = useSessionCtx();
-  const overlay = snapshot?.overlay ?? null;
+  // `overlay:workflow` is the daemon's projection of its own full-screen workflow view. The app
+  // now has a dedicated workflow run screen (`session/[id]/workflow.tsx`) reached from the live
+  // workflow pill in the session header, so popping this modal too would stack two competing
+  // workflow UIs (seen as a modal-over-screen glitch). Ignore it here; it is harmless projection
+  // state server-side and auto-clears when the run backgrounds.
+  const raw = snapshot?.overlay ?? null;
+  const overlay = raw?.kind === "overlay:workflow" ? null : raw;
 
   const [lastOverlay, setLastOverlay] = useState<Overlay | null>(null);
 

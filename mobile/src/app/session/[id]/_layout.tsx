@@ -15,7 +15,7 @@ import { router, Slot, useLocalSearchParams, usePathname } from "expo-router";
 import { ArrowLeft } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from "react-native-reanimated";
-import { StyleSheet, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { Banner } from "../../../components/ds/Banner";
@@ -25,6 +25,8 @@ import { useToast } from "../../../components/ds/ToastHost";
 import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { usePalette } from "../../../components/overlay/CommandPalette";
 import { SessionHeader } from "../../../components/session/SessionHeader";
+import { GoalBanner } from "../../../components/session/GoalBanner";
+import { StatusDot } from "../../../components/ds/StatusDot";
 import { DuelSheet } from "../../../components/session/DuelSheet";
 import { PlanSheet } from "../../../components/session/PlanSheet";
 
@@ -55,7 +57,8 @@ import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
 import { durations, easings } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
-import { space, type StatusDotState } from "../../../theme/tokens";
+import { radii, space, type StatusDotState } from "../../../theme/tokens";
+import { type as typeScale } from "../../../theme/typography";
 import { useBreakpoint } from "../../../theme/useBreakpoint";
 
 type SegmentValue = "chat" | "tasks" | "agents" | "review";
@@ -284,6 +287,8 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             onReplay={() => router.push(`/session/${sessionId}/replay`)}
             onPlan={() => setPlanVisible(true)}
 
+            onWorkflows={() => router.push(`/session/${sessionId}/workflows`)}
+
             onFork={() => setForkVisible(true)}
 
             onInit={() => setInitVisible(true)}
@@ -319,6 +324,18 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             worktree={snapshot?.worktree ?? null}
             reconnecting={reconnecting && !sessionEnded}
           />
+          {snapshot?.workflow ? (
+            <Pressable
+              onPress={() => router.push(`/session/${sessionId}/workflow`)}
+              accessibilityRole="button"
+              accessibilityLabel={`${snapshot.workflow.active ? "Live" : "Finished"} workflow ${snapshot.workflow.name ?? "run"}`}
+              style={{ flexDirection: "row", alignItems: "center", gap: space.space8, marginTop: space.space8, marginBottom: space.space8, minHeight: 40, paddingHorizontal: space.space12, borderRadius: radii.radiusPill, borderWidth: StyleSheet.hairlineWidth, borderColor: snapshot.workflow.active ? tokens.accent : tokens.border, backgroundColor: snapshot.workflow.active ? tokens.selection : tokens.bg2 }}
+            >
+              <StatusDot state={snapshot.workflow.active ? "busy" : "done"} />
+              <Text style={[typeScale.monoMeta, { flex: 1, color: tokens.ink2 }]} numberOfLines={1}>{`${snapshot.workflow.name ?? "workflow"} · ${snapshot.workflow.active ? "running" : "finished"}`}</Text>
+              <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>{snapshot.workflow.active ? "view run" : "view result"}</Text>
+            </Pressable>
+          ) : null}
           </View>
 
         <DuelSheet visible={duelVisible} onClose={() => setDuelVisible(false)} send={sendWithFeedback} />
@@ -387,6 +404,10 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           ) : null}
         </View>
       </SafeAreaView>
+
+      <View style={gutter}>
+        <GoalBanner snapshot={snapshot} send={sendWithFeedback} />
+      </View>
 
       <Animated.View key={activeSegment} style={[styles.flex, segmentStyle]}>
         <Slot />

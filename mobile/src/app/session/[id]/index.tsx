@@ -9,6 +9,7 @@
 // to de-duplicate by content. Turn-completion history invalidation (busy true->false) is already wired by the
 // T3.1 session shell's `useTurnCompleted(snapshot)` call in `_layout.tsx` — not repeated here.
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { router } from "expo-router";
 import { ChevronDown, ChevronUp, Clock, Hammer, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -39,6 +40,7 @@ import { Markdown } from "../../../components/chat/Markdown";
 import { MessageRow } from "../../../components/chat/MessageRow";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
 import { summarizeToolLine } from "../../../components/chat/SystemOutput";
+import { SubagentStrip } from "../../../components/session/SubagentStrip";
 import { BellowsSpinner } from "../../../components/ds/BellowsSpinner";
 import { BoundedList } from "../../../components/ds/BoundedList";
 import { Chip } from "../../../components/ds/Chip";
@@ -803,6 +805,8 @@ export default function SessionChat() {
       ) : null}
 
       <CardSlot />
+
+      <SubagentStrip subagents={snapshot?.subagents ?? []} onPress={() => router.push(`/session/${sessionId}/agents`)} />
 
       <Composer
         sessionId={sessionId}

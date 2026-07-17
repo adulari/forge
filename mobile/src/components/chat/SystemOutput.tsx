@@ -14,6 +14,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
 import { DiffLines } from "../review/DiffLines";
+import { renderAssayReport } from "../session/AssayView";
 import { IconButton } from "../ds/IconButton";
 
 const COLLAPSE_LINES = 4;
@@ -62,7 +63,14 @@ export function summarizeToolLine(rawLine: string): string {
   return name;
 }
 
+// A recognizable assay report (the headless runner's `◈ ASSAY REPORT` plain block or a
+// `## Forge Assay Report` markdown table) renders richly via AssayView; every other system row
+// falls through to the plain summary/collapsible body below, exactly as before.
 export function SystemOutput({ content }: SystemOutputProps) {
+  return renderAssayReport(content) ?? <SystemOutputBody content={content} />;
+}
+
+function SystemOutputBody({ content }: SystemOutputProps) {
   const tokens = useTokens();
   const lines = useMemo(() => content.split("\n"), [content]);
   const collapsible = lines.length > COLLAPSE_LINES;

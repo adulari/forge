@@ -15,6 +15,7 @@ import {
   Plus,
   Search,
   Swords,
+  Workflow,
 } from "lucide-react-native";
 import React, { useCallback, useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
@@ -43,6 +44,7 @@ export interface SessionHeaderProps {
   onDuel: () => void;
   onReplay: () => void;
   onPlan: () => void;
+  onWorkflows: () => void;
   onFork: () => void;
   onInit: () => void;
   onAssay: () => void;
@@ -79,6 +81,7 @@ export function SessionHeader(props: SessionHeaderProps) {
           <ListRow title="Start another session here" leading={<Plus size={20} color={tokens.ink2} />} onPress={() => run(props.onNewHere)} />
           <ListRow title="Start model duel" leading={<Swords size={20} color={tokens.ink2} />} onPress={() => run(props.onDuel)} />
           <ListRow title="Open session replay" leading={<History size={20} color={tokens.ink2} />} onPress={() => run(props.onReplay)} />
+          <ListRow title="Open workflows" leading={<Workflow size={20} color={tokens.ink2} />} onPress={() => run(props.onWorkflows)} />
           <ListRow title="Create implementation plan" leading={<Map size={20} color={tokens.ink2} />} onPress={() => run(props.onPlan)} />
           <ListRow title="Fork session" leading={<GitFork size={20} color={tokens.ink2} />} onPress={() => run(props.onFork)} />
           <ListRow title="Initialize project guidance" leading={<BookOpen size={20} color={tokens.ink2} />} onPress={() => run(props.onInit)} />

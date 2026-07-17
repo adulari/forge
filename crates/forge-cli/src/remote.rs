@@ -680,6 +680,11 @@ pub struct RemoteUrl {
 /// v8: next-prompt suggestion. `Snapshot` gained `suggested_prompt` (the AI-predicted likely
 /// next prompt, if any — mirrors the TUI's ghost text). The page shows it as the composer's
 /// placeholder text; there is no Tab-accept affordance on the wire, just a hint.
+///
+/// v8.1 (additive, no version bump — old clients ignore unknown fields): `Snapshot` gained
+/// `workflow` (the live workflow-run projection — see [`SnapWorkflow`]) and `SnapSubagent`
+/// gained `id`/`phase`/`ok`, so a client can render the dedicated workflow view (phase
+/// timeline + grouped agent rows + failed-agent state) instead of a flat activity list.
 pub const PROTOCOL_VERSION: u32 = 8;
 
 /// How many broadcast snapshots the per-server [`EventLog`] retains for reconnect replay. One
@@ -788,13 +793,42 @@ pub struct SnapTask {
 /// One live subagent row, projected for the wire.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SnapSubagent {
+    /// Stable per-child id (v8.1) — lets a client keep a drill-in open across frames even as
+    /// rows reorder or new agents start. Empty from pre-8.1 hosts.
+    #[serde(default)]
+    pub id: String,
     pub agent: String,
     pub task: String,
     pub model: Option<String>,
+    /// The workflow `phase()` label this row belongs to (v8.1) — `None` for a plain
+    /// `spawn_agents` batch. Clients group rows sharing a phase under one header.
+    #[serde(default)]
+    pub phase: Option<String>,
     /// Trailing edge of the child's streamed activity.
     pub last: String,
     pub done: bool,
+    /// Only meaningful once `done` (v8.1): whether the child's call succeeded. `true` while
+    /// running — no news isn't bad news.
+    pub ok: bool,
     pub cost: f64,
+}
+
+/// The live workflow-run projection (v8.1) — phases + narration + finish state. Agent rows ride
+/// in [`Snapshot::subagents`] with their `phase` attached, so this stays cheap per frame.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapWorkflow {
+    /// A script is executing (between WorkflowStarted and WorkflowFinished).
+    pub active: bool,
+    /// Saved-script name (`/workflow run <name>`); `None` for a model-authored script.
+    pub name: Option<String>,
+    /// `phase()` titles in call order — the client's phase timeline skeleton.
+    pub phases: Vec<String>,
+    /// Tail of the script's `log()` narration feed (bounded).
+    pub logs: Vec<String>,
+    /// `Some` once the run finished: whether every agent succeeded.
+    pub finished_ok: Option<bool>,
+    /// One-line finish summary (or interrupt reason), once finished.
+    pub summary: Option<String>,
 }
 
 /// One selectable option of a pending AskUserQuestion, so the page can render tappable buttons
@@ -959,6 +993,10 @@ pub struct Snapshot {
     pub diff: Option<SnapDiff>,
     /// The most recent plan proposal (v7) — see [`SnapPlan`].
     pub plan: Option<SnapPlan>,
+    /// The live (or just-finished) workflow run this turn (v8.1) — see [`SnapWorkflow`].
+    /// `None` when no `run_workflow` script has run this turn.
+    #[serde(default)]
+    pub workflow: Option<SnapWorkflow>,
     /// The AI-predicted next prompt (v8), if any — the page shows it as the composer's
     /// placeholder text (prefixed "suggested: "). `None` when there is none, or once dismissed
     /// by a fresh turn/session on the host.
@@ -1018,6 +1056,7 @@ impl Default for Snapshot {
             overlay: None,
             diff: None,
             plan: None,
+            workflow: None,
             suggested_prompt: None,
             copy_text: None,
             prompt_seq: 0,
@@ -2194,11 +2233,14 @@ mod tests {
                 status: "in_progress".into(),
             }],
             subagents: vec![SnapSubagent {
+                id: "a-1".into(),
                 agent: "general".into(),
                 task: "scan".into(),
                 model: Some("haiku".into()),
+                phase: Some("Audit".into()),
                 last: "reading…".into(),
                 done: false,
+                ok: true,
                 cost: 0.001,
             }],
             queued: vec!["next thing".into()],
