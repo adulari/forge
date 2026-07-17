@@ -52,6 +52,7 @@ export function StatusStrip(props: StatusStripProps) {
           accessibilityRole="button"
           accessibilityLabel="Open session telemetry"
           style={styles.row}
+          hitSlop={{ top: 10, bottom: 10 }}
         >
           <Text style={[typeScale.monoMeta, tabularNums, styles.left, { color: tokens.ink3 }]} numberOfLines={1}>
             {left}
@@ -70,7 +71,10 @@ export function StatusStrip(props: StatusStripProps) {
 }
 
 const styles = StyleSheet.create({
-  row: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 44, paddingVertical: space.space4 },
+  // Visually a single mono meta line — a 44px band here reads as random dead space between the
+  // title and the workflow pill. Keep the row tight and restore the 44px touch target via
+  // hitSlop on the Pressable instead.
+  row: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 24, paddingVertical: 0 },
   left: { flex: 1, flexShrink: 1, minWidth: 0 },
   right: { flexShrink: 0 },
 });
