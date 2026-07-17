@@ -106,13 +106,16 @@ const FORGELINE_STAGGER_MS = 40;
 const FORGELINE_TRANSLATE_Y = 8;
 const FORGELINE_CAP = 8;
 
-export function useForgeline(index: number) {
+export function useForgeline(index: number, enabled: boolean = true) {
   const reduced = useReducedMotion();
-  const opacity = useSharedValue(reduced ? 1 : 0);
-  const translateY = useSharedValue(reduced ? 0 : FORGELINE_TRANSLATE_Y);
+  const animate = enabled && !reduced;
+  const opacity = useSharedValue(animate ? 0 : 1);
+  const translateY = useSharedValue(animate ? FORGELINE_TRANSLATE_Y : 0);
 
   useEffect(() => {
-    if (reduced) {
+    if (!animate) {
+      // `enabled: false` renders settled immediately — virtualized lists REMOUNT rows on
+      // scroll, and replaying the entrance there reads as content flickering transparent.
       opacity.value = 1;
       translateY.value = 0;
       return;
@@ -123,7 +126,7 @@ export function useForgeline(index: number) {
     // First-mount-only is a caller contract (stable keys, no remount on refresh) —
     // this hook intentionally re-runs the entrance if `index` changes identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reduced, index]);
+  }, [animate, index]);
 
   return useAnimatedStyle(() => ({
     opacity: opacity.value,
@@ -241,6 +244,11 @@ export function useEmberdot(kind: EmberdotKind) {
   return { dotStyle, ringStyle };
 }
 
+// Hearth's Forgework motion set has exactly four patterns (emberdot pulse, waiting
+// beacon, forgeline entrance, kindle caret) — "no decorative loops, no drifting
+// glows." `HeatEdge` no longer uses this hook (its bar is static, per the prototype);
+// `useThermal` stays wired only to genuine live-process signals that aren't in the
+// named set (ContextGauge's overheat glow, VoiceRecordingPill's transcribing pulse).
 export function useThermal(kind: "busy" | "waiting" | "off") {
   const reduced = useReducedMotion();
   const opacity = useSharedValue(1);
@@ -283,6 +291,35 @@ export function useSettle(key: string) {
   }, [key, reduced, scale]);
 
   return useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+}
+
+// ---------------------------------------------------------------------------
+// Kindle caret (composer/palette, Forgework) — 2px accent bar, 1.1s step-end
+// blink: a hard on/off cut, not an eased fade. Reduced motion: solid on.
+// ---------------------------------------------------------------------------
+
+const KINDLE_CARET_PERIOD_MS = 1100;
+
+export function useKindleCaret() {
+  const reduced = useReducedMotion();
+  const opacity = useSharedValue(1);
+
+  useEffect(() => {
+    cancelAnimation(opacity);
+    if (reduced) {
+      opacity.value = 1;
+      return;
+    }
+    const half = KINDLE_CARET_PERIOD_MS / 2;
+    opacity.value = withRepeat(
+      withSequence(withDelay(half, withTiming(0, { duration: 0 })), withDelay(half, withTiming(1, { duration: 0 }))),
+      -1,
+    );
+    return () => cancelAnimation(opacity);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reduced]);
+
+  return useAnimatedStyle(() => ({ opacity: opacity.value }));
 }
 
 // ---------------------------------------------------------------------------

@@ -24,9 +24,8 @@ import { useSessionCtx } from "../../lib/sessionContext";
 import { chordHold } from "../../lib/voice/chordHold";
 import { voice } from "../../lib/voice/voice";
 import { durations, easings } from "../../theme/motion";
-import { useTokens } from "../../theme/ThemeProvider";
-import { gutter, radii, space, tapTarget } from "../../theme/tokens";
-import { useBreakpoint } from "../../theme/useBreakpoint";
+import { useTheme } from "../../theme/ThemeProvider";
+import { depthDark, depthLight, radii, shadowStyle, space, tapTarget } from "../../theme/tokens";
 import { type, webInputTextStyle } from "../../theme/typography";
 import { Chip } from "../ds/Chip";
 import { HeatEdge } from "../ds/HeatEdge";
@@ -48,7 +47,10 @@ import { VoiceRecordingPill } from "./VoiceRecordingPill";
 const MAX_LINES = 8;
 const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
 const MIN_HEIGHT = 44;
-const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES + space.space8;
+// Vertical padding = what centers one 22px line in the 44px rest state; MAX adds the same
+// padding around MAX_LINES lines.
+const INPUT_V_PADDING = 44 - LINE_HEIGHT; // MIN_HEIGHT - LINE_HEIGHT (both sides combined)
+const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES + INPUT_V_PADDING;
 
 export interface ComposerProps {
   sessionId: string;
@@ -63,17 +65,10 @@ export interface ComposerProps {
 }
 
 export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onInterrupt }: ComposerProps) {
-  const tokens = useTokens();
+  const { scheme, tokens } = useTheme();
+  const depth = scheme === "dark" ? depthDark : depthLight;
   const upload = useUpload();
-  const { isCompact } = useBreakpoint();
   const insets = useSafeAreaInsets();
-  // The parent `<Screen>` wraps ALL of its children (list, cards, composer) in one
-  // paddingHorizontal'd View for the message-list gutter — that's wanted for MessageRow/
-  // CardSlot, but it insets the composer's own bg2 panel from the true screen edges,
-  // leaving Screen's bg1 showing through as a side gutter. Cancel it here with a matching
-  // negative margin so the panel itself bleeds edge-to-edge; `styles.wrap`'s own
-  // paddingHorizontal keeps the icons/input/send button reasonably inset from that edge.
-  const screenGutter = isCompact ? gutter.compact : gutter.medium;
   const [commandFocusSignal, setCommandFocusSignal] = useState(0);
 
   // Draft (text + attachments) lives in SessionContext, not local state: the session shell
@@ -96,11 +91,26 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const [recording, setRecording] = useState(false);
   const [goalVisible, setGoalVisible] = useState(false);
   const [height, setHeight] = useState(MIN_HEIGHT);
+  const [focused, setFocused] = useState(false);
   const [draftLoadedSession, setDraftLoadedSession] = useState<string | null>(null);
   const inputRef = useRef<TextInput>(null);
   const textRef = useRef(text);
   useEffect(() => {
     textRef.current = text;
+  }, [text]);
+
+  // Web autosize: RNW's onContentSizeChange goes quiet once an explicit height style is set,
+  // so measure the textarea's natural scrollHeight directly on every text change (collapse →
+  // read → restore, the classic autosize pattern). Grows to MAX_LINES, then scrolls.
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    const node = inputRef.current as unknown as HTMLTextAreaElement | null;
+    if (!node || typeof node.scrollHeight !== "number" || !node.style) return;
+    const prev = node.style.height;
+    node.style.height = "0px";
+    const content = node.scrollHeight;
+    node.style.height = prev;
+    setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, content)));
   }, [text]);
 
   useEffect(() => {
@@ -409,17 +419,14 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
       style={[
         styles.wrap,
         {
-          backgroundColor: tokens.bg2,
-          borderTopColor: tokens.border,
-          marginHorizontal: -screenGutter,
-          // `Screen` omits "bottom" from its safe-area edges for this route (see index.tsx) so
-          // this panel — not the screen's own bg1 — is what bleeds through the home-indicator
-          // inset; otherwise a black strip would show below the grey composer.
+          // Composer floats over the screen's own bg1 (Hearth: no full-bleed panel) — the
+          // reply row below carries its own bg2/border pill per the prototype. `Screen`
+          // omits "bottom" from its safe-area edges for this route (see index.tsx), so this
+          // wrap still owns the home-indicator inset padding even though it's transparent.
           paddingBottom: space.space8 + insets.bottom,
         },
       ]}
     >
-      <HeatEdge active={busy} />
       {!recording && attachments.length > 0 ? (
         <View style={styles.chipsRow}>
           {attachments.map((a) => (
@@ -476,7 +483,21 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
           onClose={() => setRecording(false)}
         />
       ) : (
-        <View style={styles.row}>
+        <View
+          style={[
+            styles.row,
+            {
+              backgroundColor: tokens.bg2,
+              borderColor: focused ? tokens.accent : tokens.borderStrong,
+              // Rest state: one text line — center icons/text/send on the same axis (bottom-
+              // anchoring everything made the pill read as misaligned). Grown state: pin the
+              // controls to the bottom row so they stay by the newest line.
+              alignItems: height > MIN_HEIGHT ? "flex-end" : "center",
+            },
+            shadowStyle(depth.sheet),
+          ]}
+        >
+          <HeatEdge active={busy} />
           <IconButton
             icon={<ImageIcon size={20} strokeWidth={1.75} color={tokens.ink2} />}
             onPress={onAttachImage}
@@ -492,14 +513,25 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               ref={inputRef}
               value={text}
               onChangeText={setText}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
               returnKeyType="send"
               autoCapitalize="none"
               autoCorrect={false}
               spellCheck={false}
-              onContentSizeChange={(e) =>
-                setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
+              // Native only: web growth is handled by the scrollHeight effect below — RNW
+              // stops reporting content growth once an explicit height style is set, which
+              // froze the composer at one line.
+              onContentSizeChange={
+                Platform.OS === "web"
+                  ? undefined
+                  : (e) => setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
               }
               multiline
+              // Web: RNW maps this to the textarea's rows attribute. Without it the browser
+              // default (rows=2) makes an EMPTY composer measure two lines tall, inflating
+              // the pill and bottom-anchoring the icons against a phantom second line.
+              numberOfLines={1}
               scrollEnabled={height >= MAX_HEIGHT}
               textAlignVertical="top"
               // Hidden while the ghost is showing — it renders the same "empty state" copy
@@ -560,7 +592,6 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
 const styles = StyleSheet.create({
   wrap: {
     position: "relative",
-    borderTopWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: space.space12,
     paddingTop: space.space8,
     paddingBottom: space.space8,
@@ -569,8 +600,21 @@ const styles = StyleSheet.create({
   chipsRow: { flexDirection: "row", gap: space.space8, paddingRight: space.space12 },
   commandScroll: { flexGrow: 0, flexShrink: 0 },
   chipThumb: { width: 20, height: 20, borderRadius: radii.radius4 },
-  row: { flexDirection: "row", alignItems: "flex-end", gap: space.space4 },
-  input: { flex: 1, paddingHorizontal: space.space8, paddingVertical: space.space8, textAlignVertical: "top" },
+  row: {
+    position: "relative",
+    flexDirection: "row",
+    gap: space.space4,
+    borderWidth: 1,
+    borderRadius: radii.radius12 + 2,
+    paddingLeft: space.space4,
+    paddingRight: space.space4,
+    paddingVertical: space.space4,
+    overflow: "hidden",
+  },
+  // No flex on the textarea itself: `flex: 1` made flex-basis (0%) own its height inside
+  // inputWrap's column, silently overriding the measured `height` style — the composer
+  // could never grow past one line on web. inputWrap already takes the row's free width.
+  input: { width: "100%", paddingHorizontal: space.space8, paddingVertical: (MIN_HEIGHT - LINE_HEIGHT) / 2, textAlignVertical: "top" },
   inputWrap: { flex: 1, position: "relative", overflow: "visible" },
   commandRecognition: { position: "absolute", right: space.space8, top: space.space8, backgroundColor: "transparent" },
   // Mirrors `input`'s own padding exactly so the ghost text lines up with where a typed
@@ -581,7 +625,7 @@ const styles = StyleSheet.create({
     right: 0,
     top: 0,
     paddingHorizontal: space.space8,
-    paddingVertical: space.space8,
+    paddingVertical: (MIN_HEIGHT - LINE_HEIGHT) / 2,
   },
   sendCircle: { borderRadius: radii.radiusPill, width: tapTarget, height: tapTarget },
   actionIcon: { width: 20, height: 20, alignItems: "center", justifyContent: "center" },

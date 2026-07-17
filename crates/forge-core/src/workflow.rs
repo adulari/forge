@@ -411,7 +411,11 @@ fn workflow_host_fn(state: Arc<WorkflowState>) -> forge_workflow::HostFunction {
 /// concept and never goes through this.
 fn inject_args(script_body: &str, args: &serde_json::Value) -> String {
     let json = serde_json::to_string(args).unwrap_or_else(|_| "null".to_string());
-    format!("const args = {json};\n{script_body}")
+    // Strip any leading `export const meta = {…}` doc/library block first: the engine has no
+    // module system and rejects `export`, but saved scripts carry meta so `forge serve`'s
+    // `/api/workflows` can populate the app's workflow library from the same file that runs.
+    let body = strip_meta_export(script_body);
+    format!("const args = {json};\n{body}")
 }
 
 fn build_host_functions(state: Arc<WorkflowState>) -> Vec<forge_workflow::HostFunction> {
@@ -425,6 +429,72 @@ fn build_host_functions(state: Arc<WorkflowState>) -> Vec<forge_workflow::HostFu
 
 fn wrap_with_prelude(script_body: &str) -> String {
     format!("{PRELUDE}\n(async () => {{\n{script_body}\n}})")
+}
+
+/// Remove a leading `export const meta = {…};` declaration from a saved workflow script before
+/// execution. The `meta` block is a documentation/library convention (name/description/
+/// whenToUse/phases, read by `forge serve`'s `/api/workflows` for the app's workflow library),
+/// but the workflow engine has no module system and rejects the `export` keyword. Stripping it
+/// keeps one source of truth: the same file both self-documents and runs. The extractor is
+/// brace-balanced and quote-aware so a `{`/`}` or `;` inside a string literal in the meta block
+/// doesn't truncate it. Anything other than a leading `export const meta` is left untouched.
+fn strip_meta_export(script: &str) -> String {
+    let trimmed_start = script.trim_start();
+    let leading_ws = &script[..script.len() - trimmed_start.len()];
+    if !trimmed_start.starts_with("export") {
+        return script.to_string();
+    }
+    // Confirm it's `export const meta` (allowing arbitrary inner whitespace), not some other
+    // `export` we shouldn't silently eat.
+    let after_export = trimmed_start["export".len()..].trim_start();
+    let Some(after_const) = after_export.strip_prefix("const") else {
+        return script.to_string();
+    };
+    if !after_const.trim_start().starts_with("meta") {
+        return script.to_string();
+    }
+    let Some(open_rel) = trimmed_start.find('{') else {
+        return script.to_string();
+    };
+    let mut depth = 0usize;
+    let mut in_str: Option<char> = None;
+    let mut prev_backslash = false;
+    let bytes_from_open = &trimmed_start[open_rel..];
+    for (i, c) in bytes_from_open.char_indices() {
+        if let Some(q) = in_str {
+            if prev_backslash {
+                prev_backslash = false;
+            } else if c == '\\' {
+                prev_backslash = true;
+            } else if c == q {
+                in_str = None;
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => in_str = Some(c),
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    // Consume a trailing `;` and any inline whitespace after the closing brace.
+                    let mut end = open_rel + i + c.len_utf8();
+                    let rest = &trimmed_start[end..];
+                    let rest_trimmed = rest.trim_start_matches([' ', '\t']);
+                    if let Some(after_semi) = rest_trimmed.strip_prefix(';') {
+                        end = trimmed_start.len() - after_semi.len();
+                    }
+                    // Preserve original leading whitespace + everything after the meta block so
+                    // line numbers past the block barely shift and `const args = …;` injection
+                    // (which prepends) still lands before the body.
+                    return format!("{leading_ws}{}", &trimmed_start[end..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Unbalanced — leave the script as-is; the engine will surface a real parse error.
+    script.to_string()
 }
 
 /// Runs a workflow script end to end: builds the shared concurrency/event state, registers the
@@ -622,6 +692,50 @@ mod tests {
     use forge_mesh::{Router, RoutingDecision};
     use forge_provider::{EventSink, ModelResponse, Provider, ProviderError};
     use forge_types::{ModelHealth, PermissionMode, ProjectContext, SubscriptionQuota};
+
+    #[test]
+    fn strip_meta_export_removes_leading_meta_block() {
+        let script = "export const meta = {\n  name: 'demo',\n  description: 'a; b {c}',\n  phases: [{ title: 'Scan' }],\n};\nphase('Scan');\nreturn 1;";
+        let out = strip_meta_export(script);
+        assert!(!out.contains("export"), "export not stripped: {out}");
+        assert!(!out.contains("description"), "meta body leaked: {out}");
+        assert!(
+            out.trim_start().starts_with("phase('Scan')"),
+            "body lost: {out}"
+        );
+    }
+
+    #[test]
+    fn strip_meta_export_is_quote_and_brace_aware() {
+        // A `}` and `;` inside a string must not end the block early.
+        let script = "export const meta = { description: 'has } and ; inside' };\nreturn 2;";
+        let out = strip_meta_export(script);
+        assert_eq!(
+            out.trim(),
+            "return 2;",
+            "quote-aware balancing failed: {out}"
+        );
+    }
+
+    #[test]
+    fn strip_meta_export_leaves_non_meta_scripts_untouched() {
+        let script = "const x = 1;\nreturn x;";
+        assert_eq!(strip_meta_export(script), script);
+        // A different `export` is not silently eaten.
+        let other = "export const helper = 3;\nreturn helper;";
+        assert_eq!(strip_meta_export(other), other);
+    }
+
+    #[test]
+    fn inject_args_strips_meta_before_prepending_args() {
+        let script = "export const meta = { name: 'x' };\nreturn args;";
+        let out = inject_args(script, &serde_json::json!({"v": 1}));
+        assert!(
+            out.starts_with("const args = {\"v\":1};"),
+            "args not first: {out}"
+        );
+        assert!(!out.contains("export"), "meta survived inject: {out}");
+    }
 
     /// Always answers with a fixed reply, regardless of prompt/model.
     struct EchoProvider;

@@ -22,6 +22,38 @@ const THEME_COLOR = darkTokens.bg1;
 // BoundedList) is what actually stops rubber-band, `overscroll-behavior: none` here is
 // the page-level backstop.
 const GLOBAL_WEB_CSS = `
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/InterVariable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/InterVariable-Italic.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+/* react-native-web's Text default is the invalid family "System" — alias it to the
+   bundled Inter so every Text that never set an explicit fontFamily still gets the
+   app sans instead of the browser's fallback (DejaVu/Times on Linux). */
+@font-face {
+  font-family: "System";
+  src: url("/fonts/InterVariable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "System";
+  src: url("/fonts/InterVariable-Italic.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+html { font-feature-settings: "calt" 1, "cv05" 1; }
 html, body, #root {
   height: 100%;
   height: 100vh;
@@ -31,7 +63,15 @@ html, body, #root {
 body { overscroll-behavior: none; -webkit-overflow-scrolling: touch; touch-action: manipulation; }
 * { -webkit-tap-highlight-color: transparent; -webkit-touch-callout: none; }
 :focus { outline: none; }
-:focus-visible { outline: 2px solid var(--forge-focus, currentColor); outline-offset: 2px; }
+/* Keyboard-focus ring: thin, tight, low-alpha ember — the old 2px currentColor ring with
+   a 2px offset drew a fat white/orange box around anything you tabbed to. Follows the
+   element's own border-radius. */
+:root { --forge-focus: rgba(255, 145, 60, 0.45); }
+/* Text fields are excluded: every Forge input sits inside a styled container that paints
+   its own focused border (Composer/TaskComposer/Input/SearchField), so ringing the inner
+   <input>/<textarea> too drew a second box inside the first. The caret + container border
+   carry the focus signal there. */
+:focus-visible:not(input):not(textarea):not(select) { outline: 1px solid var(--forge-focus); outline-offset: 2px; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 `;
 

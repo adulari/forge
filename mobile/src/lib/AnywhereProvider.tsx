@@ -38,6 +38,11 @@ import {
 } from "./anywhereCrypto";
 import { clearAnywhereHostCache, readAnywhereHostCache, writeAnywhereHostCache } from "./anywhereHostCache";
 import {
+  openBrowserAuthUrl,
+  reserveBrowserAuthWindow,
+  type ReservedBrowserAuthWindow,
+} from "./anywhereExternalAuth";
+import {
   AnywhereJobClient,
   type CreateSessionJob,
   type PendingRemoteJob,
@@ -106,6 +111,7 @@ interface AnywhereContextValue {
   /** Returns a fresh short-lived token for first-party Anywhere clients; never persist it. */
   accessToken(): Promise<string>;
   startLogin(): Promise<void>;
+  openLoginPage(): Promise<void>;
   confirmNewRecovery(answers: Record<number, string>): Promise<void>;
   recoverExisting(words: string): Promise<void>;
   refresh(): Promise<void>;
@@ -144,6 +150,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const [remoteJobs, setRemoteJobs] = useState<PendingRemoteJob[]>([]);
   const mutationQueue = useRef(Promise.resolve());
   const revocationRecoveryAttempt = useRef<string | null>(null);
+  const browserAuthWindow = useRef<ReservedBrowserAuthWindow | null>(null);
 
   const persistCredentials = useCallback(async (next: StoredAnywhereCredentials) => {
     credentialsRef.current = next;
@@ -401,6 +408,9 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   }, [auth.isLoading, hosts, phase, runtime, syncAnywhereHosts]);
 
   const startLogin = useCallback(async () => {
+    browserAuthWindow.current?.close();
+    const reservedWindow = Platform.OS === "web" ? reserveBrowserAuthWindow() : null;
+    browserAuthWindow.current = reservedWindow;
     setError(null);
     setPhase("starting");
     try {
@@ -416,14 +426,29 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       setPending({ auth: null as never, keys });
       setFlow(started);
       setPhase("authorizing");
-      void Linking.openURL(started.verification_uri).catch(() => {
-        // The code and a retryable link remain visible if a browser blocks the automatic open.
-      });
+      if (Platform.OS === "web") {
+        reservedWindow?.navigate(started.verification_uri);
+      } else {
+        void Linking.openURL(started.verification_uri).catch(() => {
+          // The code and a retryable link remain visible if the OS cannot open the browser.
+        });
+      }
     } catch (reason) {
+      reservedWindow?.close();
+      if (browserAuthWindow.current === reservedWindow) browserAuthWindow.current = null;
       setError(message(reason));
       setPhase("error");
     }
   }, []);
+
+  const openLoginPage = useCallback(async () => {
+    if (!flow) return;
+    if (Platform.OS === "web") {
+      openBrowserAuthUrl(flow.verification_uri);
+      return;
+    }
+    await Linking.openURL(flow.verification_uri);
+  }, [flow]);
 
   useEffect(() => {
     if (phase !== "authorizing" || !flow || !pending) return;
@@ -433,6 +458,8 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       if (cancelled) return;
       if (Date.now() >= deadline) {
         clearInterval(timer);
+        browserAuthWindow.current?.close();
+        browserAuthWindow.current = null;
         setError("GitHub login expired. Start again to receive a new code.");
         setPhase("error");
         return;
@@ -442,6 +469,8 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       }).then((session) => {
         if (cancelled || !session) return;
         clearInterval(timer);
+        browserAuthWindow.current?.close();
+        browserAuthWindow.current = null;
         const nextPending = { auth: session, keys: pending.keys };
         setPending(nextPending);
         if (session.new_account) {
@@ -453,7 +482,13 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         }
       }).catch((reason) => {
         if (reason instanceof AnywhereApiError && reason.status === 202) return;
-        if (!cancelled) { clearInterval(timer); setError(message(reason)); setPhase("error"); }
+        if (!cancelled) {
+          clearInterval(timer);
+          browserAuthWindow.current?.close();
+          browserAuthWindow.current = null;
+          setError(message(reason));
+          setPhase("error");
+        }
       });
     }, Math.max(1, flow.interval) * 1000);
     return () => { cancelled = true; clearInterval(timer); };
@@ -707,7 +742,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     phase, credentials, account, subscription, hosts, devices, flow,
     recoveryWords: recoverySetup?.words ?? null,
     recoverySample: [3, 11, 20], error, pushStatus, remoteJobs,
-    accessToken, startLogin, confirmNewRecovery, recoverExisting, refresh, checkout, openBillingPortal,
+    accessToken, startLogin, openLoginPage, confirmNewRecovery, recoverExisting, refresh, checkout, openBillingPortal,
     revokeDevice, revokeHost, selectHost, approvePairing, queueRemoteJob, refreshRemoteJobs,
     enablePush, disablePush, logout,
   };

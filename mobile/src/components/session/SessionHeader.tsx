@@ -15,22 +15,27 @@ import {
   Plus,
   Search,
   Swords,
+  Workflow,
 } from "lucide-react-native";
 import React, { useCallback, useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
-import { space } from "../../theme/tokens";
+import { space, type StatusDotState } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
-import { Badge } from "../ds/Badge";
 import { IconButton } from "../ds/IconButton";
 import { ListRow } from "../ds/ListRow";
 import { Sheet } from "../ds/Sheet";
+import { StatusDot } from "../ds/StatusDot";
 
 export interface SessionHeaderProps {
   title: string;
-  cwd: string;
-  worktree: string | null;
+  /** Hearth core rule 3: a waiting/busy session carries its Emberdot beside the title —
+   * the header is the "is this alive / does it need me" glance, not a separate row. */
+  state: StatusDotState;
+  /** Only read for the public-exposure safety tag — repo/branch/model now live in the
+   * mono meta line StatusStrip renders directly under this header (Hearth core rule 8:
+   * "session titles are task titles ... repo · branch · model live in the mono meta line"). */
   exposure: string;
   onBack: () => void;
   showBack?: boolean;
@@ -39,6 +44,7 @@ export interface SessionHeaderProps {
   onDuel: () => void;
   onReplay: () => void;
   onPlan: () => void;
+  onWorkflows: () => void;
   onFork: () => void;
   onInit: () => void;
   onAssay: () => void;
@@ -62,15 +68,12 @@ export function SessionHeader(props: SessionHeaderProps) {
   return (
     <View style={styles.wrap}>
       <View style={styles.row}>
-        {props.showBack !== false ? <IconButton icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onBack} accessibilityLabel="Back" /> : null}
-        <Text style={[typeScale.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>{props.title}</Text>
+        {props.showBack !== false ? <IconButton icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onBack} accessibilityLabel="Back" style={styles.leadingBleed} /> : null}
+        <StatusDot state={props.state} />
+        <Text style={[typeScale.headingBold, styles.title, { color: tokens.ink }]} numberOfLines={1}>{props.title}</Text>
+        {isPublic ? <Text style={[typeScale.meta, { color: tokens.danger }]}>public</Text> : null}
         <IconButton icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onPalette} accessibilityLabel="Open command palette" />
-        <IconButton icon={<MoreHorizontal size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={() => setActionsVisible(true)} accessibilityLabel="Session actions" />
-      </View>
-      <View style={styles.metaRow}>
-        {props.worktree ? <Badge label="worktree" tone="outline" /> : null}
-        <Badge label={props.exposure} tone={isPublic ? "danger" : "neutral"} />
-        <Text style={[typeScale.codeSmall, styles.cwd, { color: tokens.ink2 }]} numberOfLines={1} ellipsizeMode="head">{props.cwd}</Text>
+        <IconButton icon={<MoreHorizontal size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={() => setActionsVisible(true)} accessibilityLabel="Session actions" style={styles.trailingBleed} />
       </View>
       <Sheet visible={actionsVisible} onClose={closeActions} accessibilityLabel="Session actions" snapPoints={[0.8]}>
         <ScrollView contentContainerStyle={styles.actions} keyboardShouldPersistTaps="handled">
@@ -78,6 +81,7 @@ export function SessionHeader(props: SessionHeaderProps) {
           <ListRow title="Start another session here" leading={<Plus size={20} color={tokens.ink2} />} onPress={() => run(props.onNewHere)} />
           <ListRow title="Start model duel" leading={<Swords size={20} color={tokens.ink2} />} onPress={() => run(props.onDuel)} />
           <ListRow title="Open session replay" leading={<History size={20} color={tokens.ink2} />} onPress={() => run(props.onReplay)} />
+          <ListRow title="Open workflows" leading={<Workflow size={20} color={tokens.ink2} />} onPress={() => run(props.onWorkflows)} />
           <ListRow title="Create implementation plan" leading={<Map size={20} color={tokens.ink2} />} onPress={() => run(props.onPlan)} />
           <ListRow title="Fork session" leading={<GitFork size={20} color={tokens.ink2} />} onPress={() => run(props.onFork)} />
           <ListRow title="Initialize project guidance" leading={<BookOpen size={20} color={tokens.ink2} />} onPress={() => run(props.onInit)} />
@@ -97,7 +101,10 @@ const styles = StyleSheet.create({
   wrap: { gap: space.space4 },
   row: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 44 },
   title: { flex: 1 },
-  metaRow: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 20 },
-  cwd: { flex: 1 },
+  // Icon buttons pad their 20px glyph to a 44px hit area; at the header's rails that padding
+  // reads as misalignment against rows whose text/borders sit flush. Bleed it over the edge so
+  // the glyph — not the invisible hit area — lines up with the rail.
+  leadingBleed: { marginLeft: -space.space12 },
+  trailingBleed: { marginRight: -space.space12 },
   actions: { paddingHorizontal: space.space16, paddingBottom: space.space32, gap: space.space4 },
 });

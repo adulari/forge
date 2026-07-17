@@ -47,6 +47,6 @@ export default function Review() {
 }
 
 const styles = StyleSheet.create({
-  content: { paddingVertical: space.space16, gap: space.space16 },
+  content: { paddingVertical: space.space16, gap: space.space16, width: "100%", maxWidth: 760, alignSelf: "center" },
   loading: { minHeight: 96 },
 });

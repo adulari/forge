@@ -1,5 +1,4 @@
 import { router } from "expo-router";
-import * as Linking from "expo-linking";
 import { Bell, BriefcaseBusiness, Cloud, CreditCard, GitCompareArrows, HardDrive, History, Laptop, RefreshCw, ShieldCheck, Smartphone } from "lucide-react-native";
 import React, { useMemo, useState } from "react";
 import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
@@ -95,9 +94,9 @@ export default function AnywhereAccountScreen() {
         {anywhere.phase === "authorizing" && anywhere.flow ? (
           <Card style={styles.cardGap}>
             <Text style={[type.heading, { color: tokens.ink }]}>Finish on GitHub</Text>
-            <Text style={[type.sub, { color: tokens.ink2 }]}>Enter this one-time code in the GitHub page that just opened:</Text>
+            <Text style={[type.sub, { color: tokens.ink2 }]}>Enter this one-time code in the GitHub tab that just opened. Keep Forge open here while it waits for approval.</Text>
             <Text selectable style={[type.display, styles.code, { color: tokens.accent }]}>{anywhere.flow.user_code}</Text>
-            <Button label="Open GitHub" variant="secondary" onPress={() => void Linking.openURL(anywhere.flow!.verification_uri)} fullWidth />
+            <Button label="Open GitHub in a new tab" variant="secondary" onPress={() => void anywhere.openLoginPage()} fullWidth />
             <View style={styles.waiting}><ActivityIndicator color={tokens.ink3} /><Text style={[type.sub, { color: tokens.ink2 }]}>Waiting for authorization…</Text></View>
           </Card>
         ) : (

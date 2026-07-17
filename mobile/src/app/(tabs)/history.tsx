@@ -58,8 +58,8 @@ type HistoryListItem =
 
 const FILTERS: { value: HistoryFilter; label: string }[] = [
   { value: "all", label: "All" },
-  { value: "archived", label: "Archived" },
   { value: "active", label: "Active" },
+  { value: "archived", label: "Archived" },
 ];
 
 const BUCKETS: { value: ActivityBucket; label: string }[] = [
@@ -248,7 +248,7 @@ export default function HistoryScreen() {
       <SearchField
         value={query}
         onChangeText={setQuery}
-        placeholder="search title or cwd…"
+        placeholder="search title or path…"
         autoCapitalize="none"
         autoCorrect={false}
         containerStyle={styles.search}

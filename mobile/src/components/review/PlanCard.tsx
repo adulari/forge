@@ -100,7 +100,10 @@ export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer
     <Animated.View exiting={reduced ? undefined : FadeOut.duration(durations.gentle)}>
       <Card variant="feature" style={styles.card}>
         <Animated.View style={dim}>
-          <Text style={[typeScale.section, { color: tokens.accent }]}>⬡ PLAN</Text>
+          <View style={styles.sectionLabel}>
+            <View style={[styles.sectionDash, { backgroundColor: tokens.accent }]} />
+            <Text style={[typeScale.section, { color: tokens.accent }]}>Plan</Text>
+          </View>
           <Text style={[typeScale.heading, { color: tokens.ink }, styles.title]}>{plan.title}</Text>
 
           <View style={styles.steps}>
@@ -126,11 +129,12 @@ export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer
           {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
           <View style={styles.actions}>
             <Button
-              label="Cancel"
-              variant="ghost"
-              onPress={() => commit(cancelNumber, haptics.deny, "cancel")}
+              label="Approve"
+              variant="allow"
+              onPress={() => commit(approveNumber, haptics.allow, "approve")}
               disabled={locked}
-              icon={committed === "cancel" ? <CommitIcon kind="x" color={tokens.ink2} /> : undefined}
+              icon={committed === "approve" ? <CommitIcon kind="check" color={tokens.onAccent} /> : undefined}
+              style={styles.approveBtn}
             />
             <Button
               label="Revise"
@@ -139,12 +143,11 @@ export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer
               disabled={locked}
             />
             <Button
-              label="Approve"
-              variant="allow"
-              onPress={() => commit(approveNumber, haptics.allow, "approve")}
+              label="Cancel"
+              variant="ghost"
+              onPress={() => commit(cancelNumber, haptics.deny, "cancel")}
               disabled={locked}
-              icon={committed === "approve" ? <CommitIcon kind="check" color={tokens.onAccent} /> : undefined}
-              style={styles.approveBtn}
+              icon={committed === "cancel" ? <CommitIcon kind="x" color={tokens.ink2} /> : undefined}
             />
           </View>
 
@@ -176,6 +179,8 @@ export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer
 
 const styles = StyleSheet.create({
   card: { gap: space.space8 },
+  sectionLabel: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  sectionDash: { width: 6, height: 2 },
   title: { marginBottom: space.space4 },
   steps: { gap: space.space12 },
   step: { flexDirection: "row", gap: space.space12 },

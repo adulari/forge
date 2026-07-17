@@ -1,5 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import { Copy, Quote } from "lucide-react-native";
+import { Copy, PencilLine, Quote } from "lucide-react-native";
 import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -17,6 +17,8 @@ export interface MessageActionsSheetProps {
   message: HistoryRow | null;
   onClose: () => void;
   onQuote: (text: string) => void;
+  /** Load this message's text into the composer for editing (user messages only). */
+  onEdit?: (text: string) => void;
 }
 
 function firstCodeBlock(text: string): string | null {
@@ -24,11 +26,12 @@ function firstCodeBlock(text: string): string | null {
   return match ? match[1].replace(/\n$/, "") : null;
 }
 
-export function MessageActionsSheet({ visible, message, onClose, onQuote }: MessageActionsSheetProps) {
+export function MessageActionsSheet({ visible, message, onClose, onQuote, onEdit }: MessageActionsSheetProps) {
   const tokens = useTokens();
   const toast = useToast();
   const text = message ? displayMessageText(message) : "";
   const code = firstCodeBlock(text);
+  const editable = message?.role === "user" && onEdit != null;
 
   const copy = async (value: string) => {
     await Clipboard.setStringAsync(value);
@@ -63,6 +66,17 @@ export function MessageActionsSheet({ visible, message, onClose, onQuote }: Mess
           }}
           showSeparator={false}
         />
+        {editable ? (
+          <ListRow
+            title="Edit & resend"
+            leading={<PencilLine size={18} strokeWidth={1.75} color={tokens.ink2} />}
+            onPress={() => {
+              onEdit!(text);
+              onClose();
+            }}
+            showSeparator={false}
+          />
+        ) : null}
       </View>
     </Sheet>
   );

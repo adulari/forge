@@ -9,6 +9,7 @@
 // to de-duplicate by content. Turn-completion history invalidation (busy true->false) is already wired by the
 // T3.1 session shell's `useTurnCompleted(snapshot)` call in `_layout.tsx` — not repeated here.
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { router } from "expo-router";
 import { ChevronDown, ChevronUp, Clock, Hammer, MessageSquare, SearchX, WifiOff } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -33,10 +34,13 @@ import Animated, {
 import type { SentAttachment } from "../../../components/chat/attach";
 import CardSlot from "../../../components/chat/CardSlot";
 import { Composer } from "../../../components/chat/Composer";
+import { MessageActionsMenu } from "../../../components/chat/MessageActionsMenu";
 import { MessageActionsSheet } from "../../../components/chat/MessageActionsSheet";
 import { Markdown } from "../../../components/chat/Markdown";
 import { MessageRow } from "../../../components/chat/MessageRow";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
+import { summarizeToolLine } from "../../../components/chat/SystemOutput";
+import { SubagentStrip } from "../../../components/session/SubagentStrip";
 import { BellowsSpinner } from "../../../components/ds/BellowsSpinner";
 import { BoundedList } from "../../../components/ds/BoundedList";
 import { Chip } from "../../../components/ds/Chip";
@@ -53,7 +57,7 @@ import { useSessionCtx } from "../../../lib/sessionContext";
 import { easings, useEmberdot, useForgeline } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { radii, space } from "../../../theme/tokens";
-import { type as typeScale } from "../../../theme/typography";
+import { tabularNums, type as typeScale } from "../../../theme/typography";
 
 // T3.3's CardSlot.tsx landed during this task (was a HANDOFF stub) — wired in directly above.
 
@@ -122,12 +126,16 @@ function LiveToolActivity({ entries, startedAt }: { entries: string[]; startedAt
       <View style={[styles.activityRow, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
         <Animated.View style={[styles.activityDot, { backgroundColor: tokens.accent }, dotStyle]} />
         <Hammer size={14} strokeWidth={1.75} color={tokens.accent} />
-        <Text style={[typeScale.meta, styles.activityLine, { color: tokens.ink2 }]} numberOfLines={1}>
-          {entries[entries.length - 1]}
+        <Text style={[typeScale.monoMeta, tabularNums, styles.activityLine, { color: tokens.ink2 }]} numberOfLines={1}>
+          {summarizeToolLine(entries[entries.length - 1])}
         </Text>
         <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatElapsed(elapsedMs)}</Text>
       </View>
-      {entries.slice(0, -1).map((line, index) => <Text key={`${index}:${line}`} style={[typeScale.meta, styles.activitySettled, { color: tokens.ink3 }]} numberOfLines={1}>{line}</Text>)}
+      {entries.slice(0, -1).map((line, index) => (
+        <Text key={`${index}:${line}`} style={[typeScale.monoMeta, tabularNums, styles.activitySettled, { color: tokens.ink3 }]} numberOfLines={1}>
+          {summarizeToolLine(line)}
+        </Text>
+      ))}
     </Animated.View>
   );
 }
@@ -206,9 +214,13 @@ export default function SessionChat() {
 
   const historyQuery = useHistory(sessionId);
   const [selectedMessage, setSelectedMessage] = useState<HistoryRow | null>(null);
+  // Pointer-driven opens (right-click / hover ⋯) carry an anchor → compact popover menu;
+  // long-press carries none → bottom sheet. Web-only distinction, native never sends one.
+  const [actionsAnchor, setActionsAnchor] = useState<{ x: number; y: number } | null>(null);
 
-  const onMessageLongPress = useCallback((message: HistoryRow) => {
+  const onMessageLongPress = useCallback((message: HistoryRow, anchor?: { x: number; y: number }) => {
     setSelectedMessage(message);
+    setActionsAnchor(anchor ?? null);
   }, []);
 
   const onQuote = useCallback((text: string) => {
@@ -216,6 +228,12 @@ export default function SessionChat() {
     setDraftText(draftText ? `${draftText}\n${quote}` : quote);
     focusComposer();
   }, [draftText, focusComposer, setDraftText]);
+
+  // Edit & resend: the message text REPLACES the draft (unlike quote, which appends).
+  const onEditMessage = useCallback((text: string) => {
+    setDraftText(text);
+    focusComposer();
+  }, [focusComposer, setDraftText]);
 
   const listRef = useRef<FlatList<TimelineItem>>(null);
   const [showJump, setShowJump] = useState(false);
@@ -533,7 +551,15 @@ export default function SessionChat() {
       // Snapshot transcript is chronological (oldest->newest); walk it back-to-front for the
       // inverted list. It remains visible after an empty history response because that response
       // cannot prove the server transcript is empty.
-      const filler = snapshot?.transcript ?? [];
+      let filler = snapshot?.transcript ?? [];
+      // The tail's newest lines describe the CURRENT turn, which the styled rows above
+      // (pendingSent bubble + streaming reply + LiveToolActivity) already render — keeping
+      // them here painted the same exchange twice, once as plain lines. Cut the filler at
+      // the current turn's start (the last "you" marker) while a turn is in flight.
+      if (busy || streamingText || pendingSent.length > 0) {
+        const lastYou = filler.map((l) => l.trim()).lastIndexOf("you");
+        if (lastYou >= 0) filler = filler.slice(0, lastYou);
+      }
       for (let i = filler.length - 1; i >= 0; i--) {
         list.push({ kind: "filler", id: `f${i}`, text: filler[i] });
       }
@@ -682,7 +708,7 @@ export default function SessionChat() {
   return (
     // "bottom" deliberately omitted: Composer owns the home-indicator inset itself (its bg2
     // panel bleeds through it) so Screen's bg1 never shows as a seam below the composer.
-    <Screen edges={["left", "right"]} keyboardAvoiding keyboardVerticalOffset={headerHeight}>
+    <Screen edges={["left", "right"]} keyboardAvoiding keyboardVerticalOffset={headerHeight} contentContainerStyle={styles.sessionColumn}>
       <View style={styles.flex}>
         <BoundedList<TimelineItem>
           ref={listRef}
@@ -780,6 +806,8 @@ export default function SessionChat() {
 
       <CardSlot />
 
+      <SubagentStrip subagents={snapshot?.subagents ?? []} onPress={() => router.push(`/session/${sessionId}/agents`)} />
+
       <Composer
         sessionId={sessionId}
         busy={snapshot?.busy ?? false}
@@ -788,17 +816,36 @@ export default function SessionChat() {
         onSend={handleSend}
         onInterrupt={handleInterrupt}
       />
-      <MessageActionsSheet
-        visible={selectedMessage !== null}
-        message={selectedMessage}
-        onClose={() => setSelectedMessage(null)}
-        onQuote={onQuote}
-      />
+      {actionsAnchor != null ? (
+        <MessageActionsMenu
+          message={selectedMessage}
+          anchor={actionsAnchor}
+          onClose={() => {
+            setSelectedMessage(null);
+            setActionsAnchor(null);
+          }}
+          onQuote={onQuote}
+          onEdit={onEditMessage}
+        />
+      ) : (
+        <MessageActionsSheet
+          visible={selectedMessage !== null}
+          message={selectedMessage}
+          onClose={() => setSelectedMessage(null)}
+          onQuote={onQuote}
+          onEdit={onEditMessage}
+        />
+      )}
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
+  // Hearth desktop/web: the chat column caps at 760px, centered in the remaining Fleet+Session
+  // pane (a no-op at mobile widths — see prototype "Desktop Fleet + Session").
+  // Full available width on every surface (user call: the capped 760px column wasted
+  // desktop space); message rows keep their own gutters.
+  sessionColumn: { width: "100%" },
   flex: { flex: 1 },
   streamingRow: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
   thinkingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },

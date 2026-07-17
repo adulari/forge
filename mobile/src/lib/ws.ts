@@ -22,12 +22,29 @@ export interface SnapshotTask {
 }
 
 export interface SnapshotSubagent {
+  // v8.1 additive: `id` (stable row key), `phase` (workflow phase name, null for plain
+  // subagents), `ok` (last-turn success). Server serializes Option<T> as T|null.
+  id: string;
   agent: string;
   task: string;
   model: string | null;
+  phase: string | null;
   last: string;
   done: boolean;
+  ok: boolean;
   cost: number;
+}
+
+/** v8.1 additive: workflow-run state. Absent/null when no workflow is active. Server
+ * serializes Option<T> as T|null. Workflow agent rows are the `Snapshot.subagents` entries
+ * whose `phase` is set. */
+export interface SnapshotWorkflow {
+  active: boolean;
+  name: string | null;
+  phases: string[];
+  logs: string[];
+  finished_ok: boolean | null;
+  summary: string | null;
 }
 
 export interface OverlayRow {
@@ -107,6 +124,8 @@ export interface Snapshot {
   transcript: string[];
   tasks: SnapshotTask[];
   subagents: SnapshotSubagent[];
+  // v8.1 additive: active workflow-run state, null when no workflow is running.
+  workflow?: SnapshotWorkflow | null;
   queued: string[];
   permission_prompt: string | null;
   question: string | null;
@@ -284,6 +303,11 @@ export function useSessionSocket(
         data = JSON.parse(String(event.data));
       } catch {
         console.warn("[ws] dropped malformed snapshot frame");
+        return;
+      }
+      // Keepalive heartbeats are expected wire traffic, not malformed snapshots — ack
+      // liveness silently instead of warning on every one.
+      if (data != null && typeof data === "object" && "keepalive" in (data as object)) {
         return;
       }
       if (!isValidSnapshotFrame(data)) {

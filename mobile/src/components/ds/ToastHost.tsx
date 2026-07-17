@@ -113,7 +113,13 @@ export function ToastHost({ children }: { children: React.ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      <SafeAreaView style={[styles.host, { pointerEvents: "box-none" }]} edges={["bottom"]}>
+      {/* Top-anchored: the bottom edge is owned by composers/tab bars on every surface
+          (the "another session finished" toast used to sit on top of the input bar).
+          On Tauri the 36px chrome bar owns the very top, so toasts start below it. */}
+      <SafeAreaView
+        style={[styles.host, { pointerEvents: "box-none", paddingTop: isTauri ? 44 : 0 }]}
+        edges={["top"]}
+      >
         <View style={[styles.stack, { pointerEvents: "box-none" }]}>
           {toasts.map((t) => (
             <Toast key={t.id} toast={t} onDismiss={dismiss} />
@@ -131,6 +137,6 @@ export function useToast(): ToastContextValue {
 }
 
 const styles = StyleSheet.create({
-  host: { position: "absolute", left: 0, right: 0, bottom: 0 },
-  stack: { justifyContent: "flex-end" },
+  host: { position: "absolute", left: 0, right: 0, top: 0, alignItems: "center" },
+  stack: { justifyContent: "flex-start", width: "100%", maxWidth: 520 },
 });

@@ -28,10 +28,11 @@ import { MasterDetail } from "../components/ds/MasterDetail";
 import { ToastHost } from "../components/ds/ToastHost";
 import { ExpandedFleetRail } from "../components/fleet/DesktopDrillDown";
 import { PaletteHost } from "../components/overlay/CommandPalette";
+import { WebTopBar } from "../components/WebTopBar";
 import { AuthProvider, useAuth } from "../lib/auth";
 import { AnywhereProvider, useAnywhere } from "../lib/AnywhereProvider";
 import { initHaptics } from "../lib/haptics";
-import { isTauri } from "../lib/platform";
+import { isTauri, isWeb } from "../lib/platform";
 import { checkForDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
 import { useGlobalShortcuts } from "../lib/shortcuts";
@@ -60,12 +61,18 @@ const asyncStoragePersister = createAsyncStoragePersister({
   key: "forge.queryCache",
 });
 
+// Hearth: settings-family routes bring their own 240px nav rail (SettingsShell), so the
+// persistent Fleet rail collapses there — one rail on screen at a time. Connect is a
+// full-bleed pairing screen on every surface.
+const RAILLESS_ROUTES = /^\/(settings|configuration|skills|hooks|models|plans|mcp|usage|session-tree|gallery|connect)(\/|$)/;
+
 function RootNavigator() {
   const { isLoading, isPaired } = useAuth();
   const anywhere = useAnywhere();
   const pathname = usePathname();
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
+  const railless = RAILLESS_ROUTES.test(pathname);
 
   useEffect(() => {
     if (!isLoading) {
@@ -98,7 +105,6 @@ function RootNavigator() {
         <Stack.Screen name="hooks" />
         <Stack.Screen name="models" />
         <Stack.Screen name="session-tree" />
-        <Stack.Screen name="plans" />
 
         <Stack.Screen name="mcp" />
         <Stack.Screen name="session/[id]" />
@@ -114,7 +120,10 @@ function RootNavigator() {
   return (
     <>
       {isPaired && isExpanded ? (
-        <MasterDetail master={<ExpandedFleetRail />} detail={appStack} />
+        <>
+          {isWeb && !isTauri ? <WebTopBar /> : null}
+          <MasterDetail master={railless ? null : <ExpandedFleetRail />} detail={appStack} />
+        </>
       ) : (
         appStack
       )}
@@ -168,10 +177,11 @@ export default function RootLayout() {
                       <AppLock>
                         <RootNavigator />
                       </AppLock>
+                      {/* Inside PaletteHost: the Hearth chrome bar's ⌘K field calls usePalette(). */}
+                      <DesktopWindowChrome />
                     </PaletteHost>
                   </View>
                 </ToastHost>
-                <DesktopWindowChrome />
               </PersistQueryClientProvider>
               </AnywhereProvider>
             </AuthProvider>

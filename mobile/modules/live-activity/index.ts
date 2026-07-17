@@ -3,25 +3,38 @@ import { requireNativeModule } from "expo-modules-core";
 
 // Real module only exists on iOS (see ios/LiveActivityModule.swift) — every export here
 // degrades to a safe no-op on other platforms so callers don't need their own Platform.OS guard.
+
+/** Mirrors ForgeLiveActivityAttributesInput (ios/LiveActivityModule.swift). */
+export type LiveActivityAttributes = {
+  sessionId: string;
+  title: string;
+  /** Daemon base URL (embeds the auth token) — the widget's Allow/Deny intents POST to it. */
+  baseUrl: string;
+  agentLabel: string;
+};
+
+/** Mirrors ForgeLiveActivityStateInput (ios/LiveActivityModule.swift). */
+export type LiveActivityState = {
+  busy: boolean;
+  waiting: boolean;
+  costUsd: number;
+  contextTokens: number;
+  contextLimit: number;
+  question?: string | null;
+  promptSeq?: number | null;
+  tasksDone?: number | null;
+  tasksTotal?: number | null;
+  /** Unix seconds of the last busy/waiting state transition (drives the elapsed timer). */
+  stateSinceEpoch?: number | null;
+};
+
 type NativeLiveActivity = {
   isSupported(): Promise<boolean>;
   start(
-    sessionId: string,
-    title: string,
-    busy: boolean,
-    waiting: boolean,
-    costUsd: number,
-    contextTokens: number,
-    contextLimit: number,
+    attributes: LiveActivityAttributes,
+    state: LiveActivityState,
   ): Promise<{ activityId: string | null; pushToken: string | null }>;
-  update(
-    activityId: string,
-    busy: boolean,
-    waiting: boolean,
-    costUsd: number,
-    contextTokens: number,
-    contextLimit: number,
-  ): Promise<void>;
+  update(activityId: string, state: LiveActivityState): Promise<void>;
   end(activityId: string): Promise<void>;
 };
 
@@ -68,28 +81,16 @@ export async function isLiveActivitySupported(): Promise<boolean> {
  * Live Activities are unsupported/disabled or no token arrived within the native module's
  * timeout — the caller should still treat `activityId` as running either way. */
 export async function startLiveActivity(
-  sessionId: string,
-  title: string,
-  busy: boolean,
-  waiting: boolean,
-  costUsd: number,
-  contextTokens: number,
-  contextLimit: number,
+  attributes: LiveActivityAttributes,
+  state: LiveActivityState,
 ): Promise<{ activityId: string | null; pushToken: string | null }> {
   if (!native) return { activityId: null, pushToken: null };
-  return native.start(sessionId, title, busy, waiting, costUsd, contextTokens, contextLimit);
+  return native.start(attributes, state);
 }
 
-export async function updateLiveActivity(
-  activityId: string,
-  busy: boolean,
-  waiting: boolean,
-  costUsd: number,
-  contextTokens: number,
-  contextLimit: number,
-): Promise<void> {
+export async function updateLiveActivity(activityId: string, state: LiveActivityState): Promise<void> {
   if (!native) return;
-  await native.update(activityId, busy, waiting, costUsd, contextTokens, contextLimit);
+  await native.update(activityId, state);
 }
 
 export async function endLiveActivity(activityId: string): Promise<void> {

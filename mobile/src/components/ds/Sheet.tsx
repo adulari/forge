@@ -38,12 +38,17 @@ const GRABBER_W = 36;
 const GRABBER_H = 4;
 const CLOSE_VELOCITY = 800;
 const CLOSE_DISTANCE_RATIO = 0.3;
-const SHEET_ANIMATION_MS = 200;
+const SHEET_ANIMATION_MS = 150;
 
 export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightRatio = 0.9, accessibilityLabel }: SheetProps) {
   const tokens = useTokens();
   const { scheme } = useTheme();
-  const { height: windowHeight } = useWindowDimensions();
+  const { height: windowHeight, width: windowWidth } = useWindowDimensions();
+  // A bottom sheet spanning a 1440px desktop window reads as a wall, not a sheet — cap it
+  // at a comfortable column and center it (no-op on phones). Computed insets rather than
+  // auto margins: Yoga has no auto-margin centering for absolutely-positioned views.
+  const sheetWidth = Math.min(windowWidth, 640);
+  const sheetInset = Math.max(0, (windowWidth - sheetWidth) / 2);
   const reduced = useReducedMotion();
   const depth = scheme === "dark" ? depthDark : depthLight;
 
@@ -78,7 +83,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
         scrimOpacity.value = 1 - restY / sheetHeight;
         return;
       }
-      translateY.value = withSpring(restY, { damping: 24, stiffness: 420, mass: 0.7 });
+      translateY.value = withSpring(restY, { damping: 30, stiffness: 640, mass: 0.6 });
       scrimOpacity.value = withTiming(1 - restY / sheetHeight, { duration: durations.fast, easing: easings.standard });
     } else {
       if (reduced) {
@@ -135,7 +140,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
         runOnJS(close)();
         return;
       }
-      translateY.value = withSpring(0, { damping: 24, stiffness: 420, mass: 0.7 });
+      translateY.value = withSpring(0, { damping: 30, stiffness: 640, mass: 0.6 });
       scrimOpacity.value = withTiming(1, { duration: durations.base, easing: easings.standard });
     });
 
@@ -167,11 +172,12 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
             {
               backgroundColor: tokens.bg2,
               maxHeight: maxSheetHeight,
+              left: sheetInset,
+              right: sheetInset,
               borderTopLeftRadius: radii.radius16,
               borderTopRightRadius: radii.radius16,
             },
             depth.sheet,
-            Platform.OS === "web" && !reduced && styles.webTransition,
             sheetStyle,
           ]}
           accessibilityViewIsModal
@@ -205,14 +211,11 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
   );
 }
 
+// The old `webTransition` CSS (200ms on transform) is gone deliberately: reanimated already
+// drives the translate per-frame, and layering a CSS transition on top re-eased every frame —
+// the whole sheet felt rubbery and slow.
 const styles = StyleSheet.create({
-  sheet: { position: "absolute", left: 0, right: 0, bottom: 0, overflow: "hidden" },
-  webTransition: {
-    // @ts-expect-error react-native-web-only CSS transition property
-    transitionProperty: "transform",
-    transitionDuration: "200ms",
-    transitionTimingFunction: "cubic-bezier(0.2, 0, 0, 1)",
-  },
+  sheet: { position: "absolute", bottom: 0, overflow: "hidden" },
   grabberRow: { alignItems: "center", paddingVertical: space.space12 },
   grabber: { width: GRABBER_W, height: GRABBER_H, borderRadius: 999 },
   bodyScroll: { flexShrink: 1 },

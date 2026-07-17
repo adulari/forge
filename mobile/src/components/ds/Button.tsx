@@ -1,6 +1,10 @@
 // DESIGN_SYSTEM.md §6 Button — variants primary/secondary/ghost/danger/allow.
 // States: D default · P pressed (Strike) · F focused (2px accent ring) ·
 // L loading (spinner-in-place, label persists at 0.6) · X disabled (0.4, no Strike).
+// Hearth core rule 4 (fixed semantic map, never swapped): "allow" is a filled
+// success button with `successBg` ink (not the generic `onAccent`); "danger" is the
+// outlined "deny" look — transparent fill, `borderStrong` border, `danger` ink.
+// Radius 10-12 (Hearth radii scale) for every variant.
 import React, { useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import Animated from "react-native-reanimated";
@@ -47,6 +51,7 @@ export function Button({
 
   let bg: string;
   let ink: string;
+  let border = "transparent";
   switch (variant) {
     case "primary":
       bg = tokens.accent;
@@ -61,12 +66,15 @@ export function Button({
       ink = tokens.ink2;
       break;
     case "danger":
-      bg = tokens.danger;
-      ink = tokens.onAccent;
+      // Hearth "Deny": outlined, never a filled red button.
+      bg = "transparent";
+      ink = tokens.danger;
+      border = tokens.borderStrong;
       break;
     case "allow":
+      // Hearth "Allow": success fill with successBg ink, not the generic onAccent.
       bg = tokens.success;
-      ink = tokens.onAccent;
+      ink = tokens.successBg;
       break;
   }
 
@@ -77,6 +85,7 @@ export function Button({
   if (disabled) {
     bg = tokens.bg3;
     ink = tokens.ink4;
+    border = "transparent";
   }
 
   const minHeight = variant === "primary" ? 48 : tapTarget;
@@ -102,8 +111,8 @@ export function Button({
           {
             backgroundColor: bg,
             minHeight,
-            borderRadius: radii.radius8,
-            borderColor: focused ? tokens.accent : "transparent",
+            borderRadius: radii.radius12,
+            borderColor: focused ? tokens.accent : border,
           },
           style,
         ]}

@@ -1,10 +1,8 @@
 // DESIGN_SYSTEM.md §6 — timeline rows for user/assistant/tool (system) content: Markdown +
 // CodeBlock body for user/assistant; system rows (tool/diff-ish output) render compact mono
 // per the same materials CodeBlock uses, without a full Markdown pass over structured text.
-import * as Clipboard from "expo-clipboard";
-import { Copy } from "lucide-react-native";
-import React from "react";
-import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useState } from "react";
+import { Platform, Pressable, StyleSheet, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import type { HistoryRow } from "../../lib/api";
@@ -14,9 +12,6 @@ import { useSessionCtx } from "../../lib/sessionContext";
 import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
-import { type } from "../../theme/typography";
-import { IconButton } from "../ds/IconButton";
-import { useToast } from "../ds/ToastHost";
 import { AttachmentRow } from "./Attachments";
 import type { SentAttachment } from "./attach";
 import { Markdown } from "./Markdown";
@@ -27,7 +22,10 @@ const IS_WEB = Platform.OS === "web";
 
 export interface MessageRowProps {
   row: HistoryRow;
-  onLongPress?: (message: HistoryRow) => void;
+  /** Open the message-actions surface. `anchor` (viewport coords) is set for pointer-driven
+   * opens (right-click, the hover ⋯ button) so desktop can show an anchored popover; absent
+   * for long-press, which gets the bottom sheet. */
+  onLongPress?: (message: HistoryRow, anchor?: { x: number; y: number }) => void;
   /**
    * Client-local attachments for the optimistic "just sent" bubble only — the daemon never
    * persists attachment metadata into `HistoryRow.content` (remote.rs: "the persisted row
@@ -96,11 +94,16 @@ export function displayMessageText(row: HistoryRow): string {
 
 function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   const tokens = useTokens();
-  const entrance = useForgeline(Math.max(0, row.seq));
-  const toast = useToast();
+  // Entrance only for rows that just arrived — virtualization remounts rows while
+  // scrolling, and replaying the fade there made settled messages flicker transparent.
+  // Lazy useState: evaluated once at mount (the sanctioned home for an impure read).
+  const [isFresh] = useState(() => Date.now() / 1000 - row.created_at < 5);
+  const entrance = useForgeline(Math.max(0, row.seq), isFresh);
   const { baseUrl, sessionId } = useSessionCtx();
   const isUser = row.role === "user";
   const isSystem = row.role === "system";
+  // Hearth: no on-row chrome at all — message actions live behind long-press (native and
+  // touch-web) and right-click (desktop/web). Hover buttons were tried and cut.
 
   // Only assistant turns carry inline `<think>` reasoning; a past turn's reasoning renders
   // collapsed here too, so scrollback isn't full of expanded thinking logs.
@@ -128,30 +131,36 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
     })),
   ];
 
-  // Per-block `selectable` Text (Markdown.tsx) can't drag-select across paragraphs, and there
-  // was no way to grab a whole reply at once — one tap/long-press now copies the full row:
-  // the parsed answer (no `<think>` block) for assistant turns, else the plain row text.
-  const copyText = displayMessageText(row);
-  const onCopyRow = async () => {
-    await Clipboard.setStringAsync(copyText);
-    toast.show("message copied");
-  };
-
+  // Long-press works on native AND touch-web; desktop web additionally gets right-click.
   const handleLongPress = () => {
-    if (!onLongPress || IS_WEB) return;
+    if (!onLongPress) return;
     haptics.select();
     onLongPress(row);
   };
 
+  // RNW forwards DOM handlers it doesn't know about (same passthrough DesktopWindowChrome
+  // uses for onDoubleClick) — typed via cast because react-native's Pressable props don't
+  // model web-only events.
+  const webContextMenu = IS_WEB && onLongPress
+    ? ({
+        onContextMenu: (e: { preventDefault: () => void; clientX: number; clientY: number }) => {
+          e.preventDefault();
+          onLongPress(row, { x: e.clientX, y: e.clientY });
+        },
+      } as Record<string, unknown>)
+    : null;
+
   return (
-    <Animated.View style={[styles.row, !isUser && !isSystem && styles.assistantRow, isUser && styles.userRow, entrance]}>
+    <Animated.View style={entrance}>
+      <View style={[styles.row, !isUser && !isSystem && styles.assistantRow, isUser && styles.userRow]}>
       {!isUser && !isSystem ? <View style={[styles.spine, { backgroundColor: tokens.border }]} /> : null}
       <Pressable
-        onLongPress={onLongPress && !IS_WEB ? handleLongPress : undefined}
+        onLongPress={onLongPress ? handleLongPress : undefined}
+        {...webContextMenu}
         style={[
           styles.bubble,
           isUser
-            ? [styles.userBubble, { backgroundColor: tokens.bg3 }]
+            ? [styles.userBubble, { backgroundColor: tokens.bg2, borderColor: tokens.border }]
             : { backgroundColor: "transparent" },
         ]}
       >
@@ -169,19 +178,8 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         ) : (
           <Markdown content={userText} />
         )}
-        {row.model || (IS_WEB && !isSystem) ? (
-          <View style={styles.metaRow}>
-            {row.model ? <Text style={[type.meta, styles.model, { color: tokens.ink3 }]} numberOfLines={1}>{row.model}</Text> : null}
-            {IS_WEB && !isSystem ? (
-              <IconButton
-                accessibilityLabel="copy message"
-                onPress={onCopyRow}
-                icon={<Copy size={16} strokeWidth={1.75} color={tokens.ink3} />}
-              />
-            ) : null}
-          </View>
-        ) : null}
       </Pressable>
+      </View>
     </Animated.View>
   );
 }
@@ -194,7 +192,5 @@ const styles = StyleSheet.create({
   spine: { position: "absolute", left: space.space16, top: space.space8, bottom: space.space8, width: 2, borderRadius: radii.radiusPill },
   userRow: { alignItems: "flex-end" },
   bubble: { borderRadius: 12, paddingHorizontal: space.space12, paddingVertical: space.space8 },
-  userBubble: { maxWidth: "85%", borderRadius: radii.radius16 },
-  metaRow: { flexDirection: "row", alignItems: "center", gap: space.space4, marginTop: space.space4 },
-  model: { flex: 1 },
+  userBubble: { maxWidth: "85%", borderRadius: radii.radius16, borderWidth: StyleSheet.hairlineWidth },
 });

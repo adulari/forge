@@ -17,6 +17,9 @@ export interface BadgeProps {
   label: string;
   tone?: BadgeTone;
   shape?: BadgeShape; // optional: defaults to pill for status tones, small for descriptive
+  /** Hearth kind pills ("oauth"/"bridge"/"api" on Usage) render lowercase even on status
+   * tones — the uppercase default stays for true status badges. */
+  lowercase?: boolean;
 }
 
 interface ToneStyle {
@@ -43,7 +46,7 @@ function toneStyle(tone: BadgeTone, tokens: ColorTokens): ToneStyle {
   }
 }
 
-export function Badge({ label, tone = "neutral", shape: shapeProp }: BadgeProps) {
+export function Badge({ label, tone = "neutral", shape: shapeProp, lowercase }: BadgeProps) {
   const tokens = useTokens();
   const { background, ink, borderColor } = toneStyle(tone, tokens);
 
@@ -52,7 +55,7 @@ export function Badge({ label, tone = "neutral", shape: shapeProp }: BadgeProps)
   // Descriptive badges (neutral/outline) → sentence-case + small
   const isStatusTone = tone === "danger" || tone === "accent" || tone === "success" || tone === "warn";
   const shape = shapeProp ?? (isStatusTone ? "pill" : "small");
-  const textTransform = isStatusTone ? "uppercase" : "none";
+  const textTransform = lowercase ? "lowercase" : isStatusTone ? "uppercase" : "none";
 
   return (
     <View
