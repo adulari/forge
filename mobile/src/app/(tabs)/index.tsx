@@ -4,18 +4,18 @@
 // recovery poll. Forgeline entrance is a first-mount-only side effect of stable row keys +
 // stable indices across polls (see theme/motion.ts useForgeline) — nothing extra to wire here.
 import { router } from "expo-router";
-import { Flame } from "lucide-react-native";
+import { Flame, Search } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
 import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { SearchField } from "../../components/ds/SearchField";
 import { DecisionCard } from "../../components/cards/DecisionCard";
 import { DecisionPeek } from "../../components/cards/DecisionPeek";
 import { SessionCard } from "../../components/fleet/SessionCard";
 import { BoundedList } from "../../components/ds/BoundedList";
 import { Button } from "../../components/ds/Button";
 import { EmptyState } from "../../components/ds/EmptyState";
+import { IconButton } from "../../components/ds/IconButton";
 import { Screen } from "../../components/ds/Screen";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { TaskComposer } from "../../components/ds/TaskComposer";
@@ -31,6 +31,9 @@ import { useBreakpoint } from "../../theme/useBreakpoint";
 
 // DESIGN_ELEVATION.md Move 3 — the one identity moment: the ⚒ mark beside the Fleet
 // title. Hearth: Floor left the tab bar, so this mark is now the primary way there.
+// Hearth: the old full-width "Search sessions, paths, status" SearchField + "SESSIONS"
+// jump strip are gone (HANDOFF Fleet screen has neither) — a single small search icon in
+// the header routes to History, which already covers session search.
 function FleetTitle() {
   const tokens = useTokens();
   return (
@@ -44,6 +47,13 @@ function FleetTitle() {
       >
         <Text style={[styles.mark, { color: tokens.ink3 }]}>⚒</Text>
       </Pressable>
+      <View style={styles.titleSpacer} />
+      <IconButton
+        icon={<Search size={18} strokeWidth={1.75} color={tokens.ink3} />}
+        onPress={() => router.push("/history")}
+        accessibilityLabel="Search sessions"
+        style={styles.searchButton}
+      />
     </View>
   );
 }
@@ -72,31 +82,6 @@ function FleetSummary({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: 
   );
 }
 
-function SessionJumpStrip({ sessions, onPress }: { sessions: SessionRow[]; onPress: (sessionId: string) => void }) {
-  const tokens = useTokens();
-  const visible = sessions.slice(0, 14);
-
-  if (visible.length === 0) return null;
-
-  return (
-    <View style={[styles.jumpStrip, { borderBottomColor: tokens.border }]}>
-      <Text style={[typeScale.section, { color: tokens.ink3 }]}>sessions</Text>
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.jumpStripDots}>
-        {visible.map((session) => (
-          <Pressable
-            key={session.id}
-            onPress={() => onPress(session.id)}
-            style={({ pressed }) => [styles.jumpDot, { backgroundColor: tokens.ink3, opacity: pressed ? 0.6 : 1 }]}
-            accessibilityRole="button"
-            accessibilityLabel={`Jump to ${session.title || session.id}`}
-          />
-        ))}
-        {sessions.length > visible.length ? <Text style={[typeScale.meta, { color: tokens.ink3 }]}>+{sessions.length - visible.length}</Text> : null}
-      </ScrollView>
-    </View>
-  );
-}
-
 function FleetRowSkeleton() {
   return (
     <View style={styles.skeletonRow}>
@@ -117,7 +102,9 @@ function FleetServerSwitcher() {
   const { servers, activeServerId, setActive } = useAuth();
   const fleets = useServerFleets(servers);
 
-  if (servers.length <= 1) return null;
+  // Hearth "server chips" (HANDOFF Fleet screen): always shown, even for a single
+  // server — a single server just renders as a single chip.
+  if (servers.length === 0) return null;
 
   return (
     <ScrollView
@@ -171,7 +158,6 @@ export default function FleetScreen() {
   // `isRefetching` covers those automatic refreshes too, so track only pull-triggered refreshes
   // here and never animate the spinner without a gesture.
   const [manualRefreshing, setManualRefreshing] = useState(false);
-  const [search, setSearch] = useState("");
   const [needsYouOnly, setNeedsYouOnly] = useState(false);
   const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
   const [composerText, setComposerText] = useState("");
@@ -191,7 +177,7 @@ export default function FleetScreen() {
   }, []);
 
   const data = useMemo(() => query.data ?? [], [query.data]);
-  const filteredData = useMemo(() => filterSessions(data, search, needsYouOnly), [data, search, needsYouOnly]);
+  const filteredData = useMemo(() => filterSessions(data, "", needsYouOnly), [data, needsYouOnly]);
   const deckRows = useMemo(() => buildFleetDeck(filteredData, data), [filteredData, data]);
   const hasData = data.length > 0;
   const isFirstLoad = query.isLoading && !hasData;
@@ -229,22 +215,37 @@ export default function FleetScreen() {
         </View>
         <EmptyState
           icon={Flame}
-          message={search.trim() ? "No sessions match this search." : "No sessions yet. Start with a working directory."}
-          action={search.trim() ? <Button label="Clear search" variant="secondary" onPress={() => setSearch("")} accessibilityLabel="Clear session search" /> : <Button label="Create your first session" variant="primary" onPress={() => router.push("/new-session")} accessibilityLabel="Create your first session" />}
+          message="No sessions yet. Start with a working directory."
+          action={<Button label="Create your first session" variant="primary" onPress={() => router.push("/new-session")} accessibilityLabel="Create your first session" />}
         />
       </View>
     );
-  }, [query.isError, query.error, refetch, search, tokens.ink4]);
+  }, [query.isError, query.error, refetch, tokens.ink4]);
 
-  // T5.1 (fixed): expanded's MasterDetail rail already renders the live session list —
-  // this screen fills the detail pane's `<Slot/>` in that layout (see (tabs)/_layout.tsx),
-  // so rendering the full Fleet list here too duplicated it side by side. Selecting a
-  // session pushes `session/[id]` over both panes (HANDOFF in _layout.tsx), so the detail
-  // pane never actually shows this screen's list content on expanded — just the placeholder.
+  // Hearth "Fleet" (web.dc.html:82-93): the expanded detail pane's empty state when no
+  // session is selected — centered flame + copy + a composer pill (⌘N hint), not the old
+  // generic EmptyState placeholder. Selecting a session pushes `session/[id]` over both
+  // panes (HANDOFF in _layout.tsx), so this pane only ever shows the empty state.
   if (isExpanded) {
     return (
       <Screen scroll={false}>
-        <EmptyState icon={Flame} message="select a session from the fleet to see it here." />
+        <View style={styles.expandedEmpty}>
+          <Flame size={34} color={tokens.borderStrong} strokeWidth={1.5} />
+          <Text style={[styles.expandedEmptyMessage, { color: tokens.ink3 }]}>
+            Pick a session from the fleet — or forge a new one
+          </Text>
+          <View style={styles.expandedComposerWrap}>
+            <TaskComposer
+              value={composerText}
+              onChangeText={setComposerText}
+              onSubmit={onComposerSubmit}
+              testID="fleet-empty-composer"
+            />
+            <View style={styles.expandedComposerHintWrap} pointerEvents="none">
+              <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>⌘N</Text>
+            </View>
+          </View>
+        </View>
       </Screen>
     );
   }
@@ -254,15 +255,6 @@ export default function FleetScreen() {
       <FleetTitle />
       {pickerState === "ready" ? <FleetSummary sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /> : null}
       <FleetServerSwitcher />
-      <SearchField
-        value={search}
-        onChangeText={setSearch}
-        placeholder="Search sessions, paths, status"
-        autoCapitalize="none"
-        autoCorrect={false}
-        containerStyle={styles.search}
-      />
-      {pickerState === "ready" ? <SessionJumpStrip sessions={filteredData} onPress={(sessionId) => { const target = deckRows.findIndex((item) => item.type === "session" && item.row.id === sessionId); if (target >= 0) listRef.current?.scrollToIndex({ index: target, animated: true }); }} /> : null}
       {isFirstLoad ? (
         <View style={styles.list}>
           {[0, 1, 2, 3].map((i) => (
@@ -306,19 +298,21 @@ const styles = StyleSheet.create({
   titleRow: { flexDirection: "row", alignItems: "center", paddingTop: space.space12 },
   titleText: { letterSpacing: -0.4 },
   mark: { fontSize: 14, marginLeft: space.space8, padding: space.space4 },
+  titleSpacer: { flex: 1 },
+  searchButton: { marginRight: -space.space12 },
   list: { paddingTop: space.space12 },
-  search: { paddingTop: space.space12 },
   listContent: { paddingTop: space.space12, paddingBottom: 96 },
   summary: { flexDirection: "row", flexWrap: "wrap", marginTop: space.space2 },
   emptyWrap: { flex: 1 },
   emptyAsh: { flexDirection: "row", justifyContent: "center", gap: space.space8, paddingTop: space.space24 },
   ashCoal: { width: 6, height: 6, borderRadius: 3 },
-  jumpStrip: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingVertical: space.space8, borderBottomWidth: StyleSheet.hairlineWidth },
-  jumpStripDots: { alignItems: "center", gap: space.space8 },
-  jumpDot: { width: 6, height: 6, borderRadius: 3 },
   groupLabel: { paddingTop: space.space16, paddingHorizontal: space.space16 },
   skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonRow1: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   skeletonGap: { marginTop: space.space4 },
   composer: { position: "absolute", left: space.space16, right: space.space16 },
+  expandedEmpty: { flex: 1, alignItems: "center", justifyContent: "center", gap: space.space16, paddingHorizontal: space.space24 },
+  expandedEmptyMessage: { fontSize: 14, lineHeight: 20, textAlign: "center" },
+  expandedComposerWrap: { position: "relative", width: 560, maxWidth: "100%" },
+  expandedComposerHintWrap: { position: "absolute", right: 54, top: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
 });

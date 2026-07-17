@@ -15,17 +15,24 @@
 // nav rail from the Hearth desktop prototype. They render inside this route file
 // (rather than a new shared component) to stay within this builder's file scope —
 // sibling route files import the named exports.
+//
+// `DenseRow` (below) is a local, file-scoped re-implementation of ds/ListRow's row
+// chrome at `rowHeight.dense` (44) instead of `rowHeight.list` (56) — the Hearth
+// golden mock's servers/nav/toggle rows are dense with no subtitle. ListRow itself
+// is out of this builder's file scope (shared DS component), so density couldn't be
+// added there as a prop; this mirrors its press/hover/focus/separator behavior
+// instead of forking a parallel "ListRow v2".
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import { router } from "expo-router";
 import { Bell, ChevronRight, Plus, Trash2 } from "lucide-react-native";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import Animated from "react-native-reanimated";
 
 import { Badge, type BadgeTone } from "../../components/ds/Badge";
 import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
 import { IconButton } from "../../components/ds/IconButton";
-import { KeyValueRow } from "../../components/ds/KeyValueRow";
 import { ListRow } from "../../components/ds/ListRow";
 import { Screen } from "../../components/ds/Screen";
 import { SectionHeader } from "../../components/ds/SectionHeader";
@@ -48,12 +55,13 @@ import {
   isAnonymousTelemetryEnabled,
   setAnonymousTelemetryEnabled,
 } from "../../lib/anonymousTelemetry";
-import { useHooks, useMcp, useModels, usePlans, useServerFleets, useSkills } from "../../lib/queries";
+import { useHooks, useMcp, useModels, usePlans, useServerFleets, useSkills, useUsage } from "../../lib/queries";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
 import { checkForDesktopUpdate, type DesktopUpdate } from "../../lib/updater";
+import { useStrike } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
-import { space } from "../../theme/tokens";
-import { type, tabularNums } from "../../theme/typography";
+import { radii, rowHeight, space } from "../../theme/tokens";
+import { formatCost, type, tabularNums } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 
 const NOTIFICATIONS_SUPPORTED = (isWeb && !isTauri) || isIOS;
@@ -156,20 +164,108 @@ export function SettingsShell({ active, children }: { active: string; children: 
   );
 }
 
+interface DenseRowProps {
+  leading?: React.ReactNode;
+  children: React.ReactNode;
+  trailing?: React.ReactNode;
+  onPress?: () => void;
+  showSeparator?: boolean;
+  accessibilityLabel?: string;
+  /** See ListRow — set when `trailing` renders its own interactive control, so the
+   * row's web element stays a plain focusable `<div>` (a `<button>` can't legally
+   * contain another `<button>`). */
+  hasInteractiveTrailing?: boolean;
+}
+
+function DenseRow({
+  leading,
+  children,
+  trailing,
+  onPress,
+  showSeparator = true,
+  accessibilityLabel,
+  hasInteractiveTrailing = false,
+}: DenseRowProps) {
+  const tokens = useTokens();
+  const { style: strikeStyle, onPressIn, onPressOut } = useStrike();
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const pressableRef = useRef<React.ComponentRef<typeof Pressable>>(null);
+
+  const suppressWebButtonTag = Platform.OS === "web" && hasInteractiveTrailing;
+
+  useEffect(() => {
+    if (!suppressWebButtonTag || !onPress) return;
+    const node = pressableRef.current as unknown as HTMLElement | null;
+    if (!node) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        onPress();
+      }
+    };
+    node.addEventListener("keydown", onKeyDown);
+    return () => node.removeEventListener("keydown", onKeyDown);
+  }, [suppressWebButtonTag, onPress]);
+
+  const content = (
+    <Animated.View
+      style={[
+        styles.denseRow,
+        onPress ? strikeStyle : undefined,
+        onPress && hovered ? { backgroundColor: tokens.bg3 } : undefined,
+      ]}
+    >
+      {leading}
+      <View style={styles.denseBody}>{children}</View>
+      {trailing}
+    </Animated.View>
+  );
+
+  return (
+    <View>
+      {onPress ? (
+        <Pressable
+          ref={pressableRef}
+          onPress={onPress}
+          onPressIn={onPressIn}
+          onPressOut={onPressOut}
+          onHoverIn={() => setHovered(true)}
+          onHoverOut={() => setHovered(false)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          accessibilityRole={suppressWebButtonTag ? undefined : "button"}
+          accessibilityLabel={accessibilityLabel}
+          style={{ borderWidth: 2, borderColor: focused ? tokens.accent : "transparent" }}
+        >
+          {content}
+        </Pressable>
+      ) : (
+        content
+      )}
+      {showSeparator ? <View style={[styles.denseSeparator, { backgroundColor: tokens.hairline }]} /> : null}
+    </View>
+  );
+}
+
 function NavListRow({ label, meta, onPress, showSeparator = true }: { label: string; meta?: string; onPress: () => void; showSeparator?: boolean }) {
   const tokens = useTokens();
   return (
-    <ListRow
-      title={label}
+    <DenseRow
       onPress={onPress}
       showSeparator={showSeparator}
+      accessibilityLabel={label}
       trailing={
         <View style={styles.navTrailing}>
           {meta ? <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4 }]}>{meta}</Text> : null}
           <ChevronRight size={15} strokeWidth={1.75} color={tokens.ink4} />
         </View>
       }
-    />
+    >
+      <Text style={[type.body, { color: tokens.ink }]} numberOfLines={1}>
+        {label}
+      </Text>
+    </DenseRow>
   );
 }
 
@@ -206,6 +302,11 @@ export default function SettingsScreen() {
   const plansQuery = usePlans();
   const skillsQuery = useSkills();
   const hooksQuery = useHooks();
+  // The Hearth mock's "Usage" row meta is a per-day spend figure, but the API only
+  // exposes week/session windows (no "today") — showing the week total instead of
+  // fabricating a daily number.
+  const usageQuery = useUsage();
+  const usageWeekLabel = usageQuery.data ? `${formatCost(usageQuery.data.week.combined.costUsd)} this week` : undefined;
   const modelsReadyLabel = useMemo(() => {
     if (!modelsQuery.data) return undefined;
     const ready = modelsQuery.data.providers.flatMap((p) => p.models).filter((m) => m.health == null).length;
@@ -405,42 +506,51 @@ export default function SettingsScreen() {
             const rows = fleet.data ?? [];
             const reachable = fleet.isSuccess;
             const waitingCount = rows.filter((row) => row.waiting).length;
+            const active = server.id === activeServerId;
             return (
-              <ListRow
+              <DenseRow
                 key={server.id}
-                title={server.name}
                 onPress={() => setActive(server.id)}
-                leading={
-                  <View style={styles.serverLeading}>
-                    <View style={[styles.reachabilityDot, { backgroundColor: fleet.isLoading ? tokens.warn : reachable ? tokens.success : tokens.danger }]} />
-                    {server.id === activeServerId ? <Badge label="active" tone="accent" /> : null}
-                  </View>
-                }
+                accessibilityLabel={server.name}
+                hasInteractiveTrailing
+                leading={<View style={[styles.reachabilityDot, { backgroundColor: fleet.isLoading ? tokens.warn : reachable ? tokens.success : tokens.danger }]} />}
                 trailing={
                   <View style={styles.serverTrailing}>
                     <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>{`${maskToken(server.token)} · ${waitingCount} waiting`}</Text>
                     <IconButton
-                      icon={<Trash2 size={18} strokeWidth={1.75} color={tokens.ink3} />}
+                      icon={<Trash2 size={16} strokeWidth={1.75} color={tokens.ink4} />}
                       accessibilityLabel={`Remove server ${server.name}`}
                       onPress={() => setPendingRemove(server)}
                     />
                   </View>
                 }
-                hasInteractiveTrailing
-              />
+              >
+                <View style={styles.serverName}>
+                  <Text style={[type.bodyBold, { color: active ? tokens.ink : tokens.ink2 }]} numberOfLines={1}>
+                    {server.name}
+                  </Text>
+                  {active ? (
+                    <View style={[styles.activeTag, { backgroundColor: tokens.selection }]}>
+                      <Text style={[type.meta, { color: tokens.accent }]}>active</Text>
+                    </View>
+                  ) : null}
+                </View>
+              </DenseRow>
             );
           })}
-          <ListRow
-            title="Add server"
-            leading={<Plus size={18} strokeWidth={1.75} color={tokens.accent} />}
+          <DenseRow
             onPress={() => router.push("/connect")}
             showSeparator={false}
-          />
+            accessibilityLabel="Add server"
+            leading={<Plus size={18} strokeWidth={1.75} color={tokens.accent} />}
+          >
+            <Text style={[type.bodyBold, { color: tokens.accent }]}>Add server</Text>
+          </DenseRow>
         </View>
 
         <View>
           <SectionHeader>Forge</SectionHeader>
-          <NavListRow label="Usage" onPress={() => router.push("/usage")} />
+          <NavListRow label="Usage" meta={usageWeekLabel} onPress={() => router.push("/usage")} />
           <NavListRow label="Models & mesh health" meta={modelsReadyLabel} onPress={() => router.push("/models")} />
           <NavListRow label="Plans" meta={plansOpenLabel} onPress={() => router.push("/plans")} />
           <NavListRow label="MCP servers" meta={mcpEnabledLabel} onPress={() => router.push("/mcp")} />
@@ -461,6 +571,42 @@ export default function SettingsScreen() {
             value={preference}
             onChange={setScheme}
           />
+          {NOTIFICATIONS_SUPPORTED ? (
+            <DenseRow
+              accessibilityLabel={isIOS ? "Push notifications" : "Web push"}
+              trailing={
+                pushSupported && pushLoaded ? (
+                  <Switch
+                    value={pushStatus === "subscribed"}
+                    onValueChange={onPushChange}
+                    disabled={pushBusy || !baseUrl}
+                    accessibilityLabel="Web push notifications"
+                  />
+                ) : undefined
+              }
+            >
+              <Text style={[type.body, { color: tokens.ink }]}>{isIOS ? "Push notifications" : "Web push"}</Text>
+            </DenseRow>
+          ) : null}
+          <DenseRow
+            showSeparator={false}
+            accessibilityLabel="Require Face ID"
+            trailing={
+              appLockLoaded ? (
+                <Switch value={appLock} onValueChange={onAppLockChange} accessibilityLabel="Require Face ID" />
+              ) : undefined
+            }
+          >
+            <Text style={[type.body, { color: tokens.ink }]}>Require Face ID</Text>
+          </DenseRow>
+        </View>
+
+        <View style={styles.footerRow}>
+          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4 }]}>{`v${appVersion} · protocol v7`}</Text>
+          <View style={styles.footerFill} />
+          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>
+            {host ? `${host} · ${maskToken(activeToken)}` : "not connected"}
+          </Text>
         </View>
 
         <View>
@@ -470,20 +616,6 @@ export default function SettingsScreen() {
             leading={<View style={[styles.reachabilityDot, { backgroundColor: healthDotColor }]} />}
             trailing={<Text style={[type.monoMeta, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>{healthMetaText}</Text>}
             showSeparator={false}
-          />
-        </View>
-
-        <View>
-          <SectionHeader>Security</SectionHeader>
-          <ListRow
-            title="Require Face ID"
-            subtitle="Lock Forge behind biometric authentication when you return to it."
-            showSeparator={false}
-            trailing={
-              appLockLoaded ? (
-                <Switch value={appLock} onValueChange={onAppLockChange} accessibilityLabel="Require Face ID" />
-              ) : undefined
-            }
           />
         </View>
 
@@ -515,36 +647,7 @@ export default function SettingsScreen() {
           />
         </View>
 
-        {NOTIFICATIONS_SUPPORTED ? (
-          <View>
-            <SectionHeader>Notifications</SectionHeader>
-            <ListRow
-              title={isIOS ? "Push notifications" : "Web push"}
-              subtitle={
-                !pushSupported
-                  ? "not supported in this browser."
-                  : pushStatus === "subscribed"
-                    ? isIOS
-                      ? "Forge can notify you here when a session needs you."
-                      : "Allow/Deny prompts reach you here, even with this tab closed."
-                    : isIOS
-                      ? "get notified when a session needs your input."
-                      : "get notified in this browser when a session needs you."
-              }
-              showSeparator={false}
-              trailing={
-                pushSupported && pushLoaded ? (
-                  <Switch
-                    value={pushStatus === "subscribed"}
-                    onValueChange={onPushChange}
-                    disabled={pushBusy || !baseUrl}
-                    accessibilityLabel="Web push notifications"
-                  />
-                ) : undefined
-              }
-            />
-          </View>
-        ) : isTauri ? (
+        {isTauri ? (
           <View>
             <SectionHeader>Notifications</SectionHeader>
             <ListRow
@@ -562,13 +665,12 @@ export default function SettingsScreen() {
           </View>
         ) : null}
 
-        <View>
-          <SectionHeader>About &amp; diagnostics</SectionHeader>
-          <KeyValueRow label="Version" value={appVersion} />
-          <KeyValueRow label="Protocol" value="v7" />
-          <KeyValueRow label="Active server" value={host ? `${host} · ${maskToken(activeToken)}` : "none"} />
-          {isTauri ? <ListRow title={updateBusy ? "Checking for updates…" : desktopUpdate ? `Update available: ${desktopUpdate.version}` : "Check for updates"} subtitle={desktopUpdate ? "Install and relaunch Forge" : "Desktop releases are checked in the background"} onPress={updateBusy ? undefined : desktopUpdate ? installDesktopUpdate : checkDesktopUpdate} showSeparator={false} /> : null}
-        </View>
+        {isTauri ? (
+          <View>
+            <SectionHeader>About &amp; diagnostics</SectionHeader>
+            <ListRow title={updateBusy ? "Checking for updates…" : desktopUpdate ? `Update available: ${desktopUpdate.version}` : "Check for updates"} subtitle={desktopUpdate ? "Install and relaunch Forge" : "Desktop releases are checked in the background"} onPress={updateBusy ? undefined : desktopUpdate ? installDesktopUpdate : checkDesktopUpdate} showSeparator={false} />
+          </View>
+        ) : null}
 
         <ConfirmDialog
           visible={pendingRemove != null}
@@ -588,12 +690,24 @@ export default function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
-  serverLeading: { flexDirection: "row", alignItems: "center", gap: space.space4 },
+  denseRow: {
+    minHeight: rowHeight.dense,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: space.space16,
+    gap: space.space12,
+  },
+  denseBody: { flex: 1, minWidth: 0, justifyContent: "center" },
+  denseSeparator: { height: StyleSheet.hairlineWidth, marginLeft: space.space16 },
+  serverName: { flexDirection: "row", alignItems: "center", gap: space.space4, minWidth: 0 },
+  activeTag: { paddingHorizontal: space.space8, paddingVertical: 1, borderRadius: radii.radius4 },
   serverTrailing: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   navTrailing: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   reachabilityDot: { width: 7, height: 7, borderRadius: 4 },
-  content: { paddingTop: space.space16, paddingBottom: space.space48, gap: space.space20 },
+  content: { paddingTop: space.space16, paddingBottom: space.space48 },
   pageTitle: { paddingHorizontal: space.space4 },
+  footerRow: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space16, paddingTop: space.space16 },
+  footerFill: { flex: 1 },
 });
 
 const railStyles = StyleSheet.create({

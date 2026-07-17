@@ -37,6 +37,7 @@ import { MessageActionsSheet } from "../../../components/chat/MessageActionsShee
 import { Markdown } from "../../../components/chat/Markdown";
 import { MessageRow } from "../../../components/chat/MessageRow";
 import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
+import { summarizeToolLine } from "../../../components/chat/SystemOutput";
 import { BellowsSpinner } from "../../../components/ds/BellowsSpinner";
 import { BoundedList } from "../../../components/ds/BoundedList";
 import { Chip } from "../../../components/ds/Chip";
@@ -53,7 +54,7 @@ import { useSessionCtx } from "../../../lib/sessionContext";
 import { easings, useEmberdot, useForgeline } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { radii, space } from "../../../theme/tokens";
-import { type as typeScale } from "../../../theme/typography";
+import { tabularNums, type as typeScale } from "../../../theme/typography";
 
 // T3.3's CardSlot.tsx landed during this task (was a HANDOFF stub) — wired in directly above.
 
@@ -122,12 +123,16 @@ function LiveToolActivity({ entries, startedAt }: { entries: string[]; startedAt
       <View style={[styles.activityRow, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
         <Animated.View style={[styles.activityDot, { backgroundColor: tokens.accent }, dotStyle]} />
         <Hammer size={14} strokeWidth={1.75} color={tokens.accent} />
-        <Text style={[typeScale.meta, styles.activityLine, { color: tokens.ink2 }]} numberOfLines={1}>
-          {entries[entries.length - 1]}
+        <Text style={[typeScale.monoMeta, tabularNums, styles.activityLine, { color: tokens.ink2 }]} numberOfLines={1}>
+          {summarizeToolLine(entries[entries.length - 1])}
         </Text>
         <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{formatElapsed(elapsedMs)}</Text>
       </View>
-      {entries.slice(0, -1).map((line, index) => <Text key={`${index}:${line}`} style={[typeScale.meta, styles.activitySettled, { color: tokens.ink3 }]} numberOfLines={1}>{line}</Text>)}
+      {entries.slice(0, -1).map((line, index) => (
+        <Text key={`${index}:${line}`} style={[typeScale.monoMeta, tabularNums, styles.activitySettled, { color: tokens.ink3 }]} numberOfLines={1}>
+          {summarizeToolLine(line)}
+        </Text>
+      ))}
     </Animated.View>
   );
 }

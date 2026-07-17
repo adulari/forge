@@ -1,7 +1,10 @@
 // DESIGN_SYSTEM.md §2 `section` style: 11/14 700 +0.8 letter-spacing UPPERCASE
 // ink4 (Hearth: moved from ink3) — used to head grouped rows (settings, palette
-// results, gallery sections). DESIGN_ELEVATION.md Move 3 — a 6px ember tick
-// precedes the label, then a hairline rule fills the rest of the row.
+// results, gallery sections). Hearth fidelity fix: dropped the ember tick +
+// trailing hairline rule the previous build carried over from DESIGN_ELEVATION.md
+// Move 3 — the redesign's section headers are a plain label; grouped rows below
+// already carry their own hairline separators, and the header's own top padding
+// (not a rule) is what separates one group from the next.
 import React from "react";
 import { StyleSheet, Text, type TextStyle, View } from "react-native";
 
@@ -19,34 +22,17 @@ export function SectionHeader({ children, style }: SectionHeaderProps) {
 
   return (
     <View style={styles.wrap} accessibilityRole="header">
-      <View style={[styles.tick, { backgroundColor: tokens.accent }]} />
-      <Text style={[typeScale.section, styles.label, { color: tokens.ink4 }, style]} numberOfLines={1}>
+      <Text style={[typeScale.section, { color: tokens.ink4 }, style]} numberOfLines={1}>
         {children}
       </Text>
-      <View style={[styles.rule, { backgroundColor: tokens.border }]} />
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   wrap: {
-    flexDirection: "row",
-    alignItems: "center",
     paddingHorizontal: space.space16,
-    paddingTop: space.space16,
-    paddingBottom: space.space8,
-  },
-  tick: {
-    width: 6,
-    height: 2,
-  },
-  label: {
-    flexShrink: 1,
-    marginLeft: space.space8,
-    marginRight: space.space8,
-  },
-  rule: {
-    flex: 1,
-    height: StyleSheet.hairlineWidth,
+    paddingTop: space.space12,
+    paddingBottom: space.space4,
   },
 });

@@ -10,6 +10,7 @@ import { monoFamily, type as typeScale } from "../../theme/typography";
 import { Badge } from "../ds/Badge";
 import { Button } from "../ds/Button";
 import { Input } from "../ds/Input";
+import { ListRow } from "../ds/ListRow";
 import { SearchField } from "../ds/SearchField";
 import { Sheet } from "../ds/Sheet";
 
@@ -65,32 +66,15 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
 
   return (
     <>
-      <View>
-        <Text style={[typeScale.meta, styles.label, { color: tokens.ink3 }]}>Model (optional)</Text>
-        <Pressable
-          onPress={() => setVisible(true)}
-          accessibilityRole="button"
-          accessibilityLabel="Choose model"
-          accessibilityValue={{ text: (selected?.name ?? value) || "Automatic" }}
-          style={({ pressed }) => [
-            styles.trigger,
-            {
-              backgroundColor: tokens.bg2,
-              borderColor: pressed ? tokens.borderStrong : tokens.border,
-            },
-          ]}
-        >
-          <View style={styles.triggerText}>
-            <Text style={[typeScale.body, { color: tokens.ink }]} numberOfLines={1}>
-              {(selected?.name ?? value) || "Automatic"}
-            </Text>
-            <Text style={[typeScale.meta, { color: tokens.ink3 }]} numberOfLines={1}>
-              {value ? selected?.id ?? value : "Let Forge choose the best available model"}
-            </Text>
-          </View>
-          <ChevronDown size={18} strokeWidth={1.75} color={tokens.ink3} />
-        </Pressable>
-      </View>
+      {/* Hearth: de-boxed hairline row, matching ProjectPicker's trigger above it. */}
+      <ListRow
+        title={(selected?.name ?? value) || "Automatic"}
+        subtitle={value ? selected?.id ?? value : "Let Forge choose the best available model"}
+        leading={<Cpu size={18} strokeWidth={1.75} color={tokens.ink3} />}
+        trailing={<ChevronDown size={18} strokeWidth={1.75} color={tokens.ink3} />}
+        onPress={() => setVisible(true)}
+        accessibilityLabel="Choose model"
+      />
 
       <Sheet visible={visible} onClose={close} accessibilityLabel="Choose a model" snapPoints={[0.9]}>
         <View style={styles.sheetContent}>

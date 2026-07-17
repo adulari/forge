@@ -9,16 +9,13 @@
 // snapshot (a new `prompt_seq`) is what unlocks the card again, and by then the
 // parent has usually stopped rendering this card entirely (permission_prompt
 // went null).
-import { AlertTriangle } from "lucide-react-native";
 import React, { useEffect, useRef, useState } from "react";
-import { StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import { Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import Animated, { FadeOut, useAnimatedStyle, useReducedMotion, withTiming } from "react-native-reanimated";
 
-import { Badge } from "../ds/Badge";
 import { Button } from "../ds/Button";
 import { Card } from "../ds/Card";
 import { CommitIcon } from "../ds/CommitIcon";
-import { HeatEdge } from "../ds/HeatEdge";
 import { useToast } from "../ds/ToastHost";
 import { haptics } from "../../lib/haptics";
 import { useHotkey } from "../../lib/shortcuts";
@@ -26,7 +23,7 @@ import { type Diff, type RemoteInput } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
-import { type as typeScale } from "../../theme/typography";
+import { formatRelativeTime, type as typeScale } from "../../theme/typography";
 import { DiffCard } from "../review/DiffCard";
 
 export interface PermissionCardProps {
@@ -56,17 +53,34 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
   const [queued, setQueued] = useState(false);
   const ackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Hearth header reads "permission · waiting Ns" — the daemon has no waitingSince field on
+  // Snapshot, so this times from the moment THIS card mounted for the current prompt_seq
+  // (reset below, same edge as the lock/commit reset). Both start at 0 (never call `Date.now`
+  // during render — react-hooks/purity) and get their real values from the effects below;
+  // `now` ticks every second so `formatRelativeTime(waitingSince, now)` stays live without
+  // ever reading a ref during render (react-hooks/refs).
+  const [waitingSince, setWaitingSince] = useState(0);
+  const [now, setNow] = useState(0);
+
   // A new snapshot with a different prompt_seq means the previous decision was
   // consumed (or this is a fresh prompt) — unlock and clear the commit icon.
   useEffect(() => {
     setLockedSeq(null);
     setCommitted(null);
     setQueued(false);
+    const t = Date.now();
+    setWaitingSince(t);
+    setNow(t);
     if (ackTimerRef.current != null) {
       clearTimeout(ackTimerRef.current);
       ackTimerRef.current = null;
     }
   }, [promptSeq]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(
     () => () => {
@@ -126,15 +140,18 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
   useHotkey("y", () => respond(true), { meta: false });
   useHotkey("n", () => respond(false), { meta: false });
 
+  // No `RemoteInput` kind exists yet for "always allow for this session" — inventing one
+  // client-side would silently no-op against the daemon, which is worse than saying so.
+  // Surfaces as a disabled-looking hint + toast until the protocol grows a real kind.
+  const onAlwaysAllow = () => toast.show("always allow — coming soon", { tone: "neutral" });
+
   return (
-    <Animated.View style={styles.wrap} exiting={reduced ? undefined : FadeOut.duration(durations.gentle)}>
-      <HeatEdge state="waiting" />
-      <Card variant="feature" style={[styles.card, { borderColor: tokens.danger }]}>
+    <Animated.View exiting={reduced ? undefined : FadeOut.duration(durations.gentle)}>
+      <Card variant="feature" heatEdge="waiting">
         <Animated.View style={dim}>
-          <View style={styles.header}>
-            <AlertTriangle size={16} strokeWidth={1.75} color={tokens.danger} />
-            <Badge label="permission" tone="danger" />
-          </View>
+          <Text style={[typeScale.section, styles.header, { color: tokens.danger }]}>
+            {`permission · waiting ${formatRelativeTime(waitingSince, now)}`}
+          </Text>
 
           <Text style={[typeScale.body, { color: tokens.ink }, styles.prompt]}>{prompt}</Text>
 
@@ -147,22 +164,31 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
           {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
           <View style={styles.actions}>
             <Button
-              label="Deny"
-              variant="danger"
-              onPress={() => respond(false)}
-              disabled={locked}
-              icon={committed === "deny" ? <CommitIcon kind="x" color={tokens.onAccent} /> : undefined}
-              style={styles.actionBtn}
-            />
-            <Button
               label="Allow"
               variant="allow"
               onPress={() => respond(true)}
               disabled={locked}
               icon={committed === "allow" ? <CommitIcon kind="check" color={tokens.onAccent} /> : undefined}
-              style={styles.actionBtn}
+              style={styles.allowBtn}
+            />
+            <Button
+              label="Deny"
+              variant="danger"
+              onPress={() => respond(false)}
+              disabled={locked}
+              icon={committed === "deny" ? <CommitIcon kind="x" color={tokens.onAccent} /> : undefined}
+              style={styles.denyBtn}
             />
           </View>
+          <Pressable
+            onPress={onAlwaysAllow}
+            hitSlop={13}
+            accessibilityRole="button"
+            accessibilityLabel="always allow for this session"
+            style={styles.alwaysAllow}
+          >
+            <Text style={[typeScale.sub, { color: tokens.ink3 }]}>always allow for this session</Text>
+          </Pressable>
         </Animated.View>
       </Card>
     </Animated.View>
@@ -170,11 +196,13 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
 }
 
 const styles = StyleSheet.create({
-  wrap: { position: "relative" },
-  card: { borderWidth: 1.5, marginLeft: space.space4 },
-  header: { flexDirection: "row", alignItems: "center", gap: space.space8, marginBottom: space.space8 },
+  header: { letterSpacing: 0.6, marginBottom: space.space8 },
   prompt: { marginBottom: space.space12 },
   diffSlot: { marginBottom: space.space12 },
-  actions: { flexDirection: "row", gap: space.space12 },
-  actionBtn: { flex: 1 },
+  actions: { flexDirection: "row", gap: space.space8 },
+  allowBtn: { flex: 1.4 },
+  denyBtn: { flex: 1 },
+  // Not wired to any daemon protocol yet (see onAlwaysAllow) — visually reads as
+  // not-yet-functional rather than a normal live affordance.
+  alwaysAllow: { alignSelf: "flex-start", marginTop: space.space8, opacity: 0.6 },
 });

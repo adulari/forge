@@ -58,8 +58,8 @@ type HistoryListItem =
 
 const FILTERS: { value: HistoryFilter; label: string }[] = [
   { value: "all", label: "All" },
-  { value: "archived", label: "Archived" },
   { value: "active", label: "Active" },
+  { value: "archived", label: "Archived" },
 ];
 
 const BUCKETS: { value: ActivityBucket; label: string }[] = [

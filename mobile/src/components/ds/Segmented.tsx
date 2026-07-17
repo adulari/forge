@@ -30,53 +30,75 @@ export interface SegmentedProps<T extends string = string> {
   flush?: boolean;
 }
 
+interface SegmentLayout {
+  x: number;
+  width: number;
+}
+
 export function Segmented<T extends string = string>({ options, value, onChange, testID, flush }: SegmentedProps<T>) {
   const tokens = useTokens();
   const reduced = useReducedMotion();
-  const [width, setWidth] = useState(0);
+  // Each segment reports its own measured x/width (see `onSegmentLayout` below) instead of
+  // the thumb deriving position from `track width / count` — a track/segment size mismatch
+  // (borders, rounding, the 10/7 radii padding) made that math drift from what actually
+  // rendered, showing the thumb offset from the selected label.
+  const [segmentLayouts, setSegmentLayouts] = useState<(SegmentLayout | undefined)[]>([]);
   const translateX = useSharedValue(0);
-  // Tracks whether the thumb has been placed once at its measured width yet —
-  // that first placement snaps instantly (no spring "slide-in" from the left
-  // edge on mount); every switch after that runs the `press` spring.
-  const hasPlaced = useRef(false);
+  const thumbWidth = useSharedValue(0);
+  // Tracks the previously-placed index (not just "has it ever been placed") so a layout
+  // re-measurement at the SAME index — e.g. the track settling to its final width right
+  // after mount/rotation — snaps instantly instead of spring-animating; only an actual
+  // selection change should slide.
+  const prevIndex = useRef<number | null>(null);
   const index = Math.max(
     0,
     options.findIndex((o) => o.value === value),
   );
-  const segmentWidth = options.length > 0 ? (width - 4) / options.length : 0;
 
   // flush: track = bg2 (header surface), thumb = bg3 (raised chip).
   // default:  track = bg3,          thumb = bg2 (existing section-style look).
   const trackBg = flush ? tokens.bg2 : tokens.bg3;
   const thumbBg = flush ? tokens.bg3 : tokens.bg2;
 
+  const layout = segmentLayouts[index];
+
   useEffect(() => {
-    if (segmentWidth <= 0) return;
-    const target = index * segmentWidth;
-    if (reduced || !hasPlaced.current) {
-      translateX.value = target;
-      hasPlaced.current = true;
+    if (!layout) return;
+    const indexChanged = prevIndex.current !== null && prevIndex.current !== index;
+    prevIndex.current = index;
+    if (reduced || !indexChanged) {
+      translateX.value = layout.x;
+      thumbWidth.value = layout.width;
     } else {
-      translateX.value = withSpring(target, springs.press);
+      translateX.value = withSpring(layout.x, springs.press);
+      thumbWidth.value = withSpring(layout.width, springs.press);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index, segmentWidth, reduced]);
+  }, [index, layout, reduced]);
 
   const thumbStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: translateX.value }],
-    width: segmentWidth,
+    width: thumbWidth.value,
   }));
 
-  const onLayout = (e: LayoutChangeEvent) => setWidth(e.nativeEvent.layout.width);
+  const onSegmentLayout = (i: number) => (e: LayoutChangeEvent) => {
+    const { x, width } = e.nativeEvent.layout;
+    setSegmentLayouts((prev) => {
+      const current = prev[i];
+      if (current && current.x === x && current.width === width) return prev;
+      const next = [...prev];
+      next[i] = { x, width };
+      return next;
+    });
+  };
 
   return (
     <View
-      onLayout={onLayout}
       style={[styles.track, { backgroundColor: trackBg, borderRadius: radii.radiusSegmentOuter }]}
       testID={testID}
       accessibilityRole="tablist"
     >
-      {width > 0 ? (
+      {layout ? (
         <Animated.View
           pointerEvents="none"
           style={[styles.thumb, thumbStyle, { backgroundColor: thumbBg, borderRadius: radii.radiusSegmentInner }]}
@@ -89,7 +111,7 @@ export function Segmented<T extends string = string>({ options, value, onChange,
           />
         </Animated.View>
       ) : null}
-      {options.map((opt) => {
+      {options.map((opt, i) => {
         const selected = opt.value === value;
         return (
           <SegmentOption
@@ -99,6 +121,7 @@ export function Segmented<T extends string = string>({ options, value, onChange,
             dot={opt.dot}
             selected={selected}
             onPress={() => onChange(opt.value)}
+            onLayout={onSegmentLayout(i)}
           />
         );
       })}
@@ -109,7 +132,21 @@ export function Segmented<T extends string = string>({ options, value, onChange,
 // Own component (not inline in the `.map`) so each segment can carry its own
 // hover/focus-visible state — hooks can't run conditionally/per-iteration
 // inside a parent's render body.
-function SegmentOption({ label, badge, dot, selected, onPress }: { label: string; badge?: number; dot?: boolean; selected: boolean; onPress: () => void }) {
+function SegmentOption({
+  label,
+  badge,
+  dot,
+  selected,
+  onPress,
+  onLayout,
+}: {
+  label: string;
+  badge?: number;
+  dot?: boolean;
+  selected: boolean;
+  onPress: () => void;
+  onLayout: (e: LayoutChangeEvent) => void;
+}) {
   const tokens = useTokens();
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -117,6 +154,7 @@ function SegmentOption({ label, badge, dot, selected, onPress }: { label: string
   return (
     <Pressable
       onPress={onPress}
+      onLayout={onLayout}
       onHoverIn={() => setHovered(true)}
       onHoverOut={() => setHovered(false)}
       onFocus={() => setFocused(true)}
@@ -154,7 +192,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     top: 2,
     bottom: 2,
-    left: 2,
+    left: 0,
   },
   thumbInset: {
     position: "absolute",

@@ -19,7 +19,6 @@ import { Button } from "../components/ds/Button";
 import { Checkbox } from "../components/ds/Checkbox";
 import { IconButton } from "../components/ds/IconButton";
 import { Screen } from "../components/ds/Screen";
-import { SectionHeader } from "../components/ds/SectionHeader";
 import { Segmented } from "../components/ds/Segmented";
 import { ModelPicker } from "../components/session/ModelPicker";
 import { ProjectPicker } from "../components/session/ProjectPicker";
@@ -144,13 +143,12 @@ export default function NewSessionScreen() {
 
   const whereAndHow = (
     <View>
-      <SectionHeader>Where &amp; how</SectionHeader>
+      <Text style={[typeScale.section, styles.sectionLabel, { color: tokens.ink4 }]}>Where &amp; how</Text>
       <View>
         <ProjectPicker value={cwd} onChange={rememberProject} />
         <ModelPicker value={model} onChange={setModel} />
       </View>
       <View style={styles.temperBlock}>
-        <Text style={[typeScale.body, { color: tokens.ink }]}>Run mode</Text>
         <Segmented options={TEMPER_OPTIONS} value={temper} onChange={setTemper} />
         <Text style={[typeScale.sub, { color: tokens.ink3 }]}>{TEMPER_HINT[temper]}</Text>
       </View>
@@ -308,6 +306,7 @@ const styles = StyleSheet.create({
   taskBoxWide: { marginTop: space.space16 },
   taskInput: { fontSize: 16, lineHeight: 24, minHeight: 48, textAlignVertical: "top", padding: 0 },
   taskHint: { marginTop: space.space12, lineHeight: 16 },
+  sectionLabel: { paddingTop: space.space24, paddingBottom: space.space4 },
   temperBlock: { gap: space.space4, paddingVertical: space.space12 },
   worktreeRow: { flexDirection: "row", alignItems: "center", gap: space.space12, minHeight: 52 },
   worktreeLabel: { flex: 1 },

@@ -3,8 +3,8 @@
 // per the same materials CodeBlock uses, without a full Markdown pass over structured text.
 import * as Clipboard from "expo-clipboard";
 import { Copy } from "lucide-react-native";
-import React from "react";
-import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useState } from "react";
+import { Platform, Pressable, StyleSheet, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import type { HistoryRow } from "../../lib/api";
@@ -14,7 +14,6 @@ import { useSessionCtx } from "../../lib/sessionContext";
 import { useForgeline } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
-import { type } from "../../theme/typography";
 import { IconButton } from "../ds/IconButton";
 import { useToast } from "../ds/ToastHost";
 import { AttachmentRow } from "./Attachments";
@@ -101,6 +100,10 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   const { baseUrl, sessionId } = useSessionCtx();
   const isUser = row.role === "user";
   const isSystem = row.role === "system";
+  // Hearth: no always-visible model attribution or copy icon on the row — copy is a
+  // long-press affordance on native (MessageActionsSheet) and a hover affordance here
+  // on web, where long-press has no equivalent.
+  const [hovered, setHovered] = useState(false);
 
   // Only assistant turns carry inline `<think>` reasoning; a past turn's reasoning renders
   // collapsed here too, so scrollback isn't full of expanded thinking logs.
@@ -148,6 +151,8 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
       {!isUser && !isSystem ? <View style={[styles.spine, { backgroundColor: tokens.border }]} /> : null}
       <Pressable
         onLongPress={onLongPress && !IS_WEB ? handleLongPress : undefined}
+        onHoverIn={IS_WEB ? () => setHovered(true) : undefined}
+        onHoverOut={IS_WEB ? () => setHovered(false) : undefined}
         style={[
           styles.bubble,
           isUser
@@ -169,16 +174,13 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         ) : (
           <Markdown content={userText} />
         )}
-        {row.model || (IS_WEB && !isSystem) ? (
+        {IS_WEB && !isSystem && hovered ? (
           <View style={styles.metaRow}>
-            {row.model ? <Text style={[type.meta, styles.model, { color: tokens.ink3 }]} numberOfLines={1}>{row.model}</Text> : null}
-            {IS_WEB && !isSystem ? (
-              <IconButton
-                accessibilityLabel="copy message"
-                onPress={onCopyRow}
-                icon={<Copy size={16} strokeWidth={1.75} color={tokens.ink3} />}
-              />
-            ) : null}
+            <IconButton
+              accessibilityLabel="copy message"
+              onPress={onCopyRow}
+              icon={<Copy size={16} strokeWidth={1.75} color={tokens.ink3} />}
+            />
           </View>
         ) : null}
       </Pressable>
@@ -195,6 +197,5 @@ const styles = StyleSheet.create({
   userRow: { alignItems: "flex-end" },
   bubble: { borderRadius: 12, paddingHorizontal: space.space12, paddingVertical: space.space8 },
   userBubble: { maxWidth: "85%", borderRadius: radii.radius16, borderWidth: StyleSheet.hairlineWidth },
-  metaRow: { flexDirection: "row", alignItems: "center", gap: space.space4, marginTop: space.space4 },
-  model: { flex: 1 },
+  metaRow: { flexDirection: "row", justifyContent: "flex-end", marginTop: space.space4 },
 });
