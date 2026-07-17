@@ -291,6 +291,20 @@ metadata compares `(logical_clock, device_id)` lexicographically. File records c
 content hashes; divergent bases create conflict copies. Deletion is a tombstone, never an implicit
 absence.
 
+Record dependencies are applied in `session → message → checkpoint/tool-call/routing/usage →
+compaction` order. A missing parent leaves the verified record staged and retryable; it does not
+advance an application marker or become a conflict. An entirely remote session is created with a
+host-selected workspace and safe permission mode. Fields purporting to contain a workspace path,
+worktree, or permission mode are never imported.
+
+`user_setting`, `command`, `skill`, `agent`, and `workflow` are mutable portable records. Clients
+store them outside ordinary configuration and secret storage, validate them before use, and reject
+credential-bearing settings. A `file` stable ID is a logical name, not a host path. Clients first
+materialize file bytes into a content-addressed local cache. When the current content hash differs
+from an upsert's authenticated `base_hash`, they retain the incoming bytes as a visible conflict
+copy rather than overwriting either revision. Workspace files remain ineligible outside an explicit
+handoff capsule.
+
 ### Sync object transfer
 
 Clients seal one complete `sync_record` envelope before reserving an upload. The exact ciphertext

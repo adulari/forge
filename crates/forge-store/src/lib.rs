@@ -2,7 +2,7 @@
 //! a single connection behind a mutex; SQLite is in WAL mode for crash-resilient writes.
 //! All persistence in Forge goes through this crate.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, TimeZone};
 use forge_types::{Role, TaskTier, ToolCall, Usage, Visibility};
@@ -911,6 +911,7 @@ pub struct SyncJournalEntry {
     pub operation: String,
     pub revision: u64,
     pub logical_clock: u64,
+    pub base_hash: Option<[u8; 32]>,
     pub content_hash: Vec<u8>,
     /// Immutable plaintext snapshot; the sync worker encrypts it before it leaves the host.
     pub payload: Vec<u8>,
@@ -947,6 +948,38 @@ pub struct RemoteSyncApplySummary {
     pub superseded: usize,
     pub conflicts: usize,
     pub deferred: usize,
+}
+
+/// One safely materialized account record used by local settings/command/extension consumers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableSyncRecord {
+    pub record_kind: String,
+    pub stable_id: String,
+    pub payload: Vec<u8>,
+    pub deleted: bool,
+    pub logical_clock: u64,
+    pub sender_device_id: [u8; 16],
+    pub content_hash: [u8; 32],
+}
+
+/// A content-divergent file revision retained instead of overwriting the local winner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncFileConflict {
+    pub stable_id: String,
+    pub sender_device_id: [u8; 16],
+    pub base_hash: Option<[u8; 32]>,
+    pub content_hash: [u8; 32],
+    pub payload: Vec<u8>,
+    pub detail: String,
+}
+
+/// A terminal sync conflict retained for status/UI reporting and explicit resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncApplyConflict {
+    pub cursor: i64,
+    pub record_kind: String,
+    pub stable_id: String,
+    pub detail: String,
 }
 
 #[derive(Debug)]
@@ -1054,13 +1087,14 @@ struct RemoteCompactionPayload {
 }
 
 enum HistoryMutation {
-    Session(RemoteSessionPayload),
+    Session(Option<RemoteSessionPayload>),
     Message(RemoteMessagePayload),
     Checkpoint(RemoteCheckpointPayload),
     ToolCall(RemoteToolCallPayload),
     Routing(RemoteRoutingPayload),
     Usage(RemoteUsagePayload),
     Compaction(Option<RemoteCompactionPayload>),
+    Tombstone,
 }
 
 fn default_true() -> bool {
@@ -1146,23 +1180,42 @@ fn parse_history_mutation(
     if sync_payload_hash(&record.payload) != record.content_hash {
         return Err("decrypted payload does not match its authenticated content hash".into());
     }
-    if record.record_kind == "compaction" {
+    if matches!(record.record_kind.as_str(), "session" | "compaction") {
         return match record.operation.as_str() {
-            "tombstone" if record.payload.is_empty() => Ok(HistoryMutation::Compaction(None)),
-            "tombstone" => Err("compaction tombstone payload must be empty".into()),
-            "upsert" => {
-                let payload: RemoteCompactionPayload = serde_json::from_slice(&record.payload)
-                    .map_err(|error| format!("invalid compaction snapshot: {error}"))?;
-                if payload.session_id != record.stable_id {
-                    return Err("compaction session id does not match its stable id".into());
-                }
-                Ok(HistoryMutation::Compaction(Some(payload)))
+            "tombstone" if record.payload.is_empty() && record.record_kind == "session" => {
+                Ok(HistoryMutation::Session(None))
             }
-            _ => Err("compaction operation is not supported".into()),
+            "tombstone" if record.payload.is_empty() => Ok(HistoryMutation::Compaction(None)),
+            "tombstone" => Err("mutable history tombstone payload must be empty".into()),
+            "upsert" => {
+                if record.record_kind == "session" {
+                    let payload: RemoteSessionPayload = serde_json::from_slice(&record.payload)
+                        .map_err(|error| format!("invalid session snapshot: {error}"))?;
+                    if payload.id != record.stable_id {
+                        return Err("session snapshot id does not match its stable id".into());
+                    }
+                    Ok(HistoryMutation::Session(Some(payload)))
+                } else {
+                    let payload: RemoteCompactionPayload = serde_json::from_slice(&record.payload)
+                        .map_err(|error| format!("invalid compaction snapshot: {error}"))?;
+                    if payload.session_id != record.stable_id {
+                        return Err("compaction session id does not match its stable id".into());
+                    }
+                    Ok(HistoryMutation::Compaction(Some(payload)))
+                }
+            }
+            _ => Err("mutable history operation is not supported".into()),
+        };
+    }
+    if record.operation == "tombstone" {
+        return if record.payload.is_empty() {
+            Ok(HistoryMutation::Tombstone)
+        } else {
+            Err("history tombstone payload must be empty".into())
         };
     }
     if record.operation != "upsert" {
-        return Err("append-only history records do not accept tombstones".into());
+        return Err("history operation is not supported".into());
     }
     macro_rules! parse {
         ($ty:ty, $variant:ident, $label:literal) => {{
@@ -1175,7 +1228,6 @@ fn parse_history_mutation(
         }};
     }
     Ok(match record.record_kind.as_str() {
-        "session" => parse!(RemoteSessionPayload, Session, "session"),
         "message" => parse!(RemoteMessagePayload, Message, "message"),
         "checkpoint" => parse!(RemoteCheckpointPayload, Checkpoint, "checkpoint"),
         "tool_call" => parse!(RemoteToolCallPayload, ToolCall, "tool call"),
@@ -1327,28 +1379,112 @@ fn insert_sync_journal_row(
     logical_clock: i64,
     payload: &[u8],
 ) -> Result<bool> {
+    insert_sync_journal_row_with_base(
+        conn,
+        record_kind,
+        stable_id,
+        operation,
+        revision,
+        logical_clock,
+        None,
+        payload,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_sync_journal_row_with_base(
+    conn: &Connection,
+    record_kind: &str,
+    stable_id: &str,
+    operation: SyncJournalOperation,
+    revision: i64,
+    logical_clock: i64,
+    base_hash: Option<&[u8; 32]>,
+    payload: &[u8],
+) -> Result<bool> {
     if record_kind.trim().is_empty() || stable_id.trim().is_empty() {
         return Err(StoreError::InvalidValue(
             "sync record kind and stable id must be non-empty".into(),
         ));
     }
+    if !matches!(
+        record_kind,
+        "session"
+            | "message"
+            | "checkpoint"
+            | "tool_call"
+            | "routing_decision"
+            | "usage"
+            | "compaction"
+            | "memory"
+            | "user_setting"
+            | "command"
+            | "skill"
+            | "agent"
+            | "workflow"
+            | "file"
+    ) {
+        return Err(StoreError::InvalidValue(
+            "record kind is not eligible for Anywhere sync".into(),
+        ));
+    }
+    if operation == SyncJournalOperation::Tombstone && !payload.is_empty() {
+        return Err(StoreError::InvalidValue(
+            "sync tombstones must have an empty payload".into(),
+        ));
+    }
+    if record_kind == "file" && operation == SyncJournalOperation::Upsert && base_hash.is_none() {
+        return Err(StoreError::InvalidValue(
+            "file upserts require a base content hash".into(),
+        ));
+    }
     let content_hash = sync_payload_hash(payload);
     let changed = conn.execute(
         "INSERT INTO sync_journal
-             (record_kind, stable_id, operation, revision, logical_clock, content_hash, payload)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             (record_kind, stable_id, operation, revision, logical_clock, base_hash,
+              content_hash, payload)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(record_kind, stable_id, revision) DO NOTHING",
-        (
+        rusqlite::params![
             record_kind,
             stable_id,
             operation.as_str(),
             revision,
             logical_clock,
+            base_hash.map(|hash| hash.as_slice()),
             content_hash.as_slice(),
             payload,
-        ),
+        ],
     )?;
-    Ok(changed == 1)
+    if changed == 1 {
+        return Ok(true);
+    }
+    let existing = conn.query_row(
+        "SELECT operation, logical_clock, base_hash, content_hash, payload
+         FROM sync_journal WHERE record_kind = ?1 AND stable_id = ?2 AND revision = ?3",
+        (record_kind, stable_id, revision),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+            ))
+        },
+    )?;
+    let same = existing.0 == operation.as_str()
+        && existing.1 == logical_clock
+        && existing.2.as_deref() == base_hash.map(|hash| hash.as_slice())
+        && existing.3 == content_hash
+        && existing.4 == payload;
+    if same {
+        Ok(false)
+    } else {
+        Err(StoreError::InvalidValue(
+            "sync revision already exists with different content".into(),
+        ))
+    }
 }
 
 /// Append the next immutable snapshot for a local record inside the caller's transaction.
@@ -1534,6 +1670,7 @@ impl Store {
                 &conn,
                 "ALTER TABLE sync_journal ADD COLUMN payload BLOB NOT NULL DEFAULT X''",
             )?;
+            add_column_if_missing(&conn, "ALTER TABLE sync_journal ADD COLUMN base_hash BLOB")?;
         }
         let reservation_store_id = match reservation_source {
             ConnSource::File(path) => std::fs::canonicalize(&path)
@@ -1618,13 +1755,49 @@ impl Store {
         )
     }
 
+    /// Append a file revision with its explicit base content hash.
+    ///
+    /// The base is authenticated in the encrypted record and is required for remote divergence
+    /// detection. `stable_id` is a logical id and is never interpreted as a host filesystem path.
+    pub fn append_sync_file_journal(
+        &self,
+        stable_id: &str,
+        operation: SyncJournalOperation,
+        revision: u64,
+        logical_clock: u64,
+        base_hash: Option<[u8; 32]>,
+        payload: &[u8],
+    ) -> Result<bool> {
+        if operation == SyncJournalOperation::Upsert && base_hash.is_none() {
+            return Err(StoreError::InvalidValue(
+                "file upserts require a base content hash".into(),
+            ));
+        }
+        let revision = i64::try_from(revision)
+            .map_err(|_| StoreError::InvalidValue("sync revision exceeds SQLite range".into()))?;
+        let logical_clock = i64::try_from(logical_clock).map_err(|_| {
+            StoreError::InvalidValue("sync logical clock exceeds SQLite range".into())
+        })?;
+        let conn = self.lock()?;
+        insert_sync_journal_row_with_base(
+            &conn,
+            "file",
+            stable_id,
+            operation,
+            revision,
+            logical_clock,
+            base_hash.as_ref(),
+            payload,
+        )
+    }
+
     /// Return pending sync records in durable cursor order.
     pub fn pending_sync_journal(&self, limit: usize) -> Result<Vec<SyncJournalEntry>> {
         let limit = i64::try_from(limit.clamp(1, 1000)).unwrap_or(1000);
         let conn = self.lock()?;
         let mut statement = conn.prepare(
             "SELECT id, record_kind, stable_id, operation, revision, logical_clock,
-                    content_hash, payload, created_at
+                    base_hash, content_hash, payload, created_at
              FROM sync_journal WHERE uploaded_at IS NULL ORDER BY id LIMIT ?1",
         )?;
         let rows = statement.query_map([limit], |row| {
@@ -1635,9 +1808,21 @@ impl Store {
                 operation: row.get(3)?,
                 revision: row.get::<_, i64>(4)?.max(0) as u64,
                 logical_clock: row.get::<_, i64>(5)?.max(0) as u64,
-                content_hash: row.get(6)?,
-                payload: row.get(7)?,
-                created_at: row.get(8)?,
+                base_hash: row
+                    .get::<_, Option<Vec<u8>>>(6)?
+                    .map(|hash| {
+                        hash.try_into().map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                rusqlite::types::Type::Blob,
+                                "sync base hash is not 32 bytes".into(),
+                            )
+                        })
+                    })
+                    .transpose()?,
+                content_hash: row.get(7)?,
+                payload: row.get(8)?,
+                created_at: row.get(9)?,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1760,27 +1945,29 @@ impl Store {
         }
         let existing = transaction
             .query_row(
-                "SELECT operation, logical_clock, base_hash, content_hash, payload
+                "SELECT sender_device_id, operation, logical_clock, base_hash, content_hash, payload
                  FROM anywhere_sync_remote
                  WHERE record_kind = ?1 AND stable_id = ?2 AND revision = ?3",
                 (&record.record_kind, &record.stable_id, revision),
                 |row| {
                     Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, Option<Vec<u8>>>(2)?,
-                        row.get::<_, Vec<u8>>(3)?,
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<Vec<u8>>>(3)?,
                         row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
                     ))
                 },
             )
             .optional()?;
         if let Some(existing) = existing {
-            let same = existing.0 == record.operation
-                && existing.1 == logical_clock
-                && existing.2.as_deref() == record.base_hash.as_ref().map(|hash| hash.as_slice())
-                && existing.3 == record.content_hash
-                && existing.4 == record.payload;
+            let same = existing.0 == record.sender_device_id
+                && existing.1 == record.operation
+                && existing.2 == logical_clock
+                && existing.3.as_deref() == record.base_hash.as_ref().map(|hash| hash.as_slice())
+                && existing.4 == record.content_hash
+                && existing.5 == record.payload;
             if !same {
                 return Err(StoreError::InvalidValue(
                     "remote sync revision conflicts with staged content".into(),
@@ -2153,13 +2340,9 @@ impl Store {
             if let HistoryMutation::Session(payload) = mutation {
                 let exists = transaction.query_row(
                     "SELECT EXISTS(SELECT 1 FROM session WHERE id = ?1)",
-                    [&payload.id],
+                    [&record.stable_id],
                     |row| row.get::<_, bool>(0),
                 )?;
-                if !exists {
-                    summary.deferred += 1;
-                    continue;
-                }
                 let (disposition, has_provenance) =
                     classify_mutable_sync_version(&transaction, &record, local_device_id)?;
                 match disposition {
@@ -2183,7 +2366,7 @@ impl Store {
                         summary.superseded += 1;
                         continue;
                     }
-                    None if !has_provenance => {
+                    None if exists && !has_provenance => {
                         record_sync_apply_outcome(
                             &transaction,
                             record.cursor,
@@ -2195,16 +2378,40 @@ impl Store {
                     }
                     None => {}
                 }
-                transaction.execute(
-                    "UPDATE session SET title = ?2, archived = ?3, view_snapshot = ?4,
-                         updated_at = strftime('%s','now') WHERE id = ?1",
-                    rusqlite::params![
-                        payload.id,
-                        payload.title,
-                        payload.archived,
-                        payload.view_snapshot
-                    ],
-                )?;
+                if let Some(payload) = payload {
+                    if exists {
+                        transaction.execute(
+                            "UPDATE session SET title = ?2, archived = ?3, view_snapshot = ?4,
+                                 updated_at = strftime('%s','now') WHERE id = ?1",
+                            rusqlite::params![
+                                payload.id,
+                                payload.title,
+                                payload.archived,
+                                payload.view_snapshot
+                            ],
+                        )?;
+                    } else {
+                        let local_cwd = std::env::current_dir()
+                            .unwrap_or_else(|_| PathBuf::from("."))
+                            .to_string_lossy()
+                            .into_owned();
+                        transaction.execute(
+                            "INSERT INTO session
+                             (id, title, cwd, permission_mode, archived, view_snapshot)
+                             VALUES (?1, ?2, ?3, 'accept_edits', ?4, ?5)",
+                            rusqlite::params![
+                                payload.id,
+                                payload.title,
+                                local_cwd,
+                                payload.archived,
+                                payload.view_snapshot
+                            ],
+                        )?;
+                    }
+                } else if exists {
+                    transaction
+                        .execute("DELETE FROM session WHERE id = ?1", [&record.stable_id])?;
+                }
                 upsert_sync_materialized(&transaction, &record)?;
                 record_sync_apply_outcome(&transaction, record.cursor, "applied", None)?;
                 summary.applied += 1;
@@ -2309,6 +2516,32 @@ impl Store {
                 continue;
             }
 
+            if matches!(&mutation, HistoryMutation::Tombstone) {
+                match classify_mutable_sync_version(&transaction, &record, local_device_id)?.0 {
+                    Some(SyncVersionDisposition::Conflict) => {
+                        record_sync_apply_outcome(
+                            &transaction,
+                            record.cursor,
+                            "conflict",
+                            Some("equal history tombstone versions contain different content"),
+                        )?;
+                        summary.conflicts += 1;
+                        continue;
+                    }
+                    Some(SyncVersionDisposition::Superseded) => {
+                        record_sync_apply_outcome(
+                            &transaction,
+                            record.cursor,
+                            "superseded",
+                            Some("a deterministic newer history revision already exists"),
+                        )?;
+                        summary.superseded += 1;
+                        continue;
+                    }
+                    None => {}
+                }
+            }
+
             let local = transaction
                 .query_row(
                     "SELECT operation, content_hash FROM sync_journal
@@ -2318,7 +2551,9 @@ impl Store {
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
                 )
                 .optional()?;
-            if let Some((operation, hash)) = local {
+            if let Some((operation, hash)) =
+                local.filter(|_| !matches!(&mutation, HistoryMutation::Tombstone))
+            {
                 if operation == record.operation && hash == record.content_hash {
                     record_sync_apply_outcome(
                         &transaction,
@@ -2531,9 +2766,49 @@ impl Store {
                     }
                 }
                 HistoryMutation::Compaction(_) => unreachable!("compaction handled above"),
+                HistoryMutation::Tombstone => {
+                    let table = match record.record_kind.as_str() {
+                        "message" => "message",
+                        "checkpoint" => "checkpoint",
+                        "tool_call" => "tool_call",
+                        "routing_decision" => "routing_decision",
+                        "usage" => "usage",
+                        _ => {
+                            return Err(StoreError::InvalidValue(
+                                "unsupported history tombstone kind".into(),
+                            ))
+                        }
+                    };
+                    let has_provenance = transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM anywhere_sync_materialized
+                         WHERE record_kind = ?1 AND stable_id = ?2)",
+                        (&record.record_kind, &record.stable_id),
+                        |row| row.get::<_, bool>(0),
+                    )? || transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sync_journal
+                         WHERE record_kind = ?1 AND stable_id = ?2)",
+                        (&record.record_kind, &record.stable_id),
+                        |row| row.get::<_, bool>(0),
+                    )?;
+                    let exists = transaction.query_row(
+                        &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1)"),
+                        [&record.stable_id],
+                        |row| row.get::<_, bool>(0),
+                    )?;
+                    if exists && !has_provenance {
+                        Err("existing local history row has no sync provenance")
+                    } else {
+                        transaction.execute(
+                            &format!("DELETE FROM {table} WHERE id = ?1"),
+                            [&record.stable_id],
+                        )?;
+                        Ok(true)
+                    }
+                }
             };
             match outcome {
                 Ok(true) => {
+                    upsert_sync_materialized(&transaction, &record)?;
                     record_sync_apply_outcome(&transaction, record.cursor, "applied", None)?;
                     summary.applied += 1;
                 }
@@ -2551,6 +2826,623 @@ impl Store {
         }
         transaction.commit()?;
         Ok(summary)
+    }
+
+    /// Apply account-scoped settings, commands, skills, agents, and workflows.
+    ///
+    /// Payloads remain opaque in this layer and are never copied to `config.toml`, the keyring, or
+    /// a workspace. Kind-specific consumers must validate the bytes before using them.
+    pub fn apply_staged_portable_records(
+        &self,
+        local_device_id: [u8; 16],
+        limit: usize,
+    ) -> Result<RemoteSyncApplySummary> {
+        const KINDS: &str = "'user_setting', 'command', 'skill', 'agent', 'workflow'";
+        if limit == 0 {
+            return Ok(RemoteSyncApplySummary::default());
+        }
+        let limit = i64::try_from(limit).map_err(|_| {
+            StoreError::InvalidValue("sync apply limit exceeds SQLite range".into())
+        })?;
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sql = format!(
+            "SELECT r.cursor, r.sender_device_id, r.record_kind, r.stable_id, r.operation,
+                    r.logical_clock, r.content_hash, r.payload
+             FROM anywhere_sync_remote r
+             LEFT JOIN anywhere_sync_apply a ON a.cursor = r.cursor
+             WHERE r.record_kind IN ({KINDS}) AND a.cursor IS NULL
+             ORDER BY r.cursor LIMIT ?1"
+        );
+        let raw = {
+            let mut statement = transaction.prepare(&sql)?;
+            let records = statement
+                .query_map([limit], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, Vec<u8>>(7)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            records
+        };
+        let mut summary = RemoteSyncApplySummary::default();
+        for (cursor, sender, kind, stable_id, operation, clock, hash, payload) in raw {
+            summary.inspected += 1;
+            let record = StagedHistoryRecord {
+                cursor,
+                sender_device_id: sender.try_into().map_err(|_| {
+                    StoreError::InvalidValue("staged sync sender id has the wrong length".into())
+                })?,
+                record_kind: kind,
+                stable_id,
+                operation,
+                logical_clock: clock,
+                content_hash: hash.try_into().map_err(|_| {
+                    StoreError::InvalidValue("staged sync content hash has the wrong length".into())
+                })?,
+                payload,
+            };
+            let invalid = sync_payload_hash(&record.payload) != record.content_hash
+                || (record.operation == "tombstone" && !record.payload.is_empty())
+                || !matches!(record.operation.as_str(), "upsert" | "tombstone");
+            if invalid {
+                record_sync_apply_outcome(
+                    &transaction,
+                    record.cursor,
+                    "conflict",
+                    Some("portable record payload or operation is invalid"),
+                )?;
+                summary.conflicts += 1;
+                continue;
+            }
+            match classify_mutable_sync_version(&transaction, &record, local_device_id)?.0 {
+                Some(SyncVersionDisposition::Conflict) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "conflict",
+                        Some("equal portable record versions contain different content"),
+                    )?;
+                    summary.conflicts += 1;
+                    continue;
+                }
+                Some(SyncVersionDisposition::Superseded) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "superseded",
+                        Some("a deterministic newer portable record already exists"),
+                    )?;
+                    summary.superseded += 1;
+                    continue;
+                }
+                None => {}
+            }
+            transaction.execute(
+                "INSERT INTO anywhere_sync_portable_record
+                 (record_kind, stable_id, payload, deleted, logical_clock,
+                  sender_device_id, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(record_kind, stable_id) DO UPDATE SET
+                   payload = excluded.payload, deleted = excluded.deleted,
+                   logical_clock = excluded.logical_clock,
+                   sender_device_id = excluded.sender_device_id,
+                   content_hash = excluded.content_hash",
+                rusqlite::params![
+                    &record.record_kind,
+                    &record.stable_id,
+                    &record.payload,
+                    record.operation == "tombstone",
+                    record.logical_clock,
+                    record.sender_device_id.as_slice(),
+                    record.content_hash.as_slice(),
+                ],
+            )?;
+            upsert_sync_materialized(&transaction, &record)?;
+            record_sync_apply_outcome(&transaction, record.cursor, "applied", None)?;
+            summary.applied += 1;
+        }
+        transaction.commit()?;
+        Ok(summary)
+    }
+
+    /// Load one portable record, including its tombstone when `deleted` is true.
+    pub fn portable_sync_record(
+        &self,
+        record_kind: &str,
+        stable_id: &str,
+    ) -> Result<Option<PortableSyncRecord>> {
+        self.lock()?
+            .query_row(
+                "SELECT payload, deleted, logical_clock, sender_device_id, content_hash
+                 FROM anywhere_sync_portable_record
+                 WHERE record_kind = ?1 AND stable_id = ?2",
+                (record_kind, stable_id),
+                |row| {
+                    let sender: Vec<u8> = row.get(3)?;
+                    let hash: Vec<u8> = row.get(4)?;
+                    Ok(PortableSyncRecord {
+                        record_kind: record_kind.to_owned(),
+                        stable_id: stable_id.to_owned(),
+                        payload: row.get(0)?,
+                        deleted: row.get(1)?,
+                        logical_clock: row.get::<_, i64>(2)?.max(0) as u64,
+                        sender_device_id: sender.try_into().map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Blob,
+                                "portable sender id is not 16 bytes".into(),
+                            )
+                        })?,
+                        content_hash: hash.try_into().map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                4,
+                                rusqlite::types::Type::Blob,
+                                "portable content hash is not 32 bytes".into(),
+                            )
+                        })?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Commit a local portable record and its encrypted-sync journal revision atomically.
+    pub fn write_portable_sync_record(
+        &self,
+        local_device_id: [u8; 16],
+        record_kind: &str,
+        stable_id: &str,
+        payload: Option<&[u8]>,
+    ) -> Result<()> {
+        if !matches!(
+            record_kind,
+            "user_setting" | "command" | "skill" | "agent" | "workflow"
+        ) || stable_id.trim().is_empty()
+        {
+            return Err(StoreError::InvalidValue(
+                "portable sync record kind or stable id is invalid".into(),
+            ));
+        }
+        let normalized = stable_id.to_ascii_lowercase();
+        if record_kind == "user_setting"
+            && [
+                "secret",
+                "token",
+                "password",
+                "credential",
+                "api_key",
+                "private_key",
+            ]
+            .iter()
+            .any(|needle| normalized.contains(needle))
+        {
+            return Err(StoreError::InvalidValue(
+                "secret-bearing settings are not eligible for sync".into(),
+            ));
+        }
+        let operation = if payload.is_some() {
+            SyncJournalOperation::Upsert
+        } else {
+            SyncJournalOperation::Tombstone
+        };
+        let payload = payload.unwrap_or_default();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sync_enabled = transaction.query_row(
+            "SELECT enabled FROM anywhere_sync_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let next: i64 = transaction.query_row(
+            "SELECT MAX(value) + 1 FROM (
+               SELECT COALESCE(MAX(revision), 0) AS value FROM sync_journal
+                WHERE record_kind = ?1 AND stable_id = ?2
+               UNION ALL
+               SELECT COALESCE(MAX(logical_clock), 0) AS value
+                FROM anywhere_sync_portable_record
+                WHERE record_kind = ?1 AND stable_id = ?2
+             )",
+            (record_kind, stable_id),
+            |row| row.get(0),
+        )?;
+        let hash = sync_payload_hash(payload);
+        transaction.execute(
+            "INSERT INTO anywhere_sync_portable_record
+             (record_kind, stable_id, payload, deleted, logical_clock,
+              sender_device_id, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(record_kind, stable_id) DO UPDATE SET
+               payload = excluded.payload, deleted = excluded.deleted,
+               logical_clock = excluded.logical_clock,
+               sender_device_id = excluded.sender_device_id,
+               content_hash = excluded.content_hash",
+            rusqlite::params![
+                record_kind,
+                stable_id,
+                payload,
+                operation == SyncJournalOperation::Tombstone,
+                next,
+                local_device_id.as_slice(),
+                hash.as_slice(),
+            ],
+        )?;
+        if sync_enabled {
+            insert_sync_journal_row(
+                &transaction,
+                record_kind,
+                stable_id,
+                operation,
+                next,
+                next,
+                payload,
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Apply staged file records into the content-addressed local cache.
+    ///
+    /// A logical file id is never opened as a path. If the authenticated base does not match the
+    /// local winner, the incoming bytes become a durable conflict copy and the winner is untouched.
+    pub fn apply_staged_file_records(
+        &self,
+        local_device_id: [u8; 16],
+        limit: usize,
+    ) -> Result<RemoteSyncApplySummary> {
+        if limit == 0 {
+            return Ok(RemoteSyncApplySummary::default());
+        }
+        let limit = i64::try_from(limit).map_err(|_| {
+            StoreError::InvalidValue("sync apply limit exceeds SQLite range".into())
+        })?;
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw = {
+            let mut statement = transaction.prepare(
+                "SELECT r.cursor, r.sender_device_id, r.stable_id, r.operation,
+                        r.logical_clock, r.base_hash, r.content_hash, r.payload
+                 FROM anywhere_sync_remote r
+                 LEFT JOIN anywhere_sync_apply a ON a.cursor = r.cursor
+                 WHERE r.record_kind = 'file' AND a.cursor IS NULL
+                 ORDER BY r.cursor LIMIT ?1",
+            )?;
+            let records = statement
+                .query_map([limit], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<Vec<u8>>>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, Vec<u8>>(7)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            records
+        };
+        let mut summary = RemoteSyncApplySummary::default();
+        for (cursor, sender, stable_id, operation, clock, base, hash, payload) in raw {
+            summary.inspected += 1;
+            let record = StagedHistoryRecord {
+                cursor,
+                sender_device_id: sender.try_into().map_err(|_| {
+                    StoreError::InvalidValue("staged sync sender id has the wrong length".into())
+                })?,
+                record_kind: "file".into(),
+                stable_id,
+                operation,
+                logical_clock: clock,
+                content_hash: hash.try_into().map_err(|_| {
+                    StoreError::InvalidValue("staged sync content hash has the wrong length".into())
+                })?,
+                payload,
+            };
+            let base_hash: Option<[u8; 32]> = base
+                .map(|value| {
+                    value.try_into().map_err(|_| {
+                        StoreError::InvalidValue(
+                            "staged file base hash has the wrong length".into(),
+                        )
+                    })
+                })
+                .transpose()?;
+            if sync_payload_hash(&record.payload) != record.content_hash
+                || (record.operation == "upsert" && base_hash.is_none())
+                || (record.operation == "tombstone" && !record.payload.is_empty())
+                || !matches!(record.operation.as_str(), "upsert" | "tombstone")
+            {
+                record_sync_apply_outcome(
+                    &transaction,
+                    record.cursor,
+                    "conflict",
+                    Some("file record payload, base hash, or operation is invalid"),
+                )?;
+                summary.conflicts += 1;
+                continue;
+            }
+            let current = transaction
+                .query_row(
+                    "SELECT deleted, content_hash FROM anywhere_sync_file WHERE stable_id = ?1",
+                    [&record.stable_id],
+                    |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()?;
+            if let Some((_, current_hash)) = &current {
+                if current_hash.as_slice() == record.content_hash {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "superseded",
+                        Some("the file content already exists locally"),
+                    )?;
+                    summary.superseded += 1;
+                    continue;
+                }
+            }
+            if record.operation == "upsert" {
+                if let Some((false, current_hash)) = &current {
+                    if base_hash
+                        .as_ref()
+                        .is_some_and(|base| base.as_slice() != current_hash)
+                    {
+                        transaction.execute(
+                            "INSERT INTO anywhere_sync_file_conflict
+                             (stable_id, sender_device_id, base_hash, content_hash, payload, detail)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                             ON CONFLICT(stable_id, content_hash) DO NOTHING",
+                            rusqlite::params![
+                                &record.stable_id,
+                                record.sender_device_id.as_slice(),
+                                base_hash.as_ref().map(|hash| hash.as_slice()),
+                                record.content_hash.as_slice(),
+                                &record.payload,
+                                "incoming file base differs from the local winner",
+                            ],
+                        )?;
+                        record_sync_apply_outcome(
+                            &transaction,
+                            record.cursor,
+                            "conflict",
+                            Some("incoming file base differs from the local winner"),
+                        )?;
+                        summary.conflicts += 1;
+                        continue;
+                    }
+                }
+            }
+            match classify_mutable_sync_version(&transaction, &record, local_device_id)?.0 {
+                Some(SyncVersionDisposition::Conflict) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "conflict",
+                        Some("equal file versions contain different content"),
+                    )?;
+                    summary.conflicts += 1;
+                    continue;
+                }
+                Some(SyncVersionDisposition::Superseded) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "superseded",
+                        Some("a deterministic newer file revision already exists"),
+                    )?;
+                    summary.superseded += 1;
+                    continue;
+                }
+                None => {}
+            }
+            transaction.execute(
+                "INSERT INTO anywhere_sync_file
+                 (stable_id, payload, deleted, logical_clock, sender_device_id,
+                  base_hash, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(stable_id) DO UPDATE SET
+                   payload = excluded.payload, deleted = excluded.deleted,
+                   logical_clock = excluded.logical_clock,
+                   sender_device_id = excluded.sender_device_id,
+                   base_hash = excluded.base_hash, content_hash = excluded.content_hash",
+                rusqlite::params![
+                    &record.stable_id,
+                    &record.payload,
+                    record.operation == "tombstone",
+                    record.logical_clock,
+                    record.sender_device_id.as_slice(),
+                    base_hash.as_ref().map(|hash| hash.as_slice()),
+                    record.content_hash.as_slice(),
+                ],
+            )?;
+            upsert_sync_materialized(&transaction, &record)?;
+            record_sync_apply_outcome(&transaction, record.cursor, "applied", None)?;
+            summary.applied += 1;
+        }
+        transaction.commit()?;
+        Ok(summary)
+    }
+
+    /// Atomically update one local logical file and enqueue its authenticated base revision.
+    pub fn write_sync_file(
+        &self,
+        local_device_id: [u8; 16],
+        stable_id: &str,
+        expected_base: [u8; 32],
+        payload: Option<&[u8]>,
+    ) -> Result<()> {
+        if stable_id.trim().is_empty() {
+            return Err(StoreError::InvalidValue("file stable id is empty".into()));
+        }
+        let operation = if payload.is_some() {
+            SyncJournalOperation::Upsert
+        } else {
+            SyncJournalOperation::Tombstone
+        };
+        let payload = payload.unwrap_or_default();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sync_enabled = transaction.query_row(
+            "SELECT enabled FROM anywhere_sync_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let current = transaction
+            .query_row(
+                "SELECT deleted, content_hash FROM anywhere_sync_file WHERE stable_id = ?1",
+                [stable_id],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        let empty_hash: [u8; 32] = sync_payload_hash(&[]);
+        let actual_base = current
+            .as_ref()
+            .filter(|(deleted, _)| !deleted)
+            .map_or(empty_hash.as_slice(), |(_, hash)| hash.as_slice());
+        if actual_base != expected_base {
+            return Err(StoreError::InvalidValue(
+                "file changed since the supplied base revision".into(),
+            ));
+        }
+        let next: i64 = transaction.query_row(
+            "SELECT MAX(value) + 1 FROM (
+               SELECT COALESCE(MAX(revision), 0) AS value FROM sync_journal
+                WHERE record_kind = 'file' AND stable_id = ?1
+               UNION ALL
+               SELECT COALESCE(MAX(logical_clock), 0) AS value
+                FROM anywhere_sync_file WHERE stable_id = ?1
+             )",
+            [stable_id],
+            |row| row.get(0),
+        )?;
+        let content_hash = sync_payload_hash(payload);
+        transaction.execute(
+            "INSERT INTO anywhere_sync_file
+             (stable_id, payload, deleted, logical_clock, sender_device_id,
+              base_hash, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(stable_id) DO UPDATE SET
+               payload = excluded.payload, deleted = excluded.deleted,
+               logical_clock = excluded.logical_clock,
+               sender_device_id = excluded.sender_device_id,
+               base_hash = excluded.base_hash, content_hash = excluded.content_hash",
+            rusqlite::params![
+                stable_id,
+                payload,
+                operation == SyncJournalOperation::Tombstone,
+                next,
+                local_device_id.as_slice(),
+                expected_base.as_slice(),
+                content_hash.as_slice(),
+            ],
+        )?;
+        if sync_enabled {
+            insert_sync_journal_row_with_base(
+                &transaction,
+                "file",
+                stable_id,
+                operation,
+                next,
+                next,
+                Some(&expected_base),
+                payload,
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Load the current logical file payload; tombstones return `None`.
+    pub fn sync_file(&self, stable_id: &str) -> Result<Option<Vec<u8>>> {
+        self.lock()?
+            .query_row(
+                "SELECT payload FROM anywhere_sync_file
+                 WHERE stable_id = ?1 AND deleted = 0",
+                [stable_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// List durable file conflict copies for explicit user resolution.
+    pub fn sync_file_conflicts(&self, stable_id: &str) -> Result<Vec<SyncFileConflict>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT sender_device_id, base_hash, content_hash, payload, detail
+             FROM anywhere_sync_file_conflict WHERE stable_id = ?1 ORDER BY id",
+        )?;
+        let conflicts = statement
+            .query_map([stable_id], |row| {
+                let sender: Vec<u8> = row.get(0)?;
+                let base: Option<Vec<u8>> = row.get(1)?;
+                let hash: Vec<u8> = row.get(2)?;
+                Ok(SyncFileConflict {
+                    stable_id: stable_id.to_owned(),
+                    sender_device_id: sender.try_into().map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Blob,
+                            "file conflict sender id is not 16 bytes".into(),
+                        )
+                    })?,
+                    base_hash: base
+                        .map(|value| {
+                            value.try_into().map_err(|_| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    1,
+                                    rusqlite::types::Type::Blob,
+                                    "file conflict base hash is not 32 bytes".into(),
+                                )
+                            })
+                        })
+                        .transpose()?,
+                    content_hash: hash.try_into().map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Blob,
+                            "file conflict content hash is not 32 bytes".into(),
+                        )
+                    })?,
+                    payload: row.get(3)?,
+                    detail: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(conflicts)
+    }
+
+    /// List durable terminal conflicts without exposing synchronized payload content.
+    pub fn sync_apply_conflicts(&self, limit: usize) -> Result<Vec<SyncApplyConflict>> {
+        let limit = i64::try_from(limit.clamp(1, 1000)).unwrap_or(1000);
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT a.cursor, r.record_kind, r.stable_id, COALESCE(a.detail, 'sync conflict')
+             FROM anywhere_sync_apply a
+             JOIN anywhere_sync_remote r ON r.cursor = a.cursor
+             WHERE a.state = 'conflict' ORDER BY a.cursor DESC LIMIT ?1",
+        )?;
+        let conflicts = statement
+            .query_map([limit], |row| {
+                Ok(SyncApplyConflict {
+                    cursor: row.get(0)?,
+                    record_kind: row.get(1)?,
+                    stable_id: row.get(2)?,
+                    detail: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(conflicts)
     }
 
     /// Atomically mark acknowledged journal rows uploaded. Unknown IDs are harmless.

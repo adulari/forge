@@ -923,6 +923,17 @@ async fn status() -> Result<()> {
         },
         if config.anywhere.sync { "on" } else { "off" }
     );
+    let forge_store = crate::open_store()?;
+    let pending = forge_store.pending_sync_journal(1000)?.len();
+    let conflicts = forge_store.sync_apply_conflicts(1000)?.len();
+    println!(
+        "Sync local: {pending} pending upload(s) · {conflicts} visible conflict(s){}",
+        if pending == 1000 || conflicts == 1000 {
+            " (showing first 1000)"
+        } else {
+            ""
+        }
+    );
     if !state.is_logged_in() {
         return Ok(());
     }

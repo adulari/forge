@@ -134,9 +134,20 @@ async fn upload_batch() -> Result<()> {
         .await?;
     }
     download_changes(&store, &state_store, &http, &service_url, &access_token).await?;
-    let memory = store.apply_staged_memory_records(local_device_id, BATCH_SIZE)?;
-    let history = store.apply_staged_history_records(local_device_id, BATCH_SIZE)?;
-    let conflicts = memory.conflicts + history.conflicts;
+    let mut conflicts = 0;
+    // A feed page may contain children before a parent from an earlier delayed upload. Retry a
+    // bounded number of local-only passes so newly satisfied dependencies materialize now, while
+    // genuinely missing parents remain durably staged for a future poll.
+    for _ in 0..4 {
+        let memory = store.apply_staged_memory_records(local_device_id, BATCH_SIZE)?;
+        let history = store.apply_staged_history_records(local_device_id, BATCH_SIZE)?;
+        let portable = store.apply_staged_portable_records(local_device_id, BATCH_SIZE)?;
+        let files = store.apply_staged_file_records(local_device_id, BATCH_SIZE)?;
+        conflicts += memory.conflicts + history.conflicts + portable.conflicts + files.conflicts;
+        if memory.applied + history.applied + portable.applied + files.applied == 0 {
+            break;
+        }
+    }
     if conflicts > 0 {
         eprintln!("⚠ Forge Anywhere staged {conflicts} conflict(s) without changing local data");
     }
@@ -297,7 +308,7 @@ async fn upload_entry(
                 revision: entry.revision,
                 logical_clock: entry.logical_clock,
                 operation: &entry.operation,
-                base_hash: None,
+                base_hash: entry.base_hash.map(|hash| URL_SAFE_NO_PAD.encode(hash)),
                 content_hash: URL_SAFE_NO_PAD.encode(content_hash),
                 ciphertext_bytes: prepared.envelope.len(),
                 ciphertext_sha256: URL_SAFE_NO_PAD.encode(prepared.ciphertext_sha256),
@@ -363,7 +374,7 @@ fn prepare_envelope(
         logical_clock: entry.logical_clock,
         device_id: identity.device_id,
         operation,
-        base_hash: None,
+        base_hash: entry.base_hash,
         content_hash,
         payload: entry.payload.clone(),
     };
@@ -461,12 +472,12 @@ mod tests {
     fn pending_snapshot_is_encrypted_once_and_cached_durably() {
         let store = Store::open_in_memory().expect("open store");
         store
-            .append_sync_journal(
-                "message",
-                "message-1",
+            .append_sync_file_journal(
+                "commands/review.md",
                 SyncJournalOperation::Upsert,
                 1,
                 4,
+                Some([0x55; 32]),
                 br#"{"id":"message-1","content":"plaintext secret"}"#,
             )
             .expect("append journal");
@@ -508,7 +519,8 @@ mod tests {
             )
             .expect("open envelope");
         let record: SyncRecord = serde_json::from_slice(&plaintext).expect("decode sync record");
-        assert_eq!(record.stable_id, "message-1");
+        assert_eq!(record.stable_id, "commands/review.md");
+        assert_eq!(record.base_hash, Some([0x55; 32]));
         assert_eq!(record.payload, entry.payload);
         assert_eq!(
             store

@@ -340,6 +340,7 @@ CREATE TABLE IF NOT EXISTS sync_journal (
     operation     TEXT NOT NULL CHECK (operation IN ('upsert', 'tombstone')),
     revision      INTEGER NOT NULL,
     logical_clock INTEGER NOT NULL,
+    base_hash      BLOB,
     content_hash  BLOB NOT NULL,
     payload       BLOB NOT NULL,
     created_at    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
@@ -395,6 +396,47 @@ CREATE TABLE IF NOT EXISTS anywhere_sync_materialized (
     sender_device_id BLOB NOT NULL CHECK (length(sender_device_id) = 16),
     content_hash     BLOB NOT NULL CHECK (length(content_hash) = 32),
     PRIMARY KEY(record_kind, stable_id)
+);
+
+-- Decrypted portable account records are materialized in the local store, never in config.toml.
+-- Consumers opt into a record kind and validate its payload before using it. This keeps remote
+-- settings, commands, skills, agents, and workflows available offline without allowing sync to
+-- smuggle credentials into Forge's configuration or secret stores.
+CREATE TABLE IF NOT EXISTS anywhere_sync_portable_record (
+    record_kind      TEXT NOT NULL CHECK (record_kind IN
+                       ('user_setting', 'command', 'skill', 'agent', 'workflow')),
+    stable_id        TEXT NOT NULL,
+    payload          BLOB NOT NULL,
+    deleted          INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
+    logical_clock    INTEGER NOT NULL,
+    sender_device_id BLOB NOT NULL CHECK (length(sender_device_id) = 16),
+    content_hash     BLOB NOT NULL CHECK (length(content_hash) = 32),
+    PRIMARY KEY(record_kind, stable_id)
+);
+
+-- File sync is a content-addressed local cache. A stable id is a logical name, not a filesystem
+-- path, so applying a remote record cannot escape a caller-selected root or overwrite workspace
+-- files. Divergent bases are retained as visible conflict copies.
+CREATE TABLE IF NOT EXISTS anywhere_sync_file (
+    stable_id        TEXT PRIMARY KEY,
+    payload          BLOB NOT NULL,
+    deleted          INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
+    logical_clock    INTEGER NOT NULL,
+    sender_device_id BLOB NOT NULL CHECK (length(sender_device_id) = 16),
+    base_hash        BLOB,
+    content_hash     BLOB NOT NULL CHECK (length(content_hash) = 32)
+);
+
+CREATE TABLE IF NOT EXISTS anywhere_sync_file_conflict (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    stable_id        TEXT NOT NULL,
+    sender_device_id BLOB NOT NULL CHECK (length(sender_device_id) = 16),
+    base_hash        BLOB,
+    content_hash     BLOB NOT NULL CHECK (length(content_hash) = 32),
+    payload          BLOB NOT NULL,
+    detail           TEXT NOT NULL,
+    detected_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE(stable_id, content_hash)
 );
 
 -- Provenance for a session restored through a handoff capsule. The destination session id may be

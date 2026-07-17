@@ -129,9 +129,9 @@ Practice recovery before relying on cloud-only history. The operator procedure i
 ## Encrypted sync and conflicts
 
 Eligible records include sessions, messages, checkpoints, tool calls, routing decisions, usage,
-compactions, memories, user settings, commands, skills, agents, and workflows. The host journals an
-eligible record only after the local store transaction succeeds and retains retry state until the
-service verifies the encrypted upload.
+compactions, memories, user settings, commands, skills, agents, workflows, and Forge-managed
+portable file records. The host journals an eligible record only after the local store transaction
+succeeds and retains retry state until the service verifies the encrypted upload.
 
 Forge never syncs:
 
@@ -147,12 +147,14 @@ Append-only records use stable IDs. Mutable metadata uses deterministic
 divergent edits create a visible conflict copy rather than overwriting either side. Deletions create
 tombstones. Mobile stores offline history with device-local encryption.
 
-The current pre-release client safely materializes a narrower subset: memory ordering/tombstones
-and portable metadata plus append-only records for sessions already present locally. Remote
-workspace paths and permission modes never replace host-local values; missing dependencies remain
-staged and identity/sequence collisions become durable conflicts. Entirely remote sessions,
-settings, and files remain staged until their import and conflict policies ship. Do not describe a
-build as full two-way sync until `forge anywhere status` reports it.
+The client materializes entirely remote sessions in dependency order. Remote workspace paths and
+permission modes never replace host-local values; a new remote session receives this host's current
+workspace and the safe `accept_edits` mode. Missing dependencies remain staged for a later pass,
+while identity/sequence collisions become durable conflicts. Mutable portable records use the same
+deterministic ordering and tombstones as memories. Forge-managed file records are kept in a local
+content-addressed cache: a divergent base creates a visible conflict copy and never overwrites the
+local winner or opens the logical file id as a host path. `forge anywhere status` reports pending
+uploads and visible conflicts.
 
 At 5 GB, new cloud writes are blocked, but download, restore, export, and deletion continue. Delete
 unneeded shares/history or turn sync off; local writes continue normally.

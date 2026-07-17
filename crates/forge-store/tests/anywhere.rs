@@ -57,6 +57,59 @@ fn remote_history(
     }
 }
 
+fn remote_portable(
+    cursor: i64,
+    sender_device_id: [u8; 16],
+    record_kind: &str,
+    stable_id: &str,
+    logical_clock: u64,
+    payload: &[u8],
+) -> RemoteSyncRecord {
+    RemoteSyncRecord {
+        cursor,
+        sender_device_id,
+        record_kind: record_kind.into(),
+        stable_id: stable_id.into(),
+        operation: if payload.is_empty() {
+            "tombstone"
+        } else {
+            "upsert"
+        }
+        .into(),
+        revision: logical_clock,
+        logical_clock,
+        base_hash: None,
+        content_hash: Sha256::digest(payload).into(),
+        payload: payload.to_vec(),
+    }
+}
+
+fn remote_file(
+    cursor: i64,
+    stable_id: &str,
+    logical_clock: u64,
+    base_hash: Option<[u8; 32]>,
+    payload: &[u8],
+) -> RemoteSyncRecord {
+    RemoteSyncRecord {
+        cursor,
+        sender_device_id: [0x70; 16],
+        record_kind: "file".into(),
+        stable_id: stable_id.into(),
+        operation: if payload.is_empty() {
+            "tombstone"
+        } else {
+            "upsert"
+        }
+        .into(),
+        revision: logical_clock,
+        logical_clock,
+        base_hash,
+        content_hash: Sha256::digest(payload).into(),
+        payload: payload.to_vec(),
+    }
+}
+
 #[test]
 fn sync_journal_is_idempotent_and_acknowledged_atomically() {
     let store = Store::open_in_memory().expect("open store");
@@ -712,4 +765,270 @@ fn failed_store_write_does_not_leave_a_journal_row() {
         .pending_sync_journal(10)
         .expect("pending journal")
         .is_empty());
+}
+
+#[test]
+fn entirely_remote_session_materializes_in_dependency_order_with_local_safety_fields() {
+    let store = Store::open_in_memory().expect("open store");
+    let message = remote_history(
+        1,
+        "message",
+        "remote-only-message",
+        1,
+        serde_json::json!({
+            "id": "remote-only-message",
+            "session_id": "remote-only-session",
+            "seq": 0,
+            "role": "user",
+            "content": "offline work",
+            "model": null,
+            "tool_calls": [],
+            "tool_call_id": null,
+            "visibility": "llm"
+        }),
+    );
+    let session = remote_history(
+        2,
+        "session",
+        "remote-only-session",
+        2,
+        serde_json::json!({
+            "id": "remote-only-session",
+            "title": "Remote only",
+            "cwd": "/remote/must/not/win",
+            "permission_mode": "danger_full_access",
+            "archived": false,
+            "view_snapshot": null
+        }),
+    );
+    store
+        .stage_remote_sync_record(&message)
+        .expect("stage child first");
+    store
+        .stage_remote_sync_record(&session)
+        .expect("stage parent second");
+
+    let summary = store
+        .apply_staged_history_records([0x80; 16], 10)
+        .expect("apply remote graph");
+    assert_eq!(summary.applied, 2);
+    assert_eq!(
+        store.session_mode("remote-only-session").unwrap(),
+        "accept_edits"
+    );
+    assert_ne!(
+        store.session_cwd("remote-only-session").unwrap().as_deref(),
+        Some("/remote/must/not/win")
+    );
+    assert_eq!(
+        store.load_messages("remote-only-session").unwrap()[0].content,
+        "offline work"
+    );
+}
+
+#[test]
+fn remote_history_tombstones_are_idempotent_and_cascade_only_synced_rows() {
+    let store = Store::open_in_memory().expect("open store");
+    for record in [
+        remote_history(
+            1,
+            "session",
+            "delete-session",
+            1,
+            serde_json::json!({
+                "id": "delete-session", "title": null, "archived": false,
+                "view_snapshot": null
+            }),
+        ),
+        remote_history(
+            2,
+            "message",
+            "delete-message",
+            1,
+            serde_json::json!({
+                "id": "delete-message", "session_id": "delete-session", "seq": 0,
+                "role": "user", "content": "temporary", "model": null,
+                "tool_calls": [], "tool_call_id": null, "visibility": "llm"
+            }),
+        ),
+    ] {
+        store.stage_remote_sync_record(&record).unwrap();
+    }
+    assert_eq!(
+        store
+            .apply_staged_history_records([0x80; 16], 10)
+            .unwrap()
+            .applied,
+        2
+    );
+    let message_tombstone = RemoteSyncRecord {
+        cursor: 3,
+        sender_device_id: [0x70; 16],
+        record_kind: "message".into(),
+        stable_id: "delete-message".into(),
+        operation: "tombstone".into(),
+        revision: 2,
+        logical_clock: 2,
+        base_hash: None,
+        content_hash: Sha256::digest([]).into(),
+        payload: Vec::new(),
+    };
+    store.stage_remote_sync_record(&message_tombstone).unwrap();
+    assert_eq!(
+        store
+            .apply_staged_history_records([0x80; 16], 10)
+            .unwrap()
+            .applied,
+        1
+    );
+    assert!(store.load_messages("delete-session").unwrap().is_empty());
+    assert!(!store.stage_remote_sync_record(&message_tombstone).unwrap());
+}
+
+#[test]
+fn portable_settings_commands_skills_agents_and_workflows_use_lww_and_tombstones() {
+    let store = Store::open_in_memory().expect("open store");
+    let kinds = ["user_setting", "command", "skill", "agent", "workflow"];
+    for (index, kind) in kinds.iter().enumerate() {
+        store
+            .stage_remote_sync_record(&remote_portable(
+                index as i64 + 1,
+                [0x70; 16],
+                kind,
+                &format!("{kind}/one"),
+                1,
+                format!("portable {kind}").as_bytes(),
+            ))
+            .unwrap();
+    }
+    assert_eq!(
+        store
+            .apply_staged_portable_records([0x80; 16], 10)
+            .unwrap()
+            .applied,
+        kinds.len()
+    );
+    for kind in kinds {
+        let record = store
+            .portable_sync_record(kind, &format!("{kind}/one"))
+            .unwrap()
+            .expect("materialized portable record");
+        assert!(!record.deleted);
+        assert!(String::from_utf8(record.payload).unwrap().contains(kind));
+    }
+
+    store
+        .stage_remote_sync_record(&remote_portable(
+            6,
+            [0x70; 16],
+            "user_setting",
+            "user_setting/one",
+            2,
+            &[],
+        ))
+        .unwrap();
+    assert_eq!(
+        store
+            .apply_staged_portable_records([0x80; 16], 10)
+            .unwrap()
+            .applied,
+        1
+    );
+    assert!(
+        store
+            .portable_sync_record("user_setting", "user_setting/one")
+            .unwrap()
+            .unwrap()
+            .deleted
+    );
+
+    assert!(store
+        .write_portable_sync_record(
+            [0x80; 16],
+            "user_setting",
+            "provider_api_key",
+            Some(b"must never sync"),
+        )
+        .is_err());
+}
+
+#[test]
+fn local_portable_write_and_file_base_hash_are_journaled_atomically() {
+    let store = Store::open_in_memory().expect("open store");
+    store.set_sync_journal_enabled(true).unwrap();
+    store
+        .write_portable_sync_record([0x80; 16], "skill", "reviewer", Some(b"review safely"))
+        .unwrap();
+    let empty_hash: [u8; 32] = Sha256::digest([]).into();
+    store
+        .write_sync_file([0x80; 16], "commands/review.md", empty_hash, Some(b"local"))
+        .unwrap();
+    let pending = store.pending_sync_journal(10).unwrap();
+    assert!(pending.iter().any(|entry| entry.record_kind == "skill"));
+    let file = pending
+        .iter()
+        .find(|entry| entry.record_kind == "file")
+        .unwrap();
+    assert_eq!(file.base_hash, Some(empty_hash));
+    assert_eq!(file.payload, b"local");
+}
+
+#[test]
+fn divergent_files_create_visible_conflict_copies_instead_of_overwriting() {
+    let store = Store::open_in_memory().expect("open store");
+    store.set_sync_journal_enabled(true).unwrap();
+    let empty_hash: [u8; 32] = Sha256::digest([]).into();
+    store
+        .write_sync_file([0x80; 16], "workflow/a.js", empty_hash, Some(b"local"))
+        .unwrap();
+    store
+        .stage_remote_sync_record(&remote_file(
+            1,
+            "workflow/a.js",
+            2,
+            Some(empty_hash),
+            b"remote divergent",
+        ))
+        .unwrap();
+    let summary = store.apply_staged_file_records([0x80; 16], 10).unwrap();
+    assert_eq!(summary.conflicts, 1);
+    assert_eq!(store.sync_file("workflow/a.js").unwrap().unwrap(), b"local");
+    let copies = store.sync_file_conflicts("workflow/a.js").unwrap();
+    assert_eq!(copies.len(), 1);
+    assert_eq!(copies[0].payload, b"remote divergent");
+    assert_eq!(store.sync_apply_conflicts(10).unwrap().len(), 1);
+
+    let local_hash: [u8; 32] = Sha256::digest(b"local").into();
+    store
+        .stage_remote_sync_record(&remote_file(
+            2,
+            "workflow/a.js",
+            3,
+            Some(local_hash),
+            b"remote based on local",
+        ))
+        .unwrap();
+    assert_eq!(
+        store
+            .apply_staged_file_records([0x80; 16], 10)
+            .unwrap()
+            .applied,
+        1
+    );
+    assert_eq!(
+        store.sync_file("workflow/a.js").unwrap().unwrap(),
+        b"remote based on local"
+    );
+}
+
+#[test]
+fn sender_identity_collision_does_not_advance_the_staging_cursor() {
+    let store = Store::open_in_memory().expect("open store");
+    let first = remote_portable(1, [0x11; 16], "skill", "same-revision", 1, b"one");
+    store.stage_remote_sync_record(&first).unwrap();
+    let mut collision = first;
+    collision.cursor = 2;
+    collision.sender_device_id = [0x22; 16];
+    assert!(store.stage_remote_sync_record(&collision).is_err());
+    assert_eq!(store.sync_download_cursor().unwrap(), 1);
 }
