@@ -83,6 +83,9 @@ export interface ColorTokens {
   /** Hearth — HeatEdge "waiting" glow shadow color. Zero-alpha on light (the paper theme's
    * waiting edge carries no glow — see "Fleet · Light" / "Chat · Light" screens). */
   waitingGlow: string;
+  /** Keyboard focus-visible ring (web) — low-alpha accent so tabbing reads as a quiet
+   * hairline, never a solid box. */
+  focusRing: string;
 }
 
 export const darkTokens: ColorTokens = {
@@ -121,6 +124,7 @@ export const darkTokens: ColorTokens = {
   waitingEdgeFrom: "#F0716E",
   waitingEdgeTo: "#C24845",
   waitingGlow: "rgba(240,113,110,0.25)",
+  focusRing: "rgba(255,145,60,0.45)",
 };
 
 export const lightTokens: ColorTokens = {
@@ -169,6 +173,7 @@ export const lightTokens: ColorTokens = {
   waitingEdgeFrom: "#C93835",
   waitingEdgeTo: "#9C2D2A",
   waitingGlow: "rgba(201,56,53,0)",
+  focusRing: "rgba(199,93,16,0.45)",
 };
 
 // ---------------------------------------------------------------------------

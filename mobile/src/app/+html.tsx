@@ -66,8 +66,8 @@ body { overscroll-behavior: none; -webkit-overflow-scrolling: touch; touch-actio
 /* Keyboard-focus ring: thin, tight, low-alpha ember — the old 2px currentColor ring with
    a 2px offset drew a fat white/orange box around anything you tabbed to. Follows the
    element's own border-radius. */
-:root { --forge-focus: rgba(255, 145, 60, 0.5); }
-:focus-visible { outline: 1px solid var(--forge-focus); outline-offset: 0px; }
+:root { --forge-focus: rgba(255, 145, 60, 0.45); }
+:focus-visible { outline: 1px solid var(--forge-focus); outline-offset: 2px; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 `;
 
