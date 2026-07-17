@@ -32,3 +32,12 @@ connection timing, IP address, subscription state, or aggregate quota use from t
 not protect an unlocked compromised device, malicious local Forge process, screen capture, traffic
 analysis, denial of service, or a user who loses both all enrolled devices and the recovery phrase.
 
+## Operational verification
+
+The public
+[`known-plaintext canary harness`](../scripts/ci/check-anywhere-plaintext-canary.sh) scans captured
+service logs, SQLite files, and object-store/backup artifacts for synthetic plaintext supplied in a
+separate marker file. Its self-test runs in public CI; deployment operators must run the real scan
+against live and restored captures. The harness intentionally prints artifact paths but never the
+marker value. See the [recovery drill](../docs/anywhere/recovery-and-handoff-drills.md) and
+[privacy inventory](../docs/anywhere/privacy-data-inventory.md) for capture and evidence rules.

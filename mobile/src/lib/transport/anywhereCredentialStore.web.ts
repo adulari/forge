@@ -101,4 +101,4 @@ function remove(database: IDBDatabase, key: string): Promise<void> {
   });
 }
 
-export type { AnywhereCredentialStore, StoredAnywhereCredentials } from "./anywhereCredentialTypes";
+export type { AnywhereCredentialStore, PendingDeviceRevocation, StoredAnywhereCredentials } from "./anywhereCredentialTypes";

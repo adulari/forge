@@ -342,6 +342,12 @@ export default function ConnectScreen() {
         />
       </Card>
 
+      <Card variant="feature" style={styles.gapCard}>
+        <Text style={[type.heading, { color: tokens.ink }]}>Connect from anywhere</Text>
+        <Text style={[type.sub, { color: tokens.ink2 }]}>Forge Anywhere adds managed, end-to-end encrypted access and sync. Direct, LAN, and your own tunnels remain free.</Text>
+        <Button label="Set up Forge Anywhere" variant="secondary" onPress={() => router.push("/anywhere")} fullWidth />
+      </Card>
+
       {testState !== "idle" && testState !== "testing" && testState !== "ok" ? (
         <Banner tone="danger" message={STATE_COPY[testState]} />
       ) : null}

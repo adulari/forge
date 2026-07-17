@@ -22,6 +22,7 @@ const TRANSFER_ATTEMPTS: usize = 2;
 struct PreparedShare {
     share_id: ShareId,
     key: [u8; 32],
+    signing_public_key: [u8; 32],
     envelope: Vec<u8>,
     reserve: ShareReserveRequest,
     expires_at_ms: u64,
@@ -173,6 +174,7 @@ fn prepare_share(
     Ok(PreparedShare {
         share_id,
         key,
+        signing_public_key: signing_key.verifying_key().to_bytes(),
         envelope,
         reserve: ShareReserveRequest {
             version: SHARE_VERSION,
@@ -328,8 +330,9 @@ fn public_url(
     url.set_path(&completion.url_path);
     url.set_query(None);
     url.set_fragment(Some(&format!(
-        "key={}",
-        super::URL_SAFE_NO_PAD.encode(prepared.key)
+        "key={}&signing={}",
+        super::URL_SAFE_NO_PAD.encode(prepared.key),
+        super::URL_SAFE_NO_PAD.encode(prepared.signing_public_key)
     )));
     Ok(url)
 }
@@ -391,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn public_url_keeps_the_key_only_in_the_fragment() {
+    fn public_url_keeps_verification_material_only_in_the_fragment() {
         let prepared = prepared();
         let completion = ShareCompletion {
             version: SHARE_VERSION,
@@ -403,16 +406,16 @@ mod tests {
             .expect("public URL");
         assert_eq!(url.path(), completion.url_path);
         assert!(url.query().is_none());
-        assert_eq!(
-            url.fragment(),
-            Some("key=VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU")
+        let expected_fragment = format!(
+            "key={}&signing={}",
+            super::super::URL_SAFE_NO_PAD.encode(prepared.key),
+            super::super::URL_SAFE_NO_PAD.encode(prepared.signing_public_key)
         );
-        assert!(!url
-            .as_str()
-            .split('#')
-            .next()
-            .unwrap_or_default()
-            .contains("VVVV"));
+        assert_eq!(url.fragment(), Some(expected_fragment.as_str()));
+        let request_url = url.as_str().split('#').next().unwrap_or_default();
+        assert!(!request_url.contains(&super::super::URL_SAFE_NO_PAD.encode(prepared.key)));
+        assert!(!request_url
+            .contains(&super::super::URL_SAFE_NO_PAD.encode(prepared.signing_public_key)));
     }
 
     #[test]

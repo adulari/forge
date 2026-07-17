@@ -24,6 +24,14 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  anywhere-policy:
+    name: anywhere plaintext-canary harness
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - run: bash scripts/ci/test-anywhere-plaintext-canary.sh
+
   fmt:
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 15
@@ -84,14 +92,15 @@ jobs:
         run: scripts/release-upgrade-e2e.sh "" target/release/forge
 
   CI:
-    needs: [fmt, clippy, test, release-build]
+    needs: [anywhere-policy, fmt, clippy, test, release-build]
     if: always()
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 5
     steps:
       - name: Check all jobs passed
         run: |
-          if [[ "${{ needs.fmt.result }}" != success \
+          if [[ "${{ needs.anywhere-policy.result }}" != success \
+             || "${{ needs.fmt.result }}" != success \
              || "${{ needs.clippy.result }}" != success \
              || "${{ needs.test.result }}" != success \
              || "${{ needs.release-build.result }}" != success ]]; then

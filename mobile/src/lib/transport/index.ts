@@ -27,6 +27,7 @@ export type { AnywhereRelayCredentials, RelayBlobReference } from "./EncryptedAn
 export { anywhereCredentialStore } from "./anywhereCredentialStore";
 export type {
   AnywhereCredentialStore,
+  PendingDeviceRevocation,
   StoredAnywhereCredentials,
 } from "./anywhereCredentialStore";
 export { AnywhereTransport, DirectTransport, EncryptedAnywhereRelay };

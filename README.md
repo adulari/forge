@@ -348,6 +348,9 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
   create/switch/archive from the phone; fleet dashboard (waiting-on-decision sessions first),
   permission + plan + diff review cards, file/image upload, voice input, an offline input queue,
   and actionable web push (approve/deny from the lock screen)
+- Optional [Forge Anywhere](docs/features/forge-anywhere.md) companion: managed end-to-end encrypted
+  relay, sync/history, multi-host fleet, workspace handoff, and replay shares. Forge, local/LAN
+  access, direct pairing, and user-managed `serve --anywhere` tunnels remain free and independent
 - Local Whisper transcription in the TUI and companion app, plus desktop voice shortcut support.
   Official macOS/Windows CLI builds include local microphone capture; portable Linux CLI/TUI builds
   keep file/upload transcription but make microphone capture an opt-in source-build feature
@@ -977,6 +980,7 @@ command = "bash -c 'jq .args <<< $FORGE_TOOL_INPUT >> audit.log'"
 | [`docs/architecture/02-architecture.md`](./docs/architecture/02-architecture.md) | System design with C4 diagrams |
 | [OpenAI-compatible API](./docs/features/embed-ai-backend.md) | Use the Forge mesh as an existing app's AI backend |
 | [Remote control + companion apps](./docs/features/remote-control.md) | Daemon, protocol, fleet UI, push, offline/reconnect behavior |
+| [Forge Anywhere](./docs/features/forge-anywhere.md) | Optional paid encrypted relay, sync, recovery, handoff, shares, and exact free/paid boundary |
 | [Context pipeline](./docs/features/context-pipeline.md) | Guidance, retrieval, task state, memories, and compaction order |
 | [Anonymous telemetry contract](./docs/telemetry.md) | Exact events, excluded data, opt-out, and PostHog dashboard setup |
 | [Mobile App Store checklist](./docs/mobile/APP_STORE_CHECKLIST.md) | iOS privacy, OTA/runtime, TestFlight, and submission status |

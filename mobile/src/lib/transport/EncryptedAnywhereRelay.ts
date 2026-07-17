@@ -381,7 +381,8 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       socket.onerror = () => reject(new Error("Forge Anywhere relay WebSocket failed to connect"));
     });
     socket.onmessage = (event) => {
-      this.incoming = this.incoming.then(() => this.handleEnvelope(event.data));
+      // A rejected decoder task must not poison all later sockets/frames in this relay runtime.
+      this.incoming = this.incoming.catch(() => undefined).then(() => this.handleEnvelope(event.data));
     };
     socket.onclose = () => this.connectionClosed();
     socket.onerror = () => this.connectionClosed();

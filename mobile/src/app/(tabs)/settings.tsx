@@ -12,7 +12,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import { router } from "expo-router";
-import { Bell, Plus, Trash2 } from "lucide-react-native";
+import { Bell, Cloud, Plus, Trash2 } from "lucide-react-native";
 import React, { useCallback, useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
@@ -28,6 +28,7 @@ import { Segmented } from "../../components/ds/Segmented";
 import { Switch } from "../../components/ds/Switch";
 import { useToast } from "../../components/ds/ToastHost";
 import { type StoredServer, useAuth } from "../../lib/auth";
+import { useAnywhere } from "../../lib/AnywhereProvider";
 import { checkNotifyPermission, getNotifyPermission, notify, type NotifyPermission } from "../../lib/notify";
 import {
   enablePush,
@@ -95,8 +96,10 @@ export default function SettingsScreen() {
   const toast = useToast();
   const { preference, setScheme } = useTheme();
   const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer, testConnection } = useAuth();
+  const anywhere = useAnywhere();
 
-  const serverQueries = useServerFleets(servers);
+  const directServers = servers.filter((server) => server.transport !== "anywhere");
+  const serverQueries = useServerFleets(directServers);
   const [appLock, setAppLock] = useState(false);
   const [appLockLoaded, setAppLockLoaded] = useState(false);
   const [hapticsEnabled, setHapticsEnabledState] = useState(isHapticsEnabled);
@@ -296,9 +299,21 @@ export default function SettingsScreen() {
       <Text style={[type.title, styles.pageTitle, { color: tokens.ink }]}>Settings</Text>
 
       <View>
+        <SectionHeader>Forge Anywhere</SectionHeader>
+        <Card padded={false}>
+          <ListRow
+            title={anywhere.credentials ? "Anywhere account" : "Set up Forge Anywhere"}
+            subtitle={anywhere.credentials ? `${anywhere.hosts.length} hosts · ${anywhere.account?.entitlement?.replaceAll("_", " ") ?? "checking status"}` : "Encrypted access to your Forge hosts from any device"}
+            leading={<Cloud size={20} strokeWidth={1.75} color={anywhere.credentials ? tokens.accent : tokens.ink3} />}
+            trailing={anywhere.credentials ? <Badge label="connected" tone="success" /> : undefined}
+            onPress={() => router.push("/anywhere")}
+            showSeparator={false}
+          />
+        </Card>
+
         <SectionHeader>Servers</SectionHeader>
         <Card padded={false}>
-          {servers.map((server, index) => {
+          {directServers.map((server, index) => {
             const fleet = serverQueries[index];
             const rows = fleet.data ?? [];
             const reachable = fleet.isSuccess;

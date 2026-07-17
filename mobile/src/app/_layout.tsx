@@ -11,7 +11,7 @@ import { createAsyncStoragePersister } from "@tanstack/query-async-storage-persi
 import { QueryClient } from "@tanstack/react-query";
 import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
 import { useFonts } from "expo-font";
-import { Redirect, Stack } from "expo-router";
+import { Redirect, Stack, usePathname } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
 import React, { useEffect, useMemo } from "react";
 import { ActivityIndicator, View } from "react-native";
@@ -29,6 +29,7 @@ import { ToastHost } from "../components/ds/ToastHost";
 import { ExpandedFleetRail } from "../components/fleet/DesktopDrillDown";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { AuthProvider, useAuth } from "../lib/auth";
+import { AnywhereProvider, useAnywhere } from "../lib/AnywhereProvider";
 import { initHaptics } from "../lib/haptics";
 import { isTauri } from "../lib/platform";
 import { checkForDesktopUpdate } from "../lib/updater";
@@ -61,6 +62,8 @@ const asyncStoragePersister = createAsyncStoragePersister({
 
 function RootNavigator() {
   const { isLoading, isPaired } = useAuth();
+  const anywhere = useAnywhere();
+  const pathname = usePathname();
   const tokens = useTokens();
   const { isExpanded } = useBreakpoint();
 
@@ -72,7 +75,7 @@ function RootNavigator() {
     }
   }, [isLoading]);
 
-  if (isLoading) {
+  if (isLoading || anywhere.phase === "loading") {
     return (
       <Screen>
         <ActivityIndicator color={tokens.ink3} />
@@ -88,6 +91,7 @@ function RootNavigator() {
         }}
       >
         <Stack.Screen name="connect" />
+        <Stack.Screen name="anywhere" />
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="configuration" />
         <Stack.Screen name="skills" />
@@ -117,7 +121,7 @@ function RootNavigator() {
       {/* Declarative redirect (rather than Stack.Protected) per T2.1 spec: whatever route
           expo-router resolved on cold start/deep-link, bounce to /connect once we know
           there's no active server. */}
-      {!isPaired ? <Redirect href="/connect" /> : null}
+      {!isPaired && !pathname.startsWith("/anywhere") && !pathname.startsWith("/shares/") ? <Redirect href="/connect" /> : null}
     </>
   );
 }
@@ -152,6 +156,7 @@ export default function RootLayout() {
         <ErrorBoundary>
           <ThemeProvider>
             <AuthProvider>
+              <AnywhereProvider>
               <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
                 <ToastHost>
                   <AnonymousTelemetry />
@@ -168,6 +173,7 @@ export default function RootLayout() {
                 </ToastHost>
                 <DesktopWindowChrome />
               </PersistQueryClientProvider>
+              </AnywhereProvider>
             </AuthProvider>
           </ThemeProvider>
         </ErrorBoundary>
