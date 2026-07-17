@@ -9,13 +9,20 @@ import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
-import type { Overlay, OverlayRow } from "../../lib/ws";
+import type { Overlay } from "../../lib/ws";
 import { useEmberdot } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space, tapTarget, type ColorTokens } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
-import { Badge, type BadgeTone } from "../ds/Badge";
+import { Badge } from "../ds/Badge";
 import { EmptyState } from "../ds/EmptyState";
+import {
+  badgeTone,
+  parseCandidate,
+  workflowState,
+  type ParsedCandidate,
+  type Score,
+} from "./meshParse";
 import { HeatEdge } from "../ds/HeatEdge";
 import { SectionHeader } from "../ds/SectionHeader";
 import { CHECKPOINT_OVERLAY_KIND, CheckpointOverlayRows } from "../session/CheckpointSheet";
@@ -34,13 +41,6 @@ function selectedStyle(selected: boolean, selection: string) {
 // overlay:workflow — agent-row language (pattern 2)
 // ---------------------------------------------------------------------------
 
-function workflowState(label: string): "done" | "failed" | "running" | "pending" {
-  const glyph = label.trimStart()[0];
-  if (glyph === "✓") return "done";
-  if (glyph === "✗") return "failed";
-  if (glyph === "◐") return "running";
-  return "pending";
-}
 
 function WorkflowMedallion({ state }: { state: ReturnType<typeof workflowState> }) {
   const tokens = useTokens();
@@ -97,68 +97,6 @@ function WorkflowRows({ overlay, onSelect }: NativeOverlayRowsProps) {
 // ---------------------------------------------------------------------------
 // overlay:mesh — winner decision card + reject rows + budget + fallback chain
 // ---------------------------------------------------------------------------
-
-interface Score {
-  label: string;
-  value: number;
-}
-
-interface ParsedCandidate {
-  id: string;
-  scores: Score[];
-  badges: string[];
-  reason: string;
-  benched: boolean;
-}
-
-const BADGE_KEYWORDS = new Set([
-  "complex",
-  "standard",
-  "trivial",
-  "subscription",
-  "sub",
-  "free",
-  "api",
-  "paid",
-  "benched",
-]);
-
-function badgeTone(badge: string): BadgeTone {
-  const b = badge.toLowerCase();
-  if (b === "benched") return "danger";
-  if (b === "complex" || b === "standard" || b === "trivial") return "warn";
-  if (b === "subscription" || b === "sub") return "accent";
-  if (b === "free") return "success";
-  return "neutral";
-}
-
-function modelIdFrom(label: string): string {
-  const rank = label.match(/^#\d+\s+(.+)$/);
-  return (rank?.[1] ?? label).trim();
-}
-
-function parseCandidate(row: OverlayRow): ParsedCandidate {
-  const id = modelIdFrom(row.label);
-  const parts = row.detail.split(" · ").map((p) => p.trim()).filter(Boolean);
-  const scores: Score[] = [];
-  const badges: string[] = [];
-  const reasonParts: string[] = [];
-  for (const part of parts) {
-    const score = part.match(/^([a-z][a-z ]{0,10}?)\s+(\d+(?:\.\d+)?)$/i);
-    if (score) {
-      scores.push({ label: `${score[1].trim()} ${score[2]}`, value: Number(score[2]) });
-      continue;
-    }
-    if (/^[a-z0-9.:_+-]+$/i.test(part) && BADGE_KEYWORDS.has(part.toLowerCase())) {
-      badges.push(part);
-      continue;
-    }
-    reasonParts.push(part);
-  }
-  const reason = reasonParts.join(" · ");
-  const benched = /bench|rate limit/i.test(`${reason} ${badges.join(" ")}`);
-  return { id, scores, badges, reason, benched };
-}
 
 function ScoreBar({ score }: { score: Score }) {
   const tokens = useTokens();
