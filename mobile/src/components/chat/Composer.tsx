@@ -47,7 +47,10 @@ import { VoiceRecordingPill } from "./VoiceRecordingPill";
 const MAX_LINES = 8;
 const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
 const MIN_HEIGHT = 44;
-const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES + space.space8;
+// Vertical padding = what centers one 22px line in the 44px rest state; MAX adds the same
+// padding around MAX_LINES lines.
+const INPUT_V_PADDING = 44 - LINE_HEIGHT; // MIN_HEIGHT - LINE_HEIGHT (both sides combined)
+const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES + INPUT_V_PADDING;
 
 export interface ComposerProps {
   sessionId: string;
@@ -94,6 +97,20 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const textRef = useRef(text);
   useEffect(() => {
     textRef.current = text;
+  }, [text]);
+
+  // Web autosize: RNW's onContentSizeChange goes quiet once an explicit height style is set,
+  // so measure the textarea's natural scrollHeight directly on every text change (collapse →
+  // read → restore, the classic autosize pattern). Grows to MAX_LINES, then scrolls.
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    const node = inputRef.current as unknown as HTMLTextAreaElement | null;
+    if (!node || typeof node.scrollHeight !== "number" || !node.style) return;
+    const prev = node.style.height;
+    node.style.height = "0px";
+    const content = node.scrollHeight;
+    node.style.height = prev;
+    setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, content)));
   }, [text]);
 
   useEffect(() => {
@@ -502,8 +519,13 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               autoCapitalize="none"
               autoCorrect={false}
               spellCheck={false}
-              onContentSizeChange={(e) =>
-                setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
+              // Native only: web growth is handled by the scrollHeight effect below — RNW
+              // stops reporting content growth once an explicit height style is set, which
+              // froze the composer at one line.
+              onContentSizeChange={
+                Platform.OS === "web"
+                  ? undefined
+                  : (e) => setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
               }
               multiline
               // Web: RNW maps this to the textarea's rows attribute. Without it the browser
@@ -589,7 +611,10 @@ const styles = StyleSheet.create({
     paddingVertical: space.space4,
     overflow: "hidden",
   },
-  input: { flex: 1, paddingHorizontal: space.space8, paddingVertical: (MIN_HEIGHT - LINE_HEIGHT) / 2, textAlignVertical: "top" },
+  // No flex on the textarea itself: `flex: 1` made flex-basis (0%) own its height inside
+  // inputWrap's column, silently overriding the measured `height` style — the composer
+  // could never grow past one line on web. inputWrap already takes the row's free width.
+  input: { width: "100%", paddingHorizontal: space.space8, paddingVertical: (MIN_HEIGHT - LINE_HEIGHT) / 2, textAlignVertical: "top" },
   inputWrap: { flex: 1, position: "relative", overflow: "visible" },
   commandRecognition: { position: "absolute", right: space.space8, top: space.space8, backgroundColor: "transparent" },
   // Mirrors `input`'s own padding exactly so the ghost text lines up with where a typed
