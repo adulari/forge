@@ -26,7 +26,10 @@ const IS_WEB = Platform.OS === "web";
 
 export interface MessageRowProps {
   row: HistoryRow;
-  onLongPress?: (message: HistoryRow) => void;
+  /** Open the message-actions surface. `anchor` (viewport coords) is set for pointer-driven
+   * opens (right-click, the hover ⋯ button) so desktop can show an anchored popover; absent
+   * for long-press, which gets the bottom sheet. */
+  onLongPress?: (message: HistoryRow, anchor?: { x: number; y: number }) => void;
   /**
    * Client-local attachments for the optimistic "just sent" bubble only — the daemon never
    * persists attachment metadata into `HistoryRow.content` (remote.rs: "the persisted row
@@ -152,9 +155,9 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   // model web-only events.
   const webContextMenu = IS_WEB && onLongPress
     ? ({
-        onContextMenu: (e: { preventDefault: () => void }) => {
+        onContextMenu: (e: { preventDefault: () => void; clientX: number; clientY: number }) => {
           e.preventDefault();
-          onLongPress(row);
+          onLongPress(row, { x: e.clientX, y: e.clientY });
         },
       } as Record<string, unknown>)
     : null;
@@ -188,11 +191,24 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         ) : (
           <Markdown content={userText} />
         )}
-        {/* Floating (absolute) so hover NEVER changes the bubble's layout — the old inline
-            row grew the bubble under the cursor, un-hovering it, shrinking it back: a
-            visible rapid jitter loop. */}
-        {IS_WEB && !isSystem && hovered ? (
-          <View style={[styles.hoverActions, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
+        {/* Always mounted, opacity-toggled, INSIDE the bubble's bounds: mounting-on-hover
+            plus a negative-offset position let the pill vanish before the cursor could
+            reach it (leaving the bubble un-hovered it). Kept in-bounds the pill is part of
+            the hover subtree, so moving onto it keeps the row hovered; opacity means zero
+            layout shift and no mount/unmount flicker. */}
+        {IS_WEB && !isSystem ? (
+          <View
+            style={[
+              styles.hoverActions,
+              webActionsTransition,
+              {
+                backgroundColor: tokens.bg2,
+                borderColor: tokens.border,
+                opacity: hovered ? 1 : 0,
+                pointerEvents: hovered ? "auto" : "none",
+              },
+            ]}
+          >
             <IconButton
               accessibilityLabel="copy message"
               onPress={onCopyRow}
@@ -201,7 +217,12 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
             {onLongPress ? (
               <IconButton
                 accessibilityLabel="message actions"
-                onPress={() => onLongPress(row)}
+                onPress={(e?: { nativeEvent?: { pageX?: number; pageY?: number } }) =>
+                  onLongPress(row, {
+                    x: e?.nativeEvent?.pageX ?? 0,
+                    y: e?.nativeEvent?.pageY ?? 0,
+                  })
+                }
                 icon={<MoreHorizontal size={14} strokeWidth={1.75} color={tokens.ink2} />}
               />
             ) : null}
@@ -223,11 +244,20 @@ const styles = StyleSheet.create({
   userBubble: { maxWidth: "85%", borderRadius: radii.radius16, borderWidth: StyleSheet.hairlineWidth },
   hoverActions: {
     position: "absolute",
-    top: -14,
-    right: space.space8,
+    top: 4,
+    right: 4,
     flexDirection: "row",
     borderRadius: radii.radius8,
     borderWidth: StyleSheet.hairlineWidth,
     zIndex: 2,
   },
 });
+
+// Web-only fade so the pill eases in instead of popping (same untyped-CSS cast pattern
+// as Sheet.tsx's webTransition).
+const webActionsTransition = IS_WEB
+  ? ({
+      transitionProperty: "opacity",
+      transitionDuration: "120ms",
+    } as unknown as import("react-native").ViewStyle)
+  : null;

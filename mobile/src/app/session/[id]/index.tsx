@@ -33,6 +33,7 @@ import Animated, {
 import type { SentAttachment } from "../../../components/chat/attach";
 import CardSlot from "../../../components/chat/CardSlot";
 import { Composer } from "../../../components/chat/Composer";
+import { MessageActionsMenu } from "../../../components/chat/MessageActionsMenu";
 import { MessageActionsSheet } from "../../../components/chat/MessageActionsSheet";
 import { Markdown } from "../../../components/chat/Markdown";
 import { MessageRow } from "../../../components/chat/MessageRow";
@@ -211,9 +212,13 @@ export default function SessionChat() {
 
   const historyQuery = useHistory(sessionId);
   const [selectedMessage, setSelectedMessage] = useState<HistoryRow | null>(null);
+  // Pointer-driven opens (right-click / hover ⋯) carry an anchor → compact popover menu;
+  // long-press carries none → bottom sheet. Web-only distinction, native never sends one.
+  const [actionsAnchor, setActionsAnchor] = useState<{ x: number; y: number } | null>(null);
 
-  const onMessageLongPress = useCallback((message: HistoryRow) => {
+  const onMessageLongPress = useCallback((message: HistoryRow, anchor?: { x: number; y: number }) => {
     setSelectedMessage(message);
+    setActionsAnchor(anchor ?? null);
   }, []);
 
   const onQuote = useCallback((text: string) => {
@@ -807,13 +812,26 @@ export default function SessionChat() {
         onSend={handleSend}
         onInterrupt={handleInterrupt}
       />
-      <MessageActionsSheet
-        visible={selectedMessage !== null}
-        message={selectedMessage}
-        onClose={() => setSelectedMessage(null)}
-        onQuote={onQuote}
-        onEdit={onEditMessage}
-      />
+      {actionsAnchor != null ? (
+        <MessageActionsMenu
+          message={selectedMessage}
+          anchor={actionsAnchor}
+          onClose={() => {
+            setSelectedMessage(null);
+            setActionsAnchor(null);
+          }}
+          onQuote={onQuote}
+          onEdit={onEditMessage}
+        />
+      ) : (
+        <MessageActionsSheet
+          visible={selectedMessage !== null}
+          message={selectedMessage}
+          onClose={() => setSelectedMessage(null)}
+          onQuote={onQuote}
+          onEdit={onEditMessage}
+        />
+      )}
     </Screen>
   );
 }
