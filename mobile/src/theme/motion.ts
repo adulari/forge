@@ -106,13 +106,16 @@ const FORGELINE_STAGGER_MS = 40;
 const FORGELINE_TRANSLATE_Y = 8;
 const FORGELINE_CAP = 8;
 
-export function useForgeline(index: number) {
+export function useForgeline(index: number, enabled: boolean = true) {
   const reduced = useReducedMotion();
-  const opacity = useSharedValue(reduced ? 1 : 0);
-  const translateY = useSharedValue(reduced ? 0 : FORGELINE_TRANSLATE_Y);
+  const animate = enabled && !reduced;
+  const opacity = useSharedValue(animate ? 0 : 1);
+  const translateY = useSharedValue(animate ? FORGELINE_TRANSLATE_Y : 0);
 
   useEffect(() => {
-    if (reduced) {
+    if (!animate) {
+      // `enabled: false` renders settled immediately — virtualized lists REMOUNT rows on
+      // scroll, and replaying the entrance there reads as content flickering transparent.
       opacity.value = 1;
       translateY.value = 0;
       return;
@@ -123,7 +126,7 @@ export function useForgeline(index: number) {
     // First-mount-only is a caller contract (stable keys, no remount on refresh) —
     // this hook intentionally re-runs the entrance if `index` changes identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reduced, index]);
+  }, [animate, index]);
 
   return useAnimatedStyle(() => ({
     opacity: opacity.value,

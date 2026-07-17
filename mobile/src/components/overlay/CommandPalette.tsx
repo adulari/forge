@@ -509,8 +509,8 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
         scrimOpacity.value = 1;
         return;
       }
-      opacity.value = withTiming(1, { duration: durations.base, easing: easings.standard });
-      translateY.value = withTiming(0, { duration: durations.base, easing: easings.standard });
+      opacity.value = withTiming(1, { duration: durations.fast, easing: easings.standard });
+      translateY.value = withTiming(0, { duration: durations.fast, easing: easings.standard });
       scrimOpacity.value = withTiming(1, { duration: durations.fast, easing: easings.standard });
     } else {
       if (reduced) {

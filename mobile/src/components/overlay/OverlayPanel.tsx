@@ -263,7 +263,7 @@ function CenteredModal({
         return;
       }
       opacity.value = withTiming(1, { duration: durations.fast, easing: easings.standard });
-      scale.value = withTiming(1, { duration: durations.gentle, easing: easings.standard });
+      scale.value = withTiming(1, { duration: durations.fast, easing: easings.standard });
     } else {
       if (reduced) {
         opacity.value = 0;

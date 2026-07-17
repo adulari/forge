@@ -24,6 +24,15 @@ import { SystemOutput } from "./SystemOutput";
 
 const IS_WEB = Platform.OS === "web";
 
+// DOM hover passthrough (same cast pattern as DesktopWindowChrome's onDoubleClick):
+// react-native-web's Pressable hover events proved unreliable on a handler-less wrapper,
+// so the row listens to real mouseenter/mouseleave instead.
+type HoverViewProps = import("react-native").ViewProps & {
+  onMouseEnter?: () => void;
+  onMouseLeave?: () => void;
+};
+const HoverView = View as unknown as React.ComponentType<HoverViewProps>;
+
 export interface MessageRowProps {
   row: HistoryRow;
   /** Open the message-actions surface. `anchor` (viewport coords) is set for pointer-driven
@@ -98,15 +107,36 @@ export function displayMessageText(row: HistoryRow): string {
 
 function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
   const tokens = useTokens();
-  const entrance = useForgeline(Math.max(0, row.seq));
+  // Entrance only for rows that just arrived — virtualization remounts rows while
+  // scrolling, and replaying the fade there made settled messages flicker transparent.
+  // Lazy useState: evaluated once at mount (the sanctioned home for an impure read).
+  const [isFresh] = useState(() => Date.now() / 1000 - row.created_at < 5);
+  const entrance = useForgeline(Math.max(0, row.seq), isFresh);
   const toast = useToast();
   const { baseUrl, sessionId } = useSessionCtx();
   const isUser = row.role === "user";
   const isSystem = row.role === "system";
   // Hearth: no always-visible model attribution or copy icon on the row — copy is a
-  // long-press affordance on native (MessageActionsSheet) and a hover affordance here
-  // on web, where long-press has no equivalent.
+  // long-press affordance on native (MessageActionsSheet), and on web a hover affordance
+  // scoped to the WHOLE row (a short bubble left dead zones the cursor crossed on its way
+  // to the pill, un-hovering it mid-travel) with a short grace delay before hiding.
   const [hovered, setHovered] = useState(false);
+  const hideTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hoverIn = () => {
+    if (hideTimer.current != null) clearTimeout(hideTimer.current);
+    hideTimer.current = null;
+    setHovered(true);
+  };
+  const hoverOut = () => {
+    if (hideTimer.current != null) clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => setHovered(false), 200);
+  };
+  React.useEffect(
+    () => () => {
+      if (hideTimer.current != null) clearTimeout(hideTimer.current);
+    },
+    [],
+  );
 
   // Only assistant turns carry inline `<think>` reasoning; a past turn's reasoning renders
   // collapsed here too, so scrollback isn't full of expanded thinking logs.
@@ -163,12 +193,15 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
     : null;
 
   return (
-    <Animated.View style={[styles.row, !isUser && !isSystem && styles.assistantRow, isUser && styles.userRow, entrance]}>
+    <Animated.View style={entrance}>
+      <HoverView
+        onMouseEnter={IS_WEB ? hoverIn : undefined}
+        onMouseLeave={IS_WEB ? hoverOut : undefined}
+        style={[styles.row, !isUser && !isSystem && styles.assistantRow, isUser && styles.userRow]}
+      >
       {!isUser && !isSystem ? <View style={[styles.spine, { backgroundColor: tokens.border }]} /> : null}
       <Pressable
         onLongPress={onLongPress ? handleLongPress : undefined}
-        onHoverIn={IS_WEB ? () => setHovered(true) : undefined}
-        onHoverOut={IS_WEB ? () => setHovered(false) : undefined}
         {...webContextMenu}
         style={[
           styles.bubble,
@@ -229,6 +262,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
           </View>
         ) : null}
       </Pressable>
+      </HoverView>
     </Animated.View>
   );
 }
