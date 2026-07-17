@@ -4,7 +4,7 @@
 // Mono row directly under SessionHeader's title: cwd/worktree · model on the left, cost ·
 // ctx% (+ weekly quota, when the session is on a metered subscription plan) on the right.
 import React, { useState } from "react";
-import { Pressable, StyleSheet, Text } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import type { RemoteInput } from "../../lib/ws";
@@ -12,6 +12,8 @@ import { useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { formatCost, formatCwd, tabularNums, type as typeScale } from "../../theme/typography";
+import { useBreakpoint } from "../../theme/useBreakpoint";
+import { ContextGauge } from "../ds/ContextGauge";
 import { TelemetrySheet } from "./TelemetrySheet";
 
 export interface StatusStripProps {
@@ -35,6 +37,7 @@ export interface StatusStripProps {
 export function StatusStrip(props: StatusStripProps) {
   const tokens = useTokens();
   const strike = useStrike();
+  const { isCompact } = useBreakpoint();
   const [visible, setVisible] = useState(false);
   const left = `${formatCwd(props.cwd)} · ${props.model}`;
   const ctxPct =
@@ -57,12 +60,23 @@ export function StatusStrip(props: StatusStripProps) {
           <Text style={[typeScale.monoMeta, tabularNums, styles.left, { color: tokens.ink3 }]} numberOfLines={1}>
             {left}
           </Text>
-          <Text style={[typeScale.monoMeta, tabularNums, styles.right, { color: tokens.ink3 }]} numberOfLines={1}>
-            {props.reconnecting ? <Text style={{ color: tokens.warn }}>{"reconnecting… · "}</Text> : null}
-            <Text style={{ color: tokens.success }}>{formatCost(props.costUsd)}</Text>
-            {ctxPct != null ? ` · ${ctxPct}% ctx` : ""}
-            {props.weekly ? ` · +${props.weekly.deltaPct.toFixed(1)}% wk` : ""}
-          </Text>
+          <View style={styles.right}>
+            {props.reconnecting ? <Text style={[typeScale.monoMeta, { color: tokens.warn }]} numberOfLines={1}>{"reconnecting… · "}</Text> : null}
+            <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.success }]} numberOfLines={1}>{formatCost(props.costUsd)}</Text>
+            {ctxPct != null ? (
+              isCompact ? (
+                <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3 }]} numberOfLines={1}>{` · ${ctxPct}% ctx`}</Text>
+              ) : (
+                <>
+                  <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{" · "}</Text>
+                  <View style={styles.gauge}>
+                    <ContextGauge used={props.contextTokens} total={props.contextLimit ?? 0} />
+                  </View>
+                </>
+              )
+            ) : null}
+            {props.weekly ? <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3 }]} numberOfLines={1}>{` · +${props.weekly.deltaPct.toFixed(1)}% wk`}</Text> : null}
+          </View>
         </Pressable>
       </Animated.View>
       <TelemetrySheet {...props} visible={visible} onClose={() => setVisible(false)} />
@@ -76,5 +90,7 @@ const styles = StyleSheet.create({
   // hitSlop on the Pressable instead.
   row: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 24, paddingVertical: 0 },
   left: { flex: 1, flexShrink: 1, minWidth: 0 },
-  right: { flexShrink: 0 },
+  right: { flexDirection: "row", alignItems: "center", flexShrink: 0 },
+  // Wide layouts have room for the real gauge (track + token pair) instead of a bare "NN% ctx".
+  gauge: { width: 180 },
 });
