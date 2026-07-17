@@ -2,7 +2,7 @@
 // CodeBlock body for user/assistant; system rows (tool/diff-ish output) render compact mono
 // per the same materials CodeBlock uses, without a full Markdown pass over structured text.
 import * as Clipboard from "expo-clipboard";
-import { Copy } from "lucide-react-native";
+import { Copy, MoreHorizontal } from "lucide-react-native";
 import React, { useState } from "react";
 import { Platform, Pressable, StyleSheet, View } from "react-native";
 import Animated from "react-native-reanimated";
@@ -140,19 +140,33 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
     toast.show("message copied");
   };
 
+  // Long-press works on native AND touch-web; desktop web additionally gets right-click.
   const handleLongPress = () => {
-    if (!onLongPress || IS_WEB) return;
+    if (!onLongPress) return;
     haptics.select();
     onLongPress(row);
   };
+
+  // RNW forwards DOM handlers it doesn't know about (same passthrough DesktopWindowChrome
+  // uses for onDoubleClick) — typed via cast because react-native's Pressable props don't
+  // model web-only events.
+  const webContextMenu = IS_WEB && onLongPress
+    ? ({
+        onContextMenu: (e: { preventDefault: () => void }) => {
+          e.preventDefault();
+          onLongPress(row);
+        },
+      } as Record<string, unknown>)
+    : null;
 
   return (
     <Animated.View style={[styles.row, !isUser && !isSystem && styles.assistantRow, isUser && styles.userRow, entrance]}>
       {!isUser && !isSystem ? <View style={[styles.spine, { backgroundColor: tokens.border }]} /> : null}
       <Pressable
-        onLongPress={onLongPress && !IS_WEB ? handleLongPress : undefined}
+        onLongPress={onLongPress ? handleLongPress : undefined}
         onHoverIn={IS_WEB ? () => setHovered(true) : undefined}
         onHoverOut={IS_WEB ? () => setHovered(false) : undefined}
+        {...webContextMenu}
         style={[
           styles.bubble,
           isUser
@@ -174,13 +188,23 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         ) : (
           <Markdown content={userText} />
         )}
+        {/* Floating (absolute) so hover NEVER changes the bubble's layout — the old inline
+            row grew the bubble under the cursor, un-hovering it, shrinking it back: a
+            visible rapid jitter loop. */}
         {IS_WEB && !isSystem && hovered ? (
-          <View style={styles.metaRow}>
+          <View style={[styles.hoverActions, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}>
             <IconButton
               accessibilityLabel="copy message"
               onPress={onCopyRow}
-              icon={<Copy size={16} strokeWidth={1.75} color={tokens.ink3} />}
+              icon={<Copy size={14} strokeWidth={1.75} color={tokens.ink2} />}
             />
+            {onLongPress ? (
+              <IconButton
+                accessibilityLabel="message actions"
+                onPress={() => onLongPress(row)}
+                icon={<MoreHorizontal size={14} strokeWidth={1.75} color={tokens.ink2} />}
+              />
+            ) : null}
           </View>
         ) : null}
       </Pressable>
@@ -197,5 +221,13 @@ const styles = StyleSheet.create({
   userRow: { alignItems: "flex-end" },
   bubble: { borderRadius: 12, paddingHorizontal: space.space12, paddingVertical: space.space8 },
   userBubble: { maxWidth: "85%", borderRadius: radii.radius16, borderWidth: StyleSheet.hairlineWidth },
-  metaRow: { flexDirection: "row", justifyContent: "flex-end", marginTop: space.space4 },
+  hoverActions: {
+    position: "absolute",
+    top: -14,
+    right: space.space8,
+    flexDirection: "row",
+    borderRadius: radii.radius8,
+    borderWidth: StyleSheet.hairlineWidth,
+    zIndex: 2,
+  },
 });

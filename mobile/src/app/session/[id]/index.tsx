@@ -222,6 +222,12 @@ export default function SessionChat() {
     focusComposer();
   }, [draftText, focusComposer, setDraftText]);
 
+  // Edit & resend: the message text REPLACES the draft (unlike quote, which appends).
+  const onEditMessage = useCallback((text: string) => {
+    setDraftText(text);
+    focusComposer();
+  }, [focusComposer, setDraftText]);
+
   const listRef = useRef<FlatList<TimelineItem>>(null);
   const [showJump, setShowJump] = useState(false);
   const [newWhileAway, setNewWhileAway] = useState(0);
@@ -806,6 +812,7 @@ export default function SessionChat() {
         message={selectedMessage}
         onClose={() => setSelectedMessage(null)}
         onQuote={onQuote}
+        onEdit={onEditMessage}
       />
     </Screen>
   );
