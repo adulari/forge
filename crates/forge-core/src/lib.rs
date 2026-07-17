@@ -10627,7 +10627,7 @@ mod tests {
             let n = self
                 .calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let args = if n % 2 == 0 {
+            let args = if n.is_multiple_of(2) {
                 serde_json::json!({"path": "does-not-exist-xyz.txt"}) // fails NotFound
             } else {
                 serde_json::json!({"path": "Cargo.toml"}) // succeeds → clears failure streak

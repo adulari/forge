@@ -1157,10 +1157,10 @@ mod tests {
                 cfg("__never__", Allow, &[]),
                 builtin_deny("__never__", &["x"]),
             ];
-            let has_builtin_deny = next() % 3 == 0;
-            let has_cfg_deny = next() % 3 == 0;
-            let has_cfg_allow = next() % 2 == 0;
-            let has_cfg_ask = next() % 2 == 0;
+            let has_builtin_deny = next().is_multiple_of(3);
+            let has_cfg_deny = next().is_multiple_of(3);
+            let has_cfg_allow = next().is_multiple_of(2);
+            let has_cfg_ask = next().is_multiple_of(2);
             if has_builtin_deny {
                 rules.push(builtin_deny("*", &[]));
             }

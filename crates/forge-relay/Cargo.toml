@@ -24,6 +24,7 @@ tracing-subscriber = { workspace = true }
 p256 = { version = "0.14", features = ["ecdh", "pem", "pkcs8"] }
 base64 = "0.22"
 governor = "0.7"
+sha2 = "0.11"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

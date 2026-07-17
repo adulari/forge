@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 version = "2.6.5"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "AGPL-3.0-only"
 authors = ["Floris Voskamp"]
 repository = "https://github.com/Adulari/forge"

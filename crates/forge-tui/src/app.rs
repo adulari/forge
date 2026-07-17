@@ -5604,7 +5604,7 @@ pub fn render_voice_overlay(f: &mut Frame, app: &App) {
             f.render_widget(Paragraph::new(lines), inner);
         }
         VoicePhase::Recording { ptt_active } => {
-            let blink_on = (v.anim_tick / 6) % 2 == 0;
+            let blink_on = (v.anim_tick / 6).is_multiple_of(2);
             let rec_span = if blink_on {
                 Span::styled("● REC", Style::default().fg(ERRRED).bold())
             } else {
@@ -5933,7 +5933,7 @@ fn slider_handle_color(idx: usize, tick: usize) -> Color {
         3 => XHIGH_COLORS[(tick * 3) % XHIGH_COLORS.len()],
         // Blinding pulse between white-hot and gold — the hottest point of the forge.
         _ => {
-            if (tick / 3) % 2 == 0 {
+            if (tick / 3).is_multiple_of(2) {
                 Color::Rgb(255, 252, 235)
             } else {
                 Color::Rgb(255, 220, 90)

@@ -72,10 +72,13 @@ an **opt-out relay default** with BYO-key always taking precedence, and **no bak
 secret** — abuse prevention comes from a topic allowlist, payload validation, rate limiting,
 and a daily send cap instead.
 
-Wire protocol is a drop-in transport substitution for Apple's own API shape (`POST
-/3/device/{token}`, same headers plus a new `apns-environment` header replacing the Apple
-bearer JWT's implicit role, same JSON body forwarded opaquely, Apple's real HTTP status
-proxied back verbatim) so `apns.rs`'s existing `Ok(410) => prune` logic needs zero changes.
+Wire protocol is a near drop-in transport substitution for Apple's own API shape (`POST
+/3/device` with the token in `X-Forge-Device-Token`, same headers plus a new
+`apns-environment` header replacing the Apple bearer JWT's implicit role, same JSON body
+forwarded opaquely, Apple's real HTTP status proxied back verbatim) so `apns.rs`'s existing
+`Ok(410) => prune` logic needs zero changes. The original `/3/device/{token}` route remains
+accepted for already-released clients, but new clients keep the device token out of CDN/proxy
+URL analytics.
 `ApnsNotifier` gains an `ApnsBackend` enum (`Direct{auth}` / `Relay{base_url,relay_token}`);
 only `send_one`'s body branches on it — every other caller in `apns.rs`/`serve.rs` is
 unchanged.

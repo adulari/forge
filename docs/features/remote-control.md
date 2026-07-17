@@ -544,7 +544,8 @@ between them automatically:
 
 - **Bring your own Apple key** — set `FORGE_APNS_TEAM_ID`/`FORGE_APNS_KEY_ID`/
   `FORGE_APNS_KEY_PATH` (an Apple Developer APNs Auth Key `.p8` you generate yourself in App
-  Store Connect). Fully local, exactly the same "no relay" posture as Web Push above: the
+  Developer → Certificates, Identifiers & Profiles). Fully local, exactly the same "no relay"
+  posture as Web Push above: the
   daemon signs its own ES256 JWT and POSTs straight to `api(.sandbox).push.apple.com`. Always
   wins if configured, regardless of the option below.
 - **The hosted relay (default, zero setup)** — if no local key is configured, the daemon
@@ -566,6 +567,12 @@ Since the relay's source lives in this repo (`crates/forge-relay`), anyone uncom
 trusting the project operator's instance can run their own and point `FORGE_APNS_RELAY_URL`
 at it — a strictly better answer for a team/multi-machine setup than "bring your own key
 only," since it centralizes one key without requiring the operator's trust.
+
+A private relay may set `FORGE_RELAY_TOKEN` server-side and the same value as
+`FORGE_APNS_RELAY_TOKEN` on each trusted `forge serve` daemon. The public project relay does not
+embed a shared token—an open-source client secret would be extractable—so it instead enforces the
+app-topic/payload allowlist, per-client and per-device limits, a hard daily cap, and edge/origin
+network controls described in ADR-0012.
 
 ## 2g. Run as a background service — `forge service`
 

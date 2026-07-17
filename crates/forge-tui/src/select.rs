@@ -130,7 +130,7 @@ fn draw_single(
     for (i, item) in items.iter().enumerate() {
         let on = i == cursor;
         let caret = if on {
-            if (tick / 4) % 2 == 0 {
+            if (tick / 4).is_multiple_of(2) {
                 "▸ "
             } else {
                 "▹ "
@@ -256,7 +256,7 @@ fn draw(f: &mut ratatui::Frame, title: &str, items: &[SelectItem], state: &State
         let marker_color = if checked { OKGREEN } else { DIM };
         // Animated caret on the focused row.
         let caret = if on_cursor {
-            if (state.tick / 4) % 2 == 0 {
+            if (state.tick / 4).is_multiple_of(2) {
                 "▸ "
             } else {
                 "▹ "

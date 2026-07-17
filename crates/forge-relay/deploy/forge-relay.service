@@ -1,0 +1,49 @@
+[Unit]
+Description=Forge APNs push relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=forge-relay
+DynamicUser=yes
+EnvironmentFile=/etc/forge-relay/relay.env
+LoadCredential=apns-key:/etc/forge-relay/AuthKey.p8
+# Ubuntu 22.04's systemd cannot expand the newer %d credential-directory specifier inside an
+# Environment= assignment, so expand the systemd-provided variable in a minimal shell wrapper.
+ExecStart=/bin/sh -c 'exec env FORGE_APNS_KEY_PATH="$CREDENTIALS_DIRECTORY/apns-key" /usr/local/bin/forge-relay'
+Restart=on-failure
+RestartSec=5
+
+# The relay needs outbound HTTPS and a loopback listener, but no filesystem writes or ambient
+# privileges. Keep additions deliberate and verify them with `systemd-analyze security`.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProtectSystem=strict
+ProcSubset=pid
+RemoveIPC=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+UMask=0077
+MemoryMax=192M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
