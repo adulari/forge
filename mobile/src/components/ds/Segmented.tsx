@@ -1,12 +1,11 @@
-// DESIGN_SYSTEM.md §6 Segmented — bg3 track, bg2 thumb (Tabshift: thumb slides
-// with `press` spring), section-style labels; used for Chat/Tasks/Agents/Review.
-// DESIGN_ELEVATION.md Move 3 — 1px inset hairline on the thumb ("machined" edge).
-// Hearth radii: 10 outer / 7 inner (`radiusSegmentOuter`/`radiusSegmentInner`).
-import React, { useEffect, useRef, useState } from "react";
-import { Pressable, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
-import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSpring } from "react-native-reanimated";
+// Hearth Segmented — bg2 track with 1px border (radii 10 outer / 7 inner), and a STATIC
+// selected segment: selection-bg chip with accent label, exactly as every prototype
+// segmented renders (Usage THIS WEEK, Settings LIGHT/DARK/SYSTEM, Forge-a-task
+// READ/ASK/EDIT/FULL). No sliding thumb: Hearth's Forgework motion set has no segmented
+// slide, and the old measured-thumb animation was the source of repeated misalignment.
+import React, { useState } from "react";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { springs } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii } from "../../theme/tokens";
 import { type } from "../../theme/typography";
@@ -23,108 +22,37 @@ export interface SegmentedProps<T extends string = string> {
   value: T;
   onChange: (value: T) => void;
   testID?: string;
-  /** When true, the track uses bg2 (matching the surrounding header surface) so the
-   * segmented strip blends flush into a uniform header — the selected thumb pops as a
-   * raised chip using bg3. Use this when Segmented is rendered inside a header that
-   * already paints bg2 as its background. */
+  /** Kept for source compatibility: flush tracks sit on a bg2 header surface, so they drop
+   * the track fill and keep only the border. */
   flush?: boolean;
-}
-
-interface SegmentLayout {
-  x: number;
-  width: number;
 }
 
 export function Segmented<T extends string = string>({ options, value, onChange, testID, flush }: SegmentedProps<T>) {
   const tokens = useTokens();
-  const reduced = useReducedMotion();
-  // Each segment reports its own measured x/width (see `onSegmentLayout` below) instead of
-  // the thumb deriving position from `track width / count` — a track/segment size mismatch
-  // (borders, rounding, the 10/7 radii padding) made that math drift from what actually
-  // rendered, showing the thumb offset from the selected label.
-  const [segmentLayouts, setSegmentLayouts] = useState<(SegmentLayout | undefined)[]>([]);
-  const translateX = useSharedValue(0);
-  const thumbWidth = useSharedValue(0);
-  // Tracks the previously-placed index (not just "has it ever been placed") so a layout
-  // re-measurement at the SAME index — e.g. the track settling to its final width right
-  // after mount/rotation — snaps instantly instead of spring-animating; only an actual
-  // selection change should slide.
-  const prevIndex = useRef<number | null>(null);
-  const index = Math.max(
-    0,
-    options.findIndex((o) => o.value === value),
-  );
-
-  // flush: track = bg2 (header surface), thumb = bg3 (raised chip).
-  // default:  track = bg3,          thumb = bg2 (existing section-style look).
-  const trackBg = flush ? tokens.bg2 : tokens.bg3;
-  const thumbBg = flush ? tokens.bg3 : tokens.bg2;
-
-  const layout = segmentLayouts[index];
-
-  useEffect(() => {
-    if (!layout) return;
-    const indexChanged = prevIndex.current !== null && prevIndex.current !== index;
-    prevIndex.current = index;
-    if (reduced || !indexChanged) {
-      translateX.value = layout.x;
-      thumbWidth.value = layout.width;
-    } else {
-      translateX.value = withSpring(layout.x, springs.press);
-      thumbWidth.value = withSpring(layout.width, springs.press);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [index, layout, reduced]);
-
-  const thumbStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: translateX.value }],
-    width: thumbWidth.value,
-  }));
-
-  const onSegmentLayout = (i: number) => (e: LayoutChangeEvent) => {
-    const { x, width } = e.nativeEvent.layout;
-    setSegmentLayouts((prev) => {
-      const current = prev[i];
-      if (current && current.x === x && current.width === width) return prev;
-      const next = [...prev];
-      next[i] = { x, width };
-      return next;
-    });
-  };
 
   return (
     <View
-      style={[styles.track, { backgroundColor: trackBg, borderRadius: radii.radiusSegmentOuter }]}
+      style={[
+        styles.track,
+        {
+          backgroundColor: flush ? "transparent" : tokens.bg2,
+          borderColor: tokens.border,
+          borderRadius: radii.radiusSegmentOuter,
+        },
+      ]}
       testID={testID}
       accessibilityRole="tablist"
     >
-      {layout ? (
-        <Animated.View
-          pointerEvents="none"
-          style={[styles.thumb, thumbStyle, { backgroundColor: thumbBg, borderRadius: radii.radiusSegmentInner }]}
-        >
-          <View
-            style={[
-              styles.thumbInset,
-              { borderColor: tokens.borderStrong, borderRadius: radii.radiusSegmentInner - 1, pointerEvents: "none" },
-            ]}
-          />
-        </Animated.View>
-      ) : null}
-      {options.map((opt, i) => {
-        const selected = opt.value === value;
-        return (
-          <SegmentOption
-            key={opt.value}
-            label={opt.label}
-            badge={opt.badge}
-            dot={opt.dot}
-            selected={selected}
-            onPress={() => onChange(opt.value)}
-            onLayout={onSegmentLayout(i)}
-          />
-        );
-      })}
+      {options.map((opt) => (
+        <SegmentOption
+          key={opt.value}
+          label={opt.label}
+          badge={opt.badge}
+          dot={opt.dot}
+          selected={opt.value === value}
+          onPress={() => onChange(opt.value)}
+        />
+      ))}
     </View>
   );
 }
@@ -138,14 +66,12 @@ function SegmentOption({
   dot,
   selected,
   onPress,
-  onLayout,
 }: {
   label: string;
   badge?: number;
   dot?: boolean;
   selected: boolean;
   onPress: () => void;
-  onLayout: (e: LayoutChangeEvent) => void;
 }) {
   const tokens = useTokens();
   const [hovered, setHovered] = useState(false);
@@ -154,7 +80,6 @@ function SegmentOption({
   return (
     <Pressable
       onPress={onPress}
-      onLayout={onLayout}
       onHoverIn={() => setHovered(true)}
       onHoverOut={() => setHovered(false)}
       onFocus={() => setFocused(true)}
@@ -166,15 +91,21 @@ function SegmentOption({
         styles.segment,
         {
           borderRadius: radii.radiusSegmentInner,
-          borderWidth: 2,
+          borderWidth: 1,
           borderColor: focused ? tokens.accent : "transparent",
-          backgroundColor: hovered && !selected ? tokens.bg3 : "transparent",
+          backgroundColor: selected ? tokens.selection : hovered ? tokens.bg3 : "transparent",
         },
       ]}
     >
       <View style={styles.labelRow}>
-        <Text style={[type.section, { color: selected ? tokens.ink : tokens.ink3 }]} numberOfLines={1}>{label}</Text>
-        {badge != null && badge > 0 ? <View style={[styles.badge, { backgroundColor: selected ? tokens.selection : tokens.bg3 }]}><Text style={[type.meta, { color: selected ? tokens.accent : tokens.ink2 }]}>{badge}</Text></View> : null}
+        <Text style={[type.section, { color: selected ? tokens.accent : tokens.ink3 }]} numberOfLines={1}>
+          {label}
+        </Text>
+        {badge != null && badge > 0 ? (
+          <View style={[styles.badge, { backgroundColor: selected ? tokens.selection : tokens.bg3 }]}>
+            <Text style={[type.meta, { color: selected ? tokens.accent : tokens.ink2 }]}>{badge}</Text>
+          </View>
+        ) : null}
         {dot ? <View style={[styles.dot, { backgroundColor: tokens.accent }]} /> : null}
       </View>
     </Pressable>
@@ -184,23 +115,9 @@ function SegmentOption({
 const styles = StyleSheet.create({
   track: {
     flexDirection: "row",
-    position: "relative",
-    padding: 2,
+    padding: 3,
     minHeight: 44,
-  },
-  thumb: {
-    position: "absolute",
-    top: 2,
-    bottom: 2,
-    left: 0,
-  },
-  thumbInset: {
-    position: "absolute",
-    top: 1,
-    left: 1,
-    right: 1,
-    bottom: 1,
-    borderWidth: StyleSheet.hairlineWidth,
+    borderWidth: 1,
   },
   labelRow: { flexDirection: "row", alignItems: "center", gap: 4 },
   badge: { minWidth: 16, height: 16, paddingHorizontal: 4, borderRadius: 8, alignItems: "center", justifyContent: "center" },
@@ -209,6 +126,5 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    zIndex: 1,
   },
 });

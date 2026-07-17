@@ -22,8 +22,11 @@ export const tabularNums: TextStyle = { fontVariant: ["tabular-nums"] };
 // react-native-web's own Text default falls back to the invalid CSS family "System"
 // (not the `system-ui` keyword), which browsers can't match — hence the serif fallback
 // this constant fixes. Native is left untouched (undefined = no-op style key).
+// Web additionally leads with the bundled Inter variable font (+html.tsx @font-face,
+// public/fonts/) — Linux/Windows browsers resolve `system-ui` to fonts that read nothing
+// like SF Pro (DejaVu, Segoe fallbacks), so the web/desktop shells ship their own sans.
 const sansFamily =
-  Platform.OS === "web" ? "system-ui, -apple-system, BlinkMacSystemFont, sans-serif" : undefined;
+  Platform.OS === "web" ? "Inter, system-ui, -apple-system, BlinkMacSystemFont, sans-serif" : undefined;
 
 // ---------------------------------------------------------------------------
 // §2 type scale — size / line-height / weight, the only allowed combinations.

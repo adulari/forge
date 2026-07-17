@@ -22,6 +22,38 @@ const THEME_COLOR = darkTokens.bg1;
 // BoundedList) is what actually stops rubber-band, `overscroll-behavior: none` here is
 // the page-level backstop.
 const GLOBAL_WEB_CSS = `
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/InterVariable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/InterVariable-Italic.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+/* react-native-web's Text default is the invalid family "System" — alias it to the
+   bundled Inter so every Text that never set an explicit fontFamily still gets the
+   app sans instead of the browser's fallback (DejaVu/Times on Linux). */
+@font-face {
+  font-family: "System";
+  src: url("/fonts/InterVariable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "System";
+  src: url("/fonts/InterVariable-Italic.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: italic;
+  font-display: swap;
+}
+html { font-feature-settings: "calt" 1, "cv05" 1; }
 html, body, #root {
   height: 100%;
   height: 100vh;
