@@ -472,6 +472,10 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
             {
               backgroundColor: tokens.bg2,
               borderColor: focused ? tokens.accent : tokens.borderStrong,
+              // Rest state: one text line — center icons/text/send on the same axis (bottom-
+              // anchoring everything made the pill read as misaligned). Grown state: pin the
+              // controls to the bottom row so they stay by the newest line.
+              alignItems: height > MIN_HEIGHT ? "flex-end" : "center",
             },
             shadowStyle(depth.sheet),
           ]}
@@ -502,6 +506,10 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
                 setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
               }
               multiline
+              // Web: RNW maps this to the textarea's rows attribute. Without it the browser
+              // default (rows=2) makes an EMPTY composer measure two lines tall, inflating
+              // the pill and bottom-anchoring the icons against a phantom second line.
+              numberOfLines={1}
               scrollEnabled={height >= MAX_HEIGHT}
               textAlignVertical="top"
               // Hidden while the ghost is showing — it renders the same "empty state" copy
@@ -573,15 +581,15 @@ const styles = StyleSheet.create({
   row: {
     position: "relative",
     flexDirection: "row",
-    alignItems: "flex-end",
     gap: space.space4,
     borderWidth: 1,
     borderRadius: radii.radius12 + 2,
     paddingLeft: space.space4,
     paddingRight: space.space4,
+    paddingVertical: space.space4,
     overflow: "hidden",
   },
-  input: { flex: 1, paddingHorizontal: space.space8, paddingVertical: space.space8, textAlignVertical: "top" },
+  input: { flex: 1, paddingHorizontal: space.space8, paddingVertical: (MIN_HEIGHT - LINE_HEIGHT) / 2, textAlignVertical: "top" },
   inputWrap: { flex: 1, position: "relative", overflow: "visible" },
   commandRecognition: { position: "absolute", right: space.space8, top: space.space8, backgroundColor: "transparent" },
   // Mirrors `input`'s own padding exactly so the ghost text lines up with where a typed
@@ -592,7 +600,7 @@ const styles = StyleSheet.create({
     right: 0,
     top: 0,
     paddingHorizontal: space.space8,
-    paddingVertical: space.space8,
+    paddingVertical: (MIN_HEIGHT - LINE_HEIGHT) / 2,
   },
   sendCircle: { borderRadius: radii.radiusPill, width: tapTarget, height: tapTarget },
   actionIcon: { width: 20, height: 20, alignItems: "center", justifyContent: "center" },
