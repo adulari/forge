@@ -68,12 +68,12 @@ export function SessionHeader(props: SessionHeaderProps) {
   return (
     <View style={styles.wrap}>
       <View style={styles.row}>
-        {props.showBack !== false ? <IconButton icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onBack} accessibilityLabel="Back" /> : null}
+        {props.showBack !== false ? <IconButton icon={<ArrowLeft size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onBack} accessibilityLabel="Back" style={styles.leadingBleed} /> : null}
         <StatusDot state={props.state} />
         <Text style={[typeScale.headingBold, styles.title, { color: tokens.ink }]} numberOfLines={1}>{props.title}</Text>
         {isPublic ? <Text style={[typeScale.meta, { color: tokens.danger }]}>public</Text> : null}
         <IconButton icon={<Search size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={props.onPalette} accessibilityLabel="Open command palette" />
-        <IconButton icon={<MoreHorizontal size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={() => setActionsVisible(true)} accessibilityLabel="Session actions" />
+        <IconButton icon={<MoreHorizontal size={20} strokeWidth={1.75} color={tokens.ink} />} onPress={() => setActionsVisible(true)} accessibilityLabel="Session actions" style={styles.trailingBleed} />
       </View>
       <Sheet visible={actionsVisible} onClose={closeActions} accessibilityLabel="Session actions" snapPoints={[0.8]}>
         <ScrollView contentContainerStyle={styles.actions} keyboardShouldPersistTaps="handled">
@@ -101,5 +101,10 @@ const styles = StyleSheet.create({
   wrap: { gap: space.space4 },
   row: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 44 },
   title: { flex: 1 },
+  // Icon buttons pad their 20px glyph to a 44px hit area; at the header's rails that padding
+  // reads as misalignment against rows whose text/borders sit flush. Bleed it over the edge so
+  // the glyph — not the invisible hit area — lines up with the rail.
+  leadingBleed: { marginLeft: -space.space12 },
+  trailingBleed: { marginRight: -space.space12 },
   actions: { paddingHorizontal: space.space16, paddingBottom: space.space32, gap: space.space4 },
 });
