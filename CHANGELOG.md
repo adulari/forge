@@ -84,10 +84,8 @@ and every published Forge surface.
   and ARM64 artifacts are now built on the dedicated Arch runner inside a digest-pinned Debian
   Bullseye container, capped at glibc 2.31/GLIBCXX 3.4.28, and checked across Ubuntu 22.04/24.04,
   Debian 12, and Fedora 40 without installing ALSA.
-- **Complete PR gates**: the shared app lint/typecheck/tests, web export, Tauri tests/clippy/audit,
-  supply-chain checks, and the independently publishable `genai` fork now run on every PR,
-  including changes outside their own directories, so branch protection cannot be bypassed by
-  path filters or a skipped check.
+- **Publishable-fork validation**: Forge's independently published `genai` fork is checked inside
+  the existing Rust fmt, clippy, test, audit, and deny jobs instead of expanding the PR pipeline.
 - **SQLite 3.51 usage reporting**: synthetic compaction and diagnostic usage now inherits the most
   recent routed provider without using a correlated outer column in a scalar subquery `ORDER BY`,
   fixing provider-usage queries on SQLite 3.51 while preserving the legacy following-turn fallback.

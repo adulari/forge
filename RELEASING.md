@@ -78,11 +78,9 @@ upstream-Tauri advisories; never add an ignore to make a real vulnerability gree
 ## 5. PR and merge
 
 Open a PR (`chore: prepare vX.Y.Z release`), let every required check pass, and merge to `main`.
-Branch protection must require `CI`, `cargo audit (RUSTSEC)`,
-`cargo deny (licenses + bans + advisories)`, `lint, typecheck, and tests`,
-and `Tauri tests, clippy, and audit`. These checks intentionally run on every PR;
-do not restore path filters that let a required context disappear. Do **not** tag the branch — the
-tag goes on `main` after merge.
+Branch protection must require the aggregate `CI` check. Security checks still run on every PR,
+while mobile/Tauri checks run when their source paths change. Do **not** tag the branch — the tag
+goes on `main` after merge.
 
 ## 6. Tag and release
 

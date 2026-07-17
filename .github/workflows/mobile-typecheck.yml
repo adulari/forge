@@ -1,11 +1,12 @@
 name: mobile-typecheck
 
-# Type-checks the unified app on every PR. Keeping these job names present on every change lets
-# branch protection require them without path-filtered PRs waiting forever for a missing check.
-# The Rust `CI` workflow never compiles TypeScript; this gate is fast and uses no secrets.
+# Type-checks the unified app when a PR changes mobile or protocol code. The Rust `CI` workflow
+# never compiles TypeScript, so these surfaces retain their own focused checks.
 on:
   pull_request:
-    branches: [main]
+    paths:
+      - "mobile/**"
+      - "protocol/**"
   workflow_dispatch:
 
 concurrency:

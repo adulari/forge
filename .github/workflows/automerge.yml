@@ -20,7 +20,7 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
-    runs-on: [release, linux, x64]
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 5
     steps:
       - name: Enable squash auto-merge
