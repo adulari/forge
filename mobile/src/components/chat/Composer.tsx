@@ -24,9 +24,8 @@ import { useSessionCtx } from "../../lib/sessionContext";
 import { chordHold } from "../../lib/voice/chordHold";
 import { voice } from "../../lib/voice/voice";
 import { durations, easings } from "../../theme/motion";
-import { useTokens } from "../../theme/ThemeProvider";
-import { gutter, radii, space, tapTarget } from "../../theme/tokens";
-import { useBreakpoint } from "../../theme/useBreakpoint";
+import { useTheme } from "../../theme/ThemeProvider";
+import { depthDark, depthLight, radii, shadowStyle, space, tapTarget } from "../../theme/tokens";
 import { type, webInputTextStyle } from "../../theme/typography";
 import { Chip } from "../ds/Chip";
 import { HeatEdge } from "../ds/HeatEdge";
@@ -63,17 +62,10 @@ export interface ComposerProps {
 }
 
 export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onInterrupt }: ComposerProps) {
-  const tokens = useTokens();
+  const { scheme, tokens } = useTheme();
+  const depth = scheme === "dark" ? depthDark : depthLight;
   const upload = useUpload();
-  const { isCompact } = useBreakpoint();
   const insets = useSafeAreaInsets();
-  // The parent `<Screen>` wraps ALL of its children (list, cards, composer) in one
-  // paddingHorizontal'd View for the message-list gutter — that's wanted for MessageRow/
-  // CardSlot, but it insets the composer's own bg2 panel from the true screen edges,
-  // leaving Screen's bg1 showing through as a side gutter. Cancel it here with a matching
-  // negative margin so the panel itself bleeds edge-to-edge; `styles.wrap`'s own
-  // paddingHorizontal keeps the icons/input/send button reasonably inset from that edge.
-  const screenGutter = isCompact ? gutter.compact : gutter.medium;
   const [commandFocusSignal, setCommandFocusSignal] = useState(0);
 
   // Draft (text + attachments) lives in SessionContext, not local state: the session shell
@@ -96,6 +88,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const [recording, setRecording] = useState(false);
   const [goalVisible, setGoalVisible] = useState(false);
   const [height, setHeight] = useState(MIN_HEIGHT);
+  const [focused, setFocused] = useState(false);
   const [draftLoadedSession, setDraftLoadedSession] = useState<string | null>(null);
   const inputRef = useRef<TextInput>(null);
   const textRef = useRef(text);
@@ -409,17 +402,14 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
       style={[
         styles.wrap,
         {
-          backgroundColor: tokens.bg2,
-          borderTopColor: tokens.border,
-          marginHorizontal: -screenGutter,
-          // `Screen` omits "bottom" from its safe-area edges for this route (see index.tsx) so
-          // this panel — not the screen's own bg1 — is what bleeds through the home-indicator
-          // inset; otherwise a black strip would show below the grey composer.
+          // Composer floats over the screen's own bg1 (Hearth: no full-bleed panel) — the
+          // reply row below carries its own bg2/border pill per the prototype. `Screen`
+          // omits "bottom" from its safe-area edges for this route (see index.tsx), so this
+          // wrap still owns the home-indicator inset padding even though it's transparent.
           paddingBottom: space.space8 + insets.bottom,
         },
       ]}
     >
-      <HeatEdge active={busy} />
       {!recording && attachments.length > 0 ? (
         <View style={styles.chipsRow}>
           {attachments.map((a) => (
@@ -476,7 +466,17 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
           onClose={() => setRecording(false)}
         />
       ) : (
-        <View style={styles.row}>
+        <View
+          style={[
+            styles.row,
+            {
+              backgroundColor: tokens.bg2,
+              borderColor: focused ? tokens.accent : tokens.borderStrong,
+            },
+            shadowStyle(depth.sheet),
+          ]}
+        >
+          <HeatEdge active={busy} />
           <IconButton
             icon={<ImageIcon size={20} strokeWidth={1.75} color={tokens.ink2} />}
             onPress={onAttachImage}
@@ -492,6 +492,8 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               ref={inputRef}
               value={text}
               onChangeText={setText}
+              onFocus={() => setFocused(true)}
+              onBlur={() => setFocused(false)}
               returnKeyType="send"
               autoCapitalize="none"
               autoCorrect={false}
@@ -560,7 +562,6 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
 const styles = StyleSheet.create({
   wrap: {
     position: "relative",
-    borderTopWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: space.space12,
     paddingTop: space.space8,
     paddingBottom: space.space8,
@@ -569,7 +570,17 @@ const styles = StyleSheet.create({
   chipsRow: { flexDirection: "row", gap: space.space8, paddingRight: space.space12 },
   commandScroll: { flexGrow: 0, flexShrink: 0 },
   chipThumb: { width: 20, height: 20, borderRadius: radii.radius4 },
-  row: { flexDirection: "row", alignItems: "flex-end", gap: space.space4 },
+  row: {
+    position: "relative",
+    flexDirection: "row",
+    alignItems: "flex-end",
+    gap: space.space4,
+    borderWidth: 1,
+    borderRadius: radii.radius12 + 2,
+    paddingLeft: space.space4,
+    paddingRight: space.space4,
+    overflow: "hidden",
+  },
   input: { flex: 1, paddingHorizontal: space.space8, paddingVertical: space.space8, textAlignVertical: "top" },
   inputWrap: { flex: 1, position: "relative", overflow: "visible" },
   commandRecognition: { position: "absolute", right: space.space8, top: space.space8, backgroundColor: "transparent" },

@@ -682,7 +682,7 @@ export default function SessionChat() {
   return (
     // "bottom" deliberately omitted: Composer owns the home-indicator inset itself (its bg2
     // panel bleeds through it) so Screen's bg1 never shows as a seam below the composer.
-    <Screen edges={["left", "right"]} keyboardAvoiding keyboardVerticalOffset={headerHeight}>
+    <Screen edges={["left", "right"]} keyboardAvoiding keyboardVerticalOffset={headerHeight} contentContainerStyle={styles.sessionColumn}>
       <View style={styles.flex}>
         <BoundedList<TimelineItem>
           ref={listRef}
@@ -799,6 +799,9 @@ export default function SessionChat() {
 }
 
 const styles = StyleSheet.create({
+  // Hearth desktop/web: the chat column caps at 760px, centered in the remaining Fleet+Session
+  // pane (a no-op at mobile widths — see prototype "Desktop Fleet + Session").
+  sessionColumn: { width: "100%", maxWidth: 760, alignSelf: "center" },
   flex: { flex: 1 },
   streamingRow: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
   thinkingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },

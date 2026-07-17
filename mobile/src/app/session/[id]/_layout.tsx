@@ -266,8 +266,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           <View style={gutter}>
           <SessionHeader
             title={snapshot?.title || `session ${sessionId.slice(0, 8)}`}
-            cwd={snapshot?.cwd ?? sessionId}
-            worktree={snapshot?.worktree ?? null}
+            state={statusState}
             exposure={snapshot?.exposure ?? "loopback"}
             onBack={() => goBackOr("/(tabs)")}
             showBack={!isExpanded}
@@ -296,6 +295,20 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 
             onLattice={() => setLatticeVisible(true)}
+          />
+          <StatusStrip
+            state={statusState}
+            tier={snapshot?.tier ?? null}
+            model={snapshot?.model && snapshot.model !== "—" ? snapshot.model : latestAssistantModel ?? "—"}
+            temper={snapshot?.temper ?? "—"}
+            effort={snapshot?.effort}
+            send={send}
+            costUsd={snapshot?.cost_usd ?? 0}
+            contextTokens={snapshot?.context_tokens ?? 0}
+            contextLimit={snapshot?.context_limit ?? null}
+            weekly={weekly.mode === "subscription" ? { provider: weekly.provider, deltaPct: weekly.deltaPct } : null}
+            cwd={snapshot?.cwd ?? sessionId}
+            worktree={snapshot?.worktree ?? null}
           />
           </View>
 
@@ -341,21 +354,6 @@ function SessionShell({ sessionId }: { sessionId: string }) {
         ) : reconnecting ? (
           <Banner tone="neutral" compact message="reconnecting…" />
         ) : null}
-
-        <View style={gutter}>
-          <StatusStrip
-            state={statusState}
-            tier={snapshot?.tier ?? null}
-            model={snapshot?.model && snapshot.model !== "—" ? snapshot.model : latestAssistantModel ?? "—"}
-            temper={snapshot?.temper ?? "—"}
-            effort={snapshot?.effort}
-            send={send}
-            costUsd={snapshot?.cost_usd ?? 0}
-            contextTokens={snapshot?.context_tokens ?? 0}
-            contextLimit={snapshot?.context_limit ?? null}
-            weekly={weekly.mode === "subscription" ? { provider: weekly.provider, deltaPct: weekly.deltaPct } : null}
-          />
-        </View>
 
           <View style={[gutter, styles.segmentedWrap]}>
             <Segmented

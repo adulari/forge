@@ -151,7 +151,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
         style={[
           styles.bubble,
           isUser
-            ? [styles.userBubble, { backgroundColor: tokens.bg3 }]
+            ? [styles.userBubble, { backgroundColor: tokens.bg2, borderColor: tokens.border }]
             : { backgroundColor: "transparent" },
         ]}
       >
@@ -194,7 +194,7 @@ const styles = StyleSheet.create({
   spine: { position: "absolute", left: space.space16, top: space.space8, bottom: space.space8, width: 2, borderRadius: radii.radiusPill },
   userRow: { alignItems: "flex-end" },
   bubble: { borderRadius: 12, paddingHorizontal: space.space12, paddingVertical: space.space8 },
-  userBubble: { maxWidth: "85%", borderRadius: radii.radius16 },
+  userBubble: { maxWidth: "85%", borderRadius: radii.radius16, borderWidth: StyleSheet.hairlineWidth },
   metaRow: { flexDirection: "row", alignItems: "center", gap: space.space4, marginTop: space.space4 },
   model: { flex: 1 },
 });
