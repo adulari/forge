@@ -33,7 +33,7 @@ and every published Forge surface.
   publication is isolated behind protected environments and protected-`main` dispatch, release
   tags must match the source version and be reachable from `main`, and CLI, desktop, web, Android,
   and IPA artifacts receive GitHub build-provenance attestations. Automatic merge activation is
-  limited to trusted repository collaborators, and CodeQL now covers Rust too.
+  limited to trusted repository collaborators.
 - **Dedicated publication runner**: privileged Linux publication uses the isolated Arch release
   runner and a repository-restricted runner group instead of the general CI runner pool.
 - **Dependency advisories** (#808): upgraded the updater, plist, and XML dependency chain, removing
@@ -85,9 +85,9 @@ and every published Forge surface.
   Bullseye container, capped at glibc 2.31/GLIBCXX 3.4.28, and checked across Ubuntu 22.04/24.04,
   Debian 12, and Fedora 40 without installing ALSA.
 - **Complete PR gates**: the shared app lint/typecheck/tests, web export, Tauri tests/clippy/audit,
-  Rust CodeQL analysis, supply-chain checks, and the independently publishable `genai` fork now run
-  on every PR, including changes outside their own directories, so branch protection cannot be
-  bypassed by path filters or a skipped check.
+  supply-chain checks, and the independently publishable `genai` fork now run on every PR,
+  including changes outside their own directories, so branch protection cannot be bypassed by
+  path filters or a skipped check.
 - **SQLite 3.51 usage reporting**: synthetic compaction and diagnostic usage now inherits the most
   recent routed provider without using a correlated outer column in a scalar subquery `ORDER BY`,
   fixing provider-usage queries on SQLite 3.51 while preserving the legacy following-turn fallback.

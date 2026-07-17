@@ -80,7 +80,7 @@ upstream-Tauri advisories; never add an ignore to make a real vulnerability gree
 Open a PR (`chore: prepare vX.Y.Z release`), let every required check pass, and merge to `main`.
 Branch protection must require `CI`, `cargo audit (RUSTSEC)`,
 `cargo deny (licenses + bans + advisories)`, `lint, typecheck, and tests`,
-`Tauri tests, clippy, and audit`, and `analyze Rust`. These checks intentionally run on every PR;
+and `Tauri tests, clippy, and audit`. These checks intentionally run on every PR;
 do not restore path filters that let a required context disappear. Do **not** tag the branch — the
 tag goes on `main` after merge.
 
