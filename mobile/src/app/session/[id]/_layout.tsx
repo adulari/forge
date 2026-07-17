@@ -309,6 +309,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             weekly={weekly.mode === "subscription" ? { provider: weekly.provider, deltaPct: weekly.deltaPct } : null}
             cwd={snapshot?.cwd ?? sessionId}
             worktree={snapshot?.worktree ?? null}
+            reconnecting={reconnecting}
           />
           </View>
 
@@ -345,14 +346,14 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           />
         ) : null}
         {closed ? <Banner tone="danger" message="session ended — see History to review it" /> : null}
+        {/* A soft reconnect blip renders inline in the StatusStrip meta line (calmer than a
+            full-width banner); only the hard unreachable state still earns a Banner. */}
         {unreachable ? (
           <Banner
             tone="danger"
             compact
             message="can't reach forge serve — check it's running. will keep retrying automatically."
           />
-        ) : reconnecting ? (
-          <Banner tone="neutral" compact message="reconnecting…" />
         ) : null}
 
           <View style={[gutter, styles.segmentedWrap]}>

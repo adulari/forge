@@ -29,7 +29,9 @@ export interface ToastProps {
   onDismiss: (id: string) => void;
 }
 
-const RISE_PX = 12;
+// Toasts now drop in from the top edge (ToastHost is top-anchored), so the entrance
+// translate starts above the rest position.
+const RISE_PX = -12;
 const SWIPE_DISMISS_THRESHOLD = 60;
 const SWIPE_OUT_DISTANCE = 400;
 

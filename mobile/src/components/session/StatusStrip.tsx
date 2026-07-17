@@ -27,6 +27,9 @@ export interface StatusStripProps {
   weekly?: { provider: string; deltaPct: number } | null;
   cwd: string;
   worktree: string | null;
+  /** Soft connection blip — renders as a small warm mono note inside the meta line instead
+   * of the old full-width Banner (which read as out-of-place chrome). */
+  reconnecting?: boolean;
 }
 
 export function StatusStrip(props: StatusStripProps) {
@@ -54,6 +57,7 @@ export function StatusStrip(props: StatusStripProps) {
             {left}
           </Text>
           <Text style={[typeScale.monoMeta, tabularNums, styles.right, { color: tokens.ink3 }]} numberOfLines={1}>
+            {props.reconnecting ? <Text style={{ color: tokens.warn }}>{"reconnecting… · "}</Text> : null}
             <Text style={{ color: tokens.success }}>{formatCost(props.costUsd)}</Text>
             {ctxPct != null ? ` · ${ctxPct}% ctx` : ""}
             {props.weekly ? ` · +${props.weekly.deltaPct.toFixed(1)}% wk` : ""}

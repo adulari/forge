@@ -538,7 +538,15 @@ export default function SessionChat() {
       // Snapshot transcript is chronological (oldest->newest); walk it back-to-front for the
       // inverted list. It remains visible after an empty history response because that response
       // cannot prove the server transcript is empty.
-      const filler = snapshot?.transcript ?? [];
+      let filler = snapshot?.transcript ?? [];
+      // The tail's newest lines describe the CURRENT turn, which the styled rows above
+      // (pendingSent bubble + streaming reply + LiveToolActivity) already render — keeping
+      // them here painted the same exchange twice, once as plain lines. Cut the filler at
+      // the current turn's start (the last "you" marker) while a turn is in flight.
+      if (busy || streamingText || pendingSent.length > 0) {
+        const lastYou = filler.map((l) => l.trim()).lastIndexOf("you");
+        if (lastYou >= 0) filler = filler.slice(0, lastYou);
+      }
       for (let i = filler.length - 1; i >= 0; i--) {
         list.push({ kind: "filler", id: `f${i}`, text: filler[i] });
       }

@@ -43,7 +43,12 @@ const SHEET_ANIMATION_MS = 200;
 export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightRatio = 0.9, accessibilityLabel }: SheetProps) {
   const tokens = useTokens();
   const { scheme } = useTheme();
-  const { height: windowHeight } = useWindowDimensions();
+  const { height: windowHeight, width: windowWidth } = useWindowDimensions();
+  // A bottom sheet spanning a 1440px desktop window reads as a wall, not a sheet — cap it
+  // at a comfortable column and center it (no-op on phones). Computed insets rather than
+  // auto margins: Yoga has no auto-margin centering for absolutely-positioned views.
+  const sheetWidth = Math.min(windowWidth, 640);
+  const sheetInset = Math.max(0, (windowWidth - sheetWidth) / 2);
   const reduced = useReducedMotion();
   const depth = scheme === "dark" ? depthDark : depthLight;
 
@@ -167,6 +172,8 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
             {
               backgroundColor: tokens.bg2,
               maxHeight: maxSheetHeight,
+              left: sheetInset,
+              right: sheetInset,
               borderTopLeftRadius: radii.radius16,
               borderTopRightRadius: radii.radius16,
             },
@@ -206,7 +213,7 @@ export function Sheet({ visible, onClose, children, snapPoints = [1], maxHeightR
 }
 
 const styles = StyleSheet.create({
-  sheet: { position: "absolute", left: 0, right: 0, bottom: 0, overflow: "hidden" },
+  sheet: { position: "absolute", bottom: 0, overflow: "hidden" },
   webTransition: {
     // @ts-expect-error react-native-web-only CSS transition property
     transitionProperty: "transform",

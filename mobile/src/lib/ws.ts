@@ -286,6 +286,11 @@ export function useSessionSocket(
         console.warn("[ws] dropped malformed snapshot frame");
         return;
       }
+      // Keepalive heartbeats are expected wire traffic, not malformed snapshots — ack
+      // liveness silently instead of warning on every one.
+      if (data != null && typeof data === "object" && "keepalive" in (data as object)) {
+        return;
+      }
       if (!isValidSnapshotFrame(data)) {
         console.warn("[ws] dropped invalid snapshot frame");
         return;
