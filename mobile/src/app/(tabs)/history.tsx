@@ -248,7 +248,7 @@ export default function HistoryScreen() {
       <SearchField
         value={query}
         onChangeText={setQuery}
-        placeholder="search title or cwd…"
+        placeholder="search title or path…"
         autoCapitalize="none"
         autoCorrect={false}
         containerStyle={styles.search}

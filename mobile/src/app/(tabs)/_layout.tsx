@@ -1,13 +1,14 @@
-// Bottom tabs (T2.1) — DESIGN_SYSTEM §7: Fleet · Inbox · History · Settings, styled from
-// tokens. `expanded` (>=1024) uses the persistent root-level Fleet rail. Inbox badge = count
-// of `useSessions` waiting (same
-// 3s-polled list Fleet/Inbox render, no extra fetch). Icon+pill do the Tabshift tick/
-// cross-fade (DESIGN_SYSTEM §5.2) locally per tab — a fully custom sliding-indicator tab bar
+// Bottom tabs (Hearth) — 4 tabs: Fleet · Inbox · History · Settings, styled from tokens.
+// Floor is no longer a tab (reached via the ⚒ mark on Fleet) but stays routable via
+// `href: null`. `expanded` (>=1024) uses the persistent root-level Fleet rail. Inbox's
+// badge is an unread DOT (never a count, per HANDOFF) driven off the same `useSessions`
+// list Fleet/Inbox render — no extra fetch. Icon+pill do the Tabshift tick/cross-fade
+// (DESIGN_SYSTEM §5.2) locally per tab — a fully custom sliding-indicator tab bar
 // would need @react-navigation/bottom-tabs prop types that aren't part of this app's
 // dependency surface, so this stays inside expo-router's public Tabs API
-// (tabBarIcon/tabBarBadge/tabBarStyle).
+// (tabBarIcon/tabBarStyle).
 import { Slot, Tabs } from "expo-router";
-import { BellDot, Flame, History, PanelsTopLeft, Settings2, type LucideIcon } from "lucide-react-native";
+import { BellDot, Flame, History, Settings2, type LucideIcon } from "lucide-react-native";
 import React, { useEffect } from "react";
 import { Platform, StyleSheet, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -70,10 +71,28 @@ function makeTabIcon(Icon: LucideIcon) {
 }
 
 const FleetTabIcon = makeTabIcon(Flame);
-const FloorTabIcon = makeTabIcon(PanelsTopLeft);
-const InboxTabIcon = makeTabIcon(BellDot);
 const HistoryTabIcon = makeTabIcon(History);
 const SettingsTabIcon = makeTabIcon(Settings2);
+const BaseInboxTabIcon = makeTabIcon(BellDot);
+
+/** Hearth: Inbox tab badge is an unread DOT, never a count (HANDOFF "Screens & navigation"). */
+function InboxTabIcon(props: TabIconProps) {
+  const tokens = useTokens();
+  const { data: sessions } = useSessions();
+  const hasWaiting = (sessions ?? []).some((s) => s.waiting);
+  return (
+    <View>
+      <BaseInboxTabIcon {...props} />
+      {hasWaiting ? (
+        <View
+          style={[styles.dot, { backgroundColor: tokens.danger, borderColor: tokens.bg2 }]}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+        />
+      ) : null}
+    </View>
+  );
+}
 
 function TabsNavigator() {
   const tokens = useTokens();
@@ -110,24 +129,15 @@ function TabsNavigator() {
           tabBarAccessibilityLabel: "Fleet",
         }}
       />
-      <Tabs.Screen
-        name="floor"
-        options={{
-          title: "Floor",
-          tabBarIcon: FloorTabIcon,
-          tabBarAccessibilityLabel: "Floor",
-          tabBarBadge: sessions?.filter((s) => s.busy).length || undefined,
-          tabBarBadgeStyle: { backgroundColor: tokens.accent, color: tokens.onAccent },
-        }}
-      />
+      {/* Hearth: Floor leaves the tab bar (reached via the ⚒ mark on Fleet) but stays a
+          routable screen — `href: null` keeps expo-router from auto-adding a tab for it. */}
+      <Tabs.Screen name="floor" options={{ href: null }} />
       <Tabs.Screen
         name="inbox"
         options={{
           title: "Inbox",
           tabBarIcon: InboxTabIcon,
-          tabBarAccessibilityLabel: "Inbox",
-          tabBarBadge: waitingCount > 0 ? waitingCount : undefined,
-          tabBarBadgeStyle: { backgroundColor: tokens.danger, color: tokens.onAccent },
+          tabBarAccessibilityLabel: waitingCount > 0 ? `Inbox, ${waitingCount} needs you` : "Inbox",
         }}
       />
       <Tabs.Screen
@@ -165,4 +175,13 @@ const styles = StyleSheet.create({
   iconWrap: { alignItems: "center", justifyContent: "center", width: 40, height: 32 },
   pill: { position: "absolute", width: 40, height: 32 },
   underline: { position: "absolute", top: -8, alignSelf: "center", width: 24, height: 2, borderRadius: 1 },
+  dot: {
+    position: "absolute",
+    top: 3,
+    right: 4,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    borderWidth: 2,
+  },
 });

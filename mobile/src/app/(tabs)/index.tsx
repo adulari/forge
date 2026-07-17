@@ -4,80 +4,71 @@
 // recovery poll. Forgeline entrance is a first-mount-only side effect of stable row keys +
 // stable indices across polls (see theme/motion.ts useForgeline) — nothing extra to wire here.
 import { router } from "expo-router";
-import { Flame, Plus } from "lucide-react-native";
+import { Flame } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
 import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SearchField } from "../../components/ds/SearchField";
+import { DecisionCard } from "../../components/cards/DecisionCard";
+import { DecisionPeek } from "../../components/cards/DecisionPeek";
 import { SessionCard } from "../../components/fleet/SessionCard";
 import { BoundedList } from "../../components/ds/BoundedList";
 import { Button } from "../../components/ds/Button";
-import { CostMetric } from "../../components/ds/CostMetric";
 import { EmptyState } from "../../components/ds/EmptyState";
-import { IconButton } from "../../components/ds/IconButton";
 import { Screen } from "../../components/ds/Screen";
 import { Skeleton } from "../../components/ds/Skeleton";
-import { StatusDot } from "../../components/ds/StatusDot";
+import { TaskComposer } from "../../components/ds/TaskComposer";
 import { ApiError, type SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { useServerFleets, useSessions } from "../../lib/queries";
-import { useTheme, useTokens } from "../../theme/ThemeProvider";
+import { useTokens } from "../../theme/ThemeProvider";
 import { buildFleetDeck, type FleetDeckItem } from "../../lib/fleetRows";
 import { filterSessions, isOfflineError, sessionPickerState } from "../../lib/sessionPicker";
-import { depthDark, depthLight, radii, shadowStyle, space } from "../../theme/tokens";
-import { tabularNums, type as typeScale } from "../../theme/typography";
+import { radii, space } from "../../theme/tokens";
+import { formatCost, monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 
-// DESIGN_ELEVATION.md Move 3 — the one identity moment: the ⚒ mark beside the Fleet title.
+// DESIGN_ELEVATION.md Move 3 — the one identity moment: the ⚒ mark beside the Fleet
+// title. Hearth: Floor left the tab bar, so this mark is now the primary way there.
 function FleetTitle() {
   const tokens = useTokens();
   return (
     <View style={styles.titleRow}>
       <Text style={[typeScale.title, styles.titleText, { color: tokens.ink }]}>Fleet</Text>
-      <Text
-        style={[styles.mark, { color: tokens.ink3 }]}
-        accessibilityElementsHidden
-        importantForAccessibility="no-hide-descendants"
+      <Pressable
+        onPress={() => router.push("/floor")}
+        hitSlop={space.space16}
+        accessibilityRole="button"
+        accessibilityLabel="Open the floor"
       >
-        ⚒
-      </Text>
+        <Text style={[styles.mark, { color: tokens.ink3 }]}>⚒</Text>
+      </Pressable>
     </View>
   );
 }
 
-// DESIGN_ELEVATION.md Move 2 — airy 3-up of *type* (big tabular number + tiny uppercase
-// label), hairline-separated, NOT three bordered tiles.
-function FleetHeader({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: SessionRow[]; needsYouOnly: boolean; onToggleNeedsYou: () => void }) {
+// Hearth: a single glanceable summary line — "N needs you · N forging · $X today" —
+// replaces the old boxed 3-up stat row (HANDOFF Fleet screen).
+function FleetSummary({ sessions, needsYouOnly, onToggleNeedsYou }: { sessions: SessionRow[]; needsYouOnly: boolean; onToggleNeedsYou: () => void }) {
   const tokens = useTokens();
   const totalCost = useMemo(() => sessions.reduce((sum, s) => sum + s.cost_usd, 0), [sessions]);
   const waitingCount = useMemo(() => sessions.filter((s) => s.waiting).length, [sessions]);
   const busyCount = useMemo(() => sessions.filter((s) => s.busy).length, [sessions]);
 
   return (
-    <View style={[styles.header, { borderBottomColor: tokens.border }]}>
-      <View style={styles.headerStat}>
-        <Text style={[typeScale.section, { color: tokens.ink3 }]}>spend</Text>
-        <CostMetric valueUsd={totalCost} variant="bodyBold" showZero />
-      </View>
-      <Pressable
-        onPress={onToggleNeedsYou}
-        style={[styles.headerStat, styles.headerDivider, { borderColor: tokens.border, backgroundColor: needsYouOnly ? tokens.selection : "transparent" }]}
-        accessibilityRole="button"
-        accessibilityLabel="Filter sessions needing a response"
-      >
-        <Text style={[typeScale.section, { color: tokens.ink3 }]}>waiting</Text>
-        <View style={styles.waitingCount}>
-          {waitingCount > 0 ? <StatusDot state="waiting" /> : null}
-          <Text style={[typeScale.bodyBold, tabularNums, { color: waitingCount > 0 ? tokens.danger : tokens.ink }]}>{waitingCount}</Text>
-        </View>
-      </Pressable>
-      <View style={[styles.headerStat, styles.headerDivider, { borderColor: tokens.border }]}>
-        <Text style={[typeScale.section, { color: tokens.ink3 }]}>busy</Text>
-        <Text style={[typeScale.bodyBold, tabularNums, { color: tokens.ink }]} numberOfLines={1}>
-          {busyCount}
-        </Text>
-      </View>
-    </View>
+    <Pressable
+      onPress={onToggleNeedsYou}
+      style={styles.summary}
+      accessibilityRole="button"
+      accessibilityLabel="Filter sessions needing a response"
+      accessibilityState={{ selected: needsYouOnly }}
+    >
+      <Text style={[typeScale.sub, { color: waitingCount > 0 ? tokens.danger : tokens.ink3 }]}>{waitingCount} needs you</Text>
+      <Text style={[typeScale.sub, { color: tokens.ink3 }]}> · {busyCount} forging · </Text>
+      <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>{formatCost(totalCost)}</Text>
+      <Text style={[typeScale.sub, { color: tokens.ink3 }]}> today</Text>
+    </Pressable>
   );
 }
 
@@ -119,6 +110,8 @@ function FleetRowSkeleton() {
   );
 }
 
+// Hearth Fleet screen's server chips: a row of pill chips directly under the summary
+// line (HANDOFF "server chips"), no section label/border — same switching behavior.
 function FleetServerSwitcher() {
   const tokens = useTokens();
   const { servers, activeServerId, setActive } = useAuth();
@@ -127,49 +120,49 @@ function FleetServerSwitcher() {
   if (servers.length <= 1) return null;
 
   return (
-    <View style={[styles.switcher, { borderBottomColor: tokens.border }]}>
-      <Text style={[typeScale.section, { color: tokens.ink3 }]}>servers</Text>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={styles.serverListScroll}
-        contentContainerStyle={styles.serverList}
-      >
-        {servers.map((server, index) => {
-          const fleet = fleets[index];
-          const reachable = fleet.isSuccess;
-          const rows: SessionRow[] = fleet.data ?? [];
-          const count = rows.filter((row) => row.waiting).length;
-          return (
-            <Pressable
-              key={server.id}
-              onPress={() => setActive(server.id)}
-              accessibilityRole="button"
-              accessibilityLabel={`${server.name}, ${reachable ? "reachable" : "unreachable"}, ${count} waiting`}
-              accessibilityState={{ selected: server.id === activeServerId }}
-              style={({ pressed }) => [
-                styles.serverChip,
-                { backgroundColor: server.id === activeServerId ? tokens.selection : tokens.bg3, opacity: pressed ? 0.72 : 1 },
-              ]}
-            >
-              <View style={[styles.serverDot, { backgroundColor: fleet.isPending ? tokens.warn : reachable ? tokens.success : tokens.danger }]} />
-              <Text style={[typeScale.meta, { color: server.id === activeServerId ? tokens.accent : tokens.ink2 }]} numberOfLines={1}>
-                {server.name}
-              </Text>
-              <Text style={[typeScale.meta, { color: reachable ? tokens.ink3 : tokens.ink4 }]}>{count}</Text>
-            </Pressable>
-          );
-        })}
-      </ScrollView>
-    </View>
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={styles.serverListScroll}
+      contentContainerStyle={styles.serverList}
+    >
+      {servers.map((server, index) => {
+        const fleet = fleets[index];
+        const reachable = fleet.isSuccess;
+        const rows: SessionRow[] = fleet.data ?? [];
+        const count = rows.filter((row) => row.waiting).length;
+        const active = server.id === activeServerId;
+        return (
+          <Pressable
+            key={server.id}
+            onPress={() => setActive(server.id)}
+            accessibilityRole="button"
+            accessibilityLabel={`${server.name}, ${reachable ? "reachable" : "unreachable"}, ${count} waiting`}
+            accessibilityState={{ selected: active }}
+            // Chip stays visually compact (28pt, matching the prototype) — hitSlop
+            // brings the actual touch target up to the 44pt minimum.
+            hitSlop={space.space8}
+            style={({ pressed }) => [
+              styles.serverChip,
+              { backgroundColor: active ? tokens.selection : tokens.bg3, opacity: pressed ? 0.72 : 1 },
+            ]}
+          >
+            <View style={[styles.serverDot, { backgroundColor: fleet.isPending ? tokens.warn : reachable ? tokens.success : tokens.danger }]} />
+            <Text style={[typeScale.meta, { color: active ? tokens.accent : tokens.ink2 }]} numberOfLines={1}>
+              {server.name}
+            </Text>
+            <Text style={[typeScale.monoMeta, tabularNums, { color: reachable ? tokens.ink3 : tokens.ink4, fontFamily: monoFamily.regular }]}>{count}</Text>
+          </Pressable>
+        );
+      })}
+    </ScrollView>
   );
 }
 
 
 export default function FleetScreen() {
   const tokens = useTokens();
-  const { scheme } = useTheme();
-  const depth = scheme === "dark" ? depthDark : depthLight;
+  const insets = useSafeAreaInsets();
   const { isExpanded } = useBreakpoint();
   const query = useSessions();
   const listRef = React.useRef<FlatList<FleetDeckItem>>(null);
@@ -180,11 +173,22 @@ export default function FleetScreen() {
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [search, setSearch] = useState("");
   const [needsYouOnly, setNeedsYouOnly] = useState(false);
+  const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
+  const [composerText, setComposerText] = useState("");
   const { refetch } = query;
   const onRefresh = useCallback(() => {
     setManualRefreshing(true);
     void refetch().finally(() => setManualRefreshing(false));
   }, [refetch]);
+  const onPeek = useCallback((row: SessionRow) => setPeekSessionId(row.id), []);
+  const closePeek = useCallback(() => setPeekSessionId(null), []);
+  // Hearth core rule 6: the composer replaces the "new session" affordance everywhere —
+  // it hands its typed text off to the full "Forge a task" sheet, which owns project/
+  // model/permission selection.
+  const onComposerSubmit = useCallback((text: string) => {
+    setComposerText("");
+    router.push({ pathname: "/new-session", params: { title: text } });
+  }, []);
 
   const data = useMemo(() => query.data ?? [], [query.data]);
   const filteredData = useMemo(() => filterSessions(data, search, needsYouOnly), [data, search, needsYouOnly]);
@@ -194,8 +198,17 @@ export default function FleetScreen() {
   const pickerState = sessionPickerState({ isLoading: isFirstLoad, isError: query.isError, visibleCount: filteredData.length });
 
   const renderItem = useCallback(
-    ({ item }: { item: FleetDeckItem }) => item.type === "label" ? <Text style={[typeScale.section, styles.groupLabel, { color: item.label === "NEEDS YOU" ? tokens.danger : tokens.ink3 }]}>{item.label}</Text> : <SessionCard row={item.row} index={item.sourceIndex} />,
-    [tokens.danger, tokens.ink3],
+    ({ item }: { item: FleetDeckItem }) => {
+      if (item.type === "label") {
+        return <Text style={[typeScale.section, styles.groupLabel, { color: tokens.ink4 }]}>{item.label}</Text>;
+      }
+      return item.row.waiting ? (
+        <DecisionCard row={item.row} index={item.sourceIndex} onPeek={onPeek} />
+      ) : (
+        <SessionCard row={item.row} index={item.sourceIndex} />
+      );
+    },
+    [tokens.ink4, onPeek],
   );
   const keyExtractor = useCallback((item: (typeof deckRows)[number]) => item.type === "label" ? `label:${item.label}` : item.row.id, []);
 
@@ -239,6 +252,7 @@ export default function FleetScreen() {
   return (
     <Screen scroll={false}>
       <FleetTitle />
+      {pickerState === "ready" ? <FleetSummary sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /> : null}
       <FleetServerSwitcher />
       <SearchField
         value={search}
@@ -248,7 +262,7 @@ export default function FleetScreen() {
         autoCorrect={false}
         containerStyle={styles.search}
       />
-      {pickerState === "ready" ? <><FleetHeader sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /><SessionJumpStrip sessions={filteredData} onPress={(sessionId) => { const target = deckRows.findIndex((item) => item.type === "session" && item.row.id === sessionId); if (target >= 0) listRef.current?.scrollToIndex({ index: target, animated: true }); }} /></> : null}
+      {pickerState === "ready" ? <SessionJumpStrip sessions={filteredData} onPress={(sessionId) => { const target = deckRows.findIndex((item) => item.type === "session" && item.row.id === sessionId); if (target >= 0) listRef.current?.scrollToIndex({ index: target, animated: true }); }} /> : null}
       {isFirstLoad ? (
         <View style={styles.list}>
           {[0, 1, 2, 3].map((i) => (
@@ -268,44 +282,34 @@ export default function FleetScreen() {
         />
       )}
 
-      <IconButton
-        accessibilityLabel="Create a new session"
-        accessibilityHint="Opens the session setup form"
-        icon={<Plus size={24} strokeWidth={1.75} color={tokens.onAccent} />}
-        onPress={() => router.push("/new-session")}
-        style={[
-          styles.fab,
-          { backgroundColor: tokens.accent },
-          depth.raised ? shadowStyle(depth.raised) : null,
-        ]}
+      {/* Hearth core rule 6: bottom-floating task composer replaces the FAB — the one
+          "new session" affordance on mobile Fleet. */}
+      <TaskComposer
+        value={composerText}
+        onChangeText={setComposerText}
+        onSubmit={onComposerSubmit}
+        style={[styles.composer, { bottom: space.space16 + insets.bottom }]}
+        testID="fleet-composer"
       />
+
+      <DecisionPeek sessionId={peekSessionId} visible={peekSessionId != null} onClose={closePeek} />
     </Screen>
   );
 }
 
-const FAB_SIZE = 56;
-
 const styles = StyleSheet.create({
-  switcher: { gap: space.space8, paddingTop: space.space12, paddingBottom: space.space12, borderBottomWidth: StyleSheet.hairlineWidth },
   // Horizontal ScrollViews stretch on their cross-axis in a flex column on web; pin to content.
   serverListScroll: { flexGrow: 0, flexShrink: 0 },
-  serverList: { gap: space.space8 },
-  serverChip: { minHeight: 44, maxWidth: 220, flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space12, borderRadius: radii.radiusPill },
-  serverDot: { width: 8, height: 8, borderRadius: 4 },
+  serverList: { gap: space.space8, paddingTop: space.space12 },
+  serverChip: { minHeight: 28, maxWidth: 220, flexDirection: "row", alignItems: "center", gap: space.space4, paddingHorizontal: space.space12, borderRadius: radii.radiusPill },
+  serverDot: { width: 6, height: 6, borderRadius: 3 },
   titleRow: { flexDirection: "row", alignItems: "center", paddingTop: space.space12 },
   titleText: { letterSpacing: -0.4 },
-  mark: { fontSize: 14, marginLeft: space.space8 },
+  mark: { fontSize: 14, marginLeft: space.space8, padding: space.space4 },
   list: { paddingTop: space.space12 },
   search: { paddingTop: space.space12 },
   listContent: { paddingTop: space.space12, paddingBottom: 96 },
-  header: {
-    flexDirection: "row",
-    paddingTop: space.space16,
-    paddingBottom: space.space16,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-  },
-  headerStat: { flex: 1, gap: space.space4, alignItems: "flex-start" },
-  waitingCount: { flexDirection: "row", alignItems: "center", gap: space.space4 },
+  summary: { flexDirection: "row", flexWrap: "wrap", marginTop: space.space2 },
   emptyWrap: { flex: 1 },
   emptyAsh: { flexDirection: "row", justifyContent: "center", gap: space.space8, paddingTop: space.space24 },
   ashCoal: { width: 6, height: 6, borderRadius: 3 },
@@ -313,19 +317,8 @@ const styles = StyleSheet.create({
   jumpStripDots: { alignItems: "center", gap: space.space8 },
   jumpDot: { width: 6, height: 6, borderRadius: 3 },
   groupLabel: { paddingTop: space.space16, paddingHorizontal: space.space16 },
-  headerDivider: { borderLeftWidth: StyleSheet.hairlineWidth, paddingLeft: space.space12 },
   skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonRow1: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   skeletonGap: { marginTop: space.space4 },
-  fab: {
-    position: "absolute",
-    right: space.space16,
-    bottom: space.space24,
-    width: FAB_SIZE,
-    height: FAB_SIZE,
-    borderRadius: radii.radiusPill,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 0,
-  },
+  composer: { position: "absolute", left: space.space16, right: space.space16 },
 });

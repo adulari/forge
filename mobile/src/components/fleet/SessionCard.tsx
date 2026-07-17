@@ -25,7 +25,6 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { springs, useForgeline, useSettle } from "../../theme/motion";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { formatCwd, monoFamily, type as typeScale } from "../../theme/typography";
-import { Chip } from "../ds/Chip";
 import { Badge } from "../ds/Badge";
 import { ConfirmDialog } from "../ds/ConfirmDialog";
 import { ContextGauge } from "../ds/ContextGauge";
@@ -233,11 +232,15 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                       <Text style={[typeScale.heading, styles.title, { color: tokens.ink }]} numberOfLines={1}>
                         {title}
                       </Text>
-                      {row.waiting ? (
-                        <Chip label="Respond" selected onPress={goToSession} />
-                      ) : null}
                       {hasWorktree ? <Badge label="worktree" tone="outline" /> : null}
-                      <CostMetric valueUsd={row.cost_usd} />
+                      {row.waiting ? (
+                        <RelativeTime timestampMs={row.last_activity * 1000} />
+                      ) : (
+                        <View style={styles.metricStack}>
+                          <CostMetric valueUsd={row.cost_usd} />
+                          <RelativeTime timestampMs={row.last_activity * 1000} style={typeScale.monoMeta} />
+                        </View>
+                      )}
                       <IconButton
                         icon={<Ellipsis size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink3} />}
                         onPress={openActions}
@@ -245,30 +248,35 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                       />
                     </View>
 
-                    <View style={styles.row2}>
+                    {row.waiting ? (
                       <Text
-                        style={[
-                          typeScale.sub,
-                          styles.cwd,
-                          { color: tokens.ink2, fontFamily: monoFamily.regular },
-                        ]}
+                        style={[typeScale.codeSmall, { color: tokens.ink2, fontFamily: monoFamily.regular }]}
                         numberOfLines={1}
-                        ellipsizeMode="head"
-                        accessibilityLabel={`path: ${row.cwd}`}
                       >
-                        {cwdLabel}
+                        needs a decision
                       </Text>
-                      <Text style={[typeScale.sub, { color: tokens.ink3 }]} numberOfLines={1}>
-                        {row.model}
-                      </Text>
-                      <RelativeTime timestampMs={row.last_activity * 1000} />
-                    </View>
+                    ) : (
+                      <View style={styles.row2}>
+                        <Text
+                          style={[
+                            typeScale.codeSmall,
+                            styles.cwd,
+                            { color: tokens.ink3, fontFamily: monoFamily.regular },
+                          ]}
+                          numberOfLines={1}
+                          ellipsizeMode="head"
+                          accessibilityLabel={`path: ${row.cwd}`}
+                        >
+                          {cwdLabel} · {row.model}
+                        </Text>
+                      </View>
+                    )}
 
-                    <View style={styles.row3}>
-                      {row.context_limit != null ? (
+                    {!row.waiting && row.context_limit != null ? (
+                      <View style={styles.row3}>
                         <ContextGauge used={row.context_tokens} total={row.context_limit} />
-                      ) : null}
-                    </View>
+                      </View>
+                    ) : null}
                   </View>
                 </View>
               </Pressable>
@@ -400,6 +408,7 @@ const styles = StyleSheet.create({
   },
   row1: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   title: { flex: 1 },
+  metricStack: { alignItems: "flex-end", gap: 1 },
   row2: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   cwd: { flex: 1 },
   row3: { width: "100%" },
