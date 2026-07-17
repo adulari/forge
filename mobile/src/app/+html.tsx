@@ -67,7 +67,11 @@ body { overscroll-behavior: none; -webkit-overflow-scrolling: touch; touch-actio
    a 2px offset drew a fat white/orange box around anything you tabbed to. Follows the
    element's own border-radius. */
 :root { --forge-focus: rgba(255, 145, 60, 0.45); }
-:focus-visible { outline: 1px solid var(--forge-focus); outline-offset: 2px; }
+/* Text fields are excluded: every Forge input sits inside a styled container that paints
+   its own focused border (Composer/TaskComposer/Input/SearchField), so ringing the inner
+   <input>/<textarea> too drew a second box inside the first. The caret + container border
+   carry the focus signal there. */
+:focus-visible:not(input):not(textarea):not(select) { outline: 1px solid var(--forge-focus); outline-offset: 2px; }
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 `;
 
