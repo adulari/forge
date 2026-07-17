@@ -24,11 +24,11 @@ jobs:
     name: completions + man page
     runs-on: [self-hosted, linux, x64]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - name: Generate completions + man page
         run: cargo run --release -p xtasks -- gen-dist dist-assets
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: forge-assets
           path: dist-assets/**
@@ -68,10 +68,10 @@ jobs:
             self_hosted: false
             bin: forge.exe
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -89,7 +89,7 @@ jobs:
       # The self-hosted linux leg skips it: target/ already persists on that box's local disk
       # between runs, so a network cache round-trip would be pure overhead on top of that.
       - if: ${{ !matrix.self_hosted }}
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.target }}
 
@@ -101,7 +101,7 @@ jobs:
         run: cargo build --release --locked --bin forge --target ${{ matrix.target }}
 
       - name: Upload raw binary
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: forge-raw-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/${{ matrix.bin }}
@@ -113,14 +113,14 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: forge-assets
           path: dist-assets
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: forge-raw-*
           path: raw
@@ -199,7 +199,7 @@ jobs:
           echo "----- composed release body -----"; cat dist/RELEASE_NOTES.md
 
       - name: Publish
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           files: |
             dist/*.tar.gz

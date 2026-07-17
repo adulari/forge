@@ -27,8 +27,8 @@ jobs:
   fmt:
     runs-on: [self-hosted, linux, x64]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -36,8 +36,8 @@ jobs:
   clippy:
     runs-on: [self-hosted, linux, x64]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy
       # No Swatinem/rust-cache here: this is a persistent self-hosted runner whose `target/`
@@ -56,8 +56,8 @@ jobs:
     # (30G machine; three 8G runners compiling at once repeatedly killed all runner services).
     runs-on: [self-hosted, linux, x64, heavy]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - run: cargo test --all --all-features
 
   # Release-profile + `--locked` smoke on one platform. The release workflow builds with
@@ -68,8 +68,8 @@ jobs:
     # See `test` above: heavy jobs serialize on the one heavy runner.
     runs-on: [self-hosted, linux, x64, heavy]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - run: cargo build --release --locked --bin forge
       - name: Verify upgrade, reconnect, and rollback from latest release
         env:
