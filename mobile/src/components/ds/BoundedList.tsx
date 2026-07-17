@@ -12,7 +12,7 @@
 // accent-tinted spinner (RefreshControl there has no fully-transparent tint, and
 // stacking a second custom spinner on top would read as a glitch, not polish).
 // Settle haptic fires on the refreshing:true -> false edge either way.
-import React, { forwardRef, useCallback, useEffect, useRef } from "react";
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef } from "react";
 import {
   ActivityIndicator,
   FlatList,
@@ -62,6 +62,8 @@ function BoundedListInner<T>(
 ) {
   const tokens = useTokens();
   const wasRefreshing = useRef(refreshing);
+  const listRef = useRef<FlatList<T>>(null);
+  useImperativeHandle(ref, () => listRef.current as FlatList<T>);
 
   useEffect(() => {
     if (wasRefreshing.current && !refreshing) {
@@ -69,6 +71,26 @@ function BoundedListInner<T>(
     }
     wasRefreshing.current = refreshing;
   }, [refreshing]);
+
+  // react-native-web renders `inverted` with a scaleY(-1) transform but does NOT flip wheel
+  // events to match, so mouse/trackpad scrolling fights the list (the classic glitchy
+  // inverted-chat scroll). Take over the wheel entirely on web while inverted: flip deltaY
+  // into the scroll position ourselves.
+  const inverted = Boolean((rest as { inverted?: boolean }).inverted);
+  useEffect(() => {
+    if (Platform.OS !== "web" || !inverted) return;
+    const node = (listRef.current as unknown as { getScrollableNode?: () => unknown })?.getScrollableNode?.() as
+      | (HTMLElement & { scrollTop: number })
+      | null
+      | undefined;
+    if (!node || typeof node.addEventListener !== "function") return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      node.scrollTop -= e.deltaY;
+    };
+    node.addEventListener("wheel", onWheel, { passive: false });
+    return () => node.removeEventListener("wheel", onWheel);
+  }, [inverted]);
 
   // Stable identity + row purity (row components callers pass in should be
   // React.memo'd) together satisfy "memoized rows" without fighting FlatList's
@@ -87,7 +109,7 @@ function BoundedListInner<T>(
   return (
     <View style={styles.fill}>
       <FlatList<T>
-        ref={ref}
+        ref={listRef}
         data={(data as T[]) ?? []}
         renderItem={stableRenderItem}
         keyExtractor={keyExtractor}

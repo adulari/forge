@@ -50,7 +50,7 @@ import { LatticeSheet } from "../../../components/session/LatticeSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
-import { useHistory, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
+import { useHistory, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
 import { SessionProvider, useSessionCtx } from "../../../lib/sessionContext";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
 import { durations, easings } from "../../../theme/motion";
@@ -231,7 +231,15 @@ function SessionShell({ sessionId }: { sessionId: string }) {
   const protocolMismatch = snapshot != null && snapshot.protocol !== PROTOCOL_VERSION;
   const publicExposure = (snapshot?.exposure ?? "").startsWith("public");
   const reconnecting = connectionState === "reconnecting";
-  const unreachable = connectionState === "unreachable";
+  // "Unreachable" is only honest when the daemon itself is gone. If the fleet list still
+  // answers but no longer contains this session, the session ENDED (archived/discarded) —
+  // scary "can't reach forge serve" for a normally-ended session reads as an outage. The
+  // check applies from the first reconnect attempt so the ended state lands immediately
+  // instead of after the full unreachable backoff.
+  const { data: fleetRows } = useSessions();
+  const wsDown = connectionState === "reconnecting" || connectionState === "unreachable";
+  const sessionEnded = wsDown && fleetRows != null && !fleetRows.some((row) => row.id === sessionId);
+  const unreachable = connectionState === "unreachable" && !sessionEnded;
   const projectNeedsInitialization = snapshot?.project_initialized === false && !projectWarningDismissed;
 
   const statusState: StatusDotState =
@@ -309,7 +317,7 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             weekly={weekly.mode === "subscription" ? { provider: weekly.provider, deltaPct: weekly.deltaPct } : null}
             cwd={snapshot?.cwd ?? sessionId}
             worktree={snapshot?.worktree ?? null}
-            reconnecting={reconnecting}
+            reconnecting={reconnecting && !sessionEnded}
           />
           </View>
 
@@ -345,7 +353,9 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             message={`exposure: ${snapshot?.exposure} — anyone with this link can drive this session`}
           />
         ) : null}
-        {closed ? <Banner tone="danger" message="session ended — see History to review it" /> : null}
+        {closed || sessionEnded ? (
+          <Banner tone="neutral" compact message="session ended — read-only. see History to review it" />
+        ) : null}
         {/* A soft reconnect blip renders inline in the StatusStrip meta line (calmer than a
             full-width banner); only the hard unreachable state still earns a Banner. */}
         {unreachable ? (

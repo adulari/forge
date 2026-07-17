@@ -7,7 +7,7 @@ import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTimin
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { durations, easings } from "../../theme/motion";
-import { space } from "../../theme/tokens";
+import { radii, space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
 
 export type BannerTone = "warn" | "danger" | "neutral";
@@ -75,9 +75,18 @@ export function Banner({ tone, message, actionLabel, onAction, onDismiss, compac
 }
 
 const styles = StyleSheet.create({
-  base: { width: "100%", flexDirection: "row", alignItems: "center", gap: space.space8 },
-  regular: { paddingHorizontal: space.space16, paddingVertical: space.space12 },
-  compact: { paddingHorizontal: space.space16, paddingVertical: space.space4 },
+  // Hearth: banners are inset rounded notes, never full-bleed strips jammed against
+  // the surrounding chrome.
+  base: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space8,
+    borderRadius: radii.radius8,
+    marginHorizontal: space.space16,
+    marginVertical: space.space4,
+  },
+  regular: { paddingHorizontal: space.space12, paddingVertical: space.space8 },
+  compact: { paddingHorizontal: space.space12, paddingVertical: space.space4 },
   message: { flex: 1 },
   action: { textDecorationLine: "underline" },
   dismiss: { lineHeight: 20 },

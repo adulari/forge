@@ -814,7 +814,9 @@ export default function SessionChat() {
 const styles = StyleSheet.create({
   // Hearth desktop/web: the chat column caps at 760px, centered in the remaining Fleet+Session
   // pane (a no-op at mobile widths — see prototype "Desktop Fleet + Session").
-  sessionColumn: { width: "100%", maxWidth: 760, alignSelf: "center" },
+  // Full available width on every surface (user call: the capped 760px column wasted
+  // desktop space); message rows keep their own gutters.
+  sessionColumn: { width: "100%" },
   flex: { flex: 1 },
   streamingRow: { paddingHorizontal: space.space16, paddingVertical: space.space8 },
   thinkingRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
