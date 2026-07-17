@@ -1,5 +1,7 @@
 // DESIGN_SYSTEM.md §6 Containers — ListRow: 56pt min, Strike, hairline separator
-// (inset 16), leading/trailing slots.
+// (inset 16), leading/trailing slots. Hearth core rule 1 (de-boxed lists): no card
+// background, radius 0, the translucent `hairline` token (not the solid `border`
+// used on card edges).
 import React, { useEffect, useRef, useState } from "react";
 import { type AccessibilityRole, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
@@ -114,7 +116,7 @@ export function ListRow({
         content
       )}
       {showSeparator ? (
-        <View style={[styles.separator, { backgroundColor: tokens.border }]} />
+        <View style={[styles.separator, { backgroundColor: tokens.hairline }]} />
       ) : null}
     </View>
   );

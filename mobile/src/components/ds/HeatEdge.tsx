@@ -1,15 +1,15 @@
-// Thermal state edge for live/waiting Emberline surfaces.
+// Thermal state edge for live/waiting Emberline surfaces. Hearth core rule 3: the
+// bar itself is static (the prototype's heat edges carry no animation) — StatusDot
+// owns all state-liveness pulsing.
 import React from "react";
-import { StyleSheet } from "react-native";
-import Animated from "react-native-reanimated";
+import { StyleSheet, View } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 
-import { useThermal } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { shadowStyle } from "../../theme/tokens";
 
-const WIDTH = 3;
-const GLOW_RADIUS = 16;
+const WIDTH = 2;
+const GLOW_RADIUS = 12;
 
 export interface HeatEdgeProps {
   state?: "busy" | "waiting" | false;
@@ -21,19 +21,25 @@ export interface HeatEdgeProps {
 export function HeatEdge({ state, active }: HeatEdgeProps) {
   const tokens = useTokens();
   const resolved: "busy" | "waiting" | false = state ?? (active ? "busy" : false);
-  const thermalStyle = useThermal(resolved || "off");
   if (!resolved) return null;
 
+  // Hearth core rule 3: running = ember gradient/glow, waiting = the danger gradient/glow
+  // — never swapped, and each theme (dark/light) supplies its own pair (see tokens.ts).
+  const [from, to, glow] =
+    resolved === "waiting"
+      ? [tokens.waitingEdgeFrom, tokens.waitingEdgeTo, tokens.waitingGlow]
+      : [tokens.heatEdgeFrom, tokens.heatEdgeTo, tokens.heatGlow];
+
   return (
-    <Animated.View style={[styles.wrap, thermalStyle]} pointerEvents="none">
+    <View style={styles.wrap} pointerEvents="none">
       <LinearGradient
-        colors={[tokens.heatEdgeFrom, tokens.heatEdgeTo]}
+        colors={[from, to]}
         start={{ x: 0, y: 0 }}
         end={{ x: 0, y: 1 }}
         style={[
           styles.bar,
           shadowStyle({
-            shadowColor: tokens.heatGlow,
+            shadowColor: glow,
             shadowOpacity: 1,
             shadowRadius: GLOW_RADIUS,
             shadowOffset: { width: 0, height: 0 },
@@ -41,7 +47,7 @@ export function HeatEdge({ state, active }: HeatEdgeProps) {
           }),
         ]}
       />
-    </Animated.View>
+    </View>
   );
 }
 

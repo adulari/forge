@@ -73,6 +73,16 @@ export interface ColorTokens {
   dotGlow: string;
   /** Move 1 — Screen's single top ambient ember wash (web CSS radial-gradient string). */
   forgeWash: string;
+  /** Hearth — de-boxed list row separator (§ "De-boxed lists"): a translucent hairline,
+   * NOT the solid `border` used on card edges. */
+  hairline: string;
+  /** Hearth — HeatEdge "waiting" gradient start (a pending decision, not just running). */
+  waitingEdgeFrom: string;
+  /** Hearth — HeatEdge "waiting" gradient end. */
+  waitingEdgeTo: string;
+  /** Hearth — HeatEdge "waiting" glow shadow color. Zero-alpha on light (the paper theme's
+   * waiting edge carries no glow — see "Fleet · Light" / "Chat · Light" screens). */
+  waitingGlow: string;
 }
 
 export const darkTokens: ColorTokens = {
@@ -107,6 +117,10 @@ export const darkTokens: ColorTokens = {
   heatGlow: "rgba(255,145,60,0.22)",
   dotGlow: "rgba(255,145,60,0.18)",
   forgeWash: "radial-gradient(1100px 420px at 50% -8%, rgba(255,145,60,0.05), transparent 62%)",
+  hairline: "rgba(38,38,46,0.6)",
+  waitingEdgeFrom: "#F0716E",
+  waitingEdgeTo: "#C24845",
+  waitingGlow: "rgba(240,113,110,0.25)",
 };
 
 export const lightTokens: ColorTokens = {
@@ -127,7 +141,8 @@ export const lightTokens: ColorTokens = {
   danger: "#C93835",
   warn: "#9A6E0C",
   info: "#0E7C86",
-  successBg: "#E4F4E7",
+  // Hearth handoff value (was #E4F4E7) — "Fleet · Light" / "Chat · Light" screens.
+  successBg: "#E4F3E7",
   dangerBg: "#FBE7E5",
   warnBg: "#F7EED3",
   // §1.3 has no ink override for warnBg — the default `ink` already reads fine
@@ -143,6 +158,15 @@ export const lightTokens: ColorTokens = {
   heatGlow: "rgba(199,93,16,0.20)",
   dotGlow: "rgba(199,93,16,0.16)",
   forgeWash: "radial-gradient(1100px 420px at 50% -8%, rgba(199,93,16,0.04), transparent 62%)",
+  // Hearth "hairline" is already exactly this theme's `border` value — the light palette
+  // never needed the dark theme's translucency trick (paper hairlines are already subtle).
+  hairline: "#E7E3DA",
+  // Hearth "Fleet · Light" / "Chat · Light": the waiting edge reuses this theme's own
+  // danger scale (not the dark-fixed #F0716E — the light palette re-derives every
+  // semantic color, see HANDOFF.md's separate Light token block) and carries no glow.
+  waitingEdgeFrom: "#C93835",
+  waitingEdgeTo: "#9C2D2A",
+  waitingGlow: "rgba(201,56,53,0)",
 };
 
 // ---------------------------------------------------------------------------
@@ -217,6 +241,11 @@ export interface RadiiScale {
   radius12: number;
   radius16: number;
   radiusPill: number;
+  /** Hearth — Segmented track (outer). Distinct from `radius8`/`radius12`: Segmented is the
+   * one control with its own outer/inner pair, not the general button/card scale. */
+  radiusSegmentOuter: number;
+  /** Hearth — Segmented thumb (inner). */
+  radiusSegmentInner: number;
 }
 
 export const radii: RadiiScale = {
@@ -225,6 +254,8 @@ export const radii: RadiiScale = {
   radius12: 12,
   radius16: 16,
   radiusPill: 999,
+  radiusSegmentOuter: 10,
+  radiusSegmentInner: 7,
 };
 
 export interface ShadowStyle {

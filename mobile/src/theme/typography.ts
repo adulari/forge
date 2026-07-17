@@ -31,19 +31,38 @@ const sansFamily =
 
 export const type = {
   display: { fontSize: 28, lineHeight: 34, fontWeight: "700", fontFamily: sansFamily } satisfies TextStyle,
-  title: { fontSize: 20, lineHeight: 26, fontWeight: "700", fontFamily: sansFamily } satisfies TextStyle,
+  title: {
+    fontSize: 20,
+    lineHeight: 26,
+    fontWeight: "700",
+    letterSpacing: -0.4,
+    fontFamily: sansFamily,
+  } satisfies TextStyle,
+  // Row title (session/list row names) — 600, no letterSpacing. Screen headers use
+  // `headingBold` below instead; both share the 17/24 box so they line up when adjacent.
   heading: { fontSize: 17, lineHeight: 24, fontWeight: "600", fontFamily: sansFamily } satisfies TextStyle,
+  // Hearth screen-header variant of `heading` (e.g. the Session Chat title) — 700,
+  // letterSpacing -0.3. Kept as its own key so existing `type.heading` row-title call
+  // sites are untouched.
+  headingBold: {
+    fontSize: 17,
+    lineHeight: 24,
+    fontWeight: "700",
+    letterSpacing: -0.3,
+    fontFamily: sansFamily,
+  } satisfies TextStyle,
   body: { fontSize: 15, lineHeight: 22, fontWeight: "400", fontFamily: sansFamily } satisfies TextStyle,
   bodyBold: { fontSize: 15, lineHeight: 22, fontWeight: "600", fontFamily: sansFamily } satisfies TextStyle,
   sub: { fontSize: 13, lineHeight: 18, fontWeight: "400", fontFamily: sansFamily } satisfies TextStyle,
   meta: { fontSize: 12, lineHeight: 16, fontWeight: "500", fontFamily: sansFamily } satisfies TextStyle,
-  // §1.4/§2: section headers are also ink3 + uppercase — color lives in tokens.ts
-  // (ColorTokens.ink3), so consumers merge `type.section` with `{ color: tokens.ink3 }`.
+  // Hearth: section labels move from ink3 to ink4 (color lives in tokens.ts —
+  // ColorTokens.ink4 — consumers merge `type.section` with `{ color: tokens.ink4 }`;
+  // `SectionHeader.tsx` is the reference call site). letterSpacing widened 0.6 -> 0.8.
   section: {
     fontSize: 11,
     lineHeight: 14,
     fontWeight: "700",
-    letterSpacing: 0.6,
+    letterSpacing: 0.8,
     textTransform: "uppercase",
     fontFamily: sansFamily,
   } satisfies TextStyle,
@@ -56,6 +75,17 @@ export const type = {
   codeSmall: {
     fontSize: 12,
     lineHeight: 18,
+    fontWeight: "400",
+    fontFamily: monoFamily.regular,
+  } satisfies TextStyle,
+  // Hearth mono discipline: numbers/paths/branches/model ids/commands render in
+  // JetBrains Mono at 11-12px with tabular-nums (never proportional sans). `codeSmall`
+  // (12px) covers most meta rows (cost, ctx%, model id beside a title); `monoMeta` (11px)
+  // is the tightest tier — secondary figures beside a bigger number (e.g. a relative
+  // timestamp under a cost). Always pair with `tabularNums` from this file.
+  monoMeta: {
+    fontSize: 11,
+    lineHeight: 15,
     fontWeight: "400",
     fontFamily: monoFamily.regular,
   } satisfies TextStyle,

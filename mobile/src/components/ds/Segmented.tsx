@@ -1,6 +1,7 @@
 // DESIGN_SYSTEM.md §6 Segmented — bg3 track, bg2 thumb (Tabshift: thumb slides
 // with `press` spring), section-style labels; used for Chat/Tasks/Agents/Review.
 // DESIGN_ELEVATION.md Move 3 — 1px inset hairline on the thumb ("machined" edge).
+// Hearth radii: 10 outer / 7 inner (`radiusSegmentOuter`/`radiusSegmentInner`).
 import React, { useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSpring } from "react-native-reanimated";
@@ -71,19 +72,19 @@ export function Segmented<T extends string = string>({ options, value, onChange,
   return (
     <View
       onLayout={onLayout}
-      style={[styles.track, { backgroundColor: trackBg, borderRadius: radii.radius8 }]}
+      style={[styles.track, { backgroundColor: trackBg, borderRadius: radii.radiusSegmentOuter }]}
       testID={testID}
       accessibilityRole="tablist"
     >
       {width > 0 ? (
         <Animated.View
           pointerEvents="none"
-          style={[styles.thumb, thumbStyle, { backgroundColor: thumbBg, borderRadius: radii.radius8 - 2 }]}
+          style={[styles.thumb, thumbStyle, { backgroundColor: thumbBg, borderRadius: radii.radiusSegmentInner }]}
         >
           <View
             style={[
               styles.thumbInset,
-              { borderColor: tokens.borderStrong, borderRadius: radii.radius8 - 3, pointerEvents: "none" },
+              { borderColor: tokens.borderStrong, borderRadius: radii.radiusSegmentInner - 1, pointerEvents: "none" },
             ]}
           />
         </Animated.View>
@@ -126,7 +127,7 @@ function SegmentOption({ label, badge, dot, selected, onPress }: { label: string
       style={[
         styles.segment,
         {
-          borderRadius: radii.radius8 - 2,
+          borderRadius: radii.radiusSegmentInner,
           borderWidth: 2,
           borderColor: focused ? tokens.accent : "transparent",
           backgroundColor: hovered && !selected ? tokens.bg3 : "transparent",
