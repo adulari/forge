@@ -29,6 +29,7 @@ import { ToastHost } from "../components/ds/ToastHost";
 import { ExpandedFleetRail } from "../components/fleet/DesktopDrillDown";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { WebTopBar } from "../components/WebTopBar";
+import { AnywhereProvider } from "../lib/anywhere/store";
 import { AuthProvider, useAuth } from "../lib/auth";
 import { initHaptics } from "../lib/haptics";
 import { isTauri, isWeb } from "../lib/platform";
@@ -63,7 +64,12 @@ const asyncStoragePersister = createAsyncStoragePersister({
 // Hearth: settings-family routes bring their own 240px nav rail (SettingsShell), so the
 // persistent Fleet rail collapses there — one rail on screen at a time. Connect is a
 // full-bleed pairing screen on every surface.
-const RAILLESS_ROUTES = /^\/(settings|configuration|skills|hooks|models|plans|mcp|usage|session-tree|gallery|connect)(\/|$)/;
+const RAILLESS_ROUTES = /^\/(settings|configuration|skills|hooks|models|plans|mcp|usage|session-tree|gallery|connect|anywhere|shares)(\/|$)/;
+
+// Reachable without a paired daemon: /shares/[id] is a public read-only replay link
+// (no sign-in, no server), and /anywhere/* is the relay onboarding Connect itself
+// deep-links into before any Direct server exists.
+const UNPAIRED_ROUTES = /^\/(shares|anywhere)(\/|$)/;
 
 function RootNavigator() {
   const { isLoading, isPaired } = useAuth();
@@ -127,7 +133,7 @@ function RootNavigator() {
       {/* Declarative redirect (rather than Stack.Protected) per T2.1 spec: whatever route
           expo-router resolved on cold start/deep-link, bounce to /connect once we know
           there's no active server. */}
-      {!isPaired ? <Redirect href="/connect" /> : null}
+      {!isPaired && !UNPAIRED_ROUTES.test(pathname) ? <Redirect href="/connect" /> : null}
     </>
   );
 }
@@ -162,23 +168,25 @@ export default function RootLayout() {
         <ErrorBoundary>
           <ThemeProvider>
             <AuthProvider>
-              <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
-                <ToastHost>
-                  <AnonymousTelemetry />
-                  <FleetWatcher />
-                  {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
-                      `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
-                  <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
-                    <PaletteHost>
-                      <AppLock>
-                        <RootNavigator />
-                      </AppLock>
-                      {/* Inside PaletteHost: the Hearth chrome bar's ⌘K field calls usePalette(). */}
-                      <DesktopWindowChrome />
-                    </PaletteHost>
-                  </View>
-                </ToastHost>
-              </PersistQueryClientProvider>
+              <AnywhereProvider>
+                <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
+                  <ToastHost>
+                    <AnonymousTelemetry />
+                    <FleetWatcher />
+                    {/* T4.2: global <CommandPalette /> host — ⌘K/Ctrl+K on web/desktop, a
+                        `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
+                    <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
+                      <PaletteHost>
+                        <AppLock>
+                          <RootNavigator />
+                        </AppLock>
+                        {/* Inside PaletteHost: the Hearth chrome bar's ⌘K field calls usePalette(). */}
+                        <DesktopWindowChrome />
+                      </PaletteHost>
+                    </View>
+                  </ToastHost>
+                </PersistQueryClientProvider>
+              </AnywhereProvider>
             </AuthProvider>
           </ThemeProvider>
         </ErrorBoundary>

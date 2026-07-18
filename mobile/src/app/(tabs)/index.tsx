@@ -12,8 +12,10 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { DecisionCard } from "../../components/cards/DecisionCard";
 import { DecisionPeek } from "../../components/cards/DecisionPeek";
 import { SessionCard } from "../../components/fleet/SessionCard";
+import { HostDot } from "../../components/anywhere/HostDot";
 import { BoundedList } from "../../components/ds/BoundedList";
 import { Button } from "../../components/ds/Button";
+import { Chip } from "../../components/ds/Chip";
 import { EmptyState } from "../../components/ds/EmptyState";
 import { IconButton } from "../../components/ds/IconButton";
 import { Screen } from "../../components/ds/Screen";
@@ -21,6 +23,7 @@ import { Skeleton } from "../../components/ds/Skeleton";
 import { TaskComposer } from "../../components/ds/TaskComposer";
 import { ApiError, type SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
+import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import { useServerFleets, useSessions } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { buildFleetDeck, type FleetDeckItem } from "../../lib/fleetRows";
@@ -147,10 +150,51 @@ function FleetServerSwitcher() {
 }
 
 
+// Forge Anywhere: host filter chips — "All" plus one chip per session source (this
+// server + any signed-in Anywhere hosts), gated to ≥2 sources per the design's "no
+// second dashboard" rule (mobile.dc.html "AW Fleet", lines 476-482). Distinct from
+// FleetServerSwitcher above (which switches the *active* server) — this filters the
+// visible list. Real session data today only ever comes from the active server over
+// direct transport, so selecting any other source honestly shows zero rows until
+// relay-backed sessions land (see `hostFilteredData` in FleetScreen below).
+function FleetHostFilter({ selected, onSelect }: { selected: string | null; onSelect: (id: string | null) => void }) {
+  const tokens = useTokens();
+  const { servers, activeServerId } = useAuth();
+  const { signedIn } = useAnywhere();
+  const { hosts } = useAnywhereHosts();
+
+  const serverSources = servers.map((server) => ({
+    id: `server:${server.id}`,
+    name: server.name,
+    dot: <View style={[styles.hostFilterDot, { backgroundColor: server.id === activeServerId ? tokens.success : tokens.ink4 }]} />,
+  }));
+  const hostSources = signedIn
+    ? hosts.map((host) => ({ id: `host:${host.id}`, name: host.name, dot: <HostDot state={host.state} size={5} /> }))
+    : [];
+  const sources = [...serverSources, ...hostSources];
+
+  if (sources.length < 2) return null;
+
+  return (
+    <ScrollView
+      horizontal
+      showsHorizontalScrollIndicator={false}
+      style={styles.hostFilterScroll}
+      contentContainerStyle={styles.hostFilterList}
+    >
+      <Chip label="All" selected={selected === null} onPress={() => onSelect(null)} />
+      {sources.map((source) => (
+        <Chip key={source.id} label={source.name} selected={selected === source.id} onPress={() => onSelect(source.id)} icon={source.dot} />
+      ))}
+    </ScrollView>
+  );
+}
+
 export default function FleetScreen() {
   const tokens = useTokens();
   const insets = useSafeAreaInsets();
   const { isExpanded } = useBreakpoint();
+  const { activeServerId } = useAuth();
   const query = useSessions();
   const listRef = React.useRef<FlatList<FleetDeckItem>>(null);
 
@@ -159,6 +203,7 @@ export default function FleetScreen() {
   // here and never animate the spinner without a gesture.
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const [needsYouOnly, setNeedsYouOnly] = useState(false);
+  const [hostFilter, setHostFilter] = useState<string | null>(null);
   const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
   const [composerText, setComposerText] = useState("");
   const { refetch } = query;
@@ -177,7 +222,16 @@ export default function FleetScreen() {
   }, []);
 
   const data = useMemo(() => query.data ?? [], [query.data]);
-  const filteredData = useMemo(() => filterSessions(data, "", needsYouOnly), [data, needsYouOnly]);
+  // Forge Anywhere: the host filter chips (FleetHostFilter above) only ever match the
+  // active server's source id — real rows have no host/server id of their own to filter
+  // on beyond "the server this fleet is currently fetched from" — so any other source
+  // selection honestly yields zero rows until relay-backed sessions carry that data.
+  const activeHostSourceId = activeServerId ? `server:${activeServerId}` : null;
+  const hostFilteredData = useMemo(
+    () => (hostFilter === null || hostFilter === activeHostSourceId ? data : []),
+    [data, hostFilter, activeHostSourceId],
+  );
+  const filteredData = useMemo(() => filterSessions(hostFilteredData, "", needsYouOnly), [hostFilteredData, needsYouOnly]);
   const deckRows = useMemo(() => buildFleetDeck(filteredData, data), [filteredData, data]);
   const hasData = data.length > 0;
   const isFirstLoad = query.isLoading && !hasData;
@@ -255,6 +309,7 @@ export default function FleetScreen() {
       <FleetTitle />
       {pickerState === "ready" ? <FleetSummary sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /> : null}
       <FleetServerSwitcher />
+      <FleetHostFilter selected={hostFilter} onSelect={setHostFilter} />
       {isFirstLoad ? (
         <View style={styles.list}>
           {[0, 1, 2, 3].map((i) => (
@@ -295,6 +350,9 @@ const styles = StyleSheet.create({
   serverList: { gap: space.space8, paddingTop: space.space12 },
   serverChip: { minHeight: 28, maxWidth: 220, flexDirection: "row", alignItems: "center", gap: space.space4, paddingHorizontal: space.space12, borderRadius: radii.radiusPill },
   serverDot: { width: 6, height: 6, borderRadius: 3 },
+  hostFilterScroll: { flexGrow: 0, flexShrink: 0 },
+  hostFilterList: { gap: space.space8, paddingTop: space.space8 },
+  hostFilterDot: { width: 5, height: 5, borderRadius: 2.5 },
   titleRow: { flexDirection: "row", alignItems: "center", paddingTop: space.space12 },
   titleText: { letterSpacing: -0.4 },
   mark: { fontSize: 14, marginLeft: space.space8, padding: space.space4 },

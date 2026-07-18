@@ -8,6 +8,7 @@ import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from
 import Animated from "react-native-reanimated";
 
 import { stripLeadingAttachMentions } from "../../components/chat/MessageRow";
+import { SyncGlyph } from "../../components/anywhere/SyncGlyph";
 import { Badge } from "../../components/ds/Badge";
 import { BoundedList } from "../../components/ds/BoundedList";
 import { Button } from "../../components/ds/Button";
@@ -21,6 +22,7 @@ import { SectionHeader } from "../../components/ds/SectionHeader";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { useToast } from "../../components/ds/ToastHost";
 import { ApiError, type PastSessionRow } from "../../lib/api";
+import { useAnywhere } from "../../lib/anywhere/store";
 import { useArchiveSession, useCreateSession, usePastSessions } from "../../lib/queries";
 import { useForgeline, useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -85,6 +87,9 @@ function HistoryRowBase({ row, index, onPress, onArchive }: HistoryRowProps) {
   const tokens = useTokens();
   const strike = useStrike();
   const entrance = useForgeline(index);
+  // Forge Anywhere: zero visual change for signed-out users — sync meta only renders
+  // once an Anywhere account exists at all.
+  const { signedIn: anywhereSignedIn } = useAnywhere();
   const title = row.title || `#${row.id.slice(0, 8)}`;
   const resumeRow = useCallback(() => onPress(row), [onPress, row]);
 
@@ -125,6 +130,19 @@ function HistoryRowBase({ row, index, onPress, onArchive }: HistoryRowProps) {
                 <View style={styles.metaRight}>
                   <Text style={[type.meta, { color: tokens.ink3 }]}>{row.message_count} msgs</Text>
                   {row.cost_usd > 0 ? <Text style={[type.meta, { color: tokens.success }]}>{formatCost(row.cost_usd)}</Text> : null}
+                  {anywhereSignedIn ? (
+                    // Forge Anywhere: no relay sync has happened for any real session yet,
+                    // so every row is honestly rendered via SyncGlyph's "offline-cache" kind
+                    // (glyph "◌") — the closest existing SyncStatus for "local only, nothing
+                    // has round-tripped through the relay" — paired with our own "local only"
+                    // label. The glyph itself is the real shared component, so once real
+                    // per-row sync events land (synced/uploading/conflict/etc.), swapping in
+                    // the real SyncStatus here makes the full state range light up for free.
+                    <View style={styles.syncMeta}>
+                      <SyncGlyph status={{ kind: "offline-cache", cachedAt: row.last_activity * 1000 }} showText={false} />
+                      <Text style={[type.meta, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>local only</Text>
+                    </View>
+                  ) : null}
                 </View>
               </View>
             </View>
@@ -268,6 +286,11 @@ export default function HistoryScreen() {
           />
         ))}
       </ScrollView>
+      {/* Forge Anywhere: design calls for a sync-state banner here (retrying/offline/
+          storage-full/key-update) sourced from useAnywhere().account.syncBanner, storage-
+          full linking to /anywhere/storage. AnywhereAccount (lib/anywhere/types.ts) has no
+          `syncBanner` field yet, so this is intentionally omitted rather than fabricated —
+          wire it in once the foundation type grows that field. */}
       {isLoading ? (
         <View>
           {[0, 1, 2].map((i) => (
@@ -359,6 +382,7 @@ const styles = StyleSheet.create({
   footerRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   footerWithArchive: { paddingRight: space.space32 },
   metaRight: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  syncMeta: { flexDirection: "row", alignItems: "center", gap: space.space4 },
   archiveButton: { position: "absolute", right: space.space16, bottom: space.space16 },
   skeletonRow: { paddingHorizontal: space.space16, paddingVertical: space.space16, gap: space.space8 },
   skeletonGap: { marginTop: space.space8 },

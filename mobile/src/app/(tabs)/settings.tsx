@@ -30,6 +30,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
+import { EntitlementBadge } from "../../components/anywhere/EntitlementBadge";
 import { Badge, type BadgeTone } from "../../components/ds/Badge";
 import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
 import { IconButton } from "../../components/ds/IconButton";
@@ -39,6 +40,8 @@ import { SectionHeader } from "../../components/ds/SectionHeader";
 import { Segmented } from "../../components/ds/Segmented";
 import { Switch } from "../../components/ds/Switch";
 import { useToast } from "../../components/ds/ToastHost";
+import { entitlementBadge } from "../../lib/anywhere/format";
+import { useAnywhere } from "../../lib/anywhere/store";
 import { type StoredServer, useAuth } from "../../lib/auth";
 import { checkNotifyPermission, getNotifyPermission, notify, type NotifyPermission } from "../../lib/notify";
 import {
@@ -109,10 +112,11 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/usage" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
+type SettingsRoute = "/settings" | "/anywhere" | "/usage" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
+  { key: "anywhere", label: "Forge Anywhere", href: "/anywhere" },
   { key: "usage", label: "Usage", href: "/usage" },
   { key: "models", label: "Models & mesh", href: "/models" },
   { key: "plans", label: "Plans", href: "/plans" },
@@ -125,12 +129,16 @@ const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] 
 
 export function SettingsNavRail({ active }: { active: string }) {
   const tokens = useTokens();
+  const { account } = useAnywhere();
   const appVersion = Constants.expoConfig?.version ?? "—";
   return (
     <View style={[railStyles.rail, { borderRightColor: tokens.border }]}>
       <Text style={[type.headingBold, railStyles.title, { color: tokens.ink }]}>Settings</Text>
       {SETTINGS_NAV_ITEMS.map((item) => {
         const selected = item.key === active;
+        // Only the "anywhere" row ever carries a trailing badge — the entitlement summary
+        // from the desktop rail comp (desktop.dc.html "Desktop Settings", line 106).
+        const showEntitlement = item.key === "anywhere" && account != null;
         return (
           <Pressable
             key={item.key}
@@ -140,9 +148,12 @@ export function SettingsNavRail({ active }: { active: string }) {
             accessibilityState={{ selected }}
             style={[railStyles.item, selected ? { backgroundColor: tokens.selection } : null]}
           >
-            <Text style={[type.bodyBold, { color: selected ? tokens.accent : tokens.ink2 }]} numberOfLines={1}>
-              {item.label}
-            </Text>
+            <View style={railStyles.itemRow}>
+              <Text style={[type.bodyBold, railStyles.itemLabel, { color: selected ? tokens.accent : tokens.ink2 }]} numberOfLines={1}>
+                {item.label}
+              </Text>
+              {showEntitlement && account ? <EntitlementBadge account={account} /> : null}
+            </View>
           </Pressable>
         );
       })}
@@ -274,6 +285,7 @@ export default function SettingsScreen() {
   const toast = useToast();
   const { preference, setScheme } = useTheme();
   const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer, testConnection } = useAuth();
+  const { account: anywhereAccount, signedIn: anywhereSignedIn } = useAnywhere();
 
   const serverQueries = useServerFleets(servers);
   const [appLock, setAppLock] = useState(false);
@@ -316,6 +328,10 @@ export default function SettingsScreen() {
   const mcpEnabledLabel = mcpQuery.data ? `${mcpQuery.data.servers.filter((s) => s.enabled).length} enabled` : undefined;
   const skillsCountLabel = skillsQuery.data ? `${skillsQuery.data.length}` : undefined;
   const hooksCountLabel = hooksQuery.data ? `${hooksQuery.data.length}` : undefined;
+  // "off · sign in" when signed out; otherwise the same lowercase entitlement label the
+  // rail badge and /anywhere hub use (e.g. "trial · 9d") — entitlementBadge() is the single
+  // source of truth for that text, this just re-cases it for a row meta instead of a pill.
+  const anywhereMetaLabel = anywhereSignedIn && anywhereAccount ? entitlementBadge(anywhereAccount).label.toLowerCase() : "off · sign in";
 
   useEffect(() => {
     let cancelled = false;
@@ -550,6 +566,7 @@ export default function SettingsScreen() {
 
         <View>
           <SectionHeader>Forge</SectionHeader>
+          <NavListRow label="Forge Anywhere" meta={anywhereMetaLabel} onPress={() => router.push("/anywhere")} />
           <NavListRow label="Usage" meta={usageWeekLabel} onPress={() => router.push("/usage")} />
           <NavListRow label="Models & mesh health" meta={modelsReadyLabel} onPress={() => router.push("/models")} />
           <NavListRow label="Plans" meta={plansOpenLabel} onPress={() => router.push("/plans")} />
@@ -716,6 +733,8 @@ const railStyles = StyleSheet.create({
   rail: { width: 240, flexShrink: 0, borderRightWidth: StyleSheet.hairlineWidth, paddingHorizontal: space.space12, paddingVertical: space.space16, gap: 2 },
   title: { paddingHorizontal: space.space8, paddingBottom: space.space12 },
   item: { minHeight: 36, paddingHorizontal: space.space8, borderRadius: 8, justifyContent: "center" },
+  itemRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  itemLabel: { flex: 1 },
   flexFill: { flex: 1 },
   version: { paddingHorizontal: space.space8 },
   pane: { flex: 1, minWidth: 0 },
