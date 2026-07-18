@@ -1,6 +1,7 @@
 // Session shell header: focused controls plus an accessible overflow for less-frequent actions.
 import {
   ArrowLeft,
+  ArrowLeftRight,
   BookOpen,
   Bookmark,
   Bot,
@@ -14,6 +15,8 @@ import {
   Network,
   Plus,
   Search,
+  Send,
+  Share2,
   Swords,
   Workflow,
 } from "lucide-react-native";
@@ -22,7 +25,7 @@ import { ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { useTokens } from "../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../theme/tokens";
-import { type as typeScale } from "../../theme/typography";
+import { tabularNums, type as typeScale } from "../../theme/typography";
 import { IconButton } from "../ds/IconButton";
 import { ListRow } from "../ds/ListRow";
 import { Sheet } from "../ds/Sheet";
@@ -53,6 +56,15 @@ export interface SessionHeaderProps {
   onPullRequest: () => void;
   onMemory: () => void;
   onLattice: () => void;
+  /** Forge Anywhere — these three rows only render when their handler is provided, so
+   * non-Anywhere sessions (no relay pairing) see this menu completely unchanged. */
+  onHandoff?: () => void;
+  onShareReplay?: () => void;
+  onSwitchTransport?: () => void;
+  /** Trailing mono meta for "Hand off workspace…" (e.g. "eligible · at checkpoint"). */
+  handoffEligibility?: string;
+  /** Trailing mono meta for "Switch transport" (e.g. "anywhere → direct"). */
+  transportMeta?: string;
 }
 
 export function SessionHeader(props: SessionHeaderProps) {
@@ -88,6 +100,46 @@ export function SessionHeader(props: SessionHeaderProps) {
           <ListRow title="Run quality assay" leading={<Microscope size={20} color={tokens.ink2} />} onPress={() => run(props.onAssay)} />
           <ListRow title="Manage self MCP agent" leading={<Bot size={20} color={tokens.ink2} />} onPress={() => run(props.onSelfMcp)} />
           <ListRow title="Manage session checkpoints" leading={<Bookmark size={20} color={tokens.ink2} />} onPress={() => run(props.onCheckpoint)} />
+          {props.onHandoff ? (
+            <ListRow
+              title="Hand off workspace…"
+              leading={<Send size={20} color={tokens.ink2} />}
+              trailing={
+                props.handoffEligibility ? (
+                  <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.success }]} numberOfLines={1}>
+                    {props.handoffEligibility}
+                  </Text>
+                ) : undefined
+              }
+              onPress={() => run(props.onHandoff!)}
+            />
+          ) : null}
+          {props.onShareReplay ? (
+            <ListRow
+              title="Share replay…"
+              leading={<Share2 size={20} color={tokens.ink2} />}
+              trailing={
+                <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3 }]} numberOfLines={1}>
+                  encrypted · expiring
+                </Text>
+              }
+              onPress={() => run(props.onShareReplay!)}
+            />
+          ) : null}
+          {props.onSwitchTransport ? (
+            <ListRow
+              title="Switch transport"
+              leading={<ArrowLeftRight size={20} color={tokens.ink2} />}
+              trailing={
+                props.transportMeta ? (
+                  <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3 }]} numberOfLines={1}>
+                    {props.transportMeta}
+                  </Text>
+                ) : undefined
+              }
+              onPress={() => run(props.onSwitchTransport!)}
+            />
+          ) : null}
           <ListRow title="Create pull request" leading={<GitPullRequest size={20} color={tokens.ink2} />} onPress={() => run(props.onPullRequest)} />
           <ListRow title="Manage project memory" leading={<Brain size={20} color={tokens.ink2} />} onPress={() => run(props.onMemory)} />
           <ListRow title="Inspect code symbol" leading={<Network size={20} color={tokens.ink2} />} onPress={() => run(props.onLattice)} showSeparator={false} />

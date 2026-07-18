@@ -24,6 +24,7 @@ import {
   History,
   MoonStar,
   Plus,
+  QrCode,
   Search,
   Settings2,
   SunMedium,
@@ -61,6 +62,8 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { ApiError } from "../../lib/api";
+import { entitlementBadge, hostStateText } from "../../lib/anywhere/format";
+import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import { useAuth } from "../../lib/auth";
 import { haptics } from "../../lib/haptics";
 import { useArchiveSession, useSessions } from "../../lib/queries";
@@ -71,6 +74,7 @@ import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, space, type StatusDotState } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
+import { HostDot } from "../anywhere/HostDot";
 import { DecisionPeek } from "../cards/DecisionPeek";
 import { Badge } from "../ds/Badge";
 import { EmptyState } from "../ds/EmptyState";
@@ -105,7 +109,7 @@ function activeSessionIdFromPathname(pathname: string): string | null {
   return match ? match[1] : null;
 }
 
-type PaletteGroupKey = "sessions" | "actions" | "navigation";
+type PaletteGroupKey = "sessions" | "actions" | "anywhere" | "navigation";
 
 interface PaletteItem {
   id: string;
@@ -124,9 +128,10 @@ interface PaletteItem {
 const GROUP_LABELS: Record<PaletteGroupKey, string> = {
   sessions: "Sessions",
   actions: "Actions",
+  anywhere: "Anywhere",
   navigation: "Go to",
 };
-const GROUP_ORDER: PaletteGroupKey[] = ["sessions", "actions", "navigation"];
+const GROUP_ORDER: PaletteGroupKey[] = ["sessions", "actions", "anywhere", "navigation"];
 
 // ---------------------------------------------------------------------------
 // PaletteHost / usePalette — open-state provider, mounted once at the app root.
@@ -201,6 +206,8 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
   const { data: sessions } = useSessions();
   const archiveSession = useArchiveSession();
   const skillCommands = useSkillCommands();
+  const { signedIn: anywhereSignedIn, account: anywhereAccount } = useAnywhere();
+  const { hosts: anywhereHosts } = useAnywhereHosts();
 
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -426,9 +433,68 @@ export function CommandPalette({ visible, onClose }: CommandPaletteProps) {
     [tokens, close],
   );
 
+  // Forge Anywhere: gated entirely on `signedIn` — a signed-out user sees no "Anywhere"
+  // group at all (empty array below), zero behavioral change from today's palette.
+  const anywhereItems = useMemo<PaletteItem[]>(() => {
+    if (!anywhereSignedIn) return [];
+
+    const items: PaletteItem[] = anywhereHosts.map((host) => ({
+      id: `anywhere:host:${host.id}`,
+      group: "anywhere",
+      title: `Go to host: ${host.name}`,
+      keywords: `anywhere host ${host.name}`,
+      trailing: (
+        <View style={styles.trailingRow}>
+          <HostDot state={host.state} size={5} />
+          <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{hostStateText(host)}</Text>
+        </View>
+      ),
+      onSelect: () => {
+        close();
+        router.push(`/anywhere/host/${host.id}`);
+      },
+    }));
+
+    items.push({
+      id: "anywhere:pair",
+      group: "anywhere",
+      title: "Pair a new device…",
+      keywords: "anywhere pair device qr enroll",
+      leading: <QrCode size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+      onSelect: () => {
+        close();
+        router.push("/anywhere/pair");
+      },
+    });
+
+    items.push({
+      id: "anywhere:settings",
+      group: "anywhere",
+      title: "Anywhere settings",
+      keywords: "anywhere settings entitlement plan billing devices hosts storage",
+      leading: <Settings2 size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+      trailing: anywhereAccount ? (
+        <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>{entitlementBadge(anywhereAccount).label.toLowerCase()}</Text>
+      ) : undefined,
+      onSelect: () => {
+        close();
+        router.push("/anywhere");
+      },
+    });
+
+    // Session-scoped Anywhere actions ("Hand off workspace…", "Create encrypted replay
+    // share…", "Switch transport: …") need to know the *active session's* host/transport/
+    // share state, not just which route is open — `activeSessionId` (above) only comes
+    // from the pathname, and the palette has no other session-context plumbing to source
+    // that from. Only the 3 global actions above are wired; contextual ones are deferred
+    // until the palette can query per-session Anywhere state.
+
+    return items;
+  }, [anywhereSignedIn, anywhereHosts, anywhereAccount, tokens, close]);
+
   const allItems = useMemo(
-    () => [...sessionItems, ...actionItems, ...navigationItems],
-    [sessionItems, actionItems, navigationItems],
+    () => [...sessionItems, ...actionItems, ...anywhereItems, ...navigationItems],
+    [sessionItems, actionItems, anywhereItems, navigationItems],
   );
 
   const q = query.trim().toLowerCase();

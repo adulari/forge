@@ -18,6 +18,8 @@ import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withTimin
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { HandoffSheet } from "../../../components/anywhere/HandoffSheet";
+import { ShareSheet } from "../../../components/anywhere/ShareSheet";
 import { Banner } from "../../../components/ds/Banner";
 import { IconButton } from "../../../components/ds/IconButton";
 import { TabStrip, type TabStripOption } from "../../../components/ds/TabStrip";
@@ -50,6 +52,8 @@ import { MemorySheet } from "../../../components/session/MemorySheet";
 
 import { LatticeSheet } from "../../../components/session/LatticeSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
+import { useAnywhere } from "../../../lib/anywhere/store";
+import { useAuth } from "../../../lib/auth";
 import { goBackOr } from "../../../lib/nav";
 import { useHotkey } from "../../../lib/shortcuts";
 import { useHistory, useSessions, useSessionWeeklyDelta, useTurnCompleted } from "../../../lib/queries";
@@ -112,6 +116,15 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 
   const [latticeVisible, setLatticeVisible] = useState(false);
+
+  // Forge Anywhere — session-surface features (host·transport meta, handoff, share-replay).
+  // Gated on `signedIn` so a session opened without an Anywhere account renders identically
+  // to before this landed: no host prefix on the meta line, no extra kebab rows.
+  const { signedIn } = useAnywhere();
+  const { host: authHost } = useAuth();
+  const [handoffVisible, setHandoffVisible] = useState(false);
+  const [shareVisible, setShareVisible] = useState(false);
+
   const { data: sessionHistory } = useHistory(sessionId);
   const weekly = useSessionWeeklyDelta(sessionId);
   const latestAssistantModel = useMemo(
@@ -308,6 +321,14 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 
             onLattice={() => setLatticeVisible(true)}
+
+            onHandoff={signedIn ? () => setHandoffVisible(true) : undefined}
+            onShareReplay={signedIn ? () => setShareVisible(true) : undefined}
+            // Direct<->Anywhere switching needs the relay backend (not built yet) to actually
+            // move a live session between transports — surface intent now, land the real flow later.
+            onSwitchTransport={signedIn ? () => toast.show("transport switching lands with the relay backend") : undefined}
+            handoffEligibility="eligible · at checkpoint"
+            transportMeta="anywhere → direct"
           />
           <StatusStrip
             state={statusState}
@@ -323,6 +344,10 @@ function SessionShell({ sessionId }: { sessionId: string }) {
             cwd={snapshot?.cwd ?? sessionId}
             worktree={snapshot?.worktree ?? null}
             reconnecting={reconnecting && !sessionEnded}
+            // Real sessions run Direct today — there's no relay-hosted session state yet, so
+            // `strip` stays unset rather than fabricating one of the 7 Anywhere conditions.
+            // A future relay-hosted session sets `transport: "anywhere"` and a real `strip`.
+            transport={signedIn ? { hostName: authHost ?? "this host", transport: "direct" } : undefined}
           />
           {snapshot?.workflow ? (
             <Pressable
@@ -360,6 +385,15 @@ function SessionShell({ sessionId }: { sessionId: string }) {
 
 
         <LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={sendWithFeedback} />
+
+        <HandoffSheet
+          visible={handoffVisible}
+          onClose={() => setHandoffVisible(false)}
+          sessionId={sessionId}
+          sessionTitle={snapshot?.title || `session ${sessionId.slice(0, 8)}`}
+          sourceHostName={authHost ?? "this host"}
+        />
+        <ShareSheet visible={shareVisible} onClose={() => setShareVisible(false)} sessionId={sessionId} />
 
         {protocolMismatch ? (
           <Banner tone="warn" message="protocol mismatch — update Forge or the app" />

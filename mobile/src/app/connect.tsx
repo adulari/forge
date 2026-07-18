@@ -10,7 +10,9 @@ import { router, useLocalSearchParams } from "expo-router";
 import { Flame, X } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import Svg, { Path } from "react-native-svg";
 
+import { EntitlementBadge } from "../components/anywhere/EntitlementBadge";
 import { Banner } from "../components/ds/Banner";
 import { Button } from "../components/ds/Button";
 import { IconButton } from "../components/ds/IconButton";
@@ -19,6 +21,7 @@ import { Screen } from "../components/ds/Screen";
 import { StatusDot } from "../components/ds/StatusDot";
 import { useToast } from "../components/ds/ToastHost";
 import { QRScan } from "../components/pairing/QRScan";
+import { useAnywhere, useAnywhereHosts } from "../lib/anywhere/store";
 import { type ConnectTestState, parseConnectUrl, useAuth } from "../lib/auth";
 import {
   detectForgeServe,
@@ -59,6 +62,17 @@ function decodeParam(raw: string): string {
   }
 }
 
+// lucide-react-native ships no GitHub mark — this traces the same glyph the design comp
+// embeds inline (mobile.dc.html "AW Connect", line 120), colored via the caller's token
+// instead of a literal hex so it still follows the "no raw hex" rule.
+function GithubMark({ size, color }: { size: number; color: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill={color}>
+      <Path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.09.68-.22.68-.49v-1.7c-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.9-.63.07-.62.07-.62 1 .07 1.53 1.05 1.53 1.05.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.7 0 0 .84-.28 2.75 1.05a9.4 9.4 0 0 1 5 0c1.91-1.33 2.75-1.05 2.75-1.05.55 1.4.2 2.44.1 2.7.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.9v2.82c0 .27.18.59.69.49A10.06 10.06 0 0 0 22 12.25C22 6.58 17.52 2 12 2z" />
+    </Svg>
+  );
+}
+
 // Desktop auto-detect (Tauri only, first-run only — ARCHITECTURE.md §6.4). "idle"/"detecting"/
 // "unavailable" render nothing so the screen never flashes a card that's about to disappear;
 // everything else augments the manual/QR flow below, never replaces it.
@@ -80,6 +94,8 @@ export default function ConnectScreen() {
   const tokens = useTokens();
   const { isCompact } = useBreakpoint();
   const { addServer, testConnection, servers } = useAuth();
+  const { account: anywhereAccount, signedIn: anywhereSignedIn, refresh: refreshAnywhere } = useAnywhere();
+  const { hosts: anywhereHosts, loading: anywhereHostsLoading } = useAnywhereHosts();
   const toast = useToast();
   const params = useLocalSearchParams<{ url?: string }>();
   // Tracks the last `?url=` value we already applied (not just "did we ever apply one") so a
@@ -352,6 +368,70 @@ export default function ConnectScreen() {
           connected — opening forge…
         </Text>
       ) : null}
+
+      {/* Forge Anywhere entry point — mobile.dc.html "AW Connect" (lines 116-148). The
+          direct pairing flow above stays untouched; this section only adds the optional
+          managed-relay path below it. */}
+      <View style={styles.anywhereSection}>
+        <Text style={[typeScale.section, { color: tokens.ink4 }]}>anywhere</Text>
+        <Text style={[typeScale.sub, styles.anywhereDescription, { color: tokens.ink2 }]}>
+          Optional managed encrypted relay. Leave your desk without leaving your session.
+        </Text>
+
+        {anywhereSignedIn && anywhereAccount ? (
+          <>
+            <Pressable
+              onPress={() => router.push("/anywhere")}
+              accessibilityRole="button"
+              accessibilityLabel="Forge Anywhere"
+              style={styles.anywhereStatusRow}
+            >
+              <EntitlementBadge account={anywhereAccount} />
+              <Text style={[typeScale.monoMeta, styles.anywhereStatusMeta, { color: tokens.ink4 }]} numberOfLines={1}>
+                {`@${anywhereAccount.githubLogin} · ${anywhereHostsLoading ? "…" : `${anywhereHosts.length} host${anywhereHosts.length === 1 ? "" : "s"}`}`}
+              </Text>
+            </Pressable>
+
+            {!anywhereAccount.relayConnected ? (
+              <View style={styles.anywhereStateRow}>
+                <Text style={[typeScale.sub, styles.anywhereStateText, { color: tokens.ink2 }]}>
+                  Anywhere relay unreachable — Direct still works
+                </Text>
+                <Pressable onPress={() => void refreshAnywhere()} accessibilityRole="button" accessibilityLabel="Retry" hitSlop={8}>
+                  <Text style={[typeScale.sub, styles.anywhereActionText, { color: tokens.accent }]}>Retry</Text>
+                </Pressable>
+              </View>
+            ) : !anywhereHostsLoading && anywhereHosts.length === 0 ? (
+              <View style={styles.anywhereStateRow}>
+                <Text style={[typeScale.sub, styles.anywhereStateText, { color: tokens.ink2 }]}>
+                  Signed in, no host enrolled yet
+                </Text>
+                <Pressable
+                  onPress={() => router.push("/anywhere/first-host")}
+                  accessibilityRole="button"
+                  accessibilityLabel="Connect a host"
+                  hitSlop={8}
+                >
+                  <Text style={[typeScale.sub, styles.anywhereActionText, { color: tokens.accent }]}>Connect a host</Text>
+                </Pressable>
+              </View>
+            ) : null}
+          </>
+        ) : (
+          <>
+            <Button
+              label="Sign in with GitHub"
+              icon={<GithubMark size={16} color={tokens.onAccent} />}
+              onPress={() => router.push("/anywhere/sign-in")}
+              fullWidth
+              style={styles.anywhereButton}
+            />
+            <Text style={[typeScale.sub, styles.anywhereFootnote, { color: tokens.ink4 }]}>
+              EUR 10/month · 14-day trial, no card · one Forge app, two transports
+            </Text>
+          </>
+        )}
+      </View>
     </Screen>
   );
 }
@@ -377,4 +457,13 @@ const styles = StyleSheet.create({
   urlBlockWide: { maxWidth: 480 },
   connectButton: { marginTop: space.space8 },
   successText: { textAlign: "center" },
+  anywhereSection: { gap: space.space4, maxWidth: 480, width: "100%" },
+  anywhereDescription: { marginBottom: space.space4 },
+  anywhereButton: { marginTop: space.space4 },
+  anywhereFootnote: { textAlign: "center", marginTop: space.space4 },
+  anywhereStatusRow: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingVertical: space.space8, minHeight: 44 },
+  anywhereStatusMeta: { flex: 1 },
+  anywhereStateRow: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingVertical: space.space8 },
+  anywhereStateText: { flex: 1 },
+  anywhereActionText: { fontWeight: "600" },
 });
