@@ -1,13 +1,14 @@
 import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { describe, expect, it, vi } from "vitest";
 
-import { base64Url } from "./anywhereApi";
+import { base64Url, type AnywhereAuthSession } from "./anywhereApi";
 import {
   DEFAULT_BILLING_PERIOD,
   billingCheckoutBody,
   commitPendingDeviceRevocation,
   prepareDeviceRevocation,
   refreshAnywhereCredentials,
+  refreshPendingAnywhereAuth,
   stagePreparedDeviceRevocation,
 } from "./anywhereAccountOperations";
 import { deriveRecoveryWrapKey, generateRecoveryPhrase, makeKeyWrap } from "./anywhereCrypto";
@@ -48,6 +49,31 @@ describe("Anywhere account operations", () => {
     const result = await refreshAnywhereCredentials(credentials(), refresh, persist, 100);
     expect(result).toMatchObject({ accessToken: "new-access", refreshToken: "new-refresh", accessExpiresAtMs: 999_999 });
     expect(persist).toHaveBeenCalledOnce();
+  });
+
+  it("rotates expired credentials before delayed recovery enrollment", async () => {
+    const pending: AnywhereAuthSession = {
+      version: 1,
+      account_id: "11".repeat(16),
+      device_id: "22".repeat(16),
+      github_login: "forge-user",
+      access_token: "expired-access",
+      refresh_token: "valid-refresh",
+      access_expires_at_ms: 1,
+      new_account: true,
+    };
+    const refresh = vi.fn(async (token: string) => {
+      expect(token).toBe("valid-refresh");
+      return { access_token: "fresh-access", refresh_token: "rotated-refresh", access_expires_at_ms: 999_999 };
+    });
+
+    await expect(refreshPendingAnywhereAuth(pending, refresh, 100)).resolves.toEqual({
+      ...pending,
+      access_token: "fresh-access",
+      refresh_token: "rotated-refresh",
+      access_expires_at_ms: 999_999,
+    });
+    expect(refresh).toHaveBeenCalledOnce();
   });
 
   it("durably retries an ambiguously committed revoke with exact bytes and key", async () => {

@@ -26,6 +26,21 @@ export function billingCheckoutBody(period: AnywhereBillingPeriod = DEFAULT_BILL
 
 type RefreshResponse = Pick<AnywhereAuthSession, "access_token" | "refresh_token" | "access_expires_at_ms">;
 
+export async function refreshPendingAnywhereAuth(
+  current: AnywhereAuthSession,
+  refresh: (refreshToken: string) => Promise<RefreshResponse>,
+  now = Date.now(),
+): Promise<AnywhereAuthSession> {
+  if (current.access_expires_at_ms > now + 30_000) return current;
+  const response = await refresh(current.refresh_token);
+  return {
+    ...current,
+    access_token: response.access_token,
+    refresh_token: response.refresh_token,
+    access_expires_at_ms: response.access_expires_at_ms,
+  };
+}
+
 export async function refreshAnywhereCredentials(
   current: StoredAnywhereCredentials,
   refresh: (refreshToken: string) => Promise<RefreshResponse>,

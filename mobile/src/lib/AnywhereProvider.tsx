@@ -25,6 +25,7 @@ import {
   commitPendingDeviceRevocation,
   prepareDeviceRevocation,
   refreshAnywhereCredentials,
+  refreshPendingAnywhereAuth,
   stagePreparedDeviceRevocation,
 } from "./anywhereAccountOperations";
 import {
@@ -151,6 +152,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const mutationQueue = useRef(Promise.resolve());
   const revocationRecoveryAttempt = useRef<string | null>(null);
   const browserAuthWindow = useRef<ReservedBrowserAuthWindow | null>(null);
+  const enrollmentInFlight = useRef(false);
 
   const persistCredentials = useCallback(async (next: StoredAnywhereCredentials) => {
     credentialsRef.current = next;
@@ -527,49 +529,81 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   }, [persistCredentials, refresh]);
 
   const confirmNewRecovery = useCallback(async (answers: Record<number, string>) => {
-    if (!recoverySetup) return;
+    if (!recoverySetup || enrollmentInFlight.current) return;
     const words = recoverySetup.words.split(" ");
     const samples = [3, 11, 20];
     if (samples.some((index) => answers[index]?.trim().toLowerCase() !== words[index])) {
       setError("Those recovery words do not match. Check the numbered words and try again.");
       return;
     }
-    setError(null);
-    const accountId = bytesFromHex(recoverySetup.auth.account_id);
-    const deviceId = bytesFromHex(recoverySetup.auth.device_id);
-    const deviceKey = deriveSelfDeviceWrapKey(recoverySetup.keys.exchangePrivateKey, recoverySetup.keys.exchangePublicKey, accountId, INITIAL_EPOCH);
-    const recoveryKey = deriveRecoveryWrapKey(recoverySetup.entropy, accountId, INITIAL_EPOCH);
-    const deviceWrap = makeKeyWrap(recoverySetup.dataKey, deviceKey, accountId, deviceId, 1, deviceId, INITIAL_EPOCH, 0n, recoverySetup.keys.signingPrivateKey);
-    const recoveryWrap = makeKeyWrap(recoverySetup.dataKey, recoveryKey, accountId, deviceId, 3, accountId, INITIAL_EPOCH, 1n, recoverySetup.keys.signingPrivateKey);
+    enrollmentInFlight.current = true;
     try {
+      setError(null);
+      const auth = await refreshPendingAnywhereAuth(
+        recoverySetup.auth,
+        (refreshToken) => anywhereRequest(SERVICE_URL, "/v1/auth/refresh", {
+          method: "POST",
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        }),
+      );
+      const latestSetup = auth === recoverySetup.auth ? recoverySetup : { ...recoverySetup, auth };
+      if (latestSetup !== recoverySetup) {
+        setRecoverySetup(latestSetup);
+        setPending(latestSetup);
+      }
+      const accountId = bytesFromHex(auth.account_id);
+      const deviceId = bytesFromHex(auth.device_id);
+      const deviceKey = deriveSelfDeviceWrapKey(latestSetup.keys.exchangePrivateKey, latestSetup.keys.exchangePublicKey, accountId, INITIAL_EPOCH);
+      const recoveryKey = deriveRecoveryWrapKey(latestSetup.entropy, accountId, INITIAL_EPOCH);
+      const deviceWrap = makeKeyWrap(latestSetup.dataKey, deviceKey, accountId, deviceId, 1, deviceId, INITIAL_EPOCH, 0n, latestSetup.keys.signingPrivateKey);
+      const recoveryWrap = makeKeyWrap(latestSetup.dataKey, recoveryKey, accountId, deviceId, 3, accountId, INITIAL_EPOCH, 1n, latestSetup.keys.signingPrivateKey);
       await anywhereRequest(SERVICE_URL, "/v1/key-epochs", {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey() },
         body: JSON.stringify({ epoch: INITIAL_EPOCH, device_wrap_envelope: base64Url(deviceWrap), recovery_wrap_envelope: base64Url(recoveryWrap) }),
-      }, recoverySetup.auth.access_token);
-      await finishEnrollment(recoverySetup, recoverySetup.dataKey, INITIAL_EPOCH, 2n);
-    } catch (reason) { setError(message(reason)); }
+      }, auth.access_token);
+      await finishEnrollment(latestSetup, latestSetup.dataKey, INITIAL_EPOCH, 2n);
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      enrollmentInFlight.current = false;
+    }
   }, [finishEnrollment, recoverySetup]);
 
   const recoverExisting = useCallback(async (words: string) => {
+    if (enrollmentInFlight.current) return;
     if (!pending?.auth.recovery_wrap_envelope || !pending.auth.recovery_wrap_signing_public_key) {
       setError("The service did not return this account's encrypted recovery key.");
       return;
     }
+    enrollmentInFlight.current = true;
     try {
       setError(null);
-      const recovered = openRecoveryWrap(pending.auth.recovery_wrap_envelope, pending.auth.recovery_wrap_signing_public_key, words, pending.auth.account_id);
-      const accountId = bytesFromHex(pending.auth.account_id);
-      const deviceId = bytesFromHex(pending.auth.device_id);
+      const auth = await refreshPendingAnywhereAuth(
+        pending.auth,
+        (refreshToken) => anywhereRequest(SERVICE_URL, "/v1/auth/refresh", {
+          method: "POST",
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        }),
+      );
+      const latestPending = auth === pending.auth ? pending : { ...pending, auth };
+      if (latestPending !== pending) setPending(latestPending);
+      const recovered = openRecoveryWrap(auth.recovery_wrap_envelope!, auth.recovery_wrap_signing_public_key!, words, auth.account_id);
+      const accountId = bytesFromHex(auth.account_id);
+      const deviceId = bytesFromHex(auth.device_id);
       const deviceKey = deriveSelfDeviceWrapKey(pending.keys.exchangePrivateKey, pending.keys.exchangePublicKey, accountId, recovered.epoch);
       const wrap = makeKeyWrap(recovered.dataKey, deviceKey, accountId, deviceId, 1, deviceId, recovered.epoch, 0n, pending.keys.signingPrivateKey);
       await anywhereRequest(SERVICE_URL, `/v1/key-epochs/${recovered.epoch}/wraps`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey() },
         body: JSON.stringify({ epoch: recovered.epoch, device_wrap_envelope: base64Url(wrap) }),
-      }, pending.auth.access_token);
-      await finishEnrollment(pending, recovered.dataKey, recovered.epoch, 1n);
-    } catch (reason) { setError(message(reason)); }
+      }, auth.access_token);
+      await finishEnrollment(latestPending, recovered.dataKey, recovered.epoch, 1n);
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      enrollmentInFlight.current = false;
+    }
   }, [finishEnrollment, pending]);
 
   const selectHost = useCallback((hostId: string) => setActive(`anywhere:${hostId}`), [setActive]);
