@@ -19,9 +19,10 @@ use forge_anywhere_protocol::crypto::{
 };
 use forge_anywhere_protocol::keys::{RecoveryKitV2, RecoverySecret, RecoverySecretV2};
 use forge_anywhere_protocol::{Envelope, EnvelopeKind, EnvelopeMetadata, RecipientKind};
-use reqwest::{Client, RequestBuilder, StatusCode};
+use reqwest::{Client, RequestBuilder, StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::{AnywhereCmd, ShareExpiry};
 
@@ -69,6 +70,9 @@ pub(crate) async fn notify_attention_required() {
 
 const STATE_VERSION: u8 = 1;
 const KEY_EPOCH_INITIAL: u32 = 1;
+const PAIRING_VERSION: u8 = 1;
+const PAIRING_LIFETIME: Duration = Duration::from_secs(10 * 60);
+const PAIRING_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Serialize, Deserialize, Default)]
 struct LocalState {
@@ -370,6 +374,102 @@ struct AuthSession {
     recovery_wrap_signing_public_key: Option<String>,
 }
 
+struct EnrolledCredentials {
+    account_id: String,
+    device_id: String,
+    access_token: String,
+    refresh_token: String,
+    access_expires_at_ms: u64,
+    data_key: [u8; 32],
+    key_epoch: u32,
+    next_sequence: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum EnrollmentPath {
+    Bootstrap,
+    DeviceApproval,
+    RecoveryKit,
+}
+
+fn enrollment_path(new_account: bool, recovery_requested: bool) -> EnrollmentPath {
+    if new_account {
+        EnrollmentPath::Bootstrap
+    } else if recovery_requested {
+        EnrollmentPath::RecoveryKit
+    } else {
+        EnrollmentPath::DeviceApproval
+    }
+}
+
+#[derive(Serialize)]
+struct PairingCreateRequest<'a> {
+    version: u8,
+    device_name: &'a str,
+    signing_public_key: &'a str,
+    exchange_public_key: &'a str,
+}
+
+#[derive(Deserialize)]
+struct PairingCreateResponse {
+    version: u8,
+    pairing_id: String,
+    pairing_token: String,
+    expires_at_ms: u64,
+    challenge: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct PairingChallenge {
+    version: u8,
+    pairing_id: String,
+    exchange_public_key: String,
+    expires_at_ms: u64,
+    service_origin: String,
+}
+
+#[derive(Deserialize)]
+struct PairingDetails {
+    version: u8,
+    pairing_id: String,
+    device_id: String,
+    device_name: String,
+    signing_public_key: String,
+    exchange_public_key: String,
+    expires_at_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum PairingPollResponse {
+    Pending {
+        version: u8,
+        expires_at_ms: u64,
+    },
+    Approved {
+        version: u8,
+        account_id: String,
+        device_id: String,
+        access_token: String,
+        refresh_token: String,
+        access_expires_at_ms: u64,
+        epoch: u32,
+        device_wrap_envelope: String,
+        signing_public_key: String,
+        exchange_public_key: String,
+    },
+    Denied {
+        version: u8,
+    },
+}
+
+#[derive(Serialize)]
+struct PairingApproval {
+    version: u8,
+    epoch: u32,
+    device_wrap_envelope: String,
+}
+
 #[derive(Serialize)]
 struct PollRequest<'a> {
     device_code: &'a str,
@@ -475,8 +575,9 @@ struct CurrentDeviceWrapResponse {
 
 pub(crate) async fn anywhere_cmd(command: AnywhereCmd) -> Result<()> {
     match command {
-        AnywhereCmd::Setup { name } => setup(name).await,
-        AnywhereCmd::Login => login().await,
+        AnywhereCmd::Setup { name, recovery } => setup(name, recovery).await,
+        AnywhereCmd::Login { recovery } => login(recovery).await,
+        AnywhereCmd::Approve { challenge } => approve_pairing(&challenge).await,
         AnywhereCmd::Enable { name } => enable(name).await,
         AnywhereCmd::Status => status().await,
         AnywhereCmd::Doctor => doctor().await,
@@ -507,7 +608,7 @@ pub(crate) async fn anywhere_cmd(command: AnywhereCmd) -> Result<()> {
     }
 }
 
-async fn setup(name: Option<String>) -> Result<()> {
+async fn setup(name: Option<String>, recovery: bool) -> Result<()> {
     println!("Forge Anywhere setup");
     println!("1/4 Checking this Forge installation…");
     println!("    Forge {}", env!("CARGO_PKG_VERSION"));
@@ -519,7 +620,7 @@ async fn setup(name: Option<String>) -> Result<()> {
             println!("2/4 GitHub sign-in already complete.");
         } else {
             println!("2/4 Sign in with GitHub.");
-            login().await?;
+            login(recovery).await?;
         }
 
         let state = store.load()?;
@@ -547,7 +648,7 @@ async fn setup(name: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn login() -> Result<()> {
+async fn login(recovery: bool) -> Result<()> {
     let store = StateStore::platform()?;
     let mut state = store.load()?;
     if state.is_logged_in() {
@@ -609,49 +710,86 @@ async fn login() -> Result<()> {
 
     let account_id = decode_hex_array::<16>(&auth.account_id, "account id")?;
     let device_id = decode_hex_array::<16>(&auth.device_id, "device id")?;
-    let (data_key, key_epoch, next_sequence) = if auth.new_account {
-        let data_key = bootstrap_new_account(
-            &client,
-            service_url,
-            &auth.access_token,
-            account_id,
-            device_id,
-            &signing_key,
-            &exchange_private,
-            &exchange_public,
-        )
-        .await?;
-        // Bootstrap emitted the device wrap at sequence 0 and recovery wrap at sequence 1.
-        (data_key, KEY_EPOCH_INITIAL, 2)
-    } else {
-        recover_existing_account(
-            &client,
-            service_url,
-            &auth,
-            account_id,
-            device_id,
-            &signing_key,
-            &exchange_private,
-            &exchange_public,
-        )
-        .await?
+    let enrolled = match enrollment_path(auth.new_account, recovery) {
+        EnrollmentPath::Bootstrap => {
+            let data_key = bootstrap_new_account(
+                &client,
+                service_url,
+                &auth.access_token,
+                account_id,
+                device_id,
+                &signing_key,
+                &exchange_private,
+                &exchange_public,
+            )
+            .await?;
+            // Bootstrap emitted the device wrap at sequence 0 and recovery wrap at sequence 1.
+            EnrolledCredentials {
+                account_id: auth.account_id.clone(),
+                device_id: auth.device_id.clone(),
+                access_token: auth.access_token.clone(),
+                refresh_token: auth.refresh_token.clone(),
+                access_expires_at_ms: auth.access_expires_at_ms,
+                data_key,
+                key_epoch: KEY_EPOCH_INITIAL,
+                next_sequence: 2,
+            }
+        }
+        EnrollmentPath::RecoveryKit => {
+            let (data_key, key_epoch, next_sequence) = recover_existing_account(
+                &client,
+                service_url,
+                &auth,
+                account_id,
+                device_id,
+                &signing_key,
+                &exchange_private,
+                &exchange_public,
+            )
+            .await?;
+            EnrolledCredentials {
+                account_id: auth.account_id.clone(),
+                device_id: auth.device_id.clone(),
+                access_token: auth.access_token.clone(),
+                refresh_token: auth.refresh_token.clone(),
+                access_expires_at_ms: auth.access_expires_at_ms,
+                data_key,
+                key_epoch,
+                next_sequence,
+            }
+        }
+        EnrollmentPath::DeviceApproval => {
+            enroll_existing_account(
+                &client,
+                service_url,
+                &auth,
+                &device_name,
+                &signing_key.verifying_key().to_bytes(),
+                &exchange_private,
+                &exchange_public,
+            )
+            .await?
+        }
     };
 
     state = LocalState {
         version: STATE_VERSION,
-        account_id: Some(auth.account_id),
+        account_id: Some(enrolled.account_id),
         github_login: Some(auth.github_login),
-        device_id: Some(auth.device_id),
+        device_id: Some(enrolled.device_id),
         signing_private_key: Some(URL_SAFE_NO_PAD.encode(signing_private)),
         exchange_private_key: Some(URL_SAFE_NO_PAD.encode(exchange_private)),
-        account_data_key: Some(URL_SAFE_NO_PAD.encode(data_key)),
-        key_epoch: Some(key_epoch),
-        data_key_epochs: BTreeMap::from([(key_epoch, URL_SAFE_NO_PAD.encode(data_key))]),
-        access_token: Some(auth.access_token),
-        refresh_token: Some(auth.refresh_token),
-        access_expires_at_ms: Some(auth.access_expires_at_ms),
+        account_data_key: Some(URL_SAFE_NO_PAD.encode(enrolled.data_key)),
+        key_epoch: Some(enrolled.key_epoch),
+        data_key_epochs: BTreeMap::from([(
+            enrolled.key_epoch,
+            URL_SAFE_NO_PAD.encode(enrolled.data_key),
+        )]),
+        access_token: Some(enrolled.access_token),
+        refresh_token: Some(enrolled.refresh_token),
+        access_expires_at_ms: Some(enrolled.access_expires_at_ms),
         host_id: None,
-        next_sequence,
+        next_sequence: enrolled.next_sequence,
         accepted_sequences: BTreeMap::new(),
         command_journal: BTreeMap::new(),
         capsule_journal: BTreeMap::new(),
@@ -664,6 +802,405 @@ async fn login() -> Result<()> {
     store.save(&state)?;
     println!("Logged in to Forge Anywhere. Run `forge anywhere enable` on this host.");
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enroll_existing_account(
+    client: &Client,
+    service_url: &str,
+    auth: &AuthSession,
+    device_name: &str,
+    signing_public: &[u8; 32],
+    exchange_private: &[u8; 32],
+    exchange_public: &[u8; 32],
+) -> Result<EnrolledCredentials> {
+    let signing_public = URL_SAFE_NO_PAD.encode(signing_public);
+    let exchange_public_encoded = URL_SAFE_NO_PAD.encode(exchange_public);
+    let response = client
+        .post(format!("{service_url}/v1/pairings"))
+        .json(&PairingCreateRequest {
+            version: PAIRING_VERSION,
+            device_name,
+            signing_public_key: &signing_public,
+            exchange_public_key: &exchange_public_encoded,
+        })
+        .send()
+        .await
+        .context("create device approval request")?;
+    if matches!(
+        response.status(),
+        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED | StatusCode::NOT_IMPLEMENTED
+    ) {
+        bail!(
+            "device approval is not available on this service; retry with `forge anywhere setup --recovery`"
+        );
+    }
+    let created: PairingCreateResponse = decode_response(response)
+        .await
+        .context("create device approval request")?;
+    let challenge =
+        validate_pairing_create_response(&created, service_url, exchange_public, now_ms())?;
+    let account_id = decode_hex_array::<16>(&auth.account_id, "GitHub account id")?;
+    let safety_code = pairing_safety_code(&challenge, signing_public.as_str(), &account_id)?;
+
+    println!(
+        "\nApprove this device from an enrolled Forge client within 10 minutes.\n\
+         Run on the enrolled device:\n\n  forge anywhere approve '{}'\n\n\
+         Safety code: {safety_code}\n\
+         Compare this code on both devices before approving.\n\
+         Waiting for approval… (Recovery Kit fallback: `forge anywhere setup --recovery`)",
+        created.challenge
+    );
+
+    loop {
+        if now_ms() >= created.expires_at_ms {
+            bail!("request expired — run `forge anywhere setup` to create a new approval request");
+        }
+        let response = client
+            .get(format!(
+                "{service_url}/v1/pairings/{}/poll",
+                created.pairing_id
+            ))
+            .bearer_auth(&created.pairing_token)
+            .send()
+            .await
+            .context("poll device approval")?;
+        let result: PairingPollResponse = decode_response(response)
+            .await
+            .context("poll device approval")?;
+        match result {
+            PairingPollResponse::Pending {
+                version,
+                expires_at_ms,
+            } => {
+                if version != PAIRING_VERSION || expires_at_ms != created.expires_at_ms {
+                    bail!("Forge Anywhere returned an invalid pending approval state");
+                }
+            }
+            PairingPollResponse::Denied { version } => {
+                if version != PAIRING_VERSION {
+                    bail!("Forge Anywhere returned an invalid denied approval state");
+                }
+                bail!("approval denied — confirm the device name and start setup again");
+            }
+            PairingPollResponse::Approved {
+                version,
+                account_id: approved_account_id,
+                device_id,
+                access_token,
+                refresh_token,
+                access_expires_at_ms,
+                epoch,
+                device_wrap_envelope,
+                signing_public_key,
+                exchange_public_key,
+            } => {
+                if version != PAIRING_VERSION
+                    || decode_hex_array::<16>(&approved_account_id, "approved account id")?
+                        != account_id
+                {
+                    bail!(
+                        "approval was made from a different Forge Anywhere account; no credentials were installed"
+                    );
+                }
+                let data_key = open_approved_device_wrap(
+                    &device_wrap_envelope,
+                    &approved_account_id,
+                    &device_id,
+                    epoch,
+                    exchange_private,
+                    &signing_public_key,
+                    &exchange_public_key,
+                )?;
+                println!("Device approved; encrypted account access verified.");
+                return Ok(EnrolledCredentials {
+                    account_id: approved_account_id,
+                    device_id,
+                    access_token,
+                    refresh_token,
+                    access_expires_at_ms,
+                    data_key,
+                    key_epoch: epoch,
+                    next_sequence: 0,
+                });
+            }
+        }
+        tokio::time::sleep(PAIRING_POLL_INTERVAL).await;
+    }
+}
+
+fn open_approved_device_wrap(
+    device_wrap_envelope: &str,
+    account_id: &str,
+    device_id: &str,
+    epoch: u32,
+    exchange_private: &[u8; 32],
+    approver_signing_public: &str,
+    approver_exchange_public: &str,
+) -> Result<[u8; 32]> {
+    let account_id = decode_hex_array::<16>(account_id, "approved account id")?;
+    let device_id = decode_hex_array::<16>(device_id, "approved device id")?;
+    let encoded_envelope = URL_SAFE_NO_PAD
+        .decode(device_wrap_envelope)
+        .context("decode approved device wrap")?;
+    let envelope = Envelope::decode(&encoded_envelope)?;
+    if envelope.metadata.kind != EnvelopeKind::KeyWrap
+        || envelope.metadata.recipient_kind != RecipientKind::Device
+        || envelope.metadata.account_id != account_id
+        || envelope.metadata.recipient_id != device_id
+        || envelope.metadata.key_epoch != epoch
+    {
+        bail!("approved device wrap has mismatched authenticated routing metadata");
+    }
+    let approver_exchange_public =
+        decode_base64_array::<32>(approver_exchange_public, "approver exchange public key")?;
+    let approver_signing_public =
+        decode_base64_array::<32>(approver_signing_public, "approver signing public key")?;
+    let wrap_key = derive_device_wrap_key(
+        exchange_private,
+        &approver_exchange_public,
+        &account_id,
+        epoch,
+    )?;
+    let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&approver_signing_public)?;
+    let plaintext = envelope.open(wrap_key.as_bytes(), &verifying_key)?;
+    plaintext
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("approved Account Data Key has the wrong length"))
+}
+
+async fn approve_pairing(encoded_challenge: &str) -> Result<()> {
+    let store = StateStore::platform()?;
+    let mut state = store.load()?;
+    let access_token = ensure_access_token(&store, &mut state).await?;
+    let config = forge_config::load()?;
+    let service_url = config.anywhere.service_url();
+    let challenge = parse_pairing_challenge(encoded_challenge, service_url, now_ms())?;
+    let http = client()?;
+    let details: PairingDetails = send_json(
+        http.get(format!(
+            "{service_url}/v1/pairings/{}",
+            challenge.pairing_id
+        ))
+        .bearer_auth(&access_token),
+    )
+    .await
+    .context("load device approval request")?;
+    validate_pairing_details(&details, &challenge)?;
+
+    let account_id = decode_hex_array::<16>(
+        state.account_id.as_deref().context("missing account id")?,
+        "account id",
+    )?;
+    let safety_code = pairing_safety_code(&challenge, &details.signing_public_key, &account_id)?;
+    let account = state.github_login.as_deref().unwrap_or("signed-in account");
+    let remaining = challenge.expires_at_ms.saturating_sub(now_ms()) / 1_000;
+    println!("Forge Anywhere device approval");
+    println!("  Device: {}", safe_display_text(&details.device_name));
+    println!("  Platform: Forge CLI");
+    println!("  Account: @{account}");
+    println!("  Expires in: {remaining} seconds");
+    println!("  Safety code: {safety_code}");
+    println!("Compare the safety code with the new device before continuing.");
+    print!("Type APPROVE to approve, or DENY to deny: ");
+    std::io::stdout().flush().context("show approval prompt")?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .context("read approval decision")?;
+    match answer.trim() {
+        "APPROVE" => {}
+        "DENY" => {
+            println!(
+                "Denied. No account access was granted; the request will expire automatically."
+            );
+            return Ok(());
+        }
+        _ => {
+            bail!("approval not confirmed; type exactly APPROVE or DENY and run the command again")
+        }
+    }
+
+    let (state, sequence) = store.reserve_sequences(1)?;
+    let key_epoch = state.key_epoch.context("missing current key epoch")?;
+    let data_key = decode_base64_array::<32>(
+        state
+            .account_data_key
+            .as_deref()
+            .context("missing Account Data Key")?,
+        "Account Data Key",
+    )?;
+    let exchange_private = decode_base64_array::<32>(
+        state
+            .exchange_private_key
+            .as_deref()
+            .context("missing exchange private key")?,
+        "exchange private key",
+    )?;
+    let signing_private = decode_base64_array::<32>(
+        state
+            .signing_private_key
+            .as_deref()
+            .context("missing signing private key")?,
+        "signing private key",
+    )?;
+    let sender_device_id = decode_hex_array::<16>(
+        state.device_id.as_deref().context("missing device id")?,
+        "device id",
+    )?;
+    let claimant_device_id = decode_hex_array::<16>(&details.device_id, "claimant device id")?;
+    let claimant_exchange_public =
+        decode_base64_array::<32>(&details.exchange_public_key, "claimant exchange public key")?;
+    let wrap_key = derive_device_wrap_key(
+        &exchange_private,
+        &claimant_exchange_public,
+        &account_id,
+        key_epoch,
+    )?;
+    let signing_key = SigningKey::from_bytes(&signing_private);
+    let envelope = key_wrap_envelope(
+        data_key,
+        *wrap_key.as_bytes(),
+        account_id,
+        sender_device_id,
+        RecipientKind::Device,
+        claimant_device_id,
+        key_epoch,
+        sequence,
+        &signing_key,
+    )?;
+    require_empty_success(
+        http.post(format!(
+            "{service_url}/v1/pairings/{}/approve",
+            challenge.pairing_id
+        ))
+        .bearer_auth(&access_token)
+        .header("Idempotency-Key", &challenge.pairing_id)
+        .json(&PairingApproval {
+            version: PAIRING_VERSION,
+            epoch: key_epoch,
+            device_wrap_envelope: URL_SAFE_NO_PAD.encode(envelope),
+        })
+        .send()
+        .await
+        .context("submit device approval")?,
+    )
+    .await
+    .context("submit device approval")?;
+    println!("Approved {}.", safe_display_text(&details.device_name));
+    Ok(())
+}
+
+fn validate_pairing_create_response(
+    created: &PairingCreateResponse,
+    service_url: &str,
+    exchange_public: &[u8; 32],
+    now: u64,
+) -> Result<PairingChallenge> {
+    if created.version != PAIRING_VERSION {
+        bail!("Forge Anywhere returned an unsupported pairing version");
+    }
+    decode_base64_array::<32>(&created.pairing_id, "pairing id")?;
+    decode_base64_array::<32>(&created.pairing_token, "pairing token")?;
+    let challenge = parse_pairing_challenge(&created.challenge, service_url, now)?;
+    if challenge.pairing_id != created.pairing_id
+        || challenge.expires_at_ms != created.expires_at_ms
+        || decode_base64_array::<32>(&challenge.exchange_public_key, "exchange public key")?
+            != *exchange_public
+    {
+        bail!("Forge Anywhere returned a mismatched pairing challenge");
+    }
+    Ok(challenge)
+}
+
+fn parse_pairing_challenge(value: &str, service_url: &str, now: u64) -> Result<PairingChallenge> {
+    let value = value.trim();
+    let encoded = if value.starts_with("forge-anywhere://pair?") {
+        Url::parse(value)
+            .context("pairing deep link is invalid")?
+            .query_pairs()
+            .find_map(|(key, value)| (key == "challenge").then(|| value.into_owned()))
+            .context("pairing deep link has no challenge")?
+    } else {
+        value.to_owned()
+    };
+    let decoded = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .context("pairing challenge is not valid base64url")?;
+    let challenge: PairingChallenge =
+        serde_json::from_slice(&decoded).context("pairing challenge is not valid JSON")?;
+    if challenge.version != PAIRING_VERSION
+        || decode_base64_array::<32>(&challenge.pairing_id, "pairing id").is_err()
+        || decode_base64_array::<32>(&challenge.exchange_public_key, "exchange public key").is_err()
+        || challenge.service_origin != service_origin(service_url)?
+    {
+        bail!("pairing challenge is invalid for this Forge Anywhere service");
+    }
+    let latest = now
+        .checked_add(u64::try_from(PAIRING_LIFETIME.as_millis())?)
+        .context("pairing expiry overflow")?;
+    if challenge.expires_at_ms <= now || challenge.expires_at_ms > latest {
+        bail!("request expired — create a new device approval request");
+    }
+    Ok(challenge)
+}
+
+fn validate_pairing_details(details: &PairingDetails, challenge: &PairingChallenge) -> Result<()> {
+    if details.version != PAIRING_VERSION
+        || details.pairing_id != challenge.pairing_id
+        || details.exchange_public_key != challenge.exchange_public_key
+        || details.expires_at_ms != challenge.expires_at_ms
+        || decode_hex_array::<16>(&details.device_id, "claimant device id").is_err()
+        || decode_base64_array::<32>(&details.signing_public_key, "claimant signing public key")
+            .is_err()
+    {
+        bail!("pairing details do not match the displayed challenge");
+    }
+    Ok(())
+}
+
+fn pairing_safety_code(
+    challenge: &PairingChallenge,
+    signing_public_key: &str,
+    account_id: &[u8; 16],
+) -> Result<String> {
+    let pairing_id = decode_base64_array::<32>(&challenge.pairing_id, "pairing id")?;
+    let exchange_public =
+        decode_base64_array::<32>(&challenge.exchange_public_key, "exchange public key")?;
+    let signing_public = decode_base64_array::<32>(signing_public_key, "signing public key")?;
+    let service = challenge.service_origin.as_bytes();
+    let service_len = u32::try_from(service.len()).context("service origin is too long")?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"forge-anywhere/v1/pairing-safety-code\0");
+    hasher.update(pairing_id);
+    hasher.update(exchange_public);
+    hasher.update(signing_public);
+    hasher.update(challenge.expires_at_ms.to_be_bytes());
+    hasher.update(service_len.to_be_bytes());
+    hasher.update(service);
+    hasher.update(account_id);
+    let digest = hasher.finalize();
+    let value =
+        u32::from_be_bytes(digest[..4].try_into().context("safety-code digest")?) % 1_000_000;
+    Ok(format!("{:03} {:03}", value / 1_000, value % 1_000))
+}
+
+fn service_origin(service_url: &str) -> Result<String> {
+    let url = Url::parse(service_url).context("parse Forge Anywhere service URL")?;
+    Ok(url.origin().ascii_serialization())
+}
+
+fn safe_display_text(value: &str) -> String {
+    let value = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(80)
+        .collect::<String>();
+    if value.trim().is_empty() {
+        "Unnamed device".into()
+    } else {
+        value
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1755,6 +2292,150 @@ fn human_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pairing_challenge(now: u64) -> PairingChallenge {
+        PairingChallenge {
+            version: PAIRING_VERSION,
+            pairing_id: URL_SAFE_NO_PAD.encode([1_u8; 32]),
+            exchange_public_key: URL_SAFE_NO_PAD.encode([2_u8; 32]),
+            expires_at_ms: now + 60_000,
+            service_origin: "https://app.forge.test".into(),
+        }
+    }
+
+    fn encode_pairing_challenge(challenge: &PairingChallenge) -> String {
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(challenge).expect("serialize challenge"))
+    }
+
+    #[test]
+    fn returning_accounts_default_to_device_approval() {
+        assert_eq!(
+            enrollment_path(false, false),
+            EnrollmentPath::DeviceApproval
+        );
+        assert_eq!(enrollment_path(false, true), EnrollmentPath::RecoveryKit);
+        assert_eq!(enrollment_path(true, false), EnrollmentPath::Bootstrap);
+    }
+
+    #[test]
+    fn pairing_challenges_are_service_bound_and_short_lived() {
+        let now = 100_000;
+        let challenge = pairing_challenge(now);
+        let encoded = encode_pairing_challenge(&challenge);
+        let parsed = parse_pairing_challenge(&encoded, "https://app.forge.test/", now)
+            .expect("valid challenge");
+        assert_eq!(parsed.pairing_id, challenge.pairing_id);
+
+        assert!(parse_pairing_challenge(&encoded, "https://other.forge.test", now).is_err());
+
+        let mut expired = challenge.clone();
+        expired.expires_at_ms = now;
+        assert!(parse_pairing_challenge(
+            &encode_pairing_challenge(&expired),
+            "https://app.forge.test",
+            now
+        )
+        .is_err());
+
+        let mut too_long = challenge.clone();
+        too_long.expires_at_ms = now + 10 * 60_000 + 1;
+        assert!(parse_pairing_challenge(
+            &encode_pairing_challenge(&too_long),
+            "https://app.forge.test",
+            now
+        )
+        .is_err());
+
+        let mut malformed = challenge;
+        malformed.pairing_id = "not-an-id".into();
+        assert!(parse_pairing_challenge(
+            &encode_pairing_challenge(&malformed),
+            "https://app.forge.test",
+            now
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pairing_safety_code_is_deterministic_and_account_bound() {
+        let challenge = pairing_challenge(100_000);
+        let signing_public = URL_SAFE_NO_PAD.encode([3_u8; 32]);
+        let code =
+            pairing_safety_code(&challenge, &signing_public, &[4_u8; 16]).expect("safety code");
+        assert_eq!(code, "065 385");
+        assert_eq!(
+            pairing_safety_code(&challenge, &signing_public, &[4_u8; 16])
+                .expect("same safety code"),
+            code
+        );
+        assert_ne!(
+            pairing_safety_code(&challenge, &signing_public, &[5_u8; 16])
+                .expect("other account safety code"),
+            code
+        );
+    }
+
+    #[test]
+    fn approved_pairing_wrap_rejects_mismatched_routing() {
+        let account_id = [0x11_u8; 16];
+        let device_id = [0x22_u8; 16];
+        let approver_device_id = [0x33_u8; 16];
+        let data_key = [0x44_u8; 32];
+        let claimant_exchange_private = [0x55_u8; 32];
+        let claimant_exchange_public = exchange_public_key(&claimant_exchange_private);
+        let approver_exchange_private = [0x66_u8; 32];
+        let approver_exchange_public = exchange_public_key(&approver_exchange_private);
+        let approver_signing_key = SigningKey::from_bytes(&[0x77_u8; 32]);
+        let wrap_key = derive_device_wrap_key(
+            &approver_exchange_private,
+            &claimant_exchange_public,
+            &account_id,
+            4,
+        )
+        .expect("derive approval wrap key");
+        let envelope = key_wrap_envelope(
+            data_key,
+            *wrap_key.as_bytes(),
+            account_id,
+            approver_device_id,
+            RecipientKind::Device,
+            device_id,
+            4,
+            9,
+            &approver_signing_key,
+        )
+        .expect("seal device wrap");
+        let envelope = URL_SAFE_NO_PAD.encode(envelope);
+        let account_id = hex::encode(account_id);
+        let device_id = hex::encode(device_id);
+        let signing_public =
+            URL_SAFE_NO_PAD.encode(approver_signing_key.verifying_key().to_bytes());
+        let exchange_public = URL_SAFE_NO_PAD.encode(approver_exchange_public);
+
+        assert_eq!(
+            open_approved_device_wrap(
+                &envelope,
+                &account_id,
+                &device_id,
+                4,
+                &claimant_exchange_private,
+                &signing_public,
+                &exchange_public,
+            )
+            .expect("open approved wrap"),
+            data_key
+        );
+        assert!(open_approved_device_wrap(
+            &envelope,
+            &account_id,
+            &hex::encode([0x23_u8; 16]),
+            4,
+            &claimant_exchange_private,
+            &signing_public,
+            &exchange_public,
+        )
+        .is_err());
+    }
 
     #[test]
     fn state_is_owner_only_and_logout_preserves_keys() {
