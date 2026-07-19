@@ -29,6 +29,7 @@ import {
   stagePreparedDeviceRevocation,
 } from "./anywhereAccountOperations";
 import {
+  createRecoveryKitV2,
   deriveRecoveryWrapKey,
   deriveSelfDeviceWrapKey,
   generatePendingKeys,
@@ -38,6 +39,7 @@ import {
   type PendingAnywhereKeys,
 } from "./anywhereCrypto";
 import { clearAnywhereHostCache, readAnywhereHostCache, writeAnywhereHostCache } from "./anywhereHostCache";
+import { anywhereEnrollmentStore } from "./anywhereEnrollmentStore";
 import {
   openBrowserAuthUrl,
   reserveBrowserAuthWindow,
@@ -54,10 +56,20 @@ import {
   type AnywhereCurrentDeviceWrap,
 } from "./anywhereEpochRefresh";
 import {
+  challengeFromDetails,
+  createPairing,
+  denyPairing,
+  listPairings,
+  openApprovedPairing,
   pairingDetails,
+  pairingSafetyCode,
   parsePairingChallenge,
+  pollPairing,
   preparePairingApproval,
   submitPairingApproval,
+  type PairingChallenge,
+  type PairingCreateResponse,
+  type PairingDetails,
 } from "./anywherePairing";
 import { acceptReplaySequences } from "./anywhereReplayWindow";
 import {
@@ -86,18 +98,70 @@ const INITIAL_EPOCH = 1;
 
 type PendingLogin = { auth: AnywhereAuthSession; keys: PendingAnywhereKeys };
 type RecoverySetup = PendingLogin & { words: string; entropy: Uint8Array; dataKey: Uint8Array };
+type PendingClaimantPairing = {
+  login: PendingLogin;
+  created: PairingCreateResponse;
+  challenge: PairingChallenge;
+  safetyCode: string;
+};
+
+interface EnrollmentSnapshot {
+  version: 1;
+  kind: "authorizing" | "awaiting_approval" | "new_recovery" | "existing_recovery";
+  auth?: AnywhereAuthSession;
+  keys: { signingPrivate: string; exchangePrivate: string; signingPublic: string; exchangePublic: string };
+  flow?: AnywhereDeviceFlow;
+  flowExpiresAtMs?: number;
+  created?: PairingCreateResponse;
+  challenge?: PairingChallenge;
+  safetyCode?: string;
+  words?: string;
+  entropy?: string;
+  dataKey?: string;
+}
+
+export interface AnywherePendingApproval {
+  id: string;
+  deviceId: string;
+  deviceName: string;
+  expiresAtMs: number;
+  safetyCode: string;
+}
+
+export interface AnywhereClaimantApproval {
+  expiresAtMs: number;
+  safetyCode: string;
+  deviceName: string;
+  githubLogin: string;
+}
+
+export interface AnywhereLocalHostApproval {
+  name: string;
+  expiresAtMs: number;
+  safetyCode: string;
+}
+
+type PendingLocalHost = {
+  name: string;
+  keys: PendingAnywhereKeys;
+  created: PairingCreateResponse;
+  challenge: PairingChallenge;
+  details: PairingDetails;
+  safetyCode: string;
+};
 
 export type AnywherePhase =
   | "loading"
   | "signed_out"
   | "starting"
   | "authorizing"
+  | "awaiting_approval"
   | "new_recovery"
   | "existing_recovery"
   | "ready"
   | "error";
 
-interface AnywhereContextValue {
+export interface AnywhereContextValue {
   phase: AnywherePhase;
   credentials: StoredAnywhereCredentials | null;
   account: AnywhereAccountStatus | null;
@@ -106,7 +170,12 @@ interface AnywhereContextValue {
   devices: AnywhereDevice[];
   flow: AnywhereDeviceFlow | null;
   recoveryWords: string | null;
+  recoveryKit: string | null;
   recoverySample: readonly number[];
+  claimantApproval: AnywhereClaimantApproval | null;
+  localHostApproval: AnywhereLocalHostApproval | null;
+  pendingApprovals: AnywherePendingApproval[];
+  approvalError: string | null;
   error: string | null;
   pushStatus: AnywherePushStatus;
   remoteJobs: PendingRemoteJob[];
@@ -116,12 +185,21 @@ interface AnywhereContextValue {
   openLoginPage(): Promise<void>;
   confirmNewRecovery(answers: Record<number, string>): Promise<void>;
   recoverExisting(words: string): Promise<void>;
+  useRecoveryInstead(): void;
+  restartSetup(): void;
   refresh(): Promise<void>;
   checkout(period?: AnywhereBillingPeriod): Promise<void>;
   openBillingPortal(): Promise<void>;
   revokeDevice(deviceId: string, recoveryWords: string): Promise<void>;
   revokeHost(hostId: string): Promise<void>;
+  renameHost(hostId: string, name: string): Promise<void>;
   approvePairing(challenge: string): Promise<void>;
+  approvePendingDevice(pairingId: string): Promise<void>;
+  denyPendingDevice(pairingId: string): Promise<void>;
+  refreshPendingApprovals(): Promise<void>;
+  prepareLocalHost(name: string): Promise<"approval" | "activated">;
+  confirmLocalHost(): Promise<void>;
+  cancelLocalHost(): void;
   selectHost(hostId: string): void;
   queueRemoteJob(input: Omit<CreateSessionJob, "hostDeviceId">): Promise<PendingRemoteJob>;
   refreshRemoteJobs(): Promise<void>;
@@ -133,6 +211,7 @@ interface AnywhereContextValue {
 const AnywhereContext = createContext<AnywhereContextValue | null>(null);
 const credentialStore = anywhereCredentialStore();
 const jobStore = anywhereJobStore();
+const enrollmentStore = anywhereEnrollmentStore();
 
 export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const auth = useAuth();
@@ -146,8 +225,13 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const [hosts, setHosts] = useState<AnywhereHost[]>([]);
   const [devices, setDevices] = useState<AnywhereDevice[]>([]);
   const [flow, setFlow] = useState<AnywhereDeviceFlow | null>(null);
+  const [flowExpiresAtMs, setFlowExpiresAtMs] = useState<number | null>(null);
   const [pending, setPending] = useState<PendingLogin | null>(null);
   const [recoverySetup, setRecoverySetup] = useState<RecoverySetup | null>(null);
+  const [claimantPairing, setClaimantPairing] = useState<PendingClaimantPairing | null>(null);
+  const [pendingApprovalDetails, setPendingApprovalDetails] = useState<PairingDetails[]>([]);
+  const [pendingLocalHost, setPendingLocalHost] = useState<PendingLocalHost | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pushStatus, setPushStatus] = useState<AnywherePushStatus>("unsubscribed");
   const [remoteJobs, setRemoteJobs] = useState<PendingRemoteJob[]>([]);
@@ -361,9 +445,41 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       if (cancelled) return;
       credentialsRef.current = loaded;
       setCredentials(loaded);
-      if (loaded) setHosts(cachedHosts);
-      setPhase(loaded ? "ready" : "signed_out");
-      if (loaded) void refresh();
+      if (loaded) {
+        setHosts(cachedHosts);
+        setPhase("ready");
+        void refresh();
+        return;
+      }
+      const serialized = await enrollmentStore.load();
+      if (cancelled) return;
+      if (!serialized) {
+        setPhase("signed_out");
+        return;
+      }
+      const snapshot = parseEnrollmentSnapshot(serialized);
+      const keys = restorePendingKeys(snapshot.keys);
+      if (snapshot.kind === "authorizing" && snapshot.flow && snapshot.flowExpiresAtMs && snapshot.flowExpiresAtMs > Date.now()) {
+        setPending({ auth: null as never, keys });
+        setFlow(snapshot.flow);
+        setFlowExpiresAtMs(snapshot.flowExpiresAtMs);
+        setPhase("authorizing");
+        return;
+      }
+      if (!snapshot.auth) throw new Error("protected Forge Anywhere enrollment session is incomplete");
+      const login = { auth: snapshot.auth, keys };
+      setPending(login);
+      if (snapshot.kind === "awaiting_approval" && snapshot.created && snapshot.challenge && snapshot.safetyCode) {
+        setClaimantPairing({ login, created: snapshot.created, challenge: snapshot.challenge, safetyCode: snapshot.safetyCode });
+        setPhase("awaiting_approval");
+      } else if (snapshot.kind === "new_recovery" && snapshot.words && snapshot.entropy && snapshot.dataKey) {
+        setRecoverySetup({ ...login, words: snapshot.words, entropy: bytesFromHex(snapshot.entropy), dataKey: bytesFromHex(snapshot.dataKey) });
+        setPhase("new_recovery");
+      } else if (snapshot.kind === "existing_recovery") {
+        setPhase("existing_recovery");
+      } else {
+        throw new Error("protected Forge Anywhere enrollment state is incomplete");
+      }
     }).catch((reason) => {
       if (!cancelled) { setError(message(reason)); setPhase("error"); }
     });
@@ -442,13 +558,16 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       const started = await anywhereRequest<AnywhereDeviceFlow>(SERVICE_URL, "/v1/auth/github/start", {
         method: "POST",
         body: JSON.stringify({
-          device_name: Platform.OS === "web" ? "Forge web" : `Forge ${Platform.OS}`,
+          device_name: deviceName(),
           signing_public_key: base64Url(keys.signingPublicKey),
           exchange_public_key: base64Url(keys.exchangePublicKey),
         }),
       });
       setPending({ auth: null as never, keys });
       setFlow(started);
+      const expiresAtMs = Date.now() + started.expires_in * 1000;
+      setFlowExpiresAtMs(expiresAtMs);
+      await enrollmentStore.save(JSON.stringify(snapshotAuthorizing(keys, started, expiresAtMs)));
       setPhase("authorizing");
       if (Platform.OS === "web") {
         reservedWindow?.navigate(started.verification_uri);
@@ -477,7 +596,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (phase !== "authorizing" || !flow || !pending) return;
     let cancelled = false;
-    const deadline = Date.now() + flow.expires_in * 1000;
+    const deadline = flowExpiresAtMs ?? Date.now() + flow.expires_in * 1000;
     const timer = setInterval(() => {
       if (cancelled) return;
       if (Date.now() >= deadline) {
@@ -490,7 +609,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       }
       void anywhereRequest<AnywhereAuthSession | undefined>(SERVICE_URL, "/v1/auth/device/poll", {
         method: "POST", body: JSON.stringify({ device_code: flow.device_code }),
-      }).then((session) => {
+      }).then(async (session) => {
         if (cancelled || !session) return;
         clearInterval(timer);
         browserAuthWindow.current?.close();
@@ -499,10 +618,28 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         setPending(nextPending);
         if (session.new_account) {
           const recovery = generateRecoveryPhrase();
-          setRecoverySetup({ ...nextPending, ...recovery, dataKey: crypto.getRandomValues(new Uint8Array(32)) });
+          const setup = { ...nextPending, ...recovery, dataKey: crypto.getRandomValues(new Uint8Array(32)) };
+          await enrollmentStore.save(JSON.stringify(snapshotRecovery(setup)));
+          setRecoverySetup(setup);
           setPhase("new_recovery");
         } else {
-          setPhase("existing_recovery");
+          const request = {
+            version: 1 as const,
+            device_name: deviceName(),
+            signing_public_key: base64Url(pending.keys.signingPublicKey),
+            exchange_public_key: base64Url(pending.keys.exchangePublicKey),
+          };
+          const created = await createPairing(SERVICE_URL, request);
+          const challenge = parsePairingChallenge(created.challenge, SERVICE_URL);
+          const pairing = {
+            login: nextPending,
+            created,
+            challenge,
+            safetyCode: pairingSafetyCode(challenge, request.signing_public_key, session.account_id),
+          };
+          await enrollmentStore.save(JSON.stringify(snapshotPairing(pairing)));
+          setClaimantPairing(pairing);
+          setPhase("awaiting_approval");
         }
       }).catch((reason) => {
         if (reason instanceof AnywhereApiError && reason.status === 202) return;
@@ -516,13 +653,14 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       });
     }, Math.max(1, flow.interval) * 1000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, [flow, pending, phase]);
+  }, [flow, flowExpiresAtMs, pending, phase]);
 
   const finishEnrollment = useCallback(async (
     login: PendingLogin,
     dataKey: Uint8Array,
     epoch: number,
     nextSequence: bigint,
+    recoveryKitVerified = false,
   ) => {
     const next: StoredAnywhereCredentials = {
       version: 1,
@@ -541,14 +679,72 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       nextSequence: nextSequence.toString(),
       acceptedSequences: {},
       signingPublicKeys: { [login.auth.device_id]: bytesToHex(login.keys.signingPublicKey) },
+      recoveryKitVerified,
     };
     await persistCredentials(next);
+    await enrollmentStore.clear();
     setPending(null);
     setRecoverySetup(null);
+    setClaimantPairing(null);
     setFlow(null);
+    setFlowExpiresAtMs(null);
     setPhase("ready");
     await refresh();
   }, [persistCredentials, refresh]);
+
+  useEffect(() => {
+    if (phase !== "awaiting_approval" || !claimantPairing) return;
+    let cancelled = false;
+    let checking = false;
+    const check = async () => {
+      if (cancelled || checking) return;
+      if (Date.now() >= claimantPairing.created.expires_at_ms) {
+        setError("Device approval request expired. Start again or use your Recovery Kit.");
+        setPhase("error");
+        return;
+      }
+      checking = true;
+      try {
+        const result = await pollPairing(
+          SERVICE_URL,
+          claimantPairing.created.pairing_id,
+          claimantPairing.created.pairing_token,
+        );
+        if (cancelled || result.status === "pending") return;
+        if (result.status === "denied") {
+          setError("Approval denied. Check the device name before starting again.");
+          setPhase("error");
+          return;
+        }
+        if (result.account_id !== claimantPairing.login.auth.account_id) {
+          throw new Error("Approval came from a different Forge Anywhere account. Nothing was installed.");
+        }
+        const opened = openApprovedPairing(result, claimantPairing.login.keys.exchangePrivateKey);
+        const approvedLogin: PendingLogin = {
+          keys: claimantPairing.login.keys,
+          auth: {
+            ...claimantPairing.login.auth,
+            account_id: result.account_id,
+            device_id: result.device_id,
+            access_token: result.access_token,
+            refresh_token: result.refresh_token,
+            access_expires_at_ms: result.access_expires_at_ms,
+          },
+        };
+        await finishEnrollment(approvedLogin, opened.accountDataKey, opened.epoch, 0n);
+      } catch (reason) {
+        if (!cancelled) {
+          setError(message(reason));
+          setPhase("error");
+        }
+      } finally {
+        checking = false;
+      }
+    };
+    void check();
+    const timer = setInterval(() => void check(), 2_000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [claimantPairing, finishEnrollment, phase]);
 
   const confirmNewRecovery = useCallback(async (answers: Record<number, string>) => {
     if (!recoverySetup || enrollmentInFlight.current) return;
@@ -584,7 +780,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         headers: { "Idempotency-Key": idempotencyKey() },
         body: JSON.stringify({ epoch: INITIAL_EPOCH, device_wrap_envelope: base64Url(deviceWrap), recovery_wrap_envelope: base64Url(recoveryWrap) }),
       }, auth.access_token);
-      await finishEnrollment(latestSetup, latestSetup.dataKey, INITIAL_EPOCH, 2n);
+      await finishEnrollment(latestSetup, latestSetup.dataKey, INITIAL_EPOCH, 2n, true);
     } catch (reason) {
       setError(message(reason));
     } finally {
@@ -610,7 +806,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       );
       const latestPending = auth === pending.auth ? pending : { ...pending, auth };
       if (latestPending !== pending) setPending(latestPending);
-      const recovered = openRecoveryWrap(auth.recovery_wrap_envelope!, auth.recovery_wrap_signing_public_key!, words, auth.account_id);
+      const recovered = openRecoveryWrap(auth.recovery_wrap_envelope!, auth.recovery_wrap_signing_public_key!, words, auth.account_id, SERVICE_URL);
       const accountId = bytesFromHex(auth.account_id);
       const deviceId = bytesFromHex(auth.device_id);
       const deviceKey = deriveSelfDeviceWrapKey(pending.keys.exchangePrivateKey, pending.keys.exchangePublicKey, accountId, recovered.epoch);
@@ -620,13 +816,33 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         headers: { "Idempotency-Key": idempotencyKey() },
         body: JSON.stringify({ epoch: recovered.epoch, device_wrap_envelope: base64Url(wrap) }),
       }, auth.access_token);
-      await finishEnrollment(latestPending, recovered.dataKey, recovered.epoch, 1n);
+      await finishEnrollment(latestPending, recovered.dataKey, recovered.epoch, 1n, true);
     } catch (reason) {
       setError(message(reason));
     } finally {
       enrollmentInFlight.current = false;
     }
   }, [finishEnrollment, pending]);
+
+  const useRecoveryInstead = useCallback(() => {
+    if (!pending?.auth || pending.auth.new_account) return;
+    setError(null);
+    void enrollmentStore.save(JSON.stringify(snapshotExistingRecovery(pending)));
+    setPhase("existing_recovery");
+  }, [pending]);
+
+  const restartSetup = useCallback(() => {
+    browserAuthWindow.current?.close();
+    browserAuthWindow.current = null;
+    setFlow(null);
+    setFlowExpiresAtMs(null);
+    setPending(null);
+    setRecoverySetup(null);
+    setClaimantPairing(null);
+    setError(null);
+    void enrollmentStore.clear();
+    setPhase(credentialsRef.current ? "ready" : "signed_out");
+  }, []);
 
   const selectHost = useCallback((hostId: string) => setActive(`anywhere:${hostId}`), [setActive]);
 
@@ -689,6 +905,27 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     }
   }, [accessToken, refresh]);
 
+  const renameHost = useCallback(async (hostId: string, name: string) => {
+    const normalized = name.trim();
+    if (!normalized) throw new Error("Enter a host name");
+    if (normalized.length > 80) throw new Error("Host names can contain at most 80 characters");
+    try {
+      setError(null);
+      const token = await accessToken();
+      const current = credentialsRef.current;
+      if (!current) throw new Error("Forge Anywhere is not signed in");
+      await anywhereRequest(current.serviceUrl ?? SERVICE_URL, `/v1/hosts/${hostId}`, {
+        method: "PATCH",
+        headers: { "Idempotency-Key": idempotencyKey() },
+        body: JSON.stringify({ name: normalized }),
+      }, token);
+      await refresh();
+    } catch (reason) {
+      setError(message(reason));
+      throw reason;
+    }
+  }, [accessToken, refresh]);
+
   const approvePairing = useCallback(async (encodedChallenge: string) => {
     const current = credentialsRef.current;
     if (!current) throw new Error("Forge Anywhere is not signed in");
@@ -711,6 +948,152 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     await refresh();
   }, [accessToken, persistCredentials, refresh]);
 
+  const refreshPendingApprovals = useCallback(async () => {
+    if (!credentialsRef.current) {
+      setPendingApprovalDetails([]);
+      return;
+    }
+    try {
+      const token = await accessToken();
+      const serviceUrl = credentialsRef.current?.serviceUrl ?? SERVICE_URL;
+      setPendingApprovalDetails(await listPairings(serviceUrl, token));
+      setApprovalError(null);
+    } catch (reason) {
+      setApprovalError(message(reason));
+    }
+  }, [accessToken]);
+
+  useEffect(() => {
+    if (phase !== "ready" || !credentials?.deviceIdHex) {
+      setPendingApprovalDetails([]);
+      return;
+    }
+    void refreshPendingApprovals();
+    const timer = setInterval(() => void refreshPendingApprovals(), 15_000);
+    return () => clearInterval(timer);
+  }, [credentials?.deviceIdHex, phase, refreshPendingApprovals]);
+
+  const approvePendingDevice = useCallback(async (pairingId: string) => {
+    const details = pendingApprovalDetails.find((candidate) => candidate.pairing_id === pairingId);
+    const current = credentialsRef.current;
+    if (!details || !current) throw new Error("Device approval request is no longer pending");
+    const serviceUrl = current.serviceUrl ?? SERVICE_URL;
+    const challenge = challengeFromDetails(details, serviceUrl);
+    const token = await accessToken();
+    let approval: ReturnType<typeof preparePairingApproval> | null = null;
+    mutationQueue.current = mutationQueue.current.catch(() => undefined).then(async () => {
+      const latest = credentialsRef.current;
+      if (!latest) throw new Error("Forge Anywhere is not signed in");
+      const sequence = BigInt(latest.nextSequence);
+      approval = preparePairingApproval(latest, challenge, details, sequence);
+      await persistCredentials({ ...latest, nextSequence: (sequence + 1n).toString() });
+    });
+    await mutationQueue.current;
+    if (!approval) throw new Error("Device approval could not be prepared");
+    await submitPairingApproval(serviceUrl, token, pairingId, approval);
+    setPendingApprovalDetails((currentDetails) => currentDetails.filter((candidate) => candidate.pairing_id !== pairingId));
+    await refresh();
+  }, [accessToken, pendingApprovalDetails, persistCredentials, refresh]);
+
+  const denyPendingDevice = useCallback(async (pairingId: string) => {
+    const current = credentialsRef.current;
+    if (!current) throw new Error("Forge Anywhere is not signed in");
+    const token = await accessToken();
+    await denyPairing(current.serviceUrl ?? SERVICE_URL, token, pairingId);
+    setPendingApprovalDetails((currentDetails) => currentDetails.filter((candidate) => candidate.pairing_id !== pairingId));
+  }, [accessToken]);
+
+  const prepareLocalHost = useCallback(async (name: string): Promise<"approval" | "activated"> => {
+    const normalized = name.trim();
+    if (!normalized) throw new Error("Enter a name for this computer");
+    if (normalized.length > 80) throw new Error("Host names can contain at most 80 characters");
+    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+      throw new Error("A Forge host can only be activated from Forge Desktop");
+    }
+    const { invoke } = await import("@tauri-apps/api/core");
+    if (await invoke<boolean>("forge_anywhere_host_enrolled")) {
+      await invoke("activate_forge_anywhere_host", { name: normalized });
+      await refresh();
+      return "activated";
+    }
+    const current = credentialsRef.current;
+    if (!current) throw new Error("Forge Anywhere is not signed in");
+    const keys = generatePendingKeys();
+    const request = {
+      version: 1 as const,
+      device_name: normalized,
+      signing_public_key: base64Url(keys.signingPublicKey),
+      exchange_public_key: base64Url(keys.exchangePublicKey),
+    };
+    const created = await createPairing(current.serviceUrl ?? SERVICE_URL, request);
+    const challenge = parsePairingChallenge(created.challenge, current.serviceUrl ?? SERVICE_URL);
+    const token = await accessToken();
+    const details = await pairingDetails(current.serviceUrl ?? SERVICE_URL, token, challenge);
+    setPendingLocalHost({
+      name: normalized,
+      keys,
+      created,
+      challenge,
+      details,
+      safetyCode: pairingSafetyCode(challenge, request.signing_public_key, current.accountIdHex),
+    });
+    return "approval";
+  }, [accessToken, refresh]);
+
+  const confirmLocalHost = useCallback(async () => {
+    const host = pendingLocalHost;
+    const current = credentialsRef.current;
+    if (!host || !current) throw new Error("Local host approval expired. Start again.");
+    if (Date.now() >= host.created.expires_at_ms) throw new Error("Local host approval expired. Start again.");
+    const serviceUrl = current.serviceUrl ?? SERVICE_URL;
+    const token = await accessToken();
+    let approval: ReturnType<typeof preparePairingApproval> | null = null;
+    mutationQueue.current = mutationQueue.current.catch(() => undefined).then(async () => {
+      const latest = credentialsRef.current;
+      if (!latest) throw new Error("Forge Anywhere is not signed in");
+      const sequence = BigInt(latest.nextSequence);
+      approval = preparePairingApproval(latest, host.challenge, host.details, sequence);
+      await persistCredentials({ ...latest, nextSequence: (sequence + 1n).toString() });
+    });
+    await mutationQueue.current;
+    if (!approval) throw new Error("Local host approval could not be prepared");
+    await submitPairingApproval(serviceUrl, token, host.created.pairing_id, approval);
+
+    let approved: Extract<Awaited<ReturnType<typeof pollPairing>>, { status: "approved" }> | null = null;
+    for (let attempt = 0; attempt < 20 && !approved; attempt += 1) {
+      const result = await pollPairing(serviceUrl, host.created.pairing_id, host.created.pairing_token);
+      if (result.status === "denied") throw new Error("Local host approval was denied");
+      if (result.status === "approved") approved = result;
+      else await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (!approved) throw new Error("Local host approval is still pending. Try again.");
+    if (approved.account_id !== current.accountIdHex) throw new Error("Local host approval came from another account");
+    const opened = openApprovedPairing(approved, host.keys.exchangePrivateKey);
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("install_forge_anywhere_host", {
+      name: host.name,
+      state: {
+        version: 1,
+        account_id: approved.account_id,
+        github_login: current.githubLogin ?? null,
+        device_id: approved.device_id,
+        signing_private_key: base64Url(host.keys.signingPrivateKey),
+        exchange_private_key: base64Url(host.keys.exchangePrivateKey),
+        account_data_key: base64Url(opened.accountDataKey),
+        key_epoch: opened.epoch,
+        data_key_epochs: { [String(opened.epoch)]: base64Url(opened.accountDataKey) },
+        access_token: approved.access_token,
+        refresh_token: approved.refresh_token,
+        access_expires_at_ms: approved.access_expires_at_ms,
+        next_sequence: 0,
+      },
+    });
+    setPendingLocalHost(null);
+    await refresh();
+  }, [accessToken, pendingLocalHost, persistCredentials, refresh]);
+
+  const cancelLocalHost = useCallback(() => setPendingLocalHost(null), []);
+
   const revokeDevice = useCallback(async (deviceId: string, recoveryWords: string) => {
     try {
       setError(null);
@@ -728,7 +1111,15 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       mutationQueue.current = mutationQueue.current.catch(() => undefined).then(async () => {
         const latest = credentialsRef.current;
         if (!latest) throw new Error("Forge Anywhere is not signed in");
-        const prepared = prepareDeviceRevocation(latest, devices, deviceId, recoveryWords, recovery);
+        const prepared = prepareDeviceRevocation(
+          latest,
+          devices,
+          deviceId,
+          recoveryWords,
+          recovery,
+          undefined,
+          latest.serviceUrl ?? SERVICE_URL,
+        );
         const staged = await stagePreparedDeviceRevocation(
           latest, prepared, deviceId, idempotencyKey(), persistCredentials,
         );
@@ -781,12 +1172,13 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       } catch { /* Local logout must still complete while offline. */ }
     }
     await credentialStore.clear();
+    await enrollmentStore.clear();
     await clearAnywherePushState().catch(() => {
       // The service-side logout already revoked this device's subscriptions.
     });
     credentialsRef.current = null;
     setPushStatus("unsubscribed");
-    setCredentials(null); setAccount(null); setSubscription(null); setHosts([]); setDevices([]); setRemoteJobs([]); setFlow(null); setPending(null); setRecoverySetup(null); setError(null);
+    setCredentials(null); setAccount(null); setSubscription(null); setHosts([]); setDevices([]); setRemoteJobs([]); setFlow(null); setFlowExpiresAtMs(null); setPending(null); setRecoverySetup(null); setClaimantPairing(null); setPendingApprovalDetails([]); setPendingLocalHost(null); setApprovalError(null); setError(null);
     if (current) await clearAnywhereHostCache(current.accountIdHex).catch(() => {
       // Protected credentials are already cleared; stale metadata can be overwritten next login.
     });
@@ -797,9 +1189,33 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const value: AnywhereContextValue = {
     phase, credentials, account, subscription, hosts, devices, flow,
     recoveryWords: recoverySetup?.words ?? null,
-    recoverySample: [3, 11, 20], error, pushStatus, remoteJobs,
-    accessToken, startLogin, openLoginPage, confirmNewRecovery, recoverExisting, refresh, checkout, openBillingPortal,
-    revokeDevice, revokeHost, selectHost, approvePairing, queueRemoteJob, refreshRemoteJobs,
+    recoveryKit: recoverySetup
+      ? createRecoveryKitV2(recoverySetup.words, SERVICE_URL, recoverySetup.auth.account_id)
+      : null,
+    recoverySample: [2, 6, 8],
+    claimantApproval: claimantPairing ? {
+      expiresAtMs: claimantPairing.created.expires_at_ms,
+      safetyCode: claimantPairing.safetyCode,
+      deviceName: deviceName(),
+      githubLogin: claimantPairing.login.auth.github_login,
+    } : null,
+    localHostApproval: pendingLocalHost ? {
+      name: pendingLocalHost.name,
+      expiresAtMs: pendingLocalHost.created.expires_at_ms,
+      safetyCode: pendingLocalHost.safetyCode,
+    } : null,
+    pendingApprovals: pendingApprovalDetails.map((details) => ({
+      id: details.pairing_id,
+      deviceId: details.device_id,
+      deviceName: safeDeviceName(details.device_name),
+      expiresAtMs: details.expires_at_ms,
+      safetyCode: credentials
+        ? pairingSafetyCode(challengeFromDetails(details, credentials.serviceUrl ?? SERVICE_URL), details.signing_public_key, credentials.accountIdHex)
+        : "",
+    })),
+    approvalError, error, pushStatus, remoteJobs,
+    accessToken, startLogin, openLoginPage, confirmNewRecovery, recoverExisting, useRecoveryInstead, restartSetup, refresh, checkout, openBillingPortal,
+    revokeDevice, revokeHost, renameHost, selectHost, approvePairing, approvePendingDevice, denyPendingDevice, refreshPendingApprovals, prepareLocalHost, confirmLocalHost, cancelLocalHost, queueRemoteJob, refreshRemoteJobs,
     enablePush, disablePush, logout,
   };
   const consumersReady = anywhereConsumersReady(phase, runtimeId, registeredRuntimeId);
@@ -814,6 +1230,91 @@ export function useAnywhere(): AnywhereContextValue {
 
 function message(reason: unknown): string {
   return reason instanceof Error ? reason.message : "Forge Anywhere could not complete the request";
+}
+
+function deviceName(): string {
+  if (Platform.OS === "web") return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
+    ? "Forge Desktop"
+    : "Forge Web";
+  return Platform.OS === "ios" ? "Forge on iPhone" : "Forge on Android";
+}
+
+function safeDeviceName(value: string): string {
+  const sanitized = Array.from(value).filter((character) => !/[\u0000-\u001f\u007f]/.test(character)).join("").trim().slice(0, 80);
+  return sanitized || "Unnamed device";
+}
+
+function snapshotKeys(keys: PendingAnywhereKeys): EnrollmentSnapshot["keys"] {
+  return {
+    signingPrivate: bytesToHex(keys.signingPrivateKey),
+    exchangePrivate: bytesToHex(keys.exchangePrivateKey),
+    signingPublic: bytesToHex(keys.signingPublicKey),
+    exchangePublic: bytesToHex(keys.exchangePublicKey),
+  };
+}
+
+function restorePendingKeys(keys: EnrollmentSnapshot["keys"]): PendingAnywhereKeys {
+  const restored = {
+    signingPrivateKey: bytesFromHex(keys.signingPrivate),
+    exchangePrivateKey: bytesFromHex(keys.exchangePrivate),
+    signingPublicKey: bytesFromHex(keys.signingPublic),
+    exchangePublicKey: bytesFromHex(keys.exchangePublic),
+  };
+  if (Object.values(restored).some((key) => key.length !== 32)) {
+    throw new Error("protected Forge Anywhere enrollment keys are invalid");
+  }
+  return restored;
+}
+
+function snapshotPairing(pairing: PendingClaimantPairing): EnrollmentSnapshot {
+  return {
+    version: 1,
+    kind: "awaiting_approval",
+    auth: pairing.login.auth,
+    keys: snapshotKeys(pairing.login.keys),
+    created: pairing.created,
+    challenge: pairing.challenge,
+    safetyCode: pairing.safetyCode,
+  };
+}
+
+function snapshotAuthorizing(
+  keys: PendingAnywhereKeys,
+  flow: AnywhereDeviceFlow,
+  flowExpiresAtMs: number,
+): EnrollmentSnapshot {
+  return { version: 1, kind: "authorizing", keys: snapshotKeys(keys), flow, flowExpiresAtMs };
+}
+
+function snapshotRecovery(setup: RecoverySetup): EnrollmentSnapshot {
+  return {
+    version: 1,
+    kind: "new_recovery",
+    auth: setup.auth,
+    keys: snapshotKeys(setup.keys),
+    words: setup.words,
+    entropy: bytesToHex(setup.entropy),
+    dataKey: bytesToHex(setup.dataKey),
+  };
+}
+
+function snapshotExistingRecovery(login: PendingLogin): EnrollmentSnapshot {
+  return { version: 1, kind: "existing_recovery", auth: login.auth, keys: snapshotKeys(login.keys) };
+}
+
+function parseEnrollmentSnapshot(value: string): EnrollmentSnapshot {
+  const parsed = JSON.parse(value) as Partial<EnrollmentSnapshot>;
+  if (parsed.version !== 1
+    || !["authorizing", "awaiting_approval", "new_recovery", "existing_recovery"].includes(parsed.kind ?? "")
+    || (parsed.kind !== "authorizing" && !parsed.auth)
+    || !parsed.keys
+    || typeof parsed.keys.signingPrivate !== "string"
+    || typeof parsed.keys.exchangePrivate !== "string"
+    || typeof parsed.keys.signingPublic !== "string"
+    || typeof parsed.keys.exchangePublic !== "string") {
+    throw new Error("protected Forge Anywhere enrollment state is invalid");
+  }
+  return parsed as EnrollmentSnapshot;
 }
 
 async function deviceRevocationCommitted(

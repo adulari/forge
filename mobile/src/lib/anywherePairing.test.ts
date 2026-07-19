@@ -2,7 +2,7 @@ import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { expect, it } from "vitest";
 import { base64Url, fromBase64Url } from "./anywhereApi";
 import { deriveDeviceWrapKey } from "./anywhereCrypto";
-import { openApprovedPairing, parsePairingChallenge, pairingCapability, preparePairingApproval } from "./anywherePairing";
+import { openApprovedPairing, parsePairingChallenge, pairingCapability, pairingSafetyCode, preparePairingApproval } from "./anywherePairing";
 import type { StoredAnywhereCredentials } from "./transport";
 import { bytesToHex, openEnvelope } from "./transport/anywhereEnvelope";
 
@@ -15,6 +15,17 @@ it("rejects expired and overlong QR challenges", () => {
   expect(() => parsePairingChallenge(challenge(701_000), "https://app.example", 100_000)).toThrow("expired");
 });
 it("gates services without a pairing API explicitly", async () => expect(await pairingCapability("https://app.example", "token", async () => new Response(null, { status: 404 }))).toEqual({ supported: false, message: expect.stringContaining("not enabled") }));
+
+it("matches the CLI transcript-derived safety code", () => {
+  expect(pairingSafetyCode({
+    version: 1,
+    pairing_id: base64Url(new Uint8Array(32).fill(1)),
+    exchange_public_key: base64Url(new Uint8Array(32).fill(2)),
+    expires_at_ms: 160_000,
+    service_origin: "https://app.forge.test",
+  }, base64Url(new Uint8Array(32).fill(3)), bytesToHex(new Uint8Array(16).fill(4))))
+    .toBe("065 385");
+});
 
 it("wraps the current account key to a supported QR pairing challenge", () => {
   const accountId = new Uint8Array(16).fill(0x11);

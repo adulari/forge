@@ -1548,6 +1548,25 @@ async fn status() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn tui_status_summary() -> Result<String> {
+    let state = StateStore::platform()?.load()?;
+    let config = forge_config::load()?;
+    let account = state
+        .github_login
+        .as_deref()
+        .map(|login| format!("signed in as {login}"))
+        .unwrap_or_else(|| "not enrolled".to_string());
+    Ok(format!(
+        "Forge Anywhere: {account} · connector {} · sync {}",
+        if config.anywhere.enabled {
+            "active"
+        } else {
+            "inactive"
+        },
+        if config.anywhere.sync { "on" } else { "off" },
+    ))
+}
+
 async fn doctor() -> Result<()> {
     println!("Forge Anywhere doctor");
     println!("  binary: Forge {}", env!("CARGO_PKG_VERSION"));

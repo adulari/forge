@@ -1,4 +1,6 @@
-import { anywhereRequest, base64Url, fromBase64Url } from "./anywhereApi";
+import { sha256 } from "@noble/hashes/sha2.js";
+
+import { AnywhereApiError, anywhereRequest, base64Url, fromBase64Url } from "./anywhereApi";
 import { deriveDeviceWrapKey, makeKeyWrap } from "./anywhereCrypto";
 import type { StoredAnywhereCredentials } from "./transport";
 import { bytesFromHex, bytesToHex, decodeEnvelope, openEnvelope } from "./transport/anywhereEnvelope";
@@ -6,11 +8,13 @@ import { bytesFromHex, bytesToHex, decodeEnvelope, openEnvelope } from "./transp
 export interface PairingChallenge { version: 1; pairing_id: string; exchange_public_key: string; expires_at_ms: number; service_origin: string }
 export interface PairingCapability { supported: boolean; message: string }
 export interface PairingDetails { version: 1; pairing_id: string; device_id: string; device_name: string; signing_public_key: string; exchange_public_key: string; expires_at_ms: number }
+export interface PairingInbox { version: 1; pairings: PairingDetails[] }
 export interface PairingApproval { version: 1; epoch: number; device_wrap_envelope: string }
 export interface PairingCreateRequest { version: 1; device_name: string; signing_public_key: string; exchange_public_key: string }
 export interface PairingCreateResponse { version: 1; pairing_id: string; pairing_token: string; expires_at_ms: number; challenge: string }
 export type PairingPollResponse =
   | { version: 1; status: "pending"; expires_at_ms: number }
+  | { version: 1; status: "denied" }
   | { version: 1; status: "approved"; account_id: string; device_id: string; access_token: string; refresh_token: string; access_expires_at_ms: number; epoch: number; device_wrap_envelope: string; signing_public_key: string; exchange_public_key: string };
 
 export function parsePairingChallenge(value: string, serviceUrl: string, now = Date.now()): PairingChallenge {
@@ -49,7 +53,12 @@ export async function createPairing(serviceUrl: string, request: PairingCreateRe
     || !Number.isSafeInteger(created.expires_at_ms)) {
     throw new Error("Forge Anywhere returned an invalid pairing ticket");
   }
-  parsePairingChallenge(created.challenge, serviceUrl);
+  const challenge = parsePairingChallenge(created.challenge, serviceUrl);
+  if (challenge.pairing_id !== created.pairing_id
+    || challenge.expires_at_ms !== created.expires_at_ms
+    || challenge.exchange_public_key !== request.exchange_public_key) {
+    throw new Error("Forge Anywhere returned a mismatched pairing ticket");
+  }
   return created;
 }
 
@@ -59,12 +68,78 @@ export async function pollPairing(serviceUrl: string, pairingId: string, pairing
     headers: { authorization: `Bearer ${pairingToken}`, accept: "application/json" },
     cache: "no-store",
   });
-  if (!response.ok) throw new Error(`Pairing approval poll failed (${response.status})`);
+  if (!response.ok) {
+    if (response.status === 404 || response.status === 410) throw new Error("Device approval request expired");
+    throw new Error(`Device approval could not be checked (${response.status})`);
+  }
   const result = await response.json() as PairingPollResponse;
-  if (result.version !== 1 || (result.status !== "pending" && result.status !== "approved")) {
+  if (result.version !== 1 || !["pending", "approved", "denied"].includes(result.status)) {
     throw new Error("Forge Anywhere returned an invalid pairing result");
   }
   return result;
+}
+
+export async function listPairings(serviceUrl: string, token: string): Promise<PairingDetails[]> {
+  const inbox = await anywhereRequest<PairingInbox>(serviceUrl, "/v1/pairings", { cache: "no-store" }, token);
+  if (inbox.version !== 1 || !Array.isArray(inbox.pairings)) {
+    throw new Error("Forge Anywhere returned an invalid approval inbox");
+  }
+  const now = Date.now();
+  return inbox.pairings.filter((details) => {
+    try {
+      validatePairingDetails(details, challengeFromDetails(details, serviceUrl));
+      return details.expires_at_ms > now;
+    } catch {
+      return false;
+    }
+  });
+}
+
+export async function denyPairing(serviceUrl: string, token: string, pairingId: string): Promise<void> {
+  try {
+    await anywhereRequest(serviceUrl, `/v1/pairings/${pairingId}/deny`, {
+      method: "POST",
+      headers: { "Idempotency-Key": pairingId },
+      body: JSON.stringify({ version: 1 }),
+    }, token);
+  } catch (reason) {
+    if (reason instanceof AnywhereApiError && reason.status === 404) {
+      throw new Error("Device approval request expired");
+    }
+    throw reason;
+  }
+}
+
+export function challengeFromDetails(details: PairingDetails, serviceUrl: string): PairingChallenge {
+  return {
+    version: 1,
+    pairing_id: details.pairing_id,
+    exchange_public_key: details.exchange_public_key,
+    expires_at_ms: details.expires_at_ms,
+    service_origin: new URL(serviceUrl).origin,
+  };
+}
+
+/** Six digits derived from the authenticated transcript. This is display-only, not a secret. */
+export function pairingSafetyCode(
+  challenge: PairingChallenge,
+  signingPublicKey: string,
+  accountIdHex: string,
+): string {
+  const service = new TextEncoder().encode(challenge.service_origin);
+  const transcript = concat(
+    new TextEncoder().encode("forge-anywhere/v1/pairing-safety-code\0"),
+    fromBase64Url(challenge.pairing_id),
+    fromBase64Url(challenge.exchange_public_key),
+    fromBase64Url(signingPublicKey),
+    u64(BigInt(challenge.expires_at_ms)),
+    u32(service.length),
+    service,
+    bytesFromHex(accountIdHex),
+  );
+  const digest = sha256(transcript);
+  const value = new DataView(digest.buffer, digest.byteOffset, digest.byteLength).getUint32(0, false) % 1_000_000;
+  return `${Math.floor(value / 1_000).toString().padStart(3, "0")} ${(value % 1_000).toString().padStart(3, "0")}`;
 }
 
 /** Authenticate and open the approved device wrap before a claimant installs account state. */
@@ -133,4 +208,23 @@ function decodeBase64(value: string): Uint8Array {
 
 function isOpaque32(value: string): boolean {
   try { return fromBase64Url(value).length === 32; } catch { return false; }
+}
+
+function u32(value: number): Uint8Array {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setUint32(0, value, false);
+  return bytes;
+}
+
+function u64(value: bigint): Uint8Array {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setBigUint64(0, value, false);
+  return bytes;
+}
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const output = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+  let offset = 0;
+  for (const part of parts) { output.set(part, offset); offset += part.length; }
+  return output;
 }

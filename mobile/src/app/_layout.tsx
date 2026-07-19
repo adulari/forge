@@ -29,7 +29,8 @@ import { ToastHost } from "../components/ds/ToastHost";
 import { ExpandedFleetRail } from "../components/fleet/DesktopDrillDown";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { WebTopBar } from "../components/WebTopBar";
-import { AnywhereProvider } from "../lib/anywhere/store";
+import { AnywhereProvider as RealAnywhereProvider } from "../lib/AnywhereProvider";
+import { AnywhereProvider as LegacyAnywhereProvider } from "../lib/anywhere/store";
 import { AuthProvider, useAuth } from "../lib/auth";
 import { initHaptics } from "../lib/haptics";
 import { isTauri, isWeb } from "../lib/platform";
@@ -168,8 +169,9 @@ export default function RootLayout() {
         <ErrorBoundary>
           <ThemeProvider>
             <AuthProvider>
-              <AnywhereProvider>
-                <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
+              <RealAnywhereProvider>
+                <LegacyAnywhereProvider>
+                  <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
                   <ToastHost>
                     <AnonymousTelemetry />
                     <FleetWatcher />
@@ -185,8 +187,9 @@ export default function RootLayout() {
                       </PaletteHost>
                     </View>
                   </ToastHost>
-                </PersistQueryClientProvider>
-              </AnywhereProvider>
+                  </PersistQueryClientProvider>
+                </LegacyAnywhereProvider>
+              </RealAnywhereProvider>
             </AuthProvider>
           </ThemeProvider>
         </ErrorBoundary>

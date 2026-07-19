@@ -150,6 +150,219 @@ pub fn forge_binary_available() -> bool {
     find_forge_binary().is_some()
 }
 
+#[tauri::command]
+pub fn system_host_name() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| std::fs::read_to_string("/etc/hostname").ok())
+        .map(|name| {
+            name.trim()
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(80)
+                .collect()
+        })
+        .filter(|name: &String| !name.is_empty())
+        .unwrap_or_else(|| "localhost".to_string())
+}
+
+#[derive(serde::Deserialize)]
+pub struct AnywhereHostState {
+    version: u8,
+    account_id: String,
+    github_login: Option<String>,
+    device_id: String,
+    signing_private_key: String,
+    exchange_private_key: String,
+    account_data_key: String,
+    key_epoch: u32,
+    data_key_epochs: std::collections::BTreeMap<u32, String>,
+    access_token: String,
+    refresh_token: String,
+    access_expires_at_ms: u64,
+    next_sequence: u64,
+}
+
+impl AnywhereHostState {
+    fn validate(&self) -> Result<(), String> {
+        if self.version != 1
+            || self.account_id.len() != 32
+            || self.device_id.len() != 32
+            || !self.account_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !self.device_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || self.signing_private_key.is_empty()
+            || self.exchange_private_key.is_empty()
+            || self.account_data_key.is_empty()
+            || self.access_token.is_empty()
+            || self.refresh_token.is_empty()
+            || self.key_epoch == 0
+            || !self.data_key_epochs.contains_key(&self.key_epoch)
+        {
+            return Err("the local host enrollment state is invalid".to_string());
+        }
+        Ok(())
+    }
+
+    fn into_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "version": self.version,
+            "account_id": self.account_id,
+            "github_login": self.github_login,
+            "device_id": self.device_id,
+            "signing_private_key": self.signing_private_key,
+            "exchange_private_key": self.exchange_private_key,
+            "account_data_key": self.account_data_key,
+            "key_epoch": self.key_epoch,
+            "data_key_epochs": self.data_key_epochs,
+            "access_token": self.access_token,
+            "refresh_token": self.refresh_token,
+            "access_expires_at_ms": self.access_expires_at_ms,
+            "host_id": null,
+            "next_sequence": self.next_sequence,
+            "accepted_sequences": {},
+            "command_journal": {},
+            "capsule_journal": {},
+            "capsule_replay": {},
+            "outgoing_handoffs": {},
+            "preparing_handoffs": {},
+            "refresh_lease_id": null,
+            "refresh_lease_until_ms": 0
+        })
+    }
+}
+
+fn anywhere_state_path() -> Option<std::path::PathBuf> {
+    directories::ProjectDirs::from("dev", "forge", "forge")
+        .map(|directories| directories.data_dir().join("anywhere").join("state.json"))
+}
+
+#[tauri::command]
+pub fn forge_anywhere_host_enrolled() -> bool {
+    let Some(path) = anywhere_state_path() else {
+        return false;
+    };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&contents)
+        .ok()
+        .and_then(|state| {
+            state
+                .get("refresh_token")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|token| !token.is_empty())
+}
+
+/// Install a distinct, encrypted-pairing-derived CLI identity and activate it as a host.
+/// Existing CLI enrollment is never overwritten.
+#[tauri::command]
+pub fn install_forge_anywhere_host(state: AnywhereHostState, name: String) -> Result<(), String> {
+    state.validate()?;
+    let host_name = name.trim();
+    if host_name.is_empty()
+        || host_name.chars().count() > 80
+        || host_name.chars().any(char::is_control)
+    {
+        return Err("enter a host name with at most 80 visible characters".to_string());
+    }
+    if forge_anywhere_host_enrolled() {
+        return Err("Forge CLI is already enrolled on this computer".to_string());
+    }
+    let path =
+        anywhere_state_path().ok_or_else(|| "Forge data directory is unavailable".to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Forge Anywhere state path is invalid".to_string())?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("create Forge Anywhere state directory: {error}"))?;
+    set_owner_directory(parent)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("create protected host state timestamp: {error}"))?
+        .as_nanos();
+    let temporary = parent.join(format!(".desktop-state-{}-{nonce}.tmp", std::process::id()));
+    let bytes = serde_json::to_vec_pretty(&state.into_json())
+        .map_err(|error| format!("serialize Forge Anywhere host state: {error}"))?;
+    write_owner_file(&temporary, &bytes)?;
+    if let Err(error) = std::fs::rename(&temporary, &path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("install Forge Anywhere host state: {error}"));
+    }
+    set_owner_file(&path)?;
+    activate_forge_anywhere_host(host_name.to_string())
+}
+
+#[tauri::command]
+pub fn activate_forge_anywhere_host(name: String) -> Result<(), String> {
+    let host_name = name.trim();
+    if host_name.is_empty()
+        || host_name.chars().count() > 80
+        || host_name.chars().any(char::is_control)
+    {
+        return Err("enter a host name with at most 80 visible characters".to_string());
+    }
+    let forge_binary =
+        find_forge_binary().ok_or_else(|| "Forge is not installed on this computer".to_string())?;
+    let output = std::process::Command::new(&forge_binary)
+        .args(["anywhere", "enable", "--name", host_name])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| format!("start Forge Anywhere host activation: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(
+        "Forge Anywhere could not activate this host. Check the Forge Anywhere screen and retry."
+            .to_string(),
+    )
+}
+
+#[cfg(unix)]
+fn set_owner_directory(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("protect Forge Anywhere directory: {error}"))
+}
+
+#[cfg(not(unix))]
+fn set_owner_directory(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_owner_file(path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| format!("protect Forge Anywhere state: {error}"))
+}
+
+#[cfg(not(unix))]
+fn set_owner_file(_path: &std::path::Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn write_owner_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| format!("create protected host state: {error}"))?;
+    use std::io::Write as _;
+    file.write_all(bytes)
+        .map_err(|error| format!("write protected host state: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("sync protected host state: {error}"))
+}
+
 /// Spawns `forge serve --local` detached (null stdio, no window on Windows) and returns
 /// immediately — it does NOT wait for the bind. The frontend polls `detect_forge_serve` until
 /// `serve-state.json` appears (or a ~15s timeout), since that file is only written after a
