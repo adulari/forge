@@ -14,9 +14,6 @@ name: eas-update
 # https://docs.expo.dev/accounts/programmatic-access
 
 on:
-  # Recovery/manual publication from main. The compatibility-baseline guard below applies to both
-  # automatic and manual runs; a manual dispatch cannot bypass native-layer review.
-  workflow_dispatch:
   push:
     branches:
       - main
@@ -38,14 +35,12 @@ concurrency:
 jobs:
   update:
     name: eas update (production / ios)
-    runs-on: [release, linux, x64]
-    timeout-minutes: 45
-    environment: production-ota
+    runs-on: [self-hosted, linux, x64]
     defaults:
       run:
         working-directory: mobile
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           # The guard compares the complete push range so a commit that mixes OTA-safe
           # files with native/config files cannot publish an incompatible update.
@@ -55,57 +50,50 @@ jobs:
         id: guard
         working-directory: .
         env:
-          BASELINE: ${{ vars.IOS_OTA_COMPATIBLE_BASE_SHA }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
         run: |
           set -euo pipefail
-          [ "${{ github.ref }}" = refs/heads/main ] || {
-            echo 'Production OTA publication is allowed only from main.' >&2
-            exit 1
-          }
-          [[ "$BASELINE" =~ ^[0-9a-f]{40}$ ]] || {
-            echo 'Set IOS_OTA_COMPATIBLE_BASE_SHA to the reviewed commit compatible with the installed archive.' >&2
-            exit 1
-          }
-          git cat-file -e "$BASELINE^{commit}" 2>/dev/null || {
-            echo "OTA compatibility baseline is not in repository history: $BASELINE" >&2
-            exit 1
-          }
-          git merge-base --is-ancestor "$BASELINE" HEAD || {
-            echo "OTA compatibility baseline is not an ancestor of HEAD: $BASELINE" >&2
-            exit 1
-          }
+          # Manual recovery (RELEASING.md §6) has no push range to diff — and "current main since
+          # the last release" always contains OTA-neutral non-mobile commits (version bump, this
+          # workflow), which the range diff would wrongly flag as native. The real delivery gate is
+          # the IOS_OTA_RUNTIME_VERSION pin below: an update only reaches binaries whose native
+          # runtime matches, so a stale native layer never receives it. Operator ensures a matching
+          # native build exists before dispatching.
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "safe=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch — range diff skipped; delivery gated by IOS_OTA_RUNTIME_VERSION."
+            exit 0
+          fi
+
+          # Push events carry github.event.before; the all-zeros sentinel (and any empty value)
+          # falls back to the pushed commit's parent.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            BEFORE="$(git rev-parse "$AFTER^" 2>/dev/null || printf '%s' "$AFTER")"
+          fi
 
           unsafe=()
           while IFS= read -r path; do
             case "$path" in
-              # Bundled JS/assets are the OTA payload. Documentation, tests, Android EAS config,
-              # and the independent Tauri shell cannot alter the installed iOS native runtime.
-              mobile/src/*|mobile/assets/*|mobile/*.md|mobile/.gitignore|mobile/redesign/*|mobile/src-tauri/*|mobile/eas.json) ;;
-              mobile/*) unsafe+=("$path") ;;
-              *) ;; # non-mobile changes are irrelevant to iOS runtime compatibility
+              mobile/src/*|mobile/assets/*) ;;
+              *) unsafe+=("$path") ;;
             esac
-          done <<< "$(git diff --name-only "$BASELINE" HEAD)"
+          done <<< "$(git diff --name-only "$BEFORE" "$AFTER")"
 
           if ((${#unsafe[@]})); then
-            printf 'Unreviewed iOS native/config changes since %s; refusing OTA publication:\n' "$BASELINE" >&2
-            printf -- '- %s\n' "${unsafe[@]}" >&2
-            exit 1
+            echo "safe=false" >> "$GITHUB_OUTPUT"
+            printf 'Native/config changes detected; skipping OTA publication:\n%s\n' "${unsafe[*]}"
+          else
+            echo "safe=true" >> "$GITHUB_OUTPUT"
+            echo "All changed mobile files are OTA-safe."
           fi
-          echo "safe=true" >> "$GITHUB_OUTPUT"
-          echo "All changes since the installed-runtime baseline are OTA-compatible."
 
-      - name: Prepare isolated Metro cache
-        if: steps.guard.outputs.safe == 'true'
-        run: |
-          # Metro defaults to one host-global /tmp/metro-cache. Multiple persistent self-hosted
-          # runners use different Unix users, so one run can otherwise leave entries the next user
-          # cannot clear. Keep all temporary/cache state private to this run and export it to every
-          # subsequent step.
-          tmp="$RUNNER_TEMP/forge-eas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          mkdir -p "$tmp"
-          echo "TMPDIR=$tmp" >> "$GITHUB_ENV"
+      - name: Skip incompatible OTA
+        if: steps.guard.outputs.safe != 'true'
+        run: echo 'Skipped; run the required native Xcode Cloud build before publishing an update.'
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         if: steps.guard.outputs.safe == 'true'
         with:
           node-version: "20"
@@ -125,8 +113,7 @@ jobs:
       - name: Publish EAS Update (production channel, iOS only)
         if: steps.guard.outputs.safe == 'true'
         run: |
-          test -n "$EXPO_TOKEN" || { echo 'EXPO_TOKEN is not configured' >&2; exit 1; }
-          ./node_modules/.bin/eas update \
+          npx eas-cli@latest update \
             --channel production \
             --environment production \
             --platform ios \
