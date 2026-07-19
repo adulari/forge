@@ -79,6 +79,7 @@ import {
   type StoredAnywhereCredentials,
 } from "./transport";
 import { bytesFromHex, bytesToHex } from "./transport/anywhereEnvelope";
+import { anywhereConsumersReady } from "./anywhereStartup";
 
 const SERVICE_URL = process.env.EXPO_PUBLIC_FORGE_ANYWHERE_URL ?? DEFAULT_ANYWHERE_SERVICE_URL;
 const INITIAL_EPOCH = 1;
@@ -138,6 +139,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const { setActive, syncAnywhereHosts } = auth;
   const [phase, setPhase] = useState<AnywherePhase>("loading");
   const [credentials, setCredentials] = useState<StoredAnywhereCredentials | null>(null);
+  const [registeredRuntimeId, setRegisteredRuntimeId] = useState<string | null>(null);
   const credentialsRef = useRef<StoredAnywhereCredentials | null>(null);
   const [account, setAccount] = useState<AnywhereAccountStatus | null>(null);
   const [subscription, setSubscription] = useState<AnywhereSubscription | null>(null);
@@ -260,6 +262,16 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken, credentials?.accountDataKeyHex, credentials?.accountIdHex, credentials?.deviceIdHex, credentials?.keyEpoch, credentials?.serviceUrl, credentials?.signingPrivateKeyHex]);
   /* eslint-enable react-hooks/refs */
+  const runtimeId = credentials
+    ? [
+        credentials.serviceUrl ?? SERVICE_URL,
+        credentials.accountIdHex,
+        credentials.deviceIdHex,
+        credentials.keyEpoch,
+        credentials.accountDataKeyHex,
+        credentials.signingPrivateKeyHex,
+      ].join(":")
+    : null;
 
   const jobClient = useMemo(
     // Runtime callbacks dereference protected credentials only when a queued operation runs.
@@ -401,13 +413,23 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   }, [accessToken, credentials?.pendingDeviceRevocation, persistCredentials, refresh]);
 
   useEffect(() => {
-    if (!runtime || phase !== "ready" || auth.isLoading) return;
+    if (!runtime || phase !== "ready" || auth.isLoading) {
+      if (!runtime) setRegisteredRuntimeId(null);
+      return;
+    }
+    let active = true;
     const removers = hosts.map((host) => registerAnywhereTransport(
       new AnywhereTransport(host.id, new EncryptedAnywhereRelay(runtime)),
     ));
-    void syncAnywhereHosts(hosts.map((host) => ({ id: host.id, name: host.name })));
-    return () => { for (const remove of removers) remove(); };
-  }, [auth.isLoading, hosts, phase, runtime, syncAnywhereHosts]);
+    void syncAnywhereHosts(hosts.map((host) => ({ id: host.id, name: host.name }))).then(() => {
+      // Do not mount consumers while Auth still points at an unreconciled managed target.
+      if (active) setRegisteredRuntimeId(runtimeId);
+    });
+    return () => {
+      active = false;
+      for (const remove of removers) remove();
+    };
+  }, [auth.isLoading, hosts, phase, runtime, runtimeId, syncAnywhereHosts]);
 
   const startLogin = useCallback(async () => {
     browserAuthWindow.current?.close();
@@ -780,7 +802,8 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     revokeDevice, revokeHost, selectHost, approvePairing, queueRemoteJob, refreshRemoteJobs,
     enablePush, disablePush, logout,
   };
-  return <AnywhereContext.Provider value={value}>{children}</AnywhereContext.Provider>;
+  const consumersReady = anywhereConsumersReady(phase, runtimeId, registeredRuntimeId);
+  return <AnywhereContext.Provider value={value}>{consumersReady ? children : null}</AnywhereContext.Provider>;
 }
 
 export function useAnywhere(): AnywhereContextValue {
