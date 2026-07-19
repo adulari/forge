@@ -113,6 +113,13 @@ jobs:
       - name: Publish EAS Update (production channel, iOS only)
         if: steps.guard.outputs.safe == 'true'
         run: |
+          # Isolate Metro's cache per run. These are persistent self-hosted runners where the
+          # default os.tmpdir() cache (/tmp/metro-cache) is shared across runs and runner users;
+          # `expo export --clear` then fails to rmdir a dir another user created (EACCES), which
+          # silently left production on an older OTA. $RUNNER_TEMP is per-run and owned by this
+          # job, so pointing TMPDIR there gives Metro a private, always-clearable cache.
+          export TMPDIR="$RUNNER_TEMP/metro"
+          mkdir -p "$TMPDIR"
           npx eas-cli@latest update \
             --channel production \
             --environment production \
