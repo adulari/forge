@@ -19,6 +19,7 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { ApiError, type MergeDirtyConflictResponse, type SessionRow } from "../../lib/api";
+import { useAuth } from "../../lib/auth";
 import { haptics } from "../../lib/haptics";
 import { useArchiveSession, useDiscardSession, useMergeSession } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -79,6 +80,12 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const toast = useToast();
   const reduced = useReducedMotion();
   const entranceStyle = useForgeline(index);
+  // Forge Anywhere: host + transport prefix on the meta line (design mobile.dc.html
+  // "AW Fleet" row meta, e.g. "MacBook Pro · direct · forge/relay · gpt-5.5"). Every real
+  // session today is served by the active server over direct transport — a relay-backed
+  // session will carry transport "anywhere" once Forge Anywhere sessions land here.
+  const { servers, activeServerId } = useAuth();
+  const hostLabel = servers.find((s) => s.id === activeServerId)?.name ?? "this server";
 
   const archive = useArchiveSession();
   const merge = useMergeSession();
@@ -283,7 +290,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                       ellipsizeMode={row.waiting ? "tail" : "head"}
                       accessibilityLabel={row.waiting ? undefined : `path: ${row.cwd}`}
                     >
-                      {row.waiting ? "needs a decision" : `${cwdLabel} · ${row.model}`}
+                      {row.waiting ? "needs a decision" : `${hostLabel} · direct · ${cwdLabel} · ${row.model}`}
                     </Text>
                   </View>
                 </View>

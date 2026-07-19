@@ -6,89 +6,56 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
-## [2.6.6] - 2026-07-17
+### Added
+- **Forge Anywhere Recovery Kit v2** (#811): new accounts use a mandatory, checksum-protected
+  12-word offline Recovery Kit with account-bound key derivation, while existing 24-word kits
+  remain supported. A resumable `forge anywhere setup` flow, privacy-safe doctor, hostname-based
+  host naming, and the clearer `forge serve --tunnel` command complete the first CLI rollout.
 
-Security, privacy, packaging, and release hardening for the zero-configuration notification path
-and every published Forge surface.
+## [2.7.0] - 2026-07-19
 
-### Security
-- **Public APNs relay** (#805, #808): stock installs now use the live
-  `forge.adulari.dev/relay` origin; the relay accepts only Forge alert and Live Activity shapes,
-  enforces topic/environment/priority/body constraints plus per-client, per-device, and atomic
-  daily limits, and keeps device tokens out of URLs, errors, and logs for current clients.
-- **Generic public-relay alerts**: updated stock daemons send one static “Open Forge” alert instead
-  of session IDs, titles, question/permission summaries, response lines, or error text, and the
-  public server independently replaces every alert again before APNs. This also protects the
-  upgrade window in which older daemons may still submit rich text. Direct APNs and explicitly
-  configured private relays retain rich alerts; Live Activities continue to carry only their
-  documented coarse busy/waiting, cost, and context counters.
-- **Anonymous abuse controls** (#808): rate-limit state retains only per-process salted keys rather
-  than raw client IP addresses or APNs device tokens. The production service is loopback-bound
-  behind Cloudflare/nginx with a locked-down systemd unit, Cloudflare-only origin firewall, modern
-  TLS, protected credentials, and documented deployment templates.
-- **Verified installers**: CLI/TUI and desktop installers on macOS, Linux, and Windows now fail
-  closed when the release checksum manifest, the exact asset hash, or a SHA-256 implementation is
-  unavailable or invalid; downloaded archives are never installed on a best-effort basis.
-- **Release supply chain**: third-party GitHub Actions are pinned to immutable commits, privileged
-  publication is isolated behind protected environments and protected-`main` dispatch, release
-  tags must match the source version and be reachable from `main`, and CLI, desktop, web, Android,
-  and IPA artifacts receive GitHub build-provenance attestations. Automatic merge activation is
-  limited to trusted repository collaborators.
-- **Dedicated publication runner**: privileged Linux publication uses the isolated Arch release
-  runner and a repository-restricted runner group instead of the general CI runner pool.
-- **Dependency advisories** (#808): upgraded the updater, plist, and XML dependency chain, removing
-  four high-severity XML denial-of-service advisories from the RustSec audit. Forge now requires
-  Rust 1.88 when building from source.
+A redesigned cross-platform app, the Forge Anywhere relay surface, and the production hardening of
+the public notification relay — the first release to ship the rebuilt mobile, desktop, and web UIs.
+
+### Added
+- **Forge Anywhere UI** (#812): the complete relay-transport surface across mobile, desktop, and
+  web — GitHub device-code sign-in, 24-word recovery phrase, host enrollment and detail (rename,
+  transport preference, disable/revoke), device pairing and atomic key-rotation, encrypted storage
+  and retention, remote-job queue, session hand-off and encrypted replay shares, billing and the
+  public read-only share viewer at `/shares/[id]`. Built over a typed `AnywhereClient` interface
+  with a seeded mock client so the managed relay backend plugs in behind the same contract; signed
+  out, the app is unchanged apart from the Settings and Connect entry points. Anywhere is a
+  transport plus Settings detail routes — no second dashboard, no new tab, and only three
+  design-system additions (`EntitlementBadge`, `HostDot`, `SyncGlyph`).
+- **Hearth redesign** (#810): the mobile, desktop, and web clients are rebuilt on one Expo +
+  react-native-web + Tauri codebase with the Emberline design system — de-boxed hairline lists, the
+  Fleet/session shell, command palette, telemetry and context gauges, and the full set of session
+  action sheets, with responsive desktop/web layouts sharing the mobile component tree.
+
+### Changed
+- **Public APNs relay default** (#805): stock installs point at the live
+  `forge.adulari.dev/relay` origin so zero-configuration notifications work out of the box.
 
 ### Fixed
-- **Desktop release publication** (#803, #804, #806): release repair can rebuild an existing tag
-  from `main`, Arch runners bootstrap every required Tauri/AppImage tool, Linux packaging bypasses
-  host binfmt interception, and the Tauri updater manifest publishes only after all five platform
-  bundles and their updater signatures are complete.
-- **Mobile OTA publication**: Metro now uses a run-isolated temporary cache on persistent Arch
-  runners, avoiding the cross-user ownership failure that left production on an older update; a
-  main-only manual recovery trigger retains the installed-runtime compatibility gate.
-- **Cross-platform release E2E**: the weekly Windows/macOS/Linux real-turn gate now uses a model
-  with enough token throughput for Forge's system context instead of failing all three platforms
-  at the former Groq model's pre-inference TPM limit.
-- **SideStore publication**: protected-`main` dispatch now validates an existing `mobile-v*` tag,
-  derives the minimum iOS version from the built IPA, fixes source-manifest generation, attests the
-  IPA, deploys a fresh GitHub Pages artifact to the documented stable add-source URL, verifies that
-  URL points to the exact IPA, and prevents an older repair tag from replacing a newer stable source.
-- **Android and web publication**: tagged Android artifacts and static web bundles now validate the
-  exact tag/main provenance before protected publication, with Android preview builds remaining
-  available independently of Play submission.
-- **crates.io streaming parity**: Forge's maintained `genai` fork is now the explicit
-  `forge-agent-genai` package instead of relying on a workspace-only `[patch.crates-io]`. Installs
-  from crates.io therefore retain batched parallel tool calls, empty tool-call normalization, and
-  sparse/out-of-order stream-index fixes.
-- **Embedded CLI bridge harnesses**: non-Forge hosts can now use
-  `CliProvider::with_forge_binary(...)` to point harness mode at a real Forge executable instead of
-  incorrectly spawning the embedding process as `mcp-serve`.
-- **Distribution manifests** (#807): Homebrew and Scoop now use their canonical repository layouts;
-  AUR metadata, license, source URLs, versions, and real release hashes stay synchronized with the
-  same published `checksums.txt`. The checked-in v2.6.5 manifests are valid until v2.6.6 release
-  automation advances all of them transactionally.
-- **APNs subscription hygiene**: registration now accepts only Apple's 64-character lowercase-hex
-  device and Live Activity token shape. Malformed legacy rows are removed before delivery, and
-  Apple's `410 Unregistered` plus reason-qualified `400 BadDeviceToken`/
-  `DeviceTokenNotForTopic` responses prune only the rejected subscription; unrelated 400s do not.
-- **Installer compatibility**: Windows PowerShell 5 string and PowerShell 7 byte-array checksum
-  responses are decoded consistently, Linux desktop installs use the verified AppImage's embedded
-  icon instead of requesting a nonexistent companion asset, and unsupported-architecture guidance
-  names the real `forge-agent` Cargo package.
-- **Portable default Linux build**: CLI/TUI releases no longer link ALSA merely to start Forge, so
-  servers, WSL, and minimal containers do not need `libasound.so.2`. Audio-file and companion-app
-  uploads still transcribe locally; TUI microphone capture on Linux is available to source builds
-  through `--features microphone` and fails with an actionable message when absent. Both x86-64
-  and ARM64 artifacts are now built on the dedicated Arch runner inside a digest-pinned Debian
-  Bullseye container, capped at glibc 2.31/GLIBCXX 3.4.28, and checked across Ubuntu 22.04/24.04,
-  Debian 12, and Fedora 40 without installing ALSA.
-- **Publishable-fork validation**: Forge's independently published `genai` fork is checked inside
-  the existing Rust fmt, clippy, test, audit, and deny jobs instead of expanding the PR pipeline.
-- **SQLite 3.51 usage reporting**: synthetic compaction and diagnostic usage now inherits the most
-  recent routed provider without using a correlated outer column in a scalar subquery `ORDER BY`,
-  fixing provider-usage queries on SQLite 3.51 while preserving the legacy following-turn fallback.
+- **Remote overlay delivery** (#810): background overlay loads (`/mesh`, `/usage`) now mark the
+  headless frame dirty so resolved overlays broadcast to remote clients instead of appearing stuck
+  loading; a finished workflow overlay no longer holds the projection on web clients
+  (`crates/forge-cli/src/cli/commands/run/driver.rs`, mobile `OverlayHost`).
+- **Idle bridge reaper** (#810): parked persistent Claude/Codex bridge processes are torn down
+  after an idle TTL instead of lingering as orphaned trees
+  (`crates/forge-provider/src/cli_provider.rs`).
+- **Desktop release publication** (#806): Linux AppImage packaging bypasses host binfmt
+  interception on the Arch release runner.
+- **Release manifests** (#807): Homebrew, Scoop, and AUR manifests track the published checksums.
+
+### Security
+- **Public APNs relay hardening** (#808): the production relay accepts only Forge alert and Live
+  Activity shapes with topic/environment/priority/body constraints and per-client, per-device, and
+  atomic daily limits; stock daemons send a single generic “Open Forge” alert rather than session
+  IDs, titles, or transcript content, and the server independently replaces every alert again
+  before APNs. Rate-limit state keeps only per-process salted keys, never raw client IPs or device
+  tokens, and the service runs loopback-bound behind a locked-down systemd unit and Cloudflare-only
+  origin firewall. Direct APNs and explicitly configured private relays retain rich alerts.
 
 ## [2.6.5] - 2026-07-16
 
@@ -816,7 +783,7 @@ here were latent from a bulk merge and only surfaced in `cargo test`, the separa
 ## [2.0.0] - 2026-06-30
 
 The "ready for the world" release. A full robustness, UX, and ecosystem pass synthesized from
-three deep audits (see the [v2 delivery record](docs/ROADMAP-v2-DELIVERED.md) for the 1:1
+three deep audits (see `docs/ROADMAP-v2.md` / `docs/ROADMAP-v2-DELIVERED.md` for the 1:1
 item→PR mapping). Every change shipped CI-green across Linux, macOS, and Windows.
 
 ### Packaging
@@ -1210,7 +1177,7 @@ item→PR mapping). Every change shipped CI-green across Linux, macOS, and Windo
   `--replace` (overwrite), and the default now APPENDS instead of overwriting. Keys also come from
   the env as `VAR="k1,k2"` or numbered `VAR_2`/`VAR_3`/…. Rotation engages only at ≥2 keys, so
   single-key (and cache-sensitive paid) providers are unchanged. See
-  [mesh configuration reference](docs/features/mesh-routing.md#12-configuration-reference-routing-relevant-mesh-keys).
+  [docs/features/free-models.md](docs/features/free-models.md#multiple-keys-per-provider-rotation).
 - **🆓 Recommended free providers** — a new README section (linked from the top nav) tiering every
   free-tier provider with best models, rate limits, direct signup links, and the exact `forge auth`
   command.
@@ -1229,7 +1196,7 @@ item→PR mapping). Every change shipped CI-green across Linux, macOS, and Windo
   OpenAI-compatible provider genai lacks an SDK adapter for. Adding a provider is a single struct
   literal — it wires auth, env injection, mesh discovery, cost-tier routing, the free/paid flag, and
   cross-provider failover end-to-end. The Cerebras integration was migrated onto it. See
-  [mesh configuration reference](docs/features/mesh-routing.md#12-configuration-reference-routing-relevant-mesh-keys).
+  [docs/features/free-models.md](docs/features/free-models.md#adding-an-openai-compatible-provider).
 
 ## [1.0.0] - 2026-06-28
 
@@ -2691,14 +2658,11 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.6.6...HEAD
-[2.6.6]: https://github.com/Adulari/forge/compare/v2.6.5...v2.6.6
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.7.0...HEAD
+[2.7.0]: https://github.com/Adulari/forge/compare/v2.6.5...v2.7.0
 [2.6.5]: https://github.com/Adulari/forge/compare/v2.6.4...v2.6.5
 [2.6.4]: https://github.com/Adulari/forge/compare/v2.6.3...v2.6.4
 [2.6.3]: https://github.com/Adulari/forge/compare/v2.6.2...v2.6.3
-[2.6.2]: https://github.com/Adulari/forge/compare/v2.6.1...v2.6.2
-[2.6.1]: https://github.com/Adulari/forge/compare/v2.6.0...v2.6.1
-[2.6.0]: https://github.com/Adulari/forge/compare/v2.5.8...v2.6.0
 [2.5.8]: https://github.com/Adulari/forge/compare/v2.5.7...v2.5.8
 [2.5.7]: https://github.com/Adulari/forge/compare/v2.5.6...v2.5.7
 [2.5.6]: https://github.com/Adulari/forge/compare/v2.5.5...v2.5.6

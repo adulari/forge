@@ -19,7 +19,7 @@
 //!
 //! ## For example
 //!
-//! ```rust,ignore
+//! ```rust
 //! use genai::resolver::{Endpoint, ServiceTargetResolver};
 //! use genai::{Client, AdapterKind, ModelIden};
 //!

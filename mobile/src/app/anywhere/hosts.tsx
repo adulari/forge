@@ -1,89 +1,193 @@
-import { Laptop, Trash2 } from "lucide-react-native";
-import React, { useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+// Forge Anywhere — Hosts list (mobile.dc.html "AW Hosts" lines 343-404). The design's
+// "other host states" block (lines 389-398) is a reference showcase for the design doc
+// itself, not a real screen section — skipped per BUILD instructions; the mock host seed
+// (mockClient.ts) already covers online/busy/stale/revoked so the real row below is
+// exercised against every HostState that matters.
+import * as Clipboard from "expo-clipboard";
+import { router } from "expo-router";
+import { ChevronRight, Copy } from "lucide-react-native";
+import React, { useCallback, useEffect } from "react";
+import { Pressable, StyleSheet, Text, View } from "react-native";
+import Animated from "react-native-reanimated";
 
+import { SettingsShell } from "../(tabs)/settings";
+import { HostDot } from "../../components/anywhere/HostDot";
 import { BackLink } from "../../components/ds/BackLink";
-import { Badge } from "../../components/ds/Badge";
-import { Banner } from "../../components/ds/Banner";
-import { Card } from "../../components/ds/Card";
-import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
-import { EmptyState } from "../../components/ds/EmptyState";
-import { IconButton } from "../../components/ds/IconButton";
-import { ListRow } from "../../components/ds/ListRow";
 import { Screen } from "../../components/ds/Screen";
-import { useAnywhere } from "../../lib/AnywhereProvider";
-import { useAuth } from "../../lib/auth";
+import { SectionHeader } from "../../components/ds/SectionHeader";
+import { SkeletonRow } from "../../components/ds/Skeleton";
+import { useToast } from "../../components/ds/ToastHost";
+import { goBackOr } from "../../lib/nav";
+import { hostStateText } from "../../lib/anywhere/format";
+import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
+import { MAX_ACTIVE_HOSTS, type AnywhereHost, type HostState } from "../../lib/anywhere/types";
 import { useTokens } from "../../theme/ThemeProvider";
-import { space } from "../../theme/tokens";
-import { type } from "../../theme/typography";
+import { useStrike } from "../../theme/motion";
+import { radii, rowHeight, space, type ColorTokens } from "../../theme/tokens";
+import { type as typeScale, tabularNums } from "../../theme/typography";
 
-export default function AnywhereHostsScreen() {
-  const anywhere = useAnywhere();
-  const auth = useAuth();
+const ADD_HOST_COMMAND = "forge anywhere enable --name NAME";
+
+function hostMetaColor(state: HostState, tokens: ColorTokens): string {
+  switch (state.kind) {
+    case "stale":
+    case "update-required":
+      return tokens.warn;
+    case "revoked":
+    case "disabled":
+    case "offline":
+      return tokens.ink4;
+    default:
+      return tokens.ink3;
+  }
+}
+
+function HostRow({ host, showSeparator }: { host: AnywhereHost; showSeparator: boolean }) {
   const tokens = useTokens();
-  const [targetId, setTargetId] = useState<string | null>(null);
-  const [revoking, setRevoking] = useState(false);
-  const target = anywhere.hosts.find((host) => host.id === targetId) ?? null;
+  const { style: strikeStyle, onPressIn, onPressOut } = useStrike();
+  const revoked = host.state.kind === "revoked";
 
-  const revoke = async () => {
-    if (!target) return;
-    const host = target;
-    setTargetId(null);
-    setRevoking(true);
-    try { await anywhere.revokeHost(host.id); }
-    catch { /* Provider exposes the safe service error. */ }
-    finally { setRevoking(false); }
-  };
+  const row = (
+    <Animated.View style={[styles.row, revoked ? undefined : strikeStyle]}>
+      <HostDot state={host.state} />
+      <Text
+        style={[
+          typeScale.bodyBold,
+          styles.name,
+          { color: revoked ? tokens.ink3 : tokens.ink },
+          revoked && styles.strikethrough,
+        ]}
+        numberOfLines={1}
+      >
+        {host.name}
+      </Text>
+      <Text style={[typeScale.monoMeta, tabularNums, { color: hostMetaColor(host.state, tokens) }]} numberOfLines={1}>
+        {hostStateText(host)}
+      </Text>
+      {!revoked ? <ChevronRight size={14} strokeWidth={1.75} color={tokens.ink4} /> : null}
+    </Animated.View>
+  );
 
   return (
-    <Screen scroll contentContainerStyle={styles.content}>
-      <BackLink label="Anywhere" />
-      <Text style={[type.title, { color: tokens.ink }]}>Your hosts</Text>
-      <Text style={[type.sub, { color: tokens.ink2 }]}>Choose which enrolled machine this app controls. Cached names and presence remain visible offline; direct and LAN servers stay in the regular server list.</Text>
-      {anywhere.error ? <Banner tone="danger" message={anywhere.error} /> : null}
-      {anywhere.hosts.length === 0 ? (
-        <EmptyState icon={Laptop} message="No hosts connected. Run `forge anywhere enable` on a computer to add it here. Your trial starts when the first host connects." />
+    <View>
+      {revoked ? (
+        row
       ) : (
-        <Card padded={false}>
-          {anywhere.hosts.map((host, index) => {
-            const selected = auth.activeServerId === `anywhere:${host.id}`;
-            const online = isOnline(host.last_heartbeat_at);
-            return (
-              <ListRow
-                key={host.id}
-                title={host.name}
-                subtitle={online ? "Online now" : lastSeen(host.last_heartbeat_at)}
-                leading={<Laptop size={20} color={online ? tokens.success : tokens.ink3} />}
-                trailing={<View style={styles.trailing}>
-                  {selected ? <Badge label="active" tone="accent" /> : null}
-                  <IconButton icon={<Trash2 size={20} color={tokens.danger} />} accessibilityLabel={`Revoke ${host.name}`} onPress={() => setTargetId(host.id)} disabled={revoking} />
-                </View>}
-                onPress={() => anywhere.selectHost(host.id)}
-                hasInteractiveTrailing
-                showSeparator={index !== anywhere.hosts.length - 1}
-              />
-            );
-          })}
-        </Card>
+        <Pressable
+          onPress={() => router.push({ pathname: "/anywhere/host/[id]", params: { id: host.id } })}
+          onPressIn={onPressIn}
+          onPressOut={onPressOut}
+          accessibilityRole="button"
+          accessibilityLabel={`${host.name} — ${hostStateText(host)}`}
+        >
+          {row}
+        </Pressable>
       )}
-      <Text style={[type.meta, { color: tokens.ink3 }]}>Up to three active hosts are included. The service supports host revocation; rename remains available by re-enabling the connector with the desired host name.</Text>
-      <ConfirmDialog
-        visible={target != null}
-        title={`Revoke ${target?.name ?? "host"}?`}
-        message="The connector will lose managed relay access. Local Forge, LAN access, and user-managed tunnels on that machine remain unchanged."
-        confirmLabel={revoking ? "Revoking…" : "Revoke host"}
-        destructive
-        onConfirm={() => void revoke()}
-        onCancel={() => { if (!revoking) setTargetId(null); }}
-      />
-    </Screen>
+      {showSeparator ? <View style={[styles.separator, { backgroundColor: tokens.hairline }]} /> : null}
+    </View>
   );
 }
 
-function seconds(value: string | null): number | null { const parsed = value ? Number(value) : NaN; return Number.isFinite(parsed) ? parsed : null; }
-function isOnline(value: string | null): boolean { const timestamp = seconds(value); return timestamp !== null && Date.now() / 1000 - timestamp < 90; }
-function lastSeen(value: string | null): string { const timestamp = seconds(value); return timestamp === null ? "Never connected" : `Last seen ${new Date(timestamp * 1000).toLocaleString()}`; }
+function HostsSkeleton() {
+  return (
+    <View style={styles.skeletonWrap}>
+      <SkeletonRow />
+      <SkeletonRow />
+      <SkeletonRow />
+    </View>
+  );
+}
+
+export default function AnywhereHostsScreen() {
+  const tokens = useTokens();
+  const toast = useToast();
+  const { signedIn, loading: accountLoading } = useAnywhere();
+  const { hosts, loading } = useAnywhereHosts();
+
+  useEffect(() => {
+    if (!accountLoading && !signedIn) router.replace("/anywhere");
+  }, [accountLoading, signedIn]);
+
+  const activeCount = hosts.filter((h) => h.state.kind !== "revoked" && h.state.kind !== "disabled").length;
+
+  const onCopyCommand = useCallback(async () => {
+    await Clipboard.setStringAsync(ADD_HOST_COMMAND);
+    toast.show("Command copied.", { tone: "neutral" });
+  }, [toast]);
+
+  if (!signedIn) return null;
+
+  return (
+    <SettingsShell active="anywhere">
+      <Screen scroll contentContainerStyle={styles.content}>
+        <View style={styles.headerRow}>
+          <BackLink label="Anywhere" onPress={() => goBackOr("/anywhere")} />
+          <Text style={[typeScale.headingBold, styles.headerTitle, { color: tokens.ink }]}>Hosts</Text>
+          {!loading ? (
+            <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3 }]}>{`${activeCount} of ${MAX_ACTIVE_HOSTS} active`}</Text>
+          ) : null}
+        </View>
+
+        {loading ? (
+          <HostsSkeleton />
+        ) : (
+          <View style={styles.section}>
+            {hosts.map((host, index) => (
+              <HostRow key={host.id} host={host} showSeparator={index < hosts.length - 1} />
+            ))}
+          </View>
+        )}
+
+        <View style={styles.section}>
+          <SectionHeader>Add a host</SectionHeader>
+          <Pressable
+            onPress={onCopyCommand}
+            accessibilityRole="button"
+            accessibilityLabel="Copy command to enable Anywhere on a host"
+            style={[styles.commandBox, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}
+          >
+            <Text style={[typeScale.codeSmall, tabularNums, styles.commandText, { color: tokens.ink }]} numberOfLines={1}>
+              <Text style={{ color: tokens.ink3 }}>$ </Text>
+              {ADD_HOST_COMMAND}
+            </Text>
+            <Copy size={14} strokeWidth={1.75} color={tokens.ink2} />
+          </Pressable>
+          <Text style={[typeScale.meta, styles.limitNote, { color: tokens.ink3 }]}>
+            Anywhere includes up to 3 active hosts. At the limit, disable or revoke one first — its local Forge keeps
+            working either way.
+          </Text>
+        </View>
+      </Screen>
+    </SettingsShell>
+  );
+}
+
 const styles = StyleSheet.create({
-  content: { paddingTop: space.space24, paddingBottom: space.space32, gap: space.space16 },
-  trailing: { flexDirection: "row", alignItems: "center", gap: space.space4 },
+  content: { paddingTop: space.space16, paddingBottom: space.space48 },
+  headerRow: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space4 },
+  headerTitle: { flex: 1 },
+  section: { marginTop: space.space20 },
+  row: {
+    minHeight: rowHeight.list,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: space.space4,
+    gap: 10,
+  },
+  name: { flex: 1 },
+  strikethrough: { textDecorationLine: "line-through" },
+  separator: { height: StyleSheet.hairlineWidth, marginLeft: space.space16 },
+  skeletonWrap: { marginTop: space.space16, gap: space.space8 },
+  commandBox: {
+    marginTop: space.space8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radii.radius12,
+    paddingHorizontal: space.space12,
+    paddingVertical: space.space12,
+  },
+  commandText: { flex: 1 },
+  limitNote: { marginTop: space.space8, lineHeight: 16 },
 });

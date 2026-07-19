@@ -10,19 +10,27 @@
 // matching the desktop "Forge a Task" modal — same pattern OverlayPanel/CommandPalette use
 // for their wide variant.
 import { router, useLocalSearchParams } from "expo-router";
-import { X } from "lucide-react-native";
+import { Check, ChevronDown, X } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Platform, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+import { HostDot } from "../components/anywhere/HostDot";
 import { Button } from "../components/ds/Button";
 import { Checkbox } from "../components/ds/Checkbox";
 import { IconButton } from "../components/ds/IconButton";
+import { ListRow } from "../components/ds/ListRow";
 import { Screen } from "../components/ds/Screen";
+import { SectionHeader } from "../components/ds/SectionHeader";
 import { Segmented } from "../components/ds/Segmented";
+import { Sheet } from "../components/ds/Sheet";
+import { useToast } from "../components/ds/ToastHost";
 import { ModelPicker } from "../components/session/ModelPicker";
 import { ProjectPicker } from "../components/session/ProjectPicker";
 import { ApiError } from "../lib/api";
+import { hostStateText } from "../lib/anywhere/format";
+import { anywhereClient, useAnywhere, useAnywhereHosts } from "../lib/anywhere/store";
+import type { AnywhereHost } from "../lib/anywhere/types";
 import { useAuth } from "../lib/auth";
 import { goBackOr } from "../lib/nav";
 import { lastProjectStorageKey } from "../lib/projectSelection";
@@ -32,6 +40,10 @@ import { useTheme, useTokens } from "../theme/ThemeProvider";
 import { depthDark, depthLight, gutter, radii, shadowStyle, space } from "../theme/tokens";
 import { type as typeScale, webInputTextStyle } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
+
+// Forge Anywhere: which host a new session targets. `default` = the active server over
+// direct transport (today's only real path); `anywhere` = a signed-in Anywhere host.
+type HostChoice = { kind: "default" } | { kind: "anywhere"; host: AnywhereHost };
 
 const MODAL_WIDTH = 600;
 
@@ -51,6 +63,88 @@ const TEMPER_HINT: Record<Temper, string> = {
   Full: "full autonomy, use only in trusted projects",
 };
 
+// Forge Anywhere: "Host" row (design mobile.dc.html "AW Forge a Task", lines 921-926) —
+// mirrors ProjectPicker/ModelPicker's trigger-ListRow + Sheet idiom. Defined locally
+// rather than as its own src/components/session/ file since this task's edit scope is
+// new-session.tsx only.
+function HostPicker({
+  value,
+  onChange,
+  activeServerName,
+  hosts,
+}: {
+  value: HostChoice;
+  onChange: (choice: HostChoice) => void;
+  activeServerName: string;
+  hosts: AnywhereHost[];
+}) {
+  const tokens = useTokens();
+  const [visible, setVisible] = useState(false);
+
+  const selectedLabel = value.kind === "default" ? activeServerName : value.host.name;
+  const selectedMeta = value.kind === "default" ? "direct · default" : `${hostStateText(value.host)} · anywhere`;
+
+  const select = (choice: HostChoice) => {
+    onChange(choice);
+    setVisible(false);
+  };
+
+  return (
+    <View>
+      <ListRow
+        title={selectedLabel}
+        subtitle={selectedMeta}
+        leading={
+          value.kind === "anywhere" ? (
+            <HostDot state={value.host.state} />
+          ) : (
+            <View style={[styles.defaultHostDot, { backgroundColor: tokens.success }]} />
+          )
+        }
+        trailing={<ChevronDown size={18} strokeWidth={1.75} color={tokens.ink3} />}
+        onPress={() => setVisible(true)}
+        accessibilityLabel={`Host: ${selectedLabel}. Change host`}
+      />
+      <Sheet visible={visible} onClose={() => setVisible(false)} accessibilityLabel="Choose host">
+        <View style={styles.hostSheetContent}>
+          <Text style={[typeScale.headingBold, { color: tokens.ink }]}>Choose host</Text>
+          <View>
+            <SectionHeader>This device</SectionHeader>
+            <ListRow
+              title={`${activeServerName} (default)`}
+              subtitle="direct"
+              leading={<View style={[styles.defaultHostDot, { backgroundColor: tokens.success }]} />}
+              trailing={value.kind === "default" ? <Check size={16} strokeWidth={2} color={tokens.success} /> : undefined}
+              onPress={() => select({ kind: "default" })}
+              showSeparator={false}
+            />
+          </View>
+          {hosts.length > 0 ? (
+            <View>
+              <SectionHeader>Forge Anywhere</SectionHeader>
+              {hosts.map((host, index) => (
+                <ListRow
+                  key={host.id}
+                  title={host.name}
+                  subtitle={`${hostStateText(host)} · anywhere`}
+                  leading={<HostDot state={host.state} />}
+                  trailing={
+                    value.kind === "anywhere" && value.host.id === host.id ? (
+                      <Check size={16} strokeWidth={2} color={tokens.success} />
+                    ) : undefined
+                  }
+                  onPress={() => select({ kind: "anywhere", host })}
+                  showSeparator={index < hosts.length - 1}
+                />
+              ))}
+            </View>
+          ) : null}
+        </View>
+      </Sheet>
+    </View>
+  );
+}
+
 export default function NewSessionScreen() {
   const tokens = useTokens();
   const { scheme } = useTheme();
@@ -60,7 +154,7 @@ export default function NewSessionScreen() {
   // Fleet/rail TaskComposer hands its typed text over as ?title= — the composer IS the
   // new-session affordance (HANDOFF rule 6), so that text must survive the navigation.
   const requestedTitle = Array.isArray(params.title) ? params.title[0] : params.title;
-  const { activeServerId } = useAuth();
+  const { activeServerId, servers } = useAuth();
   const projects = useProjects();
   const initializedProjectKey = useRef<string | null>(null);
   const projectSelectionRevision = useRef(0);
@@ -70,6 +164,19 @@ export default function NewSessionScreen() {
   const [worktree, setWorktree] = useState(true);
   const [temper, setTemper] = useState<Temper>("Ask");
   const create = useCreateSession();
+  const toast = useToast();
+
+  // Forge Anywhere: "Host" row only appears once signed in with at least one host —
+  // zero visual/behavioral change otherwise.
+  const { signedIn: anywhereSignedIn } = useAnywhere();
+  const { hosts: anywhereHosts } = useAnywhereHosts();
+  const activeServerName = servers.find((s) => s.id === activeServerId)?.name ?? "this server";
+  const showHostPicker = anywhereSignedIn && anywhereHosts.length > 0;
+  const [hostChoice, setHostChoice] = useState<HostChoice>({ kind: "default" });
+  const isOfflineHostQueue =
+    showHostPicker && hostChoice.kind === "anywhere" && hostChoice.host.state.kind === "offline";
+  const [queuing, setQueuing] = useState(false);
+  const [queueError, setQueueError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!activeServerId || !projects.data) return;
@@ -104,6 +211,27 @@ export default function NewSessionScreen() {
   );
 
   const handleSubmit = useCallback(() => {
+    // Forge Anywhere: an offline host queues a remote job instead of creating a session
+    // directly — queued jobs are immutable (cancel/replace only, never edit), so this is
+    // a distinct action from the normal create flow, not a variant of it.
+    if (isOfflineHostQueue) {
+      if (queuing || hostChoice.kind !== "anywhere") return;
+      setQueuing(true);
+      setQueueError(null);
+      const host = hostChoice.host;
+      anywhereClient
+        .queueJob({ hostId: host.id, prompt: task.trim() })
+        .then(() => {
+          toast.show(`queued for ${host.name}`);
+          router.push("/anywhere/jobs");
+        })
+        .catch((err) => {
+          setQueueError(err instanceof Error ? err.message : "could not queue job");
+        })
+        .finally(() => setQueuing(false));
+      return;
+    }
+
     if (create.isPending) return;
     const trimmedCwd = cwd.trim();
     create.mutate(
@@ -121,7 +249,7 @@ export default function NewSessionScreen() {
         },
       },
     );
-  }, [cwd, task, model, worktree, temper, create, activeServerId]);
+  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktree, temper, activeServerId]);
 
   const onClose = useCallback(() => goBackOr("/(tabs)"), []);
 
@@ -136,16 +264,26 @@ export default function NewSessionScreen() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
-  const serverError =
-    create.error instanceof ApiError ? create.error.message : create.isError ? "create failed" : null;
+  const serverError = isOfflineHostQueue
+    ? queueError
+    : create.error instanceof ApiError
+      ? create.error.message
+      : create.isError
+        ? "create failed"
+        : null;
 
-  const canSubmit = !create.isPending;
+  const submitPending = isOfflineHostQueue ? queuing : create.isPending;
+  const canSubmit = !submitPending;
+  const submitLabel = isOfflineHostQueue ? "Queue remote job" : "Forge session";
 
   const whereAndHow = (
     <View>
       <Text style={[typeScale.section, styles.sectionLabel, { color: tokens.ink4 }]}>Where &amp; how</Text>
       <View>
         <ProjectPicker value={cwd} onChange={rememberProject} />
+        {showHostPicker ? (
+          <HostPicker value={hostChoice} onChange={setHostChoice} activeServerName={activeServerName} hosts={anywhereHosts} />
+        ) : null}
         <ModelPicker value={model} onChange={setModel} />
       </View>
       <View style={styles.temperBlock}>
@@ -157,6 +295,23 @@ export default function NewSessionScreen() {
         <Text style={[typeScale.body, styles.worktreeLabel, { color: tokens.ink }]}>Isolated git worktree</Text>
         <Text style={[typeScale.meta, { color: tokens.ink4 }]}>recommended</Text>
       </View>
+      {showHostPicker && hostChoice.kind === "anywhere" ? (
+        isOfflineHostQueue ? (
+          // Design mobile.dc.html "AW Forge a Task", line 950 — queue-privacy footnote,
+          // shown only for the offline-host queue path.
+          <Text style={[typeScale.meta, styles.hostNote, { color: tokens.ink4 }]}>
+            Prompt, path and title are encrypted in the queue. The relay sees size, kind and timestamps only.
+          </Text>
+        ) : (
+          // Real session creation isn't routed to a chosen Anywhere host yet
+          // (CreateSessionRequest has no host/transport param) — an online host still
+          // creates on the active server, this note says so honestly instead of implying
+          // the session actually runs on the selected host.
+          <Text style={[typeScale.meta, styles.hostNote, { color: tokens.ink3 }]}>
+            runs via {activeServerName} until relay sessions land
+          </Text>
+        )
+      ) : null}
       {serverError ? (
         <Text accessibilityRole="alert" style={[typeScale.sub, styles.errorText, { color: tokens.danger }]}>
           {serverError}
@@ -186,13 +341,13 @@ export default function NewSessionScreen() {
           {whereAndHow}
           <View style={styles.spacer} />
           <Button
-            label="Forge session"
+            label={submitLabel}
             onPress={handleSubmit}
-            loading={create.isPending}
+            loading={submitPending}
             disabled={!canSubmit}
             fullWidth
-            accessibilityLabel="Forge session"
-            accessibilityHint="Creates a session for this task"
+            accessibilityLabel={submitLabel}
+            accessibilityHint={isOfflineHostQueue ? "Queues a remote job for when the host returns" : "Creates a session for this task"}
           />
         </Screen>
       </View>
@@ -228,12 +383,12 @@ export default function NewSessionScreen() {
           <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>↵ forge · esc cancel</Text>
           <View style={styles.flexSpacer} />
           <Button
-            label="Forge session"
+            label={submitLabel}
             onPress={handleSubmit}
-            loading={create.isPending}
+            loading={submitPending}
             disabled={!canSubmit}
-            accessibilityLabel="Forge session"
-            accessibilityHint="Creates a session for this task"
+            accessibilityLabel={submitLabel}
+            accessibilityHint={isOfflineHostQueue ? "Queues a remote job for when the host returns" : "Creates a session for this task"}
           />
         </View>
       </View>
@@ -311,6 +466,9 @@ const styles = StyleSheet.create({
   worktreeRow: { flexDirection: "row", alignItems: "center", gap: space.space12, minHeight: 52 },
   worktreeLabel: { flex: 1 },
   errorText: { paddingTop: space.space8 },
+  defaultHostDot: { width: 7, height: 7, borderRadius: 3.5 },
+  hostSheetContent: { paddingHorizontal: space.space16, paddingBottom: space.space32, gap: space.space12 },
+  hostNote: { paddingTop: space.space8 },
   modalRoot: { flex: 1, alignItems: "center", justifyContent: "flex-start", paddingTop: 110, padding: space.space24 },
   modalCard: { width: MODAL_WIDTH, maxWidth: "100%", borderWidth: 1, padding: space.space24 },
   modalHeaderRow: { flexDirection: "row", alignItems: "center" },

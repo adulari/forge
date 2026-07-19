@@ -1,180 +1,412 @@
+// Forge Anywhere — Settings-entered status hub (mobile.dc.html "AW Settings Hub" lines
+// 26-91) with a desktop two-column layout at the expanded breakpoint (desktop.dc.html
+// "AW Desktop Settings" lines 92-162). Signed-out renders only the explainer + sign-in,
+// per the design's "First use -> the hub shows only 'Sign in with GitHub' + what Anywhere
+// adds" application state (mobile.dc.html line 1347) — this matches AnywhereProvider's
+// signed-out-by-default posture (store.tsx), so a fresh install never probes the client.
 import { router } from "expo-router";
-import { Bell, BriefcaseBusiness, Cloud, CreditCard, GitCompareArrows, HardDrive, History, Laptop, RefreshCw, ShieldCheck, Smartphone } from "lucide-react-native";
-import React, { useMemo, useState } from "react";
-import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useState } from "react";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 
+import { SettingsShell } from "../(tabs)/settings";
+import { EntitlementBadge } from "../../components/anywhere/EntitlementBadge";
 import { BackLink } from "../../components/ds/BackLink";
-import { Badge } from "../../components/ds/Badge";
-import { Banner } from "../../components/ds/Banner";
 import { Button } from "../../components/ds/Button";
-import { Card } from "../../components/ds/Card";
-import { Input } from "../../components/ds/Input";
+import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
 import { KeyValueRow } from "../../components/ds/KeyValueRow";
-import { ListRow } from "../../components/ds/ListRow";
 import { Screen } from "../../components/ds/Screen";
 import { SectionHeader } from "../../components/ds/SectionHeader";
-import { useAnywhere } from "../../lib/AnywhereProvider";
+import { Skeleton } from "../../components/ds/Skeleton";
+import { useToast } from "../../components/ds/ToastHost";
+import { goBackOr } from "../../lib/nav";
+import { formatBytes, hostStateText } from "../../lib/anywhere/format";
+import { useAnywhere, useAnywhereDevices, useAnywhereHosts, useAnywhereStorage } from "../../lib/anywhere/store";
+import { MAX_ACTIVE_HOSTS, type AnywhereAccount, type AnywhereHost } from "../../lib/anywhere/types";
 import { useTokens } from "../../theme/ThemeProvider";
-import { space } from "../../theme/tokens";
-import { monoFamily, type } from "../../theme/typography";
+import { radii, space } from "../../theme/tokens";
+import { formatRelativeTime, type, tabularNums } from "../../theme/typography";
+import { useBreakpoint } from "../../theme/useBreakpoint";
 
-export default function AnywhereAccountScreen() {
-  const anywhere = useAnywhere();
+const PRIVACY_COPY =
+  "Only your paired devices. The relay routes sealed envelopes — it sees sizes, timestamps and kinds, never contents. If every device and your recovery phrase are lost, no one can decrypt this account, including Forge support.";
+const LOCAL_FALLBACK_NOTE = "Local Forge keeps working without Anywhere — Direct and LAN access stay free.";
+
+function relaySubtitle(account: AnywhereAccount): string {
+  if (!account.relayConnected) return "Relay disconnected";
+  if (account.lastSyncAt == null) return "Relay connected · not synced yet";
+  return `Relay connected · last sync ${formatRelativeTime(account.lastSyncAt)} ago`;
+}
+
+/** Trial copy mirrors the design's exact business-rule state machine (types.ts lines 12-15). */
+function billingMeta(account: AnywhereAccount): string {
+  switch (account.entitlement) {
+    case "not-started":
+      return "not started";
+    case "trial":
+      return account.trialDaysLeft != null ? `trial · ${account.trialDaysLeft} days left` : "trial";
+    case "active":
+      return `active · ${account.plan ?? "monthly"}`;
+    case "grace":
+      return account.graceDaysLeft != null ? `grace · ${account.graceDaysLeft} days left` : "grace";
+    case "read-only":
+      return account.readOnlyDaysLeft != null ? `read-only · ${account.readOnlyDaysLeft} days left` : "read-only";
+    case "suspended":
+      return account.deletesInDays != null ? `suspended · deletes in ${account.deletesInDays}d` : "suspended";
+    case "webhook-pending":
+      return "pending";
+    default: {
+      const _exhaustive: never = account.entitlement;
+      return _exhaustive;
+    }
+  }
+}
+
+function billingParagraph(account: AnywhereAccount): string {
+  switch (account.entitlement) {
+    case "trial":
+      return `Trial · ${account.trialDaysLeft ?? 14} days left · no card on file. Annual €79/yr (default) or €10/mo via Paddle. At expiry: read-only immediately — no grace. Grace (7d) applies only to paid payment failure. Checkout restores access instantly.`;
+    case "active":
+      return `Active · ${account.plan === "yearly" ? "€79/yr" : "€10/mo"} via Paddle.`;
+    case "grace":
+      return `Payment failed · ${account.graceDaysLeft ?? 7} days of grace left before read-only.`;
+    case "read-only":
+      return `Read-only · ${account.readOnlyDaysLeft ?? 30} days left to restore access before suspension.`;
+    case "suspended":
+      return `Suspended · deletes in ${account.deletesInDays ?? 90} days unless restored.`;
+    case "not-started":
+      return "Not started — connect a host to begin your 14-day trial, no card required.";
+    case "webhook-pending":
+      return "Payment received — waiting for confirmation.";
+    default: {
+      const _exhaustive: never = account.entitlement;
+      return _exhaustive;
+    }
+  }
+}
+
+function hostsSummary(hosts: AnywhereHost[]): string {
+  const active = hosts.filter((h) => h.state.kind !== "revoked" && h.state.kind !== "disabled");
+  const anyOnline = active.some((h) => h.state.kind === "online");
+  const status = anyOnline ? "online" : active.length === 0 ? "none active" : "offline";
+  return `${active.length} of ${MAX_ACTIVE_HOSTS} · ${status}`;
+}
+
+function SignedOutBody() {
   const tokens = useTokens();
-  const [answers, setAnswers] = useState<Record<number, string>>({});
-  const [recovery, setRecovery] = useState("");
-  const words = useMemo(() => anywhere.recoveryWords?.split(" ") ?? [], [anywhere.recoveryWords]);
-
-  if (anywhere.phase === "loading") {
-    return <Screen contentContainerStyle={styles.center}><ActivityIndicator color={tokens.ink3} /></Screen>;
-  }
-
-  if (anywhere.phase === "new_recovery" && words.length === 24) {
-    return (
-      <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
-        <BackLink label="Connect" />
-        <View style={styles.hero}>
-          <Text style={[type.title, { color: tokens.ink }]}>Save your recovery words</Text>
-          <Text style={[type.body, { color: tokens.ink2 }]}>These words are the only way to recover encrypted history on a new device. Forge cannot reset them.</Text>
-        </View>
-        <Card variant="feature" style={styles.wordGrid} accessibilityLabel="24 word recovery phrase">
-          {words.map((word, index) => (
-            <View key={`${index}-${word}`} style={styles.word}>
-              <Text style={[type.meta, { color: tokens.ink3 }]}>{index + 1}</Text>
-              <Text selectable style={[type.body, { color: tokens.ink, fontFamily: monoFamily.regular }]}>{word}</Text>
-            </View>
-          ))}
-        </Card>
-        <Banner tone="warn" message="Store this phrase offline. It will not be shown again after confirmation." />
-        <Card style={styles.cardGap}>
-          <Text style={[type.bodyBold, { color: tokens.ink }]}>Confirm three words</Text>
-          {anywhere.recoverySample.map((index) => (
-            <Input key={index} label={`Word ${index + 1}`} value={answers[index] ?? ""} onChangeText={(value) => setAnswers((current) => ({ ...current, [index]: value }))} autoCapitalize="none" autoCorrect={false} />
-          ))}
-          {anywhere.error ? <Text style={[type.sub, { color: tokens.danger }]}>{anywhere.error}</Text> : null}
-          <Button label="Confirm and enable encryption" onPress={() => void anywhere.confirmNewRecovery(answers)} disabled={anywhere.recoverySample.some((index) => !answers[index]?.trim())} fullWidth />
-        </Card>
-      </Screen>
-    );
-  }
-
-  if (anywhere.phase === "existing_recovery") {
-    return (
-      <Screen scroll keyboardAvoiding contentContainerStyle={styles.content}>
-        <BackLink label="Connect" />
-        <View style={styles.hero}>
-          <Text style={[type.title, { color: tokens.ink }]}>Recover encrypted access</Text>
-          <Text style={[type.body, { color: tokens.ink2 }]}>GitHub confirmed your identity. Enter your 24 recovery words to enroll this device and decrypt your own data.</Text>
-        </View>
-        <Card style={styles.cardGap}>
-          <Input label="24-word recovery phrase" value={recovery} onChangeText={setRecovery} autoCapitalize="none" autoCorrect={false} multiline numberOfLines={4} secureTextEntry />
-          {anywhere.error ? <Text style={[type.sub, { color: tokens.danger }]}>{anywhere.error}</Text> : null}
-          <Button label="Recover this device" onPress={() => void anywhere.recoverExisting(recovery)} disabled={recovery.trim().split(/\s+/).length !== 24} fullWidth />
-        </Card>
-      </Screen>
-    );
-  }
-
-  const signedOut = !anywhere.credentials;
-  if (signedOut) {
-    return (
-      <Screen scroll contentContainerStyle={styles.content}>
-        <BackLink label="Connect" />
-        <View style={styles.hero}>
-          <Text style={[type.display, { color: tokens.ink }]}>Forge Anywhere</Text>
-          <Text style={[type.body, { color: tokens.ink2 }]}>Leave your desk without leaving your Forge session. Reach enrolled hosts with end-to-end encryption while local and LAN access stay unchanged.</Text>
-        </View>
-        <Card variant="feature" style={styles.cardGap}>
-          <View style={styles.iconTitle}><ShieldCheck size={22} color={tokens.accent} /><Text style={[type.heading, { color: tokens.ink }]}>Private by design</Text></View>
-          <Text style={[type.sub, { color: tokens.ink2 }]}>The service routes encrypted envelopes. Your daemon token, prompts, diffs, and recovery secret never leave your devices.</Text>
-          <KeyValueRow label="Trial" value="14 days · no card" />
-          <KeyValueRow label="Plans" value="€10 monthly · €79 yearly" />
-          <KeyValueRow label="Included" value="3 hosts · 5 GB" />
-        </Card>
-        {anywhere.phase === "authorizing" && anywhere.flow ? (
-          <Card style={styles.cardGap}>
-            <Text style={[type.heading, { color: tokens.ink }]}>Finish on GitHub</Text>
-            <Text style={[type.sub, { color: tokens.ink2 }]}>Enter this one-time code in the GitHub tab that just opened. Keep Forge open here while it waits for approval.</Text>
-            <Text selectable style={[type.display, styles.code, { color: tokens.accent }]}>{anywhere.flow.user_code}</Text>
-            <Button label="Open GitHub in a new tab" variant="secondary" onPress={() => void anywhere.openLoginPage()} fullWidth />
-            <View style={styles.waiting}><ActivityIndicator color={tokens.ink3} /><Text style={[type.sub, { color: tokens.ink2 }]}>Waiting for authorization…</Text></View>
-          </Card>
-        ) : (
-          <Button label={anywhere.phase === "starting" ? "Starting secure login…" : "Start 14-day trial with GitHub"} onPress={() => void anywhere.startLogin()} loading={anywhere.phase === "starting"} fullWidth />
-        )}
-        {anywhere.error ? <Banner tone="danger" message={anywhere.error} actionLabel="Try again" onAction={() => void anywhere.startLogin()} /> : null}
-        <Button label="Use a direct Forge server" variant="ghost" onPress={() => router.replace("/connect")} fullWidth />
-      </Screen>
-    );
-  }
-
-  const entitlement = anywhere.account?.entitlement ?? "checking";
-  const enrolled = anywhere.credentials;
-  if (!enrolled) return null;
   return (
     <Screen scroll contentContainerStyle={styles.content}>
-      <BackLink label="Settings" />
-      <View style={styles.titleRow}>
-        <View style={styles.titleGrow}>
-          <Text style={[type.title, { color: tokens.ink }]}>Forge Anywhere</Text>
-          <Text style={[type.sub, { color: tokens.ink2 }]}>{enrolled.githubLogin ? `Signed in as @${enrolled.githubLogin}` : "Encrypted account connected"}</Text>
-        </View>
-        <Badge label={entitlement.replaceAll("_", " ")} tone={entitlement === "active" || entitlement === "trialing" ? "success" : entitlement === "grace" ? "warn" : "neutral"} />
+      <BackLink label="Settings" onPress={() => goBackOr("/settings")} />
+      <Text style={[type.title, styles.pageTitle, { color: tokens.ink }]}>Forge Anywhere</Text>
+
+      <View style={styles.explainerBlock}>
+        <Text style={[type.bodyBold, { color: tokens.ink }]}>What Forge Anywhere adds</Text>
+        <Text style={[type.sub, styles.explainerLine, { color: tokens.ink2 }]}>
+          Reach your hosts from anywhere, not just your LAN. Pair extra devices to control the same sessions.
+          Sessions, settings and memories sync end-to-end encrypted — the relay only ever sees sealed envelopes.
+        </Text>
       </View>
-      {anywhere.error ? <Banner tone="danger" message={anywhere.error} actionLabel="Retry" onAction={() => void anywhere.refresh()} /> : null}
-      <Card padded={false}>
-        <ListRow title="Hosts" subtitle={`${anywhere.hosts.length} of 3 enrolled`} leading={<Laptop size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/hosts")} />
-        <ListRow title="Devices" subtitle={`${anywhere.devices.length} enrolled`} leading={<Smartphone size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/devices")} />
-        <ListRow title="Notifications" subtitle={pushStatusLabel(anywhere.pushStatus)} leading={<Bell size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/notifications")} />
-        <ListRow title="Remote jobs" subtitle="Encrypted offline queue" leading={<BriefcaseBusiness size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/jobs")} />
-        <ListRow title="Workspace handoff" subtitle="Move an idle workspace safely" leading={<GitCompareArrows size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/handoff")} />
-        <ListRow title="Offline history" subtitle="Device-encrypted synced records" leading={<History size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/history")} />
-        <ListRow title="Encrypted storage" subtitle={formatBytes(anywhere.account?.storage_used_bytes ?? 0)} leading={<HardDrive size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/storage")} />
-        <ListRow title="Plan and billing" subtitle="€79 yearly · €10 monthly" leading={<CreditCard size={20} color={tokens.ink2} />} onPress={() => router.push("/anywhere/billing")} showSeparator={false} />
-      </Card>
-      <SectionHeader>Account status</SectionHeader>
-      <Card padded={false}>
-        <KeyValueRow label="Entitlement" value={entitlement.replaceAll("_", " ")} />
-        <KeyValueRow label="Trial ends" value={formatDate(anywhere.account?.trial_ends_at)} />
-        <KeyValueRow label="Encryption" value={`epoch ${enrolled.keyEpoch}`} />
-        <KeyValueRow label="Service" value="app.forge.adulari.dev" />
-      </Card>
-      <Button label="Refresh status" variant="secondary" icon={<RefreshCw size={18} color={tokens.ink} />} onPress={() => void anywhere.refresh()} fullWidth />
-      <Button label="Log out of Anywhere" variant="ghost" onPress={() => void anywhere.logout()} fullWidth />
-      <View style={styles.footnote}><Cloud size={16} color={tokens.ink3} /><Text style={[type.meta, styles.titleGrow, { color: tokens.ink3 }]}>Logging out removes this device’s local tokens and keys. Direct Forge servers remain available.</Text></View>
+
+      <Button
+        label="Sign in with GitHub"
+        onPress={() => router.push("/anywhere/sign-in")}
+        fullWidth
+        style={styles.signInButton}
+      />
+
+      <Text style={[type.meta, styles.footerNote, { color: tokens.ink4 }]}>{LOCAL_FALLBACK_NOTE}</Text>
     </Screen>
   );
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB used`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB used`;
+function HubSkeleton() {
+  return (
+    <Screen scroll contentContainerStyle={styles.content}>
+      <BackLink label="Settings" onPress={() => goBackOr("/settings")} />
+      <Skeleton width={180} height={22} style={styles.skeletonTitle} />
+      <Skeleton width={220} height={13} style={styles.skeletonSubtitle} />
+      <View style={styles.skeletonRows}>
+        {[0, 1, 2, 3, 4, 5].map((i) => (
+          <Skeleton key={i} width="100%" height={44} />
+        ))}
+      </View>
+    </Screen>
+  );
 }
 
-function pushStatusLabel(status: "unsupported" | "denied" | "unsubscribed" | "subscribed"): string {
-  if (status === "subscribed") return "Generic alerts enabled";
-  if (status === "denied") return "Blocked in iOS Settings";
-  if (status === "unsupported") return "Available on iPhone";
-  return "Off";
+function CompactHub({ account }: { account: AnywhereAccount }) {
+  const tokens = useTokens();
+  const toast = useToast();
+  const { hosts, loading: hostsLoading } = useAnywhereHosts();
+  const { devices, loading: devicesLoading } = useAnywhereDevices();
+  const { storage, loading: storageLoading } = useAnywhereStorage();
+
+  return (
+    <Screen scroll contentContainerStyle={styles.content}>
+      <BackLink label="Settings" onPress={() => goBackOr("/settings")} />
+
+      <View style={styles.titleRow}>
+        <Text style={[type.title, styles.titleFlex, { color: tokens.ink }]}>Forge Anywhere</Text>
+        <Pressable
+          onPress={() => router.push("/anywhere/billing")}
+          accessibilityRole="button"
+          accessibilityLabel="Billing"
+        >
+          <EntitlementBadge account={account} />
+        </Pressable>
+      </View>
+      <Text style={[type.sub, styles.subtitle, { color: tokens.ink3 }]}>{relaySubtitle(account)}</Text>
+
+      <View style={styles.section}>
+        <SectionHeader>Account</SectionHeader>
+        <KeyValueRow label={`@${account.githubLogin}`} value="github" chevron onPress={() => router.push("/anywhere/account")} />
+        <KeyValueRow
+          label="Hosts"
+          value={hostsLoading ? undefined : hostsSummary(hosts)}
+          chevron
+          onPress={() => router.push("/anywhere/hosts")}
+        />
+        <KeyValueRow
+          label="Devices"
+          value={devicesLoading ? undefined : `${devices.length} paired`}
+          chevron
+          onPress={() => router.push("/anywhere/devices")}
+        />
+        <KeyValueRow label="Notifications" value="on" chevron onPress={() => router.push("/anywhere/notifications")} />
+        <KeyValueRow
+          label="Encrypted storage"
+          value={storageLoading || !storage ? undefined : `${formatBytes(storage.usedBytes)} of ${formatBytes(storage.quotaBytes)}`}
+          chevron
+          onPress={() => router.push("/anywhere/storage")}
+        />
+        <KeyValueRow label="Billing" value={billingMeta(account)} chevron onPress={() => router.push("/anywhere/billing")} />
+      </View>
+
+      <View style={styles.section}>
+        <SectionHeader>Who can read your data</SectionHeader>
+        <Text style={[type.sub, styles.privacyText, { color: tokens.ink2 }]}>{PRIVACY_COPY}</Text>
+        <Pressable
+          onPress={() => toast.show("Technical disclosure — coming soon.", { tone: "neutral" })}
+          accessibilityRole="button"
+          accessibilityLabel="Technical disclosure"
+        >
+          <Text style={[type.bodyBold, styles.disclosureLink, { color: tokens.accent }]}>Technical disclosure</Text>
+        </Pressable>
+      </View>
+
+      <Text style={[type.meta, styles.footerNote, { color: tokens.ink4 }]}>{LOCAL_FALLBACK_NOTE}</Text>
+    </Screen>
+  );
 }
 
-function formatDate(value: string | null | undefined): string {
-  if (!value) return "—";
-  const timestamp = Number(value) * 1000;
-  return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleDateString() : "—";
+function WideHub({ account }: { account: AnywhereAccount }) {
+  const tokens = useTokens();
+  const toast = useToast();
+  const { client, refresh } = useAnywhere();
+  const { hosts, loading: hostsLoading } = useAnywhereHosts();
+  const { devices, loading: devicesLoading } = useAnywhereDevices();
+  const { storage, loading: storageLoading } = useAnywhereStorage();
+  const [deleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
+  const [exporting, setExporting] = useState(false);
+
+  const onExport = useCallback(async () => {
+    setExporting(true);
+    try {
+      await client.exportAccountData();
+      toast.show("Account data exported.", { tone: "neutral" });
+    } finally {
+      setExporting(false);
+    }
+  }, [client, toast]);
+
+  const onSignOut = useCallback(async () => {
+    await client.signOut();
+    await refresh();
+    toast.show("Signed out of Forge Anywhere.", { tone: "neutral" });
+  }, [client, refresh, toast]);
+
+  const onDeleteAccount = useCallback(async () => {
+    setDeleteConfirmVisible(false);
+    await client.deleteAccount();
+    await refresh();
+    toast.show("Account deleted.", { tone: "neutral" });
+  }, [client, refresh, toast]);
+
+  const pct = storage && storage.quotaBytes > 0 ? Math.round((storage.usedBytes / storage.quotaBytes) * 100) : 0;
+
+  return (
+    <Screen scroll contentContainerStyle={styles.wideContent}>
+      <View style={styles.wideHeaderRow}>
+        <Text style={[type.title, { color: tokens.ink }]}>Forge Anywhere</Text>
+        <Pressable onPress={() => router.push("/anywhere/billing")} accessibilityRole="button" accessibilityLabel="Billing">
+          <EntitlementBadge account={account} />
+        </Pressable>
+      </View>
+      <Text style={[type.sub, styles.subtitle, { color: tokens.ink3 }]}>
+        {`@${account.githubLogin} · ${relaySubtitle(account).toLowerCase()}`}
+      </Text>
+
+      <View style={styles.wideColumns}>
+        <View style={styles.wideLeft}>
+          <SectionHeader>{`Hosts · ${hostsLoading ? "…" : hostsSummary(hosts)}`}</SectionHeader>
+          {hostsLoading ? (
+            <Skeleton width="100%" height={44} />
+          ) : (
+            hosts.map((host) => (
+              <KeyValueRow
+                key={host.id}
+                label={host.name}
+                value={hostStateText(host)}
+                chevron
+                onPress={() => router.push({ pathname: "/anywhere/host/[id]", params: { id: host.id } })}
+              />
+            ))
+          )}
+          <Pressable
+            onPress={() => toast.show("Copy the command from the Hosts screen.", { tone: "neutral" })}
+            accessibilityRole="button"
+            accessibilityLabel="Add a host"
+            style={[styles.addHostBox, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}
+          >
+            <Text style={[type.codeSmall, tabularNums, styles.addHostText, { color: tokens.ink }]} numberOfLines={1}>
+              <Text style={{ color: tokens.ink3 }}>$ </Text>
+              forge anywhere enable --name NAME
+            </Text>
+          </Pressable>
+
+          <SectionHeader>{`Devices · ${devicesLoading ? "…" : devices.length}`}</SectionHeader>
+          {devicesLoading ? (
+            <Skeleton width="100%" height={44} />
+          ) : (
+            devices.map((device) => (
+              <KeyValueRow
+                key={device.id}
+                label={device.isThisDevice ? `${device.name} · this device` : device.name}
+                value={device.isThisDevice ? `enrolled ${formatRelativeTime(device.enrolledAt)} ago` : `last seen ${formatRelativeTime(device.lastSeenAt)} ago`}
+                onPress={() => router.push("/anywhere/devices")}
+              />
+            ))
+          )}
+          <View style={styles.wideLinkRow}>
+            <Pressable onPress={() => router.push("/anywhere/pair")} accessibilityRole="button" accessibilityLabel="Pair a device">
+              <Text style={[type.bodyBold, { color: tokens.accent }]}>Pair a device</Text>
+            </Pressable>
+            <Pressable onPress={() => router.push("/anywhere/devices")} accessibilityRole="button" accessibilityLabel="Lost a device?">
+              <Text style={[type.bodyBold, { color: tokens.danger }]}>Lost a device?</Text>
+            </Pressable>
+          </View>
+        </View>
+
+        <View style={styles.wideRight}>
+          <SectionHeader>Storage</SectionHeader>
+          {storageLoading || !storage ? (
+            <Skeleton width="100%" height={40} />
+          ) : (
+            <>
+              <View style={styles.storageFigureRow}>
+                <Text style={[type.codeSmall, tabularNums, styles.storageFigure, { color: tokens.ink }]}>
+                  {formatBytes(storage.usedBytes)}
+                </Text>
+                <Text style={[type.monoMeta, tabularNums, { color: tokens.ink3 }]}>{`of ${formatBytes(storage.quotaBytes)} · ${pct}%`}</Text>
+              </View>
+              <View style={[styles.gaugeTrack, { backgroundColor: tokens.border }]}>
+                <View style={[styles.gaugeFill, { width: `${Math.min(100, pct)}%`, backgroundColor: tokens.accent }]} />
+              </View>
+            </>
+          )}
+
+          <SectionHeader style={styles.wideSectionSpacing}>Billing</SectionHeader>
+          <Text style={[type.sub, styles.billingText, { color: tokens.ink2 }]}>{billingParagraph(account)}</Text>
+          <Button label="Choose a plan" onPress={() => router.push("/anywhere/billing")} style={styles.chooseplanButton} />
+
+          <SectionHeader style={styles.wideSectionSpacing}>Notifications</SectionHeader>
+          <KeyValueRow label="Generic pushes" value="enabled" onPress={() => router.push("/anywhere/notifications")} />
+
+          <SectionHeader style={styles.wideSectionSpacing}>Account</SectionHeader>
+          <Pressable onPress={onExport} disabled={exporting} accessibilityRole="button" accessibilityLabel="Export account data">
+            <Text style={[type.body, styles.accountLink, { color: tokens.ink2 }]}>
+              {exporting ? "Exporting…" : "Export account data"}
+            </Text>
+          </Pressable>
+          <Pressable onPress={onSignOut} accessibilityRole="button" accessibilityLabel="Sign out on this device">
+            <Text style={[type.body, styles.accountLink, { color: tokens.ink2 }]}>Sign out on this device</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => setDeleteConfirmVisible(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Delete account"
+          >
+            <Text style={[type.body, styles.accountLink, { color: tokens.danger }]}>Delete account…</Text>
+          </Pressable>
+
+          <Text style={[type.meta, styles.wideFooterNote, { color: tokens.ink4 }]}>
+            Direct servers, appearance, app lock, usage and diagnostics stay in their existing Settings sections.
+          </Text>
+        </View>
+      </View>
+
+      <ConfirmDialog
+        visible={deleteConfirmVisible}
+        title="Delete your Forge Anywhere account?"
+        message="This deletes your encrypted account, hosts, devices and stored data after the retention window. Local Forge on every machine keeps working."
+        confirmLabel="Delete account"
+        destructive
+        onConfirm={onDeleteAccount}
+        onCancel={() => setDeleteConfirmVisible(false)}
+      />
+    </Screen>
+  );
+}
+
+export default function AnywhereHubScreen() {
+  const { account, loading, signedIn } = useAnywhere();
+  const { isExpanded } = useBreakpoint();
+
+  return (
+    <SettingsShell active="anywhere">
+      {loading ? (
+        <HubSkeleton />
+      ) : !signedIn || !account ? (
+        <SignedOutBody />
+      ) : isExpanded ? (
+        <WideHub account={account} />
+      ) : (
+        <CompactHub account={account} />
+      )}
+    </SettingsShell>
+  );
 }
 
 const styles = StyleSheet.create({
-  content: { paddingTop: space.space24, paddingBottom: space.space32, gap: space.space16 },
-  center: { flex: 1, justifyContent: "center", alignItems: "center" },
-  hero: { gap: space.space8, maxWidth: 720 },
-  cardGap: { gap: space.space12 },
-  iconTitle: { flexDirection: "row", alignItems: "center", gap: space.space8 },
-  code: { textAlign: "center", letterSpacing: 2 },
-  waiting: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: space.space8 },
-  wordGrid: { flexDirection: "row", flexWrap: "wrap", gap: space.space8 },
-  word: { width: "30%", minWidth: 96, flexGrow: 1, flexDirection: "row", gap: space.space8 },
-  titleRow: { flexDirection: "row", alignItems: "flex-start", gap: space.space12 },
-  titleGrow: { flex: 1 },
-  footnote: { flexDirection: "row", gap: space.space8, alignItems: "flex-start" },
+  content: { paddingTop: space.space16, paddingBottom: space.space48, gap: space.space4 },
+  pageTitle: { paddingHorizontal: space.space4, marginTop: space.space4 },
+  titleRow: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space4, marginTop: space.space4 },
+  titleFlex: { flex: 1 },
+  subtitle: { paddingHorizontal: space.space4, marginTop: -2 },
+  explainerBlock: { marginTop: space.space24, paddingHorizontal: space.space4, gap: space.space8 },
+  explainerLine: { lineHeight: 19 },
+  signInButton: { marginTop: space.space24, marginHorizontal: space.space4 },
+  footerNote: { marginTop: space.space24, paddingHorizontal: space.space4 },
+  skeletonTitle: { marginTop: space.space12, marginHorizontal: space.space4 },
+  skeletonSubtitle: { marginTop: space.space8, marginHorizontal: space.space4 },
+  skeletonRows: { marginTop: space.space24, gap: space.space8 },
+  section: { marginTop: space.space16 },
+  privacyText: { paddingHorizontal: space.space16, marginTop: space.space8, lineHeight: 19 },
+  disclosureLink: { paddingHorizontal: space.space16, marginTop: space.space8, paddingVertical: space.space4 },
+  wideContent: { paddingTop: space.space24, paddingBottom: space.space48, maxWidth: 720, alignSelf: "center", width: "100%" },
+  wideHeaderRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  wideColumns: { flexDirection: "row", gap: 44, marginTop: space.space24 },
+  wideLeft: { flex: 1, minWidth: 0 },
+  wideRight: { width: 290, flexShrink: 0 },
+  wideSectionSpacing: { marginTop: space.space16 },
+  addHostBox: { marginTop: space.space12, borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius12, paddingHorizontal: space.space12, paddingVertical: space.space12 },
+  addHostText: { flexShrink: 1 },
+  wideLinkRow: { flexDirection: "row", gap: space.space16, marginTop: space.space8 },
+  storageFigureRow: { flexDirection: "row", alignItems: "baseline", gap: space.space8, marginTop: space.space8 },
+  storageFigure: { fontSize: 19, fontWeight: "700" },
+  gaugeTrack: { height: 4, borderRadius: 2, overflow: "hidden", marginTop: space.space8 },
+  gaugeFill: { height: "100%", borderRadius: 2 },
+  billingText: { marginTop: space.space8, lineHeight: 19 },
+  chooseplanButton: { marginTop: space.space12 },
+  accountLink: { paddingVertical: space.space4, marginTop: space.space8 },
+  wideFooterNote: { marginTop: space.space20, lineHeight: 17 },
 });

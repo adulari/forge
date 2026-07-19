@@ -1,10 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
-exclude = ["vendor/genai-0.6.5"]
 
 [workspace.package]
-version = "2.6.6"
+version = "2.7.0"
 edition = "2021"
 rust-version = "1.88"
 license = "AGPL-3.0-only"
@@ -15,26 +14,26 @@ description = "Fast, model-agnostic AI coding harness and CLI in Rust."
 [workspace.dependencies]
 # Internal crates. version MUST track workspace.package.version above so `cargo publish`
 # resolves each path+version dep against the just-published sibling (a stale version here makes
-# `cargo publish -p forge-agent` fail to select its deps). See docs/RELEASING-crates.md.
+# `cargo publish -p forge-cli` fail to select its deps). See docs/RELEASING-crates.md.
 # Dependency KEYS stay `forge-X` so dependents' `forge-X.workspace = true` and all
-# `use forge_X::` imports keep working with zero source changes; `package = "forge-agent-X"`
+# `use forge_X::` imports keep working with zero source changes; `package = "adforge-X"`
 # points each at its renamed crates.io package (the `forge-*` names are taken). Lib names
 # are preserved as `forge_X` in each crate's `[lib]` so import paths are unchanged.
-forge-types = { package = "forge-agent-types", path = "crates/forge-types", version = "2.6.6" }
-forge-config = { package = "forge-agent-config", path = "crates/forge-config", version = "2.6.6" }
-forge-core = { package = "forge-agent-core", path = "crates/forge-core", version = "2.6.6" }
-forge-index = { package = "forge-agent-index", path = "crates/forge-index", version = "2.6.6" }
-forge-lsp = { package = "forge-agent-lsp", path = "crates/forge-lsp", version = "2.6.6" }
-forge-mcp = { package = "forge-agent-mcp", path = "crates/forge-mcp", version = "2.6.6" }
-forge-mesh = { package = "forge-agent-mesh", path = "crates/forge-mesh", version = "2.6.6" }
-forge-provider = { package = "forge-agent-provider", path = "crates/forge-provider", version = "2.6.6" }
-forge-skills = { package = "forge-agent-skills", path = "crates/forge-skills", version = "2.6.6" }
-forge-store = { package = "forge-agent-store", path = "crates/forge-store", version = "2.6.6" }
-forge-tools = { package = "forge-agent-tools", path = "crates/forge-tools", version = "2.6.6" }
-forge-tui = { package = "forge-agent-tui", path = "crates/forge-tui", version = "2.6.6" }
-forge-voice = { package = "forge-agent-voice", path = "crates/forge-voice", version = "2.6.6" }
-forge-workflow = { package = "forge-agent-workflow", path = "crates/forge-workflow", version = "2.6.6" }
-forge-anywhere-protocol = { package = "forge-agent-anywhere-protocol", path = "crates/forge-anywhere-protocol", version = "2.6.6" }
+forge-types = { package = "forge-agent-types", path = "crates/forge-types", version = "2.6.5" }
+forge-config = { package = "forge-agent-config", path = "crates/forge-config", version = "2.6.5" }
+forge-core = { package = "forge-agent-core", path = "crates/forge-core", version = "2.6.5" }
+forge-index = { package = "forge-agent-index", path = "crates/forge-index", version = "2.6.5" }
+forge-lsp = { package = "forge-agent-lsp", path = "crates/forge-lsp", version = "2.6.5" }
+forge-mcp = { package = "forge-agent-mcp", path = "crates/forge-mcp", version = "2.6.5" }
+forge-mesh = { package = "forge-agent-mesh", path = "crates/forge-mesh", version = "2.6.5" }
+forge-provider = { package = "forge-agent-provider", path = "crates/forge-provider", version = "2.6.5" }
+forge-skills = { package = "forge-agent-skills", path = "crates/forge-skills", version = "2.6.5" }
+forge-store = { package = "forge-agent-store", path = "crates/forge-store", version = "2.6.5" }
+forge-tools = { package = "forge-agent-tools", path = "crates/forge-tools", version = "2.6.5" }
+forge-tui = { package = "forge-agent-tui", path = "crates/forge-tui", version = "2.6.5" }
+forge-voice = { package = "forge-agent-voice", path = "crates/forge-voice", version = "2.6.5" }
+forge-workflow = { package = "forge-agent-workflow", path = "crates/forge-workflow", version = "2.6.5" }
+forge-anywhere-protocol = { package = "forge-agent-anywhere-protocol", path = "crates/forge-anywhere-protocol", version = "2.7.0" }
 
 # External (pinned to current stable as of 2026-06; see ADRs)
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "fs", "process", "io-util", "time", "net", "signal"] }
@@ -49,11 +48,9 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4.6", features = ["derive"] }
-# rusqlite 0.40/libsqlite3-sys 0.38 use cfg_select!, which requires a newer compiler than the
-# workspace's documented Rust 1.88 MSRV. Keep the newest compatible line until the MSRV moves.
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
-genai = { package = "forge-agent-genai", path = "vendor/genai-0.6.5", version = "=0.6.5-forge.1" }
+genai = "0.6"
 # unstable-rendered-line-info: Paragraph::line_count, used to size insert_before so
 # scrollback lines never clip or overlap the inline viewport. Compiles on stable.
 ratatui = { version = "0.30", features = [
@@ -89,10 +86,8 @@ tokio-tungstenite = "0.30"
 qrcode = "0.14"
 # Cross-platform hardware probe (total RAM, CPU cores) to recommend a local-LLM size. default
 # off + only the components we read, to keep the dep light.
-# 0.39 raised its MSRV to Rust 1.95. Keep this on the newest line that honors
-# the workspace's documented Rust 1.88 MSRV.
-sysinfo = { version = "0.38", default-features = false, features = ["system"] }
-# Forge Anywhere's public, audited end-to-end encryption stack. These primitives are kept in the
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+# Forge Anywhere's public, audited end-to-end encryption stack. These primitives remain in the
 # protocol crate so the hosted service can independently implement the published wire format.
 chacha20poly1305 = "0.11"
 ed25519-dalek = "2.2"
@@ -112,7 +107,13 @@ strip = true
 [profile.dev]
 debug = "line-tables-only"
 
-# Forge-maintained genai 0.6.5 fork. Keeping this as an explicitly named registry dependency (not
-# `[patch.crates-io]`) makes crates.io installs retain the same streaming fixes as prebuilt Forge:
-# batched parallel calls, sparse/out-of-order call indices, and content deltas carrying an empty
-# `tool_calls` array. Replace it when upstream ships equivalent fixes.
+# Vendored + patched genai 0.6.5 (vendor/genai-0.6.5, src/ + Cargo.toml only, examples/tests
+# stripped): its plain-OpenAI streaming adapter only ever read `delta.tool_calls[0]`, silently
+# dropping every other parallel tool call in an SSE message that batched more than one (a shape
+# vLLM-based backends — e.g. NVIDIA NIM — commonly send). A later arguments-only delta for a
+# dropped index then created a fresh call with an empty name, producing "unknown tool ''" and
+# garbled arguments for every call after the first in a batch. Also fixed the sibling gap-fill
+# bug (`resize` cloning the wrong call's data into skipped indices). Drop this patch once
+# upstream genai ships an equivalent fix (https://github.com/jeremychone/rust-genai).
+[patch.crates-io]
+genai = { path = "vendor/genai-0.6.5" }

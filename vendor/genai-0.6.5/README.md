@@ -1,20 +1,14 @@
-# forge-agent-genai
-
-> Forge-maintained fork of upstream [`genai` 0.6.5](https://github.com/jeremychone/rust-genai)
-> at commit `660b752fa62b639311e9c89642cbd9ce90565eb7`. The crate keeps the Rust library
-> name `genai` and adds lossless OpenAI-compatible streaming for batched parallel tool calls,
-> sparse call indices, and content deltas containing `tool_calls: []`. Upstream's MIT and
-> Apache-2.0 licenses are preserved in this directory.
+# genai
 
 **A Native-Protocol Multi-AI Provider Library for Rust**
 
 ```toml
-genai = { package = "forge-agent-genai", version = "=0.6.5-forge.1" }
+genai = "0.6"
 ```
 
 <div align="center">
 
-<a href="https://crates.io/crates/forge-agent-genai"><img src="https://img.shields.io/crates/v/forge-agent-genai.svg" /></a>
+<a href="https://crates.io/crates/genai"><img src="https://img.shields.io/crates/v/genai.svg" /></a>
 <a href="https://github.com/jeremychone/rust-genai"><img alt="Static Badge" src="https://img.shields.io/badge/GitHub-Repo?color=%23336699"></a>
 
 </div>
@@ -25,7 +19,7 @@ Over 200+ LLM models, 25+ LLM providers out of the box, including **Ollama** for
 
 Out-of-the-box providers: `openai`, `openai_resp`, `anthropic`, `gemini`, `ollama`, `ollama_cloud`, `vertex`, `bedrock_api`, `bedrock_sigv4`, `github_copilot`, `opencode_go`, `groq`, `together`, `fireworks`,  `cohere`, `nebius`, `mimo`, `deepseek`, `minimax`, `zai`, `zai_coding`, `bigmodel`, `aliyun`, `baidu`, `moonshot`, `aihubmix`, `open_router`, `xai`
 
-Also supports custom endpoints and auth with `ServiceTargetResolver` (see [examples/c06-target-resolver.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c06-target-resolver.rs)) to support any other providers.
+Also supports custom endpoints and auth with `ServiceTargetResolver` (see [examples/c06-target-resolver.rs](examples/c06-target-resolver.rs)) to support any other providers.
 
 
 ```rust
@@ -47,7 +41,7 @@ println!("{}", chat_res.first_text().unwrap_or("NO ANSWER"));
 	
 ```
 
-[Docs for LLMs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/docs/for-llm/api-reference-for-llm.md) | [CHANGELOG](CHANGELOG.md) | [BIG THANKS](BIG-THANKS.md)
+[Docs for LLMs](docs/for-llm/api-reference-for-llm.md) | [CHANGELOG](CHANGELOG.md) | [BIG THANKS](BIG-THANKS.md)
 
 ## v0.6.x Released 🎉 
 
@@ -83,7 +77,7 @@ Here’s what’s new:
 - **Perf Improvements**: HTTP requests use performance optimizations such as gzip, `TCP_NODELAY`, and HTTP/2 tuning.
 - Numerous fixes, optimizations, and API enhancements.
 
-See [v0.5.x to v0.6.x migration](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/docs/migration/migration-v_0_5_to_0_6.md)
+See [v0.5.x to v0.6.x migration](docs/migration/migration_v_0_5_to_0_6.md)
 
 See [CHANGELOG](CHANGELOG.md)
 
@@ -91,11 +85,11 @@ See [BIG-THANKS](BIG-THANKS.md) for contributors
 
 ## Key Features
 
-- Multi-AI provider/model access optimized per provider: native protocols when available, OpenAI-compatible APIs when appropriate or required, and one common Rust API for OpenAI, OpenAI Responses, Anthropic, Gemini, Ollama, Ollama Cloud, OpenCode Go, Groq, xAI, DeepSeek, Cohere, Together, Fireworks, Nebius, Mimo, Zai, BigModel, Aliyun, Google Vertex, and GitHub Copilot (direct chat and streaming) (see [examples/c00-readme.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c00-readme.rs))
-- Image analysis (for OpenAI, Gemini Flash-2, Anthropic) (see [examples/c07-image.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c07-image.rs))
-- Custom auth/API key (see [examples/c02-auth.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c02-auth.rs))
-- Model aliases (see [examples/c05-model-names.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c05-model-names.rs))
-- Custom endpoint, auth, and model identifier (see [examples/c06-target-resolver.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c06-target-resolver.rs))
+- Multi-AI provider/model access optimized per provider: native protocols when available, OpenAI-compatible APIs when appropriate or required, and one common Rust API for OpenAI, OpenAI Responses, Anthropic, Gemini, Ollama, Ollama Cloud, OpenCode Go, Groq, xAI, DeepSeek, Cohere, Together, Fireworks, Nebius, Mimo, Zai, BigModel, Aliyun, Google Vertex, and GitHub Copilot (direct chat and streaming) (see [examples/c00-readme.rs](examples/c00-readme.rs))
+- Image analysis (for OpenAI, Gemini Flash-2, Anthropic) (see [examples/c07-image.rs](examples/c07-image.rs))
+- Custom auth/API key (see [examples/c02-auth.rs](examples/c02-auth.rs))
+- Model aliases (see [examples/c05-model-names.rs](examples/c05-model-names.rs))
+- Custom endpoint, auth, and model identifier (see [examples/c06-target-resolver.rs](examples/c06-target-resolver.rs))
 - And much more
 
 [Examples](#examples) | [Thanks](BIG-THANKS.md) | [Library Focus](#library-focus) | [Changelog](CHANGELOG.md) | Provider Mapping: [ChatOptions](#chatoptions) | [Usage](#usage)
@@ -143,7 +137,7 @@ For a complete list of `AdapterKind`, see the [AdapterKind enum](src/adapter/ada
 
 ## Examples
 
-[examples/c00-readme.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c00-readme.rs)
+[examples/c00-readme.rs](examples/c00-readme.rs)
 
 ```rust
 //! Base examples demonstrating the core capabilities of genai
@@ -246,14 +240,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### More Examples
 
-- [examples/c00-readme.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c00-readme.rs) - Quick overview code with multiple providers and streaming.
-- [examples/c01-conv.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c01-conv.rs) - Shows how to build a conversation flow.
-- [examples/c02-auth.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c02-auth.rs) - Demonstrates how to provide a custom `AuthResolver` to supply auth data, such as `api_key`, per adapter kind.
-- [examples/c03-mapper.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c03-mapper.rs) - Demonstrates how to provide a custom `AdapterKindResolver` to customize the "model name" to "adapter kind" mapping.
-- [examples/c04-chat-options.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c04-chat-options.rs) - Demonstrates how to set chat generation options such as `temperature` and `max_tokens` at the client level, for all requests, and at the per-request level.
-- [examples/c05-model-names.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c05-model-names.rs) - Shows how to get model names per `AdapterKind`.
-- [examples/c06-target-resolver.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c06-target-resolver.rs) - For custom auth, endpoint, and model.
-- [examples/c07-image.rs](https://github.com/jeremychone/rust-genai/blob/660b752fa62b639311e9c89642cbd9ce90565eb7/examples/c07-image.rs) - Image analysis support
+- [examples/c00-readme.rs](examples/c00-readme.rs) - Quick overview code with multiple providers and streaming.
+- [examples/c01-conv.rs](examples/c01-conv.rs) - Shows how to build a conversation flow.
+- [examples/c02-auth.rs](examples/c02-auth.rs) - Demonstrates how to provide a custom `AuthResolver` to supply auth data, such as `api_key`, per adapter kind.
+- [examples/c03-mapper.rs](examples/c03-mapper.rs) - Demonstrates how to provide a custom `AdapterKindResolver` to customize the "model name" to "adapter kind" mapping.
+- [examples/c04-chat-options.rs](examples/c04-chat-options.rs) - Demonstrates how to set chat generation options such as `temperature` and `max_tokens` at the client level, for all requests, and at the per-request level.
+- [examples/c05-model-names.rs](examples/c05-model-names.rs) - Shows how to get model names per `AdapterKind`.
+- [examples/c06-target-resolver.rs](examples/c06-target-resolver.rs) - For custom auth, endpoint, and model.
+- [examples/c07-image.rs](examples/c07-image.rs) - Image analysis support
 
 <br />
 <a href="https://www.youtube.com/playlist?list=PL7r-PXl6ZPcBcLsBdBABOFUuLziNyigqj"><img alt="Static Badge" src="https://img.shields.io/badge/YouTube_JC_AI_Playlist-Video?style=flat&logo=youtube&color=%23ff0000"></a>
@@ -352,5 +346,5 @@ If you set `default-features = false` on `genai` without enabling a TLS feature,
 
 ## Links
 
-- crates.io: [crates.io/crates/forge-agent-genai](https://crates.io/crates/forge-agent-genai)
+- crates.io: [crates.io/crates/genai](https://crates.io/crates/genai)
 - GitHub: [github.com/jeremychone/rust-genai](https://github.com/jeremychone/rust-genai)

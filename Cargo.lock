@@ -1927,7 +1927,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "forge-agent"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1987,7 +1987,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-anywhere-protocol"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "base64",
  "bip39",
@@ -2005,7 +2005,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-config"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -2027,7 +2027,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-core"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "async-trait",
  "flate2",
@@ -2062,32 +2062,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "forge-agent-genai"
-version = "0.6.5-forge.1"
-dependencies = [
- "base64",
- "bytes",
- "derive_more",
- "eventsource-stream",
- "futures",
- "mime_guess",
- "paste",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "serde_with",
- "strum",
- "tokio",
- "tokio-stream",
- "tracing",
- "uuid",
- "value-ext",
-]
-
-[[package]]
 name = "forge-agent-index"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "async-trait",
  "forge-agent-config",
@@ -2126,7 +2102,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-lsp"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "forge-agent-config",
  "serde",
@@ -2138,7 +2114,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-mcp"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "forge-agent-config",
  "forge-agent-types",
@@ -2155,7 +2131,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-mesh"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "async-trait",
  "forge-agent-config",
@@ -2167,15 +2143,15 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-provider"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "forge-agent-config",
- "forge-agent-genai",
  "forge-agent-index",
  "forge-agent-types",
  "futures",
+ "genai",
  "httpmock",
  "libc",
  "reqwest",
@@ -2190,7 +2166,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-skills"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "forge-agent-types",
  "tracing",
@@ -2198,7 +2174,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-store"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "chrono",
  "forge-agent-types",
@@ -2212,7 +2188,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-tools"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "async-trait",
  "forge-agent-index",
@@ -2233,7 +2209,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-tui"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "crossterm",
  "forge-agent-config",
@@ -2251,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-types"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2260,7 +2236,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-voice"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "cpal",
  "futures",
@@ -2278,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-workflow"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "rquickjs",
  "serde_json",
@@ -2287,7 +2263,7 @@ dependencies = [
 
 [[package]]
 name = "forge-relay"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2454,6 +2430,30 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "genai"
+version = "0.6.5"
+dependencies = [
+ "base64",
+ "bytes",
+ "derive_more",
+ "eventsource-stream",
+ "futures",
+ "mime_guess",
+ "paste",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "strum",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+ "value-ext",
 ]
 
 [[package]]
@@ -2641,11 +2641,11 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.11.1"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "824e001ac4f3012dd16a264bec811403a67ca9deb6c102fc5049b32c4574b35f"
+checksum = "a5081f264ed7adee96ea4b4778b6bb9da0a7228b084587aa3bd3ff05da7c5a3b"
 dependencies = [
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -3374,9 +3374,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.37.0"
+version = "0.38.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1"
+checksum = "f6c19a05435c21ac299d71b6a9c13db3e3f47c520517d58990a462a1397a61db"
 dependencies = [
  "cc",
  "pkg-config",
@@ -5120,9 +5120,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.39.0"
+version = "0.40.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0d2b0146dd9661bf67bb107c0bb2a55064d556eeb3fc314151b957f313bcd4e"
+checksum = "11438310b19e3109b6446c33d1ed5e889428cf2e278407bc7896bc4aaea43323"
 dependencies = [
  "bitflags 2.13.0",
  "fallible-iterator",
@@ -6100,9 +6100,9 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.38.4"
+version = "0.39.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92ab6a2f8bfe508deb3c6406578252e491d299cbbf3bc0529ecc3313aee4a52f"
+checksum = "d2071df9448915b71c4fe6d25deaf1c22f12bd234f01540b77312bb8e41361e6"
 dependencies = [
  "libc",
  "memchr",
@@ -7859,7 +7859,7 @@ dependencies = [
 
 [[package]]
 name = "xtasks"
-version = "2.6.6"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "clap",
