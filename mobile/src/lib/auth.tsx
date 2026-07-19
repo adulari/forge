@@ -8,13 +8,16 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
 import { probeConnection } from "./api";
 import { deleteSecureItem, getSecureItem, setSecureItem } from "./secureStore";
 import { parseConnectUrl } from "./connectUrl";
+import { reconcileAnywhereHosts, type ManagedAnywhereHost, type StoredServer } from "./serverTargets";
 export { parseConnectUrl, type ParsedConnectUrl } from "./connectUrl";
+export { type StoredServer } from "./serverTargets";
 
 // Legacy single-server key from before multi-server support; migrated into `forge.servers`
 // on first load, then deleted.
@@ -30,14 +33,6 @@ export type ConnectTestState =
   | "unreachable"
   | "server-error";
 
-export interface StoredServer {
-  id: string;
-  name: string;
-  baseUrl: string;
-  token: string;
-  host: string;
-  addedAt: number;
-}
 
 function makeServerId(): string {
   return `srv_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -71,6 +66,7 @@ interface AuthContextValue {
   addServer: (connectUrl: string, options?: { setActive?: boolean }) => Promise<StoredServer>;
   removeServer: (id: string) => Promise<void>;
   setActive: (id: string) => void;
+  syncAnywhereHosts: (hosts: readonly ManagedAnywhereHost[]) => Promise<void>;
   /** @deprecated legacy single-server alias for `addServer` — kept for the old Connect screen. */
   pair: (connectUrl: string) => Promise<void>;
   /** @deprecated legacy single-server alias for `removeServer(activeServerId)`. */
@@ -84,6 +80,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [servers, setServers] = useState<StoredServer[]>([]);
   const [activeServerId, setActiveServerId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const serverMutationQueue = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     let cancelled = false;
@@ -151,37 +148,40 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         host: parsed.host,
         addedAt: Date.now(),
       };
-      const existing = servers.find((item) => item.baseUrl === server.baseUrl);
-      const replacement = existing ? { ...server, id: existing.id, addedAt: existing.addedAt } : server;
-      const next = [...servers.filter((item) => item.baseUrl !== replacement.baseUrl), replacement];
-      await saveServers(next);
-      const shouldActivate = options?.setActive ?? true;
-      if (shouldActivate) {
-        await setSecureItem(ACTIVE_SERVER_KEY, replacement.id);
-      }
-      setServers(next);
-      if (shouldActivate) {
-        setActiveServerId(replacement.id);
-      }
-      return replacement;
+      return enqueueMutation(serverMutationQueue, async () => {
+        const current = await loadServers();
+        const existing = current.find((item) => item.baseUrl === server.baseUrl);
+        const replacement = existing ? { ...server, id: existing.id, addedAt: existing.addedAt } : server;
+        const next = [...current.filter((item) => item.baseUrl !== replacement.baseUrl), replacement];
+        await saveServers(next);
+        const shouldActivate = options?.setActive ?? true;
+        if (shouldActivate) await setSecureItem(ACTIVE_SERVER_KEY, replacement.id);
+        setServers(next);
+        if (shouldActivate) setActiveServerId(replacement.id);
+        return replacement;
+      });
     },
-    [servers],
+    [],
   );
 
   const removeServer = useCallback(
     async (id: string): Promise<void> => {
-      const next = servers.filter((s) => s.id !== id);
-      await saveServers(next);
-      let nextActive = activeServerId;
-      if (activeServerId === id) {
-        nextActive = next[0]?.id ?? null;
-        if (nextActive) await setSecureItem(ACTIVE_SERVER_KEY, nextActive);
-        else await deleteSecureItem(ACTIVE_SERVER_KEY);
-      }
-      setServers(next);
-      setActiveServerId(nextActive);
+      await enqueueMutation(serverMutationQueue, async () => {
+        const current = await loadServers();
+        const next = current.filter((s) => s.id !== id);
+        await saveServers(next);
+        const active = await getSecureItem(ACTIVE_SERVER_KEY);
+        let nextActive = active;
+        if (active === id) {
+          nextActive = next[0]?.id ?? null;
+          if (nextActive) await setSecureItem(ACTIVE_SERVER_KEY, nextActive);
+          else await deleteSecureItem(ACTIVE_SERVER_KEY);
+        }
+        setServers(next);
+        setActiveServerId(nextActive);
+      });
     },
-    [servers, activeServerId],
+    [],
   );
 
   const setActive = useCallback(
@@ -193,6 +193,25 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       });
     },
     [servers],
+  );
+
+  const syncAnywhereHosts = useCallback(
+    async (hosts: readonly ManagedAnywhereHost[]): Promise<void> => {
+      await enqueueMutation(serverMutationQueue, async () => {
+        // Always merge against protected storage inside the same queue as add/remove. This keeps
+        // a cold-start Anywhere reconciliation from publishing an empty, stale React closure.
+        const next = await reconcileAnywhereHosts(loadServers, saveServers, hosts);
+        setServers(next);
+        const active = await getSecureItem(ACTIVE_SERVER_KEY);
+        if (active && !next.some((server) => server.id === active)) {
+          const fallback = next[0]?.id ?? null;
+          if (fallback) await setSecureItem(ACTIVE_SERVER_KEY, fallback);
+          else await deleteSecureItem(ACTIVE_SERVER_KEY);
+          setActiveServerId(fallback);
+        }
+      });
+    },
+    [],
   );
 
   const pair = useCallback(
@@ -240,6 +259,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       addServer,
       removeServer,
       setActive,
+      syncAnywhereHosts,
       pair,
       forget,
       testConnection,
@@ -252,6 +272,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       addServer,
       removeServer,
       setActive,
+      syncAnywhereHosts,
       pair,
       forget,
       testConnection,
@@ -259,6 +280,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+function enqueueMutation<T>(
+  queue: React.MutableRefObject<Promise<void>>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const result = queue.current.catch(() => undefined).then(operation);
+  queue.current = result.then(() => undefined, () => undefined);
+  return result;
 }
 
 export function useAuth(): AuthContextValue {

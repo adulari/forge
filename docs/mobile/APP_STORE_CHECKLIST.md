@@ -1,237 +1,176 @@
-# App Store readiness checklist (Track B)
+# App Store and mobile release checklist
 
-Human-facing checklist for shipping Forge to TestFlight/App Store via Xcode Cloud (`mobile/eas.json`,
-`mobile/ios/ci_scripts/ci_post_clone.sh`) and for publishing compatible EAS Updates
-(`.github/workflows/eas-update.yml`). Everything here is either a manual Apple/App Store Connect
-step that cannot be scripted, or a piece of app content owned by another workstream — this doc
-just tells you what still needs doing and where.
+This is the current operator checklist for Forge's mobile releases. The supported distribution
+paths are deliberately separate:
 
-Apple Developer Program enrollment approved 2026-07-08. Team ID `95VXXPD28Y` is now wired into
-`mobile/eas.json` (`build.preview`/`build.production`/`submit.production`) and
-`mobile/app.config.ts` (`ios.appleTeamId`) — confirmed via `npx expo config --type public`.
+- **Signed iOS/TestFlight/App Store:** Xcode Cloud. It regenerates the native project with
+  [`ci_post_clone.sh`](../../mobile/ios/ci_scripts/ci_post_clone.sh), signs it, and uploads it to
+  TestFlight. EAS Build and EAS Submit are not the iOS release path.
+- **iOS JavaScript/assets:** EAS Update on the `production` channel, guarded by the installed
+  archive's native fingerprint. An OTA never replaces a required native build.
+- **Unsigned iOS:** the `mobile-v*` SideStore release and GitHub Pages source.
+- **Android:** the manually dispatched `mobile-android.yml` workflow (APK by default, AAB for a
+  tagged release).
 
-## 0. Prerequisites
+As of 2026-07-17, the Apple Developer membership, App Store Connect app, Xcode Cloud workflow,
+production OTA bootstrap, and TestFlight OTA delivery have all been exercised. TestFlight build
+74 was the installed binary used while verifying the latest OTA fixes. Do not interpret that as
+proof that every future native or OTA release is compatible; run the checks below for each one.
 
-- [x] Apple Developer Program membership approved.
-- [x] Team ID `95VXXPD28Y` set in `mobile/eas.json` and `mobile/app.config.ts`.
-- [ ] Create an **App Store Connect** app record for `dev.adulari.forge` (or let
-      `eas submit` create it on first run) and fill in `submit.production.ios.ascAppId` in
-      `mobile/eas.json` with the resulting numeric App ID.
-- [ ] Set `submit.production.ios.appleId` in `mobile/eas.json` to the Apple ID email used to manage
-      this app in App Store Connect.
+## Checked-in release configuration
 
-## 1. EAS-managed credentials
+- [x] Bundle ID `dev.adulari.forge` and Apple Team ID `95VXXPD28Y` are set in
+      [`app.config.ts`](../../mobile/app.config.ts).
+- [x] EAS project ID, production update URL/channel, and fingerprint runtime policy are set in
+      `app.config.ts`.
+- [x] Camera, photo-library, microphone, Face ID, document access, App Group, Live Activity, and
+      export-compliance declarations are present.
+- [x] The privacy manifest is declared through `ios.privacyManifests` and checked in as
+      [`PrivacyInfo.xcprivacy`](../../mobile/PrivacyInfo.xcprivacy).
+- [x] `expo-splash-screen` has light and dark launch backgrounds.
+- [x] `assets/icon.png` is a 1024×1024 RGB PNG with no alpha channel.
+- [x] The generated main iOS target currently requires iOS 16.4. The widget target requires 16.1;
+      release manifests must advertise the stricter 16.4 minimum.
+- [x] Anonymous usage counters have no installation/person identifier, disable GeoIP enrichment,
+      and can be disabled in Settings → Privacy. See [Anonymous usage statistics](../telemetry.md).
 
-EAS holds all signing material server-side, keyed to the project's Expo account — this is simpler
-and safer than managing `.p12`/`.mobileprovision` files by hand, and it's what `eas.json` here is
-set up for.
+Re-run `cd mobile && npm run check && npx expo config --type public` whenever the Expo config or
+native dependencies change. A successful JavaScript check does not compile Swift or prove Apple
+signing; Xcode Cloud is the native iOS gate.
 
-- [ ] Run `eas credentials` (interactively, once, from `mobile/`) and let EAS generate/upload:
-  - iOS **Distribution Certificate**.
-  - iOS **Provisioning Profile** (App Store distribution type) for `dev.adulari.forge`.
-  - An **APNs key** — see §7 below, native push/widgets/Live Activities now build against it.
-- [ ] Create an **App Store Connect API Key** (App Store Connect → Users and Access → Integrations
-      → App Store Connect API → "+") and register it with EAS
-      (`eas credentials` → iOS → App Store Connect API Key) so `eas submit` in CI can authenticate
-      non-interactively. This key is stored by EAS, not as a GitHub secret.
-- [x] Add the **`EXPO_TOKEN`** GitHub Actions secret (Expo access token — Expo dashboard → Account
-      settings → Access tokens) so `.github/workflows/eas-update.yml` can publish compatible
-      production OTA updates non-interactively. This secret does not build or submit a native
-      binary; native iOS builds remain manual Xcode Cloud work.
+## Privacy and security declarations
 
-## 2. Privacy manifest + App Privacy "nutrition label"
+Keep App Store Connect's App Privacy answers synchronized with the implementation:
 
-Apple requires both a bundled `PrivacyInfo.xcprivacy` manifest **and** matching answers in App
-Store Connect's App Privacy questionnaire. The checked-in manifest and `mobile/app.config.ts` are
-the synchronized source of truth. What this app actually does:
+- Declare **Product Interaction → Analytics**, not linked to identity and not used for tracking,
+  for the fixed anonymous counters. Forge has no advertising identifier or person profile.
+- The daemon pairing URL is a bearer credential stored in the device keychain. Forge does not send
+  it to Apple, Expo, PostHog, or the APNs relay. When the user chooses `--tunnel`, however, the
+  configured tunnel provider terminates TLS and can technically observe the pairing token and
+  relayed session traffic. Do not promise that a public tunnel is end-to-end encrypted to the
+  daemon.
+- Session data normally travels only between the app and the user's daemon. It can still pass
+  through a user-selected HTTPS tunnel. Updated daemons send no session text to the stock public
+  APNs relay. During the CLI upgrade window an older daemon can still transmit rich alert text, but
+  the public relay does not log it and replaces it before forwarding to APNs.
+- The default hosted APNs relay receives an opaque APNs device or Live Activity token plus either
+  a static generic alert or the small Live Activity status object
+  (`busy`/`waiting`/`cost_usd`/`context_tokens`/`context_limit`). It does not receive session titles,
+  questions, permission prompts, response/error snippets, local session IDs, daemon tokens,
+  transcripts, source files, paths, commands, or API credentials. An explicitly configured private
+  relay may
+  retain rich alert text, and bring-your-own Apple credentials bypass every relay. See
+  [ADR-0012](../architecture/decisions/0012-hosted-apns-relay.md).
 
-- **Data stored locally:** the daemon pairing token (`{scheme}://{host}:{port}/{token}`), stored in
-  `expo-secure-store` on-device. It is a bearer credential for the user's *own* self-hosted `forge
-  serve` daemon — it is never transmitted to Apple, Expo, or any third party.
-- **Anonymous analytics:** fixed installation/activity counters go to PostHog EU. They contain no
-  stable identifier, content, or location, are not linked to a user, are not used for tracking,
-  and can be disabled under Settings → Privacy. There is no analytics SDK or advertising ID.
-- **Data NOT collected:** no tracking or third-party data sharing. Session transcripts/tasks/diffs are fetched live from the user's own
-  daemon over the connection they configured and are not persisted by Apple/Expo infrastructure
-  beyond the on-device react-query cache.
-- [ ] In App Store Connect → App Privacy, answer **no tracking** and declare **Product Interaction
-      → Analytics**, not linked to identity. The pairing credential remains on-device and is used
-      solely for app functionality.
-- [ ] Confirm `PrivacyInfo.xcprivacy` (wherever the owning worker lands it) declares required
-      reason API usage matching what's actually called — camera (QR scan), photo library
-      (attachments), and secure-store/keychain access (token storage) are the ones this app
-      actually uses per `mobile/app.config.ts`'s `infoPlist` strings and `expo-camera`/
-      `expo-image-picker`/`expo-secure-store` plugins.
+Before App Store submission:
 
-## 3. Required device capabilities
+- [ ] Complete/update the App Privacy questionnaire with those exact facts.
+- [ ] Re-run the privacy-manifest/config review after adding any native package, permission,
+      analytics property, relay payload, or stored data.
+- [ ] Ensure the privacy policy and App Review notes disclose the hosted notification relay and
+      user-selected tunnel rather than making a blanket “no third party sees session data” claim.
 
-- [ ] Confirm `mobile/app.config.ts` `ios.infoPlist` usage strings are present for every permission
-      actually invoked (camera, photo library, documents) — they're already there as of this
-      writing; re-check if screens change.
-- [ ] No unusual `UIRequiredDeviceCapabilities` needed — this is a standard networked app (HTTP +
-      WebSocket client), no ARKit/NFC/etc. Leave Expo's defaults.
-- [ ] Decide/confirm minimum iOS version. `eas.json`'s generated manifest and this app's use of
-      current Expo SDK 57 / RN 0.86 imply **iOS 16+** — confirm against Expo SDK 57's actual
-      minimum supported iOS version at build time (`npx expo config --type public` or Expo's SDK
-      57 release notes) and keep it consistent with the `minOSVersion` used in the SideStore
-      manifest (`.github/workflows/mobile-sidestore.yml`, currently `16.0` as a placeholder — align
-      it once confirmed).
+## Signed iOS and TestFlight (Xcode Cloud)
 
-## 4. App icons, launch screen, screenshots
+Xcode Cloud is the only supported signed-iOS build pipeline. The repository's `eas.json` is used
+for Expo/Android configuration; its old EAS-managed iOS signing and `eas submit` workflow have
+been removed.
 
-- [ ] App icon set (all required iOS sizes) — Expo/EAS generates the full icon set from a single
-      1024×1024 source (`assets/icon.png`, already referenced in `app.config.ts`); verify it's a
-      real 1024×1024 PNG with no alpha channel (App Store rejects icons with transparency).
-- [ ] Launch screen: `mobile/app.config.ts` currently has **no working splash config** — see the
-      `FLAGGED (w11-splash)` comment block in that file. SDK 57 needs the `expo-splash-screen`
-      config plugin wired in (owned by the worker(s) touching `app.config.ts`, not this one) before
-      a production build will have a real launch screen instead of a blank/default one. **This
-      blocks a polished production submission** even though it doesn't block Track A sideloading.
-- [ ] App Store screenshots: required sizes are per device class Apple currently mandates for the
-      Store listing (6.7"/6.9" iPhone at minimum; iPad sizes only if `supportsTablet` stays `true`
-      in `app.config.ts`, which it currently is). Capture from real screens once Batch 1–4 UI lands
-      (`mobile/BUILD_PLAN.md` §6/§7) — a Simulator or a device via `--anywhere` tunnel both work
-      since this app is a thin client over HTTP/WS.
-- [ ] App preview video: optional, skip for v1.
+- [x] Xcode Cloud is connected to `adulari/forge` and has produced processed TestFlight builds.
+- [x] `mobile/ios/ci_scripts/ci_post_clone.sh` installs dependencies, regenerates the Expo iOS
+      project, applies a monotonically increasing build number, and installs Pods.
+- [x] A production-channel OTA bootstrap binary has been installed and an OTA has been observed on
+      TestFlight build 74.
+- [ ] For every native release, trigger Xcode Cloud with
+      `scripts/trigger-ios-build.mjs`; set `TESTFLIGHT_GROUPS` so the processed build is assigned to
+      testers automatically. If the build was triggered separately, run
+      `scripts/testflight-assign-group.mjs` or dispatch `testflight-autogroup.yml`.
+- [ ] Confirm the Xcode Cloud archive succeeded, Apple finished processing it, the intended beta
+      group can install it, and its marketing/build versions exceed the previously uploaded pair.
+- [ ] On a physical device, smoke-test cold launch, pairing, session creation/chat, permission and
+      question prompts, background/foreground reconnect, attachments, voice input, Face ID,
+      widget, Live Activity, and native push.
+- [ ] Keep App Store screenshots, description, keywords, Developer Tools category, support URL,
+      copyright, age rating, and reviewer contact current.
 
-## 5. Age rating & App Store listing metadata
+The App Store reviewer has no Forge daemon by default. Provide a short-lived, sandboxed demo:
 
-- [ ] Age rating questionnaire in App Store Connect — this app has no user-generated content
-      shared with other users, no gambling, no mature content; it's a personal dev-tool client.
-      Expect the lowest tier (4+), but the questionnaire itself must be filled in App Store Connect
-      by a human — it isn't derivable from the codebase.
-- [ ] App name, subtitle, description, keywords, category (likely **Developer Tools**), support URL,
-      marketing URL (optional).
-- [ ] **Support URL**: point at the `adulari/forge` GitHub repo (issues) or a docs page — decide and
-      set in App Store Connect; not encoded anywhere in this app's code.
-- [ ] Copyright / legal entity name for the listing.
+1. Start `forge serve --tunnel` in a throwaway repository with no valuable credentials or
+   network access.
+2. Put its pairing URL/QR and a concise workflow in App Review Information.
+3. Explain that the app is a client for the user's self-hosted Forge daemon, that the selected
+   tunnel terminates TLS, and that the default APNs relay processes the limited payload documented
+   above.
+4. Rotate the daemon token before and after the review window with
+   `forge serve --rotate-token`.
 
-## 6. Reviewer access (App Review sign-in notes)
+## OTA updates
 
-This app has no login of its own — it pairs with a self-hosted `forge serve` daemon via a token
-URL (QR or paste). Apple's reviewer will not have a daemon to pair with unless one is provided.
+EAS Update publishes iOS JavaScript and assets only. The workflow validates the complete diff from
+the reviewed installed-runtime baseline, not merely the files in the triggering commit.
 
-- [ ] Provide reviewer notes in App Store Connect's "App Review Information" with either:
-  - **A demo daemon**: run `forge serve --anywhere` against a throwaway/sandboxed repo, and paste
-    the resulting `connect:` URL (or a QR screenshot) into the reviewer notes, valid for the
-    review window. `--anywhere` gives real TLS via a tunnel (cloudflared/ngrok), which is required
-    since App Review devices won't be on the same LAN or VPN as `--local`.
-  - **Or** a short written walkthrough + screen-recording showing pairing and core flows, if
-    standing up a live reviewer-accessible daemon for the review window isn't practical.
-- [ ] Explicitly note in reviewer comments: "this app requires a running instance of the
-  open-source `forge` CLI (`forge serve`) that the user runs on their own machine; there is no
-  user-account system. Native iOS push notifications are, by default, relayed through a small
-  operator-run forwarding service (source: `crates/forge-relay`, see ADR-0012) that sees only
-  an opaque device token and the notification's title/body/status payload — never session
-  content, source code, or credentials — and any user may point their own daemon at their own
-  Apple Developer key (or their own relay instance) to bypass it entirely." This heads off a
-  common rejection reason (apps that appear to require an unreachable backend) while staying
-  accurate about the one small forwarding service that does exist.
-  - Note if the reviewer-demo daemon (above) is configured with `FORGE_APNS_TEAM_ID`/`_KEY_ID`/
-    `_KEY_PATH` (Direct mode) rather than the default relay, so reviewer notes describe
-    whichever path is actually being exercised.
-- [ ] Re-generate/rotate the demo token before and after the review window
-  (`forge serve --rotate-token`) so a stale reviewer credential doesn't linger.
+- [ ] Repository variable `IOS_OTA_COMPATIBLE_BASE_SHA` is not configured yet. Set it to the
+      reviewed installed archive's source commit before the next production OTA; keep the workflow
+      fail-closed until that baseline and `IOS_OTA_RUNTIME_VERSION` are both verified.
+- [ ] Before publication, confirm the baseline is the newest commit whose complete mobile diff has
+      been reviewed as compatible with the installed Xcode archive, and the runtime value is that
+      archive's exact Expo fingerprint. Initially the baseline is the archive source commit; it may
+      advance without a rebuild only after that compatibility review.
+- [ ] Use OTA only when every iOS-relevant change since the baseline is JavaScript, assets, tests,
+      docs, Android-only config, or independent Tauri-shell code accepted by
+      `eas-update.yml`'s guard. Native dependencies, Expo/RN upgrades, config plugins,
+      entitlements, permissions, `app.config.ts`, lockfile changes, or generated iOS code require a
+      new Xcode Cloud binary and a new baseline.
+- [ ] Verify the workflow's EAS update ID/channel/runtime, then launch the installed TestFlight app
+      twice and verify the expected behavior. Keep the preceding embedded bundle usable in case the
+      update cannot load.
+- [ ] Use `gh workflow run eas-update.yml --ref main` only to recover a failed automatic
+      publication from the current `main`; manual dispatch cannot bypass the compatibility guard.
 
-## 7. APNs key, App Group, Widgets/Live Activities, Xcode Cloud
+## APNs, widgets, and Live Activities
 
-Added once Team ID `95VXXPD28Y` unblocked these entitlement-gated capabilities: native push
-(`crates/forge-cli/src/apns.rs`), a Home Screen widget + Live Activity (`mobile/targets/widget/`,
-`mobile/modules/live-activity/`), and Xcode Cloud as the CI that actually compiles the Swift
-(this repo's dev environment has no macOS/Xcode, so this is the only real build verification for
-that code until a device/TestFlight test).
+Regular users do not receive the Apple `.p8` key. Native push works through the hosted relay by
+default; operators can instead configure a direct APNs key, run a private relay, or set
+`FORGE_APNS_DISABLE_RELAY=1`.
 
-- [ ] **APNs key**: **developer.apple.com/account** (not App Store Connect — different site) →
-      Certificates, Identifiers & Profiles → Keys → "+", enable "Apple Push Notifications service
-      (APNs)". Download the `.p8` **once** (Apple won't let you re-download it) and record its Key
-      ID and this account's Team ID (`95VXXPD28Y`).
-- [ ] Configure the `forge serve` host with `FORGE_APNS_TEAM_ID=95VXXPD28Y`,
-      `FORGE_APNS_KEY_ID=<key id>`, `FORGE_APNS_KEY_PATH=/path/to/AuthKey_<key id>.p8` (see
-      `ApnsConfig::from_env` in `crates/forge-cli/src/apns.rs`). Never commit the `.p8` file.
-- [ ] **App ID capabilities**: in the Developer Portal, edit the `dev.adulari.forge` App ID and
-      enable **Push Notifications** and **App Groups** (both require the paid membership, both
-      were unavailable before enrollment). Register the App Group
-      `group.dev.adulari.forge` (must match `mobile/app.config.ts`'s `APP_GROUP` constant exactly
-      — the widget/Live Activity extension and the main app share data through it).
-- [x] **Xcode Cloud workflow**: App Store Connect → your app → Xcode Cloud → Get Started, connect
-      the `adulari/forge` GitHub repo, and create a workflow scoped to `mobile/` changes on
-      `main` (Xcode Cloud can filter by path). `mobile/ios/ci_scripts/ci_post_clone.sh` (already in
-      the repo) runs `npm ci && npx expo prebuild` automatically post-clone — no other config
-      needed for it to materialize the widget/Live-Activity extension target and build. Xcode
-      Cloud handles signing itself (no `eas credentials`/EAS provisioning profile needed — that
-      pipeline is gone, this is the only build/distribution path now). Workflow's Archive action
-      has `buildDistributionAudience: INTERNAL_ONLY` set, so it auto-uploads to TestFlight on
-      success.
-- [ ] **One-time OTA bootstrap**: after the OTA channel configuration is merged, manually run one
-      signed Xcode Cloud build and install its processed TestFlight build. Confirm the generated
-      iOS `Expo.plist` contains `EXUpdatesURL`, `EXUpdatesRequestHeaders` with
-      `expo-channel-name=production`, and `EXUpdatesRuntimeVersion`. This is required before
-      installed binaries can receive production OTA updates; ordinary `main` pushes do not create
-      a native binary.
-- [ ] **OTA compatibility check**: publish only pushes whose complete changed-path set is limited
-      to `mobile/src/**` or `mobile/assets/**` through `.github/workflows/eas-update.yml`. Native
-      dependencies, Expo/RN upgrades, config plugins, permissions, entitlements, iOS/Android
-      files, widgets, Live Activities, or any other path in the same push require a new Xcode Cloud
-      binary or a follow-up OTA-safe push. The workflow skips mixed pushes automatically.
-- [ ] **TestFlight OTA proof**: after the bootstrap build is processed, install it, launch it twice
-      after a known compatible update, and confirm the update is downloaded/applied. Record the
-      binary's fingerprint and production channel before publishing a user-facing OTA.
-- [ ] **Release versioning**: mobile's native marketing/build version may differ from the Forge
-      CLI/desktop version. Label a compatible OTA with the Forge release it carries (for example,
-      `Forge v2.6.3`), and bump the mobile native version only when the native layer changes.
-- [ ] **Beta-group assignment.** Xcode Cloud uploads the build but never assigns it to a beta
-      group, so testers see nothing until `scripts/testflight-assign-group.mjs` runs. Because iOS
-      builds are opt-in (Xcode Cloud is triggered by hand via the ASC API, not on push), the assign
-      step is **manual-only** — `.github/workflows/testflight-autogroup.yml` is `workflow_dispatch`
-      (auto-firing on push would just hang ~45m polling for a build that a plain push never
-      produces). **Use the one-step trigger** so this can't be forgotten again (it stranded builds
-      #68–#70): `scripts/trigger-ios-build.mjs` triggers the Xcode Cloud build AND, when
-      `TESTFLIGHT_GROUPS` is set, waits for processing and assigns the group in the same run:
-  - `ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_API_PRIVATE_KEY="$(cat AuthKey_*.p8)" TESTFLIGHT_GROUPS=Testers node scripts/trigger-ios-build.mjs`
-  - Or, if you triggered the build another way, assign after the fact with
-    `gh workflow run testflight-autogroup.yml` or `scripts/testflight-assign-group.mjs` directly.
-  - CI config for the workflow path:
-  - repo **variable** `TESTFLIGHT_GROUPS` = the internal beta group name(s), comma-separated
-    (e.g. `Internal`). The group must already exist in App Store Connect → TestFlight.
-  - repo **secrets** `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_API_PRIVATE_KEY` — an App Store Connect
-    API key (Users and Access → Integrations → App Store Connect API) with the Developer/App
-    Manager role and access to the app; `ASC_API_PRIVATE_KEY` is the whole `AuthKey_*.p8` file.
-    Until these are set the workflow skips cleanly (never fails).
-- [ ] Also set the marketing version (`mobile/app.config.ts`'s `version`) higher than any build
-      number Xcode Cloud's own automatic build-number management has already used for the current
-      version string, if builds start failing "bundle version must be higher than previously
-      uploaded" again — that setting isn't exposed via Xcode Cloud's UI/API, only inferable from
-      failures.
-- [ ] TestFlight builds are **production-signed**, not sandbox — a common misconception. Both
-      TestFlight and App Store builds talk to APNs' production host; only Xcode
-      Debug-run-on-device builds are sandbox (`ApnsNotifier`/`push.ios.ts` both derive this from
-      `__DEV__`, matching that split).
-- [ ] Once a device/TestFlight build exists, manually verify: the widget renders on the Home
-      Screen and updates after a session's state changes; starting a turn shows a Live Activity
-      on the Lock Screen and in the Dynamic Island; ending a turn dismisses/updates it correctly.
-      **This cannot be confirmed from this environment** — nothing here has run on a real device
-      or Simulator.
+- [x] Push Notifications and App Groups are represented in the native configuration for
+      `dev.adulari.forge` / `group.dev.adulari.forge`.
+- [x] The production relay implementation and deployment runbook live in
+      [`crates/forge-relay`](../../crates/forge-relay/README.md).
+- [ ] For each rollout, check the relay health endpoint and server logs/metrics without exposing
+      device tokens or notification text.
+- [ ] Verify on a production-signed physical-device build: permission request, token registration,
+      question/permission/final/error notifications, tap routing, Live Activity start/update/end,
+      widget refresh, unsubscribe, malformed-token rejection, expired-token cleanup after Apple's
+      `410 Unregistered` or invalid-token 400 response, and relay outage fallback.
+- [ ] Rotate/revoke the APNs key immediately if it is ever copied into source control, logs,
+      artifacts, chat, or an untrusted host. Keep the key only in the relay secret store or a
+      tightly permissioned direct-mode host.
 
-## 8. What a human must do that cannot be automated
+TestFlight and App Store builds use APNs production. Xcode Debug builds use APNs sandbox. A relay
+health check proves reachability and configuration, but not delivery to a real device.
 
-Summary of the manual, Apple-side/App-Store-Connect-side actions from the sections above:
+## SideStore and Android
 
-1. Wait for and accept Apple Developer Program approval; record the Team ID.
-2. Create/confirm the App Store Connect app record and API key; wire IDs into `mobile/eas.json`.
-3. Run `eas credentials` once (interactive) to provision the Distribution cert + profile.
-4. Add the `EXPO_TOKEN` repo secret.
-5. Fill in the App Privacy questionnaire in App Store Connect.
-6. Supply App Store screenshots (needs real UI, i.e. after Batches 1–4 land).
-7. Fill in age rating questionnaire, listing metadata, support URL.
-8. Write App Review reviewer notes and stand up (or record) a reviewer-accessible demo daemon.
-9. Coordinate with whoever owns `mobile/app.config.ts` to finish the splash-screen plugin wiring
-   before the first production submission (not required for Track A/TestFlight-internal testing,
-   but expected for a real App Store listing).
-10. Generate the APNs `.p8` key, register the App Group, enable Push Notifications/App Groups on
-    the App ID, and set up the Xcode Cloud workflow (§7) — then verify the widget/Live Activity
-    on a real device or TestFlight build, since none of that can be confirmed headlessly.
+- [ ] For a `mobile-v*` release, confirm the unsigned `Forge.ipa`, source JSON, and install page are
+      all public and mutually consistent (version, size, SHA/source URL, icon, and minimum iOS
+      16.4). Open the stable Pages source URL from a clean client before announcing it.
+- [ ] Install that IPA through SideStore and complete the same core pairing/chat/reconnect smoke
+      test. SideStore validates the unsigned distribution path, not App Store signing.
+- [ ] Dispatch `mobile-android.yml` for the intended ref. Install and smoke-test the APK; for a
+      tagged release, also verify the AAB artifact/release asset and Play Console upload if used.
+- [ ] Do not call an OTA, a SideStore IPA, or a GitHub Android artifact a complete mobile release
+      until its matching install path has been exercised on a device.
 
-None of steps 1–9 are things `mobile-eas.yml` or `eas.json` can do on their own — the workflow's
-`guard` job simply keeps CI quiet (skips, doesn't fail) until step 4 is done, and `eas build`/
-`eas submit` will still fail loudly if steps 1–3 aren't finished, with EAS's own error messages
-pointing at what's missing.
+## Final App Store submission gate
+
+- [ ] All automated checks and the Xcode Cloud archive are green at the exact submitted commit.
+- [ ] A production-signed build passed the physical-device matrix above.
+- [ ] Privacy answers, relay/tunnel disclosure, screenshots, metadata, age rating, support URL,
+      reviewer notes, and demo daemon are current.
+- [ ] TestFlight feedback has no unresolved release-blocking issue.
+- [ ] Select the verified build in App Store Connect and submit it manually for review.
+
+App Store metadata, reviewer access, physical-device behavior, Apple processing, and final review
+cannot be certified from repository CI alone. Keep those boxes unchecked until a human verifies
+the exact release candidate.

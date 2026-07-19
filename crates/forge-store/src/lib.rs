@@ -2,11 +2,13 @@
 //! a single connection behind a mutex; SQLite is in WAL mode for crash-resilient writes.
 //! All persistence in Forge goes through this crate.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, TimeZone};
 use forge_types::{Role, TaskTier, ToolCall, Usage, Visibility};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 mod memory;
 mod schema;
@@ -204,6 +206,8 @@ pub enum StoreError {
     Pool(String),
     #[error("portable metadata JSON: {0}")]
     Json(String),
+    #[error("invalid store value: {0}")]
+    InvalidValue(String),
     #[error(
         "database schema version {found} is newer than this build supports ({supported}); \
          upgrade Forge to open it"
@@ -293,10 +297,13 @@ pub struct Store {
 /// SQL fragment: derives a usage row's provider from its message model (aliased `m`).
 ///
 /// Ordinary completions retain their routed model. Synthetic side-call messages (compact,
-/// diagnose) have no model, so inherit the nearest routed model in their session instead of
-/// appearing in a misleading shared `other` bucket. A session containing no routed model at all
-/// still falls back to `other`.
-const USAGE_PROVIDER_EXPR: &str = "COALESCE(NULLIF(CASE WHEN instr(m.model, '::') > 0 THEN substr(m.model, 1, instr(m.model, '::') - 1) ELSE m.model END, ''), (SELECT CASE WHEN instr(pm.model, '::') > 0 THEN substr(pm.model, 1, instr(pm.model, '::') - 1) ELSE pm.model END FROM message pm WHERE pm.session_id = m.session_id AND pm.model IS NOT NULL ORDER BY ABS(pm.seq - m.seq), pm.seq DESC LIMIT 1), 'other')";
+/// diagnose) have no model, so inherit the most recent routed model in their session instead of
+/// appearing in a misleading shared `other` bucket. The earliest following model covers legacy
+/// rows that precede every routed turn; a session with no routed model still falls back to `other`.
+///
+/// Keep outer-row references in each subquery's `WHERE` clause. SQLite 3.51 rejects a correlated
+/// outer column used directly by a scalar subquery's `ORDER BY` (`no such column: m.seq`).
+const USAGE_PROVIDER_EXPR: &str = "COALESCE(NULLIF(CASE WHEN instr(m.model, '::') > 0 THEN substr(m.model, 1, instr(m.model, '::') - 1) ELSE m.model END, ''), (SELECT CASE WHEN instr(pm.model, '::') > 0 THEN substr(pm.model, 1, instr(pm.model, '::') - 1) ELSE pm.model END FROM message pm WHERE pm.session_id = m.session_id AND pm.model IS NOT NULL AND pm.seq <= m.seq ORDER BY pm.seq DESC LIMIT 1), (SELECT CASE WHEN instr(pm.model, '::') > 0 THEN substr(pm.model, 1, instr(pm.model, '::') - 1) ELSE pm.model END FROM message pm WHERE pm.session_id = m.session_id AND pm.model IS NOT NULL AND pm.seq > m.seq ORDER BY pm.seq ASC LIMIT 1), 'other')";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderUsage {
@@ -781,7 +788,15 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
 /// by a newer build, rather than silently misreading it.
 fn run_migrations(conn: &Connection) -> Result<()> {
     debug_assert_eq!(MIGRATIONS.len() as i64, SCHEMA_VERSION);
-    let current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let mut current: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    // Forge Anywhere's additive tables briefly consumed versions 18-21 on its unreleased feature
+    // branch. They now live in the idempotent base schema so the previous public binary can open a
+    // database after rollback. Repair only those known pre-release markers; truly newer versions
+    // remain rejected below.
+    if (18..=21).contains(&current) {
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        current = SCHEMA_VERSION;
+    }
     if current > SCHEMA_VERSION {
         return Err(StoreError::SchemaTooNew {
             found: current,
@@ -887,6 +902,721 @@ pub struct ModelOutcomeCalibration {
     pub mean_latency_ms: f64,
 }
 
+/// One pending local record for the encrypted Anywhere sync worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncJournalEntry {
+    pub id: i64,
+    pub record_kind: String,
+    pub stable_id: String,
+    pub operation: String,
+    pub revision: u64,
+    pub logical_clock: u64,
+    pub base_hash: Option<[u8; 32]>,
+    pub content_hash: Vec<u8>,
+    /// Immutable plaintext snapshot; the sync worker encrypts it before it leaves the host.
+    pub payload: Vec<u8>,
+    pub created_at: i64,
+}
+
+/// Durable ciphertext associated with one pending sync journal revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncUploadEnvelope {
+    pub envelope: Vec<u8>,
+    pub ciphertext_sha256: [u8; 32],
+}
+
+/// One authenticated and decrypted change staged from the Anywhere service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteSyncRecord {
+    pub cursor: i64,
+    pub sender_device_id: [u8; 16],
+    pub record_kind: String,
+    pub stable_id: String,
+    pub operation: String,
+    pub revision: u64,
+    pub logical_clock: u64,
+    pub base_hash: Option<[u8; 32]>,
+    pub content_hash: [u8; 32],
+    pub payload: Vec<u8>,
+}
+
+/// Outcomes from one bounded pass applying staged mutable records to local primary tables.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RemoteSyncApplySummary {
+    pub inspected: usize,
+    pub applied: usize,
+    pub superseded: usize,
+    pub conflicts: usize,
+    pub deferred: usize,
+}
+
+/// One safely materialized account record used by local settings/command/extension consumers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortableSyncRecord {
+    pub record_kind: String,
+    pub stable_id: String,
+    pub payload: Vec<u8>,
+    pub deleted: bool,
+    pub logical_clock: u64,
+    pub sender_device_id: [u8; 16],
+    pub content_hash: [u8; 32],
+}
+
+/// A content-divergent file revision retained instead of overwriting the local winner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncFileConflict {
+    pub stable_id: String,
+    pub sender_device_id: [u8; 16],
+    pub base_hash: Option<[u8; 32]>,
+    pub content_hash: [u8; 32],
+    pub payload: Vec<u8>,
+    pub detail: String,
+}
+
+/// A terminal sync conflict retained for status/UI reporting and explicit resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncApplyConflict {
+    pub cursor: i64,
+    pub record_kind: String,
+    pub stable_id: String,
+    pub detail: String,
+}
+
+#[derive(Debug)]
+struct StagedMemoryRecord {
+    cursor: i64,
+    sender_device_id: [u8; 16],
+    stable_id: String,
+    operation: String,
+    logical_clock: i64,
+    content_hash: [u8; 32],
+    payload: Vec<u8>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RemoteMemoryPayload {
+    id: String,
+    scope: String,
+    kind: String,
+    text: String,
+    source_session: String,
+    created_at: i64,
+    updated_at: i64,
+    salience: f64,
+}
+
+#[derive(Debug)]
+struct StagedHistoryRecord {
+    cursor: i64,
+    sender_device_id: [u8; 16],
+    record_kind: String,
+    stable_id: String,
+    operation: String,
+    logical_clock: i64,
+    content_hash: [u8; 32],
+    payload: Vec<u8>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RemoteSessionPayload {
+    id: String,
+    title: Option<String>,
+    archived: bool,
+    view_snapshot: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RemoteMessagePayload {
+    id: String,
+    session_id: String,
+    seq: i64,
+    role: String,
+    content: String,
+    model: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ToolCall>,
+    tool_call_id: Option<String>,
+    visibility: String,
+    #[serde(default = "default_true")]
+    active: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RemoteCheckpointPayload {
+    id: String,
+    session_id: String,
+    label: Option<String>,
+    seq: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RemoteToolCallPayload {
+    id: String,
+    message_id: String,
+    tool_name: String,
+    args_json: String,
+    result_json: String,
+    permission: String,
+    status: String,
+    path: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RemoteRoutingPayload {
+    id: String,
+    message_id: String,
+    task_tier: String,
+    chosen_model: String,
+    rationale: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RemoteUsagePayload {
+    id: String,
+    message_id: String,
+    input_tokens: i64,
+    output_tokens: i64,
+    cost_usd: f64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RemoteCompactionPayload {
+    session_id: String,
+    summary: String,
+    keep_count: usize,
+}
+
+enum HistoryMutation {
+    Session(Option<RemoteSessionPayload>),
+    Message(RemoteMessagePayload),
+    Checkpoint(RemoteCheckpointPayload),
+    ToolCall(RemoteToolCallPayload),
+    Routing(RemoteRoutingPayload),
+    Usage(RemoteUsagePayload),
+    Compaction(Option<RemoteCompactionPayload>),
+    Tombstone,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+enum MemoryMutation {
+    Upsert(RemoteMemoryPayload),
+    Tombstone,
+}
+
+enum SyncVersionDisposition {
+    Superseded,
+    Conflict,
+}
+
+#[derive(Clone, Copy)]
+struct SyncVersion<'a> {
+    operation: &'a str,
+    logical_clock: i64,
+    device_id: [u8; 16],
+    content_hash: &'a [u8],
+}
+
+/// Operation recorded in the local Anywhere sync outbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncJournalOperation {
+    Upsert,
+    Tombstone,
+}
+
+impl SyncJournalOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Upsert => "upsert",
+            Self::Tombstone => "tombstone",
+        }
+    }
+}
+
+fn sync_payload_hash(payload: &[u8]) -> [u8; 32] {
+    Sha256::digest(payload).into()
+}
+
+fn sync_json(value: serde_json::Value) -> Result<Vec<u8>> {
+    serde_json::to_vec(&value).map_err(|error| StoreError::Json(error.to_string()))
+}
+
+fn parse_memory_mutation(
+    record: &StagedMemoryRecord,
+) -> std::result::Result<MemoryMutation, String> {
+    if sync_payload_hash(&record.payload) != record.content_hash {
+        return Err("decrypted payload does not match its authenticated content hash".into());
+    }
+    match record.operation.as_str() {
+        "tombstone" if record.payload.is_empty() => Ok(MemoryMutation::Tombstone),
+        "tombstone" => Err("memory tombstone payload must be empty".into()),
+        "upsert" => {
+            let payload: RemoteMemoryPayload = serde_json::from_slice(&record.payload)
+                .map_err(|error| format!("invalid memory snapshot: {error}"))?;
+            if payload.id != record.stable_id {
+                return Err("memory snapshot id does not match its stable id".into());
+            }
+            if payload.scope.trim().is_empty()
+                || payload.kind.trim().is_empty()
+                || payload.text.trim().is_empty()
+                || payload.source_session.trim().is_empty()
+            {
+                return Err("memory snapshot contains an empty required field".into());
+            }
+            if !payload.salience.is_finite() || !(0.0..=1.0).contains(&payload.salience) {
+                return Err("memory snapshot salience must be between zero and one".into());
+            }
+            Ok(MemoryMutation::Upsert(payload))
+        }
+        _ => Err("memory operation is not supported".into()),
+    }
+}
+
+fn parse_history_mutation(
+    record: &StagedHistoryRecord,
+) -> std::result::Result<HistoryMutation, String> {
+    if sync_payload_hash(&record.payload) != record.content_hash {
+        return Err("decrypted payload does not match its authenticated content hash".into());
+    }
+    if matches!(record.record_kind.as_str(), "session" | "compaction") {
+        return match record.operation.as_str() {
+            "tombstone" if record.payload.is_empty() && record.record_kind == "session" => {
+                Ok(HistoryMutation::Session(None))
+            }
+            "tombstone" if record.payload.is_empty() => Ok(HistoryMutation::Compaction(None)),
+            "tombstone" => Err("mutable history tombstone payload must be empty".into()),
+            "upsert" => {
+                if record.record_kind == "session" {
+                    let payload: RemoteSessionPayload = serde_json::from_slice(&record.payload)
+                        .map_err(|error| format!("invalid session snapshot: {error}"))?;
+                    if payload.id != record.stable_id {
+                        return Err("session snapshot id does not match its stable id".into());
+                    }
+                    Ok(HistoryMutation::Session(Some(payload)))
+                } else {
+                    let payload: RemoteCompactionPayload = serde_json::from_slice(&record.payload)
+                        .map_err(|error| format!("invalid compaction snapshot: {error}"))?;
+                    if payload.session_id != record.stable_id {
+                        return Err("compaction session id does not match its stable id".into());
+                    }
+                    Ok(HistoryMutation::Compaction(Some(payload)))
+                }
+            }
+            _ => Err("mutable history operation is not supported".into()),
+        };
+    }
+    if record.operation == "tombstone" {
+        return if record.payload.is_empty() {
+            Ok(HistoryMutation::Tombstone)
+        } else {
+            Err("history tombstone payload must be empty".into())
+        };
+    }
+    if record.operation != "upsert" {
+        return Err("history operation is not supported".into());
+    }
+    macro_rules! parse {
+        ($ty:ty, $variant:ident, $label:literal) => {{
+            let payload: $ty = serde_json::from_slice(&record.payload)
+                .map_err(|error| format!(concat!("invalid ", $label, " snapshot: {}"), error))?;
+            if payload.id != record.stable_id {
+                return Err(concat!($label, " snapshot id does not match its stable id").into());
+            }
+            HistoryMutation::$variant(payload)
+        }};
+    }
+    Ok(match record.record_kind.as_str() {
+        "message" => parse!(RemoteMessagePayload, Message, "message"),
+        "checkpoint" => parse!(RemoteCheckpointPayload, Checkpoint, "checkpoint"),
+        "tool_call" => parse!(RemoteToolCallPayload, ToolCall, "tool call"),
+        "routing_decision" => parse!(RemoteRoutingPayload, Routing, "routing decision"),
+        "usage" => parse!(RemoteUsagePayload, Usage, "usage"),
+        _ => return Err("history record kind is not supported".into()),
+    })
+}
+
+fn compare_sync_version(
+    remote: SyncVersion<'_>,
+    existing: SyncVersion<'_>,
+) -> Option<SyncVersionDisposition> {
+    match (existing.logical_clock, existing.device_id)
+        .cmp(&(remote.logical_clock, remote.device_id))
+    {
+        std::cmp::Ordering::Greater => Some(SyncVersionDisposition::Superseded),
+        std::cmp::Ordering::Equal
+            if existing.operation == remote.operation
+                && existing.content_hash == remote.content_hash =>
+        {
+            Some(SyncVersionDisposition::Superseded)
+        }
+        std::cmp::Ordering::Equal => Some(SyncVersionDisposition::Conflict),
+        std::cmp::Ordering::Less => None,
+    }
+}
+
+fn record_sync_apply_outcome(
+    transaction: &rusqlite::Transaction<'_>,
+    cursor: i64,
+    state: &str,
+    detail: Option<&str>,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "INSERT INTO anywhere_sync_apply (cursor, state, detail) VALUES (?1, ?2, ?3)",
+        rusqlite::params![cursor, state, detail],
+    )?;
+    Ok(())
+}
+
+fn classify_mutable_sync_version(
+    transaction: &rusqlite::Transaction<'_>,
+    record: &StagedHistoryRecord,
+    local_device_id: [u8; 16],
+) -> Result<(Option<SyncVersionDisposition>, bool)> {
+    let local = transaction
+        .query_row(
+            "SELECT operation, logical_clock, content_hash FROM sync_journal
+             WHERE record_kind = ?1 AND stable_id = ?2
+             ORDER BY logical_clock DESC, id DESC LIMIT 1",
+            (&record.record_kind, &record.stable_id),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let materialized = transaction
+        .query_row(
+            "SELECT operation, logical_clock, sender_device_id, content_hash
+             FROM anywhere_sync_materialized WHERE record_kind = ?1 AND stable_id = ?2",
+            (&record.record_kind, &record.stable_id),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let mut disposition = local.as_ref().and_then(|(operation, clock, hash)| {
+        compare_sync_version(
+            SyncVersion {
+                operation: &record.operation,
+                logical_clock: record.logical_clock,
+                device_id: record.sender_device_id,
+                content_hash: &record.content_hash,
+            },
+            SyncVersion {
+                operation,
+                logical_clock: *clock,
+                device_id: local_device_id,
+                content_hash: hash,
+            },
+        )
+    });
+    if let Some((operation, clock, sender, hash)) = &materialized {
+        let sender = sender.as_slice().try_into().map_err(|_| {
+            StoreError::InvalidValue("materialized sync sender id has the wrong length".into())
+        })?;
+        let candidate = compare_sync_version(
+            SyncVersion {
+                operation: &record.operation,
+                logical_clock: record.logical_clock,
+                device_id: record.sender_device_id,
+                content_hash: &record.content_hash,
+            },
+            SyncVersion {
+                operation,
+                logical_clock: *clock,
+                device_id: sender,
+                content_hash: hash,
+            },
+        );
+        if matches!(candidate, Some(SyncVersionDisposition::Conflict)) || disposition.is_none() {
+            disposition = candidate.or(disposition);
+        }
+    }
+    Ok((disposition, local.is_some() || materialized.is_some()))
+}
+
+fn upsert_sync_materialized(
+    transaction: &rusqlite::Transaction<'_>,
+    record: &StagedHistoryRecord,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "INSERT INTO anywhere_sync_materialized
+         (record_kind, stable_id, operation, logical_clock, sender_device_id, content_hash)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(record_kind, stable_id) DO UPDATE SET
+           operation = excluded.operation,
+           logical_clock = excluded.logical_clock,
+           sender_device_id = excluded.sender_device_id,
+           content_hash = excluded.content_hash",
+        rusqlite::params![
+            &record.record_kind,
+            &record.stable_id,
+            &record.operation,
+            record.logical_clock,
+            record.sender_device_id.as_slice(),
+            record.content_hash.as_slice()
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_sync_journal_row(
+    conn: &Connection,
+    record_kind: &str,
+    stable_id: &str,
+    operation: SyncJournalOperation,
+    revision: i64,
+    logical_clock: i64,
+    payload: &[u8],
+) -> Result<bool> {
+    insert_sync_journal_row_with_base(
+        conn,
+        record_kind,
+        stable_id,
+        operation,
+        revision,
+        logical_clock,
+        None,
+        payload,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_sync_journal_row_with_base(
+    conn: &Connection,
+    record_kind: &str,
+    stable_id: &str,
+    operation: SyncJournalOperation,
+    revision: i64,
+    logical_clock: i64,
+    base_hash: Option<&[u8; 32]>,
+    payload: &[u8],
+) -> Result<bool> {
+    if record_kind.trim().is_empty() || stable_id.trim().is_empty() {
+        return Err(StoreError::InvalidValue(
+            "sync record kind and stable id must be non-empty".into(),
+        ));
+    }
+    if !matches!(
+        record_kind,
+        "session"
+            | "message"
+            | "checkpoint"
+            | "tool_call"
+            | "routing_decision"
+            | "usage"
+            | "compaction"
+            | "memory"
+            | "user_setting"
+            | "command"
+            | "skill"
+            | "agent"
+            | "workflow"
+            | "file"
+    ) {
+        return Err(StoreError::InvalidValue(
+            "record kind is not eligible for Anywhere sync".into(),
+        ));
+    }
+    if operation == SyncJournalOperation::Tombstone && !payload.is_empty() {
+        return Err(StoreError::InvalidValue(
+            "sync tombstones must have an empty payload".into(),
+        ));
+    }
+    if record_kind == "file" && operation == SyncJournalOperation::Upsert && base_hash.is_none() {
+        return Err(StoreError::InvalidValue(
+            "file upserts require a base content hash".into(),
+        ));
+    }
+    let content_hash = sync_payload_hash(payload);
+    let changed = conn.execute(
+        "INSERT INTO sync_journal
+             (record_kind, stable_id, operation, revision, logical_clock, base_hash,
+              content_hash, payload)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(record_kind, stable_id, revision) DO NOTHING",
+        rusqlite::params![
+            record_kind,
+            stable_id,
+            operation.as_str(),
+            revision,
+            logical_clock,
+            base_hash.map(|hash| hash.as_slice()),
+            content_hash.as_slice(),
+            payload,
+        ],
+    )?;
+    if changed == 1 {
+        return Ok(true);
+    }
+    let existing = conn.query_row(
+        "SELECT operation, logical_clock, base_hash, content_hash, payload
+         FROM sync_journal WHERE record_kind = ?1 AND stable_id = ?2 AND revision = ?3",
+        (record_kind, stable_id, revision),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+            ))
+        },
+    )?;
+    let same = existing.0 == operation.as_str()
+        && existing.1 == logical_clock
+        && existing.2.as_deref() == base_hash.map(|hash| hash.as_slice())
+        && existing.3 == content_hash
+        && existing.4 == payload;
+    if same {
+        Ok(false)
+    } else {
+        Err(StoreError::InvalidValue(
+            "sync revision already exists with different content".into(),
+        ))
+    }
+}
+
+/// Append the next immutable snapshot for a local record inside the caller's transaction.
+pub(crate) fn append_sync_revision(
+    conn: &Connection,
+    record_kind: &str,
+    stable_id: &str,
+    operation: SyncJournalOperation,
+    payload: &[u8],
+) -> Result<()> {
+    let enabled = conn
+        .query_row(
+            "SELECT enabled FROM anywhere_sync_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(());
+    }
+    let (revision, logical_clock) = conn.query_row(
+        "SELECT COALESCE(MAX(revision), 0) + 1, COALESCE(MAX(logical_clock), 0) + 1
+         FROM sync_journal WHERE record_kind = ?1 AND stable_id = ?2",
+        (record_kind, stable_id),
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    if !insert_sync_journal_row(
+        conn,
+        record_kind,
+        stable_id,
+        operation,
+        revision,
+        logical_clock,
+        payload,
+    )? {
+        return Err(StoreError::InvalidValue(
+            "sync journal revision collision".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn append_session_snapshot(conn: &Connection, session_id: &str) -> Result<()> {
+    let payload = conn.query_row(
+        "SELECT id, title, cwd, permission_mode, total_cost_usd, parent_session_id,
+                forked_from, forked_at_seq, worktree_path, archived, view_snapshot
+         FROM session WHERE id = ?1",
+        [session_id],
+        |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "title": row.get::<_, Option<String>>(1)?,
+                "cwd": row.get::<_, String>(2)?,
+                "permission_mode": row.get::<_, String>(3)?,
+                "total_cost_usd": row.get::<_, f64>(4)?,
+                "parent_session_id": row.get::<_, Option<String>>(5)?,
+                "forked_from": row.get::<_, Option<String>>(6)?,
+                "forked_at_seq": row.get::<_, Option<i64>>(7)?,
+                "worktree_path": row.get::<_, Option<String>>(8)?,
+                "archived": row.get::<_, bool>(9)?,
+                "view_snapshot": row.get::<_, Option<String>>(10)?,
+            }))
+        },
+    )?;
+    let payload = sync_json(payload)?;
+    append_sync_revision(
+        conn,
+        "session",
+        session_id,
+        SyncJournalOperation::Upsert,
+        &payload,
+    )
+}
+
+/// Immutable provenance for a session imported from an encrypted handoff capsule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedSessionMetadata {
+    pub session_id: String,
+    pub source_session_id: String,
+    pub source_device_id: [u8; 16],
+    pub capsule_id: String,
+    pub base_commit: String,
+    pub worktree_path: String,
+    pub imported_at: i64,
+}
+
+/// Portable session state embedded in an end-to-end encrypted handoff capsule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffSessionExport {
+    pub version: u8,
+    pub source_session_id: String,
+    pub title: Option<String>,
+    pub permission_mode: String,
+    pub messages: Vec<HandoffMessage>,
+    pub checkpoints: Vec<HandoffCheckpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffMessage {
+    pub seq: i64,
+    pub role: Role,
+    pub content: String,
+    pub model: Option<String>,
+    pub tool_calls: Vec<ToolCall>,
+    pub tool_call_id: Option<String>,
+    pub visibility: Visibility,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffCheckpoint {
+    pub label: Option<String>,
+    pub seq: i64,
+}
+
+/// Result of importing a portable handoff session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffSessionImport {
+    pub session_id: String,
+    pub remapped: bool,
+}
+
+/// Source provenance supplied while atomically importing a handoff session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffImportProvenance {
+    pub source_device_id: [u8; 16],
+    pub capsule_id: String,
+    pub base_commit: String,
+    pub imported_at: i64,
+}
+
 impl Store {
     /// Open (creating if needed) a database file and run migrations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -933,6 +1663,14 @@ impl Store {
             // Versioned migrations (PRAGMA user_version). Folds the historic ad-hoc ADD COLUMN
             // migrations and the UNIQUE(session_id, seq) index; refuses a DB from a newer build.
             run_migrations(&conn)?;
+            // Forge Anywhere's payload snapshot column was added while schema v18 was still on an
+            // unreleased feature branch. Repair databases opened by that branch without consuming
+            // a permanent migration number; released schemas must use MIGRATIONS instead.
+            add_column_if_missing(
+                &conn,
+                "ALTER TABLE sync_journal ADD COLUMN payload BLOB NOT NULL DEFAULT X''",
+            )?;
+            add_column_if_missing(&conn, "ALTER TABLE sync_journal ADD COLUMN base_hash BLOB")?;
         }
         let reservation_store_id = match reservation_source {
             ConnSource::File(path) => std::fs::canonicalize(&path)
@@ -972,6 +1710,2156 @@ impl Store {
     /// `PooledConnection` derefs to `rusqlite::Connection` and returns itself to the pool on drop.
     fn lock(&self) -> Result<r2d2::PooledConnection<SqliteManager>> {
         self.pool.get().map_err(|e| StoreError::Pool(e.to_string()))
+    }
+
+    /// Enable or disable creation of new local Anywhere sync snapshots.
+    ///
+    /// Existing pending rows are retained when disabled so logout/service outages cannot destroy
+    /// unsynchronized history. Ordinary Forge installs default to disabled and incur no duplicate
+    /// payload writes.
+    pub fn set_sync_journal_enabled(&self, enabled: bool) -> Result<()> {
+        self.lock()?.execute(
+            "UPDATE anywhere_sync_state SET enabled = ?1 WHERE singleton = 1",
+            [enabled],
+        )?;
+        Ok(())
+    }
+
+    /// Idempotently append a record to the durable encrypted-sync outbox.
+    ///
+    /// Callers that own a larger store transaction should add the journal row in that same
+    /// transaction; this public boundary is for already-committed records and import workers.
+    pub fn append_sync_journal(
+        &self,
+        record_kind: &str,
+        stable_id: &str,
+        operation: SyncJournalOperation,
+        revision: u64,
+        logical_clock: u64,
+        payload: &[u8],
+    ) -> Result<bool> {
+        let revision = i64::try_from(revision)
+            .map_err(|_| StoreError::InvalidValue("sync revision exceeds SQLite range".into()))?;
+        let logical_clock = i64::try_from(logical_clock).map_err(|_| {
+            StoreError::InvalidValue("sync logical clock exceeds SQLite range".into())
+        })?;
+        let conn = self.lock()?;
+        insert_sync_journal_row(
+            &conn,
+            record_kind,
+            stable_id,
+            operation,
+            revision,
+            logical_clock,
+            payload,
+        )
+    }
+
+    /// Append a file revision with its explicit base content hash.
+    ///
+    /// The base is authenticated in the encrypted record and is required for remote divergence
+    /// detection. `stable_id` is a logical id and is never interpreted as a host filesystem path.
+    pub fn append_sync_file_journal(
+        &self,
+        stable_id: &str,
+        operation: SyncJournalOperation,
+        revision: u64,
+        logical_clock: u64,
+        base_hash: Option<[u8; 32]>,
+        payload: &[u8],
+    ) -> Result<bool> {
+        if operation == SyncJournalOperation::Upsert && base_hash.is_none() {
+            return Err(StoreError::InvalidValue(
+                "file upserts require a base content hash".into(),
+            ));
+        }
+        let revision = i64::try_from(revision)
+            .map_err(|_| StoreError::InvalidValue("sync revision exceeds SQLite range".into()))?;
+        let logical_clock = i64::try_from(logical_clock).map_err(|_| {
+            StoreError::InvalidValue("sync logical clock exceeds SQLite range".into())
+        })?;
+        let conn = self.lock()?;
+        insert_sync_journal_row_with_base(
+            &conn,
+            "file",
+            stable_id,
+            operation,
+            revision,
+            logical_clock,
+            base_hash.as_ref(),
+            payload,
+        )
+    }
+
+    /// Return pending sync records in durable cursor order.
+    pub fn pending_sync_journal(&self, limit: usize) -> Result<Vec<SyncJournalEntry>> {
+        let limit = i64::try_from(limit.clamp(1, 1000)).unwrap_or(1000);
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, record_kind, stable_id, operation, revision, logical_clock,
+                    base_hash, content_hash, payload, created_at
+             FROM sync_journal WHERE uploaded_at IS NULL ORDER BY id LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit], |row| {
+            Ok(SyncJournalEntry {
+                id: row.get(0)?,
+                record_kind: row.get(1)?,
+                stable_id: row.get(2)?,
+                operation: row.get(3)?,
+                revision: row.get::<_, i64>(4)?.max(0) as u64,
+                logical_clock: row.get::<_, i64>(5)?.max(0) as u64,
+                base_hash: row
+                    .get::<_, Option<Vec<u8>>>(6)?
+                    .map(|hash| {
+                        hash.try_into().map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                rusqlite::types::Type::Blob,
+                                "sync base hash is not 32 bytes".into(),
+                            )
+                        })
+                    })
+                    .transpose()?,
+                content_hash: row.get(7)?,
+                payload: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Return previously sealed ciphertext for a journal row, if upload preparation completed.
+    pub fn sync_upload_envelope(&self, journal_id: i64) -> Result<Option<SyncUploadEnvelope>> {
+        self.lock()?
+            .query_row(
+                "SELECT envelope, ciphertext_sha256 FROM anywhere_sync_upload
+                 WHERE journal_id = ?1",
+                [journal_id],
+                |row| {
+                    let hash: Vec<u8> = row.get(1)?;
+                    let ciphertext_sha256 = hash.try_into().map_err(|_| {
+                        rusqlite::Error::InvalidColumnType(
+                            1,
+                            "ciphertext_sha256".into(),
+                            rusqlite::types::Type::Blob,
+                        )
+                    })?;
+                    Ok(SyncUploadEnvelope {
+                        envelope: row.get(0)?,
+                        ciphertext_sha256,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Persist ciphertext once and return the authoritative bytes if another worker won the race.
+    pub fn store_sync_upload_envelope(
+        &self,
+        journal_id: i64,
+        envelope: &[u8],
+        ciphertext_sha256: [u8; 32],
+    ) -> Result<SyncUploadEnvelope> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute(
+            "INSERT INTO anywhere_sync_upload (journal_id, envelope, ciphertext_sha256)
+             VALUES (?1, ?2, ?3) ON CONFLICT(journal_id) DO NOTHING",
+            (journal_id, envelope, ciphertext_sha256.as_slice()),
+        )?;
+        let stored = transaction.query_row(
+            "SELECT envelope, ciphertext_sha256 FROM anywhere_sync_upload WHERE journal_id = ?1",
+            [journal_id],
+            |row| {
+                let hash: Vec<u8> = row.get(1)?;
+                let ciphertext_sha256 = hash.try_into().map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(
+                        1,
+                        "ciphertext_sha256".into(),
+                        rusqlite::types::Type::Blob,
+                    )
+                })?;
+                Ok(SyncUploadEnvelope {
+                    envelope: row.get(0)?,
+                    ciphertext_sha256,
+                })
+            },
+        )?;
+        transaction.commit()?;
+        Ok(stored)
+    }
+
+    /// Last service cursor durably staged by the remote sync worker.
+    pub fn sync_download_cursor(&self) -> Result<i64> {
+        self.lock()?
+            .query_row(
+                "SELECT cursor FROM anywhere_sync_cursor WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)
+    }
+
+    /// Advance past service-side changes whose ciphertext was deliberately deleted.
+    pub fn advance_sync_download_cursor(&self, cursor: i64) -> Result<()> {
+        if cursor < 0 {
+            return Err(StoreError::InvalidValue(
+                "sync cursor must not be negative".into(),
+            ));
+        }
+        self.lock()?.execute(
+            "UPDATE anywhere_sync_cursor SET cursor = MAX(cursor, ?1) WHERE singleton = 1",
+            [cursor],
+        )?;
+        Ok(())
+    }
+
+    /// Stage one verified remote record and advance its cursor in the same transaction.
+    pub fn stage_remote_sync_record(&self, record: &RemoteSyncRecord) -> Result<bool> {
+        if record.cursor <= 0
+            || record.record_kind.trim().is_empty()
+            || record.stable_id.trim().is_empty()
+            || !matches!(record.operation.as_str(), "upsert" | "tombstone")
+        {
+            return Err(StoreError::InvalidValue(
+                "remote sync record metadata is invalid".into(),
+            ));
+        }
+        let revision = i64::try_from(record.revision)
+            .map_err(|_| StoreError::InvalidValue("sync revision exceeds SQLite range".into()))?;
+        let logical_clock = i64::try_from(record.logical_clock).map_err(|_| {
+            StoreError::InvalidValue("sync logical clock exceeds SQLite range".into())
+        })?;
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current: i64 = transaction.query_row(
+            "SELECT cursor FROM anywhere_sync_cursor WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        if record.cursor <= current {
+            transaction.commit()?;
+            return Ok(false);
+        }
+        let existing = transaction
+            .query_row(
+                "SELECT sender_device_id, operation, logical_clock, base_hash, content_hash, payload
+                 FROM anywhere_sync_remote
+                 WHERE record_kind = ?1 AND stable_id = ?2 AND revision = ?3",
+                (&record.record_kind, &record.stable_id, revision),
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<Vec<u8>>>(3)?,
+                        row.get::<_, Vec<u8>>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            let same = existing.0 == record.sender_device_id
+                && existing.1 == record.operation
+                && existing.2 == logical_clock
+                && existing.3.as_deref() == record.base_hash.as_ref().map(|hash| hash.as_slice())
+                && existing.4 == record.content_hash
+                && existing.5 == record.payload;
+            if !same {
+                return Err(StoreError::InvalidValue(
+                    "remote sync revision conflicts with staged content".into(),
+                ));
+            }
+        } else {
+            transaction.execute(
+                "INSERT INTO anywhere_sync_remote
+                 (cursor, sender_device_id, record_kind, stable_id, operation, revision,
+                  logical_clock, base_hash, content_hash, payload)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    record.cursor,
+                    record.sender_device_id.as_slice(),
+                    &record.record_kind,
+                    &record.stable_id,
+                    &record.operation,
+                    revision,
+                    logical_clock,
+                    record.base_hash.as_ref().map(|hash| hash.as_slice()),
+                    record.content_hash.as_slice(),
+                    &record.payload
+                ],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE anywhere_sync_cursor SET cursor = ?1 WHERE singleton = 1",
+            [record.cursor],
+        )?;
+        transaction.commit()?;
+        Ok(true)
+    }
+
+    /// Apply staged memory records using deterministic `(logical_clock, device_id)` ordering.
+    ///
+    /// Memory embeddings remain device-local: remote upserts preserve an existing embedding and
+    /// never import one. Records without safe local sync provenance become durable conflicts rather
+    /// than overwriting pre-Anywhere data. Other record kinds remain staged for their own policy.
+    pub fn apply_staged_memory_records(
+        &self,
+        local_device_id: [u8; 16],
+        limit: usize,
+    ) -> Result<RemoteSyncApplySummary> {
+        if limit == 0 {
+            return Ok(RemoteSyncApplySummary::default());
+        }
+        let limit = i64::try_from(limit).map_err(|_| {
+            StoreError::InvalidValue("sync apply limit exceeds SQLite range".into())
+        })?;
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw_records = {
+            let mut statement = transaction.prepare(
+                "SELECT r.cursor, r.sender_device_id, r.stable_id, r.operation,
+                        r.logical_clock, r.content_hash, r.payload
+                 FROM anywhere_sync_remote r
+                 LEFT JOIN anywhere_sync_apply a ON a.cursor = r.cursor
+                 WHERE r.record_kind = 'memory' AND a.cursor IS NULL
+                 ORDER BY r.cursor LIMIT ?1",
+            )?;
+            let records = statement
+                .query_map([limit], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Vec<u8>>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            records
+        };
+        let mut records = Vec::with_capacity(raw_records.len());
+        for (cursor, sender, stable_id, operation, logical_clock, content_hash, payload) in
+            raw_records
+        {
+            records.push(StagedMemoryRecord {
+                cursor,
+                sender_device_id: sender.try_into().map_err(|_| {
+                    StoreError::InvalidValue("staged sync sender id has the wrong length".into())
+                })?,
+                stable_id,
+                operation,
+                logical_clock,
+                content_hash: content_hash.try_into().map_err(|_| {
+                    StoreError::InvalidValue("staged sync content hash has the wrong length".into())
+                })?,
+                payload,
+            });
+        }
+
+        let mut summary = RemoteSyncApplySummary::default();
+        for record in records {
+            summary.inspected += 1;
+            let mutation = match parse_memory_mutation(&record) {
+                Ok(mutation) => mutation,
+                Err(detail) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "conflict",
+                        Some(&detail),
+                    )?;
+                    summary.conflicts += 1;
+                    continue;
+                }
+            };
+
+            let local_version = transaction
+                .query_row(
+                    "SELECT operation, logical_clock, content_hash FROM sync_journal
+                     WHERE record_kind = 'memory' AND stable_id = ?1
+                     ORDER BY logical_clock DESC, id DESC LIMIT 1",
+                    [&record.stable_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let materialized_version = transaction
+                .query_row(
+                    "SELECT operation, logical_clock, sender_device_id, content_hash
+                     FROM anywhere_sync_materialized
+                     WHERE record_kind = 'memory' AND stable_id = ?1",
+                    [&record.stable_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Vec<u8>>(2)?,
+                            row.get::<_, Vec<u8>>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+
+            let mut disposition = None;
+            if let Some((operation, clock, hash)) = &local_version {
+                disposition = compare_sync_version(
+                    SyncVersion {
+                        operation: &record.operation,
+                        logical_clock: record.logical_clock,
+                        device_id: record.sender_device_id,
+                        content_hash: &record.content_hash,
+                    },
+                    SyncVersion {
+                        operation,
+                        logical_clock: *clock,
+                        device_id: local_device_id,
+                        content_hash: hash,
+                    },
+                );
+            }
+            if let Some((operation, clock, sender, hash)) = &materialized_version {
+                let sender: [u8; 16] = sender.as_slice().try_into().map_err(|_| {
+                    StoreError::InvalidValue(
+                        "materialized sync sender id has the wrong length".into(),
+                    )
+                })?;
+                let candidate = compare_sync_version(
+                    SyncVersion {
+                        operation: &record.operation,
+                        logical_clock: record.logical_clock,
+                        device_id: record.sender_device_id,
+                        content_hash: &record.content_hash,
+                    },
+                    SyncVersion {
+                        operation,
+                        logical_clock: *clock,
+                        device_id: sender,
+                        content_hash: hash,
+                    },
+                );
+                if matches!(candidate, Some(SyncVersionDisposition::Conflict))
+                    || disposition.is_none()
+                {
+                    disposition = candidate.or(disposition);
+                }
+            }
+            match disposition {
+                Some(SyncVersionDisposition::Conflict) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "conflict",
+                        Some("equal sync versions contain different content"),
+                    )?;
+                    summary.conflicts += 1;
+                    continue;
+                }
+                Some(SyncVersionDisposition::Superseded) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "superseded",
+                        Some("a deterministic newer local or remote version already exists"),
+                    )?;
+                    summary.superseded += 1;
+                    continue;
+                }
+                None => {}
+            }
+
+            let primary_exists = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memory WHERE id = ?1)",
+                [&record.stable_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if primary_exists && local_version.is_none() && materialized_version.is_none() {
+                record_sync_apply_outcome(
+                    &transaction,
+                    record.cursor,
+                    "conflict",
+                    Some("existing local memory has no sync provenance"),
+                )?;
+                summary.conflicts += 1;
+                continue;
+            }
+
+            match mutation {
+                MemoryMutation::Upsert(payload) => {
+                    transaction.execute(
+                        "INSERT INTO memory
+                         (id, scope, kind, text, source_session, created_at, updated_at, salience)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                         ON CONFLICT(id) DO UPDATE SET
+                           scope = excluded.scope,
+                           kind = excluded.kind,
+                           text = excluded.text,
+                           source_session = excluded.source_session,
+                           created_at = excluded.created_at,
+                           updated_at = excluded.updated_at,
+                           salience = excluded.salience",
+                        rusqlite::params![
+                            payload.id,
+                            payload.scope,
+                            payload.kind,
+                            payload.text,
+                            payload.source_session,
+                            payload.created_at,
+                            payload.updated_at,
+                            payload.salience
+                        ],
+                    )?;
+                }
+                MemoryMutation::Tombstone => {
+                    transaction.execute("DELETE FROM memory WHERE id = ?1", [&record.stable_id])?;
+                }
+            }
+            transaction.execute(
+                "INSERT INTO anywhere_sync_materialized
+                 (record_kind, stable_id, operation, logical_clock, sender_device_id, content_hash)
+                 VALUES ('memory', ?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(record_kind, stable_id) DO UPDATE SET
+                   operation = excluded.operation,
+                   logical_clock = excluded.logical_clock,
+                   sender_device_id = excluded.sender_device_id,
+                   content_hash = excluded.content_hash",
+                rusqlite::params![
+                    &record.stable_id,
+                    &record.operation,
+                    record.logical_clock,
+                    record.sender_device_id.as_slice(),
+                    record.content_hash.as_slice()
+                ],
+            )?;
+            record_sync_apply_outcome(&transaction, record.cursor, "applied", None)?;
+            summary.applied += 1;
+        }
+        transaction.commit()?;
+        Ok(summary)
+    }
+
+    /// Apply staged portable history whose local dependency graph is already present.
+    ///
+    /// Session snapshots update only portable presentation metadata and never replace `cwd`,
+    /// worktree, or permission fields. Missing sessions/messages remain staged for a later pass;
+    /// stable-id or message-sequence collisions become durable conflicts instead of being remapped.
+    pub fn apply_staged_history_records(
+        &self,
+        local_device_id: [u8; 16],
+        limit: usize,
+    ) -> Result<RemoteSyncApplySummary> {
+        if limit == 0 {
+            return Ok(RemoteSyncApplySummary::default());
+        }
+        let limit = i64::try_from(limit).map_err(|_| {
+            StoreError::InvalidValue("sync apply limit exceeds SQLite range".into())
+        })?;
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw_records = {
+            let mut statement = transaction.prepare(
+                "SELECT r.cursor, r.sender_device_id, r.record_kind, r.stable_id, r.operation,
+                        r.logical_clock, r.content_hash, r.payload
+                 FROM anywhere_sync_remote r
+                 LEFT JOIN anywhere_sync_apply a ON a.cursor = r.cursor
+                 WHERE r.record_kind IN
+                       ('session', 'message', 'checkpoint', 'tool_call',
+                        'routing_decision', 'usage', 'compaction')
+                   AND a.cursor IS NULL
+                 ORDER BY CASE r.record_kind
+                            WHEN 'session' THEN 0
+                            WHEN 'message' THEN 1
+                            WHEN 'checkpoint' THEN 2
+                            WHEN 'compaction' THEN 4
+                            ELSE 3
+                          END,
+                          r.cursor
+                 LIMIT ?1",
+            )?;
+            let records = statement
+                .query_map([limit], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, Vec<u8>>(7)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            records
+        };
+        let mut records = Vec::with_capacity(raw_records.len());
+        for (cursor, sender, kind, stable_id, operation, clock, hash, payload) in raw_records {
+            records.push(StagedHistoryRecord {
+                cursor,
+                sender_device_id: sender.try_into().map_err(|_| {
+                    StoreError::InvalidValue("staged sync sender id has the wrong length".into())
+                })?,
+                record_kind: kind,
+                stable_id,
+                operation,
+                logical_clock: clock,
+                content_hash: hash.try_into().map_err(|_| {
+                    StoreError::InvalidValue("staged sync content hash has the wrong length".into())
+                })?,
+                payload,
+            });
+        }
+
+        let mut summary = RemoteSyncApplySummary::default();
+        for record in records {
+            summary.inspected += 1;
+            let mutation = match parse_history_mutation(&record) {
+                Ok(mutation) => mutation,
+                Err(detail) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "conflict",
+                        Some(&detail),
+                    )?;
+                    summary.conflicts += 1;
+                    continue;
+                }
+            };
+
+            if let HistoryMutation::Session(payload) = mutation {
+                let exists = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session WHERE id = ?1)",
+                    [&record.stable_id],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                let (disposition, has_provenance) =
+                    classify_mutable_sync_version(&transaction, &record, local_device_id)?;
+                match disposition {
+                    Some(SyncVersionDisposition::Conflict) => {
+                        record_sync_apply_outcome(
+                            &transaction,
+                            record.cursor,
+                            "conflict",
+                            Some("equal session versions contain different content"),
+                        )?;
+                        summary.conflicts += 1;
+                        continue;
+                    }
+                    Some(SyncVersionDisposition::Superseded) => {
+                        record_sync_apply_outcome(
+                            &transaction,
+                            record.cursor,
+                            "superseded",
+                            Some("a deterministic newer session snapshot already exists"),
+                        )?;
+                        summary.superseded += 1;
+                        continue;
+                    }
+                    None if exists && !has_provenance => {
+                        record_sync_apply_outcome(
+                            &transaction,
+                            record.cursor,
+                            "conflict",
+                            Some("existing local session has no sync provenance"),
+                        )?;
+                        summary.conflicts += 1;
+                        continue;
+                    }
+                    None => {}
+                }
+                if let Some(payload) = payload {
+                    if exists {
+                        transaction.execute(
+                            "UPDATE session SET title = ?2, archived = ?3, view_snapshot = ?4,
+                                 updated_at = strftime('%s','now') WHERE id = ?1",
+                            rusqlite::params![
+                                payload.id,
+                                payload.title,
+                                payload.archived,
+                                payload.view_snapshot
+                            ],
+                        )?;
+                    } else {
+                        let local_cwd = std::env::current_dir()
+                            .unwrap_or_else(|_| PathBuf::from("."))
+                            .to_string_lossy()
+                            .into_owned();
+                        transaction.execute(
+                            "INSERT INTO session
+                             (id, title, cwd, permission_mode, archived, view_snapshot)
+                             VALUES (?1, ?2, ?3, 'accept_edits', ?4, ?5)",
+                            rusqlite::params![
+                                payload.id,
+                                payload.title,
+                                local_cwd,
+                                payload.archived,
+                                payload.view_snapshot
+                            ],
+                        )?;
+                    }
+                } else if exists {
+                    transaction
+                        .execute("DELETE FROM session WHERE id = ?1", [&record.stable_id])?;
+                }
+                upsert_sync_materialized(&transaction, &record)?;
+                record_sync_apply_outcome(&transaction, record.cursor, "applied", None)?;
+                summary.applied += 1;
+                continue;
+            }
+
+            if let HistoryMutation::Compaction(payload) = mutation {
+                let exists = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session WHERE id = ?1)",
+                    [&record.stable_id],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                if !exists {
+                    summary.deferred += 1;
+                    continue;
+                }
+                let had_compaction = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_compaction WHERE session_id = ?1)",
+                    [&record.stable_id],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                let (disposition, has_provenance) =
+                    classify_mutable_sync_version(&transaction, &record, local_device_id)?;
+                match disposition {
+                    Some(SyncVersionDisposition::Conflict) => {
+                        record_sync_apply_outcome(
+                            &transaction,
+                            record.cursor,
+                            "conflict",
+                            Some("equal compaction versions contain different content"),
+                        )?;
+                        summary.conflicts += 1;
+                        continue;
+                    }
+                    Some(SyncVersionDisposition::Superseded) => {
+                        record_sync_apply_outcome(
+                            &transaction,
+                            record.cursor,
+                            "superseded",
+                            Some("a deterministic newer compaction already exists"),
+                        )?;
+                        summary.superseded += 1;
+                        continue;
+                    }
+                    None if had_compaction && !has_provenance => {
+                        record_sync_apply_outcome(
+                            &transaction,
+                            record.cursor,
+                            "conflict",
+                            Some("existing local compaction has no sync provenance"),
+                        )?;
+                        summary.conflicts += 1;
+                        continue;
+                    }
+                    None => {}
+                }
+                if let Some(payload) = payload {
+                    let keep_count = i64::try_from(payload.keep_count).map_err(|_| {
+                        StoreError::InvalidValue(
+                            "remote compaction keep count exceeds SQLite range".into(),
+                        )
+                    })?;
+                    if keep_count == 0 {
+                        transaction.execute(
+                            "UPDATE message SET active = 0, compacted = 1
+                             WHERE session_id = ?1 AND active = 1",
+                            [&payload.session_id],
+                        )?;
+                    } else {
+                        transaction.execute(
+                            "UPDATE message SET active = 0, compacted = 1
+                             WHERE session_id = ?1 AND active = 1
+                               AND seq < (
+                                 SELECT seq FROM message
+                                 WHERE session_id = ?1 AND active = 1
+                                 ORDER BY seq DESC LIMIT 1 OFFSET ?2
+                               )",
+                            rusqlite::params![&payload.session_id, keep_count - 1],
+                        )?;
+                    }
+                    transaction.execute(
+                        "INSERT INTO session_compaction (session_id, summary) VALUES (?1, ?2)
+                         ON CONFLICT(session_id) DO UPDATE SET
+                           summary = excluded.summary,
+                           created_at = strftime('%s','now')",
+                        rusqlite::params![payload.session_id, payload.summary],
+                    )?;
+                } else {
+                    transaction.execute(
+                        "UPDATE message SET active = 1, compacted = 0
+                         WHERE session_id = ?1 AND compacted = 1",
+                        [&record.stable_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM session_compaction WHERE session_id = ?1",
+                        [&record.stable_id],
+                    )?;
+                }
+                upsert_sync_materialized(&transaction, &record)?;
+                record_sync_apply_outcome(&transaction, record.cursor, "applied", None)?;
+                summary.applied += 1;
+                continue;
+            }
+
+            if matches!(&mutation, HistoryMutation::Tombstone) {
+                match classify_mutable_sync_version(&transaction, &record, local_device_id)?.0 {
+                    Some(SyncVersionDisposition::Conflict) => {
+                        record_sync_apply_outcome(
+                            &transaction,
+                            record.cursor,
+                            "conflict",
+                            Some("equal history tombstone versions contain different content"),
+                        )?;
+                        summary.conflicts += 1;
+                        continue;
+                    }
+                    Some(SyncVersionDisposition::Superseded) => {
+                        record_sync_apply_outcome(
+                            &transaction,
+                            record.cursor,
+                            "superseded",
+                            Some("a deterministic newer history revision already exists"),
+                        )?;
+                        summary.superseded += 1;
+                        continue;
+                    }
+                    None => {}
+                }
+            }
+
+            let local = transaction
+                .query_row(
+                    "SELECT operation, content_hash FROM sync_journal
+                     WHERE record_kind = ?1 AND stable_id = ?2
+                     ORDER BY logical_clock DESC, id DESC LIMIT 1",
+                    (&record.record_kind, &record.stable_id),
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()?;
+            if let Some((operation, hash)) =
+                local.filter(|_| !matches!(&mutation, HistoryMutation::Tombstone))
+            {
+                if operation == record.operation && hash == record.content_hash {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "superseded",
+                        Some("the immutable record already exists locally"),
+                    )?;
+                    summary.superseded += 1;
+                } else {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "conflict",
+                        Some("an immutable local record has different content"),
+                    )?;
+                    summary.conflicts += 1;
+                }
+                continue;
+            }
+
+            let outcome = match mutation {
+                HistoryMutation::Session(_) => unreachable!("session handled above"),
+                HistoryMutation::Message(payload) => {
+                    if payload.session_id.trim().is_empty()
+                        || payload.seq < 0
+                        || Role::parse(&payload.role).is_none()
+                        || !matches!(payload.visibility.as_str(), "llm" | "ui")
+                    {
+                        Err("message snapshot contains invalid fields")
+                    } else if !transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM session WHERE id = ?1)",
+                        [&payload.session_id],
+                        |row| row.get::<_, bool>(0),
+                    )? {
+                        Ok(false)
+                    } else if transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM message WHERE id = ?1 OR
+                             (session_id = ?2 AND seq = ?3))",
+                        rusqlite::params![&payload.id, &payload.session_id, payload.seq],
+                        |row| row.get::<_, bool>(0),
+                    )? {
+                        Err("message id or session sequence already belongs to local data")
+                    } else {
+                        let tool_calls = if payload.tool_calls.is_empty() {
+                            None
+                        } else {
+                            Some(
+                                serde_json::to_string(&payload.tool_calls)
+                                    .map_err(|error| StoreError::Json(error.to_string()))?,
+                            )
+                        };
+                        transaction.execute(
+                            "INSERT INTO message
+                             (id, session_id, seq, role, content, model, tool_calls_json,
+                              tool_call_id, visibility, active)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                            rusqlite::params![
+                                payload.id,
+                                payload.session_id,
+                                payload.seq,
+                                payload.role,
+                                payload.content,
+                                payload.model,
+                                tool_calls,
+                                payload.tool_call_id,
+                                payload.visibility,
+                                payload.active
+                            ],
+                        )?;
+                        Ok(true)
+                    }
+                }
+                HistoryMutation::Checkpoint(payload) => {
+                    if payload.session_id.trim().is_empty() || payload.seq < 0 {
+                        Err("checkpoint snapshot contains invalid fields")
+                    } else if !transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM session WHERE id = ?1)",
+                        [&payload.session_id],
+                        |row| row.get::<_, bool>(0),
+                    )? {
+                        Ok(false)
+                    } else if transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM checkpoint WHERE id = ?1)",
+                        [&payload.id],
+                        |row| row.get::<_, bool>(0),
+                    )? {
+                        Err("checkpoint id already belongs to local data")
+                    } else {
+                        transaction.execute(
+                            "INSERT INTO checkpoint (id, session_id, label, seq)
+                             VALUES (?1, ?2, ?3, ?4)",
+                            rusqlite::params![
+                                payload.id,
+                                payload.session_id,
+                                payload.label,
+                                payload.seq
+                            ],
+                        )?;
+                        Ok(true)
+                    }
+                }
+                HistoryMutation::ToolCall(payload) => {
+                    if payload.message_id.trim().is_empty() || payload.tool_name.trim().is_empty() {
+                        Err("tool-call snapshot contains invalid fields")
+                    } else if !transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM message WHERE id = ?1)",
+                        [&payload.message_id],
+                        |row| row.get::<_, bool>(0),
+                    )? {
+                        Ok(false)
+                    } else if transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM tool_call WHERE id = ?1)",
+                        [&payload.id],
+                        |row| row.get::<_, bool>(0),
+                    )? {
+                        Err("tool-call id already belongs to local data")
+                    } else {
+                        transaction.execute(
+                            "INSERT INTO tool_call
+                             (id, message_id, tool_name, args_json, result_json,
+                              permission, status, path)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                            rusqlite::params![
+                                payload.id,
+                                payload.message_id,
+                                payload.tool_name,
+                                payload.args_json,
+                                payload.result_json,
+                                payload.permission,
+                                payload.status,
+                                payload.path
+                            ],
+                        )?;
+                        Ok(true)
+                    }
+                }
+                HistoryMutation::Routing(payload) => {
+                    if payload.message_id.trim().is_empty()
+                        || payload.chosen_model.trim().is_empty()
+                    {
+                        Err("routing snapshot contains invalid fields")
+                    } else if !transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM message WHERE id = ?1)",
+                        [&payload.message_id],
+                        |row| row.get::<_, bool>(0),
+                    )? {
+                        Ok(false)
+                    } else if transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM routing_decision WHERE id = ?1)",
+                        [&payload.id],
+                        |row| row.get::<_, bool>(0),
+                    )? {
+                        Err("routing-decision id already belongs to local data")
+                    } else {
+                        transaction.execute(
+                            "INSERT INTO routing_decision
+                             (id, message_id, task_tier, chosen_model, rationale)
+                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                            rusqlite::params![
+                                payload.id,
+                                payload.message_id,
+                                payload.task_tier,
+                                payload.chosen_model,
+                                payload.rationale
+                            ],
+                        )?;
+                        Ok(true)
+                    }
+                }
+                HistoryMutation::Usage(payload) => {
+                    if payload.message_id.trim().is_empty()
+                        || payload.input_tokens < 0
+                        || payload.output_tokens < 0
+                        || !payload.cost_usd.is_finite()
+                        || payload.cost_usd < 0.0
+                    {
+                        Err("usage snapshot contains invalid fields")
+                    } else if !transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM message WHERE id = ?1)",
+                        [&payload.message_id],
+                        |row| row.get::<_, bool>(0),
+                    )? {
+                        Ok(false)
+                    } else if transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM usage WHERE id = ?1)",
+                        [&payload.id],
+                        |row| row.get::<_, bool>(0),
+                    )? {
+                        Err("usage id already belongs to local data")
+                    } else {
+                        transaction.execute(
+                            "INSERT INTO usage
+                             (id, message_id, input_tokens, output_tokens, cost_usd)
+                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                            rusqlite::params![
+                                payload.id,
+                                payload.message_id,
+                                payload.input_tokens,
+                                payload.output_tokens,
+                                payload.cost_usd
+                            ],
+                        )?;
+                        transaction.execute(
+                            "UPDATE session SET total_cost_usd = total_cost_usd + ?1,
+                                 updated_at = strftime('%s','now')
+                             WHERE id = (SELECT session_id FROM message WHERE id = ?2)",
+                            rusqlite::params![payload.cost_usd, payload.message_id],
+                        )?;
+                        Ok(true)
+                    }
+                }
+                HistoryMutation::Compaction(_) => unreachable!("compaction handled above"),
+                HistoryMutation::Tombstone => {
+                    let table = match record.record_kind.as_str() {
+                        "message" => "message",
+                        "checkpoint" => "checkpoint",
+                        "tool_call" => "tool_call",
+                        "routing_decision" => "routing_decision",
+                        "usage" => "usage",
+                        _ => {
+                            return Err(StoreError::InvalidValue(
+                                "unsupported history tombstone kind".into(),
+                            ))
+                        }
+                    };
+                    let has_provenance = transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM anywhere_sync_materialized
+                         WHERE record_kind = ?1 AND stable_id = ?2)",
+                        (&record.record_kind, &record.stable_id),
+                        |row| row.get::<_, bool>(0),
+                    )? || transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM sync_journal
+                         WHERE record_kind = ?1 AND stable_id = ?2)",
+                        (&record.record_kind, &record.stable_id),
+                        |row| row.get::<_, bool>(0),
+                    )?;
+                    let exists = transaction.query_row(
+                        &format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE id = ?1)"),
+                        [&record.stable_id],
+                        |row| row.get::<_, bool>(0),
+                    )?;
+                    if exists && !has_provenance {
+                        Err("existing local history row has no sync provenance")
+                    } else {
+                        transaction.execute(
+                            &format!("DELETE FROM {table} WHERE id = ?1"),
+                            [&record.stable_id],
+                        )?;
+                        Ok(true)
+                    }
+                }
+            };
+            match outcome {
+                Ok(true) => {
+                    upsert_sync_materialized(&transaction, &record)?;
+                    record_sync_apply_outcome(&transaction, record.cursor, "applied", None)?;
+                    summary.applied += 1;
+                }
+                Ok(false) => summary.deferred += 1,
+                Err(detail) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "conflict",
+                        Some(detail),
+                    )?;
+                    summary.conflicts += 1;
+                }
+            }
+        }
+        transaction.commit()?;
+        Ok(summary)
+    }
+
+    /// Apply account-scoped settings, commands, skills, agents, and workflows.
+    ///
+    /// Payloads remain opaque in this layer and are never copied to `config.toml`, the keyring, or
+    /// a workspace. Kind-specific consumers must validate the bytes before using them.
+    pub fn apply_staged_portable_records(
+        &self,
+        local_device_id: [u8; 16],
+        limit: usize,
+    ) -> Result<RemoteSyncApplySummary> {
+        const KINDS: &str = "'user_setting', 'command', 'skill', 'agent', 'workflow'";
+        if limit == 0 {
+            return Ok(RemoteSyncApplySummary::default());
+        }
+        let limit = i64::try_from(limit).map_err(|_| {
+            StoreError::InvalidValue("sync apply limit exceeds SQLite range".into())
+        })?;
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sql = format!(
+            "SELECT r.cursor, r.sender_device_id, r.record_kind, r.stable_id, r.operation,
+                    r.logical_clock, r.content_hash, r.payload
+             FROM anywhere_sync_remote r
+             LEFT JOIN anywhere_sync_apply a ON a.cursor = r.cursor
+             WHERE r.record_kind IN ({KINDS}) AND a.cursor IS NULL
+             ORDER BY r.cursor LIMIT ?1"
+        );
+        let raw = {
+            let mut statement = transaction.prepare(&sql)?;
+            let records = statement
+                .query_map([limit], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, Vec<u8>>(7)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            records
+        };
+        let mut summary = RemoteSyncApplySummary::default();
+        for (cursor, sender, kind, stable_id, operation, clock, hash, payload) in raw {
+            summary.inspected += 1;
+            let record = StagedHistoryRecord {
+                cursor,
+                sender_device_id: sender.try_into().map_err(|_| {
+                    StoreError::InvalidValue("staged sync sender id has the wrong length".into())
+                })?,
+                record_kind: kind,
+                stable_id,
+                operation,
+                logical_clock: clock,
+                content_hash: hash.try_into().map_err(|_| {
+                    StoreError::InvalidValue("staged sync content hash has the wrong length".into())
+                })?,
+                payload,
+            };
+            let invalid = sync_payload_hash(&record.payload) != record.content_hash
+                || (record.operation == "tombstone" && !record.payload.is_empty())
+                || !matches!(record.operation.as_str(), "upsert" | "tombstone");
+            if invalid {
+                record_sync_apply_outcome(
+                    &transaction,
+                    record.cursor,
+                    "conflict",
+                    Some("portable record payload or operation is invalid"),
+                )?;
+                summary.conflicts += 1;
+                continue;
+            }
+            match classify_mutable_sync_version(&transaction, &record, local_device_id)?.0 {
+                Some(SyncVersionDisposition::Conflict) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "conflict",
+                        Some("equal portable record versions contain different content"),
+                    )?;
+                    summary.conflicts += 1;
+                    continue;
+                }
+                Some(SyncVersionDisposition::Superseded) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "superseded",
+                        Some("a deterministic newer portable record already exists"),
+                    )?;
+                    summary.superseded += 1;
+                    continue;
+                }
+                None => {}
+            }
+            transaction.execute(
+                "INSERT INTO anywhere_sync_portable_record
+                 (record_kind, stable_id, payload, deleted, logical_clock,
+                  sender_device_id, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(record_kind, stable_id) DO UPDATE SET
+                   payload = excluded.payload, deleted = excluded.deleted,
+                   logical_clock = excluded.logical_clock,
+                   sender_device_id = excluded.sender_device_id,
+                   content_hash = excluded.content_hash",
+                rusqlite::params![
+                    &record.record_kind,
+                    &record.stable_id,
+                    &record.payload,
+                    record.operation == "tombstone",
+                    record.logical_clock,
+                    record.sender_device_id.as_slice(),
+                    record.content_hash.as_slice(),
+                ],
+            )?;
+            upsert_sync_materialized(&transaction, &record)?;
+            record_sync_apply_outcome(&transaction, record.cursor, "applied", None)?;
+            summary.applied += 1;
+        }
+        transaction.commit()?;
+        Ok(summary)
+    }
+
+    /// Load one portable record, including its tombstone when `deleted` is true.
+    pub fn portable_sync_record(
+        &self,
+        record_kind: &str,
+        stable_id: &str,
+    ) -> Result<Option<PortableSyncRecord>> {
+        self.lock()?
+            .query_row(
+                "SELECT payload, deleted, logical_clock, sender_device_id, content_hash
+                 FROM anywhere_sync_portable_record
+                 WHERE record_kind = ?1 AND stable_id = ?2",
+                (record_kind, stable_id),
+                |row| {
+                    let sender: Vec<u8> = row.get(3)?;
+                    let hash: Vec<u8> = row.get(4)?;
+                    Ok(PortableSyncRecord {
+                        record_kind: record_kind.to_owned(),
+                        stable_id: stable_id.to_owned(),
+                        payload: row.get(0)?,
+                        deleted: row.get(1)?,
+                        logical_clock: row.get::<_, i64>(2)?.max(0) as u64,
+                        sender_device_id: sender.try_into().map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Blob,
+                                "portable sender id is not 16 bytes".into(),
+                            )
+                        })?,
+                        content_hash: hash.try_into().map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                4,
+                                rusqlite::types::Type::Blob,
+                                "portable content hash is not 32 bytes".into(),
+                            )
+                        })?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// Commit a local portable record and its encrypted-sync journal revision atomically.
+    pub fn write_portable_sync_record(
+        &self,
+        local_device_id: [u8; 16],
+        record_kind: &str,
+        stable_id: &str,
+        payload: Option<&[u8]>,
+    ) -> Result<()> {
+        if !matches!(
+            record_kind,
+            "user_setting" | "command" | "skill" | "agent" | "workflow"
+        ) || stable_id.trim().is_empty()
+        {
+            return Err(StoreError::InvalidValue(
+                "portable sync record kind or stable id is invalid".into(),
+            ));
+        }
+        let normalized = stable_id.to_ascii_lowercase();
+        if record_kind == "user_setting"
+            && [
+                "secret",
+                "token",
+                "password",
+                "credential",
+                "api_key",
+                "private_key",
+            ]
+            .iter()
+            .any(|needle| normalized.contains(needle))
+        {
+            return Err(StoreError::InvalidValue(
+                "secret-bearing settings are not eligible for sync".into(),
+            ));
+        }
+        let operation = if payload.is_some() {
+            SyncJournalOperation::Upsert
+        } else {
+            SyncJournalOperation::Tombstone
+        };
+        let payload = payload.unwrap_or_default();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sync_enabled = transaction.query_row(
+            "SELECT enabled FROM anywhere_sync_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let next: i64 = transaction.query_row(
+            "SELECT MAX(value) + 1 FROM (
+               SELECT COALESCE(MAX(revision), 0) AS value FROM sync_journal
+                WHERE record_kind = ?1 AND stable_id = ?2
+               UNION ALL
+               SELECT COALESCE(MAX(logical_clock), 0) AS value
+                FROM anywhere_sync_portable_record
+                WHERE record_kind = ?1 AND stable_id = ?2
+             )",
+            (record_kind, stable_id),
+            |row| row.get(0),
+        )?;
+        let hash = sync_payload_hash(payload);
+        transaction.execute(
+            "INSERT INTO anywhere_sync_portable_record
+             (record_kind, stable_id, payload, deleted, logical_clock,
+              sender_device_id, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(record_kind, stable_id) DO UPDATE SET
+               payload = excluded.payload, deleted = excluded.deleted,
+               logical_clock = excluded.logical_clock,
+               sender_device_id = excluded.sender_device_id,
+               content_hash = excluded.content_hash",
+            rusqlite::params![
+                record_kind,
+                stable_id,
+                payload,
+                operation == SyncJournalOperation::Tombstone,
+                next,
+                local_device_id.as_slice(),
+                hash.as_slice(),
+            ],
+        )?;
+        if sync_enabled {
+            insert_sync_journal_row(
+                &transaction,
+                record_kind,
+                stable_id,
+                operation,
+                next,
+                next,
+                payload,
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Apply staged file records into the content-addressed local cache.
+    ///
+    /// A logical file id is never opened as a path. If the authenticated base does not match the
+    /// local winner, the incoming bytes become a durable conflict copy and the winner is untouched.
+    pub fn apply_staged_file_records(
+        &self,
+        local_device_id: [u8; 16],
+        limit: usize,
+    ) -> Result<RemoteSyncApplySummary> {
+        if limit == 0 {
+            return Ok(RemoteSyncApplySummary::default());
+        }
+        let limit = i64::try_from(limit).map_err(|_| {
+            StoreError::InvalidValue("sync apply limit exceeds SQLite range".into())
+        })?;
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let raw = {
+            let mut statement = transaction.prepare(
+                "SELECT r.cursor, r.sender_device_id, r.stable_id, r.operation,
+                        r.logical_clock, r.base_hash, r.content_hash, r.payload
+                 FROM anywhere_sync_remote r
+                 LEFT JOIN anywhere_sync_apply a ON a.cursor = r.cursor
+                 WHERE r.record_kind = 'file' AND a.cursor IS NULL
+                 ORDER BY r.cursor LIMIT ?1",
+            )?;
+            let records = statement
+                .query_map([limit], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, Option<Vec<u8>>>(5)?,
+                        row.get::<_, Vec<u8>>(6)?,
+                        row.get::<_, Vec<u8>>(7)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            records
+        };
+        let mut summary = RemoteSyncApplySummary::default();
+        for (cursor, sender, stable_id, operation, clock, base, hash, payload) in raw {
+            summary.inspected += 1;
+            let record = StagedHistoryRecord {
+                cursor,
+                sender_device_id: sender.try_into().map_err(|_| {
+                    StoreError::InvalidValue("staged sync sender id has the wrong length".into())
+                })?,
+                record_kind: "file".into(),
+                stable_id,
+                operation,
+                logical_clock: clock,
+                content_hash: hash.try_into().map_err(|_| {
+                    StoreError::InvalidValue("staged sync content hash has the wrong length".into())
+                })?,
+                payload,
+            };
+            let base_hash: Option<[u8; 32]> = base
+                .map(|value| {
+                    value.try_into().map_err(|_| {
+                        StoreError::InvalidValue(
+                            "staged file base hash has the wrong length".into(),
+                        )
+                    })
+                })
+                .transpose()?;
+            if sync_payload_hash(&record.payload) != record.content_hash
+                || (record.operation == "upsert" && base_hash.is_none())
+                || (record.operation == "tombstone" && !record.payload.is_empty())
+                || !matches!(record.operation.as_str(), "upsert" | "tombstone")
+            {
+                record_sync_apply_outcome(
+                    &transaction,
+                    record.cursor,
+                    "conflict",
+                    Some("file record payload, base hash, or operation is invalid"),
+                )?;
+                summary.conflicts += 1;
+                continue;
+            }
+            let current = transaction
+                .query_row(
+                    "SELECT deleted, content_hash FROM anywhere_sync_file WHERE stable_id = ?1",
+                    [&record.stable_id],
+                    |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )
+                .optional()?;
+            if let Some((_, current_hash)) = &current {
+                if current_hash.as_slice() == record.content_hash {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "superseded",
+                        Some("the file content already exists locally"),
+                    )?;
+                    summary.superseded += 1;
+                    continue;
+                }
+            }
+            if record.operation == "upsert" {
+                if let Some((false, current_hash)) = &current {
+                    if base_hash
+                        .as_ref()
+                        .is_some_and(|base| base.as_slice() != current_hash)
+                    {
+                        transaction.execute(
+                            "INSERT INTO anywhere_sync_file_conflict
+                             (stable_id, sender_device_id, base_hash, content_hash, payload, detail)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                             ON CONFLICT(stable_id, content_hash) DO NOTHING",
+                            rusqlite::params![
+                                &record.stable_id,
+                                record.sender_device_id.as_slice(),
+                                base_hash.as_ref().map(|hash| hash.as_slice()),
+                                record.content_hash.as_slice(),
+                                &record.payload,
+                                "incoming file base differs from the local winner",
+                            ],
+                        )?;
+                        record_sync_apply_outcome(
+                            &transaction,
+                            record.cursor,
+                            "conflict",
+                            Some("incoming file base differs from the local winner"),
+                        )?;
+                        summary.conflicts += 1;
+                        continue;
+                    }
+                }
+            }
+            match classify_mutable_sync_version(&transaction, &record, local_device_id)?.0 {
+                Some(SyncVersionDisposition::Conflict) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "conflict",
+                        Some("equal file versions contain different content"),
+                    )?;
+                    summary.conflicts += 1;
+                    continue;
+                }
+                Some(SyncVersionDisposition::Superseded) => {
+                    record_sync_apply_outcome(
+                        &transaction,
+                        record.cursor,
+                        "superseded",
+                        Some("a deterministic newer file revision already exists"),
+                    )?;
+                    summary.superseded += 1;
+                    continue;
+                }
+                None => {}
+            }
+            transaction.execute(
+                "INSERT INTO anywhere_sync_file
+                 (stable_id, payload, deleted, logical_clock, sender_device_id,
+                  base_hash, content_hash)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(stable_id) DO UPDATE SET
+                   payload = excluded.payload, deleted = excluded.deleted,
+                   logical_clock = excluded.logical_clock,
+                   sender_device_id = excluded.sender_device_id,
+                   base_hash = excluded.base_hash, content_hash = excluded.content_hash",
+                rusqlite::params![
+                    &record.stable_id,
+                    &record.payload,
+                    record.operation == "tombstone",
+                    record.logical_clock,
+                    record.sender_device_id.as_slice(),
+                    base_hash.as_ref().map(|hash| hash.as_slice()),
+                    record.content_hash.as_slice(),
+                ],
+            )?;
+            upsert_sync_materialized(&transaction, &record)?;
+            record_sync_apply_outcome(&transaction, record.cursor, "applied", None)?;
+            summary.applied += 1;
+        }
+        transaction.commit()?;
+        Ok(summary)
+    }
+
+    /// Atomically update one local logical file and enqueue its authenticated base revision.
+    pub fn write_sync_file(
+        &self,
+        local_device_id: [u8; 16],
+        stable_id: &str,
+        expected_base: [u8; 32],
+        payload: Option<&[u8]>,
+    ) -> Result<()> {
+        if stable_id.trim().is_empty() {
+            return Err(StoreError::InvalidValue("file stable id is empty".into()));
+        }
+        let operation = if payload.is_some() {
+            SyncJournalOperation::Upsert
+        } else {
+            SyncJournalOperation::Tombstone
+        };
+        let payload = payload.unwrap_or_default();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sync_enabled = transaction.query_row(
+            "SELECT enabled FROM anywhere_sync_state WHERE singleton = 1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let current = transaction
+            .query_row(
+                "SELECT deleted, content_hash FROM anywhere_sync_file WHERE stable_id = ?1",
+                [stable_id],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?;
+        let empty_hash: [u8; 32] = sync_payload_hash(&[]);
+        let actual_base = current
+            .as_ref()
+            .filter(|(deleted, _)| !deleted)
+            .map_or(empty_hash.as_slice(), |(_, hash)| hash.as_slice());
+        if actual_base != expected_base {
+            return Err(StoreError::InvalidValue(
+                "file changed since the supplied base revision".into(),
+            ));
+        }
+        let next: i64 = transaction.query_row(
+            "SELECT MAX(value) + 1 FROM (
+               SELECT COALESCE(MAX(revision), 0) AS value FROM sync_journal
+                WHERE record_kind = 'file' AND stable_id = ?1
+               UNION ALL
+               SELECT COALESCE(MAX(logical_clock), 0) AS value
+                FROM anywhere_sync_file WHERE stable_id = ?1
+             )",
+            [stable_id],
+            |row| row.get(0),
+        )?;
+        let content_hash = sync_payload_hash(payload);
+        transaction.execute(
+            "INSERT INTO anywhere_sync_file
+             (stable_id, payload, deleted, logical_clock, sender_device_id,
+              base_hash, content_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(stable_id) DO UPDATE SET
+               payload = excluded.payload, deleted = excluded.deleted,
+               logical_clock = excluded.logical_clock,
+               sender_device_id = excluded.sender_device_id,
+               base_hash = excluded.base_hash, content_hash = excluded.content_hash",
+            rusqlite::params![
+                stable_id,
+                payload,
+                operation == SyncJournalOperation::Tombstone,
+                next,
+                local_device_id.as_slice(),
+                expected_base.as_slice(),
+                content_hash.as_slice(),
+            ],
+        )?;
+        if sync_enabled {
+            insert_sync_journal_row_with_base(
+                &transaction,
+                "file",
+                stable_id,
+                operation,
+                next,
+                next,
+                Some(&expected_base),
+                payload,
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Load the current logical file payload; tombstones return `None`.
+    pub fn sync_file(&self, stable_id: &str) -> Result<Option<Vec<u8>>> {
+        self.lock()?
+            .query_row(
+                "SELECT payload FROM anywhere_sync_file
+                 WHERE stable_id = ?1 AND deleted = 0",
+                [stable_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    /// List durable file conflict copies for explicit user resolution.
+    pub fn sync_file_conflicts(&self, stable_id: &str) -> Result<Vec<SyncFileConflict>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT sender_device_id, base_hash, content_hash, payload, detail
+             FROM anywhere_sync_file_conflict WHERE stable_id = ?1 ORDER BY id",
+        )?;
+        let conflicts = statement
+            .query_map([stable_id], |row| {
+                let sender: Vec<u8> = row.get(0)?;
+                let base: Option<Vec<u8>> = row.get(1)?;
+                let hash: Vec<u8> = row.get(2)?;
+                Ok(SyncFileConflict {
+                    stable_id: stable_id.to_owned(),
+                    sender_device_id: sender.try_into().map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Blob,
+                            "file conflict sender id is not 16 bytes".into(),
+                        )
+                    })?,
+                    base_hash: base
+                        .map(|value| {
+                            value.try_into().map_err(|_| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    1,
+                                    rusqlite::types::Type::Blob,
+                                    "file conflict base hash is not 32 bytes".into(),
+                                )
+                            })
+                        })
+                        .transpose()?,
+                    content_hash: hash.try_into().map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Blob,
+                            "file conflict content hash is not 32 bytes".into(),
+                        )
+                    })?,
+                    payload: row.get(3)?,
+                    detail: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(conflicts)
+    }
+
+    /// List durable terminal conflicts without exposing synchronized payload content.
+    pub fn sync_apply_conflicts(&self, limit: usize) -> Result<Vec<SyncApplyConflict>> {
+        let limit = i64::try_from(limit.clamp(1, 1000)).unwrap_or(1000);
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT a.cursor, r.record_kind, r.stable_id, COALESCE(a.detail, 'sync conflict')
+             FROM anywhere_sync_apply a
+             JOIN anywhere_sync_remote r ON r.cursor = a.cursor
+             WHERE a.state = 'conflict' ORDER BY a.cursor DESC LIMIT ?1",
+        )?;
+        let conflicts = statement
+            .query_map([limit], |row| {
+                Ok(SyncApplyConflict {
+                    cursor: row.get(0)?,
+                    record_kind: row.get(1)?,
+                    stable_id: row.get(2)?,
+                    detail: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(conflicts)
+    }
+
+    /// Atomically mark acknowledged journal rows uploaded. Unknown IDs are harmless.
+    pub fn mark_sync_journal_uploaded(&self, ids: &[i64], uploaded_at: i64) -> Result<usize> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut changed = 0;
+        for id in ids {
+            changed += transaction.execute(
+                "UPDATE sync_journal SET uploaded_at = ?1
+                 WHERE id = ?2 AND uploaded_at IS NULL",
+                (uploaded_at, id),
+            )?;
+            transaction.execute(
+                "DELETE FROM anywhere_sync_upload
+                 WHERE journal_id = ?1
+                   AND EXISTS (SELECT 1 FROM sync_journal
+                               WHERE id = ?1 AND uploaded_at IS NOT NULL)",
+                [id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(changed)
+    }
+
+    /// Record immutable handoff provenance after the destination session import succeeds.
+    pub fn record_imported_session(&self, metadata: &ImportedSessionMetadata) -> Result<()> {
+        self.lock()?.execute(
+            "INSERT INTO imported_session
+                 (session_id, source_session_id, source_device_id, capsule_id, base_commit,
+                  worktree_path, imported_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            (
+                &metadata.session_id,
+                &metadata.source_session_id,
+                metadata.source_device_id.as_slice(),
+                &metadata.capsule_id,
+                &metadata.base_commit,
+                &metadata.worktree_path,
+                metadata.imported_at,
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// Load imported-session provenance, if this session originated from a capsule.
+    pub fn imported_session_metadata(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ImportedSessionMetadata>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT session_id, source_session_id, source_device_id, capsule_id, base_commit,
+                    worktree_path, imported_at
+             FROM imported_session WHERE session_id = ?1",
+            [session_id],
+            |row| {
+                let source_device_id: Vec<u8> = row.get(2)?;
+                let source_device_id = source_device_id.try_into().map_err(|_| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Blob,
+                        "source device id is not 16 bytes".into(),
+                    )
+                })?;
+                Ok(ImportedSessionMetadata {
+                    session_id: row.get(0)?,
+                    source_session_id: row.get(1)?,
+                    source_device_id,
+                    capsule_id: row.get(3)?,
+                    base_commit: row.get(4)?,
+                    worktree_path: row.get(5)?,
+                    imported_at: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::from)
+    }
+
+    /// Load handoff provenance by capsule id for crash-safe destination retries.
+    pub fn imported_session_by_capsule(
+        &self,
+        capsule_id: &str,
+    ) -> Result<Option<ImportedSessionMetadata>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT session_id, source_session_id, source_device_id, capsule_id, base_commit,
+                    worktree_path, imported_at
+             FROM imported_session WHERE capsule_id = ?1",
+            [capsule_id],
+            |row| {
+                let source_device_id: Vec<u8> = row.get(2)?;
+                let source_device_id = source_device_id.try_into().map_err(|_| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Blob,
+                        "source device id is not 16 bytes".into(),
+                    )
+                })?;
+                Ok(ImportedSessionMetadata {
+                    session_id: row.get(0)?,
+                    source_session_id: row.get(1)?,
+                    source_device_id,
+                    capsule_id: row.get(3)?,
+                    base_commit: row.get(4)?,
+                    worktree_path: row.get(5)?,
+                    imported_at: row.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StoreError::from)
+    }
+
+    /// Export the portable transcript and rewind points needed to resume a session after handoff.
+    /// Provider credentials, indexes, caches, schedules, and queue internals are never included.
+    pub fn export_handoff_session(&self, session_id: &str) -> Result<HandoffSessionExport> {
+        let conn = self.lock()?;
+        let (title, permission_mode) = conn
+            .query_row(
+                "SELECT title, permission_mode FROM session WHERE id = ?1",
+                [session_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::InvalidValue("handoff session does not exist".into()))?;
+        let messages = {
+            let mut statement = conn.prepare(
+                "SELECT seq, role, content, model, tool_calls_json, tool_call_id, visibility, active
+                 FROM message WHERE session_id = ?1 ORDER BY seq, created_at",
+            )?;
+            let rows = statement
+                .query_map([session_id], |row| {
+                    let role: String = row.get(1)?;
+                    let tool_calls_json: Option<String> = row.get(4)?;
+                    Ok(HandoffMessage {
+                        seq: row.get(0)?,
+                        role: Role::parse(&role).unwrap_or(Role::User),
+                        content: row.get(2)?,
+                        model: row.get(3)?,
+                        tool_calls: tool_calls_json
+                            .and_then(|json| serde_json::from_str(&json).ok())
+                            .unwrap_or_default(),
+                        tool_call_id: row.get(5)?,
+                        visibility: Visibility::parse(&row.get::<_, String>(6)?),
+                        active: row.get(7)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let checkpoints = {
+            let mut statement = conn.prepare(
+                "SELECT label, seq FROM checkpoint WHERE session_id = ?1 ORDER BY seq, created_at",
+            )?;
+            let rows = statement
+                .query_map([session_id], |row| {
+                    Ok(HandoffCheckpoint {
+                        label: row.get(0)?,
+                        seq: row.get(1)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        Ok(HandoffSessionExport {
+            version: 1,
+            source_session_id: session_id.to_owned(),
+            title,
+            permission_mode,
+            messages,
+            checkpoints,
+        })
+    }
+
+    /// Import a handoff session into `worktree_path`, remapping its id on a local collision.
+    /// The complete import is one transaction; callers record provenance before acknowledging the
+    /// remote lease and delete the session/worktree if that later step fails.
+    pub fn import_handoff_session(
+        &self,
+        export: &HandoffSessionExport,
+        worktree_path: &str,
+    ) -> Result<HandoffSessionImport> {
+        self.import_handoff_session_inner(export, worktree_path, None)
+    }
+
+    /// Atomically import a handoff session and its immutable capsule provenance.
+    pub fn import_handoff_session_with_provenance(
+        &self,
+        export: &HandoffSessionExport,
+        worktree_path: &str,
+        provenance: &HandoffImportProvenance,
+    ) -> Result<HandoffSessionImport> {
+        self.import_handoff_session_inner(export, worktree_path, Some(provenance))
+    }
+
+    fn import_handoff_session_inner(
+        &self,
+        export: &HandoffSessionExport,
+        worktree_path: &str,
+        provenance: Option<&HandoffImportProvenance>,
+    ) -> Result<HandoffSessionImport> {
+        if export.version != 1 || export.source_session_id.trim().is_empty() {
+            return Err(StoreError::InvalidValue(
+                "unsupported or invalid handoff session export".into(),
+            ));
+        }
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let collision = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session WHERE id = ?1)",
+            [&export.source_session_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let session_id = if collision {
+            forge_types::new_id()
+        } else {
+            export.source_session_id.clone()
+        };
+        transaction.execute(
+            "INSERT INTO session
+                 (id, title, cwd, permission_mode, worktree_path, archived)
+             VALUES (?1, ?2, ?3, ?4, ?3, ?5)",
+            (
+                &session_id,
+                &export.title,
+                worktree_path,
+                &export.permission_mode,
+                i64::from(provenance.is_some()),
+            ),
+        )?;
+        for message in &export.messages {
+            let id = forge_types::new_id();
+            let tool_calls_json = if message.tool_calls.is_empty() {
+                None
+            } else {
+                Some(
+                    serde_json::to_string(&message.tool_calls)
+                        .map_err(|error| StoreError::Json(error.to_string()))?,
+                )
+            };
+            transaction.execute(
+                "INSERT INTO message
+                     (id, session_id, seq, role, content, model, tool_calls_json, tool_call_id,
+                      visibility, active)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![
+                    id,
+                    session_id,
+                    message.seq,
+                    message.role.as_str(),
+                    message.content,
+                    message.model,
+                    tool_calls_json,
+                    message.tool_call_id,
+                    message.visibility.as_str(),
+                    message.active,
+                ],
+            )?;
+        }
+        for checkpoint in &export.checkpoints {
+            transaction.execute(
+                "INSERT INTO checkpoint (id, session_id, label, seq) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    forge_types::new_id(),
+                    session_id,
+                    checkpoint.label,
+                    checkpoint.seq,
+                ],
+            )?;
+        }
+        if let Some(provenance) = provenance {
+            transaction.execute(
+                "INSERT INTO imported_session
+                     (session_id, source_session_id, source_device_id, capsule_id, base_commit,
+                      worktree_path, imported_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                (
+                    &session_id,
+                    &export.source_session_id,
+                    provenance.source_device_id.as_slice(),
+                    &provenance.capsule_id,
+                    &provenance.base_commit,
+                    worktree_path,
+                    provenance.imported_at,
+                ),
+            )?;
+            transaction.execute(
+                "INSERT INTO anywhere_handoff_session_state (session_id, capsule_id, state)
+                 VALUES (?1, ?2, 'destination_quarantined')",
+                (&session_id, &provenance.capsule_id),
+            )?;
+        }
+        append_session_snapshot(&transaction, &session_id)?;
+        transaction.commit()?;
+        Ok(HandoffSessionImport {
+            session_id,
+            remapped: collision,
+        })
+    }
+
+    /// Remove a locally imported session during a failed handoff acknowledgement rollback.
+    pub fn rollback_handoff_session(&self, session_id: &str) -> Result<bool> {
+        Ok(self
+            .lock()?
+            .execute("DELETE FROM session WHERE id = ?1", [session_id])?
+            > 0)
+    }
+
+    /// Freeze a source session before any handoff network request. Repeating the exact operation
+    /// is idempotent; a different capsule cannot replace a pending or transferred operation.
+    pub fn begin_source_handoff(&self, session_id: &str, capsule_id: &str) -> Result<()> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing = transaction
+            .query_row(
+                "SELECT capsule_id, state FROM anywhere_handoff_session_state WHERE session_id=?1",
+                [session_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        match existing {
+            Some((existing, state)) if existing == capsule_id && state == "source_pending" => {}
+            Some(_) => {
+                return Err(StoreError::InvalidValue(
+                    "session already has a different or terminal handoff".into(),
+                ));
+            }
+            None => {
+                let exists: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session WHERE id=?1)",
+                    [session_id],
+                    |row| row.get(0),
+                )?;
+                if !exists {
+                    return Err(StoreError::InvalidValue(
+                        "handoff session does not exist".into(),
+                    ));
+                }
+                transaction.execute(
+                    "INSERT INTO anywhere_handoff_session_state (session_id, capsule_id, state)
+                     VALUES (?1, ?2, 'source_pending')",
+                    (session_id, capsule_id),
+                )?;
+            }
+        }
+        transaction.execute("UPDATE session SET archived=1 WHERE id=?1", [session_id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Confirm that the service cancelled a pending source handoff and make it resumable again.
+    pub fn cancel_source_handoff(&self, session_id: &str, capsule_id: &str) -> Result<bool> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let removed = transaction.execute(
+            "DELETE FROM anywhere_handoff_session_state
+             WHERE session_id=?1 AND capsule_id=?2 AND state='source_pending'",
+            (session_id, capsule_id),
+        )? > 0;
+        if removed {
+            transaction.execute("UPDATE session SET archived=0 WHERE id=?1", [session_id])?;
+        }
+        transaction.commit()?;
+        Ok(removed)
+    }
+
+    /// Permanently record that this source lease moved away. Ordinary archive controls cannot
+    /// resurrect a transferred session.
+    pub fn mark_source_handoff_transferred(
+        &self,
+        session_id: &str,
+        capsule_id: &str,
+    ) -> Result<()> {
+        let changed = self.lock()?.execute(
+            "UPDATE anywhere_handoff_session_state
+             SET state='source_transferred', updated_at=strftime('%s','now')
+             WHERE session_id=?1 AND capsule_id=?2 AND state IN
+                   ('source_pending','source_transferred')",
+            (session_id, capsule_id),
+        )?;
+        if changed == 0 {
+            return Err(StoreError::InvalidValue(
+                "source handoff is not pending on this machine".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Activate a quarantined destination only after the service accepted its acknowledgement.
+    pub fn activate_destination_handoff(&self, session_id: &str, capsule_id: &str) -> Result<()> {
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let removed = transaction.execute(
+            "DELETE FROM anywhere_handoff_session_state
+             WHERE session_id=?1 AND capsule_id=?2 AND state='destination_quarantined'",
+            (session_id, capsule_id),
+        )?;
+        if removed == 0 {
+            return Err(StoreError::InvalidValue(
+                "destination handoff is not quarantined".into(),
+            ));
+        }
+        transaction.execute("UPDATE session SET archived=0 WHERE id=?1", [session_id])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Whether local input/resume must be rejected to preserve a handoff lease invariant.
+    pub fn session_handoff_blocked(&self, session_id: &str) -> Result<bool> {
+        let blocked: bool = self.lock()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM anywhere_handoff_session_state WHERE session_id=?1)",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        Ok(blocked)
     }
 
     /// Export machine-agnostic model metadata (health cooldowns, context windows, pricing) as JSON,
@@ -1064,10 +3952,17 @@ impl Store {
     /// Create a new session row and return its id.
     pub fn create_session(&self, cwd: &str, mode: &str) -> Result<String> {
         let id = forge_types::new_id();
-        self.lock()?.execute(
-            "INSERT INTO session (id, cwd, permission_mode, total_cost_usd) VALUES (?1, ?2, ?3, 0)",
-            (&id, cwd, mode),
-        )?;
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                "INSERT INTO session (id, cwd, permission_mode, total_cost_usd) VALUES (?1, ?2, ?3, 0)",
+                (&id, cwd, mode),
+            )?;
+            append_session_snapshot(&tx, &id)?;
+            tx.commit()?;
+            Ok(())
+        })?;
         // Opportunistic, bounded retention sweep so the global append-only DB doesn't grow forever.
         // Best-effort: a prune failure must never block opening a session.
         let _ = self.prune(RETENTION_HORIZON_SECS, PRUNE_BATCH);
@@ -1079,12 +3974,20 @@ impl Store {
     /// metadata is deliberately left untouched: this is a narrow durability guard for writes
     /// that reference `session_id`, not a session update operation.
     pub fn ensure_session(&self, id: &str, cwd: &str, mode: &str) -> Result<()> {
-        self.lock()?.execute(
-            "INSERT INTO session (id, cwd, permission_mode, total_cost_usd) VALUES (?1, ?2, ?3, 0) \
-             ON CONFLICT(id) DO NOTHING",
-            (id, cwd, mode),
-        )?;
-        Ok(())
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let inserted = tx.execute(
+                "INSERT INTO session (id, cwd, permission_mode, total_cost_usd) VALUES (?1, ?2, ?3, 0) \
+                 ON CONFLICT(id) DO NOTHING",
+                (id, cwd, mode),
+            )?;
+            if inserted == 1 {
+                append_session_snapshot(&tx, id)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// The working directory recorded for a session at creation time, or `None` if no such
@@ -1181,11 +4084,18 @@ impl Store {
     /// Create a subagent child session linked to `parent_id` (RFC subagent-orchestration).
     pub fn create_child_session(&self, cwd: &str, mode: &str, parent_id: &str) -> Result<String> {
         let id = forge_types::new_id();
-        self.lock()?.execute(
-            "INSERT INTO session (id, cwd, permission_mode, total_cost_usd, parent_session_id) \
-             VALUES (?1, ?2, ?3, 0, ?4)",
-            (&id, cwd, mode, parent_id),
-        )?;
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                "INSERT INTO session (id, cwd, permission_mode, total_cost_usd, parent_session_id) \
+                 VALUES (?1, ?2, ?3, 0, ?4)",
+                (&id, cwd, mode, parent_id),
+            )?;
+            append_session_snapshot(&tx, &id)?;
+            tx.commit()?;
+            Ok(())
+        })?;
         Ok(id)
     }
 
@@ -1200,11 +4110,19 @@ impl Store {
 
     /// Update a session's permission mode (temper) — persisted when the user switches it live.
     pub fn update_session_mode(&self, session_id: &str, mode: &str) -> Result<()> {
-        self.lock()?.execute(
-            "UPDATE session SET permission_mode = ?2, updated_at = strftime('%s','now') WHERE id = ?1",
-            (session_id, mode),
-        )?;
-        Ok(())
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if tx.execute(
+                "UPDATE session SET permission_mode = ?2, updated_at = strftime('%s','now') WHERE id = ?1",
+                (session_id, mode),
+            )? == 1
+            {
+                append_session_snapshot(&tx, session_id)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// A session's persisted TUI view snapshot (opaque JSON), if one was saved. Used to restore the
@@ -1220,11 +4138,19 @@ impl Store {
     /// Persist a session's TUI view snapshot (opaque JSON). Written at the end of each completed
     /// turn and on clean exit so a resume restores the screen as of the last prompt.
     pub fn update_session_view_snapshot(&self, session_id: &str, json: &str) -> Result<()> {
-        self.lock()?.execute(
-            "UPDATE session SET view_snapshot = ?2, updated_at = strftime('%s','now') WHERE id = ?1",
-            (session_id, json),
-        )?;
-        Ok(())
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if tx.execute(
+                "UPDATE session SET view_snapshot = ?2, updated_at = strftime('%s','now') WHERE id = ?1",
+                (session_id, json),
+            )? == 1
+            {
+                append_session_snapshot(&tx, session_id)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// Ids of the subagent child sessions spawned by `parent_id`, oldest first.
@@ -1240,11 +4166,19 @@ impl Store {
     /// Name a session — for a subagent child, the resolved agent name (`title` doubles as the
     /// child's address for `send_to_agent`; top-level sessions title themselves elsewhere).
     pub fn set_session_title(&self, session_id: &str, title: &str) -> Result<()> {
-        self.lock()?.execute(
-            "UPDATE session SET title = ?2 WHERE id = ?1",
-            (session_id, title),
-        )?;
-        Ok(())
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            if tx.execute(
+                "UPDATE session SET title = ?2 WHERE id = ?1",
+                (session_id, title),
+            )? == 1
+            {
+                append_session_snapshot(&tx, session_id)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
     }
 
     /// `(id, title)` of `parent_id`'s child sessions, oldest first — the address book
@@ -1375,6 +4309,18 @@ impl Store {
                     Err(e) => return Err(StoreError::Sqlite(e)),
                 }
             }
+            let payload = sync_json(serde_json::json!({
+                "id": id,
+                "session_id": session_id,
+                "seq": s,
+                "role": role.as_str(),
+                "content": content,
+                "model": model,
+                "tool_calls": tool_calls,
+                "tool_call_id": tool_call_id,
+                "visibility": visibility.as_str(),
+            }))?;
+            append_sync_revision(&tx, "message", &id, SyncJournalOperation::Upsert, &payload)?;
             tx.commit()?;
             Ok(())
         })?;
@@ -1389,19 +4335,30 @@ impl Store {
         chosen_model: &str,
         rationale: &str,
     ) -> Result<()> {
+        let id = forge_types::new_id();
         with_busy_retry(|| {
-            let conn = self.lock()?;
-            conn.prepare_cached(
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.prepare_cached(
                 "INSERT INTO routing_decision (id, message_id, task_tier, chosen_model, rationale)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
             )?
-            .execute((
-                forge_types::new_id(),
-                message_id,
-                tier.as_str(),
-                chosen_model,
-                rationale,
-            ))?;
+            .execute((&id, message_id, tier.as_str(), chosen_model, rationale))?;
+            let payload = sync_json(serde_json::json!({
+                "id": id,
+                "message_id": message_id,
+                "task_tier": tier.as_str(),
+                "chosen_model": chosen_model,
+                "rationale": rationale,
+            }))?;
+            append_sync_revision(
+                &tx,
+                "routing_decision",
+                &id,
+                SyncJournalOperation::Upsert,
+                &payload,
+            )?;
+            tx.commit()?;
             Ok(())
         })
     }
@@ -1409,6 +4366,7 @@ impl Store {
     /// Record token usage/cost for a message and bump the session's running total.
     /// Batched in one explicit transaction so the INSERT + UPDATE land in a single WAL commit.
     pub fn record_usage(&self, session_id: &str, message_id: &str, usage: &Usage) -> Result<()> {
+        let id = forge_types::new_id();
         with_busy_retry(|| {
             let mut conn = self.lock()?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1416,7 +4374,7 @@ impl Store {
                 "INSERT INTO usage (id, message_id, input_tokens, output_tokens, cost_usd)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 (
-                    forge_types::new_id(),
+                    &id,
                     message_id,
                     usage.input_tokens as i64,
                     usage.output_tokens as i64,
@@ -1428,6 +4386,16 @@ impl Store {
                  updated_at = strftime('%s','now') WHERE id = ?2",
                 (usage.cost_usd, session_id),
             )?;
+            let payload = sync_json(serde_json::json!({
+                "id": id,
+                "message_id": message_id,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cached_input_tokens": usage.cached_input_tokens,
+                "cost_usd": usage.cost_usd,
+            }))?;
+            append_sync_revision(&tx, "usage", &id, SyncJournalOperation::Upsert, &payload)?;
+            append_session_snapshot(&tx, session_id)?;
             tx.commit()?;
             Ok(())
         })
@@ -1443,6 +4411,7 @@ impl Store {
         usage: &Usage,
     ) -> Result<()> {
         let msg_id = forge_types::new_id();
+        let usage_id = forge_types::new_id();
         // IMMEDIATE: this SELECTs MAX(seq) then writes. A DEFERRED txn would take a read snapshot
         // first and, if another connection committed in between, fail the upgrade with
         // SQLITE_BUSY_SNAPSHOT (which busy_timeout does NOT cover) — silently losing the usage/cost
@@ -1473,7 +4442,7 @@ impl Store {
                 "INSERT INTO usage (id, message_id, input_tokens, output_tokens, cost_usd) \
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 (
-                    forge_types::new_id(),
+                    &usage_id,
                     msg_id.as_str(),
                     usage.input_tokens as i64,
                     usage.output_tokens as i64,
@@ -1485,6 +4454,41 @@ impl Store {
                  updated_at = strftime('%s','now') WHERE id = ?2",
                 (usage.cost_usd, session_id),
             )?;
+            let message_payload = sync_json(serde_json::json!({
+                "id": msg_id,
+                "session_id": session_id,
+                "seq": s,
+                "role": "system",
+                "content": label,
+                "model": null,
+                "tool_calls": [],
+                "tool_call_id": null,
+                "visibility": "llm",
+                "active": false,
+            }))?;
+            append_sync_revision(
+                &tx,
+                "message",
+                &msg_id,
+                SyncJournalOperation::Upsert,
+                &message_payload,
+            )?;
+            let usage_payload = sync_json(serde_json::json!({
+                "id": usage_id,
+                "message_id": msg_id,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cached_input_tokens": usage.cached_input_tokens,
+                "cost_usd": usage.cost_usd,
+            }))?;
+            append_sync_revision(
+                &tx,
+                "usage",
+                &usage_id,
+                SyncJournalOperation::Upsert,
+                &usage_payload,
+            )?;
+            append_session_snapshot(&tx, session_id)?;
             tx.commit()?;
             Ok(())
         })
@@ -1507,13 +4511,33 @@ impl Store {
         // can't grow without bound; the head is preserved with a truncation marker for audit/replay.
         let args_json = cap_result_json(args_json);
         let result = cap_result_json(result);
+        let id = forge_types::new_id();
         with_busy_retry(|| {
-            let conn = self.lock()?;
-            conn.prepare_cached(
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.prepare_cached(
                 "INSERT INTO tool_call (id, message_id, tool_name, args_json, result_json, permission, status, path)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?
-            .execute((forge_types::new_id(), message_id, tool_name, args_json.as_ref(), result.as_ref(), permission, status, path.as_deref()))?;
+            .execute((&id, message_id, tool_name, args_json.as_ref(), result.as_ref(), permission, status, path.as_deref()))?;
+            let payload = sync_json(serde_json::json!({
+                "id": id,
+                "message_id": message_id,
+                "tool_name": tool_name,
+                "args_json": args_json.as_ref(),
+                "result_json": result.as_ref(),
+                "permission": permission,
+                "status": status,
+                "path": path,
+            }))?;
+            append_sync_revision(
+                &tx,
+                "tool_call",
+                &id,
+                SyncJournalOperation::Upsert,
+                &payload,
+            )?;
+            tx.commit()?;
             Ok(())
         })
     }
@@ -2870,7 +5894,18 @@ impl Store {
     /// an explicit choice to bring it back, so it should reappear in [`Store::list_sessions`]
     /// and the fleet list once it stops running again, rather than immediately re-hiding itself.
     pub fn unarchive_session(&self, session_id: &str) -> Result<()> {
-        self.lock()?.execute(
+        let conn = self.lock()?;
+        let blocked: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM anywhere_handoff_session_state WHERE session_id=?1)",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        if blocked {
+            return Err(StoreError::InvalidValue(
+                "session is frozen by an Anywhere handoff".into(),
+            ));
+        }
+        conn.execute(
             "UPDATE session SET archived = 0 WHERE id = ?1",
             [session_id],
         )?;
@@ -3277,6 +6312,18 @@ impl Store {
                created_at = strftime('%s','now')",
             (session_id, summary),
         )?;
+        let payload = sync_json(serde_json::json!({
+            "session_id": session_id,
+            "summary": summary,
+            "keep_count": keep_count,
+        }))?;
+        append_sync_revision(
+            &tx,
+            "compaction",
+            session_id,
+            SyncJournalOperation::Upsert,
+            &payload,
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -3304,6 +6351,13 @@ impl Store {
         tx.execute(
             "DELETE FROM session_compaction WHERE session_id = ?1",
             [session_id],
+        )?;
+        append_sync_revision(
+            &tx,
+            "compaction",
+            session_id,
+            SyncJournalOperation::Tombstone,
+            &[],
         )?;
         tx.commit()?;
         Ok(true)
@@ -3538,10 +6592,29 @@ impl Store {
         seq: i64,
     ) -> Result<String> {
         let id = forge_types::new_id();
-        self.lock()?.execute(
-            "INSERT INTO checkpoint (id, session_id, label, seq) VALUES (?1, ?2, ?3, ?4)",
-            (&id, session_id, label, seq),
-        )?;
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute(
+                "INSERT INTO checkpoint (id, session_id, label, seq) VALUES (?1, ?2, ?3, ?4)",
+                (&id, session_id, label, seq),
+            )?;
+            let payload = sync_json(serde_json::json!({
+                "id": id,
+                "session_id": session_id,
+                "label": label,
+                "seq": seq,
+            }))?;
+            append_sync_revision(
+                &tx,
+                "checkpoint",
+                &id,
+                SyncJournalOperation::Upsert,
+                &payload,
+            )?;
+            tx.commit()?;
+            Ok(())
+        })?;
         Ok(id)
     }
 
@@ -7444,5 +10517,110 @@ mod tests {
                 .is_some_and(|age| age <= 1),
             "a direct header observation, not a bridge alias, owns the refresh gate"
         );
+    }
+
+    #[test]
+    fn handoff_session_import_remaps_collisions_and_rolls_back_cleanly() {
+        let source = Store::open_in_memory().unwrap();
+        let session_id = source.create_session("/source", "default").unwrap();
+        source
+            .add_message(&session_id, 0, Role::User, "portable", None)
+            .unwrap();
+        source.add_checkpoint(&session_id, Some("idle"), 0).unwrap();
+        let export = source.export_handoff_session(&session_id).unwrap();
+
+        let destination = Store::open_in_memory().unwrap();
+        destination
+            .ensure_session(&session_id, "/existing", "default")
+            .unwrap();
+        let imported = destination
+            .import_handoff_session(&export, "/handoffs/capsule")
+            .unwrap();
+        assert!(imported.remapped);
+        assert_ne!(imported.session_id, session_id);
+        assert_eq!(
+            destination.load_messages(&imported.session_id).unwrap()[0].content,
+            "portable"
+        );
+        assert_eq!(
+            destination
+                .list_checkpoints(&imported.session_id)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(destination
+            .rollback_handoff_session(&imported.session_id)
+            .unwrap());
+        assert!(!destination.session_exists(&imported.session_id).unwrap());
+        assert!(destination.session_exists(&session_id).unwrap());
+    }
+
+    #[test]
+    fn source_handoff_freeze_survives_archive_controls_and_transfer() {
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/repo", "default").unwrap();
+        let capsule = "ab".repeat(16);
+
+        store.begin_source_handoff(&session, &capsule).unwrap();
+        assert!(store.session_handoff_blocked(&session).unwrap());
+        assert!(store.session_archived(&session).unwrap());
+        assert!(store.unarchive_session(&session).is_err());
+        store.begin_source_handoff(&session, &capsule).unwrap();
+
+        store
+            .mark_source_handoff_transferred(&session, &capsule)
+            .unwrap();
+        assert!(!store.cancel_source_handoff(&session, &capsule).unwrap());
+        assert!(store.unarchive_session(&session).is_err());
+        assert!(store.session_archived(&session).unwrap());
+    }
+
+    #[test]
+    fn cancelled_source_handoff_becomes_resumable() {
+        let store = Store::open_in_memory().unwrap();
+        let session = store.create_session("/repo", "default").unwrap();
+        let capsule = "cd".repeat(16);
+        store.begin_source_handoff(&session, &capsule).unwrap();
+        assert!(store.cancel_source_handoff(&session, &capsule).unwrap());
+        assert!(!store.session_handoff_blocked(&session).unwrap());
+        assert!(!store.session_archived(&session).unwrap());
+        store.unarchive_session(&session).unwrap();
+    }
+
+    #[test]
+    fn destination_import_stays_quarantined_until_explicit_activation() {
+        let source = Store::open_in_memory().unwrap();
+        let source_session = source.create_session("/source", "default").unwrap();
+        source
+            .add_message(&source_session, 0, Role::User, "portable", None)
+            .unwrap();
+        let export = source.export_handoff_session(&source_session).unwrap();
+        let destination = Store::open_in_memory().unwrap();
+        let capsule = "ef".repeat(16);
+        let imported = destination
+            .import_handoff_session_with_provenance(
+                &export,
+                "/handoffs/quarantine",
+                &HandoffImportProvenance {
+                    source_device_id: [7; 16],
+                    capsule_id: capsule.clone(),
+                    base_commit: "1".repeat(40),
+                    imported_at: 1,
+                },
+            )
+            .unwrap();
+        assert!(destination.session_archived(&imported.session_id).unwrap());
+        assert!(destination
+            .session_handoff_blocked(&imported.session_id)
+            .unwrap());
+        assert!(destination.unarchive_session(&imported.session_id).is_err());
+        destination
+            .activate_destination_handoff(&imported.session_id, &capsule)
+            .unwrap();
+        assert!(!destination.session_archived(&imported.session_id).unwrap());
+        assert!(!destination
+            .session_handoff_blocked(&imported.session_id)
+            .unwrap());
     }
 }

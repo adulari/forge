@@ -9,26 +9,33 @@ pub(crate) fn open_store() -> Result<Store> {
     // across restarts and don't reset when `forge` is launched from a different directory (the
     // budget is global per FR-5). Fall back to the legacy cwd-local path only if no data dir
     // resolves. `FORGE_DB` overrides both (tests / power users).
-    if let Ok(custom) = std::env::var("FORGE_DB") {
+    let store = if let Ok(custom) = std::env::var("FORGE_DB") {
         let path = std::path::PathBuf::from(custom);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("creating store directory")?;
         }
-        return Store::open(&path).context("opening session store");
-    }
-    let Some(dir) = forge_config::data_dir() else {
+        Store::open(&path).context("opening session store")?
+    } else if let Some(dir) = forge_config::data_dir() {
+        std::fs::create_dir_all(&dir).context("creating data directory")?;
+        let db = dir.join("forge.db");
+        // One-time migration: if there's no global store yet but a legacy `./.forge/forge.db` exists in
+        // this directory, move its history over so the switch doesn't appear to wipe past usage.
+        let legacy = Path::new(".forge/forge.db");
+        if !db.exists() && legacy.exists() {
+            let _ = std::fs::copy(legacy, &db);
+        }
+        Store::open(&db).context("opening session store")?
+    } else {
         std::fs::create_dir_all(".forge").context("creating .forge directory")?;
-        return Store::open(Path::new(".forge/forge.db")).context("opening session store");
+        Store::open(Path::new(".forge/forge.db")).context("opening session store")?
     };
-    std::fs::create_dir_all(&dir).context("creating data directory")?;
-    let db = dir.join("forge.db");
-    // One-time migration: if there's no global store yet but a legacy `./.forge/forge.db` exists in
-    // this directory, move its history over so the switch doesn't appear to wipe past usage.
-    let legacy = Path::new(".forge/forge.db");
-    if !db.exists() && legacy.exists() {
-        let _ = std::fs::copy(legacy, &db);
-    }
-    Store::open(&db).context("opening session store")
+    let anywhere_enabled = forge_config::load()
+        .map(|config| config.anywhere.enabled && config.anywhere.sync)
+        .unwrap_or(false);
+    store
+        .set_sync_journal_enabled(anywhere_enabled)
+        .context("configure Anywhere sync journal")?;
+    Ok(store)
 }
 
 /// How `forge chat` should handle session continuity on startup.

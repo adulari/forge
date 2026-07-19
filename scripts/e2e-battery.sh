@@ -11,6 +11,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="${OUT:-$REPO/scripts/.e2e-out}"
 SCRIPT="$REPO/scripts/tui-scripts/workload-bugfix-loop.txt"
 mkdir -p "$OUT"
+: > "$OUT/summary.txt"
 
 # Diverse coverage: real mesh routing, both subscription bridges, a free OpenRouter coder, a paid
 # frontier via OpenRouter (direct-API path, not a bridge). Empty model = let the mesh route.

@@ -35,7 +35,7 @@ These aren't hypotheticals — we hit them in real SWE-bench runs:
 **Verify the whole thing in one command:**
 
 ```bash
-cargo test -p forge-core -p forge-provider
+cargo test -p forge-agent-core -p forge-agent-provider
 ```
 
 That's **300+ deterministic tests** (no model, no network — scripted mock providers drive the real

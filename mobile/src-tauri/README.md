@@ -1,49 +1,54 @@
 # Forge desktop shell (Tauri v2)
 
-Thin wrapper around the static web export (ARCHITECTURE.md §6). No custom Rust commands in
-v1 — all daemon communication happens in the webview via the JS transport seam
-(`../src/lib/transport/index.ts`).
+Native shell around the shared Expo web export (`../dist`). The React Native Web app remains the UI
+and session client; Rust provides the narrow desktop capabilities a browser cannot safely provide.
 
-## What's registered
+## Native surface
 
-- `tauri-plugin-notification` — native notifications, called from `../src/lib/notify.ts`
-  when `isTauri` (feature-detected alongside the web `Notification` API).
-- `tauri-plugin-opener` — external links open in the system browser.
-- `tauri-plugin-http` — backs `@tauri-apps/plugin-http`'s `fetch`, used by the transport
-  seam for `http:` daemon URLs (immune to the WebView's mixed-content blocking of plain
-  `http://` requests that a plain `https://`-origin WebView page would otherwise refuse).
-- `tauri-plugin-websocket` — backs the WS fallback adapter in the transport seam, used only
-  if the native `WebSocket` fails to open a plain `ws://` connection.
+- `tauri-plugin-http` and `tauri-plugin-websocket` carry HTTP/WS traffic to a same-machine
+  `forge serve --local` daemon without WebView mixed-content failures.
+- `tauri-plugin-notification` provides native desktop notifications.
+- `tauri-plugin-opener` opens external links in the system browser.
+- `tauri-plugin-dialog` provides the native project-folder picker.
+- `tauri-plugin-updater` plus `tauri-plugin-process` verifies signed updater artifacts and restarts
+  after an accepted update.
+- `serve_discovery.rs` exposes three narrow commands: detect a live daemon from
+  `serve-state.json`, check whether a Forge binary is installed, and start `forge serve --local`.
+  No general filesystem or shell plugin is granted to the webview.
 
-A basic app menu (About, Reload, Quit, standard Edit menu for copy/paste on macOS) is built
-in `src/lib.rs`'s `.setup()` hook.
+The shell also installs native window chrome and a standard macOS app/Edit menu. Windows and Linux
+use the shared React title bar.
 
-## Building this (NOT done in this session)
+## Development
 
-This was built on a headless box with no display server and no system WebView — `tauri
-dev`/`tauri build` need a real display (or at minimum a working system webview: WebKitGTK on
-Linux, WebView2 on Windows, WKWebView on macOS) to actually launch the shell. What WAS
-verified here, on this machine:
+From `mobile/`:
 
-- `cargo check` in this directory compiles cleanly against the pinned plugin versions
-  (tauri 2.11, tauri-plugin-http/websocket/notification/opener 2.x) and validates
-  `tauri.conf.json` + `capabilities/default.json` (ACL/permission identifiers) via
-  `tauri-build`'s codegen — a bad permission name or malformed config fails this step.
-- `npx tauri icon ../assets/icon.png -o icons` generated real `icon.icns`/`icon.ico`/PNG set
-  (not placeholders) from the app's actual icon.
-- `npx tsc --noEmit` (from `mobile/`) is clean with the new transport/notify code.
-- `npx expo export -p web` still produces `dist/` — the exact `frontendDist` this shell
-  wraps — and an unminified debug export confirms all three Tauri plugin dynamic imports
-  (`@tauri-apps/plugin-http`, `-websocket`, `-notification`) resolve correctly and are
-  behind runtime `isTauri` checks, never touched on plain web/native bundles.
+```bash
+npm ci
+npm run check
+npm run tauri:dev
+```
 
-Actually running `npm run tauri:dev` / `npm run tauri:build` and confirming the window
-opens, pairs with a `--local` daemon over plain http, and streams a session is deferred to
-a dev machine or the B6 CI matrix (`.github/workflows/app-desktop.yml`, T6.3) per
-BUILD_ORDER.md's T5.2 "Done" line — that check needs a real 3-OS runner, not this box.
+The Tauri crate has focused Rust tests for daemon discovery and executable lookup:
 
-## Forward path (not built, per ARCHITECTURE §6.4)
+```bash
+cd src-tauri
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
 
-`transport`/`auth` seams are already shaped for a later Rust command that discovers/starts
-`forge serve` locally and hands the app a ready-made baseUrl. Tray icon + global shortcut is
-the second follow-up. Neither is in scope for v1.
+## Release builds
+
+`.github/workflows/app-desktop.yml` runs the mobile preflight and builds five desktop targets:
+
+- Linux x86-64 and ARM64 (`.AppImage` updater + `.deb` installer)
+- macOS Apple Silicon and Intel (`.app.tar.gz` updater + `.dmg` installer)
+- Windows x86-64 (NSIS `.exe` updater/installer)
+
+The OS installers are currently unsigned. Tauri updater artifacts are signed, and `latest.json` is
+published only after all five platform artifacts and signatures exist. A protected-`main` dispatch
+with an existing `v*`/`app-v*` tag checks out that exact source and publishes it; a dispatch without
+`release_tag` is artifact-only.
+
+Tray/fleet-glance behavior remains a possible follow-up; local daemon discovery and startup are
+already shipped.

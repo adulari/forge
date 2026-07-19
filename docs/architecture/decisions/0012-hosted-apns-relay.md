@@ -75,8 +75,12 @@ and a daily send cap instead.
 Wire protocol is a near drop-in transport substitution for Apple's own API shape (`POST
 /3/device` with the token in `X-Forge-Device-Token`, same headers plus a new
 `apns-environment` header replacing the Apple bearer JWT's implicit role, same JSON body
-forwarded opaquely, Apple's real HTTP status proxied back verbatim) so `apns.rs`'s existing
-`Ok(410) => prune` logic needs zero changes. The original `/3/device/{token}` route remains
+validated and normally forwarded, Apple's real HTTP status/body proxied back). The public
+deployment enables `FORGE_RELAY_GENERIC_ALERTS=true`, which replaces every alert with a static
+generic payload before APNs; private relays leave it disabled to retain rich alerts. Updated clients
+also redact before transmission. The client prunes `410 Unregistered` plus reason-qualified `400
+BadDeviceToken`/`DeviceTokenNotForTopic` responses without destroying tokens for unrelated 400s.
+The original `/3/device/{token}` route remains
 accepted for already-released clients, but new clients keep the device token out of CDN/proxy
 URL analytics.
 `ApnsNotifier` gains an `ApnsBackend` enum (`Direct{auth}` / `Relay{base_url,relay_token}`);
@@ -105,12 +109,30 @@ unchanged.
 - **Negative / trade-offs accepted:** the relay is a new deployable surface with real
   production consequences (the operator's live Apple key) and no existing deploy-workflow
   precedent to lean on — deploy is a manual runbook (`crates/forge-relay/README.md`) rather
-  than CI-automated for now. The relay does see notification title/body text and Live
-  Activity status fields (`busy`/`waiting`/`cost_usd`/`context_tokens`) in transit — never
-  session content, source code, or credentials, but this is a real disclosure point, not
-  "opaque token only," and both docs updates say so explicitly.
+  than CI-automated for now. The stock public relay sees an opaque device token, environment,
+  a static generic alert from updated clients, and Live Activity status fields
+  (`busy`/`waiting`/`cost_usd`/`context_tokens`/`context_limit`) in transit. It does not receive
+  session titles, prompts, response/error snippets, the local Live Activity session ID, full
+  transcripts, source files, or daemon credentials. The public server independently rewrites all
+  alert output before APNs; older clients can still transmit rich alert input during the upgrade
+  window, but it is not logged or forwarded. An explicitly configured private relay intentionally
+  retains rich alert text; bring-your-own Apple credentials bypass the relay entirely.
 - **Follow-ups:** extract a shared `forge-apns-core` crate only if `forge-cli`'s and
   `forge-relay`'s copies of the JWT/HTTP logic need to change in lockstep often enough to make
   the duplication a genuine maintenance cost — not before. Add a CI deploy workflow (matching
   `app-web.yml`'s opt-in-Actions-variable pattern) only if manual `fly deploy` becomes
   frequent enough to be annoying.
+
+## Operational update (2026-07-17)
+
+The production instance is self-hosted at `https://forge.adulari.dev/relay` behind Cloudflare and
+nginx rather than Fly.io; Fly remains a supported alternative deployment. The origin binds only to
+loopback, the host firewall accepts web traffic only from Cloudflare, and the Apple key is loaded as
+a root-only systemd credential. Current clients use `POST /3/device` with
+`X-Forge-Device-Token`; the legacy path-token route remains log-disabled for released-client
+compatibility. The relay validates Forge-specific payloads and priorities before APNs, enforces a
+4 KiB body limit plus per-client/per-device/global caps, and stores only salted in-memory limiter
+keys. Public deployments must expose `"generic_alerts":true` from `/health`. The checked-in
+deployment templates and operator runbook live under
+[`crates/forge-relay/deploy/`](../../../crates/forge-relay/deploy/) and
+[`crates/forge-relay/README.md`](../../../crates/forge-relay/README.md).

@@ -61,11 +61,12 @@ configuration is merged, and verify that the processed build includes the update
 channel header, and fingerprint runtime version before publishing a production update.
 
 After that bootstrap, pushes containing only `mobile/src/**` or `mobile/assets/**` use OTA by
-default. Changes to native dependencies, Expo/RN versions, config plugins, entitlements,
-permissions, iOS/Android native files, widgets, Live Activities, or any other path in the same
-push require another manual native build or a follow-up OTA-safe push. The fingerprint policy
-prevents an update from being offered to an incompatible binary, while the workflow guard prevents
-an unsafe publication attempt in the first place.
+default. The workflow checks the entire range since the last commit explicitly reviewed as
+compatible with the installed native runtime. Changes to native dependencies, Expo/RN versions,
+config plugins, entitlements, permissions, iOS native files, widgets, or Live Activities require a
+new native build. Tests, docs, Android-only config, and the independent Tauri shell may be reviewed
+as compatible without rebuilding iOS. The fingerprint policy prevents an update from being offered
+to an incompatible binary, while the workflow guard prevents an unreviewed publication attempt.
 
 To verify a TestFlight binary without publishing an update, inspect its embedded `Expo.plist` for
 `EXUpdatesURL`, `EXUpdatesRequestHeaders` with `expo-channel-name=production`, and
@@ -76,22 +77,25 @@ publish an update automatically.
 ## CI workflow
 
 `.github/workflows/eas-update.yml` runs on pushes to `main` that touch OTA-safe app source
-(`mobile/src/**` or `mobile/assets/**`). It also compares the complete push range and skips
-publication if the same push contains any other path. This protects against a mixed commit that
-changes native/config inputs or shared code together with JavaScript.
+(`mobile/src/**` or `mobile/assets/**`). It compares the complete range from the repository variable
+`IOS_OTA_COMPATIBLE_BASE_SHA` to current `main`, not only the triggering commit. The baseline starts
+at the installed archive's source commit and may advance only after every intervening mobile change
+has been reviewed as compatible with that archive. This protects against a mixed or earlier commit
+quietly changing native/config inputs alongside JavaScript.
 
 When the guard passes, it publishes to the `production` channel with:
 
 ```
-EXPO_RUNTIME_VERSION_OVERRIDE="<installed archive fingerprint>" npx eas-cli@latest update --channel production --environment production --platform ios --message "<commit SHA> <commit subject>" --non-interactive
+EXPO_RUNTIME_VERSION_OVERRIDE="<installed archive fingerprint>" ./node_modules/.bin/eas update --channel production --environment production --platform ios --message "<commit SHA> <commit subject>" --non-interactive
 ```
 
 The workflow reads that value from the `IOS_OTA_RUNTIME_VERSION` GitHub repository variable.
 It must be the fingerprint stored inside the installed Xcode Cloud `.xcarchive`, not a locally
 recalculated fingerprint. Expo fingerprints include generated native state and can differ between
 Apple's archive environment and another macOS runner even from the same source commit. Update this
-variable after promoting a new native build to TestFlight; the workflow fails closed when it is
-missing.
+runtime value after promoting a new native build to TestFlight. Separately advance
+`IOS_OTA_COMPATIBLE_BASE_SHA` after a successful compatibility review; both variables fail closed
+when missing or invalid.
 
 ### `--platform ios` is required
 

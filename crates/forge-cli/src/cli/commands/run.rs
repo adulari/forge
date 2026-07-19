@@ -188,6 +188,16 @@ pub(crate) async fn build_session_with_self_mcp(
     allow_self_mcp: bool,
     session_cwd: Option<&str>,
 ) -> Result<Session> {
+    if let Some(session_id) = resume.as_deref() {
+        if crate::open_store()?
+            .session_handoff_blocked(session_id)
+            .context("checking Anywhere handoff state")?
+        {
+            anyhow::bail!(
+                "session {session_id} is frozen by an Anywhere handoff and cannot be resumed"
+            );
+        }
+    }
     // Make any keyring-stored provider keys visible to the provider client.
     forge_config::inject_provider_keys();
     // …and the search-API key visible to the web_search tool.

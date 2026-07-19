@@ -8,6 +8,30 @@ use super::run::{
 use crate::*;
 
 #[test]
+fn serve_prefers_tunnel_and_retains_deprecated_anywhere_flag() {
+    let tunnel = Cli::try_parse_from(["forge", "serve", "--tunnel"]).expect("new tunnel flag");
+    assert!(matches!(
+        tunnel.command,
+        Command::Serve {
+            tunnel: true,
+            anywhere: false,
+            ..
+        }
+    ));
+
+    let legacy = Cli::try_parse_from(["forge", "serve", "--anywhere"]).expect("deprecated alias");
+    assert!(matches!(
+        legacy.command,
+        Command::Serve {
+            tunnel: false,
+            anywhere: true,
+            ..
+        }
+    ));
+    assert!(Cli::try_parse_from(["forge", "serve", "--tunnel", "--anywhere"]).is_err());
+}
+
+#[test]
 fn extract_code_blocks_pulls_fenced_blocks_with_lang() {
     let md =
         "Here you go:\n\n```rust\nfn main() {}\n```\n\nand shell:\n\n```bash\nls -la\n```\ndone";

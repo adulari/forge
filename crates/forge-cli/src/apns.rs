@@ -91,6 +91,16 @@ impl ApnsConfig {
 /// The default hosted relay (ADR-0012) — used when no local Apple key is configured and the
 /// operator hasn't overridden `FORGE_APNS_RELAY_URL` or opted out entirely.
 const DEFAULT_RELAY_URL: &str = "https://forge.adulari.dev/relay";
+const PUBLIC_RELAY_HOST: &str = "forge.adulari.dev";
+
+/// APNs device and Live Activity push tokens are 32 opaque bytes rendered by the iOS client as
+/// lowercase hexadecimal. Validate that exact wire shape before persisting or sending it.
+pub(crate) fn is_valid_token(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
 
 /// Which `ApnsNotifier` construction path `serve_cmd` should take, given the environment. A
 /// pure function (no I/O beyond env var reads) purely so this precedence decision has a unit
@@ -206,6 +216,25 @@ pub(crate) fn alert_payload(msg: &crate::push::PushMessage) -> serde_json::Value
     })
 }
 
+/// Static alert sent through Forge's public relay. The placeholder routing fields retain wire
+/// compatibility with already-deployed relay validation, but disclose nothing about the session
+/// or event that triggered the push.
+fn generic_relay_alert_payload() -> serde_json::Value {
+    serde_json::json!({
+        "aps": {
+            "alert": {
+                "title": "Forge",
+                "body": "Open Forge to view an update.",
+            },
+            "sound": "default",
+            "mutable-content": 1,
+        },
+        "session": "forge-notification",
+        "kind": "done",
+        "seq": 0,
+    })
+}
+
 /// Content-state pushed to an active Live Activity — kept intentionally small and stable;
 /// changing these field names/types requires updating the matching Swift
 /// `ActivityAttributes.ContentState` in the mobile app's widget extension (`mobile/targets/widget`)
@@ -255,6 +284,27 @@ pub(crate) fn live_activity_payload(
 /// (mint/cache an Apple ES256 JWT locally, POST straight to Apple); `Relay` forwards to a hosted
 /// relay this daemon doesn't need any Apple credential to talk to. Only [`ApnsNotifier::send_one`]
 /// branches on this — every other method (dispatch/prune/store logic) is identical either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayAlertPolicy {
+    Generic,
+    Rich,
+}
+
+fn relay_alert_policy(base_url: &str) -> RelayAlertPolicy {
+    match reqwest::Url::parse(base_url) {
+        Ok(url)
+            if url
+                .host_str()
+                .is_some_and(|host| host.eq_ignore_ascii_case(PUBLIC_RELAY_HOST)) =>
+        {
+            RelayAlertPolicy::Generic
+        }
+        Ok(_) => RelayAlertPolicy::Rich,
+        // A malformed override cannot send successfully, so default to the non-disclosing policy.
+        Err(_) => RelayAlertPolicy::Generic,
+    }
+}
+
 enum ApnsBackend {
     Direct {
         auth: ApnsAuth,
@@ -262,7 +312,20 @@ enum ApnsBackend {
     Relay {
         base_url: String,
         relay_token: Option<String>,
+        alert_policy: RelayAlertPolicy,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ApnsSendResult {
+    status: u16,
+    invalid_token: bool,
+}
+
+impl ApnsSendResult {
+    fn is_success(self) -> bool {
+        (200..300).contains(&self.status)
+    }
 }
 
 /// Owns the backend (direct-to-Apple or hosted-relay), the store (device tokens + Live Activity
@@ -305,10 +368,12 @@ impl ApnsNotifier {
         base_url: String,
         relay_token: Option<String>,
     ) -> anyhow::Result<Self> {
+        let alert_policy = relay_alert_policy(&base_url);
         Ok(Self {
             backend: ApnsBackend::Relay {
                 base_url,
                 relay_token,
+                alert_policy,
             },
             store,
             client: build_client()?,
@@ -347,6 +412,14 @@ impl ApnsNotifier {
         .unwrap_or_default();
         let payload = alert_payload(&msg);
         for sub in subs {
+            if !is_valid_token(&sub.device_token) {
+                let store = self.store.clone();
+                let token = sub.device_token;
+                let _ = tokio::task::spawn_blocking(move || store.delete_apns_subscription(&token))
+                    .await;
+                tracing::warn!("pruned a malformed stored APNs device token");
+                continue;
+            }
             match self
                 .send_one(
                     &sub.device_token,
@@ -357,14 +430,22 @@ impl ApnsNotifier {
                 )
                 .await
             {
-                // 410 (Unregistered/BadDeviceToken): the token is gone — prune it, mirroring
-                // push.rs's 404/410 pruning of dead Web Push subscriptions.
-                Ok(410) => {
+                // 410 Unregistered and reason-qualified 400 BadDeviceToken/
+                // DeviceTokenNotForTopic mean this token is unusable — prune it, mirroring
+                // push.rs's pruning of dead Web Push subscriptions.
+                Ok(result) if result.invalid_token => {
                     let store = self.store.clone();
                     let token = sub.device_token.clone();
                     let _ =
                         tokio::task::spawn_blocking(move || store.delete_apns_subscription(&token))
                             .await;
+                    tracing::warn!(
+                        status = result.status,
+                        "pruned an APNs subscription rejected as an invalid token"
+                    );
+                }
+                Ok(result) if !result.is_success() => {
+                    tracing::warn!(status = result.status, "apns alert delivery was rejected");
                 }
                 Ok(_) => {}
                 // Device tokens are bearer-like routing secrets; never retain them in logs.
@@ -403,6 +484,14 @@ impl ApnsNotifier {
         .await
         .unwrap_or(None);
         let Some(token) = token else { return };
+        if !is_valid_token(&token.push_token) {
+            let store = self.store.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || store.delete_live_activity_token(&session_id))
+                    .await;
+            tracing::warn!("pruned a malformed stored Live Activity push token");
+            return;
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -419,15 +508,25 @@ impl ApnsNotifier {
             )
             .await
         {
-            Ok(410) => {
+            Ok(result) if result.invalid_token => {
                 let store = self.store.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     store.delete_live_activity_token(&session_id)
                 })
                 .await;
+                tracing::warn!(
+                    status = result.status,
+                    "pruned a Live Activity token rejected as invalid"
+                );
+            }
+            Ok(result) if !result.is_success() => {
+                tracing::warn!(
+                    status = result.status,
+                    "apns Live Activity delivery was rejected"
+                );
             }
             Ok(_) => {}
-            Err(e) => tracing::debug!("apns live activity to session {session_id} failed: {e}"),
+            Err(e) => tracing::debug!("apns Live Activity delivery failed: {e}"),
         }
     }
 
@@ -438,7 +537,15 @@ impl ApnsNotifier {
         push_type: &str,
         payload: &serde_json::Value,
         topic: &str,
-    ) -> anyhow::Result<u16> {
+    ) -> anyhow::Result<ApnsSendResult> {
+        let generic_payload = match &self.backend {
+            ApnsBackend::Relay {
+                alert_policy: RelayAlertPolicy::Generic,
+                ..
+            } if push_type == "alert" => Some(generic_relay_alert_payload()),
+            _ => None,
+        };
+        let outbound_payload = generic_payload.as_ref().unwrap_or(payload);
         let req = match &self.backend {
             ApnsBackend::Direct { auth } => {
                 let now = std::time::SystemTime::now()
@@ -459,6 +566,7 @@ impl ApnsNotifier {
             ApnsBackend::Relay {
                 base_url,
                 relay_token,
+                ..
             } => {
                 // Keep the opaque device token out of CDN/proxy path analytics. The hosted relay
                 // still accepts the legacy path-token shape for older Forge versions.
@@ -480,11 +588,32 @@ impl ApnsNotifier {
         // The device token lives in the URL. Strip it from any reqwest error before callers log
         // the error, otherwise a transport failure would persist that bearer-like token.
         let resp = req
-            .json(payload)
+            .json(outbound_payload)
             .send()
             .await
             .map_err(reqwest::Error::without_url)?;
-        Ok(resp.status().as_u16())
+        let status = resp.status().as_u16();
+        let invalid_token = if status == 410 {
+            true
+        } else if status == 400 {
+            resp.json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| {
+                    body.get("reason")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|reason| {
+                    matches!(reason.as_str(), "BadDeviceToken" | "DeviceTokenNotForTopic")
+                })
+        } else {
+            false
+        };
+        Ok(ApnsSendResult {
+            status,
+            invalid_token,
+        })
     }
 }
 
@@ -555,6 +684,15 @@ mod tests {
             ApnsNotifier::host("garbage"),
             "https://api.sandbox.push.apple.com"
         );
+    }
+
+    #[test]
+    fn apns_token_validation_accepts_only_64_lowercase_hex_chars() {
+        assert!(is_valid_token(&"a0".repeat(32)));
+        assert!(!is_valid_token(&"a".repeat(63)));
+        assert!(!is_valid_token(&"a".repeat(65)));
+        assert!(!is_valid_token(&"A".repeat(64)));
+        assert!(!is_valid_token(&"g".repeat(64)));
     }
 
     #[test]
@@ -715,6 +853,29 @@ mod tests {
         });
     }
 
+    #[test]
+    fn only_the_public_relay_uses_generic_alerts() {
+        assert_eq!(
+            relay_alert_policy(DEFAULT_RELAY_URL),
+            RelayAlertPolicy::Generic
+        );
+        assert_eq!(
+            relay_alert_policy("https://FORGE.ADULARI.DEV:443/custom-path"),
+            RelayAlertPolicy::Generic,
+            "URL spelling must not bypass public-relay privacy"
+        );
+        assert_eq!(
+            relay_alert_policy("not a URL"),
+            RelayAlertPolicy::Generic,
+            "ambiguous relay destinations must fail closed"
+        );
+        assert_eq!(
+            relay_alert_policy("https://relay.internal.example"),
+            RelayAlertPolicy::Rich,
+            "an explicitly configured self-hosted relay retains rich alerts"
+        );
+    }
+
     /// `FORGE_APNS_DISABLE_RELAY` turns native push off entirely when no local key is set,
     /// rather than silently falling back to some other behavior.
     #[test]
@@ -735,6 +896,7 @@ mod tests {
             backend: ApnsBackend::Relay {
                 base_url,
                 relay_token: None,
+                alert_policy: RelayAlertPolicy::Rich,
             },
             store: std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap()),
             client: reqwest::Client::new(),
@@ -749,7 +911,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(status, 410);
+        assert_eq!(status.status, 410);
 
         let captured = rx.try_recv().expect("mock server captured a request");
         assert!(
@@ -765,6 +927,148 @@ mod tests {
                 && captured.contains(&format!("x-forge-device-token: {}", "a".repeat(64))),
             "relay mode must keep the token out of the URL: {captured}"
         );
+    }
+
+    /// The operator-hosted public relay must never receive per-session notification content.
+    /// Capture the actual HTTP request body so this cannot regress behind a payload helper that
+    /// is correct in isolation but bypassed by the transport path.
+    #[tokio::test]
+    async fn public_relay_sends_only_a_generic_alert_payload() {
+        let (base_url, mut rx) = mock_http_server(200).await;
+        let store = std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap());
+        store
+            .upsert_apns_subscription(&"c".repeat(64), "production")
+            .unwrap();
+        let notifier = ApnsNotifier {
+            backend: ApnsBackend::Relay {
+                base_url,
+                relay_token: None,
+                alert_policy: RelayAlertPolicy::Generic,
+            },
+            store,
+            client: reqwest::Client::new(),
+        };
+        let sensitive_markers = [
+            "SESSION-ID-PRIVATE",
+            "QUESTION-PRIVATE",
+            "TOOL-write_file-PRIVATE",
+            "/home/user/secret/project",
+            "ERROR-PRIVATE",
+            "FINAL-ANSWER-PRIVATE",
+        ];
+
+        notifier
+            .send_alert_all(crate::push::PushMessage {
+                kind: "failed",
+                session: sensitive_markers[0].into(),
+                title: format!("{} {}", sensitive_markers[1], sensitive_markers[3]),
+                body: format!(
+                    "{} {} {} {}",
+                    sensitive_markers[2],
+                    sensitive_markers[3],
+                    sensitive_markers[4],
+                    sensitive_markers[5]
+                ),
+                seq: 42,
+                ttl: 3600,
+            })
+            .await;
+
+        let captured = rx.try_recv().expect("mock server captured a request");
+        for marker in sensitive_markers {
+            assert!(
+                !captured.contains(marker),
+                "public relay request leaked sensitive marker {marker}: {captured}"
+            );
+        }
+        let (_, body) = captured
+            .split_once("\r\n\r\n")
+            .expect("captured HTTP request has a body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("valid JSON request body");
+        assert_eq!(body, generic_relay_alert_payload());
+    }
+
+    #[tokio::test]
+    async fn explicitly_self_hosted_relay_preserves_the_rich_alert_payload() {
+        let (base_url, mut rx) = mock_http_server(200).await;
+        let store = std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap());
+        store
+            .upsert_apns_subscription(&"d".repeat(64), "production")
+            .unwrap();
+        let notifier = ApnsNotifier::new_relay(store, base_url, None).unwrap();
+        let message = crate::push::PushMessage {
+            kind: "question",
+            session: "SELF-HOSTED-SESSION".into(),
+            title: "SELF-HOSTED-TITLE".into(),
+            body: "SELF-HOSTED-QUESTION".into(),
+            seq: 9,
+            ttl: 300,
+        };
+
+        notifier.send_alert_all(message.clone()).await;
+
+        let captured = rx.try_recv().expect("mock server captured a request");
+        let (_, body) = captured
+            .split_once("\r\n\r\n")
+            .expect("captured HTTP request has a body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("valid JSON request body");
+        assert_eq!(body, alert_payload(&message));
+    }
+
+    #[tokio::test]
+    async fn public_relay_live_activity_payload_contains_no_session_text() {
+        let (base_url, mut rx) = mock_http_server(200).await;
+        let store = std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let session_marker = "LIVE-ACTIVITY-PRIVATE-SESSION-PATH-/secret/project";
+        store
+            .upsert_live_activity_token(session_marker, &"e".repeat(64), "production")
+            .unwrap();
+        let notifier = ApnsNotifier {
+            backend: ApnsBackend::Relay {
+                base_url,
+                relay_token: None,
+                alert_policy: RelayAlertPolicy::Generic,
+            },
+            store,
+            client: reqwest::Client::new(),
+        };
+
+        notifier
+            .send_live_activity(
+                session_marker.into(),
+                LiveActivityContentState {
+                    busy: true,
+                    waiting: false,
+                    cost_usd: 1.25,
+                    context_tokens: 1234,
+                    context_limit: 200_000,
+                    question: None,
+                    prompt_seq: None,
+                    tasks_done: None,
+                    tasks_total: None,
+                    state_since: None,
+                },
+            )
+            .await;
+
+        let captured = rx.try_recv().expect("mock server captured a request");
+        assert!(
+            !captured.contains(session_marker),
+            "Live Activity request leaked its lookup-only session id: {captured}"
+        );
+        let (_, body) = captured
+            .split_once("\r\n\r\n")
+            .expect("captured HTTP request has a body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("valid JSON request body");
+        assert_eq!(
+            body.as_object()
+                .expect("Live Activity payload is an object")
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["aps"]
+        );
+        assert_eq!(body["aps"]["event"], "update");
+        assert_eq!(body["aps"]["content-state"]["cost_usd"], 1.25);
     }
 
     /// A mocked 410 in relay mode must still trigger the existing prune-on-410 path in
@@ -783,6 +1087,7 @@ mod tests {
             backend: ApnsBackend::Relay {
                 base_url,
                 relay_token: None,
+                alert_policy: RelayAlertPolicy::Rich,
             },
             store: store.clone(),
             client: reqwest::Client::new(),
@@ -804,12 +1109,138 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn relay_mode_400_bad_device_token_prunes_the_dead_token() {
+        let (base_url, _rx) =
+            mock_http_server_with_body(400, r#"{"reason":"BadDeviceToken"}"#).await;
+        let store = std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap());
+        store
+            .upsert_apns_subscription(&"f".repeat(64), "production")
+            .unwrap();
+        let notifier = ApnsNotifier {
+            backend: ApnsBackend::Relay {
+                base_url,
+                relay_token: None,
+                alert_policy: RelayAlertPolicy::Rich,
+            },
+            store: store.clone(),
+            client: reqwest::Client::new(),
+        };
+
+        notifier
+            .send_alert_all(crate::push::PushMessage {
+                kind: "done",
+                session: "sess-1".into(),
+                title: "done".into(),
+                body: "done".into(),
+                seq: 1,
+                ttl: 300,
+            })
+            .await;
+
+        assert!(
+            store.list_apns_subscriptions().unwrap().is_empty(),
+            "APNs BadDeviceToken responses must prune the unusable subscription"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_mode_400_non_token_failure_keeps_the_subscription() {
+        let (base_url, _rx) = mock_http_server_with_body(400, r#"{"reason":"BadTopic"}"#).await;
+        let store = std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap());
+        store
+            .upsert_apns_subscription(&"e".repeat(64), "production")
+            .unwrap();
+        let notifier = ApnsNotifier::new_relay(store.clone(), base_url, None).unwrap();
+
+        notifier
+            .send_alert_all(crate::push::PushMessage {
+                kind: "done",
+                session: "sess-1".into(),
+                title: "done".into(),
+                body: "done".into(),
+                seq: 1,
+                ttl: 300,
+            })
+            .await;
+
+        assert_eq!(
+            store.list_apns_subscriptions().unwrap().len(),
+            1,
+            "a configuration/payload rejection must not destroy a valid device token"
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_mode_400_device_token_not_for_topic_prunes_live_activity_token() {
+        let (base_url, _rx) =
+            mock_http_server_with_body(400, r#"{"reason":"DeviceTokenNotForTopic"}"#).await;
+        let store = std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap());
+        store
+            .upsert_live_activity_token("sess-live", &"d".repeat(64), "production")
+            .unwrap();
+        let notifier = ApnsNotifier::new_relay(store.clone(), base_url, None).unwrap();
+
+        notifier
+            .send_live_activity(
+                "sess-live".into(),
+                LiveActivityContentState {
+                    busy: true,
+                    waiting: false,
+                    cost_usd: 0.0,
+                    context_tokens: 1,
+                    context_limit: 100,
+                    question: None,
+                    prompt_seq: None,
+                    tasks_done: None,
+                    tasks_total: None,
+                    state_since: None,
+                },
+            )
+            .await;
+
+        assert!(store
+            .get_live_activity_token("sess-live")
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_legacy_subscription_is_pruned_without_a_network_send() {
+        let store = std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap());
+        store
+            .upsert_apns_subscription("legacy-invalid-token", "sandbox")
+            .unwrap();
+        let notifier =
+            ApnsNotifier::new_relay(store.clone(), "http://127.0.0.1:9".to_string(), None).unwrap();
+
+        notifier
+            .send_alert_all(crate::push::PushMessage {
+                kind: "done",
+                session: "sess-legacy".into(),
+                title: "done".into(),
+                body: "done".into(),
+                seq: 1,
+                ttl: 300,
+            })
+            .await;
+
+        assert!(store.list_apns_subscriptions().unwrap().is_empty());
+    }
+
     /// A minimal local HTTP/1.1 mock: accepts exactly one connection, captures the raw request
     /// text (so a test can assert on headers) into the returned channel, and replies with
     /// `status` and an empty body. Good enough to stand in for "the relay" in unit tests — full
     /// relay behavior itself is tested in `crates/forge-relay`.
     async fn mock_http_server(
         status: u16,
+    ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+        mock_http_server_with_body(status, "").await
+    }
+
+    async fn mock_http_server_with_body(
+        status: u16,
+        response_body: &'static str,
     ) -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -819,12 +1250,39 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 8192];
-            let n = stream.read(&mut buf).await.unwrap_or(0);
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let mut request = Vec::with_capacity(8192);
+            while request.len() < 8192 {
+                let mut chunk = [0u8; 1024];
+                let n = stream.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..n]);
+                let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                });
+                if content_length.is_some_and(|len| request.len() >= header_end + 4 + len) {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request).to_string();
             let _ = tx.send(request);
-            let reason = if status == 410 { "Gone" } else { "OK" };
-            let resp = format!("HTTP/1.1 {status} {reason}\r\ncontent-length: 0\r\n\r\n");
+            let reason = match status {
+                400 => "Bad Request",
+                410 => "Gone",
+                _ => "OK",
+            };
+            let resp = format!(
+                "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{response_body}",
+                response_body.len()
+            );
             let _ = stream.write_all(resp.as_bytes()).await;
         });
 

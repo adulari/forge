@@ -1,9 +1,10 @@
 //! `forge-relay` — the hosted APNs push relay (ADR-0012). A self-hosted `forge serve` daemon
 //! that hasn't configured its own Apple `.p8` key (`FORGE_APNS_KEY_PATH`/etc.) POSTs here
 //! instead of talking to Apple directly; this process holds the operator's real Apple
-//! credential and forwards on the daemon's behalf. It never sees session content, source code,
-//! or a daemon's auth token — only an opaque device token, an environment string, and the
-//! notification payload text (see `docs/features/remote-control.md` for the full disclosure).
+//! credential and forwards on the daemon's behalf. Updated clients send a generic alert; the
+//! public deployment rewrites alerts again before APNs. Older daemons can still transmit rich
+//! alert input during the upgrade window, but it is never logged or forwarded in public mode.
+//! See `docs/features/remote-control.md` for the precise disclosure.
 //!
 //! Wire protocol is a privacy-preserving substitution for Apple's API shape: `POST /3/device`
 //! with the token in `x-forge-device-token`, the same
@@ -40,8 +41,11 @@ struct AppState {
     client: reqwest::Client,
     allowed_topics: Vec<String>,
     relay_token: Option<String>,
+    generic_alerts: bool,
     trust_proxy_headers: bool,
     limiters: Arc<RateLimiters>,
+    #[cfg(test)]
+    upstream_base_url: Option<String>,
 }
 
 #[tokio::main]
@@ -65,8 +69,11 @@ async fn main() -> anyhow::Result<()> {
         client,
         allowed_topics: config.allowed_topics,
         relay_token: config.relay_token,
+        generic_alerts: config.generic_alerts,
         trust_proxy_headers: config.trust_proxy_headers,
         limiters,
+        #[cfg(test)]
+        upstream_base_url: None,
     });
 
     let app = Router::new()
@@ -91,6 +98,7 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({
         "ok": true,
         "daily_sent": state.limiters.daily_sent_count(),
+        "generic_alerts": state.generic_alerts,
     }))
 }
 
@@ -139,8 +147,22 @@ fn relay_token_matches(actual: Option<&str>, expected: &str) -> bool {
         == 0
 }
 
-/// Accept only the two payload shapes Forge itself emits. The relay remains forward-compatible
-/// with additional fields, but cannot be used as a generic arbitrary-notification proxy.
+fn require_only_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+) -> Result<(), &'static str> {
+    if object
+        .keys()
+        .all(|key| allowed.iter().any(|allowed_key| key == allowed_key))
+    {
+        Ok(())
+    } else {
+        Err("payload contains unsupported fields")
+    }
+}
+
+/// Accept only the two payload shapes Forge itself emits. Unknown fields are rejected so a public
+/// relay cannot be repurposed as a generic arbitrary-notification proxy.
 fn validate_payload(payload: &serde_json::Value, push_type: &str) -> Result<(), &'static str> {
     let root = payload.as_object().ok_or("payload must be a JSON object")?;
     let aps = root
@@ -149,10 +171,13 @@ fn validate_payload(payload: &serde_json::Value, push_type: &str) -> Result<(), 
         .ok_or("payload.aps must be a JSON object")?;
 
     if push_type == "alert" {
+        require_only_keys(root, &["aps", "session", "kind", "seq"])?;
+        require_only_keys(aps, &["alert", "sound", "mutable-content"])?;
         let alert = aps
             .get("alert")
             .and_then(serde_json::Value::as_object)
             .ok_or("alert payload requires aps.alert")?;
+        require_only_keys(alert, &["title", "body"])?;
         let title = alert
             .get("title")
             .and_then(serde_json::Value::as_str)
@@ -163,6 +188,14 @@ fn validate_payload(payload: &serde_json::Value, push_type: &str) -> Result<(), 
             .ok_or("alert body must be a string")?;
         if title.chars().count() > 512 || body.chars().count() > 512 {
             return Err("alert title/body is too long");
+        }
+        if aps.get("sound").and_then(serde_json::Value::as_str) != Some("default")
+            || aps
+                .get("mutable-content")
+                .and_then(serde_json::Value::as_u64)
+                != Some(1)
+        {
+            return Err("alert APS fields are invalid");
         }
         if !matches!(
             root.get("kind").and_then(serde_json::Value::as_str),
@@ -182,6 +215,8 @@ fn validate_payload(payload: &serde_json::Value, push_type: &str) -> Result<(), 
             return Err("alert session/seq is invalid");
         }
     } else {
+        require_only_keys(root, &["aps"])?;
+        require_only_keys(aps, &["timestamp", "event", "content-state"])?;
         if aps.get("event").and_then(serde_json::Value::as_str) != Some("update")
             || aps
                 .get("timestamp")
@@ -194,6 +229,16 @@ fn validate_payload(payload: &serde_json::Value, push_type: &str) -> Result<(), 
             .get("content-state")
             .and_then(serde_json::Value::as_object)
             .ok_or("Live Activity content-state is required")?;
+        require_only_keys(
+            content,
+            &[
+                "busy",
+                "waiting",
+                "cost_usd",
+                "context_tokens",
+                "context_limit",
+            ],
+        )?;
         if content
             .get("busy")
             .and_then(serde_json::Value::as_bool)
@@ -218,6 +263,34 @@ fn validate_payload(payload: &serde_json::Value, push_type: &str) -> Result<(), 
         }
     }
     Ok(())
+}
+
+fn generic_alert_payload() -> serde_json::Value {
+    serde_json::json!({
+        "aps": {
+            "alert": {
+                "title": "Forge",
+                "body": "Open Forge to view an update.",
+            },
+            "sound": "default",
+            "mutable-content": 1,
+        },
+        "session": "forge-notification",
+        "kind": "done",
+        "seq": 0,
+    })
+}
+
+fn outbound_payload<'a>(
+    payload: &'a serde_json::Value,
+    push_type: &str,
+    generic_alerts: bool,
+) -> std::borrow::Cow<'a, serde_json::Value> {
+    if generic_alerts && push_type == "alert" {
+        std::borrow::Cow::Owned(generic_alert_payload())
+    } else {
+        std::borrow::Cow::Borrowed(payload)
+    }
 }
 
 async fn send_push(
@@ -290,7 +363,15 @@ async fn send_push(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let url = format!("{}/3/device/{device_token}", apns::host(environment));
+    #[cfg(test)]
+    let upstream_base_url = state
+        .upstream_base_url
+        .as_deref()
+        .unwrap_or_else(|| apns::host(environment));
+    #[cfg(not(test))]
+    let upstream_base_url = apns::host(environment);
+    let url = format!("{upstream_base_url}/3/device/{device_token}");
+    let outbound_payload = outbound_payload(&payload, push_type, state.generic_alerts);
     let result = state
         .client
         .post(&url)
@@ -304,7 +385,7 @@ async fn send_push(
             "apns-priority",
             header_str(&headers, "apns-priority").unwrap_or("10"),
         )
-        .json(&payload)
+        .json(outbound_payload.as_ref())
         .send()
         .await
         // The device token is part of Apple's URL. Never let a transport error retain it.
@@ -392,7 +473,11 @@ mod tests {
     #[test]
     fn payload_validation_accepts_only_forge_shapes() {
         let alert = serde_json::json!({
-            "aps": { "alert": { "title": "Forge", "body": "Done" } },
+            "aps": {
+                "alert": { "title": "Forge", "body": "Done" },
+                "sound": "default",
+                "mutable-content": 1,
+            },
             "session": "session-1",
             "kind": "done",
             "seq": 7,
@@ -401,7 +486,11 @@ mod tests {
         assert!(validate_payload(&serde_json::json!({ "aps": {} }), "alert").is_err());
         assert!(validate_payload(
             &serde_json::json!({
-                "aps": { "alert": { "title": "Spam", "body": "arbitrary" } },
+                "aps": {
+                    "alert": { "title": "Spam", "body": "arbitrary" },
+                    "sound": "default",
+                    "mutable-content": 1,
+                },
                 "session": "session-1", "kind": "marketing", "seq": 1
             }),
             "alert"
@@ -424,19 +513,151 @@ mod tests {
         assert!(validate_payload(&live_activity, "liveactivity").is_ok());
     }
 
+    #[test]
+    fn payload_validation_rejects_unknown_fields_and_non_forge_aps_values() {
+        let alert_with_extra_field = serde_json::json!({
+            "aps": {
+                "alert": { "title": "Forge", "body": "Done", "subtitle": "extra" },
+                "sound": "default",
+                "mutable-content": 1,
+            },
+            "session": "session-1",
+            "kind": "done",
+            "seq": 7,
+        });
+        assert!(validate_payload(&alert_with_extra_field, "alert").is_err());
+
+        let alert_with_custom_sound = serde_json::json!({
+            "aps": {
+                "alert": { "title": "Forge", "body": "Done" },
+                "sound": "marketing.aiff",
+                "mutable-content": 1,
+            },
+            "session": "session-1",
+            "kind": "done",
+            "seq": 7,
+        });
+        assert!(validate_payload(&alert_with_custom_sound, "alert").is_err());
+
+        let live_activity_with_extra_field = serde_json::json!({
+            "aps": {
+                "timestamp": 1_700_000_000u64,
+                "event": "update",
+                "content-state": {
+                    "busy": true,
+                    "waiting": false,
+                    "cost_usd": 0.02,
+                    "context_tokens": 1000,
+                    "context_limit": 200_000,
+                    "private_text": "must not pass",
+                }
+            }
+        });
+        assert!(validate_payload(&live_activity_with_extra_field, "liveactivity").is_err());
+    }
+
+    #[test]
+    fn public_mode_rewrites_only_alerts_before_forwarding() {
+        let rich_alert = serde_json::json!({
+            "aps": { "alert": { "title": "private title", "body": "private answer" } },
+            "session": "private-session",
+            "kind": "question",
+            "seq": 42,
+        });
+        let generic = outbound_payload(&rich_alert, "alert", true);
+        assert_eq!(generic["aps"]["alert"]["title"], "Forge");
+        assert_eq!(
+            generic["aps"]["alert"]["body"],
+            "Open Forge to view an update."
+        );
+        assert_eq!(generic["session"], "forge-notification");
+        assert_eq!(generic["kind"], "done");
+        assert_eq!(generic["seq"], 0);
+        assert!(!generic.to_string().contains("private"));
+
+        assert_eq!(
+            outbound_payload(&rich_alert, "alert", false).as_ref(),
+            &rich_alert
+        );
+
+        let live_activity = serde_json::json!({
+            "aps": {
+                "timestamp": 1_700_000_000u64,
+                "event": "update",
+                "content-state": {
+                    "busy": true,
+                    "waiting": false,
+                    "cost_usd": 0.02,
+                    "context_tokens": 1000,
+                    "context_limit": 200_000,
+                }
+            }
+        });
+        assert_eq!(
+            outbound_payload(&live_activity, "liveactivity", true).as_ref(),
+            &live_activity,
+            "public mode must preserve the documented Live Activity state"
+        );
+    }
+
     /// Builds real `AppState` (a real `ApnsAuth` from a test scalar, same trick
     /// `apns.rs`'s own tests use) so these exercise the actual `send_push` handler, not a
     /// stand-in — every case here must reject BEFORE the handler ever reaches
     /// `state.client.post(...)`, so no real network call happens in this test suite.
     fn test_state(allowed_topics: &[&str]) -> Arc<AppState> {
+        test_state_with_options(allowed_topics, None, 1_000_000, false, None)
+    }
+
+    fn test_state_with_options(
+        allowed_topics: &[&str],
+        relay_token: Option<&str>,
+        daily_cap: u64,
+        generic_alerts: bool,
+        upstream_base_url: Option<String>,
+    ) -> Arc<AppState> {
         Arc::new(AppState {
             auth: ApnsAuth::from_scalar(&[7u8; 32], "TEAM", "KEY"),
             client: reqwest::Client::new(),
             allowed_topics: allowed_topics.iter().map(|s| s.to_string()).collect(),
-            relay_token: None,
+            relay_token: relay_token.map(str::to_string),
+            generic_alerts,
             trust_proxy_headers: false,
-            limiters: Arc::new(RateLimiters::new(1000, 60, 1_000_000)),
+            limiters: Arc::new(RateLimiters::new(1000, 60, daily_cap)),
+            upstream_base_url,
         })
+    }
+
+    fn relay_app(state: Arc<AppState>) -> Router {
+        Router::new()
+            .route("/3/device", post(send_push_from_header))
+            .route("/3/device/{device_token}", post(send_push))
+            .layer(DefaultBodyLimit::max(APNS_MAX_PAYLOAD_BYTES))
+            .with_state(state)
+    }
+
+    fn valid_header_route_request() -> axum::http::Request<axum::body::Body> {
+        let mut request = axum::http::Request::post("/3/device")
+            .header("content-type", "application/json")
+            .header("x-forge-device-token", "a".repeat(64))
+            .header("apns-topic", "dev.adulari.forge")
+            .header("apns-push-type", "alert")
+            .header("apns-environment", "production")
+            .body(axum::body::Body::from(
+                serde_json::json!({
+                    "aps": {
+                        "alert": { "title": "Forge", "body": "Done" },
+                        "sound": "default",
+                        "mutable-content": 1,
+                    },
+                    "session": "session-1",
+                    "kind": "done",
+                    "seq": 7,
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        request.extensions_mut().insert(ConnectInfo(peer()));
+        request
     }
 
     fn peer() -> SocketAddr {
@@ -446,6 +667,45 @@ mod tests {
     async fn body_text(resp: Response) -> String {
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    async fn mock_upstream() -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::with_capacity(8192);
+            while request.len() < 8192 {
+                let mut chunk = [0_u8; 1024];
+                let read = stream.read(&mut chunk).await.unwrap_or(0);
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                });
+                if content_length.is_some_and(|length| request.len() >= header_end + 4 + length) {
+                    break;
+                }
+            }
+            let _ = tx.send(String::from_utf8_lossy(&request).to_string());
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .await;
+        });
+        (format!("http://{addr}"), rx)
     }
 
     #[tokio::test]
@@ -550,5 +810,108 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert!(body_text(resp).await.contains("apns-environment"));
+    }
+
+    #[tokio::test]
+    async fn current_header_route_enforces_and_accepts_configured_auth() {
+        let state =
+            test_state_with_options(&["dev.adulari.forge"], Some("relay-secret"), 0, false, None);
+        let app = relay_app(state);
+
+        let resp = app
+            .clone()
+            .oneshot(valid_header_route_request())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let mut wrong = valid_header_route_request();
+        wrong
+            .headers_mut()
+            .insert("x-forge-relay-token", "wrong".parse().unwrap());
+        let resp = app.clone().oneshot(wrong).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let mut accepted = valid_header_route_request();
+        accepted
+            .headers_mut()
+            .insert("x-forge-relay-token", "relay-secret".parse().unwrap());
+        let resp = app.oneshot(accepted).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "correct auth must reach the final pre-upstream limiter"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_header_route_rewrites_rich_alert_on_the_actual_upstream_request() {
+        let (upstream, captured) = mock_upstream().await;
+        let state = test_state_with_options(
+            &["dev.adulari.forge"],
+            Some("relay-secret"),
+            1_000_000,
+            true,
+            Some(upstream),
+        );
+        let app = relay_app(state);
+        let mut request = valid_header_route_request();
+        request
+            .headers_mut()
+            .insert("x-forge-relay-token", "relay-secret".parse().unwrap());
+
+        let resp = app.oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let captured = captured.await.expect("upstream request was captured");
+        let (_, body) = captured
+            .split_once("\r\n\r\n")
+            .expect("captured request has a body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("valid JSON body");
+        assert_eq!(body, generic_alert_payload());
+    }
+
+    #[tokio::test]
+    async fn current_header_route_requires_its_device_token_header() {
+        let app = relay_app(test_state(&["dev.adulari.forge"]));
+        let mut request = valid_header_route_request();
+        request.headers_mut().remove("x-forge-device-token");
+
+        let resp = app.oneshot(request).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(body_text(resp).await.contains("x-forge-device-token"));
+    }
+
+    #[tokio::test]
+    async fn current_header_route_rejects_priority_and_topic_type_mismatches() {
+        let app = relay_app(test_state(&[
+            "dev.adulari.forge",
+            "dev.adulari.forge.push-type.liveactivity",
+        ]));
+
+        let mut bad_priority = valid_header_route_request();
+        bad_priority
+            .headers_mut()
+            .insert("apns-priority", "7".parse().unwrap());
+        let resp = app.clone().oneshot(bad_priority).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(body_text(resp).await.contains("apns-priority"));
+
+        let mut live_type_on_alert_topic = valid_header_route_request();
+        live_type_on_alert_topic
+            .headers_mut()
+            .insert("apns-push-type", "liveactivity".parse().unwrap());
+        let resp = app.clone().oneshot(live_type_on_alert_topic).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(body_text(resp).await.contains("liveactivity"));
+
+        let mut alert_type_on_live_topic = valid_header_route_request();
+        alert_type_on_live_topic.headers_mut().insert(
+            "apns-topic",
+            "dev.adulari.forge.push-type.liveactivity".parse().unwrap(),
+        );
+        let resp = app.oneshot(alert_type_on_live_topic).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(body_text(resp).await.contains("liveactivity"));
     }
 }

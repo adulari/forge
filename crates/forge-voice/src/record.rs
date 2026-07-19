@@ -1,13 +1,16 @@
 //! Microphone capture (cpal) -> 16kHz mono f32, with a live RMS level feed for UI meters.
 
+#[cfg(feature = "microphone")]
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "microphone")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tokio::sync::watch;
 
 use crate::{Result, VoiceError};
 
 /// Commands sent from [`RecordingHandle`] to the capture thread.
+#[cfg(feature = "microphone")]
 enum Cmd {
     /// Stop capturing and return the recorded (resampled, mono) samples.
     Stop,
@@ -19,6 +22,7 @@ enum Cmd {
 /// 30x/sec, for a waveform/meter UI. The actual microphone capture happens on a dedicated OS
 /// thread (cpal's `Stream` is not `Send`), so this handle is a thin, `Send`-safe remote control
 /// for it.
+#[cfg(feature = "microphone")]
 pub struct RecordingHandle {
     /// Live RMS level (0..1), updated as audio arrives. Cheap to poll — a `watch` channel only
     /// ever holds the latest value.
@@ -28,6 +32,7 @@ pub struct RecordingHandle {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+#[cfg(feature = "microphone")]
 impl RecordingHandle {
     /// Stop capturing and return the recorded audio as 16kHz mono f32 samples.
     pub fn stop(mut self) -> Result<Vec<f32>> {
@@ -50,13 +55,45 @@ impl RecordingHandle {
     }
 }
 
+/// Placeholder handle used when this crate was built without a microphone backend. A value of
+/// this type cannot be produced by [`Recorder::start`]; retaining the type keeps callers portable
+/// while the start operation reports a normal, actionable error at runtime.
+#[cfg(not(feature = "microphone"))]
+#[non_exhaustive]
+pub struct RecordingHandle {
+    /// Kept API-compatible with microphone-enabled handles. No receiver is created because
+    /// [`Recorder::start`] always returns an error in this build.
+    pub levels: watch::Receiver<f32>,
+}
+
+#[cfg(not(feature = "microphone"))]
+impl RecordingHandle {
+    /// Return the same graceful unavailability error as [`Recorder::start`].
+    pub fn stop(self) -> Result<Vec<f32>> {
+        Err(VoiceError::MicrophoneUnavailable)
+    }
+
+    /// No-op for API compatibility; an unavailable build cannot create a live recording.
+    pub fn cancel(self) {}
+}
+
 /// Starts/stops microphone recordings. Stateless — every [`Recorder::start`] call spins up its
 /// own capture thread.
 pub struct Recorder;
 
 impl Recorder {
+    /// Whether this build contains a local microphone capture backend.
+    ///
+    /// This is a compile-time capability check; it does not probe for an attached input device or
+    /// operating-system permission. Call [`Recorder::start`] to perform those runtime checks.
+    #[must_use]
+    pub const fn is_supported() -> bool {
+        cfg!(feature = "microphone")
+    }
+
     /// Start recording from the default input device. Returns immediately with a handle whose
     /// `levels` receiver starts updating as soon as the device is open.
+    #[cfg(feature = "microphone")]
     pub fn start() -> Result<RecordingHandle> {
         let (level_tx, level_rx) = watch::channel(0.0f32);
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<Cmd>();
@@ -77,11 +114,19 @@ impl Recorder {
             thread: Some(thread),
         })
     }
+
+    /// Report that microphone capture was not included in this build.
+    #[cfg(not(feature = "microphone"))]
+    pub fn start() -> Result<RecordingHandle> {
+        Err(VoiceError::MicrophoneUnavailable)
+    }
 }
 
 /// Target sample rate whisper.cpp expects.
+#[cfg(feature = "microphone")]
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
+#[cfg(feature = "microphone")]
 fn record_thread(
     level_tx: watch::Sender<f32>,
     cmd_rx: std::sync::mpsc::Receiver<Cmd>,
@@ -184,6 +229,7 @@ fn record_thread(
 /// publish an RMS level and append to the shared recording buffer. Runs on cpal's realtime audio
 /// callback thread — no allocation beyond the per-callback downmix buffer, no locking beyond the
 /// single buffer append.
+#[cfg(feature = "microphone")]
 fn on_input(data: &[f32], channels: usize, buf: &Mutex<Vec<f32>>, level_tx: &watch::Sender<f32>) {
     let mono = downmix(data, channels);
     let level = rms(&mono);
@@ -206,6 +252,7 @@ pub(crate) fn downmix(data: &[f32], channels: usize) -> Vec<f32> {
 
 /// Root-mean-square amplitude of `samples`, clamped to 0..1 (samples are expected to already be
 /// in -1.0..1.0 range).
+#[cfg(feature = "microphone")]
 fn rms(samples: &[f32]) -> f32 {
     if samples.is_empty() {
         return 0.0;
@@ -296,10 +343,27 @@ mod tests {
     }
 
     #[test]
+    fn recorder_reports_compile_time_capability() {
+        assert_eq!(Recorder::is_supported(), cfg!(feature = "microphone"));
+    }
+
+    #[cfg(not(feature = "microphone"))]
+    #[test]
+    fn recorder_fails_gracefully_without_capture_backend() {
+        match Recorder::start() {
+            Err(VoiceError::MicrophoneUnavailable) => {}
+            Err(other) => panic!("expected microphone-unavailable error, got {other}"),
+            Ok(_) => panic!("capture-disabled build unexpectedly started a recording"),
+        }
+    }
+
+    #[cfg(feature = "microphone")]
+    #[test]
     fn rms_of_silence_is_zero() {
         assert_eq!(rms(&[0.0, 0.0, 0.0]), 0.0);
     }
 
+    #[cfg(feature = "microphone")]
     #[test]
     fn rms_of_full_scale_is_one() {
         assert_eq!(rms(&[1.0, -1.0, 1.0, -1.0]), 1.0);

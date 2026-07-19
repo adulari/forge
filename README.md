@@ -74,7 +74,7 @@ sonnet` fixes **50% more bugs through Forge than through the raw CLI**.
 - **Provenance & the arena** — `forge blame` traces any line back to the model, prompt, and
   reasoning that wrote it; `/duel` races models on the same task in parallel worktrees, merges the
   winner, and feeds the outcome back into routing. No other agent has either.
-- **One fast static binary** — Rust, no Node/Python/Bun runtime, no Electron. Installs in one line.
+- **One fast native binary** — Rust, no Node/Python/Bun runtime, no Electron. Installs in one line.
 
 ---
 
@@ -165,7 +165,7 @@ Gemini CLI, Windsurf/Devin, and opencode) lives in **[docs/comparison.md](docs/c
 | MCP server (expose itself to other tools) | ✅ | ✅ | ✅ | ❓ | ❌ | ❌ |
 | Skills / Claude Code import | ✅ | ✅ | partial⁵ | ❌ | ❌ | partial⁵ |
 | Open source | ✅ AGPL-3.0 | ❌ | ✅ Apache | ❌ | ✅ Apache | ✅ Apache |
-| Single static binary (no runtime) | ✅ Rust | Node | ✅ Rust | closed | Python | Node (VS Code) |
+| Single native binary (no language runtime) | ✅ Rust | Node | ✅ Rust | closed | Python | Node (VS Code) |
 
 <sub>¹ Codex CLI is OpenAI-leaning but reaches any OpenAI-compatible endpoint (incl. Ollama) via
 `config.toml`; it does no automatic routing or failover. ² Cline added a wrapper to ride a Claude Max
@@ -348,7 +348,12 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
   create/switch/archive from the phone; fleet dashboard (waiting-on-decision sessions first),
   permission + plan + diff review cards, file/image upload, voice input, an offline input queue,
   and actionable web push (approve/deny from the lock screen)
-- Local Whisper voice input in the TUI and companion app, plus desktop voice shortcut support
+- Optional [Forge Anywhere](docs/features/forge-anywhere.md) companion: managed end-to-end encrypted
+  relay, sync/history, multi-host fleet, workspace handoff, and replay shares. Forge, local/LAN
+  access, direct pairing, and user-managed `serve --tunnel` tunnels remain free and independent
+- Local Whisper transcription in the TUI and companion app, plus desktop voice shortcut support.
+  Official macOS/Windows CLI builds include local microphone capture; portable Linux CLI/TUI builds
+  keep file/upload transcription but make microphone capture an opt-in source-build feature
 - Companion app from the same TypeScript/React Native codebase for iOS, Android, Web, Windows, macOS,
   and Linux; fleet/home/inbox/history, plans/tasks/agents/review, replay/tree, usage, models, hooks,
   skills, MCP, and configuration are native screens rather than a thin chat wrapper
@@ -357,14 +362,17 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
   fallback; the desktop app also has a native folder picker. The model catalog ranks healthy models
   while keeping automatic mesh routing and offline manual IDs; desktop auto-discovers Forge from
   Cargo/Homebrew/user-local installs and starts it
-- Actionable push notifications, iOS Live Activities/Dynamic Island status, signed desktop updates,
-  production iOS OTA updates, offline prompt queueing, and reconnect replay
+- Actionable push notifications, iOS Live Activities/Dynamic Island status, Tauri-signed desktop
+  updater artifacts, production iOS OTA updates, offline prompt queueing, and reconnect replay
 - `--inline` for native scrollback; `--mock` offline deterministic provider (no key needed)
 
 **🔒 Safety**
 - Permission broker with per-tool rules and four tempers (Read-only / Ask / Auto-edit / Full)
-- `Auto-edit` (accept-edits) auto-approves file writes **and** shell commands; the unoverridable denylist still blocks catastrophic ops (`rm -rf /`, `.env` reads, pipe-to-sh)
-- Answering `a` (always) at a prompt persists for the rest of the session — that tool won't prompt again until restart — and is saved to config
+- `Auto-edit` (`accept-edits`) auto-approves file writes while still asking before shell commands;
+  `Full` (`bypass`) removes ordinary prompts, but the unoverridable denylist still blocks
+  catastrophic operations (`rm -rf /`, `.env` reads, pipe-to-shell)
+- Answering `a` (always) at a prompt allows that tool immediately and writes a project allow rule
+  to `.forge/config.toml`, so future turns and sessions reuse the choice
 - Diff preview before every write; shadow file snapshots; `/undo` with file restore
 - Per-turn checkpoints; full audit trail of tool calls, routing, and permission outcomes
 - Workspace isolation binds every session, provider bridge, tool, checkpoint, and post-check to the
@@ -372,12 +380,24 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
 - Unoverridable denylist; opt-in OS shell sandbox (Linux Landlock)
 
 **🕊️ Privacy & anonymous telemetry**
-- No prompts, responses, file contents, paths, repository names, API keys, account IDs, IP-derived
-  location, or stable device/user identifiers are collected
+- Anonymous telemetry never includes prompts, responses, file contents, paths, repository names,
+  API keys, account IDs, IP-derived location, or stable device/user identifiers
 - Best-effort anonymous counters cover install/launch/activity, platform/version/distribution,
   success/failure outcomes, coarse latency/cost/token buckets, and public release downloads
 - Telemetry never blocks Forge and is easy to disable everywhere with
   `[telemetry] enabled = false`; the complete event contract is in [`docs/telemetry.md`](docs/telemetry.md)
+- Native iOS push uses the open-source hosted APNs relay by default. The APNs device or Live
+  Activity token, environment, and notification payload cross it in transit, but stock public-relay
+  alerts are deliberately generic: no session ID/title, question or permission summary, response
+  line, error text, transcript, source file, or daemon credential is sent. Live Activity updates
+  contain only coarse busy/waiting, cost, and context counters. The relay does not log tokens or
+  payloads; current clients keep tokens out of URLs, and access logging is disabled on the legacy
+  path-token route. The public server also replaces every alert before APNs as defense in depth;
+  older clients may transmit rich input during the upgrade window, but it is not logged or
+  forwarded. Direct APNs and explicitly configured self-hosted relays retain rich alerts.
+  Bring your own APNs key, point Forge at a self-hosted relay, or set
+  `FORGE_APNS_DISABLE_RELAY=1`; see
+  [Remote control + companion apps](docs/features/remote-control.md#2f-native-ios-push-apns--the-hosted-relay)
 
 > **Why a harness, not just a CLI?** Forge can run the *same* model you'd run with `claude`/`codex`
 > directly — so the harness is the only difference. Real models loop, write tool calls as prose that
@@ -397,10 +417,16 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
 curl -fsSL https://raw.githubusercontent.com/Adulari/forge/main/install.sh | sh
 ```
 
-Detects your OS/arch, downloads the matching release binary (verifying its SHA-256), and installs
-`forge` to `~/.local/bin`. It supports Linux x86-64/ARM64 and macOS Apple Silicon/Intel. Override
-with `FORGE_VERSION` (a tag) or `FORGE_INSTALL_DIR`; unsupported platforms can use Cargo or build
-from source.
+Detects your OS/arch, downloads the matching release binary, requires an exact match in the
+release's SHA-256 manifest, and installs `forge` to `~/.local/bin`. A missing or invalid manifest,
+hash, or SHA-256 tool aborts installation. It supports Linux x86-64/ARM64 and macOS Apple
+Silicon/Intel. Override with `FORGE_VERSION` (a tag) or `FORGE_INSTALL_DIR`; unsupported platforms
+can use Cargo or build from source.
+
+Official Linux CLI/TUI archives are built inside a digest-pinned Debian Bullseye toolchain instead
+of inheriting the rolling Arch release host. A release gate caps required symbols at glibc 2.31 and
+GLIBCXX 3.4.28 and rejects any startup dependency on ALSA, covering older distributions and minimal
+server/WSL installs as well as current desktops.
 
 The main installer also offers to install the **Forge desktop app** alongside the CLI/TUI. The
 interactive default is **yes**: answer `n` to decline. For scripts, set `FORGE_DESKTOP=0` to skip or
@@ -421,9 +447,12 @@ The installer selects the matching release bundle: macOS Apple Silicon or Intel,
 x86-64 or ARM64 AppImage. Desktop bundles are published by the desktop release workflow (alongside
 Windows x86-64 NSIS builds). The Tauri desktop app connects to `forge serve`, supports the same remote
 control UI as the web/mobile app, keeps the Fleet session rail beside the active chat on larger
-windows, and checks for signed updates automatically. On Linux it installs
-an AppImage and desktop entry; on macOS it installs `Forge.app` to `/Applications` (or
-`~/Applications`).
+windows, and verifies Tauri updater signatures automatically. The download installer also requires
+the exact asset SHA-256 from `desktop-checksums.txt`. On Linux it installs an AppImage, its embedded
+icon, and a desktop entry; on macOS it installs `Forge.app` to `/Applications` (or
+`~/Applications`). Current macOS and Windows bundles are not yet Apple-notarized or
+Authenticode-signed, so Gatekeeper or SmartScreen can show an unverified-publisher warning even
+though Forge's installer checksum and updater signature verification still apply.
 
 **Windows (PowerShell):**
 
@@ -439,12 +468,13 @@ available separately via `install.ps1` below.
 The fastest mobile install is the PWA served by `forge serve`: open or scan its URL, then use
 **Add to Home Screen** on iOS Safari or Android Chrome. The native Expo app adds camera QR pairing,
 secure token storage, attachment and voice capture, actionable push notifications, and iOS
-Live Activities/Dynamic Island. It receives compatible JavaScript fixes through the signed
-production OTA channel without replacing the native binary.
+Live Activities/Dynamic Island. It receives compatible JavaScript fixes through the production
+OTA channel without replacing the native binary.
 
-Unsigned iOS sideload builds and their SideStore manifests are published under `mobile-v*` GitHub
-Releases; the stable GitHub Pages source requires the one-time Pages setup documented in the
-sideload guide and is not assumed to be live. Native TestFlight/App Store distribution is managed
+Unsigned iOS sideload builds and their SideStore manifests are published from protected `main`
+against existing `mobile-v*` tags. The live SideStore source is
+[`https://adulari.github.io/forge/forge-source.json`](https://adulari.github.io/forge/forge-source.json).
+Native TestFlight/App Store distribution is managed
 separately because native capabilities and OTA runtime compatibility must stay aligned. Android can
 use the installable PWA or the native Expo build: the `mobile-android` workflow produces an internal
 APK or production AAB and can submit production builds to Google Play internal testing. See
@@ -458,7 +488,7 @@ APK or production AAB and can submit production builds to Google Play internal t
 irm https://raw.githubusercontent.com/Adulari/forge/main/install.ps1 | iex
 ```
 
-Downloads the x86-64 release binary (verifying its SHA-256), installs `forge.exe` to
+Downloads the x86-64 release binary (requiring its published SHA-256), installs `forge.exe` to
 `%LOCALAPPDATA%\Programs\forge`, and adds it to your user `PATH`. After install, `forge update` keeps it
 current.
 
@@ -466,7 +496,14 @@ current.
 
 ```bash
 brew tap Adulari/forge https://github.com/Adulari/forge
-brew install forge
+brew install Adulari/forge/forge
+```
+
+### 🪣 Scoop
+
+```powershell
+scoop bucket add forge https://github.com/Adulari/forge
+scoop install forge/forge
 ```
 
 ### 🦀 Cargo (crates.io)
@@ -475,8 +512,9 @@ brew install forge
 cargo install forge-agent
 ```
 
-Installs the latest published release from crates.io. The crate is `forge-agent`; the installed
-binary is `forge`.
+The crate is `forge-agent`; the installed binary is `forge`. The matching crate is published after
+the GitHub release tag. Until crates.io shows the same version as the Releases page, use the
+one-line installer above for the current Forge version.
 
 ### 🔨 From source
 
@@ -485,8 +523,17 @@ cargo build --release          # produces target/release/forge
 cp target/release/forge ~/.local/bin/   # or anywhere on PATH
 ```
 
-Requires a recent stable Rust toolchain. Prebuilt binaries for each OS are on the
+Requires Rust 1.88 or newer (the workspace MSRV). Prebuilt binaries for each OS are on the
 [**Releases**](https://github.com/Adulari/forge/releases) page.
+
+On Linux, the default build intentionally omits CPAL/ALSA so every Forge command can start on a
+server, WSL installation, or minimal desktop without `libasound.so.2`. File and companion-app audio
+uploads still use local Whisper transcription. To enable the TUI's `/voice` microphone recorder,
+install your distribution's ALSA development package and build with
+`cargo build --release -p forge-agent --features microphone`.
+
+A source build inherits the toolchain and system-library baseline of the machine that builds it;
+use the release archives above when you need Forge's glibc 2.31 portability floor.
 
 ---
 
@@ -572,7 +619,7 @@ viewer (main chat + subagents + critics).
 | `/remember <text>` · `/memories` | Save a memory · list what Forge knows |
 | `/remote [--lan\|--local\|--anywhere]` | Toggle browser remote control |
 | `/self-mcp [enable\|disable]` | Let the session call a sub-Forge through `forge_chat` / `forge_assay` MCP tools |
-| `/voice` | Record and locally transcribe speech into the draft; never auto-sends |
+| `/voice` | Record and locally transcribe speech into the draft; never auto-sends (microphone capture is opt-in when building on Linux) |
 | `/config` | Dynamic settings editor — fuzzy-search + edit any setting (and API keys) |
 | `/statusline [layout\|toggle <widget>\|reset\|edit]` | Manage the statusline — toggle/reorder widgets, or reset to default |
 | `/copy [N]` · `/clear` | Copy a recent assistant reply · clear the screen without clearing the session |
@@ -628,7 +675,7 @@ wide, the Fleet stays visible beside the active chat; mobile keeps focused full-
 ```bash
 forge serve                  # LAN, self-signed HTTPS (default)
 forge serve --local          # loopback only
-forge serve --anywhere       # public tunnel via cloudflared/ngrok
+forge serve --tunnel         # public tunnel via cloudflared/ngrok
 forge serve --port 9000      # override the stable port
 forge serve --rotate-token   # revoke: mint a new daemon token (old links/PWAs die)
 ```
@@ -933,6 +980,7 @@ command = "bash -c 'jq .args <<< $FORGE_TOOL_INPUT >> audit.log'"
 | [`docs/architecture/02-architecture.md`](./docs/architecture/02-architecture.md) | System design with C4 diagrams |
 | [OpenAI-compatible API](./docs/features/embed-ai-backend.md) | Use the Forge mesh as an existing app's AI backend |
 | [Remote control + companion apps](./docs/features/remote-control.md) | Daemon, protocol, fleet UI, push, offline/reconnect behavior |
+| [Forge Anywhere](./docs/features/forge-anywhere.md) | Optional paid encrypted relay, sync, recovery, handoff, shares, and exact free/paid boundary |
 | [Context pipeline](./docs/features/context-pipeline.md) | Guidance, retrieval, task state, memories, and compaction order |
 | [Anonymous telemetry contract](./docs/telemetry.md) | Exact events, excluded data, opt-out, and PostHog dashboard setup |
 | [Mobile App Store checklist](./docs/mobile/APP_STORE_CHECKLIST.md) | iOS privacy, OTA/runtime, TestFlight, and submission status |
@@ -965,7 +1013,7 @@ crates/
 
 mobile/
 ├── src              # Expo Router React Native app shared by iOS, Android, Web, and desktop UI
-├── src-tauri        # signed Tauri v2 desktop shell for macOS, Linux, and Windows
+├── src-tauri        # Tauri v2 desktop shell + signed updater artifacts
 ├── modules          # native Expo modules, including iOS Live Activities
 └── targets          # widget / Dynamic Island extension
 ```

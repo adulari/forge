@@ -20,6 +20,7 @@ use forge_types::{
 use forge_types::{Presenter, PresenterEvent};
 
 pub mod assay;
+pub mod capsule;
 pub(crate) mod completion;
 pub mod context_pack;
 pub(crate) mod context_pipeline;

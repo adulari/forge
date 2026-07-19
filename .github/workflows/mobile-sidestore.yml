@@ -1,31 +1,31 @@
 name: mobile-sidestore
 
 # Track A distribution (see docs/mobile/SIDELOAD.md): an UNSIGNED iOS IPA, sideloaded via
-# SideStore. No Apple Developer account, no code-signing certs, no GitHub secrets required —
-# CODE_SIGNING_ALLOWED=NO end to end. This unblocks real-device testing before Apple Developer
-# approval lands (Track B, mobile-eas.yml, is the signed/App Store path for later).
+# SideStore. No Apple Developer account or code-signing certificate is required —
+# CODE_SIGNING_ALLOWED=NO end to end. The separately signed TestFlight/App Store path uses Xcode
+# Cloud; this workflow remains the public sideload channel.
 #
-# Publishes on every `mobile-v*` tag:
+# A protected-main dispatch validates and publishes an existing `mobile-v*` tag:
 #   1. A GitHub Release with Forge.ipa attached.
 #   2. A SideStore/AltStore "source" manifest (forge-source.json), both as a release asset and
 #      to GitHub Pages for a stable add-source URL that always points at the latest release.
 #
-# One-time manual setup required (cannot be automated from the workflow):
-#   Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
+# Forks must select GitHub Actions as their Pages source and allow the protected `main` branch in
+# the `github-pages` environment. The production repository is already configured.
 
 on:
-  push:
-    tags:
-      - "mobile-v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing mobile-vX.Y.Z tag to rebuild/repair
+        required: true
+        type: string
 
 permissions:
-  contents: write
-  pages: write
-  id-token: write
+  contents: read
 
 concurrency:
-  group: mobile-sidestore-${{ github.ref }}
+  group: mobile-sidestore-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 env:
@@ -33,23 +33,51 @@ env:
   DEVELOPER_NAME: adulari
   EXPO_PUBLIC_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
   EXPO_PUBLIC_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
-  # Xcode scheme name that `npx expo prebuild -p ios` generates from app.config.ts `name: "Forge"`.
-  # TODO: verify against ios/Forge.xcodeproj/xcshareddata/xcschemes/ after a local prebuild if the
-  # xcodebuild step below fails to find the scheme.
+  # Xcode scheme generated and verified by successful unsigned archive builds.
   IOS_SCHEME: Forge
 
 jobs:
   build-ipa:
     name: build unsigned IPA
     runs-on: macos-15
+    timeout-minutes: 90
     defaults:
       run:
         working-directory: mobile
     outputs:
       ipa-version: ${{ steps.meta.outputs.version }}
       ipa-size: ${{ steps.package.outputs.size }}
+      ipa-min-os: ${{ steps.package.outputs.min-os }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.release_tag != '' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          fetch-depth: 0
+
+      - name: Verify mobile release provenance
+        working-directory: .
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^mobile-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo 'release_tag must look like mobile-v1.0.1' >&2
+            exit 1
+          }
+          git show-ref --verify --quiet "refs/tags/$RELEASE_TAG" || {
+            echo "release tag does not exist: $RELEASE_TAG" >&2
+            exit 1
+          }
+          [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" ] || {
+            echo "checked-out source does not match $RELEASE_TAG" >&2
+            exit 1
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "release tag is not reachable from origin/main: $RELEASE_TAG" >&2
+            exit 1
+          }
 
       # Expo SDK 57 / RN 0.86 Podfile requires Xcode 16+. The macos runner's default
       # Xcode can be older (macos-14 defaulted to 15.4 → `pod install` fails with
@@ -61,7 +89,7 @@ jobs:
           sudo xcode-select -s "$XC/Contents/Developer"
           xcodebuild -version
 
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: "20"
           cache: npm
@@ -76,11 +104,16 @@ jobs:
           # MUST equal the IPA's CFBundleShortVersionString — SideStore rejects a mismatch
           # ("expected X found Y"). Expo bakes that from the resolved app-config version, so
           # read it from there rather than from the git tag.
-          VERSION="$(npx expo config --json | jq -r '.version // "0.0.0"')"
+          VERSION="$(npx --no-install expo config --json | jq -r '.version // "0.0.0"')"
+          RELEASE_TAG="${{ inputs.release_tag || github.ref_name }}"
+          [ "$RELEASE_TAG" = "mobile-v$VERSION" ] || {
+            echo "tag $RELEASE_TAG does not match app version $VERSION" >&2
+            exit 1
+          }
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Prebuild native iOS project
-        run: npx expo prebuild -p ios --clean
+        run: npx --no-install expo prebuild -p ios --clean
 
       - name: Archive (unsigned)
         run: |
@@ -102,11 +135,22 @@ jobs:
         run: |
           mkdir -p build/Payload
           cp -r build/Forge.xcarchive/Products/Applications/*.app build/Payload/Forge.app
+          BUILT_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/Payload/Forge.app/Info.plist)"
+          [ "$BUILT_VERSION" = "${{ steps.meta.outputs.version }}" ] || {
+            echo "built IPA version $BUILT_VERSION does not match expected ${{ steps.meta.outputs.version }}" >&2
+            exit 1
+          }
+          MIN_OS="$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' build/Payload/Forge.app/Info.plist)"
+          [[ "$MIN_OS" =~ ^[0-9]+\.[0-9]+([.][0-9]+)?$ ]] || {
+            echo "invalid built MinimumOSVersion: $MIN_OS" >&2
+            exit 1
+          }
           (cd build && zip -r -y Forge.ipa Payload)
           echo "size=$(stat -f%z build/Forge.ipa)" >> "$GITHUB_OUTPUT"
+          echo "min-os=$MIN_OS" >> "$GITHUB_OUTPUT"
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: forge-ipa
           path: mobile/build/Forge.ipa
@@ -115,26 +159,40 @@ jobs:
   release:
     name: publish release + source manifest
     needs: build-ipa
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [release, linux, x64]
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
     outputs:
       manifest-generated: ${{ steps.manifest.outcome }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.release_tag != '' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: forge-ipa
           path: dist
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+      - name: Attest unsigned IPA provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
         with:
-          tag_name: ${{ github.ref_name }}
+          subject-path: dist/Forge.ipa
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
+        with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           name: "Forge iOS ${{ needs.build-ipa.outputs.ipa-version }} (sideload)"
           files: |
             dist/Forge.ipa
             mobile/assets/icon.png
           generate_release_notes: true
+          make_latest: false
 
       - name: Generate SideStore/AltStore source manifest
         id: manifest
@@ -143,9 +201,11 @@ jobs:
           cp mobile/assets/icon.png site/icon.png
           VERSION="${{ needs.build-ipa.outputs.ipa-version }}"
           SIZE="${{ needs.build-ipa.outputs.ipa-size }}"
+          MIN_OS="${{ needs.build-ipa.outputs.ipa-min-os }}"
           DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/Forge.ipa"
-          ICON_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/icon.png"
+          RELEASE_TAG="${{ inputs.release_tag || github.ref_name }}"
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/Forge.ipa"
+          ICON_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/icon.png"
 
           # SideStore's AltSource decoder requires a per-app iconURL (nil → decode error) and a
           # versions[].version that equals the IPA's CFBundleShortVersionString.
@@ -157,6 +217,7 @@ jobs:
             --argjson size "$SIZE" \
             --arg bundleId "$BUNDLE_ID" \
             --arg dev "$DEVELOPER_NAME" \
+            --arg minOS "$MIN_OS" \
             '{
               name: "Forge",
               identifier: ($bundleId + ".source"),
@@ -179,7 +240,7 @@ jobs:
                       localizedDescription: "SideStore build.",
                       downloadURL: $url,
                       size: $size,
-                      minOSVersion: "16.0"
+                      minOSVersion: $minOS
                     }
                   ]
                 }
@@ -190,24 +251,85 @@ jobs:
           cat site/forge-source.json
 
       - name: Upload manifest as release asset
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: site/forge-source.json
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
-        with:
-          path: site
+          make_latest: false
 
   deploy-pages:
     name: publish stable add-source URL
     needs: release
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [release, linux, x64]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Protect the stable source from an older repair tag
+        id: newest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          latest="$({
+            gh release list --limit 100 --json tagName,isDraft,isPrerelease \
+              --jq '.[] | select(.isDraft == false and .isPrerelease == false) | .tagName'
+          } | grep -E '^mobile-v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)"
+          [ -n "$latest" ] || {
+            echo 'No published mobile-vX.Y.Z release exists.' >&2
+            exit 1
+          }
+          if [ "$RELEASE_TAG" = "$latest" ]; then
+            echo 'publish=true' >> "$GITHUB_OUTPUT"
+            echo "Publishing stable SideStore source for newest release $RELEASE_TAG."
+          else
+            echo 'publish=false' >> "$GITHUB_OUTPUT"
+            echo "Repaired $RELEASE_TAG without replacing stable source for newer release $latest."
+          fi
+      # Reconstruct from durable release assets in this retryable job. A delayed failed-job rerun
+      # therefore does not depend on upload-pages-artifact's one-day artifact retention.
+      - name: Reconstruct published site
+        if: steps.newest.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          mkdir site
+          gh release download "$RELEASE_TAG" \
+            --pattern forge-source.json --pattern icon.png --dir site
+          test -s site/forge-source.json
+          test -s site/icon.png
+          jq -e '(.apps | length == 1) and (.apps[0].versions | length >= 1)' site/forge-source.json >/dev/null
+      - name: Upload fresh Pages artifact
+        if: steps.newest.outputs.publish == 'true'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
+        with:
+          path: site
       - name: Deploy to GitHub Pages
+        if: steps.newest.outputs.publish == 'true'
         id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128
+      - name: Verify stable SideStore source
+        if: steps.newest.outputs.publish == 'true'
+        env:
+          SOURCE_URL: https://adulari.github.io/forge/forge-source.json
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          expected="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/Forge.ipa"
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent --show-error --location "$SOURCE_URL" -o published.json \
+              && download="$(jq -er '.apps[0].versions[0].downloadURL' published.json)" \
+              && [ "$download" = "$expected" ] \
+              && curl --fail --silent --show-error --location --connect-timeout 15 --head "$download" >/dev/null; then
+              exit 0
+            fi
+            sleep $((attempt * 3))
+          done
+          echo "SideStore source verification failed: $SOURCE_URL" >&2
+          exit 1

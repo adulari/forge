@@ -1,19 +1,63 @@
 name: release
 
-# Build release binaries for Linux, macOS (Apple Silicon + Intel), and Windows whenever a
-# `v*` tag is pushed, and attach them to a GitHub Release.
+# From protected `main`, require an existing `v*` tag at the exact workflow-dispatch SHA, build five
+# release binaries, attest them, and attach them to the matching GitHub Release.
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing vX.Y.Z tag at the protected-main dispatch SHA
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.release_tag }}
+  cancel-in-progress: false
 
 permissions:
-  contents: write
-  pull-requests: write
-  actions: write # lets the Homebrew-formula step `gh workflow run ci.yml` against the PR branch
+  contents: read
 
 jobs:
+  preflight:
+    name: verify release provenance
+    runs-on: [release, linux, x64, heavy]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          fetch-depth: 0
+      - name: Verify tag matches Cargo version and dispatch SHA
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "release tag must look like v2.6.6: $RELEASE_TAG" >&2
+            exit 1
+          }
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          [ "$RELEASE_TAG" = "v$version" ] || {
+            echo "release tag $RELEASE_TAG does not match workspace version $version" >&2
+            exit 1
+          }
+          TAG_SHA="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          [ "$(git rev-parse HEAD)" = "$TAG_SHA" ] || {
+            echo "checked-out source does not match $RELEASE_TAG" >&2
+            exit 1
+          }
+          [ "$TAG_SHA" = "$DISPATCH_SHA" ] || {
+            echo "release tag $RELEASE_TAG ($TAG_SHA) must equal workflow dispatch SHA $DISPATCH_SHA" >&2
+            exit 1
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "release tag is not reachable from origin/main" >&2
+            exit 1
+          }
+
   # Generate shell completions + the man page ONCE (they're platform-independent text). Runs
   # fully in parallel with `build` below (no `needs` either way) — it used to hard-block every
   # platform build for its own ~6min compile (it links most of forge-cli's dependency graph in
@@ -22,13 +66,17 @@ jobs:
   # clap tree via its library facade — no runtime CLI subcommand.
   assets:
     name: completions + man page
-    runs-on: [self-hosted, linux, x64]
+    needs: preflight
+    runs-on: [release, linux, x64, heavy]
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       - name: Generate completions + man page
-        run: cargo run --release -p xtasks -- gen-dist dist-assets
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        run: cargo run --release --locked -p xtasks -- gen-dist dist-assets
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: forge-assets
           path: dist-assets/**
@@ -39,69 +87,140 @@ jobs:
   # and `assets` finish, so this job has zero dependency on `assets` and starts immediately.
   build:
     name: build ${{ matrix.target }}
+    needs: preflight
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: [self-hosted, linux, x64]
+          - os: [release, linux, x64, heavy]
             target: x86_64-unknown-linux-gnu
             self_hosted: true
+            portable_linux: true
+            linux_cross: false
             bin: forge
-          # arm64 stays on GitHub's native-arm runner: the self-hosted x64 box can't build
-          # aarch64 natively, and cross-compiling would need a linker that isn't set up. This
-          # leg only runs on release tags (rare), so keeping it hosted is cheap and correct.
-          - os: ubuntu-24.04-arm
+          # Keep ARM on the dedicated Arch release runner too. The pinned Bullseye container
+          # supplies its aarch64 cross-linker and a glibc 2.31 sysroot, so this neither spends
+          # hosted-runner quota nor inherits the rolling host's glibc/libstdc++ requirements.
+          - os: [release, linux, x64, heavy]
             target: aarch64-unknown-linux-gnu
-            self_hosted: false
+            self_hosted: true
+            portable_linux: true
+            linux_cross: true
             bin: forge
           - os: macos-latest
             target: aarch64-apple-darwin
             self_hosted: false
+            portable_linux: false
+            linux_cross: false
             bin: forge
           - os: macos-latest
             target: x86_64-apple-darwin
             self_hosted: false
+            portable_linux: false
+            linux_cross: false
             bin: forge
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             self_hosted: false
+            portable_linux: false
+            linux_cross: false
             bin: forge.exe
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        if: ${{ !matrix.portable_linux }}
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           targets: ${{ matrix.target }}
 
-      # alsa-sys (pulled in transitively by the audio-capture path) needs ALSA dev headers +
-      # pkg-config at build time. The self-hosted x64 box already has them system-wide; the
-      # GitHub-hosted aarch64 leg is a clean image, so install them there or cargo build fails
-      # with "failed to run custom build command for alsa-sys".
-      - name: Install Linux audio build deps
-        if: ${{ runner.os == 'Linux' && !matrix.self_hosted }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev pkg-config
-
       # Ephemeral GitHub-hosted legs have no warm target/ dir, so the cache earns its keep.
-      # The self-hosted linux leg skips it: target/ already persists on that box's local disk
-      # between runs, so a network cache round-trip would be pure overhead on top of that.
+      # The portable Linux legs instead use dedicated Docker volumes on the release runner.
       - if: ${{ !matrix.self_hosted }}
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
         with:
           key: ${{ matrix.target }}
 
       - name: Build
+        if: ${{ !matrix.portable_linux }}
         env:
           FORGE_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
           FORGE_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
           FORGE_DISTRIBUTION: github-release
         run: cargo build --release --locked --bin forge --target ${{ matrix.target }}
 
+      - name: Build portable Linux binary in Bullseye
+        if: ${{ matrix.portable_linux }}
+        shell: bash
+        env:
+          FORGE_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
+          FORGE_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
+          FORGE_DISTRIBUTION: github-release
+          LINUX_CROSS: ${{ matrix.linux_cross }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          image='rust:1.88.0-bullseye@sha256:b315f988b86912bafa7afd39a6ded0a497bf850ec36578ca9a3bdd6a14d5db4e'
+          artifact_dir="$GITHUB_WORKSPACE/target/$TARGET/release"
+          cache_target="forge-release-bullseye-target-${TARGET//_/-}"
+          mkdir -p "$artifact_dir"
+
+          docker pull "$image"
+          docker run --rm \
+            --env CARGO_TARGET_DIR=/out \
+            --env FORGE_DISTRIBUTION \
+            --env FORGE_POSTHOG_HOST \
+            --env FORGE_POSTHOG_KEY \
+            --env HOST_GID="$(id -g)" \
+            --env HOST_UID="$(id -u)" \
+            --env LINUX_CROSS \
+            --env TARGET \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --volume "$artifact_dir:/artifact" \
+            --volume forge-release-cargo-git:/usr/local/cargo/git \
+            --volume forge-release-cargo-registry:/usr/local/cargo/registry \
+            --volume "$cache_target:/out" \
+            --workdir /workspace \
+            "$image" \
+            bash -euxo pipefail -c '
+              apt-get update -qq
+              packages=(cmake libclang-dev)
+              if [[ "$LINUX_CROSS" == true ]]; then
+                packages+=(gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user)
+              fi
+              apt-get install -y -qq --no-install-recommends "${packages[@]}"
+
+              if [[ "$LINUX_CROSS" == true ]]; then
+                rustup target add "$TARGET"
+                export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+                export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+                export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+                export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+                export BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu="--target=aarch64-linux-gnu --sysroot=/usr/aarch64-linux-gnu"
+              fi
+
+              cargo build --release --locked --bin forge --target "$TARGET"
+              install -m 0755 "/out/$TARGET/release/forge" /artifact/forge
+              chown "$HOST_UID:$HOST_GID" /artifact/forge
+
+              if [[ "$LINUX_CROSS" == true ]]; then
+                qemu-aarch64 -L /usr/aarch64-linux-gnu /artifact/forge --version
+              else
+                /artifact/forge --version
+              fi
+            '
+
+      - name: Verify portable Linux runtime dependencies
+        if: ${{ matrix.portable_linux }}
+        shell: bash
+        run: scripts/check-linux-runtime-deps.sh "target/${{ matrix.target }}/release/${{ matrix.bin }}"
+
       - name: Upload raw binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: forge-raw-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/${{ matrix.bin }}
@@ -110,20 +229,43 @@ jobs:
   release:
     name: package + publish release
     needs: [assets, build]
-    runs-on: [self-hosted, linux, x64]
-    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: [release, linux, x64]
+    timeout-minutes: 30
+    environment: release
+    if: startsWith(inputs.release_tag, 'v')
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+      pull-requests: write
+      actions: write # dispatches required workflows against the generated distribution-manifest PR
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: forge-assets
           path: dist-assets
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           pattern: forge-raw-*
           path: raw
+
+      - name: Verify native release binary version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          binary=raw/forge-raw-x86_64-unknown-linux-gnu/forge
+          chmod 0755 "$binary"
+          [ "$("$binary" --version)" = "forge ${RELEASE_TAG#v}" ] || {
+            echo "native release binary version does not match $RELEASE_TAG" >&2
+            exit 1
+          }
 
       # Assemble each platform's final archive here (not per-matrix-leg): now that `assets` and
       # `build` run fully in parallel, this is the one place that needs both. Doing it once also
@@ -132,7 +274,7 @@ jobs:
       # it's targeting.
       - name: Package all platforms
         run: |
-          set -e
+          set -euo pipefail
           declare -A ARCHIVE=(
             [x86_64-unknown-linux-gnu]=tar.gz
             [aarch64-unknown-linux-gnu]=tar.gz
@@ -180,8 +322,10 @@ jobs:
       # require it. Hybrid: generate_release_notes below appends GitHub's auto PR list.
       - name: Compose release notes
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           {
             echo "## Forge v${VERSION}"
             echo
@@ -198,9 +342,18 @@ jobs:
           } > dist/RELEASE_NOTES.md
           echo "----- composed release body -----"; cat dist/RELEASE_NOTES.md
 
-      - name: Publish
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+      - name: Attest CLI/TUI release provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
         with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+
+      - name: Publish
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
+        with:
+          tag_name: ${{ inputs.release_tag }}
           files: |
             dist/*.tar.gz
             dist/*.zip
@@ -208,34 +361,37 @@ jobs:
           body_path: dist/RELEASE_NOTES.md
           generate_release_notes: true
           fail_on_unmatched_files: false
+          make_latest: true
 
-      # Keep Homebrew, AUR, and Scoop in step with THIS release's just-built checksums (no "sha
+      # Keep Homebrew, AUR metadata, and Scoop in step with THIS release's just-built checksums (no "sha
       # race" against assets that don't exist yet). Opens a PR because main is branch-protected.
       # This is a required release stage: a published binary with broken/stale package-manager
       # metadata is an incomplete release, so failures stay visible instead of being swallowed.
       #
       # The PR is opened using GITHUB_TOKEN, so its `pull_request` event does NOT spawn a new
       # workflow run (GitHub's anti-recursion guard on the default token) — the branch-protection-
-      # required "CI" check would otherwise never appear on it, leaving `gh pr merge --auto` stuck
+      # required checks would otherwise never appear on it, leaving `gh pr merge --auto` stuck
       # forever. `workflow_dispatch` is explicitly exempt from that guard, so we manually dispatch
-      # ci.yml against the PR branch to get a real "CI" check posted to its head SHA first.
+      # every required workflow against the PR branch before enabling auto-merge.
       - name: Update package-manager manifests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           git clone --depth 1 --branch main \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" brew-repo
           cd brew-repo
           bash scripts/update-package-manifests.sh "$VERSION" "$GITHUB_WORKSPACE/dist/checksums.txt"
-          if git diff --quiet homebrew/forge.rb packaging/aur/PKGBUILD packaging/scoop/forge.json; then
+          (cd packaging/aur && makepkg --printsrcinfo > .SRCINFO)
+          if git diff --quiet Formula/forge.rb packaging/aur/PKGBUILD packaging/aur/.SRCINFO bucket/forge.json; then
             echo "package manifests already current"; exit 0
           fi
           BRANCH="dist/v$VERSION"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$BRANCH"
-          git add homebrew/forge.rb packaging/aur/PKGBUILD packaging/scoop/forge.json
+          git add Formula/forge.rb packaging/aur/PKGBUILD packaging/aur/.SRCINFO bucket/forge.json
           git commit -m "chore(dist): update manifests to v$VERSION"
           git push -f origin "$BRANCH"
           if ! gh pr view "$BRANCH" --json url --jq .url >/dev/null 2>&1; then
@@ -243,5 +399,15 @@ jobs:
               --title "chore(dist): update package manifests to v$VERSION" \
               --body "Auto-generated by release.yml after publishing v$VERSION. Homebrew, AUR, and Scoop hashes come from this release's checksums.txt."
           fi
-          gh workflow run ci.yml --ref "$BRANCH"
+          for workflow in ci.yml security.yml mobile-typecheck.yml codeql.yml; do
+            gh workflow run "$workflow" --ref "$BRANCH"
+          done
           gh pr merge "$BRANCH" --squash --auto
+
+      - name: Dispatch matching desktop and web releases from protected main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh workflow run app-desktop.yml --ref main -f release_tag="$RELEASE_TAG"
+          gh workflow run app-web.yml --ref main -f release_tag="$RELEASE_TAG"

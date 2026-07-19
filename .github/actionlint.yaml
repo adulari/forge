@@ -1,0 +1,7 @@
+self-hosted-runner:
+  labels:
+    - heavy
+    - linux
+    - release
+    - self-hosted
+    - x64

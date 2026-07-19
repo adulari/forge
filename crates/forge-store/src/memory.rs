@@ -6,7 +6,11 @@
 
 use std::collections::HashSet;
 
-use crate::{Store, StoreError};
+use rusqlite::{Connection, TransactionBehavior};
+
+use crate::{
+    append_sync_revision, sync_json, with_busy_retry, Store, StoreError, SyncJournalOperation,
+};
 
 type Result<T> = std::result::Result<T, StoreError>;
 
@@ -46,21 +50,29 @@ impl Store {
         if text.is_empty() {
             return Err(StoreError::Pool("empty memory text".into()));
         }
-        if let Some(existing) = self.find_duplicate_memory(scope, text)? {
-            self.lock()?.execute(
-                "UPDATE memory SET salience = min(1.0, salience + 0.1), \
-                 updated_at = strftime('%s','now') WHERE id = ?1",
-                [&existing],
-            )?;
-            return Ok(existing);
-        }
         let id = forge_types::new_id();
-        self.lock()?.execute(
-            "INSERT INTO memory (id, scope, kind, text, source_session) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![id, scope, kind, text, source_session],
-        )?;
-        self.evict_memories_over_cap(scope)?;
-        Ok(id)
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let stored_id = if let Some(existing) = find_duplicate_memory_on(&tx, scope, text)? {
+                tx.execute(
+                    "UPDATE memory SET salience = min(1.0, salience + 0.1), \
+                     updated_at = strftime('%s','now') WHERE id = ?1",
+                    [&existing],
+                )?;
+                existing
+            } else {
+                tx.execute(
+                    "INSERT INTO memory (id, scope, kind, text, source_session) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![&id, scope, kind, text, source_session],
+                )?;
+                id.clone()
+            };
+            append_memory_snapshot(&tx, &stored_id)?;
+            evict_memories_over_cap_on(&tx, scope)?;
+            tx.commit()?;
+            Ok(stored_id)
+        })
     }
 
     /// Like `add_memory`, but also stores the embedding vector (little-endian f32 bytes) on the
@@ -82,56 +94,30 @@ impl Store {
             return Err(StoreError::Pool("empty memory text".into()));
         }
         let bytes = f32_to_le_bytes(embedding);
-        if let Some(existing) = self.find_duplicate_memory(scope, text)? {
-            self.lock()?.execute(
-                "UPDATE memory SET salience = min(1.0, salience + 0.1), \
-                 updated_at = strftime('%s','now'), embedding = ?2 WHERE id = ?1",
-                rusqlite::params![&existing, &bytes],
-            )?;
-            return Ok(existing);
-        }
         let id = forge_types::new_id();
-        self.lock()?.execute(
-            "INSERT INTO memory (id, scope, kind, text, source_session, embedding) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![id, scope, kind, text, source_session, &bytes],
-        )?;
-        self.evict_memories_over_cap(scope)?;
-        Ok(id)
-    }
-
-    /// The id of an existing memory in `scope` whose text is a near-duplicate of `text`, if any.
-    fn find_duplicate_memory(&self, scope: &str, text: &str) -> Result<Option<String>> {
-        let want = tokenize(text);
-        if want.is_empty() {
-            return Ok(None);
-        }
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare("SELECT id, text FROM memory WHERE scope = ?1")?;
-        let rows = stmt.query_map([scope], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        for row in rows.flatten() {
-            if jaccard(&want, &tokenize(&row.1)) >= DUP_JACCARD {
-                return Ok(Some(row.0));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Evict the least-salient (then least-recently-updated) rows of `scope` past
-    /// [`MEMORY_SCOPE_CAP`], so a scope's memory count — and the cost of
-    /// [`find_duplicate_memory`](Self::find_duplicate_memory)'s per-row scan — never grows
-    /// unbounded.
-    fn evict_memories_over_cap(&self, scope: &str) -> Result<()> {
-        self.lock()?.execute(
-            "DELETE FROM memory WHERE scope = ?1 AND id NOT IN ( \
-               SELECT id FROM memory WHERE scope = ?1 \
-               ORDER BY salience DESC, updated_at DESC LIMIT ?2 \
-             )",
-            rusqlite::params![scope, MEMORY_SCOPE_CAP],
-        )?;
-        Ok(())
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let stored_id = if let Some(existing) = find_duplicate_memory_on(&tx, scope, text)? {
+                tx.execute(
+                    "UPDATE memory SET salience = min(1.0, salience + 0.1), \
+                     updated_at = strftime('%s','now'), embedding = ?2 WHERE id = ?1",
+                    rusqlite::params![&existing, &bytes],
+                )?;
+                existing
+            } else {
+                tx.execute(
+                    "INSERT INTO memory (id, scope, kind, text, source_session, embedding) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![&id, scope, kind, text, source_session, &bytes],
+                )?;
+                id.clone()
+            };
+            append_memory_snapshot(&tx, &stored_id)?;
+            evict_memories_over_cap_on(&tx, scope)?;
+            tx.commit()?;
+            Ok(stored_id)
+        })
     }
 
     /// All memories in a scope, most-salient + most-recent first.
@@ -217,17 +203,37 @@ impl Store {
 
     /// Delete one memory by id. `Ok(true)` if a row was removed.
     pub fn delete_memory(&self, id: &str) -> Result<bool> {
-        Ok(self
-            .lock()?
-            .execute("DELETE FROM memory WHERE id = ?1", [id])?
-            > 0)
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let deleted = tx.execute("DELETE FROM memory WHERE id = ?1", [id])? > 0;
+            if deleted {
+                append_sync_revision(&tx, "memory", id, SyncJournalOperation::Tombstone, &[])?;
+            }
+            tx.commit()?;
+            Ok(deleted)
+        })
     }
 
     /// Delete every memory in a scope. Returns how many were removed.
     pub fn clear_memories(&self, scope: &str) -> Result<usize> {
-        Ok(self
-            .lock()?
-            .execute("DELETE FROM memory WHERE scope = ?1", [scope])?)
+        with_busy_retry(|| {
+            let mut conn = self.lock()?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let ids = {
+                let mut statement = tx.prepare("SELECT id FROM memory WHERE scope = ?1")?;
+                let ids = statement
+                    .query_map([scope], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                ids
+            };
+            let deleted = tx.execute("DELETE FROM memory WHERE scope = ?1", [scope])?;
+            for id in &ids {
+                append_sync_revision(&tx, "memory", id, SyncJournalOperation::Tombstone, &[])?;
+            }
+            tx.commit()?;
+            Ok(deleted)
+        })
     }
 
     /// Number of memories stored in a scope.
@@ -238,6 +244,67 @@ impl Store {
             |r| r.get(0),
         )?)
     }
+}
+
+fn find_duplicate_memory_on(conn: &Connection, scope: &str, text: &str) -> Result<Option<String>> {
+    let want = tokenize(text);
+    if want.is_empty() {
+        return Ok(None);
+    }
+    let mut statement = conn.prepare("SELECT id, text FROM memory WHERE scope = ?1")?;
+    let rows = statement.query_map([scope], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows.flatten() {
+        if jaccard(&want, &tokenize(&row.1)) >= DUP_JACCARD {
+            return Ok(Some(row.0));
+        }
+    }
+    Ok(None)
+}
+
+fn append_memory_snapshot(conn: &Connection, id: &str) -> Result<()> {
+    let payload = conn.query_row(
+        "SELECT id, scope, kind, text, source_session, created_at, updated_at, salience
+         FROM memory WHERE id = ?1",
+        [id],
+        |row| {
+            Ok(serde_json::json!({
+                "id": row.get::<_, String>(0)?,
+                "scope": row.get::<_, String>(1)?,
+                "kind": row.get::<_, String>(2)?,
+                "text": row.get::<_, String>(3)?,
+                "source_session": row.get::<_, String>(4)?,
+                "created_at": row.get::<_, i64>(5)?,
+                "updated_at": row.get::<_, i64>(6)?,
+                "salience": row.get::<_, f64>(7)?,
+            }))
+        },
+    )?;
+    let payload = sync_json(payload)?;
+    append_sync_revision(conn, "memory", id, SyncJournalOperation::Upsert, &payload)
+}
+
+fn evict_memories_over_cap_on(conn: &Connection, scope: &str) -> Result<()> {
+    let ids = {
+        let mut statement = conn.prepare(
+            "SELECT id FROM memory WHERE scope = ?1 AND id NOT IN (
+                 SELECT id FROM memory WHERE scope = ?1
+                 ORDER BY salience DESC, updated_at DESC LIMIT ?2
+             )",
+        )?;
+        let ids = statement
+            .query_map(rusqlite::params![scope, MEMORY_SCOPE_CAP], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids
+    };
+    for id in &ids {
+        conn.execute("DELETE FROM memory WHERE id = ?1", [id])?;
+        append_sync_revision(conn, "memory", id, SyncJournalOperation::Tombstone, &[])?;
+    }
+    Ok(())
 }
 
 fn row_to_memory(r: &rusqlite::Row) -> rusqlite::Result<Memory> {

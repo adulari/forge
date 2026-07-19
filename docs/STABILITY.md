@@ -1,7 +1,7 @@
 # Stability Policy
 
 Forge follows [SemVer](https://semver.org/). This document defines what "stable" means for each
-public surface as Forge moves toward v2.0, and what a major/minor/patch bump may change.
+public surface in the current v2 line, and what a major/minor/patch bump may change.
 
 ## Versioned surfaces
 
@@ -10,7 +10,7 @@ public surface as Forge moves toward v2.0, and what a major/minor/patch bump may
 | **CLI** | Subcommand names, their flags, and documented exit codes | Stable |
 | **Config** (`config.toml`) | The documented sections + keys in [`docs/config-schema.json`](./config-schema.json) | Stable |
 | **Output formats** | `--format json` / `--format sarif` for `forge assay`, and other documented machine-readable outputs | Stable |
-| **Crate APIs** (`forge-*` on crates.io) | Public Rust items of the library crates | **Unstable** pre-2.0 (see below) |
+| **Crate APIs** (`forge-agent-*` on crates.io) | Public Rust items of the library crates | Internal/unstable (see below) |
 | Internal logs, the TUI layout, human-readable stdout prose | — | Not covered; may change anytime |
 
 ## What each bump may do
@@ -49,7 +49,7 @@ public surface as Forge moves toward v2.0, and what a major/minor/patch bump may
   removed or repurposed. Always parse defensively and ignore unknown fields.
 - Human-readable (default) output is **not** stable — do not scrape it; use a `--format` flag.
 
-## Crate API stability (pre-2.0)
+## Crate API stability
 
 The `forge-*` library crates are published to crates.io (as `forge-agent-*`) to make the `forge`
 binary installable (`cargo install forge-agent`), not as a stable embedding API. Until a crate

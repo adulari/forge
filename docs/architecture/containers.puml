@@ -10,7 +10,7 @@ skinparam component {
 
 actor Developer as dev
 
-package "forge (single static binary)" {
+package "forge (single native binary)" {
 
   [forge-cli\narg parsing (clap), command dispatch,\nbootstraps runtime + wiring] as cli #D9E8FF
 

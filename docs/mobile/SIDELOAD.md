@@ -6,9 +6,10 @@ signing certificates. It mirrors the Helm app's distribution flow.
 
 ## How it works
 
-1. Pushing a `mobile-v*` tag (e.g. `mobile-v1.0.0`) runs
-   [`.github/workflows/mobile-sidestore.yml`](../../.github/workflows/mobile-sidestore.yml) on a
-   macOS GitHub Actions runner:
+1. After creating a `mobile-v*` tag (e.g. `mobile-v1.0.1`) on `main`, a maintainer dispatches
+   [`.github/workflows/mobile-sidestore.yml`](../../.github/workflows/mobile-sidestore.yml) from
+   protected `main` with that existing tag. The workflow checks out and validates the exact tag,
+   then runs on a macOS GitHub Actions runner:
    - `npx expo prebuild -p ios` generates the native Xcode project from `mobile/app.config.ts`.
    - `xcodebuild archive` builds it with `CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO` — no
      certificate or provisioning profile is involved.
@@ -20,21 +21,23 @@ signing certificates. It mirrors the Helm app's distribution flow.
    - To **GitHub Pages**, so there's one URL that always resolves to the *latest* release without
      needing to know a tag name.
 
-Because the repo (`adulari/forge`) is public, the macOS runner minutes are free and unlimited on
-GitHub Actions.
+The unsigned archive still requires Xcode, so this is the one release leg that cannot run on the
+dedicated Arch runner. It uses GitHub's `macos-15` runner; hosted-runner availability and GitHub's
+current public-repository policy limits still apply.
 
 ## The add-source URL
 
-Once GitHub Pages is enabled for this repo (see "One-time setup" below), the stable add-source URL
-is:
+The production repository is configured and the stable add-source URL is live:
 
 ```
 https://adulari.github.io/forge/forge-source.json
 ```
 
-This is what you paste into SideStore. It is never versioned in the URL — every `mobile-v*`
-release overwrites it in place, and the `versions[]` entry inside always reflects the tag that was
-just built.
+Verify that URL returns the source JSON before pasting it into SideStore. It is never versioned in
+the URL. A protected-`main` deployment replaces it only when the requested tag is the newest
+published `mobile-v*` version, and then verifies that the live manifest points to that exact IPA.
+Repairing an older tag can refresh that release's IPA/manifest assets but cannot roll the stable
+source back from a newer mobile release.
 
 If Pages isn't enabled yet, use the release-asset copy instead (versioned, so it won't silently
 update):
@@ -53,10 +56,13 @@ https://github.com/adulari/forge/releases/download/<tag>/forge-source.json
    avoids needing a paid Apple Developer account for Track A.
 4. Trust the resulting profile if prompted (Settings → General → VPN & Device Management).
 
+The generated app currently requires iOS 16.4; the source manifest must advertise the same minimum
+before the release is announced.
+
 ## Updating
 
-SideStore polls added sources periodically (and on manual refresh). When a new `mobile-v*` tag
-ships, `forge-source.json`'s `versions[0]` changes and SideStore surfaces an in-app update — no
+SideStore polls added sources periodically (and on manual refresh). When a new `mobile-v*` tag is
+published through the workflow, `forge-source.json`'s `versions[0]` changes and SideStore surfaces an in-app update — no
 re-adding the source, no re-pairing.
 
 Because SideStore's free-Apple-ID signing is tied to a 7-day certificate refresh cycle, SideStore
@@ -71,14 +77,21 @@ keeps the CI script simple. If historical versions are ever wanted (e.g. to let 
 extend the `jq` step in `mobile-sidestore.yml` to fetch and merge the previous manifest's
 `versions[]` array before writing the new one.
 
-## One-time setup required (not automatable from the workflow)
+## One-time setup for forks
 
-GitHub Pages must be pointed at Actions-based deployment once, by a human with repo admin access:
+Forge's production repository is already configured. A fork must point GitHub Pages at
+Actions-based deployment once, by a human with repo admin access:
 
 **Settings → Pages → Build and deployment → Source: "GitHub Actions"**
 
-Until that's done, the `deploy-pages` job in `mobile-sidestore.yml` will fail (or the Pages URL
-simply won't resolve) — use the release-asset manifest URL as a fallback in the meantime.
+The `github-pages` environment must allow deployments from the protected `main` branch:
+
+**Settings → Environments → github-pages → Deployment branches and tags → Selected branches
+→ `main`**
+
+Without both settings, GitHub can reject `deploy-pages` before a runner starts (or the Pages URL
+simply won't resolve) even after the IPA and release manifest succeed. Use the release-asset
+manifest URL as a fallback in the meantime.
 
 ## Alternative considered: serving the manifest from `forge serve`
 

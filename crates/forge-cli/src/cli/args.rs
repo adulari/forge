@@ -277,6 +277,88 @@ pub(crate) enum AssayCmd {
     },
 }
 
+/// Managed Forge Anywhere account and host operations.
+#[derive(Subcommand)]
+pub(crate) enum AnywhereCmd {
+    /// Guided, resumable setup: sign in, recover or enroll, activate this host, and verify it.
+    Setup {
+        /// Stable name shown in the host fleet (defaults to the system hostname).
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+    },
+    /// Sign in with GitHub's device flow and enroll this controller device.
+    Login,
+    /// Register this machine as a managed host and enable its connector.
+    Enable {
+        /// Stable name shown in the host fleet.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+    },
+    /// Show local enrollment plus live entitlement, connection, and quota state.
+    Status,
+    /// Diagnose setup, enrollment, connector, and service readiness without printing secrets.
+    Doctor,
+    /// Move a paused session and its workspace capsule to another host.
+    Handoff {
+        /// Session id or unique prefix.
+        session: String,
+        /// Destination host id or unique name.
+        #[arg(long, value_name = "HOST")]
+        to: String,
+    },
+    /// Create an end-to-end encrypted replay link.
+    Share {
+        /// Session id or unique prefix.
+        session: String,
+        /// Link lifetime, capped at 30 days.
+        #[arg(long, value_enum, default_value_t = ShareExpiry::Hours24)]
+        expires: ShareExpiry,
+    },
+    /// Queue an encrypted create-session job for a host, even when its live relay is offline.
+    Job {
+        /// Destination host id, unique id prefix, or unique name.
+        #[arg(long, value_name = "HOST")]
+        to: String,
+        /// Working directory on the destination host (encrypted end to end).
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<String>,
+        /// Optional session title (encrypted end to end).
+        #[arg(long)]
+        title: Option<String>,
+        /// Optional model pin (encrypted end to end).
+        #[arg(long)]
+        model: Option<String>,
+        /// Initial permission mode.
+        #[arg(long, value_name = "MODE")]
+        temper: Option<String>,
+        /// Create the session in an isolated git worktree.
+        #[arg(long)]
+        worktree: bool,
+    },
+    /// Retry exact queued job ciphertext and poll categorical host acknowledgements.
+    Jobs,
+    /// List enrolled devices, or atomically revoke one and rotate the data-key epoch.
+    Devices {
+        /// Device id to revoke. Omit to list devices.
+        #[arg(long, value_name = "DEVICE")]
+        revoke: Option<String>,
+    },
+    /// Revoke this host and stop its managed connector. Local Forge is unchanged.
+    Disable,
+    /// Revoke local account tokens while preserving local Forge and encrypted history.
+    Logout,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ShareExpiry {
+    #[value(name = "24h")]
+    Hours24,
+    #[value(name = "7d")]
+    Days7,
+    #[value(name = "30d")]
+    Days30,
+}
+
 #[derive(Subcommand)]
 pub(crate) enum Command {
     /// Run a single agent turn against your prompt.
@@ -361,13 +443,16 @@ pub(crate) enum Command {
     /// create/attach/archive them from the page. See docs/features/remote-control.md.
     Serve {
         /// Bind loopback only (control from this machine, plain HTTP).
-        #[arg(long, conflicts_with = "anywhere")]
+        #[arg(long, conflicts_with_all = ["tunnel", "anywhere"])]
         local: bool,
         /// Bind the LAN with self-signed HTTPS (this is the default; accepted for symmetry).
-        #[arg(long, conflicts_with_all = ["local", "anywhere"])]
+        #[arg(long, conflicts_with_all = ["local", "tunnel", "anywhere"])]
         lan: bool,
         /// Bind loopback and open a public tunnel (cloudflared/ngrok) so any network reaches it.
         #[arg(long)]
+        tunnel: bool,
+        /// Deprecated alias for `--tunnel`; managed Forge Anywhere uses `forge anywhere`.
+        #[arg(long, hide = true, conflicts_with_all = ["local", "lan", "tunnel"])]
         anywhere: bool,
         /// Listen port. Defaults to `[remote] port` from config, else 7420. Keep it stable —
         /// the PWA install is bound to the origin.
@@ -379,6 +464,11 @@ pub(crate) enum Command {
         /// New sessions use the offline deterministic mock provider (testing).
         #[arg(long)]
         mock: bool,
+    },
+    /// Securely reach Forge through the optional managed Anywhere companion.
+    Anywhere {
+        #[command(subcommand)]
+        cmd: AnywhereCmd,
     },
     /// Attach a thin terminal client to a running `forge serve` daemon: watch a live session's
     /// stream (assistant output, tool activity, turn boundaries) and drive it — submit prompts and
@@ -1083,7 +1173,7 @@ pub(crate) enum ServiceCmd {
     /// `--anywhere`/`--lan`/`--local` is given.
     Install {
         /// Bind loopback and open a public tunnel (cloudflared/ngrok) — passed through to
-        /// `forge serve --anywhere`.
+        /// `forge serve --tunnel`.
         #[arg(long, conflicts_with_all = ["lan", "local"])]
         anywhere: bool,
         /// Bind the LAN with self-signed HTTPS. This is already the default; accepted for

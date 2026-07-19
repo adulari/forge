@@ -1,8 +1,8 @@
 # Forge App — FEATURES (capability inventory, parity gaps, net-new, IA)
 
-Ground truth: `crates/forge-cli/src/serve.rs` + `remote.rs` (protocol v7) and the daemon web PWA
-(`remote_assets/page.html` + `app.js`), both read on 2026-07-06. Every row below is backed by a
-real endpoint or Snapshot field — nothing here invents data the daemon doesn't serve.
+Ground truth: `crates/forge-cli/src/serve.rs` + `remote.rs` (protocol v8), the daemon web PWA
+(`remote_assets/page.html` + `app.js`), and the shipped companion app, refreshed on 2026-07-17.
+Every row below is backed by a real endpoint or Snapshot field.
 
 Priorities: **P0** = core parity (app is unusable without) · **P1** = full parity with the web
 PWA · **P2** = enhancement beyond both existing UIs.
@@ -47,7 +47,7 @@ PWA · **P2** = enhancement beyond both existing UIs.
 | `cost_usd`, `context_tokens`, `context_limit`, `model`, `tier`, `temper` | Session status strip (CostMetric, ContextGauge, model/tier, temper chip) | P0 |
 | `title`, `cwd`, `worktree`, `session_id` | Session header | P0 |
 | `exposure` | Header badge; danger Banner when `public (…)` | P1 |
-| `protocol` | Persistent warn Banner on mismatch (≠7), with "update Forge / update app" copy | P1 |
+| `protocol` | Persistent warn Banner on mismatch (≠8), with "update Forge / update app" copy | P1 |
 | `revision`, `resync`, `closed` | ws.ts reconnect machinery (kept); `closed` → "session ended" banner, stop reconnecting, offer History | P0 |
 
 ### 1.3 RemoteInput sends
@@ -63,49 +63,25 @@ PWA · **P2** = enhancement beyond both existing UIs.
 
 ---
 
-## 2. Parity gap list (what the CURRENT Expo app is missing / gets wrong)
+## 2. Former parity gaps — delivered
 
-Vs the daemon web PWA and the daemon itself — these must all be closed by the redesign:
-
-1. **Web Push** — the PWA subscribes and receives Allow/Deny-actionable notifications with the
-   page closed; the Expo app has nothing. New app: full Web Push on the web target
-   (`public/sw.js` + `lib/push/push.web.ts`); native remains a flagged backend gap (§3).
-2. **Voice input** — PWA has Web Speech transcription into the prompt box; Expo app has none.
-   New app: full parity + native mic, both platforms transcribing through the daemon's local
-   whisper endpoint (`POST /api/voice/transcribe`) instead of the browser-only Web Speech API —
-   `lib/voice/voice.ts` (native, expo-audio) / `voice.web.ts` (web + Tauri desktop, WebAudio).
-3. **Paste-image upload** — PWA uploads images pasted into the prompt; missing natively-shaped
-   composer. New app: web composer paste handler.
-4. **Protocol-mismatch banner** — PWA warns when `snapshot.protocol != 7`; Expo app ignores it.
-5. **Desktop keyboard parity for overlays** — PWA forwards arrows/Enter/Esc/Tab as `key` inputs
-   while an overlay is open; Expo app has no keyboard story. New app: web/desktop hotkeys.
-6. **Chat duplication bug** — the Expo chat renders snapshot `transcript` tail rows AND the
-   newest history page, which can show the same content twice (`session/[id]/index.tsx`
-   `combined`). Fixed by the timeline rule in ARCHITECTURE §4.1.4.
-7. **`done` field unused**, and turn-completion doesn't refresh history — finalized turns only
-   appear via the tail ring. Fixed by busy→idle history invalidation.
-8. **Installability** — the PWA is installable (manifest/sw); the Expo web export currently
-   ships no manifest/service worker. New app: PWA-complete web export.
-9. **Session quick actions from the list** — PWA has archive/merge/discard on every session row;
-   Expo app hides some behind navigation. New app: swipe + action sheet on SessionCard.
-10. **Public-exposure warning** — PWA badges `public (…)` exposure; carry through as a danger
-    banner (it means anyone with the link can drive the session).
-
-Things the current Expo app does that the PWA lacks (keep them): QR pairing, Face ID app lock,
-offline prompt queue with persistence, native attach pickers, per-session haptics.
+The redesign closed the original PWA/app gaps: web push actions, native APNs alerts and Live
+Activities, local-Whisper voice input, image/file attachment, protocol-v8 mismatch handling,
+desktop overlay hotkeys, history/live-tail deduplication, busy→idle history refresh, installable web
+assets, session quick actions, and public-exposure warnings. QR pairing, Face ID app lock, the
+persistent offline prompt queue, native attachment pickers, and haptics remain native advantages.
 
 ---
 
-## 3. Flagged backend gaps (do NOT build app-side; keep flagged)
+## 3. Remaining transport/data constraints
 
-- **Native push (APNs/FCM)**: `/api/push/*` is Web-Push-only. Smallest backend addition later:
-  accept `{kind:"apns"|"fcm", device_token}` on subscribe + a sender. Until then native ships
-  foreground-only alerts (Inbox tab + badge counts from the 3s fleet poll).
-- **Self-signed LAN TLS**: unfixable app-side; pairing errors must show the `--anywhere` /
-  `--local`+VPN guidance verbatim.
-- **Fleet prompt text**: `SessionRow` doesn't carry the pending prompt/question text — the Inbox
-  list can say *that* a session needs you, not *what* it asks. DecisionPeek (temporary WS attach)
-  is the app-side answer; a `waiting_reason` field on SessionRow is the flagged backend nicety.
+- **Self-signed LAN TLS:** clients do not trust default `--lan` automatically. Use `--anywhere` for
+  another device, same-machine `--local` for desktop/web, or an explicitly configured trusted HTTPS
+  reverse proxy such as Tailscale Serve.
+- **Fleet prompt text:** `SessionRow` does not carry the pending prompt/question text. The Inbox can
+  say *that* a session needs attention; DecisionPeek temporarily attaches to render the real card.
+- **Android background push:** native APNs is implemented for iOS; Android relies on the app/PWA
+  surfaces until an Android-native push channel is added.
 
 ---
 
@@ -120,7 +96,7 @@ src/app/
   (tabs)/inbox.tsx            # INBOX — waiting sessions; DecisionPeek sheets; tab badge = count
   (tabs)/history.tsx          # HISTORY — past sessions, search, resume
   (tabs)/settings.tsx         # SETTINGS — servers (multi-daemon), appearance, app lock,
-                              #   notifications (web), about/diagnostics (protocol v7, version)
+                              #   notifications, about/diagnostics (protocol v8, version)
   new-session.tsx             # modal (Rise)
   session/[id]/_layout.tsx    # session shell: header, status strip, Segmented, banners,
                               #   copy_text→clipboard, notes→toasts, socket provider
@@ -156,7 +132,7 @@ rail replaces tabs and ⌘K is the primary mover.
 | **Keyboard-first desktop**: ⌘K palette, ⌘1..4 tabs, ⌘N new session, Esc/arrow overlay passthrough, ⌘Enter send | `key` input + local nav | Enhancement | P2 |
 | **Cost analytics view** (Settings → Usage): total/per-project spend aggregated from live + past sessions | `cost_usd` on SessionRow/PastSessionRow | Enhancement | P2 |
 | **Voice input**: native + web mic, local-whisper transcription (`POST /api/voice/transcribe`) via animated recording pill, never auto-sends | PWA parity+ | Parity+ | done |
-| **Desktop later** (flagged, not v1): tray fleet glance, local-daemon auto-pair bridge | ARCHITECTURE §6.4 | Enhancement | later |
+| **Desktop later**: tray fleet glance (local-daemon discovery/start is already shipped) | ARCHITECTURE §6.4 | Enhancement | later |
 
-Non-goals (explicitly out): `forge api` OpenAI-compat server (separate product), any Rust/daemon
-changes, mock data of any kind, native APNs until the backend gap closes.
+Non-goals (explicitly out): `forge api` OpenAI-compat server (separate product) and mock data of any
+kind. Backend changes are documented in their owning Rust feature docs rather than invented here.

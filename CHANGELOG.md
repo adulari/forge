@@ -6,6 +6,12 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Forge Anywhere Recovery Kit v2** (#811): new accounts use a mandatory, checksum-protected
+  12-word offline Recovery Kit with account-bound key derivation, while existing 24-word kits
+  remain supported. A resumable `forge anywhere setup` flow, privacy-safe doctor, hostname-based
+  host naming, and the clearer `forge serve --tunnel` command complete the first CLI rollout.
+
 ## [2.7.0] - 2026-07-19
 
 A redesigned cross-platform app, the Forge Anywhere relay surface, and the production hardening of

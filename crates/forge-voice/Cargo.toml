@@ -10,6 +10,14 @@ repository.workspace = true
 [lib]
 name = "forge_voice"
 
+[features]
+# Keep the portable speech-to-text pipeline usable without linking a host audio stack. CPAL's
+# Linux backend depends on ALSA unconditionally, which would otherwise make every Forge command
+# require libasound.so.2 before main() can run. Applications that capture a local microphone can
+# opt in; file/upload decoding and Whisper transcription never need this feature.
+default = []
+microphone = ["dep:cpal"]
+
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
@@ -19,8 +27,9 @@ reqwest.workspace = true
 webpki-root-certs = "1"
 # Rust bindings for whisper.cpp (cmake + C++ build via whisper-rs-sys; cmake must be on PATH).
 whisper-rs = "0.16"
-# Mic capture (cross-platform: CoreAudio/WASAPI/ALSA/PulseAudio).
-cpal = "0.18"
+# Mic capture (cross-platform: CoreAudio/WASAPI/ALSA/PulseAudio). Optional because CPAL links the
+# platform audio runtime even when no recording is requested.
+cpal = { version = "0.18", optional = true }
 hound = "3.5"
 # m4a/aac/mp4 (mobile client uploads) + wav decode; kept feature-minimal (no mp3/flac/ogg/video).
 symphonia = { version = "0.6", default-features = false, features = [

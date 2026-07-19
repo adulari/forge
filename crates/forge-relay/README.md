@@ -6,8 +6,12 @@ for the user-facing disclosure of what data crosses it.
 
 A self-hosted `forge serve` daemon that hasn't configured its own Apple `.p8` key talks to this
 service instead of Apple directly. This process holds the real Apple Developer credential
-centrally; the relay never sees session content, source code, or a daemon's auth token — only
-an opaque device token, an environment string, and the notification payload text.
+centrally. Updated stock clients send only a static generic alert; the public deployment also sets
+`FORGE_RELAY_GENERIC_ALERTS=true`, so every alert is replaced again at the server boundary before
+APNs. Live Activity payloads contain coarse activity/cost/context status. During the upgrade window,
+an older daemon can still transmit rich alert text to the relay process, but the public server does
+not log it and never forwards it to Apple. Private relays intentionally default to rich alerts. The
+daemon auth token, full transcript, and source files are not sent to the relay.
 
 This is a standalone deployable service, **not** part of `forge-cli`'s single-binary delivery
 (ADR-0002's one anticipated exception). There is currently no CI deploy workflow — deploys are
@@ -20,11 +24,12 @@ if manual deploys become frequent enough to be annoying.
 | Env var | Required | Notes |
 |---|---|---|
 | `FORGE_APNS_TEAM_ID` | yes | Apple Developer Team ID |
-| `FORGE_APNS_KEY_ID` | yes | The APNs Auth Key's Key ID (App Store Connect → Certificates, IDs & Profiles → Keys) |
+| `FORGE_APNS_KEY_ID` | yes | The APNs Auth Key's Key ID (Apple Developer → Certificates, Identifiers & Profiles → Keys) |
 | `FORGE_APNS_KEY_PEM` | one of this or `_KEY_PATH` | The `.p8` file's contents, set directly as a secret — preferred, since the key never touches the container filesystem |
 | `FORGE_APNS_KEY_PATH` | one of this or `_KEY_PEM` | Path to a mounted `.p8` file, if you'd rather not put the PEM in an env var |
 | `FORGE_RELAY_ALLOWED_TOPICS` | no | Comma-separated allowlist. Default: `dev.adulari.forge,dev.adulari.forge.push-type.liveactivity` |
 | `FORGE_RELAY_TOKEN` | no | Optional private-relay bearer token; callers supply the same value as `FORGE_APNS_RELAY_TOKEN` |
+| `FORGE_RELAY_GENERIC_ALERTS` | no | Default `false` (private relays retain rich alerts). Set `true` on every public deployment to replace all alert text/routing fields with Forge's static generic payload before APNs |
 | `FORGE_RELAY_BIND_ADDR` | no | Listener address. Secure default: `127.0.0.1`; container platforms must explicitly use `0.0.0.0` |
 | `FORGE_RELAY_TRUST_PROXY_HEADERS` | no | Default `false`. Enable only behind a trusted proxy that overwrites `X-Real-IP`/`CF-Connecting-IP` |
 | `PORT` | no | Default `8787` |
@@ -60,6 +65,8 @@ Hardened reference files live in [`deploy/`](deploy/). The important invariants 
   world-readable environment file;
 - let nginx overwrite the trusted client-IP header and enable
   `FORGE_RELAY_TRUST_PROXY_HEADERS=true` only in that topology;
+- set `FORGE_RELAY_GENERIC_ALERTS=true` on the project-hosted public relay; leave it false only for
+  a private relay whose operator intentionally wants rich alerts;
 - disable access logging on the token-bearing `/3/device/{token}` route;
 - cap request bodies at Apple's 4 KiB payload limit;
 - if Cloudflare fronts the hostname, restrict ports 80/443 at the host firewall to Cloudflare's
@@ -73,7 +80,7 @@ restart, confirm the backend is not public (`curl http://ORIGIN_IP:8787/health` 
 
 ```sh
 curl https://forge.adulari.dev/relay/health
-# {"ok":true,"daily_sent":0}
+# {"daily_sent":0,"generic_alerts":true,"ok":true}
 ```
 
 ## Rollback
@@ -85,7 +92,8 @@ fly deploy --config crates/forge-relay/fly.toml --image <previous-image-ref>
 
 ## Monitoring
 
-Watch service logs for `rejected disallowed topic` (someone
+The public health response must report `"generic_alerts":true`; treat `false` as a failed rollout
+and stop before directing clients at it. Watch service logs for `rejected disallowed topic` (someone
 probing with the wrong bundle id) and `rate limited` warnings. A daily-cap trip logs loudly
 (`daily send cap reset (was N/CAP)`) rather than silently dropping — if `N` is ever close to
 `CAP`, that's the signal to investigate before the cap becomes a real availability problem for
@@ -95,6 +103,11 @@ Device tokens and payload bodies are intentionally never logged. Preserve that p
 front proxy too. Current clients put the token in `X-Forge-Device-Token` on the fixed
 `POST /3/device` route; the legacy `/3/device/{token}` route remains only for compatibility and
 must have access logging disabled.
+
+The daemon accepts only Apple's 64-character lowercase-hex token shape. It removes malformed
+legacy rows before sending and prunes a subscription when Apple returns `410 Unregistered` or a
+reason-qualified `400 BadDeviceToken`/`DeviceTokenNotForTopic`; other 400 responses do not destroy
+the stored subscription.
 
 ## Testing locally
 
