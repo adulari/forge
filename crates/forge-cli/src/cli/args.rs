@@ -285,9 +285,21 @@ pub(crate) enum AnywhereCmd {
         /// Stable name shown in the host fleet (defaults to the system hostname).
         #[arg(long, value_name = "NAME")]
         name: Option<String>,
+        /// Recover with an offline Recovery Kit instead of approval from an enrolled device.
+        #[arg(long)]
+        recovery: bool,
     },
     /// Sign in with GitHub's device flow and enroll this controller device.
-    Login,
+    Login {
+        /// Recover with an offline Recovery Kit instead of approval from an enrolled device.
+        #[arg(long)]
+        recovery: bool,
+    },
+    /// Approve a short-lived enrollment challenge from a new device.
+    Approve {
+        /// Challenge printed by `forge anywhere setup` on the new device.
+        challenge: String,
+    },
     /// Register this machine as a managed host and enable its connector.
     Enable {
         /// Stable name shown in the host fleet.
