@@ -32,6 +32,36 @@ fn serve_prefers_tunnel_and_retains_deprecated_anywhere_flag() {
 }
 
 #[test]
+fn anywhere_exposes_approval_and_explicit_recovery_fallback() {
+    let approve = Cli::try_parse_from(["forge", "anywhere", "approve", "challenge"])
+        .expect("approval command");
+    assert!(matches!(
+        approve.command,
+        Command::Anywhere {
+            cmd: AnywhereCmd::Approve { ref challenge }
+        } if challenge == "challenge"
+    ));
+
+    let setup = Cli::try_parse_from(["forge", "anywhere", "setup", "--recovery"])
+        .expect("setup recovery fallback");
+    assert!(matches!(
+        setup.command,
+        Command::Anywhere {
+            cmd: AnywhereCmd::Setup { recovery: true, .. }
+        }
+    ));
+
+    let login = Cli::try_parse_from(["forge", "anywhere", "login", "--recovery"])
+        .expect("login recovery fallback");
+    assert!(matches!(
+        login.command,
+        Command::Anywhere {
+            cmd: AnywhereCmd::Login { recovery: true }
+        }
+    ));
+}
+
+#[test]
 fn extract_code_blocks_pulls_fenced_blocks_with_lang() {
     let md =
         "Here you go:\n\n```rust\nfn main() {}\n```\n\nand shell:\n\n```bash\nls -la\n```\ndone";
