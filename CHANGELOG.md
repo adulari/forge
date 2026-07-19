@@ -6,6 +6,51 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-07-19
+
+A redesigned cross-platform app, the Forge Anywhere relay surface, and the production hardening of
+the public notification relay — the first release to ship the rebuilt mobile, desktop, and web UIs.
+
+### Added
+- **Forge Anywhere UI** (#812): the complete relay-transport surface across mobile, desktop, and
+  web — GitHub device-code sign-in, 24-word recovery phrase, host enrollment and detail (rename,
+  transport preference, disable/revoke), device pairing and atomic key-rotation, encrypted storage
+  and retention, remote-job queue, session hand-off and encrypted replay shares, billing and the
+  public read-only share viewer at `/shares/[id]`. Built over a typed `AnywhereClient` interface
+  with a seeded mock client so the managed relay backend plugs in behind the same contract; signed
+  out, the app is unchanged apart from the Settings and Connect entry points. Anywhere is a
+  transport plus Settings detail routes — no second dashboard, no new tab, and only three
+  design-system additions (`EntitlementBadge`, `HostDot`, `SyncGlyph`).
+- **Hearth redesign** (#810): the mobile, desktop, and web clients are rebuilt on one Expo +
+  react-native-web + Tauri codebase with the Emberline design system — de-boxed hairline lists, the
+  Fleet/session shell, command palette, telemetry and context gauges, and the full set of session
+  action sheets, with responsive desktop/web layouts sharing the mobile component tree.
+
+### Changed
+- **Public APNs relay default** (#805): stock installs point at the live
+  `forge.adulari.dev/relay` origin so zero-configuration notifications work out of the box.
+
+### Fixed
+- **Remote overlay delivery** (#810): background overlay loads (`/mesh`, `/usage`) now mark the
+  headless frame dirty so resolved overlays broadcast to remote clients instead of appearing stuck
+  loading; a finished workflow overlay no longer holds the projection on web clients
+  (`crates/forge-cli/src/cli/commands/run/driver.rs`, mobile `OverlayHost`).
+- **Idle bridge reaper** (#810): parked persistent Claude/Codex bridge processes are torn down
+  after an idle TTL instead of lingering as orphaned trees
+  (`crates/forge-provider/src/cli_provider.rs`).
+- **Desktop release publication** (#806): Linux AppImage packaging bypasses host binfmt
+  interception on the Arch release runner.
+- **Release manifests** (#807): Homebrew, Scoop, and AUR manifests track the published checksums.
+
+### Security
+- **Public APNs relay hardening** (#808): the production relay accepts only Forge alert and Live
+  Activity shapes with topic/environment/priority/body constraints and per-client, per-device, and
+  atomic daily limits; stock daemons send a single generic “Open Forge” alert rather than session
+  IDs, titles, or transcript content, and the server independently replaces every alert again
+  before APNs. Rate-limit state keeps only per-process salted keys, never raw client IPs or device
+  tokens, and the service runs loopback-bound behind a locked-down systemd unit and Cloudflare-only
+  origin firewall. Direct APNs and explicitly configured private relays retain rich alerts.
+
 ## [2.6.5] - 2026-07-16
 
 Release, remote-session, and shared-app hardening from full Serve Anywhere and Claude/Sonnet
@@ -2607,7 +2652,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.6.5...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.7.0...HEAD
+[2.7.0]: https://github.com/Adulari/forge/compare/v2.6.5...v2.7.0
 [2.6.5]: https://github.com/Adulari/forge/compare/v2.6.4...v2.6.5
 [2.6.4]: https://github.com/Adulari/forge/compare/v2.6.3...v2.6.4
 [2.6.3]: https://github.com/Adulari/forge/compare/v2.6.2...v2.6.3

@@ -1901,7 +1901,7 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "forge-agent"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1955,7 +1955,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-config"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "base64",
  "chacha20poly1305",
@@ -1977,7 +1977,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-core"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "async-trait",
  "forge-agent-config",
@@ -2007,7 +2007,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-index"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "async-trait",
  "forge-agent-config",
@@ -2046,7 +2046,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-lsp"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "forge-agent-config",
  "serde",
@@ -2058,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-mcp"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "forge-agent-config",
  "forge-agent-types",
@@ -2075,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-mesh"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "async-trait",
  "forge-agent-config",
@@ -2087,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-provider"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2110,7 +2110,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-skills"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "forge-agent-types",
  "tracing",
@@ -2118,7 +2118,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-store"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "chrono",
  "forge-agent-types",
@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-tools"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "async-trait",
  "forge-agent-index",
@@ -2151,7 +2151,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-tui"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "crossterm",
  "forge-agent-config",
@@ -2169,7 +2169,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-types"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2178,7 +2178,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-voice"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "cpal",
  "futures",
@@ -2196,7 +2196,7 @@ dependencies = [
 
 [[package]]
 name = "forge-agent-workflow"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "rquickjs",
  "serde_json",
@@ -2205,7 +2205,7 @@ dependencies = [
 
 [[package]]
 name = "forge-relay"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -7739,7 +7739,7 @@ dependencies = [
 
 [[package]]
 name = "xtasks"
-version = "2.6.5"
+version = "2.7.0"
 dependencies = [
  "anyhow",
  "clap",
