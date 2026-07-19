@@ -47,7 +47,7 @@ if missing:
     raise SystemExit("checksums.txt is missing required release assets:\n- " + "\n- ".join(missing))
 
 # Homebrew: associate each sha with the release asset URL immediately above it.
-formula = root / "homebrew/forge.rb"
+formula = root / "Formula/forge.rb"
 out = []
 last_asset = None
 for line in formula.read_text().splitlines():
@@ -80,7 +80,7 @@ text = re.sub(
 aur.write_text(text)
 
 # Scoop: the checked-in manifest is immediately usable; autoupdate handles later releases too.
-scoop = root / "packaging/scoop/forge.json"
+scoop = root / "bucket/forge.json"
 manifest = json.loads(scoop.read_text())
 manifest["version"] = version
 manifest["license"] = "AGPL-3.0-only"

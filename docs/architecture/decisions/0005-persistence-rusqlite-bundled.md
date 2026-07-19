@@ -8,19 +8,20 @@
 
 FR-7 requires persisting sessions (messages, tool calls, costs, routing decisions) locally
 and resuming them. The workload is single-user, single-machine, modest volume
-(requirements §4). NFRs that bear on this: portability (one static binary on three OSes,
-no system library dependency), footprint, and reliability (never corrupt session state).
+(requirements §4). NFRs that bear on this: portability (one native binary on three OSes,
+with no system SQLite dependency), footprint, and reliability (never corrupt session state).
 The blueprint specifies SQLite.
 
-Facts as of 2026-06: rusqlite 0.40.1 (2026-06-06) is a thin, complete SQLite binding with
+Facts as of 2026-06: rusqlite 0.39 is a thin, complete SQLite binding with
 a `bundled` feature that compiles SQLite from source into the binary (no reliance on a
-system `libsqlite3`). sqlx 0.9.0 (2026-05-21) is an async, compile-time-checked SQL
-toolkit supporting multiple databases.
+system `libsqlite3`). Forge remains on 0.39 because rusqlite 0.40's dependency line requires a
+compiler newer than the workspace's Rust 1.88 MSRV. sqlx 0.9.0 (2026-05-21) is an async,
+compile-time-checked SQL toolkit supporting multiple databases.
 
 ## Options considered
 
-1. **rusqlite (+ `bundled`)** — direct, full SQLite feature access; bundled SQLite means a
-   self-contained static binary on every OS (portability win); synchronous API. Cons:
+1. **rusqlite (+ `bundled`)** — direct, full SQLite feature access; bundled SQLite means the
+   native executable does not need a system `libsqlite3` (portability win); synchronous API. Cons:
    blocking calls must be offloaded off the async runtime; no compile-time query checking;
    SQLite-only (fine — we want exactly SQLite).
 2. **sqlx (SQLite backend)** — async, compile-time-checked queries, multi-DB portable.
@@ -32,7 +33,7 @@ toolkit supporting multiple databases.
 
 ## Decision
 
-Use **rusqlite 0.40 with the `bundled` feature**, encapsulated in a `forge-store` crate.
+Use **rusqlite 0.39 with the `bundled` feature**, encapsulated in a `forge-store` crate.
 All DB access goes through that crate; blocking calls are isolated there and offloaded via
 `tokio::task::spawn_blocking` (or a dedicated connection thread) so the async runtime is
 never blocked.
@@ -40,13 +41,13 @@ never blocked.
 ## Rationale
 
 For a single-user local store, rusqlite is the lightest fit and `bundled` directly serves
-the static-binary/portability NFR (no libsqlite3 to find on the user's machine).
+the single-binary portability NFR (no libsqlite3 to find on the user's machine).
 sqlx's headline features (async-native, compile-time checks, multi-DB) solve problems this
 project doesn't have, at extra cost. Boring and proven wins.
 
 ## Consequences
 
-- **Positive:** Self-contained binary on all three OSes; full SQLite (JSON1, FTS, WAL)
+- **Positive:** No system SQLite dependency on any supported OS; full SQLite (JSON1, FTS, WAL)
   available; minimal dependency surface; fast.
 - **Negative / trade-offs accepted:** We own a small blocking-isolation pattern; queries
   are checked at runtime/test time, not compile time (mitigated by tests + migrations).

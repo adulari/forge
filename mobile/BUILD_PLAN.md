@@ -1,8 +1,14 @@
-# Forge iOS Companion — BUILD PLAN (build contract)
+# Forge companion app — original build plan (completed)
 
-Phase-0 discovery output. Implementation workers: follow this document exactly. Backend is
-`forge serve` (crates/forge-cli/src/serve.rs + remote.rs). The app calls the REAL API — never mocks.
-Do NOT modify any Rust code.
+> **Historical implementation record.** This was the phase-0 contract used to build the first
+> companion app on 2026-07-06. The project has since shipped the redesign, protocol 8, native iOS
+> push, light/dark/system themes, Tauri desktop, Xcode Cloud/TestFlight, EAS OTA, SideStore, and
+> Android distribution. Do not treat its worker instructions or “future” flags as current status.
+> Use [mobile/README.md](README.md), [redesign/FEATURES.md](redesign/FEATURES.md), and
+> [the current release checklist](../docs/mobile/APP_STORE_CHECKLIST.md) for current operations.
+
+The backend is `forge serve` (`crates/forge-cli/src/serve.rs` + `remote.rs`). The app calls the
+real API; this record intentionally describes the initial implementation scope.
 
 ---
 
@@ -19,9 +25,12 @@ Do NOT modify any Rust code.
   URL `forge serve` prints and renders as a QR code at startup. The app accepts it via paste OR
   QR scan and derives `baseUrl` from it. Store in `expo-secure-store` (it is a credential).
 - Exposure modes (affects scheme, app must handle all):
-  - `--local` → `http://127.0.0.1:7420/<token>` (use with Tailscale/VPN from a phone)
+  - `--local` → `http://127.0.0.1:7420/<token>` (same-machine clients only; a phone cannot reach
+    the daemon's loopback address)
   - default LAN → `https://<lan-host>:7420/<token>` with a **self-signed cert** — RN `fetch`/WS
-    will reject it. Supported paths for the app: `--local` + VPN, or `--anywhere`.
+    will reject it. Supported paths: same-machine desktop/web via `--local`; another device via
+    `--anywhere`; or a deliberately configured trusted HTTPS reverse proxy such as Tailscale
+    Serve.
   - `--anywhere` → `https://<tunnel-host>/<token>` (cloudflared/ngrok, real TLS — works out of box)
 - `forge api` (api_serve.rs, port 8787, `GET /v1/models`, `POST /v1/chat/completions`,
   `GET /health`, optional `Authorization: Bearer`) is a **separate OpenAI-compat server — OUT OF
@@ -52,10 +61,10 @@ status unless noted.
 - Connect: `{wsScheme}://{host}:{port}/{token}/ws?session=<id>&rev=<lastSeenRevision>` (`rev=0` or
   omitted on first connect).
 - **Server → client**: each frame is one JSON **`Snapshot`** (full state, not a delta). Fields
-  (remote.rs::Snapshot, `PROTOCOL_VERSION = 7`):
+  (remote.rs::Snapshot, `PROTOCOL_VERSION = 8`):
 
 ```
-protocol:number            // warn + degrade gracefully if > 7
+protocol:number            // current value 8; warn on a mismatch
 session_id, title, cwd:string; worktree:string|null
 exposure:string            // "loopback" | "LAN" | "public (…)"
 busy:bool; done:bool
@@ -124,7 +133,11 @@ backend doesn't serve.
 
 ---
 
-## 3. Tech stack (pinned — do not deviate)
+## 3. Original tech-stack proposal (superseded where implementation differs)
+
+The delivered redesign replaced NativeWind and the one-file primitive layer with semantic tokens,
+JetBrains Mono assets, and components under `src/components/ds/`. The list below is retained to
+explain the initial build, not to pin new work.
 
 Expo SDK 57 · React Native 0.86 · expo-router (typed, file-based, `src/app/`) · NativeWind v4 ·
 @tanstack/react-query v5 with `PersistQueryClientProvider` + AsyncStorage · react-native-reanimated
@@ -141,9 +154,8 @@ Loading, ErrorText, BoundedList`.
 - `ios.bundleIdentifier = "dev.adulari.forge"`
 - `expo.extra.eas.projectId = "e1d145b5-344e-4147-ba35-5f0b993b4c8c"`; `owner` = the EAS account
   that owns that project.
-- `ios.appleTeamId` → **TODO(apple-team-id): unavailable until Apple Developer approval (~12–14h);
-  leave a clearly-marked placeholder, DO NOT block any batch on it.** Only the signed EAS path
-  (§9b) needs it; SideStore-now (§9a) and Expo web do not.
+- `ios.appleTeamId = "95VXXPD28Y"` (Apple Developer enrollment is complete). Signed iOS builds use
+  Xcode Cloud; EAS Build/EAS Submit are not the current iOS distribution path.
 - `scheme = "forge"`, `ios.icon`/splash bg `#16161c`, `ios.infoPlist`: camera usage string (QR),
   photo-library + document usage strings (uploads).
 
@@ -159,9 +171,10 @@ Core libs (`src/lib/`):
   (infinite, `before` cursor), `useHistory(sessionId)` (infinite, `before` seq cursor), mutations
   `useCreateSession/useArchive/useMerge/useDiscard/useAnswer/useUpload`.
 
-## 4. Design tokens (extracted from remote_assets/styles.css — the source of truth)
+## 4. Original dark-palette extraction
 
-Dark-only (`color-scheme: dark`). No light theme — do not invent one.
+This table captured the original web UI. The shipped app supports light, dark, and system themes;
+`src/theme/tokens.ts` is now the source of truth.
 
 | Token | Value | Source/use |
 |---|---|---|
@@ -200,7 +213,7 @@ accent+pulse=busy, no+fast-pulse=waiting, dim=idle-past. Pulse animation: opacit
 
 ---
 
-## 5. Auth conclusion + flagged backend gaps (FLAG ONLY — do not build)
+## 5. Auth conclusion and gaps resolved after the initial build
 
 **Conclusion:** the app authenticates by embedding the daemon token as the URL's first path
 segment. Pairing = paste or QR-scan the exact `connect:` URL `forge serve` prints. No backend
@@ -208,14 +221,17 @@ change is required for auth. Probe validity with `GET {base}/api/sessions` (200 
 404 = wrong token, network error = unreachable). Token rotation (`forge serve --rotate-token`)
 invalidates the stored URL → app shows "pairing invalid, re-scan" on persistent 404.
 
-**FLAGGED (backend additions/considerations — explicitly NOT built in this project):**
-1. **Native push:** `/api/push/*` is Web Push (VAPID) — unusable from iOS native. The app ships
-   with foreground WS + `waiting` polling only. If background alerts are wanted later: smallest
-   addition = `POST /<token>/api/push/subscribe` accepting a `{kind:"apns", device_token}` variant
-   + APNs sender behind the same token auth. FLAGGED, not built.
+**Current resolution of the original gaps:**
+1. **Native push shipped:** iOS registers its APNs device token with the user's daemon. The daemon
+   uses a direct operator key when configured or the open-source hosted relay by default. The
+   relay receives the opaque device/Live Activity token and notification title/body/status; those
+   snippets can contain sensitive session text. It does not deliberately receive the daemon token,
+   full transcript, source files, or API credentials. Users can self-host, bring their own APNs
+   key, or set `FORGE_APNS_DISABLE_RELAY=1`.
 2. **Self-signed LAN TLS:** default `--lan` mode's self-signed cert is rejected by RN fetch/WS.
-   Documented app guidance: use `--anywhere` (tunnel, real TLS) or `--local` + Tailscale. A
-   possible future backend nicety (user-supplied cert) is FLAGGED, not built.
+   Use `--local` only for a client on the daemon machine. For another device, use `--anywhere` or
+   put the daemon behind a trusted HTTPS reverse proxy. A tunnel provider terminates TLS and can
+   technically observe the bearer token and session traffic.
 
 ---
 
@@ -322,7 +338,7 @@ scrollable text (usage//mesh/workflow views). If `free_text`: value field + OK �
 **More** (`/(tabs)/more`) — Search-first launcher (SearchInput at top) over: Settings, Pair new
 server, per-session quick actions (jump to any live session's Tasks/Agents/Review/palette —
 opens `/session/[id]/overlay` after sending `{kind:"key",key:"Char:/"}`? NO — just deep-link to
-segments; palette opens via chip `/help` etc.), About (protocol version 7, app version), and
+segments; palette opens via chip `/help` etc.), About (protocol version 8, app version), and
 docs links. Keep it thin and honest — Forge's surface is session-centric.
 
 **Settings** (`/settings`) — Show current server host (token masked, `…{last4}`), exposure of
@@ -367,55 +383,28 @@ splash (bg #16161c, accent ⚒ mark).
 
 ---
 
-## 9. Testing + distribution (DUAL TRACK — build both)
+## 9. Current testing and distribution paths
 
-Two independent tracks. SideStore-now unblocks real-device testing before Apple approval; EAS is
-the signed store path added once the Apple Developer account is approved (~12–14h from 2026-07-06).
+The original dual-track proposal evolved into four independently verified paths:
 
-### 9a. Testing NOW — Expo web + SideStore sideload (mirror the Helm app's flow)
+1. **Web and development:** `npm run web` is the fast browser loop; `npm run tauri:dev` exercises
+   the native desktop transport. Pair same-machine clients with `--local` and other devices with
+   `--anywhere` or a trusted HTTPS reverse proxy.
+2. **Signed iOS:** Xcode Cloud regenerates the Expo native project, signs it, and uploads it to
+   TestFlight. `scripts/trigger-ios-build.mjs` can trigger the configured workflow and assign the
+   processed build to a beta group. EAS Build/EAS Submit are no longer used for native iOS.
+3. **iOS OTA:** `.github/workflows/eas-update.yml` publishes JavaScript/assets to the production
+   channel only when the full diff from the installed-runtime baseline is native-compatible. The
+   exact installed archive fingerprint is supplied as the runtime version.
+4. **Alternative/native artifacts:** `.github/workflows/mobile-sidestore.yml` publishes an
+   unsigned SideStore IPA/source from protected `main` for validated existing `mobile-v*` tags,
+   while `mobile-android.yml` builds Android
+   artifacts. Both still require installation and device smoke tests; artifact creation alone is
+   not end-to-end proof.
 
-- **Fast QA loop:** `npx expo start --web` for browser iteration (the app is a data-viewer over an
-  HTTP/WS API, so most screens QA fine in a desktop browser against a `--anywhere` daemon). This is
-  the primary inner loop; keep every screen web-renderable (no iOS-only native calls on first
-  paint; guard camera/haptics behind `Platform`/availability checks).
-- **Real-device testing = unsigned IPA sideloaded via SideStore**, mirroring Helm's pipeline:
-  1. **CI build (unsigned):** a GitHub Actions workflow `.github/workflows/mobile-ipa.yml` runs
-     on tag `mobile-v*` (and manual dispatch): `npm ci` in `mobile/`, `npx expo prebuild -p ios`,
-     then an **unsigned** `xcodebuild archive` + `-exportArchive` with an export options plist
-     using `signingStyle=manual` / `CODE_SIGNING_ALLOWED=NO` to emit a `Forge.ipa` with no
-     provisioning profile. Upload the IPA as a release asset on a GitHub Release.
-  2. **Self-served update manifest:** generate an **AltStore/SideStore source JSON**
-     (`mobile/dist/forge-source.json`) that Helm-style points at the latest release IPA. Shape:
-     `{ "name":"Forge", "identifier":"dev.adulari.forge.source",
-       "apps":[ { "name":"Forge", "bundleIdentifier":"dev.adulari.forge",
-       "developerName":"adulari", "version":"<x.y.z>", "versionDate":"<iso>",
-       "downloadURL":"<github release IPA url>", "localizedDescription":"…",
-       "iconURL":"…", "size":<bytes>, "tintColor":"ff913c" } ] }`.
-     The CI job regenerates this JSON on each release (version, date, downloadURL, size) and commits
-     it to a stable install URL (GitHub Pages or the release itself). Users add that source URL in
-     SideStore once; subsequent releases surface as in-app updates automatically.
-  3. **Install URL / manifest:** publish an `install.html`/landing (or reuse the raw source JSON
-     URL) as the "add to SideStore" entry point — the same self-hosted-update pattern Helm uses.
-     Document the SideStore source URL in `mobile/README.md`.
-  - CI is unsigned ⇒ **no Apple Team ID or secrets required for 9a** — this is why testing is not
-    blocked on Apple approval.
-
-### 9b. Signed / store path — EAS + App Store (LATER, after Apple approval)
-
-- `eas.json` with `development` (dev-client, internal), `preview` (internal distribution IPA), and
-  `production` (store) profiles. `extra.eas.projectId = e1d145b5-344e-4147-ba35-5f0b993b4c8c` is
-  already wired into app config (§3).
-- Blocked ONLY on: Apple Developer approval → then set `ios.appleTeamId`
-  (TODO(apple-team-id)) and the EAS credentials. `eas build -p ios --profile preview` for signed
-  internal test builds; `eas submit` / `production` profile for TestFlight + App Store.
-- Do NOT block Batches 0–4 on this. Land `eas.json` + the app-config projectId in Batch 0 with the
-  Team ID as a marked TODO; the signed build is a post-approval follow-up, not a screen dependency.
-
-### Build-order placement
-- Batch 0 also lands: `app.config.ts` (bundle id, projectId, TODO team id, scheme, usage strings),
-  `eas.json` (profiles, team id TODO), and the CI workflow skeleton + source-JSON generator (9a).
-- A dedicated **Batch 4 task (W11-adjacent)**: finish `forge-source.json` generator, `install.html`
-  landing, and `mobile/README.md` sideload/QA docs.
+See [mobile/README.md](README.md), [RELEASING.md](../RELEASING.md), and the
+[App Store/mobile checklist](../docs/mobile/APP_STORE_CHECKLIST.md) for the live commands and
+manual release gates.
 
 ## 10. Capability list (what the app can do, exhaustively)
 
@@ -425,5 +414,6 @@ with infinite scrollback + live streaming · send prompts and slash commands · 
 permissions (seq-safe) · answer questions (options + free text) · approve/revise/cancel plans ·
 read structured diffs · watch tasks + subagents live · drive every TUI overlay (palette, pickers,
 config wizard, usage, mesh, workflow) · upload images/text files into a session · stop a turn ·
-receive host clipboard payloads · offline prompt queue. Out of scope: native push (flagged),
-`forge api` OpenAI server, any Rust changes.
+receive host clipboard payloads · offline prompt queue. Native iOS push, widgets/Live Activities,
+light/dark/system themes, and the Tauri shell shipped after this original list. `forge api` remains
+a separate OpenAI-compatible server rather than a companion-app surface.

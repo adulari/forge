@@ -12,7 +12,8 @@ against multiple model providers, with a **Model Mesh** that routes each task to
 cheapest capable model under a budget. It is structured as a **modular monolith** — a
 Cargo workspace of small library crates with compiler-enforced seams, assembled by one
 thin binary — so the broad roadmap (code memory, multi-agent, MCP, marketplace) can be
-added without core rewrites, while still shipping as one static executable.
+added without core rewrites, while still shipping as one native executable with no language
+runtime.
 
 All technology choices were verified against current releases as of **June 2026** (see
 ADRs for sources/versions).
@@ -23,7 +24,7 @@ ADRs for sources/versions).
 | Code structure | Modular monolith, Cargo workspace, single binary | [ADR-0002](decisions/0002-modular-monolith-single-binary.md) |
 | Model providers | Own `Provider` trait + `genai` 0.6 backend (Anthropic/OpenAI/Ollama) | [ADR-0003](decisions/0003-provider-abstraction-via-genai.md) |
 | TUI | ratatui 0.30 + crossterm 0.29; headless mode | [ADR-0004](decisions/0004-tui-ratatui-crossterm.md) |
-| Persistence | rusqlite 0.40 (bundled SQLite) | [ADR-0005](decisions/0005-persistence-rusqlite-bundled.md) |
+| Persistence | rusqlite 0.39 (bundled SQLite) | [ADR-0005](decisions/0005-persistence-rusqlite-bundled.md) |
 | Model Mesh | rule-based heuristic `Router` (pluggable) | [ADR-0006](decisions/0006-model-mesh-rule-based-routing.md) |
 | Config / secrets | figment 0.10 layered config + keyring 4.0 (env-first) | [ADR-0007](decisions/0007-config-figment-secrets-keyring.md) |
 | Tool safety | permission modes + per-tool rules, central broker | [ADR-0008](decisions/0008-tool-permission-modes.md) |
@@ -111,9 +112,9 @@ the **walking skeleton** target for Phase 4.
 
 | Attribute (from requirements) | How the design achieves it |
 |-------------------------------|----------------------------|
-| Performance / startup (<100 ms) | Native Rust, single binary, no runtime; lazy-init subsystems; bundled SQLite (no lib lookup) |
+| Performance / startup (<100 ms) | Native Rust, single binary, no language runtime; lazy-init subsystems; bundled SQLite (no lib lookup) |
 | Streaming responsiveness | Tokio `select!` loop; provider stream events pushed straight to presenter |
-| Footprint / portability | One static binary (bundled SQLite, crossterm); 3-OS CI matrix; no system deps |
+| Footprint / portability | One native binary (bundled SQLite, crossterm); three-OS release/E2E matrix; Linux artifacts pin a glibc 2.31 ABI floor and omit default ALSA linkage |
 | Security | Single permission broker gates all side effects (ADR-0008); secrets via env+keyring, never in config/logs (ADR-0007); BYOK; anonymous telemetry has a closed content-free schema |
 | Cost-correctness | `usage` recorded per call from provider token counts; bundled+overridable pricing tables; budget checked inside the router before each call (ADR-0006) |
 | Reliability | Graceful provider/tool failure → retry/fallback tier; WAL SQLite; session state persisted per turn so a crash resumes |

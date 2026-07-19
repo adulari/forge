@@ -133,6 +133,10 @@ pub struct Config {
     /// starts it at chat launch so the session is reachable without typing `/remote` first.
     #[serde(default)]
     pub remote: RemoteConfig,
+    /// Optional managed Forge Anywhere companion. Credentials and device keys are deliberately
+    /// stored outside config.toml in the owner-only platform data directory.
+    #[serde(default)]
+    pub anywhere: AnywhereConfig,
     /// Local whisper.cpp speech-to-text (voice.md, V1): which model size to run, transcription
     /// language, and auto-stop-on-silence. Models download on first use into
     /// `{data_dir}/models/whisper/`.
@@ -178,6 +182,46 @@ pub struct RemoteConfig {
     /// without exposing the rest of the host filesystem.
     #[serde(default)]
     pub project_roots: Vec<String>,
+}
+
+/// `[anywhere]` config block for the optional managed companion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnywhereConfig {
+    /// Connect this host to the managed relay when `forge serve` is running.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Stable user-facing name for this host. The service still assigns an opaque host ID.
+    #[serde(default)]
+    pub host_name: Option<String>,
+    /// Upload eligible encrypted journal records. Provider credentials and local-only records are
+    /// excluded regardless of this setting.
+    #[serde(default = "default_true")]
+    pub sync: bool,
+    /// Alternate service origin for local development. Release builds ignore this field.
+    #[serde(default)]
+    pub service_url: Option<String>,
+}
+
+impl Default for AnywhereConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host_name: None,
+            sync: true,
+            service_url: None,
+        }
+    }
+}
+
+impl AnywhereConfig {
+    /// Resolve the service origin. Custom origins are honored only in debug builds.
+    pub fn service_url(&self) -> &str {
+        #[cfg(debug_assertions)]
+        if let Some(url) = self.service_url.as_deref() {
+            return url.trim_end_matches('/');
+        }
+        "https://app.forge.adulari.dev"
+    }
 }
 
 /// The default `forge serve` port when `[remote] port` is unset (see [`RemoteConfig::port`]).
@@ -2185,6 +2229,7 @@ impl Default for Config {
             keybinds: KeybindsConfig::default(),
             providers: ProvidersConfig::default(),
             remote: RemoteConfig::default(),
+            anywhere: AnywhereConfig::default(),
             voice: VoiceConfig::default(),
         }
     }
@@ -2412,6 +2457,49 @@ pub fn write_settings(
     let path = dir.join("config.toml");
     write_settings_at(&path, permission, credit_mode)?;
     Ok(path)
+}
+
+/// Persist the public `[anywhere]` host settings while preserving unrelated user configuration.
+/// Credentials and keys are never accepted by this API.
+pub fn write_anywhere_settings(
+    enabled: bool,
+    host_name: Option<&str>,
+    sync: bool,
+) -> Result<PathBuf, ConfigError> {
+    let dir = config_dir().ok_or(ConfigError::NoConfigDir)?;
+    std::fs::create_dir_all(&dir).map_err(|e| ConfigError::Write(e.to_string()))?;
+    let path = dir.join("config.toml");
+    write_anywhere_settings_at(&path, enabled, host_name, sync)?;
+    Ok(path)
+}
+
+fn write_anywhere_settings_at(
+    path: &Path,
+    enabled: bool,
+    host_name: Option<&str>,
+    sync: bool,
+) -> Result<(), ConfigError> {
+    let mut root: toml::Table = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or_default();
+    let anywhere = root
+        .entry("anywhere")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| ConfigError::Write("[anywhere] must be a TOML table".into()))?;
+    anywhere.insert("enabled".into(), toml::Value::Boolean(enabled));
+    anywhere.insert("sync".into(), toml::Value::Boolean(sync));
+    match host_name {
+        Some(name) => {
+            anywhere.insert("host_name".into(), toml::Value::String(name.to_owned()));
+        }
+        None => {
+            anywhere.remove("host_name");
+        }
+    }
+    let rendered = toml::to_string_pretty(&root).map_err(|e| ConfigError::Write(e.to_string()))?;
+    std::fs::write(path, rendered).map_err(|e| ConfigError::Write(e.to_string()))
 }
 
 fn write_settings_at(

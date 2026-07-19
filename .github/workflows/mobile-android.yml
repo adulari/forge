@@ -1,10 +1,15 @@
 name: mobile-android
 
-# Native Android distribution for the shared Expo app. Manual runs produce an installable APK
-# (preview) or Play-ready AAB (production); android-v* tags publish the artifact to GitHub too.
+# Native Android distribution for the shared Expo app. Protected-main dispatches produce an
+# installable APK (preview) or Play-ready AAB (production); an optional existing android-v* tag
+# publishes the exact production artifact to GitHub too.
 on:
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: Existing android-vX.Y.Z tag to publish (leave blank for build only)
+        required: false
+        type: string
       profile:
         description: Build profile
         required: true
@@ -16,43 +21,94 @@ on:
         required: true
         default: false
         type: boolean
-  push:
-    tags:
-      - "android-v*"
 
 concurrency:
-  group: mobile-android-${{ github.ref }}
+  group: mobile-android-${{ inputs.release_tag || github.ref }}
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     name: EAS Android build
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [release, linux, x64]
+    timeout-minutes: 120
+    environment: google-play
     defaults:
       run:
         working-directory: mobile
     env:
-      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
       EXPO_PUBLIC_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
       EXPO_PUBLIC_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
       PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.profile || 'production' }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.release_tag != '' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+          fetch-depth: 0
+      - name: Verify tagged build provenance
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^android-v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "invalid Android release tag: $RELEASE_TAG" >&2
+            exit 1
+          }
+          [ "$PROFILE" = production ] || {
+            echo 'tagged Android publication requires the production profile' >&2
+            exit 1
+          }
+          [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" ] || {
+            echo "checked-out source does not match $RELEASE_TAG" >&2
+            exit 1
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo 'Android release tag is not reachable from origin/main' >&2
+            exit 1
+          }
+      - name: Validate build request
+        if: github.event_name == 'workflow_dispatch' && inputs.submit_to_play
+        env:
+          GOOGLE_SERVICE_ACCOUNT_KEY_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY_JSON }}
+        run: |
+          test "$PROFILE" = production || {
+            echo 'Play submission requires the production profile' >&2
+            exit 1
+          }
+          test -n "$GOOGLE_SERVICE_ACCOUNT_KEY_JSON" || {
+            echo 'GOOGLE_SERVICE_ACCOUNT_KEY_JSON is not configured' >&2
+            exit 1
+          }
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: mobile/package-lock.json
       - run: npm ci
+      - name: Verify tagged app version
+        if: inputs.release_tag != ''
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          version="$(./node_modules/.bin/expo config --json | jq -r .version)"
+          [ "$RELEASE_TAG" = "android-v$version" ] || {
+            echo "tag $RELEASE_TAG does not match app version $version" >&2
+            exit 1
+          }
       - name: Verify app before native build
         run: npm run check
       - name: Queue and wait for EAS build
         id: eas
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
-          npx eas-cli build --platform android --profile "$PROFILE" --non-interactive --wait --json > build.json
+          test -n "$EXPO_TOKEN" || { echo 'EXPO_TOKEN is not configured' >&2; exit 1; }
+          ./node_modules/.bin/eas build --platform android --profile "$PROFILE" \
+            --environment "$PROFILE" --non-interactive --wait --json > build.json
           node - <<'NODE'
           const fs = require('fs');
           const raw = JSON.parse(fs.readFileSync('build.json', 'utf8'));
@@ -66,29 +122,61 @@ jobs:
         run: |
           ext=apk
           [ "$PROFILE" = production ] && ext=aab
-          curl --fail --location --retry 4 "${{ steps.eas.outputs.url }}" -o "Forge-android-${PROFILE}.${ext}"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+          curl --fail --location --retry 4 --retry-all-errors --connect-timeout 15 \
+            "${{ steps.eas.outputs.url }}" -o "Forge-android-${PROFILE}.${ext}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: forge-android-${{ env.PROFILE }}
           path: mobile/Forge-android-*.*
           if-no-files-found: error
-      - name: Publish tagged Android artifact
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
-        with:
-          files: mobile/Forge-android-*.*
-          fail_on_unmatched_files: true
       - name: Configure Google Play credentials
         if: github.event_name == 'workflow_dispatch' && inputs.submit_to_play
         env:
           GOOGLE_SERVICE_ACCOUNT_KEY_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY_JSON }}
         run: |
-          test "$PROFILE" = production || { echo 'Play submission requires the production profile' >&2; exit 1; }
-          test -n "$GOOGLE_SERVICE_ACCOUNT_KEY_JSON" || { echo 'GOOGLE_SERVICE_ACCOUNT_KEY_JSON is not configured' >&2; exit 1; }
-          printf '%s' "$GOOGLE_SERVICE_ACCOUNT_KEY_JSON" > google-service-account.json
+          credential="$RUNNER_TEMP/forge-google-play-${GITHUB_RUN_ID}.json"
+          printf '%s' "$GOOGLE_SERVICE_ACCOUNT_KEY_JSON" > "$credential"
+          chmod 0600 "$credential"
+          node - "$credential" <<'NODE'
+          const fs = require('fs');
+          const path = process.argv[2];
+          const config = JSON.parse(fs.readFileSync('eas.json', 'utf8'));
+          config.submit.production.android.serviceAccountKeyPath = path;
+          fs.writeFileSync('eas.json', JSON.stringify(config, null, 2) + '\n');
+          NODE
+          echo "GOOGLE_PLAY_CREDENTIAL=$credential" >> "$GITHUB_ENV"
       - name: Submit to Google Play internal testing
         if: github.event_name == 'workflow_dispatch' && inputs.submit_to_play
-        run: npx eas-cli submit --platform android --profile production --id "${{ steps.eas.outputs.id }}" --non-interactive
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: ./node_modules/.bin/eas submit --platform android --profile production --id "${{ steps.eas.outputs.id }}" --non-interactive
       - name: Remove Google Play credentials
         if: always()
-        run: rm -f google-service-account.json
+        run: '[ -z "${GOOGLE_PLAY_CREDENTIAL:-}" ] || rm -f "$GOOGLE_PLAY_CREDENTIAL"'
+
+  publish:
+    name: publish tagged Android artifact
+    needs: build
+    if: inputs.release_tag != ''
+    runs-on: [release, linux, x64]
+    timeout-minutes: 20
+    environment: google-play
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: forge-android-production
+          path: release
+      - name: Attest Android release provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
+        with:
+          subject-path: release/Forge-android-*.*
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          files: release/Forge-android-*.*
+          fail_on_unmatched_files: true
+          make_latest: false

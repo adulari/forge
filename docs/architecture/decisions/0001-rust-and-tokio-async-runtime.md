@@ -7,8 +7,8 @@
 ## Context
 
 The product thesis (blueprint, requirements §1) demands sub-100 ms startup, a single
-static binary, low memory footprint, and safe parallelism for future multi-agent
-orchestration (NFR: performance, portability, footprint). The harness is I/O-bound:
+native binary with no language runtime, low memory footprint, and safe parallelism for future
+multi-agent orchestration (NFR: performance, portability, footprint). The harness is I/O-bound:
 concurrent streaming HTTP to model providers, subprocess execution for tools, file I/O,
 and a TUI render loop — all of which must run without blocking each other.
 

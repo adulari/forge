@@ -1,11 +1,16 @@
-# Forge App — BUILD ORDER (Sonnet worker batches)
+# Forge App — completed redesign build order
+
+> **Historical implementation record (completed).** This file preserves the worker batches used
+> to deliver the current app; references to stubs, handoffs, and future batches describe
+> intermediate states, not current product gaps. Use [mobile/README.md](../README.md) for current
+> development/release commands and [FEATURES.md](FEATURES.md) for delivered capability status.
 
 Rules of engagement (every worker, every task):
 
 - Read ARCHITECTURE.md + DESIGN_SYSTEM.md + FEATURES.md sections named in your task FIRST.
 - File scopes are DISJOINT within a batch — do not touch files outside your scope; if you need a
   change in another scope, leave a `// HANDOFF(<task-id>):` comment and flag it in the PR.
-- Real daemon data only. To hand-test: `cargo run -p forge-cli -- serve --local --mock` from the
+- Real daemon data only. To hand-test: `cargo run -p forge-agent -- serve --local --mock` from the
   repo root (or a real daemon), pair with the printed connect URL.
 - **Gate per batch** (all must pass before the next batch starts):
   `npx tsc --noEmit` clean · `npx expo lint` clean · `npx expo start --web` boots and the batch's
@@ -47,8 +52,9 @@ Files (edit in place): `src/lib/api.ts`, `src/lib/ws.ts`, `src/lib/queries.ts`,
 (new) `src/lib/transport/index.ts`, `src/lib/platform.ts`, `src/lib/haptics.ts`.
 Do: ARCHITECTURE §4.1 changes only — multi-server `auth.tsx` (list + activeServerId, same
 `useAuth().baseUrl` contract, plus `servers`, `addServer`, `removeServer`, `setActive`);
-route fetch/WebSocket through `lib/transport` (default = globals; Tauri branch stubbed behind
-`isTauri` returning globals for now); export a `useTurnCompleted(snapshot)` helper (busy
+route fetch/WebSocket through `lib/transport` (default = globals; this foundation task initially
+left the Tauri branch behind `isTauri` on globals, then T5.2 replaced it with native plugins);
+export a `useTurnCompleted(snapshot)` helper (busy
 true→false edge) for the history-invalidation rule. Do NOT change wire types.
 Done: tsc clean; `parseConnectUrl` unit behavior unchanged (paste a real connect URL against a
 running mock daemon and probe succeeds).
@@ -85,7 +91,7 @@ both themes at 3 breakpoints.
   `src/components/pairing/QRScan.native.tsx` / `.web.tsx` paste-only; URL field mono; test
   states idle/testing/ok/bad-token/unreachable/server-error with the TLS guidance copy from
   FEATURES §3; deep-link `?url=`), `src/app/(tabs)/settings.tsx` (servers list add/remove/switch,
-  appearance light/dark/system, app-lock toggle, about/diagnostics: app version + protocol 7 +
+  appearance light/dark/system, app-lock toggle, about/diagnostics: app version + protocol 8 +
   active server host with masked token `…{last4}`).
 - **T2.3 Fleet + New Session** — `src/app/(tabs)/index.tsx` (fleet header Σ cost/waiting/busy;
   `src/components/fleet/SessionCard.tsx` per DESIGN_SYSTEM; swipe + action sheet
@@ -167,7 +173,8 @@ streams a session; `npx expo export -p web` output loads standalone with the PWA
   (serial within batch), or restrict to a `copy.ts` strings module + screen-local fixes
   coordinated via HANDOFF comments.
 - **T6.3 Distribution** — `.github/workflows/app-web.yml` (export + artifact),
-  `app-desktop.yml` (3-OS Tauri matrix), keep/refresh `mobile-ipa.yml` (SideStore) for SDK 57,
+  `app-desktop.yml` (five-target Tauri release matrix), keep/refresh `mobile-sidestore.yml`
+  (SideStore) for SDK 57,
   `eas.json` profiles check, `mobile/README.md` (pairing, dev loops, build matrix, SideStore
   source URL). No store submission automation yet.
 Final gate: the FEATURES §1 table walked end-to-end against a real daemon on: iPhone (sim or

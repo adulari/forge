@@ -4,7 +4,7 @@
 //! that "codex/claude can find + load Forge's skills." `#[ignore]`: spawns a process + does timed
 //! stdio I/O, so it's run on demand, not in CI.
 //!
-//! Run: `cargo test -p forge-cli --test mcp_serve_e2e -- --ignored --nocapture`
+//! Run: `cargo test -p forge-agent --test mcp_serve_e2e -- --ignored --nocapture`
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;

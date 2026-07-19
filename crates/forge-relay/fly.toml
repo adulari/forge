@@ -12,6 +12,8 @@ primary_region = "ams"  # Amsterdam — closest to the operator; adjust if laten
   # forge-relay defaults to loopback for secure nginx deployments. Fly's proxy needs the
   # container listener on every interface.
   FORGE_RELAY_BIND_ADDR = "0.0.0.0"
+  # The project-hosted service must never forward caller-supplied alert text to APNs.
+  FORGE_RELAY_GENERIC_ALERTS = "true"
 
 [http_service]
   internal_port = 8787

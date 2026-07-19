@@ -39,10 +39,10 @@ pub fn run() {
 
             Ok(())
         })
-        .on_menu_event(|app, event| {
+        .on_menu_event(|_app, _event| {
             #[cfg(debug_assertions)]
-            if event.id() == "reload" {
-                if let Some(window) = app.get_webview_window("main") {
+            if _event.id() == "reload" {
+                if let Some(window) = _app.get_webview_window("main") {
                     let _ = window.eval("window.location.reload()");
                 }
             }

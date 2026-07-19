@@ -2,7 +2,7 @@
 //! through a pseudo-terminal — answering the terminal's cursor-position (DSR) query so the inline
 //! viewport initializes (a CI runner's null terminal won't, hence `#[ignore]`).
 //!
-//! Run locally: `cargo test -p forge-cli --test tui_e2e -- --ignored --nocapture`
+//! Run locally: `cargo test -p forge-agent --test tui_e2e -- --ignored --nocapture`
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -142,7 +142,12 @@ fn tui_assay_mode_opens_choice_picker_and_runs_without_crashing() {
     // /assay opens the analysis-vs-cleanup picker; selecting a choice runs the flow. Under --mock
     // with no provider keys there are no live models, so it degrades gracefully (a note) rather
     // than crashing — this smoke proves the palette → AssayChoice picker → spawn_assay wiring.
-    let (clean, plain) = drive_pty(&[("/assay\r", 800), ("\r", 1200), ("\x1b", 0)]);
+    let (clean, plain) = drive_pty(&[
+        ("/assay\r", 800),
+        ("\r", 1200),
+        ("\x03", 600),
+        ("/quit\r", 600),
+    ]);
     assert!(clean, "clean exit, no panic: {plain}");
     assert!(!plain.to_lowercase().contains("panic"), "no panic: {plain}");
     assert!(
@@ -262,7 +267,7 @@ fn tui_remote_control_toggles_and_shows_statusline_indicator() {
         "turning on printed the on-note: {plain}"
     );
     assert!(
-        plain.contains("http://127.0.0.1:") || plain.contains("http://"),
+        plain.contains("http://") || plain.contains("https://"),
         "the connect URL was printed: {plain}"
     );
     assert!(

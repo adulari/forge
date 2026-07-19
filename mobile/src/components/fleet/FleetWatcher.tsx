@@ -8,6 +8,7 @@ import { useSessions } from "../../lib/queries";
 import type { SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { TWebSocket } from "../../lib/transport";
+import { supportsFleetInvalidationSocket } from "../../lib/fleetTransport";
 
 const DEBOUNCE_MS = 1200;
 
@@ -21,7 +22,7 @@ export function FleetWatcher() {
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (!baseUrl) return;
+    if (!baseUrl || !supportsFleetInvalidationSocket(baseUrl)) return;
     let active = true;
     let socket: WebSocket | null = null;
     let reconnect: ReturnType<typeof setTimeout> | null = null;

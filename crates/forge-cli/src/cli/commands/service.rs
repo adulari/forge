@@ -33,7 +33,7 @@ pub(crate) fn service_cmd(cmd: ServiceCmd) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Exposure — mirrors `forge serve`'s own `--local`/`--lan`/`--anywhere` (default: LAN).
+// Exposure — mirrors `forge serve`'s own `--local`/`--lan`/`--tunnel` (default: LAN).
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +61,7 @@ impl Exposure {
         match self {
             Exposure::Local => "--local",
             Exposure::Lan => "--lan",
-            Exposure::Anywhere => "--anywhere",
+            Exposure::Anywhere => "--tunnel",
         }
     }
 }
@@ -581,7 +581,7 @@ mod tests {
         let local = render_systemd_service("/bin/forge", Exposure::Local, 1234);
         assert!(local.contains("serve --local --port 1234"));
         let anywhere = render_systemd_service("/bin/forge", Exposure::Anywhere, 1234);
-        assert!(anywhere.contains("serve --anywhere --port 1234"));
+        assert!(anywhere.contains("serve --tunnel --port 1234"));
     }
 
     #[test]

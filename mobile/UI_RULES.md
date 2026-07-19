@@ -1,7 +1,11 @@
-# UI RULES — binding for every screen (Forge iOS companion)
+# Original UI rules — superseded by the Emberline redesign
 
-Read BEFORE writing any screen. These rules are not suggestions. If a screen needs something these
-rules forbid, stop and flag it in the PR description instead of deviating.
+> **Historical implementation record.** These rules governed the first companion-app build and
+> are retained to explain older decisions. They are not binding for current work: component paths,
+> styling, theming, motion, haptics, and responsive behavior were superseded by
+> [redesign/DESIGN_SYSTEM.md](redesign/DESIGN_SYSTEM.md) and
+> [redesign/ARCHITECTURE.md](redesign/ARCHITECTURE.md). The shipped app supports mobile, web, and
+> Tauri desktop with light, dark, and system themes.
 
 ## 1. Structure
 
@@ -36,9 +40,9 @@ rules forbid, stop and flag it in the PR description instead of deviating.
 
 ## 3. Theme
 
-9. **Theme tokens only — zero raw hex in screens.** Every color comes from `theme.ts` /
-   tailwind classes generated from it. The only file allowed to contain hex literals is
-   `src/lib/theme.ts`. Dark-only app: no light-mode styling, no `useColorScheme` branching.
+9. **Historical rule: theme tokens only.** The original build took colors from `theme.ts` and was
+   dark-only. The current source of truth is `src/theme/tokens.ts`, with light/dark/system theme
+   selection through the redesign's ThemeProvider.
 10. Semantic color use is fixed: `accent` = brand/active/busy/pending-attention; `ok` =
     success/allow/cost/done/diff-add; `no` = danger/deny/waiting/diff-del; `dim` = secondary;
     `ink` = primary text. Allow buttons are ALWAYS `ok` bg with `#1c1c22`-equivalent

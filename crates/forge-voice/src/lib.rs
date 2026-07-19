@@ -4,7 +4,7 @@
 //! in what they need:
 //! - [`model`]: which whisper.cpp GGML model to use, and fetching it from Hugging Face.
 //! - [`transcribe`]: running whisper-rs against 16kHz mono f32 samples (CPU-blocking).
-//! - [`record`]: cpal microphone capture -> 16kHz mono f32.
+//! - [`record`]: optional cpal microphone capture -> 16kHz mono f32 (`microphone` feature).
 //! - [`decode`]: turning an uploaded file's bytes (wav/m4a/aac/mp4) into 16kHz mono f32.
 
 pub mod decode;
@@ -32,6 +32,10 @@ pub enum VoiceError {
     Decode(String),
     #[error("microphone recording failed: {0}")]
     Record(String),
+    #[error(
+        "microphone capture is unavailable in this build; on Linux, install the ALSA development libraries and rebuild Forge with `--features microphone`"
+    )]
+    MicrophoneUnavailable,
     #[error("no input (microphone) device available")]
     NoInputDevice,
     #[error("unrecognized model kind '{0}' (expected tiny, base, small, or medium)")]

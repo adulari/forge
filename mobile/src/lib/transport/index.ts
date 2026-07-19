@@ -17,6 +17,21 @@
 import type { Message as TauriWsMessage } from "@tauri-apps/plugin-websocket";
 
 import { isTauri } from "../platform";
+import { AnywhereTransport } from "./AnywhereTransport";
+import { DirectTransport } from "./DirectTransport";
+import { EncryptedAnywhereRelay } from "./EncryptedAnywhereRelay";
+import type { RemoteTransport } from "./RemoteTransport";
+
+export type { AnywhereRelay } from "./AnywhereTransport";
+export type { AnywhereRelayCredentials, RelayBlobReference } from "./EncryptedAnywhereRelay";
+export { anywhereCredentialStore } from "./anywhereCredentialStore";
+export type {
+  AnywhereCredentialStore,
+  PendingDeviceRevocation,
+  StoredAnywhereCredentials,
+} from "./anywhereCredentialStore";
+export { AnywhereTransport, DirectTransport, EncryptedAnywhereRelay };
+export type { RemoteSocket, RemoteTransport } from "./RemoteTransport";
 
 // ---------------------------------------------------------------------------
 // fetch
@@ -39,7 +54,7 @@ async function tauriAwareFetch(
   return globalThis.fetch(input, init);
 }
 
-export const tFetch: typeof fetch = isTauri
+const platformFetch: typeof fetch = isTauri
   ? (tauriAwareFetch as typeof fetch)
   : globalThis.fetch.bind(globalThis);
 
@@ -201,6 +216,50 @@ class TauriAwareWebSocket {
   }
 }
 
-export const TWebSocket = (
+const PlatformWebSocket = (
   isTauri ? TauriAwareWebSocket : globalThis.WebSocket
 ) as unknown as typeof WebSocket;
+
+const directTransport = new DirectTransport(platformFetch, PlatformWebSocket);
+const anywhereTransports = new Map<string, AnywhereTransport>();
+
+/** Register one enrolled managed host. Removing it immediately prevents new relay requests. */
+export function registerAnywhereTransport(transport: AnywhereTransport): () => void {
+  anywhereTransports.set(transport.hostId, transport);
+  return () => {
+    if (anywhereTransports.get(transport.hostId) === transport) {
+      anywhereTransports.delete(transport.hostId);
+    }
+  };
+}
+
+function transportFor(urlValue: string): RemoteTransport {
+  const url = new URL(urlValue);
+  if (url.protocol !== "fany:" && url.protocol !== "fany-ws:") {
+    return directTransport;
+  }
+  const transport = anywhereTransports.get(url.hostname);
+  if (!transport) {
+    throw new Error(`Forge Anywhere host is not enrolled: ${url.hostname}`);
+  }
+  return transport;
+}
+
+export const tFetch: typeof fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+  const url = requestUrl(input);
+  return transportFor(url).fetch(input, init);
+}) as typeof fetch;
+
+class RoutedWebSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+
+  constructor(url: string | URL, protocols?: string | string[]) {
+    const value = url.toString();
+    return transportFor(value).openWebSocket(value, protocols) as RoutedWebSocket;
+  }
+}
+
+export const TWebSocket = RoutedWebSocket as unknown as typeof WebSocket;

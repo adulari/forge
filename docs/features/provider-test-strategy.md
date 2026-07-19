@@ -146,7 +146,7 @@ providers.
   `cargo test --all --all-features` matrix. Layer 3 is `#[ignore]`d so it is auto-skipped.
 - Add (Could) a separate `integration` job, `schedule:`d (nightly) + `workflow_dispatch`,
   on `ubuntu-latest` only, with an Ollama **service container**, running
-  `FORGE_OLLAMA_TESTS=1 cargo test -p forge-provider -- --ignored`. Kept off the PR path.
+  `FORGE_OLLAMA_TESTS=1 cargo test -p forge-agent-provider -- --ignored`. Kept off the PR path.
 
 ## 5. Technical design
 

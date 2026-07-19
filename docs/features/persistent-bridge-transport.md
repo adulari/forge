@@ -7,6 +7,21 @@ stdin, so re-drives within a turn reuse a warm process.
 
 Implemented in `crates/forge-provider/src/cli_provider.rs` (`LiveSession`, `complete_persistent`).
 
+## Embedding the harness
+
+Harness mode starts a Forge `mcp-serve` child so the bridged CLI can call Forge's tools. By default,
+`CliProvider` assumes the current executable is Forge itself. A different host executable must point
+the provider at an actual Forge binary:
+
+```rust
+let provider = CliProvider::claude_code()
+    .with_forge_binary("/path/to/forge");
+```
+
+`with_forge_binary` configures the harness process only; `with_binary` separately selects the
+external `claude`, `codex`, or `agy` executable. The supplied Forge path must be executable and
+support the `mcp-serve` command.
+
 ## claude — shipped (v0.4.63, #304)
 
 claude Code exposes `--input-format stream-json` ("realtime streaming input", confirmed against

@@ -1,0 +1,25 @@
+[package]
+name = "forge-agent-anywhere-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Public wire protocol and end-to-end encryption for Forge Anywhere."
+repository.workspace = true
+
+[lib]
+name = "forge_anywhere_protocol"
+
+[dependencies]
+bip39.workspace = true
+base64 = "0.22"
+chacha20poly1305.workspace = true
+ed25519-dalek.workspace = true
+hkdf.workspace = true
+hex = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true
