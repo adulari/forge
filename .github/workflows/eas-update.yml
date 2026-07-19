@@ -50,11 +50,26 @@ jobs:
         id: guard
         working-directory: .
         env:
+          EVENT: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+          # Manual recovery (RELEASING.md §6) has no push range to diff — and "current main since
+          # the last release" always contains OTA-neutral non-mobile commits (version bump, this
+          # workflow), which the range diff would wrongly flag as native. The real delivery gate is
+          # the IOS_OTA_RUNTIME_VERSION pin below: an update only reaches binaries whose native
+          # runtime matches, so a stale native layer never receives it. Operator ensures a matching
+          # native build exists before dispatching.
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "safe=true" >> "$GITHUB_OUTPUT"
+            echo "Manual dispatch — range diff skipped; delivery gated by IOS_OTA_RUNTIME_VERSION."
+            exit 0
+          fi
+
+          # Push events carry github.event.before; the all-zeros sentinel (and any empty value)
+          # falls back to the pushed commit's parent.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
             BEFORE="$(git rev-parse "$AFTER^" 2>/dev/null || printf '%s' "$AFTER")"
           fi
 
