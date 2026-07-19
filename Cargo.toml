@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+exclude = ["vendor/genai-0.6.5"]
 
 [workspace.package]
 version = "2.7.0"
