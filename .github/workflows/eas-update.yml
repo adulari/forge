@@ -131,3 +131,7 @@ jobs:
           EXPO_PUBLIC_POSTHOG_KEY: ${{ vars.POSTHOG_PROJECT_KEY }}
           EXPO_PUBLIC_POSTHOG_HOST: ${{ vars.POSTHOG_HOST }}
           EXPO_RUNTIME_VERSION_OVERRIDE: ${{ vars.IOS_OTA_RUNTIME_VERSION }}
+          # Cap Metro transform workers: unbounded fan-out on the memory-constrained
+          # self-hosted runner exhausts RAM during bundling and freezes it (job lost
+          # at ~600s, empty logs). Read by mobile/metro.config.js.
+          METRO_MAX_WORKERS: "2"
