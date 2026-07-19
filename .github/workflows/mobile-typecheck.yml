@@ -1,12 +1,9 @@
 name: mobile-typecheck
 
-# Type-checks the unified app when a PR changes mobile or protocol code. The Rust `CI` workflow
-# never compiles TypeScript, so these surfaces retain their own focused checks.
+# Classifies every PR, then runs only the affected app and/or Tauri checks. Keeping the workflow
+# present on every PR gives branch protection a stable aggregate check even for intentional skips.
 on:
   pull_request:
-    paths:
-      - "mobile/**"
-      - "protocol/**"
   workflow_dispatch:
 
 concurrency:
@@ -17,8 +14,29 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: detect affected jobs
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 5
+    outputs:
+      mobile_app: ${{ steps.classify.outputs.mobile_app }}
+      mobile_tauri: ${{ steps.classify.outputs.mobile_tauri }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+      - id: classify
+        name: Classify changed files
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/ci/changed-groups.sh
+
   app:
     name: lint, typecheck, and tests
+    needs: changes
+    if: needs.changes.outputs.mobile_app == 'true'
     runs-on: [self-hosted, linux, x64]
     defaults:
       run:
@@ -42,6 +60,8 @@ jobs:
 
   tauri:
     name: Tauri tests, clippy, and audit
+    needs: changes
+    if: needs.changes.outputs.mobile_tauri == 'true'
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -59,3 +79,23 @@ jobs:
       # while upstream completes its GTK dependency migration. Unmaintained GTK3 warnings remain
       # visible without failing because Tauri/Wry still require that stack on Linux.
       - run: cargo audit --file mobile/src-tauri/Cargo.lock --ignore RUSTSEC-2024-0429
+
+  mobile-typecheck:
+    name: mobile checks
+    needs: [changes, app, tauri]
+    if: always()
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 5
+    steps:
+      - name: Check affected jobs passed
+        run: |
+          for result in \
+            "${{ needs.changes.result }}" \
+            "${{ needs.app.result }}" \
+            "${{ needs.tauri.result }}"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "An affected mobile job failed or was cancelled"; exit 1 ;;
+            esac
+          done
+          echo "All affected mobile jobs passed"
