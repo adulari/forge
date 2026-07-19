@@ -156,7 +156,7 @@ Once you're comfortable with the basics:
 | Race models on a task, keep the winner | `/duel <task>` in chat |
 | See which model wrote a line | `forge blame <file> --line <n>` |
 | Schedule a recurring headless run | `forge schedule add "<task>" --every 30m` |
-| Control sessions from desktop/mobile/web | `forge serve --anywhere`, then open or scan its URL |
+| Control sessions from desktop/mobile/web | `forge serve --tunnel`, then open or scan its URL |
 | Import your Claude Code skills | `forge import claude` |
 | Connect MCP servers | `forge mcp add ...` or `forge mcp import` |
 | Move Forge to another machine | `forge migrate export ./bundle.tar.gz` |

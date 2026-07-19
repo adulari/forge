@@ -280,6 +280,12 @@ pub(crate) enum AssayCmd {
 /// Managed Forge Anywhere account and host operations.
 #[derive(Subcommand)]
 pub(crate) enum AnywhereCmd {
+    /// Guided, resumable setup: sign in, recover or enroll, activate this host, and verify it.
+    Setup {
+        /// Stable name shown in the host fleet (defaults to the system hostname).
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+    },
     /// Sign in with GitHub's device flow and enroll this controller device.
     Login,
     /// Register this machine as a managed host and enable its connector.
@@ -290,6 +296,8 @@ pub(crate) enum AnywhereCmd {
     },
     /// Show local enrollment plus live entitlement, connection, and quota state.
     Status,
+    /// Diagnose setup, enrollment, connector, and service readiness without printing secrets.
+    Doctor,
     /// Move a paused session and its workspace capsule to another host.
     Handoff {
         /// Session id or unique prefix.
@@ -435,13 +443,16 @@ pub(crate) enum Command {
     /// create/attach/archive them from the page. See docs/features/remote-control.md.
     Serve {
         /// Bind loopback only (control from this machine, plain HTTP).
-        #[arg(long, conflicts_with = "anywhere")]
+        #[arg(long, conflicts_with_all = ["tunnel", "anywhere"])]
         local: bool,
         /// Bind the LAN with self-signed HTTPS (this is the default; accepted for symmetry).
-        #[arg(long, conflicts_with_all = ["local", "anywhere"])]
+        #[arg(long, conflicts_with_all = ["local", "tunnel", "anywhere"])]
         lan: bool,
         /// Bind loopback and open a public tunnel (cloudflared/ngrok) so any network reaches it.
         #[arg(long)]
+        tunnel: bool,
+        /// Deprecated alias for `--tunnel`; managed Forge Anywhere uses `forge anywhere`.
+        #[arg(long, hide = true, conflicts_with_all = ["local", "lan", "tunnel"])]
         anywhere: bool,
         /// Listen port. Defaults to `[remote] port` from config, else 7420. Keep it stable —
         /// the PWA install is bound to the origin.
@@ -1162,7 +1173,7 @@ pub(crate) enum ServiceCmd {
     /// `--anywhere`/`--lan`/`--local` is given.
     Install {
         /// Bind loopback and open a public tunnel (cloudflared/ngrok) — passed through to
-        /// `forge serve --anywhere`.
+        /// `forge serve --tunnel`.
         #[arg(long, conflicts_with_all = ["lan", "local"])]
         anywhere: bool,
         /// Bind the LAN with self-signed HTTPS. This is already the default; accepted for

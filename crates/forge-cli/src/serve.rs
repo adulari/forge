@@ -37,7 +37,7 @@
 //!   the model downloads into `{data_dir}/models/whisper/` on first use and is cached in memory.
 //!
 //! Exposure mirrors `/remote`: `--lan` (default) binds 0.0.0.0 with self-signed HTTPS, `--local`
-//! binds loopback plain HTTP, `--anywhere` binds loopback and opens a cloudflared/ngrok tunnel —
+//! binds loopback plain HTTP, `--tunnel` binds loopback and opens a cloudflared/ngrok tunnel —
 //! by default an ephemeral quick tunnel (new random URL every launch); set `[remote] tunnel_name`
 //! (cloudflared named tunnel) or `tunnel_hostname` alone (ngrok reserved domain) for a stable URL
 //! across restarts (see [`remote::resolve_tunnel_kind`]).

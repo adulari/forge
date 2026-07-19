@@ -296,11 +296,12 @@ control; `project_roots` limits browsing, not explicit session creation.
 
 ### Stable tunnel URL
 
-By default `--anywhere` opens an ephemeral **quick tunnel**: a new random
+By default `/remote --anywhere` or `forge serve --tunnel` opens an ephemeral **quick tunnel**: a new random
 `trycloudflare.com`/`ngrok-free.app` URL every launch. Bookmarking or installing that URL to a
 phone home screen is pointless — it dies the moment you restart. `[remote] tunnel_name` /
 `tunnel_hostname` pin it to a stable hostname instead, so the same link keeps working across
-every `forge chat --anywhere` / `forge serve --anywhere` launch.
+every `forge chat --anywhere` / `forge serve --tunnel` launch. The older
+`forge serve --anywhere` spelling remains a deprecated alias during migration.
 
 **cloudflared (named tunnel)** — one-time setup, then a config line:
 

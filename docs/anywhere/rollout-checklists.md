@@ -15,7 +15,7 @@ evidence.
   recovery, and entitlement-transition tests pass.
 - [ ] Cross-account authorization and relay-isolation tests cover every API group.
 - [ ] Quota race, abandoned upload, object mismatch, retention, deletion, and restore tests pass.
-- [ ] Direct HTTP/WebSocket, LAN pairing, and user-managed `serve --anywhere` regression tests pass.
+- [ ] Direct HTTP/WebSocket, LAN pairing, and user-managed `serve --tunnel` regression tests pass.
 - [ ] Production and backup R2 buckets are separate; lifecycle policies match the published
   retention contract.
 - [ ] SQLite WAL, foreign keys, busy timeout, bounded pool, Litestream replication, readiness, and

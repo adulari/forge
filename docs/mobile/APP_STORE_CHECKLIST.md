@@ -45,7 +45,7 @@ Keep App Store Connect's App Privacy answers synchronized with the implementatio
 - Declare **Product Interaction → Analytics**, not linked to identity and not used for tracking,
   for the fixed anonymous counters. Forge has no advertising identifier or person profile.
 - The daemon pairing URL is a bearer credential stored in the device keychain. Forge does not send
-  it to Apple, Expo, PostHog, or the APNs relay. When the user chooses `--anywhere`, however, the
+  it to Apple, Expo, PostHog, or the APNs relay. When the user chooses `--tunnel`, however, the
   configured tunnel provider terminates TLS and can technically observe the pairing token and
   relayed session traffic. Do not promise that a public tunnel is end-to-end encrypted to the
   daemon.
@@ -95,7 +95,7 @@ been removed.
 
 The App Store reviewer has no Forge daemon by default. Provide a short-lived, sandboxed demo:
 
-1. Start `forge serve --anywhere` in a throwaway repository with no valuable credentials or
+1. Start `forge serve --tunnel` in a throwaway repository with no valuable credentials or
    network access.
 2. Put its pairing URL/QR and a concise workflow in App Review Information.
 3. Explain that the app is a client for the user's self-hosted Forge daemon, that the selected

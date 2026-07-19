@@ -17,7 +17,7 @@ open source and free.
 | The Forge CLI, TUI, daemon, and local session history | Managed encrypted relay with stable host identity |
 | Loopback and LAN access | Up to three active hosts in a personal fleet |
 | Direct device pairing | Unlimited personal controller devices |
-| `forge serve --anywhere` through a tunnel you operate | 5 GB of encrypted cloud sync/history |
+| `forge serve --tunnel` through a tunnel you operate | 5 GB of encrypted cloud sync/history |
 | Any self-hosted networking and storage you operate | Remote jobs and generic push notifications |
 | Local workspace export/import | Safe encrypted workspace handoff between hosts |
 | Direct HTTP/WebSocket protocol (`remote-v8`) | Expiring end-to-end encrypted replay links |

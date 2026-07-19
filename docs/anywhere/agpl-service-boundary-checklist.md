@@ -15,7 +15,7 @@ independently implements the published network protocol.
 - [ ] Client cryptography, recovery, pairing, revocation, connector allowlist, sync rules, capsule
   safety, and transport code remain AGPL in this repository.
 - [ ] A user can still run Forge, local/LAN remote control, direct pairing, and their own
-  `forge serve --anywhere` tunnel without the private service or a subscription.
+  `forge serve --tunnel` tunnel without the private service or a subscription.
 - [ ] Public documentation clearly distinguishes the optional managed service from Forge itself.
 
 ## Private service side

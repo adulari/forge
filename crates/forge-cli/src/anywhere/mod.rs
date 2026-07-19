@@ -14,9 +14,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use ed25519_dalek::SigningKey;
 use forge_anywhere_protocol::crypto::{
-    derive_device_wrap_key, derive_recovery_wrap_key, exchange_public_key,
+    derive_device_wrap_key, derive_recovery_wrap_key, derive_recovery_wrap_key_v2,
+    exchange_public_key, SecretKey,
 };
-use forge_anywhere_protocol::keys::RecoverySecret;
+use forge_anywhere_protocol::keys::{RecoveryKitV2, RecoverySecret, RecoverySecretV2};
 use forge_anywhere_protocol::{Envelope, EnvelopeKind, EnvelopeMetadata, RecipientKind};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
@@ -474,9 +475,11 @@ struct CurrentDeviceWrapResponse {
 
 pub(crate) async fn anywhere_cmd(command: AnywhereCmd) -> Result<()> {
     match command {
+        AnywhereCmd::Setup { name } => setup(name).await,
         AnywhereCmd::Login => login().await,
         AnywhereCmd::Enable { name } => enable(name).await,
         AnywhereCmd::Status => status().await,
+        AnywhereCmd::Doctor => doctor().await,
         AnywhereCmd::Handoff { session, to } => handoff(&session, &to).await,
         AnywhereCmd::Share { session, expires } => share(&session, expires).await,
         AnywhereCmd::Job {
@@ -502,6 +505,46 @@ pub(crate) async fn anywhere_cmd(command: AnywhereCmd) -> Result<()> {
         AnywhereCmd::Disable => disable().await,
         AnywhereCmd::Logout => logout().await,
     }
+}
+
+async fn setup(name: Option<String>) -> Result<()> {
+    println!("Forge Anywhere setup");
+    println!("1/4 Checking this Forge installation…");
+    println!("    Forge {}", env!("CARGO_PKG_VERSION"));
+
+    let result: Result<()> = async {
+        let store = StateStore::platform()?;
+        let state = store.load()?;
+        if state.is_logged_in() {
+            println!("2/4 GitHub sign-in already complete.");
+        } else {
+            println!("2/4 Sign in with GitHub.");
+            login().await?;
+        }
+
+        let state = store.load()?;
+        if state.host_id.is_some() {
+            println!("3/4 Host already activated; checking its connector.");
+            ensure_managed_connector().await?;
+        } else {
+            println!("3/4 Activate this host.");
+            enable(name).await?;
+        }
+
+        println!("4/4 Verify the connection.");
+        status().await?;
+        println!("Forge Anywhere setup is complete.");
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        eprintln!("Setup could not continue: {error:#}");
+        eprintln!("\nRunning `forge anywhere doctor`…");
+        doctor().await?;
+        bail!("Forge Anywhere setup stopped; follow the safe next action above");
+    }
+    Ok(())
 }
 
 async fn login() -> Result<()> {
@@ -634,9 +677,16 @@ async fn bootstrap_new_account(
     exchange_private: &[u8; 32],
     exchange_public: &[u8; 32],
 ) -> Result<[u8; 32]> {
-    let recovery = RecoverySecret::from_entropy(rand::random::<[u8; 32]>())?;
+    let recovery = RecoverySecretV2::from_entropy(rand::random::<[u8; 16]>())?;
     let words = recovery.words()?;
-    println!("\nRecovery phrase (shown once — store it offline):\n\n{words}\n");
+    let kit = RecoveryKitV2::new(&recovery, service_url, &account_id)?;
+    println!(
+        "\nRecovery Kit (shown once — store these 12 words offline):\n\n{words}\n\n\
+         A `.forge-recovery` file or QR created from this kit carries the same bearer secret."
+    );
+    // Construct the portable representation before verification so malformed bindings can never
+    // activate an account. It is intentionally not written to disk without an explicit UI action.
+    let _portable_kit = kit.to_json()?;
     confirm_recovery_words(&words)?;
 
     let data_key = rand::random::<[u8; 32]>();
@@ -647,7 +697,7 @@ async fn bootstrap_new_account(
         KEY_EPOCH_INITIAL,
     )?;
     let recovery_wrap_key =
-        derive_recovery_wrap_key(recovery.as_bytes(), &account_id, KEY_EPOCH_INITIAL)?;
+        derive_recovery_wrap_key_v2(recovery.as_bytes(), &account_id, KEY_EPOCH_INITIAL)?;
     let device_wrap = key_wrap_envelope(
         data_key,
         *device_wrap_key.as_bytes(),
@@ -705,11 +755,13 @@ async fn recover_existing_account(
         .recovery_wrap_signing_public_key
         .as_deref()
         .context("service did not return the recovery-wrap signing key")?;
-    let words = rpassword::prompt_password("24-word recovery phrase: ")?;
-    let recovery = RecoverySecret::from_words(words.trim())?;
+    let input = rpassword::prompt_password(
+        "Recovery Kit path, 12-word phrase, or legacy 24-word phrase: ",
+    )?;
     let envelope = Envelope::decode(&URL_SAFE_NO_PAD.decode(encoded_wrap)?)?;
-    let recovery_key = derive_recovery_wrap_key(
-        recovery.as_bytes(),
+    let recovery_key = recovery_wrap_key_from_input(
+        input.trim(),
+        service_url,
         &account_id,
         envelope.metadata.key_epoch,
     )?;
@@ -956,6 +1008,83 @@ async fn status() -> Result<()> {
     if let Some(trial_end) = me.trial_ends_at {
         println!("Trial ends: {trial_end}");
     }
+    Ok(())
+}
+
+async fn doctor() -> Result<()> {
+    println!("Forge Anywhere doctor");
+    println!("  binary: Forge {}", env!("CARGO_PKG_VERSION"));
+
+    let store = StateStore::platform()?;
+    let state = match store.load() {
+        Ok(state) => state,
+        Err(_) => {
+            println!("  enrollment: local state is unreadable");
+            println!(
+                "  next action: restore the protected state file or run `forge anywhere login`"
+            );
+            return Ok(());
+        }
+    };
+    println!(
+        "  enrollment: {}",
+        if state.is_logged_in() {
+            "device enrolled"
+        } else {
+            "not enrolled"
+        }
+    );
+
+    let config = forge_config::load()?;
+    println!(
+        "  host: {}",
+        if state.host_id.is_some() {
+            "activated"
+        } else {
+            "not activated"
+        }
+    );
+    println!(
+        "  connector: {}",
+        if config.anywhere.enabled {
+            match crate::serve::read_state()? {
+                Some(serve) if serve.process_is_alive() => "configured; local daemon is running",
+                _ => "configured; local daemon is offline",
+            }
+        } else {
+            "not configured"
+        }
+    );
+
+    let health_url = format!(
+        "{}/health",
+        config.anywhere.service_url().trim_end_matches('/')
+    );
+    let service_ready = match client()?.get(health_url).send().await {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    };
+    println!(
+        "  service: {}",
+        if service_ready {
+            "ready"
+        } else {
+            "dependency unavailable"
+        }
+    );
+
+    let next_action = if !state.is_logged_in() {
+        "run `forge anywhere setup`"
+    } else if state.host_id.is_none() {
+        "run `forge anywhere setup` to activate this host"
+    } else if !config.anywhere.enabled {
+        "run `forge anywhere enable`"
+    } else if !service_ready {
+        "keep using local/LAN Forge and retry when the service is available"
+    } else {
+        "none; setup is healthy"
+    };
+    println!("  next action: {next_action}");
     Ok(())
 }
 
@@ -1472,31 +1601,49 @@ fn service_error(status: StatusCode, body: &[u8]) -> String {
         code: Option<String>,
         message: Option<String>,
     }
-    serde_json::from_slice::<ErrorBody>(body)
-        .ok()
+    let error = serde_json::from_slice::<ErrorBody>(body).ok();
+    let searchable = error
+        .as_ref()
         .map(|error| {
             format!(
-                "Anywhere service returned HTTP {}{}{}",
-                status.as_u16(),
-                error
-                    .code
-                    .map(|code| format!(" [{code}]"))
-                    .unwrap_or_default(),
-                error
-                    .message
-                    .map(|message| format!(": {message}"))
-                    .unwrap_or_default()
+                "{} {}",
+                error.code.as_deref().unwrap_or_default(),
+                error.message.as_deref().unwrap_or_default()
             )
+            .to_ascii_lowercase()
         })
-        .unwrap_or_else(|| format!("Anywhere service returned HTTP {}", status.as_u16()))
+        .unwrap_or_default();
+    if searchable.contains("expired") || status == StatusCode::GONE {
+        "request expired — start the approval or setup again".into()
+    } else if searchable.contains("denied") {
+        "approval denied — confirm the device name and start setup again".into()
+    } else if searchable.contains("host_offline") || searchable.contains("host offline") {
+        "host offline — keep using local Forge or bring the selected host online".into()
+    } else if searchable.contains("version")
+        || searchable.contains("upgrade")
+        || status == StatusCode::UPGRADE_REQUIRED
+    {
+        "update required — install the current Forge release before continuing".into()
+    } else if searchable.contains("recovery") {
+        "recovery unavailable — use an enrolled device or your offline Recovery Kit".into()
+    } else if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
+        "service dependency unavailable — local and LAN Forge remain available; retry later".into()
+    } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        "device enrollment is not authorized — run `forge anywhere setup`".into()
+    } else {
+        format!(
+            "Forge Anywhere could not complete the request (HTTP {}) — run `forge anywhere doctor`",
+            status.as_u16()
+        )
+    }
 }
 
 fn confirm_recovery_words(words: &str) -> Result<()> {
     let words: Vec<&str> = words.split_whitespace().collect();
-    if words.len() != 24 {
-        bail!("generated recovery phrase did not contain 24 words");
+    if !matches!(words.len(), 12 | 24) {
+        bail!("generated recovery phrase did not contain 12 or 24 words");
     }
-    for index in [2_usize, 11, 20] {
+    for index in [2_usize, words.len() / 2, words.len() - 4] {
         let answer = rpassword::prompt_password(format!("Recovery word {}: ", index + 1))?;
         if answer.trim() != words[index] {
             bail!("recovery confirmation failed; no key material was uploaded");
@@ -1505,12 +1652,66 @@ fn confirm_recovery_words(words: &str) -> Result<()> {
     Ok(())
 }
 
+fn recovery_wrap_key_from_input(
+    input: &str,
+    service_url: &str,
+    account_id: &[u8; 16],
+    key_epoch: u32,
+) -> Result<SecretKey> {
+    if Path::new(input).is_file() {
+        let json = std::fs::read_to_string(input).context("read Recovery Kit")?;
+        let (_, secret) = RecoveryKitV2::from_json(&json, service_url, account_id)?;
+        return Ok(derive_recovery_wrap_key_v2(
+            secret.as_bytes(),
+            account_id,
+            key_epoch,
+        )?);
+    }
+
+    match input.split_whitespace().count() {
+        12 => {
+            let secret = RecoverySecretV2::from_words(input)?;
+            Ok(derive_recovery_wrap_key_v2(
+                secret.as_bytes(),
+                account_id,
+                key_epoch,
+            )?)
+        }
+        24 => {
+            let secret = RecoverySecret::from_words(input)?;
+            Ok(derive_recovery_wrap_key(
+                secret.as_bytes(),
+                account_id,
+                key_epoch,
+            )?)
+        }
+        count => bail!(
+            "Recovery Kit must be a `.forge-recovery` file or a 12/24-word phrase (got {count} words)"
+        ),
+    }
+}
+
 fn default_host_name() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .ok()
         .filter(|name| !name.trim().is_empty())
-        .unwrap_or_else(|| "Forge host".into())
+        .or_else(system_hostname)
+        .unwrap_or_else(|| "localhost".into())
+}
+
+fn system_hostname() -> Option<String> {
+    #[cfg(unix)]
+    {
+        std::fs::read_to_string("/etc/hostname")
+            .ok()
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 fn decode_hex_array<const N: usize>(value: &str, label: &str) -> Result<[u8; N]> {
@@ -1610,9 +1811,24 @@ mod tests {
             StatusCode::BAD_REQUEST,
             br#"{"code":"invalid_request","message":"safe message","secret":"do-not-log"}"#,
         );
-        assert!(error.contains("invalid_request"));
-        assert!(error.contains("safe message"));
+        assert!(error.contains("run `forge anywhere doctor`"));
+        assert!(!error.contains("invalid_request"));
+        assert!(!error.contains("safe message"));
         assert!(!error.contains("do-not-log"));
+    }
+
+    #[test]
+    fn service_errors_are_actionable_states() {
+        assert!(
+            service_error(StatusCode::GONE, br#"{"code":"challenge_expired"}"#,)
+                .starts_with("request expired")
+        );
+        assert!(
+            service_error(StatusCode::CONFLICT, br#"{"code":"approval_denied"}"#,)
+                .starts_with("approval denied")
+        );
+        assert!(service_error(StatusCode::SERVICE_UNAVAILABLE, b"")
+            .starts_with("service dependency unavailable"));
     }
 
     #[test]

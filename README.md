@@ -350,7 +350,7 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
   and actionable web push (approve/deny from the lock screen)
 - Optional [Forge Anywhere](docs/features/forge-anywhere.md) companion: managed end-to-end encrypted
   relay, sync/history, multi-host fleet, workspace handoff, and replay shares. Forge, local/LAN
-  access, direct pairing, and user-managed `serve --anywhere` tunnels remain free and independent
+  access, direct pairing, and user-managed `serve --tunnel` tunnels remain free and independent
 - Local Whisper transcription in the TUI and companion app, plus desktop voice shortcut support.
   Official macOS/Windows CLI builds include local microphone capture; portable Linux CLI/TUI builds
   keep file/upload transcription but make microphone capture an opt-in source-build feature
@@ -675,7 +675,7 @@ wide, the Fleet stays visible beside the active chat; mobile keeps focused full-
 ```bash
 forge serve                  # LAN, self-signed HTTPS (default)
 forge serve --local          # loopback only
-forge serve --anywhere       # public tunnel via cloudflared/ngrok
+forge serve --tunnel         # public tunnel via cloudflared/ngrok
 forge serve --port 9000      # override the stable port
 forge serve --rotate-token   # revoke: mint a new daemon token (old links/PWAs die)
 ```

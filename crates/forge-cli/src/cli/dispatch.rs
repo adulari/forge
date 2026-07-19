@@ -42,11 +42,19 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Serve {
             local,
             lan: _,
+            tunnel,
             anywhere,
             port,
             rotate_token,
             mock,
-        } => crate::serve::serve_cmd(local, anywhere, port, rotate_token, mock).await,
+        } => {
+            if anywhere {
+                eprintln!(
+                    "warning: `forge serve --anywhere` is deprecated; use `forge serve --tunnel`"
+                );
+            }
+            crate::serve::serve_cmd(local, tunnel || anywhere, port, rotate_token, mock).await
+        }
         Command::Anywhere { cmd } => crate::anywhere::anywhere_cmd(cmd).await,
         Command::Attach {
             id,

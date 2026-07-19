@@ -13,7 +13,7 @@ does, an embedder can do. There is **no separate SDK**: the contract is the HTTP
 ```
 forge serve            # LAN: binds 0.0.0.0, self-signed HTTPS
 forge serve --local    # loopback, plain HTTP (easiest to embed against)
-forge serve --anywhere # loopback + a public cloudflared/ngrok tunnel
+forge serve --tunnel # loopback + a public cloudflared/ngrok tunnel
 ```
 
 On start it prints the connect URL, which contains the daemon token (see §2):

@@ -9,6 +9,7 @@ use crate::AccountId;
 
 const DEVICE_WRAP_CONTEXT: &[u8] = b"forge-anywhere/v1/device-wrap";
 const RECOVERY_WRAP_CONTEXT: &[u8] = b"forge-anywhere/v1/recovery-wrap";
+const RECOVERY_WRAP_V2_CONTEXT: &[u8] = b"forge-anywhere/v2/recovery-wrap";
 
 /// A secret 256-bit symmetric key that is zeroed when dropped.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
@@ -68,6 +69,22 @@ pub fn derive_recovery_wrap_key(
     derive_key(recovery_secret, account_id, &context)
 }
 
+/// Derive the wrap key for a v2 Recovery Kit's 128-bit bearer secret.
+///
+/// V2 deliberately has its own domain. Feeding the same bytes to another Forge HKDF use cannot
+/// produce this key, and the account id in the HKDF salt prevents a kit from being tried against
+/// another account.
+pub fn derive_recovery_wrap_key_v2(
+    recovery_entropy: &[u8; 16],
+    account_id: &AccountId,
+    key_epoch: u32,
+) -> Result<SecretKey, CryptoError> {
+    let mut context = Vec::with_capacity(RECOVERY_WRAP_V2_CONTEXT.len() + 4);
+    context.extend_from_slice(RECOVERY_WRAP_V2_CONTEXT);
+    context.extend_from_slice(&key_epoch.to_be_bytes());
+    derive_key(recovery_entropy, account_id, &context)
+}
+
 fn derive_key(
     input_key_material: &[u8],
     salt: &[u8],
@@ -112,5 +129,20 @@ mod tests {
         let first = derive_device_wrap_key(&key, &peer, &[0x33; 16], 1).expect("first epoch");
         let second = derive_device_wrap_key(&key, &peer, &[0x33; 16], 2).expect("second epoch");
         assert_ne!(first.as_bytes(), second.as_bytes());
+    }
+
+    #[test]
+    fn recovery_versions_and_accounts_are_domain_separated() {
+        let account = [0x33; 16];
+        let v1 = derive_recovery_wrap_key(&[0x42; 32], &account, 1).expect("v1 key");
+        let v2 = derive_recovery_wrap_key_v2(&[0x42; 16], &account, 1).expect("v2 key");
+        let other =
+            derive_recovery_wrap_key_v2(&[0x42; 16], &[0x34; 16], 1).expect("other account key");
+        assert_ne!(v1.as_bytes(), v2.as_bytes());
+        assert_ne!(v2.as_bytes(), other.as_bytes());
+        assert_eq!(
+            hex::encode(v2.as_bytes()),
+            "fe1e8aec769b9f6c31a63ceb7bb58b592738f19d2c6cdf45b6fe82b0e1b2e15f"
+        );
     }
 }
