@@ -20,6 +20,10 @@ on:
     paths:
       - "mobile/src/**"
       - "mobile/assets/**"
+  # Main-only manual recovery when an automatic publish did not run or failed (see
+  # RELEASING.md §6). The runtimeVersion fingerprint still gates delivery, so a dispatch
+  # only reaches binaries whose native layer matches — never dispatch from a topic branch.
+  workflow_dispatch:
 
 permissions:
   contents: read
