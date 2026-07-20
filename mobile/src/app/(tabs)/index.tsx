@@ -24,6 +24,7 @@ import { TaskComposer } from "../../components/ds/TaskComposer";
 import { ApiError, type SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
+import { unrepresentedAnywhereHosts } from "../../lib/serverTargets";
 import { useServerFleets, useSessions } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { buildFleetDeck, type FleetDeckItem } from "../../lib/fleetRows";
@@ -169,7 +170,7 @@ function FleetHostFilter({ selected, onSelect }: { selected: string | null; onSe
     dot: <View style={[styles.hostFilterDot, { backgroundColor: server.id === activeServerId ? tokens.success : tokens.ink4 }]} />,
   }));
   const hostSources = signedIn
-    ? hosts.map((host) => ({ id: `host:${host.id}`, name: host.name, dot: <HostDot state={host.state} size={5} /> }))
+    ? unrepresentedAnywhereHosts(servers, hosts).map((host) => ({ id: `host:${host.id}`, name: host.name, dot: <HostDot state={host.state} size={5} /> }))
     : [];
   const sources = [...serverSources, ...hostSources];
 
