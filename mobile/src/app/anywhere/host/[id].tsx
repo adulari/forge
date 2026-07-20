@@ -9,6 +9,7 @@ import { Input } from "../../../components/ds/Input";
 import { Screen } from "../../../components/ds/Screen";
 import { useToast } from "../../../components/ds/ToastHost";
 import { useAnywhere } from "../../../lib/AnywhereProvider";
+import { hostStatusText } from "../../../lib/anywhereHostPresence";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { radii, space } from "../../../theme/tokens";
 import { type as typeScale } from "../../../theme/typography";
@@ -46,7 +47,7 @@ export default function AnywhereHostScreen() {
 
   return <Screen scroll keyboardAvoiding contentContainerStyle={styles.screen}><View style={styles.shell}>
     <BackLink label="Forge Anywhere" />
-    <View style={styles.header}><View style={[styles.icon, { backgroundColor: tokens.selection }]}><Laptop size={22} color={tokens.accent} /></View><View style={styles.headerCopy}><Text accessibilityRole="header" style={[typeScale.title, { color: tokens.ink }]}>{host.name}</Text><Text style={[typeScale.sub, { color: tokens.ink3 }]}>{host.last_heartbeat_at ? `Last active ${new Date(host.last_heartbeat_at).toLocaleString()}` : "Waiting for first connection"}</Text></View></View>
+    <View style={styles.header}><View style={[styles.icon, { backgroundColor: tokens.selection }]}><Laptop size={22} color={tokens.accent} /></View><View style={styles.headerCopy}><Text accessibilityRole="header" style={[typeScale.title, { color: tokens.ink }]}>{host.name}</Text><Text style={[typeScale.sub, { color: tokens.ink3 }]}>{hostStatusText(host)}</Text></View></View>
     <View style={styles.form}><Input label="Host name" value={name} onChangeText={setName} maxLength={80} /><Button label="Save host name" onPress={() => void rename()} loading={busy} disabled={!name.trim() || name.trim() === host.name} fullWidth /></View>
     <View style={[styles.danger, { borderColor: tokens.borderStrong }]}><Text style={[typeScale.headingBold, { color: tokens.ink }]}>Remove managed access</Text><Text style={[typeScale.sub, { color: tokens.ink2 }]}>Revoking disconnects this host from Forge Anywhere. Projects and other local Forge data stay on the computer.</Text>{confirmRevoke ? <View style={styles.actions}><Button label="Keep host" variant="ghost" disabled={busy} onPress={() => setConfirmRevoke(false)} style={styles.action} /><Button label="Revoke host" variant="danger" icon={<Trash2 size={17} color={tokens.danger} />} loading={busy} onPress={() => void revoke()} style={styles.action} /></View> : <Button label="Revoke host" variant="danger" onPress={() => setConfirmRevoke(true)} fullWidth />}</View>
   </View></Screen>;

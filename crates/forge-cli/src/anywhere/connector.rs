@@ -1,7 +1,7 @@
 //! Managed encrypted relay connector for `forge serve`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -34,10 +34,30 @@ const MAX_INLINE_BODY: usize = 256 * 1024;
 const MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_QUERY_LEN: usize = 4096;
 const RECONNECT_DELAY: Duration = Duration::from_secs(10);
+const RELAY_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+const RELAY_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(60);
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const COMMAND_WORKER_LEASE_MS: u64 = 2 * 60 * 1000;
 const COMMAND_JOURNAL_RETENTION_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const OCTET_STREAM: &str = "application/octet-stream";
+
+struct RelayHeartbeat {
+    last_pong: Instant,
+}
+
+impl RelayHeartbeat {
+    fn new(now: Instant) -> Self {
+        Self { last_pong: now }
+    }
+
+    fn record_pong(&mut self, now: Instant) {
+        self.last_pong = now;
+    }
+
+    fn is_timed_out(&self, now: Instant) -> bool {
+        now.duration_since(self.last_pong) > RELAY_HEARTBEAT_TIMEOUT
+    }
+}
 
 #[derive(Serialize)]
 struct RelayTicketRequest<'a> {
@@ -265,6 +285,10 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
         .context("connect encrypted Anywhere relay")?;
     println!("⚒ Forge Anywhere connector online");
     let (mut relay_write, mut relay_read) = relay.split();
+    let mut heartbeat = RelayHeartbeat::new(Instant::now());
+    let mut heartbeat_interval = tokio::time::interval(RELAY_HEARTBEAT_INTERVAL);
+    heartbeat_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat_interval.tick().await;
     let (local_events_tx, mut local_events_rx) = mpsc::channel(128);
     let mut streams = HashMap::<[u8; 16], StreamHandle>::new();
     let blobs = RelayBlobClient {
@@ -292,11 +316,23 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                             &mut relay_write,
                         ).await?;
                     }
-                    Message::Ping(bytes) => relay_write.send(Message::Pong(bytes)).await?,
-                    Message::Pong(_) => {}
+                    Message::Ping(bytes) => {
+                        heartbeat.record_pong(Instant::now());
+                        relay_write.send(Message::Pong(bytes)).await?;
+                    }
+                    Message::Pong(_) => heartbeat.record_pong(Instant::now()),
                     Message::Close(_) => bail!("relay closed the connection"),
                     Message::Text(_) | Message::Frame(_) => bail!("relay sent a non-binary data frame"),
                 }
+            }
+            _ = heartbeat_interval.tick() => {
+                if heartbeat.is_timed_out(Instant::now()) {
+                    bail!("relay heartbeat timed out");
+                }
+                relay_write
+                    .send(Message::Ping(Vec::new().into()))
+                    .await
+                    .context("send relay heartbeat")?;
             }
             event = local_events_rx.recv() => {
                 let Some(event) = event else {
@@ -1758,8 +1794,23 @@ fn bridge_error(request_id: [u8; 16], status: u16, message: &str) -> BridgeRespo
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use std::time::Instant;
 
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    #[test]
+    fn relay_heartbeat_times_out_only_after_missing_pongs() {
+        let started = Instant::now();
+        let mut heartbeat = RelayHeartbeat::new(started);
+        assert!(!heartbeat.is_timed_out(started + RELAY_HEARTBEAT_TIMEOUT));
+        assert!(
+            heartbeat.is_timed_out(started + RELAY_HEARTBEAT_TIMEOUT + Duration::from_millis(1))
+        );
+
+        let pong_at = started + Duration::from_secs(30);
+        heartbeat.record_pong(pong_at);
+        assert!(!heartbeat.is_timed_out(pong_at + RELAY_HEARTBEAT_TIMEOUT));
+    }
 
     fn request(route: RouteId, method: &str, parameters: &[&str]) -> BridgeRequest {
         BridgeRequest {
