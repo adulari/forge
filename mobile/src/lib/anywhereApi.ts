@@ -22,6 +22,42 @@ export interface AnywhereAuthSession {
   recovery_wrap_signing_public_key?: string;
 }
 
+export interface AnywhereCapabilities {
+  version: 1;
+  service_version: string;
+  protocol_version: number;
+  minimum_client_version: string;
+  maximum_client_major: number;
+  ready: boolean;
+  features: {
+    account_bound_enrollment: boolean;
+    passkey_prf_recovery: boolean;
+    seven_day_clean_reset: boolean;
+    recovery_kit_v2: boolean;
+    legacy_recovery_kit_v1: boolean;
+  };
+}
+
+export async function preflightAnywhere(serviceUrl: string): Promise<AnywhereCapabilities> {
+  const capabilities = await anywhereRequest<AnywhereCapabilities>(
+    serviceUrl,
+    "/v1/capabilities",
+    { cache: "no-store" },
+  );
+  if (capabilities.version !== 1 || capabilities.protocol_version !== 2
+    || capabilities.maximum_client_major < 2) {
+    throw new Error("Update Forge before setting up Forge Anywhere.");
+  }
+  if (!capabilities.ready) {
+    throw new Error("Forge Anywhere is temporarily unavailable. Your local Forge data is unaffected.");
+  }
+  if (!capabilities.features.account_bound_enrollment
+    || !capabilities.features.recovery_kit_v2) {
+    throw new Error("Forge Anywhere is being updated. Try setup again shortly.");
+  }
+  return capabilities;
+}
+
 export interface AnywhereAccountStatus {
   version: 1;
   entitlement: string;
@@ -30,6 +66,18 @@ export interface AnywhereAccountStatus {
   devices: number;
   storage_used_bytes: number;
   storage_limit_bytes: number;
+  pending_reset: AnywherePendingReset | null;
+}
+
+export interface AnywherePendingReset {
+  requested_at_ms: number;
+  executes_at_ms: number;
+  cancelable: boolean;
+}
+
+export interface AnywhereResetStatus {
+  version: 1;
+  pending_reset: AnywherePendingReset | null;
 }
 
 export type AnywhereBillingPeriod = "monthly" | "annual";
