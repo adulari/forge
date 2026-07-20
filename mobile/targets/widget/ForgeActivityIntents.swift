@@ -22,6 +22,14 @@ struct ForgeAllowIntent: LiveActivityIntent {
     @Parameter(title: "Sequence")
     var seq: Int
 
+    init() {}
+
+    init(sessionId: String, baseUrl: String, seq: Int) {
+        self.sessionId = sessionId
+        self.baseUrl = baseUrl
+        self.seq = seq
+    }
+
     func perform() async throws -> some IntentResult {
         await ForgeActivityDecision.send(sessionId: sessionId, baseUrl: baseUrl, seq: seq, allow: true)
         return .result()
@@ -41,13 +49,21 @@ struct ForgeDenyIntent: LiveActivityIntent {
     @Parameter(title: "Sequence")
     var seq: Int
 
+    init() {}
+
+    init(sessionId: String, baseUrl: String, seq: Int) {
+        self.sessionId = sessionId
+        self.baseUrl = baseUrl
+        self.seq = seq
+    }
+
     func perform() async throws -> some IntentResult {
         await ForgeActivityDecision.send(sessionId: sessionId, baseUrl: baseUrl, seq: seq, allow: false)
         return .result()
     }
 }
 
-@available(iOS 16.1, *)
+@available(iOS 17.0, *)
 private enum ForgeActivityDecision {
     private static let logger = Logger(subsystem: "dev.adulari.forge", category: "LiveActivityIntent")
 
