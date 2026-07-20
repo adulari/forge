@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   clampComposerHeight,
+  composerInputVerticalPadding,
+  COMPOSER_LINE_HEIGHT,
   COMPOSER_MAX_HEIGHT,
   COMPOSER_MAX_LINES,
   COMPOSER_MIN_HEIGHT,
@@ -29,5 +31,13 @@ describe("mobile composer sizing", () => {
       expect(nativeComposerHeightFromContent(measuredHeight)).toBe(measuredHeight);
     }
     expect(nativeComposerHeightFromContent(22)).toBe(COMPOSER_MIN_HEIGHT);
+  });
+
+  it("keeps web input padding out of scroll height while preserving the native inset", () => {
+    const nativeInset = (COMPOSER_MIN_HEIGHT - COMPOSER_LINE_HEIGHT) / 2;
+
+    expect(nativeInset).toBe(11);
+    expect(composerInputVerticalPadding("web")).toBe(0);
+    expect(composerInputVerticalPadding("ios")).toBe(nativeInset);
   });
 });

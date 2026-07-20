@@ -43,6 +43,7 @@ import {
 } from "./attach";
 import {
   clampComposerHeight,
+  composerInputVerticalPadding,
   COMPOSER_LINE_HEIGHT as LINE_HEIGHT,
   COMPOSER_MAX_HEIGHT as MAX_HEIGHT,
   COMPOSER_MIN_HEIGHT as MIN_HEIGHT,
@@ -655,7 +656,7 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     paddingHorizontal: space.space8,
-    paddingVertical: (MIN_HEIGHT - LINE_HEIGHT) / 2,
+    paddingVertical: composerInputVerticalPadding(Platform.OS),
     textAlignVertical: "top",
   },
   inputWrap: { flex: 1, minWidth: 0, position: "relative", overflow: "visible" },

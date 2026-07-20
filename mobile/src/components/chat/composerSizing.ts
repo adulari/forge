@@ -11,3 +11,7 @@ export function clampComposerHeight(contentHeight: number): number {
 export function nativeComposerHeightFromContent(contentHeight: number): number {
   return clampComposerHeight(contentHeight);
 }
+
+export function composerInputVerticalPadding(platform: string): number {
+  return platform === "web" ? 0 : (COMPOSER_MIN_HEIGHT - COMPOSER_LINE_HEIGHT) / 2;
+}
