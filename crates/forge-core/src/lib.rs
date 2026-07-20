@@ -1369,6 +1369,9 @@ struct ModelLoopOutcome {
     final_text: String,
     context_tokens: u64,
     hit_step_cap: bool,
+    /// A repetition/failure guard deliberately ended this loop. Outer recovery passes must honor
+    /// that terminal decision instead of starting a fresh loop with reset guard counters.
+    halted_by_loop_guard: bool,
     /// The model that produced the last response (may differ from the input if failover fired).
     active_model: String,
     /// A plan a CLI-bridge model proposed this loop (tailed from the sink as [`StreamEvent::Plan`]).
@@ -4506,6 +4509,7 @@ prompt text, nothing else.";
         // safe. Only bridge completions feed it (direct turns leave it 0).
         let mut bridge_input_accum: u64 = 0;
         let mut hit_step_cap = true;
+        let mut halted_by_loop_guard = false;
         // A plan a bridge model proposes via the out-of-band sink (StreamEvent::Plan). Captured by
         // the per-step stream closure and returned in the outcome for the turn's approval flow.
         // Only honored in planning mode (the bridge advertises present_plan unconditionally — it
@@ -5708,6 +5712,7 @@ prompt text, nothing else.";
                         }
                         .to_string(),
                     ));
+                    halted_by_loop_guard = true;
                     hit_step_cap = false;
                     break;
                 }
@@ -5868,6 +5873,7 @@ prompt text, nothing else.";
                         "`{tool}` kept failing ({}) after a nudge — stopping to avoid a wasted loop",
                         kind.label()
                     )));
+                    halted_by_loop_guard = true;
                     hit_step_cap = false;
                     break;
                 }
@@ -5878,6 +5884,7 @@ prompt text, nothing else.";
             final_text,
             context_tokens,
             hit_step_cap,
+            halted_by_loop_guard,
             active_model,
             plan: proposed_plan,
             tools_ran: tools_ran.load(std::sync::atomic::Ordering::Relaxed),
@@ -6321,6 +6328,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         let mut context_tokens = outcome.context_tokens;
         let mut active_model = outcome.active_model;
         let mut hit_step_cap = outcome.hit_step_cap;
+        let mut halted_by_loop_guard = outcome.halted_by_loop_guard;
         // Wave 7: did ANY bridge completion this turn (primary or a guard re-drive) report that
         // `mcp-serve` failed to start? OR-ed across the re-drives below, then combined with the
         // final tree/tool state to classify a toolless-bridge turn (see below the guards).
@@ -6386,6 +6394,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         if self.config.mesh.nudge_empty_diff
             && (self.expect_code_change || self.last_turn_contract.requires_changed_artifact())
             && self.edits_this_turn == 0
+            && !halted_by_loop_guard
         {
             let mut continuation_count = 0usize;
             // No prior continuation yet: a sentinel that keeps the diminishing-returns stop from
@@ -6453,6 +6462,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         context_tokens = nudge_outcome.context_tokens;
                         active_model = nudge_outcome.active_model;
                         hit_step_cap = nudge_outcome.hit_step_cap;
+                        halted_by_loop_guard = nudge_outcome.halted_by_loop_guard;
                         // The nudge re-drive spawns a FRESH bridge process (a new `mcp-serve`); if it
                         // too failed to start, this stays a toolless turn — carry the signal into the
                         // classification below.
@@ -6461,6 +6471,9 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         // diminishing-returns signal for the NEXT iteration.
                         delta_tokens_last = context_tokens.saturating_sub(tokens_before);
                         continuation_count += 1;
+                        if halted_by_loop_guard {
+                            break;
+                        }
                     }
                 }
             }
@@ -6481,6 +6494,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         if self.config.mesh.guard_test_edits
             && self.expect_code_change
             && !self.past_turn_deadline()
+            && !halted_by_loop_guard
         {
             let test_edits = modified_test_files_in_tree(Some(self.workspace.root()));
             if !test_edits.is_empty() && stash_paths(Some(self.workspace.root()), &test_edits) {
@@ -6512,6 +6526,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 context_tokens = guard_outcome.context_tokens;
                 active_model = guard_outcome.active_model;
                 hit_step_cap = guard_outcome.hit_step_cap;
+                halted_by_loop_guard = guard_outcome.halted_by_loop_guard;
             }
         }
 
@@ -6552,7 +6567,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // original task and fixes any bug/incompleteness — the self-correction leverage a
         // single-pass harness lacks, needing no external tools or test env. Fires only on edit
         // turns; runs BEFORE autofix so any fix it makes is then lint/test-checked too.
-        if self.config.mesh.self_review && self.edits_this_turn > 0 {
+        if self.config.mesh.self_review && self.edits_this_turn > 0 && !halted_by_loop_guard {
             self.presenter.emit(PresenterEvent::Warning(
                 "self-review: re-checking the changes against the task".to_string(),
             ));
@@ -6571,6 +6586,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             // Keep the original answer text: the review fixes code, it doesn't re-answer the user.
             context_tokens = rv.context_tokens;
             active_model = rv.active_model;
+            hit_step_cap = rv.hit_step_cap;
+            halted_by_loop_guard = rv.halted_by_loop_guard;
         }
 
         // ── Autofix self-healing loop (autofix.md) ────────────────────────────────────────────
@@ -6598,6 +6615,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         }
 
         let autofix_active = self.edits_this_turn > 0
+            && !halted_by_loop_guard
             && ((af.auto_lint && !af.lint_cmd.is_empty())
                 || (af.auto_test && !af.test_cmd.is_empty()));
 
@@ -6649,6 +6667,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                         context_tokens = fix_outcome.context_tokens;
                         active_model = fix_outcome.active_model;
                         hit_step_cap = fix_outcome.hit_step_cap;
+                        halted_by_loop_guard = fix_outcome.halted_by_loop_guard;
+                        if halted_by_loop_guard {
+                            break;
+                        }
                         if fix_outcome.hit_step_cap {
                             self.presenter.emit(PresenterEvent::Warning(format!(
                                 "autofix: inner model loop hit the {max_steps}-step limit"
@@ -6670,7 +6692,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // ── Auto-review gate (assay.auto_review) ──────────────────────────────────────────────
         // When enabled: build a unified diff of files written THIS turn, run the Assay critic
         // crew over it, and either warn or block depending on gate_mode. Zero overhead when off.
-        if self.config.assay.auto_review && self.edits_this_turn > 0 {
+        if self.config.assay.auto_review && self.edits_this_turn > 0 && !halted_by_loop_guard {
             let ar = self.config.assay.clone();
             if let Err(e) = self.auto_review_gate(&ar).await {
                 // TurnBlocked propagates up so the caller can surface it; other errors are
@@ -6694,8 +6716,11 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // the build turn through the full machinery (autofix, self-review, gate); typed feedback
         // runs a fresh planning turn; Cancel falls through and ends the turn in planning mode.
         if let Some(plan) = self.pending_plan.take() {
-            if let Some(followup) = self.resolve_plan_approval(&plan) {
-                return Box::pin(self.run_turn_with(&followup, &[], Some(TaskTier::Complex))).await;
+            if !halted_by_loop_guard {
+                if let Some(followup) = self.resolve_plan_approval(&plan) {
+                    return Box::pin(self.run_turn_with(&followup, &[], Some(TaskTier::Complex)))
+                        .await;
+                }
             }
         }
 
@@ -6722,6 +6747,9 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             let Some(reason) = stop_outcome.blocked else {
                 break;
             };
+            if halted_by_loop_guard {
+                break;
+            }
             if stop_blocks >= MAX_STOP_BLOCKS {
                 self.presenter.emit(PresenterEvent::Warning(format!(
                     "stop hook blocked {MAX_STOP_BLOCKS}× in a row — forcing the turn to end ({reason})"
@@ -6753,6 +6781,10 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             context_tokens = cont_outcome.context_tokens;
             active_model = cont_outcome.active_model;
             hit_step_cap = cont_outcome.hit_step_cap;
+            halted_by_loop_guard = cont_outcome.halted_by_loop_guard;
+            if halted_by_loop_guard {
+                break;
+            }
         }
 
         let (session_in, session_out) = self.store.session_tokens(&self.id)?;
@@ -10604,6 +10636,111 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("kept repeating the same tool call")),
             "the doom-loop guard should halt a repeating model; warnings: {warnings:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn doom_loop_halt_is_not_restarted_by_empty_diff_recovery() {
+        // A hard loop halt is terminal for this turn. The outer empty-diff recovery must not treat
+        // it as an ordinary model sign-off and start fresh model loops with reset guard state.
+        let dir = clean_git_repo();
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(DoomLoopProvider),
+            Arc::new(HeuristicRouter::new(Config::default())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            Config::default(),
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+        session.workspace = WorkspaceContext::new(&dir).unwrap();
+        session.set_expect_code_change(true);
+
+        session.run_turn("fix the bug").await.unwrap();
+
+        let warnings: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                PresenterEvent::Warning(message) | PresenterEvent::Error(message) => {
+                    Some(message.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|message| message.contains("kept repeating the same tool call"))
+                .count(),
+            1,
+            "a hard loop halt must be surfaced once; warnings: {warnings:?}"
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|message| message.contains("empty diff")),
+            "empty-diff recovery must not restart a loop-guard halt; warnings: {warnings:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn doom_loop_halt_is_not_restarted_by_blocking_stop_hook() {
+        // Stop hooks still run for lifecycle observation, but a blocking hook cannot override a
+        // hard model-loop halt and re-enter the same guarded turn with fresh counters.
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        let mut config = stop_hook_config("exit 2");
+        config.recap.enabled = false;
+        config.suggest.enabled = false;
+        config.mesh.auto_memory = false;
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(DoomLoopProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(capture),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        session.run_turn("read the file").await.unwrap();
+
+        let warnings: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                PresenterEvent::Warning(message) | PresenterEvent::Error(message) => {
+                    Some(message.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|message| message.contains("kept repeating the same tool call"))
+                .count(),
+            1,
+            "a blocking Stop hook must not restart a hard loop halt; warnings: {warnings:?}"
+        );
+        assert!(
+            !warnings
+                .iter()
+                .any(|message| message.contains("stop hook requested continuation")),
+            "a hard loop halt must override Stop-hook continuation; warnings: {warnings:?}"
         );
     }
 
