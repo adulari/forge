@@ -30,7 +30,7 @@ export interface PasskeySession {
   completed: boolean;
 }
 
-interface CreatedSession {
+export interface CreatedSession {
   version: 1;
   session_token: string;
   browser_url: string;
@@ -118,6 +118,62 @@ export async function sendRegistrationEntropy(
     headers: sessionHeaders(sessionToken),
     body: JSON.stringify({ version: 1, ciphertext }),
   }, token);
+}
+
+interface PasskeyRegistrationDependencies {
+  createSession: typeof createPasskeySession;
+  sendEntropy: typeof sendRegistrationEntropy;
+}
+
+/**
+ * Encrypt and deliver the Recovery Kit entropy before leaving the native app. System browsers
+ * background mobile claimants immediately, so waiting for a browser-published key deadlocks both
+ * sides. The session-bound deterministic browser exchange lets the claimant prepare the payload
+ * first; the browser derives the identical key when it opens.
+ */
+export async function beginPasskeyRegistration(
+  serviceUrl: string,
+  token: string,
+  accountIdHex: string,
+  entropy: Uint8Array,
+  openBrowser: (url: string) => Promise<void>,
+  dependencies: PasskeyRegistrationDependencies = {
+    createSession: createPasskeySession,
+    sendEntropy: sendRegistrationEntropy,
+  },
+): Promise<{ created: CreatedSession }> {
+  const client = generatePasskeyExchange();
+  const created = await dependencies.createSession(
+    serviceUrl,
+    token,
+    "registration",
+    client.publicKey,
+  );
+  const browser = browserPasskeyExchange(created.session_token);
+  const channelKey = passkeyChannelKey(
+    client.privateKey,
+    browser.publicKey,
+    accountIdHex,
+    created.session_token,
+  );
+  try {
+    await dependencies.sendEntropy(
+      serviceUrl,
+      token,
+      created.session_token,
+      sealPasskeySecret(
+        entropy,
+        channelKey,
+        passkeyChannelAad(accountIdHex, "registration"),
+      ),
+    );
+  } finally {
+    client.privateKey.fill(0);
+    browser.privateKey.fill(0);
+    channelKey.fill(0);
+  }
+  await openBrowser(created.browser_url);
+  return { created };
 }
 
 export function passkeyChannelKey(
