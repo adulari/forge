@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { base64Url } from "./anywhereApi";
 import {
+  browserPasskeyExchange,
   openPasskeySecret,
   passkeyChannelAad,
   passkeyChannelKey,
@@ -12,6 +13,17 @@ import {
 import { bytesToHex } from "./transport/anywhereEnvelope";
 
 describe("Anywhere passkey recovery channel", () => {
+  it("keeps the browser exchange key stable when a native ceremony URL is reopened", () => {
+    const session = base64Url(new Uint8Array(32).fill(0x20));
+    const first = browserPasskeyExchange(session);
+    const reopened = browserPasskeyExchange(session);
+    const different = browserPasskeyExchange(base64Url(new Uint8Array(32).fill(0x21)));
+
+    expect(reopened.privateKey).toEqual(first.privateKey);
+    expect(reopened.publicKey).toEqual(first.publicKey);
+    expect(different.privateKey).not.toEqual(first.privateKey);
+  });
+
   it("derives the same account- and session-bound key on both devices", () => {
     const claimant = new Uint8Array(32).fill(0x21);
     const browser = new Uint8Array(32).fill(0x22);

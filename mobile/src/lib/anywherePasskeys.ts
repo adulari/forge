@@ -8,6 +8,7 @@ import { secureRandomBytes } from "./secureRandom";
 import { bytesFromHex } from "./transport/anywhereEnvelope";
 
 const CHANNEL_CONTEXT = new TextEncoder().encode("forge-anywhere/v2/passkey-channel");
+const BROWSER_EXCHANGE_CONTEXT = new TextEncoder().encode("forge-anywhere/v2/passkey-browser-exchange");
 const WRAP_CONTEXT = new TextEncoder().encode("forge-anywhere/v2/passkey-prf-wrap");
 
 export interface AnywherePasskey {
@@ -44,6 +45,17 @@ interface OptionsResponse {
 
 export function generatePasskeyExchange(): { privateKey: Uint8Array; publicKey: Uint8Array } {
   const privateKey = secureRandomBytes(32);
+  return { privateKey, publicKey: x25519.getPublicKey(privateKey) };
+}
+
+/**
+ * Derive the browser half of a ceremony from its 256-bit bearer token. Mobile platforms may
+ * foreground the same system-browser URL after sending the encrypted payload. A stable key lets
+ * that reload resume the authenticated channel instead of replacing its private half and failing
+ * XChaCha authentication with an `invalid tag` error.
+ */
+export function browserPasskeyExchange(sessionToken: string): { privateKey: Uint8Array; publicKey: Uint8Array } {
+  const privateKey = hkdf(sha256, fromBase64Url(sessionToken), new Uint8Array(), BROWSER_EXCHANGE_CONTEXT, 32);
   return { privateKey, publicKey: x25519.getPublicKey(privateKey) };
 }
 
@@ -148,7 +160,7 @@ export async function completeBrowserPasskeySession(
   if (typeof navigator === "undefined" || !navigator.credentials || !window.PublicKeyCredential) {
     throw new Error("This browser does not support passkeys.");
   }
-  const exchange = generatePasskeyExchange();
+  const exchange = browserPasskeyExchange(sessionToken);
   let session = await getPasskeySession(serviceUrl, sessionToken);
   await anywhereRequest(serviceUrl, "/v1/passkey-sessions/browser-key", {
     method: "POST",
