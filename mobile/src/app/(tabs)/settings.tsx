@@ -43,6 +43,7 @@ import { useToast } from "../../components/ds/ToastHost";
 import { entitlementBadge } from "../../lib/anywhere/format";
 import { useAnywhere } from "../../lib/anywhere/store";
 import { type StoredServer, useAuth } from "../../lib/auth";
+import { connectionHealthFromFleet } from "../../lib/connectionHealth";
 import { checkNotifyPermission, getNotifyPermission, notify, type NotifyPermission } from "../../lib/notify";
 import {
   enablePush,
@@ -60,6 +61,7 @@ import {
 } from "../../lib/anonymousTelemetry";
 import { useHooks, useMcp, useModels, usePlans, useServerFleets, useSkills, useUsage } from "../../lib/queries";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
+import { PROTOCOL_VERSION } from "../../lib/remoteProtocol";
 import { checkForDesktopUpdate, type DesktopUpdate } from "../../lib/updater";
 import { useStrike } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
@@ -158,7 +160,7 @@ export function SettingsNavRail({ active }: { active: string }) {
         );
       })}
       <View style={railStyles.flexFill} />
-      <Text style={[type.monoMeta, tabularNums, railStyles.version, { color: tokens.ink4 }]}>{`v${appVersion} · protocol v7`}</Text>
+      <Text style={[type.monoMeta, tabularNums, railStyles.version, { color: tokens.ink4 }]}>{`v${appVersion} · protocol v${PROTOCOL_VERSION}`}</Text>
     </View>
   );
 }
@@ -284,7 +286,7 @@ export default function SettingsScreen() {
   const tokens = useTokens();
   const toast = useToast();
   const { preference, setScheme } = useTheme();
-  const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer, testConnection } = useAuth();
+  const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer } = useAuth();
   const { account: anywhereAccount, signedIn: anywhereSignedIn } = useAnywhere();
 
   const serverQueries = useServerFleets(servers);
@@ -294,8 +296,6 @@ export default function SettingsScreen() {
   const [anonymousTelemetry, setAnonymousTelemetry] = useState(true);
   const [anonymousTelemetryLoaded, setAnonymousTelemetryLoaded] = useState(false);
   const [pendingRemove, setPendingRemove] = useState<StoredServer | null>(null);
-  const [health, setHealth] = useState<"idle" | "checking" | "ok" | "bad-token" | "unreachable" | "server-error">("idle");
-
   const [pushStatus, setPushStatus] = useState<PushSubscriptionState>("unsupported");
   const [pushLoaded, setPushLoaded] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
@@ -394,25 +394,11 @@ export default function SettingsScreen() {
     };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    if (!baseUrl) {
-      setHealth("idle");
-      return;
-    }
-    setHealth("checking");
-    testConnection().then((result) => {
-      // testConnection's in-flight state is "testing"; this screen models that as "checking".
-      if (!cancelled) setHealth(result === "testing" ? "checking" : result);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeServerId, baseUrl, testConnection]);
-
-  const healthStatusWord = health === "ok" ? "online" : health === "checking" ? "checking…" : health === "bad-token" ? "pairing invalid" : health === "unreachable" ? "offline" : health === "server-error" ? "server error" : "not connected";
-  const healthDotColor = health === "ok" ? tokens.success : health === "checking" ? tokens.warn : health === "idle" ? tokens.ink3 : tokens.danger;
-  const healthMetaText = host ? `${healthStatusWord} · protocol v7 · ${host}` : healthStatusWord;
+  const activeServerIndex = servers.findIndex((server) => server.id === activeServerId);
+  const health = connectionHealthFromFleet(activeServerIndex >= 0 ? serverQueries[activeServerIndex] : undefined);
+  const healthStatusWord = health === "ok" ? "online" : health === "testing" ? "checking…" : health === "bad-token" ? "pairing invalid" : health === "unreachable" ? "offline" : health === "server-error" ? "server error" : "not connected";
+  const healthDotColor = health === "ok" ? tokens.success : health === "testing" ? tokens.warn : health === "idle" ? tokens.ink3 : tokens.danger;
+  const healthMetaText = host ? `${healthStatusWord} · protocol v${PROTOCOL_VERSION} · ${host}` : healthStatusWord;
 
   const onAppLockChange = (value: boolean) => {
     const previous = appLock;
@@ -619,7 +605,7 @@ export default function SettingsScreen() {
         </View>
 
         <View style={styles.footerRow}>
-          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 0 }]}>{`v${appVersion} · protocol v7`}</Text>
+          <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 0 }]}>{`v${appVersion} · protocol v${PROTOCOL_VERSION}`}</Text>
           <View style={styles.footerFill} />
           <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4, flexShrink: 1 }]} numberOfLines={1}>
             {host ? `${host} · ${maskToken(activeToken)}` : "not connected"}
