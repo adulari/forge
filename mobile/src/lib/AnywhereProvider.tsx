@@ -55,6 +55,7 @@ import {
   type PendingRemoteJob,
 } from "./anywhereJobs";
 import { anywhereJobStore } from "./anywhereJobStore";
+import { secureRandomBytes } from "./secureRandom";
 import {
   promoteCurrentDeviceWrap,
   type AnywhereCurrentDeviceWrap,
@@ -367,7 +368,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         if (!value) throw new Error("Forge Anywhere sender is not an enrolled device");
         return bytesFromHex(value);
       },
-      randomBytes: (length) => crypto.getRandomValues(new Uint8Array(length)),
+      randomBytes: secureRandomBytes,
     };
     // Runtime remains stable while tokens/sequences mutate; a key/device epoch change replaces it.
     // Only key identity changes replace live relays; token and replay-state writes are read via refs.
@@ -652,7 +653,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         }
         if (session.new_account) {
           const recovery = generateRecoveryPhrase();
-          const setup = { ...nextPending, ...recovery, dataKey: crypto.getRandomValues(new Uint8Array(32)) };
+          const setup = { ...nextPending, ...recovery, dataKey: secureRandomBytes(32) };
           await enrollmentStore.save(JSON.stringify(snapshotRecovery(setup)));
           setRecoverySetup(setup);
           setPhase("new_recovery");

@@ -6,6 +6,7 @@ import {
   createRecoveryKitV2,
   deriveRecoveryWrapKey,
   deriveSelfDeviceWrapKey,
+  generatePendingKeys,
   generateRecoveryPhrase,
   makeKeyWrap,
   recoveryEntropy,
@@ -14,6 +15,32 @@ import {
 import { bytesToHex, openEnvelope } from "./transport/anywhereEnvelope";
 
 describe("Anywhere account cryptography", () => {
+  it("generates setup secrets when Hermes has no Web Crypto global", () => {
+    const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    const expoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "expo");
+    let uuidCounter = 0;
+    Object.defineProperty(globalThis, "crypto", { configurable: true, value: undefined });
+    Object.defineProperty(globalThis, "expo", {
+      configurable: true,
+      value: {
+        uuidv4: () => {
+          uuidCounter += 1;
+          const hex = uuidCounter.toString(16).padStart(32, "0");
+          return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20)}`;
+        },
+      },
+    });
+    try {
+      expect(generatePendingKeys().signingPrivateKey).toHaveLength(32);
+      expect(generateRecoveryPhrase().entropy).toHaveLength(16);
+    } finally {
+      if (cryptoDescriptor) Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+      else Reflect.deleteProperty(globalThis, "crypto");
+      if (expoDescriptor) Object.defineProperty(globalThis, "expo", expoDescriptor);
+      else Reflect.deleteProperty(globalThis, "expo");
+    }
+  });
+
   it("round-trips URL-safe base64 without padding", () => {
     const bytes = new Uint8Array([0, 1, 2, 250, 251, 252, 253, 254, 255]);
     const encoded = base64Url(bytes);
