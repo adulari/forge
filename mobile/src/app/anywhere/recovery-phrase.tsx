@@ -1,7 +1,7 @@
 import * as DocumentPicker from "expo-document-picker";
 import { File as ExpoFile } from "expo-file-system";
 import { Redirect } from "expo-router";
-import { Check, KeyRound, Laptop, ShieldAlert, ShieldCheck, Smartphone, Trash2 } from "lucide-react-native";
+import { Check, KeyRound, Laptop, Pencil, Plus, ShieldAlert, ShieldCheck, Smartphone, Trash2 } from "lucide-react-native";
 import React, { useCallback, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
@@ -23,6 +23,9 @@ export default function RecoveryCenterScreen() {
   const [target, setTarget] = useState<string | null>(null);
   const [kit, setKit] = useState("");
   const [busy, setBusy] = useState(false);
+  const [passkeyKit, setPasskeyKit] = useState("");
+  const [passkeyTarget, setPasskeyTarget] = useState<string | null>(null);
+  const [passkeyName, setPasskeyName] = useState("");
 
   const importKit = useCallback(async () => {
     const result = await DocumentPicker.getDocumentAsync({ type: ["application/json", "application/octet-stream", "text/plain"], multiple: false, copyToCacheDirectory: true });
@@ -34,6 +37,29 @@ export default function RecoveryCenterScreen() {
       toast.show("That Recovery Kit could not be read.", { tone: "danger" });
     }
   }, [toast]);
+
+  const importPasskeyKit = useCallback(async () => {
+    const result = await DocumentPicker.getDocumentAsync({ type: ["application/json", "application/octet-stream", "text/plain"], multiple: false, copyToCacheDirectory: true });
+    if (result.canceled) return;
+    try {
+      setPasskeyKit(await new ExpoFile(result.assets[0].uri).text());
+      toast.show("Recovery Kit loaded for passkey registration.", { tone: "neutral" });
+    } catch {
+      toast.show("That Recovery Kit could not be read.", { tone: "danger" });
+    }
+  }, [toast]);
+
+  const registerPasskey = useCallback(async () => {
+    if (!passkeyKit.trim()) return;
+    setBusy(true);
+    try {
+      await anywhere.registerPasskey(passkeyKit);
+      setPasskeyKit("");
+      toast.show("Recovery passkey registered.", { tone: "neutral" });
+    } catch (reason) {
+      toast.show(reason instanceof Error ? reason.message : "Passkey registration failed.", { tone: "danger" });
+    } finally { setBusy(false); }
+  }, [anywhere, passkeyKit, toast]);
 
   const revoke = useCallback(async () => {
     if (!target || !kit.trim()) return;
@@ -59,11 +85,22 @@ export default function RecoveryCenterScreen() {
 
         <View style={styles.health}>
           <HealthRow icon={anywhere.credentials?.recoveryKitVerified ? <ShieldCheck size={19} color={tokens.success} /> : <ShieldAlert size={19} color={tokens.warn} />} title="Recovery Kit" value={anywhere.credentials?.recoveryKitVerified ? "Verified on this device" : "Not checked on this device"} />
-          <HealthRow icon={<KeyRound size={19} color={tokens.ink3} />} title="Passkey recovery" value="Optional · no local registration found" />
+          <HealthRow icon={<KeyRound size={19} color={anywhere.passkeys.length ? tokens.success : tokens.warn} />} title="Passkey recovery" value={anywhere.passkeys.length ? `${anywhere.passkeys.length} registered` : "Recommended · none registered"} />
           <HealthRow icon={<Laptop size={19} color={tokens.info} />} title="Enrolled devices" value={`${anywhere.devices.length} available`} />
         </View>
 
         {!anywhere.credentials?.recoveryKitVerified ? <Banner tone="warn" message="Keep your Recovery Kit offline. This device has not verified it during the current enrollment." style={styles.flushBanner} /> : null}
+        {anywhere.account?.pending_reset ? <Banner tone="danger" message={`Clean reset scheduled for ${new Date(anywhere.account.pending_reset.executes_at_ms).toLocaleString()}.`} actionLabel="Cancel reset" onAction={() => void anywhere.cancelCleanReset().then(() => toast.show("Clean reset canceled.", { tone: "neutral" })).catch((reason) => toast.show(reason instanceof Error ? reason.message : "Reset could not be canceled.", { tone: "danger" }))} style={styles.flushBanner} /> : null}
+
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}><Text style={[typeScale.headingBold, { color: tokens.ink }]}>Passkeys</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Optional, recommended</Text></View>
+          <View style={[styles.deviceList, { borderTopColor: tokens.border }]}>
+            {anywhere.passkeys.map((passkey) => <View key={passkey.id} style={[styles.deviceRow, { borderBottomColor: tokens.hairline }]}><KeyRound size={18} color={tokens.success} /><View style={styles.deviceCopy}><Text style={[typeScale.bodyBold, { color: tokens.ink }]}>{passkey.name}</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{passkey.last_used_at ? `Last used ${new Date(passkey.last_used_at * 1000).toLocaleString()}` : `Added ${new Date(passkey.created_at * 1000).toLocaleDateString()}`}</Text></View><Pressable accessibilityRole="button" accessibilityLabel={`Rename ${passkey.name}`} onPress={() => { setPasskeyTarget(passkey.id); setPasskeyName(passkey.name); }} style={styles.iconButton}><Pencil size={16} color={tokens.ink2} /></Pressable><Pressable accessibilityRole="button" accessibilityLabel={`Remove ${passkey.name}`} onPress={() => void anywhere.revokePasskey(passkey.id).then(() => toast.show("Passkey removed.", { tone: "neutral" })).catch((reason) => toast.show(reason instanceof Error ? reason.message : "Passkey could not be removed.", { tone: "danger" }))} style={styles.iconButton}><Trash2 size={16} color={tokens.danger} /></Pressable></View>)}
+            {!anywhere.passkeys.length ? <View style={[styles.deviceRow, { borderBottomColor: tokens.hairline }]}><KeyRound size={18} color={tokens.ink3} /><Text style={[typeScale.sub, { color: tokens.ink3 }]}>No recovery passkeys registered yet.</Text></View> : null}
+          </View>
+          {passkeyTarget ? <View style={[styles.revokePanel, { backgroundColor: tokens.bg2, borderColor: tokens.borderStrong }]}><Text style={[typeScale.headingBold, { color: tokens.ink }]}>Rename passkey</Text><Input label="Passkey name" value={passkeyName} onChangeText={setPasskeyName} /><View style={styles.actions}><Button label="Cancel" variant="ghost" onPress={() => setPasskeyTarget(null)} style={styles.action} /><Button label="Save name" onPress={() => void anywhere.renamePasskey(passkeyTarget, passkeyName).then(() => { setPasskeyTarget(null); toast.show("Passkey renamed.", { tone: "neutral" }); }).catch((reason) => toast.show(reason instanceof Error ? reason.message : "Passkey could not be renamed.", { tone: "danger" }))} disabled={!passkeyName.trim()} style={styles.action} /></View></View> : null}
+          <View style={[styles.revokePanel, { backgroundColor: tokens.bg2, borderColor: tokens.borderStrong }]}><View style={styles.addTitle}><Plus size={18} color={tokens.accent} /><Text style={[typeScale.headingBold, { color: tokens.ink }]}>Add a recovery passkey</Text></View><Text style={[typeScale.sub, { color: tokens.ink2 }]}>Load your Recovery Kit once so this browser can wrap its secret with the new passkey. The secret and PRF output never reach Forge.</Text><Button label="Choose Recovery Kit file" variant="secondary" onPress={() => void importPasskeyKit()} fullWidth /><Input label="Or enter 12 / legacy 24 words" value={passkeyKit.startsWith("{") ? "Recovery Kit file loaded" : passkeyKit} onChangeText={setPasskeyKit} multiline autoCapitalize="none" autoCorrect={false} /><Button label="Create recovery passkey" loading={busy} disabled={!passkeyKit.trim()} onPress={() => void registerPasskey()} fullWidth /></View>
+        </View>
 
         <View style={styles.section}>
           <View style={styles.sectionHeader}><Text style={[typeScale.headingBold, { color: tokens.ink }]}>Devices</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Revoke lost access</Text></View>
@@ -109,6 +146,8 @@ const styles = StyleSheet.create({
   deviceRow: { minHeight: 60, flexDirection: "row", alignItems: "center", gap: space.space12, borderBottomWidth: StyleSheet.hairlineWidth },
   deviceCopy: { flex: 1, gap: 2 },
   revokeButton: { minHeight: 44, flexDirection: "row", alignItems: "center", gap: space.space4, paddingHorizontal: space.space8 },
+  iconButton: { minWidth: 42, minHeight: 42, alignItems: "center", justifyContent: "center" },
+  addTitle: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   revokePanel: { marginTop: space.space20, borderWidth: 1, borderRadius: radii.radius12, padding: space.space16, gap: space.space12 },
   actions: { flexDirection: "row", gap: space.space8 },
   action: { flex: 1 },

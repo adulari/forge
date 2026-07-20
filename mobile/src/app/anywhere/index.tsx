@@ -231,6 +231,9 @@ function RecoveryStep() {
   const toast = useToast();
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showReset, setShowReset] = useState(false);
+  const [resetConfirmation, setResetConfirmation] = useState("");
+  const [resetAt, setResetAt] = useState<number | null>(null);
 
   const importKit = useCallback(async () => {
     const result = await DocumentPicker.getDocumentAsync({ type: ["application/json", "application/octet-stream", "text/plain"], multiple: false, copyToCacheDirectory: true });
@@ -250,15 +253,40 @@ function RecoveryStep() {
     try { await anywhere.recoverExisting(value); } finally { setBusy(false); }
   }, [anywhere, value]);
 
+  const scheduleReset = useCallback(async () => {
+    setBusy(true);
+    try {
+      const executeAt = await anywhere.scheduleCleanReset(resetConfirmation);
+      setResetAt(executeAt);
+      toast.show("Clean reset scheduled. Any enrolled device can cancel it for seven days.", { tone: "neutral" });
+    } catch (reason) {
+      toast.show(reason instanceof Error ? reason.message : "Clean reset could not be scheduled.", { tone: "danger" });
+    } finally { setBusy(false); }
+  }, [anywhere, resetConfirmation, toast]);
+
   return (
     <View style={styles.step}>
       <Text style={[typeScale.headingBold, { color: tokens.ink }]}>Recover this device</Text>
-      <Text style={[typeScale.body, styles.measure, { color: tokens.ink2 }]}>Use the Recovery Kit file you saved when the account was created. A 12-word kit or legacy 24-word phrase also works.</Text>
+      <Text style={[typeScale.body, styles.measure, { color: tokens.ink2 }]}>Choose the easiest recovery method available. Recovery data stays encrypted and GitHub sign-in alone cannot unlock it.</Text>
+      {anywhere.passkeys.length ? <View style={[styles.safetyPanel, { borderColor: tokens.borderStrong, backgroundColor: tokens.bg2 }]}>
+        <View style={styles.safetyHeader}><KeyRound size={18} color={tokens.accent} /><Text style={[typeScale.bodyBold, { color: tokens.ink }]}>Recover with a passkey</Text></View>
+        {anywhere.passkeys.map((passkey) => <Button key={passkey.id} label={passkey.name} variant="secondary" loading={busy} onPress={() => { setBusy(true); void anywhere.recoverWithPasskey(passkey.id).catch((reason) => toast.show(reason instanceof Error ? reason.message : "Passkey recovery failed.", { tone: "danger" })).finally(() => setBusy(false)); }} fullWidth />)}
+      </View> : null}
+      <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Recovery Kit file, QR, or words</Text>
       <Button label="Choose Recovery Kit file" variant="secondary" icon={<Download size={17} color={tokens.ink} />} onPress={() => void importKit()} fullWidth />
       <View style={styles.orRow}><View style={[styles.rule, { backgroundColor: tokens.border }]} /><Text style={[typeScale.meta, { color: tokens.ink3 }]}>or enter words</Text><View style={[styles.rule, { backgroundColor: tokens.border }]} /></View>
       <Input label="Recovery words" value={value.startsWith("{") ? "Recovery Kit file loaded" : value} onChangeText={setValue} multiline autoCapitalize="none" autoCorrect={false} clearable containerStyle={styles.phraseInput} accessibilityHint="Enter 12 or 24 recovery words" />
       <Button label="Recover this device" onPress={() => void recover()} loading={busy} disabled={!value.trim()} fullWidth />
       <Button label="Try device approval again" variant="ghost" icon={<RefreshCw size={17} color={tokens.ink2} />} onPress={anywhere.restartSetup} fullWidth />
+      {!showReset ? <Button label="I lost every recovery method" variant="ghost" onPress={() => setShowReset(true)} fullWidth /> : null}
+      {showReset ? <View style={[styles.resetPanel, { borderColor: tokens.danger, backgroundColor: tokens.dangerBg }]}>
+        <Text style={[typeScale.headingBold, { color: tokens.ink }]}>Schedule a clean reset</Text>
+        <Text style={[typeScale.sub, { color: tokens.ink2 }]}>This waits seven days, then permanently deletes hosted encrypted account data. It never deletes local Forge data. Enrolled devices are notified and can cancel.</Text>
+        {resetAt ? <Banner tone="warn" message={`Reset scheduled for ${new Date(resetAt).toLocaleString()}.`} style={styles.flushBanner} /> : <>
+          <Input label="Type DELETE MY FORGE ANYWHERE DATA" value={resetConfirmation} onChangeText={setResetConfirmation} autoCapitalize="characters" autoCorrect={false} accessibilityHint="Exact destructive confirmation phrase" />
+          <View style={styles.actionRow}><Button label="Keep trying recovery" variant="ghost" disabled={busy} onPress={() => { setShowReset(false); setResetConfirmation(""); }} style={styles.flexAction} /><Button label="Schedule seven-day reset" variant="danger" loading={busy} disabled={resetConfirmation !== "DELETE MY FORGE ANYWHERE DATA"} onPress={() => void scheduleReset()} style={styles.flexAction} /></View>
+        </>}
+      </View> : null}
     </View>
   );
 }
@@ -307,6 +335,15 @@ function ReadyCenter() {
         </View>
         <Button label="Refresh" variant="ghost" icon={<RefreshCw size={16} color={tokens.ink2} />} onPress={() => void Promise.all([anywhere.refresh(), anywhere.refreshPendingApprovals()])} />
       </View>
+
+      {anywhere.account?.pending_reset ? <Banner
+        tone="danger"
+        message={`A clean reset is scheduled for ${new Date(anywhere.account.pending_reset.executes_at_ms).toLocaleString()}. Hosted encrypted data will be deleted unless an enrolled device cancels it.`}
+        actionLabel="Cancel reset"
+        onAction={() => void anywhere.cancelCleanReset().catch((reason) => toast.show(reason instanceof Error ? reason.message : "Reset could not be canceled.", { tone: "danger" }))}
+        style={styles.flushBanner}
+      /> : null}
+      {!anywhere.passkeys.length ? <Banner tone="neutral" message="Add a recovery passkey before connecting your first host for the quickest zero-knowledge recovery." actionLabel="Open Recovery Center" onAction={() => router.push("/anywhere/recovery-phrase")} style={styles.flushBanner} /> : null}
 
       <Section title="Approval inbox" meta={anywhere.pendingApprovals.length ? `${anywhere.pendingApprovals.length} pending` : "No pending requests"}>
         {anywhere.approvalError ? <Banner tone="warn" message="Approval inbox is temporarily unavailable." actionLabel="Retry" onAction={() => void anywhere.refreshPendingApprovals()} style={styles.flushBanner} /> : null}
@@ -414,6 +451,7 @@ const styles = StyleSheet.create({
   orRow: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   rule: { height: StyleSheet.hairlineWidth, flex: 1 },
   phraseInput: { minHeight: 72 },
+  resetPanel: { borderWidth: 1, borderRadius: radii.radius12, padding: space.space16, gap: space.space12, marginTop: space.space8 },
   errorIcon: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
   ready: { marginTop: space.space12, gap: space.space24 },
   readyHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.space12 },

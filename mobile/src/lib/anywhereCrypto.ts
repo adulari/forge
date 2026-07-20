@@ -165,6 +165,20 @@ export function openRecoveryWrap(
   accountIdHex: string,
   serviceUrl = "https://app.forge.adulari.dev",
 ): { dataKey: Uint8Array; epoch: number } {
+  return openRecoveryWrapWithEntropy(
+    encodedEnvelope,
+    encodedSigningKey,
+    recoveryEntropyFromInput(words, serviceUrl, accountIdHex),
+    accountIdHex,
+  );
+}
+
+export function openRecoveryWrapWithEntropy(
+  encodedEnvelope: string,
+  encodedSigningKey: string,
+  entropy: Uint8Array,
+  accountIdHex: string,
+): { dataKey: Uint8Array; epoch: number } {
   const envelopeBytes = fromBase64Url(encodedEnvelope);
   const envelope = decodeEnvelope(envelopeBytes);
   const accountId = bytesFromHex(accountIdHex);
@@ -175,7 +189,7 @@ export function openRecoveryWrap(
     throw new Error("Recovery wrap belongs to another account");
   }
   const key = deriveRecoveryWrapKey(
-    recoveryEntropyFromInput(words, serviceUrl, accountIdHex),
+    entropy,
     accountId,
     envelope.metadata.keyEpoch,
   );

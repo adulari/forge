@@ -49,6 +49,37 @@ export async function createPairing(serviceUrl: string, request: PairingCreateRe
     method: "POST",
     body: JSON.stringify(request),
   });
+  return validateCreatedPairing(created, request, serviceUrl);
+}
+
+/** Creates an account-bound request that enrolled clients discover automatically. */
+export async function createEnrollmentRequest(
+  serviceUrl: string,
+  token: string,
+  request: PairingCreateRequest,
+): Promise<PairingCreateResponse> {
+  const created = await anywhereRequest<PairingCreateResponse>(serviceUrl, "/v1/enrollment-requests", {
+    method: "POST",
+    body: JSON.stringify(request),
+  }, token);
+  return validateCreatedPairing(created, request, serviceUrl);
+}
+
+export async function cancelPairing(
+  serviceUrl: string,
+  pairingId: string,
+  pairingToken: string,
+): Promise<void> {
+  await anywhereRequest(serviceUrl, `/v1/pairings/${pairingId}/cancel`, {
+    method: "POST",
+  }, pairingToken);
+}
+
+function validateCreatedPairing(
+  created: PairingCreateResponse,
+  request: PairingCreateRequest,
+  serviceUrl: string,
+): PairingCreateResponse {
   if (created.version !== 1 || !isOpaque32(created.pairing_id) || !isOpaque32(created.pairing_token)
     || !Number.isSafeInteger(created.expires_at_ms)) {
     throw new Error("Forge Anywhere returned an invalid pairing ticket");

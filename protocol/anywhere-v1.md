@@ -253,17 +253,77 @@ acknowledgement; upload, claim, timeout, or failure leaves the service-side sour
 - Sender authentication: Ed25519.
 - Symmetric encryption: XChaCha20-Poly1305 with a 256-bit key.
 - Derivation: HKDF-SHA256.
-- Account recovery: a random 256-bit secret encoded as 24 English BIP39 words.
+- Account recovery: new accounts use 128 random bits encoded as 12 checksum-protected English
+  BIP39 words (Recovery Kit v2). Existing 256-bit/24-word v1 recovery remains valid indefinitely.
 
 The device-wrap key is HKDF with X25519 shared secret as IKM, `account_id` as salt, and
 `"forge-anywhere/v1/device-wrap" || key_epoch:u32` as info. The recovery-wrap key substitutes the
 256-bit recovery entropy as IKM and uses
 `"forge-anywhere/v1/recovery-wrap" || key_epoch:u32` as info.
+For v2, it substitutes the 128-bit entropy and uses
+`"forge-anywhere/v2/recovery-wrap" || key_epoch:u32`; both use `account_id` as HKDF salt.
 
 Each Account Data Key epoch is independently wrapped to every authorized device and to recovery.
 Revocation atomically invalidates the device's tokens, advances the epoch, and publishes wraps only
 for remaining devices and recovery. Old epochs remain available for decrypting retained history.
 Recovery words are displayed once; uploads remain disabled until sampled-word confirmation passes.
+The v2 `.forge-recovery` JSON and QR representation contain `{version:2,service,account_id,words,
+checksum}`. `checksum` is SHA-256 over the domain-separated service/account/entropy binding. Clients
+reject a wrong service, wrong account, malformed checksum, or non-12-word v2 value before deriving
+any key. Recovery material is never emitted to analytics, logs, URLs, crash reports, or clipboard
+without an explicit copy action.
+
+### Account-bound device approval
+
+After GitHub authentication, a returning claimant uses its restricted enrollment access token with
+`POST /v1/enrollment-requests`. The request is bound to that GitHub account at creation. It stores a
+public pairing id and hash-only polling token; `GET /v1/pairings` lets enrolled devices discover the
+request without scanning. The inbox shows the claimant name/platform, account, expiry, and the same
+six-digit transcript-derived safety code as the claimant. The code is verification UI, never an
+authorization secret.
+
+An enrolled device explicitly calls `POST /v1/pairings/{id}/approve` or `/deny`. The claimant may
+call `/cancel` with its pairing bearer token. Polling terminates as `approved`, `denied`, expired, or
+canceled; cross-account lookup and mutation return the same not-found response as an unknown id.
+QR, deep-link, and copied approval challenges remain supported through unauthenticated
+`POST /v1/pairings` as deliberate fallback paths.
+
+### Passkey PRF recovery
+
+Passkey management uses `/v1/passkeys`; registration and authentication use short-lived
+`/v1/passkey-sessions/*` ceremonies. A native claimant creates an ephemeral X25519 key and receives
+a browser URL whose opaque session bearer is in the URL fragment. The browser clears that fragment
+before starting. All subsequent requests use `X-Forge-Passkey-Session`; the token is stored only as
+a SHA-256 hash.
+
+The browser requests WebAuthn PRF output using a server-generated 32-byte salt. It derives the
+recovery-wrap key as HKDF-SHA256 with PRF output as IKM, `account_id` as salt, and
+`"forge-anywhere/v2/passkey-prf-wrap" || prf_salt` as info. It stores only the credential public
+metadata, PRF salt, and XChaCha20-Poly1305-encrypted recovery entropy. PRF output and plaintext
+recovery entropy never leave the browser.
+
+Browser and claimant derive a channel key from their ephemeral X25519 shared secret using
+`account_id` as salt and `"forge-anywhere/v2/passkey-channel" || SHA256(session_token)` as info.
+Only XChaCha20-Poly1305 ciphertext crosses the service. Registration moves recovery entropy from an
+enrolled client to the browser; authentication moves it from the browser to the claimant. The
+service cannot decrypt either direction. Credential counters are updated after successful WebAuthn
+authentication. Recovery-secret rotation atomically replaces the current recovery key wrap,
+revokes every old passkey wrap, cancels active ceremonies, and prompts registration of a new
+passkey.
+
+### Seven-day clean reset
+
+Total loss starts only after fresh GitHub authentication and the exact destructive confirmation.
+`POST /v1/account/reset` schedules deletion exactly seven days later without revoking existing
+devices or hosts. `GET /v1/account/reset` and `/v1/me` expose the pending deadline; any enrolled
+device may call `POST /v1/account/reset/cancel`. Generic notifications carry only the event kind.
+At the deadline, the service deletes hosted ciphertext and account state. It has no path to, and
+does not delete, local Forge data.
+
+Clients call unauthenticated `GET /v1/capabilities` before setup. It reports service/protocol
+versions, compatible client range, readiness, and independent account-enrollment, passkey, and
+clean-reset feature flags. An incompatible build fails before GitHub login with one update action;
+a dependency outage leaves direct/LAN operation available.
 
 ### QR device enrollment
 
