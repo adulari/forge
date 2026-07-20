@@ -4,6 +4,7 @@ import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
 import { base64Url, fromBase64Url } from "./anywhereApi";
+import { secureRandomBytes } from "./secureRandom";
 import { decodeEnvelope, openEnvelope, bytesFromHex, bytesToHex } from "./transport/anywhereEnvelope";
 import type { StoredAnywhereCredentials } from "./transport/anywhereCredentialTypes";
 
@@ -102,7 +103,7 @@ export function syncPayloadText(entry: OfflineHistoryEntry): string {
 
 export async function writeOfflineHistory(credentials: StoredAnywhereCredentials, entries: OfflineHistoryEntry[], storage: CacheStorage = AsyncStorage): Promise<void> {
   const key = cacheKey(credentials);
-  const nonce = crypto.getRandomValues(new Uint8Array(24));
+  const nonce = secureRandomBytes(24);
   const plaintext = new TextEncoder().encode(JSON.stringify(entries.slice(-500)));
   const ciphertext = xchacha20poly1305(key, nonce).encrypt(plaintext);
   await storage.setItem(cacheName(credentials), JSON.stringify({ version: 1, nonce: base64Url(nonce), ciphertext: base64Url(ciphertext) }));

@@ -4,6 +4,7 @@ import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
 import { anywhereRequest, base64Url, fromBase64Url } from "./anywhereApi";
+import { secureRandomBytes } from "./secureRandom";
 import { bytesFromHex } from "./transport/anywhereEnvelope";
 
 const CHANNEL_CONTEXT = new TextEncoder().encode("forge-anywhere/v2/passkey-channel");
@@ -42,7 +43,7 @@ interface OptionsResponse {
 }
 
 export function generatePasskeyExchange(): { privateKey: Uint8Array; publicKey: Uint8Array } {
-  const privateKey = crypto.getRandomValues(new Uint8Array(32));
+  const privateKey = secureRandomBytes(32);
   return { privateKey, publicKey: x25519.getPublicKey(privateKey) };
 }
 
@@ -124,7 +125,7 @@ export function passkeyChannelKey(
 }
 
 export function sealPasskeySecret(secret: Uint8Array, key: Uint8Array, aad: string): string {
-  const nonce = crypto.getRandomValues(new Uint8Array(24));
+  const nonce = secureRandomBytes(24);
   const encrypted = xchacha20poly1305(key, nonce, new TextEncoder().encode(aad)).encrypt(secret);
   return base64Url(concat(nonce, encrypted));
 }

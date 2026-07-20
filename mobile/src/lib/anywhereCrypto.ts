@@ -5,6 +5,7 @@ import { entropyToMnemonic, mnemonicToEntropy, validateMnemonic } from "@scure/b
 import { wordlist } from "@scure/bip39/wordlists/english.js";
 
 import { fromBase64Url } from "./anywhereApi";
+import { secureRandomBytes } from "./secureRandom";
 import {
   bytesFromHex,
   bytesToHex,
@@ -33,8 +34,8 @@ export interface RecoveryKitV2 {
 }
 
 export function generatePendingKeys(): PendingAnywhereKeys {
-  const signingPrivateKey = crypto.getRandomValues(new Uint8Array(32));
-  const exchangePrivateKey = crypto.getRandomValues(new Uint8Array(32));
+  const signingPrivateKey = secureRandomBytes(32);
+  const exchangePrivateKey = secureRandomBytes(32);
   return {
     signingPrivateKey,
     exchangePrivateKey,
@@ -44,7 +45,7 @@ export function generatePendingKeys(): PendingAnywhereKeys {
 }
 
 export function generateRecoveryPhrase(): { words: string; entropy: Uint8Array } {
-  const entropy = crypto.getRandomValues(new Uint8Array(16));
+  const entropy = secureRandomBytes(16);
   return { words: entropyToMnemonic(entropy, wordlist), entropy };
 }
 
@@ -154,7 +155,7 @@ export function makeKeyWrap(
     keyEpoch: epoch,
     sequence,
     createdAtMs: BigInt(Date.now()),
-    nonce: crypto.getRandomValues(new Uint8Array(24)),
+    nonce: secureRandomBytes(24),
   }, dataKey, wrapKey, signingPrivateKey);
 }
 

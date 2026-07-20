@@ -1,3 +1,5 @@
+import { secureRandomBytes } from "./secureRandom";
+
 export const DEFAULT_ANYWHERE_SERVICE_URL = "https://app.forge.adulari.dev";
 
 export interface AnywhereDeviceFlow {
@@ -167,7 +169,7 @@ export async function anywhereRequest<T>(
 }
 
 export function idempotencyKey(): string {
-  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) =>
+  return Array.from(secureRandomBytes(16), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
 }

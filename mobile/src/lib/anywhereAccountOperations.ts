@@ -13,6 +13,7 @@ import {
   openRecoveryWrap,
   recoveryEntropyFromInput,
 } from "./anywhereCrypto";
+import { secureRandomBytes } from "./secureRandom";
 import type { PendingDeviceRevocation, StoredAnywhereCredentials } from "./transport";
 import { bytesFromHex, bytesToHex } from "./transport/anywhereEnvelope";
 
@@ -77,7 +78,7 @@ export function prepareDeviceRevocation(
   targetDeviceId: string,
   recoveryWords: string,
   currentRecovery: AnywhereRecoveryWrap,
-  randomBytes: (length: number) => Uint8Array = (length) => crypto.getRandomValues(new Uint8Array(length)),
+  randomBytes: (length: number) => Uint8Array = secureRandomBytes,
   serviceUrl = "https://app.forge.adulari.dev",
 ): PreparedDeviceRevocation {
   if (targetDeviceId === credentials.deviceIdHex) throw new Error("Use logout to remove this device");
