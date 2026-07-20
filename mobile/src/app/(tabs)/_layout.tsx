@@ -60,7 +60,7 @@ function makeTabIcon(Icon: LucideIcon) {
         {/* DESIGN_ELEVATION.md Move 3 — active tab's 2px ember heat underline. */}
         <Animated.View style={[styles.underline, pillStyle, { backgroundColor: tokens.accent }]} />
         <Animated.View
-          style={[styles.pill, pillStyle, { backgroundColor: tokens.bg3, borderRadius: radii.radius12 }]}
+          style={[styles.pill, pillStyle, { backgroundColor: tokens.bg3, borderColor: tokens.border, borderWidth: StyleSheet.hairlineWidth }]}
         />
         <Animated.View style={iconStyle}>
           <Icon size={22} color={color} strokeWidth={1.75} />
@@ -104,18 +104,36 @@ function TabsNavigator() {
   // (+html.tsx) is what makes `useSafeAreaInsets()` read a non-zero value here on web at all.
   // Native is untouched: react-navigation already reserves the inset there.
   const insets = useSafeAreaInsets();
-  const webTabBar = Platform.OS === "web" ? { height: 58 + insets.bottom, paddingBottom: insets.bottom } : null;
+  const tabBarBottom = insets.bottom + 10;
+  const webTabBar = Platform.OS === "web" ? { height: 64, paddingBottom: 0 } : null;
 
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
         tabBarStyle: {
-          backgroundColor: tokens.bg2,
-          borderTopColor: tokens.border,
-          borderTopWidth: StyleSheet.hairlineWidth,
+          position: "absolute",
+          left: 16,
+          right: 16,
+          bottom: tabBarBottom,
+          height: 64,
+          paddingTop: 6,
+          paddingBottom: 6,
+          backgroundColor: "transparent",
+          borderTopWidth: 0,
+          borderRadius: radii.radiusPill,
           ...webTabBar,
         },
+        tabBarBackground: () => (
+          <View
+            pointerEvents="none"
+            style={[
+              StyleSheet.absoluteFill,
+              styles.glassBackground,
+              { backgroundColor: tokens.bg2, borderColor: tokens.borderStrong, shadowColor: tokens.bg0 },
+            ]}
+          />
+        ),
         tabBarActiveTintColor: tokens.accent,
         tabBarInactiveTintColor: tokens.ink3,
         tabBarLabelStyle: { fontSize: 11, fontWeight: "600" },
@@ -175,8 +193,18 @@ export default function TabsLayout() {
 
 const styles = StyleSheet.create({
   iconWrap: { alignItems: "center", justifyContent: "center", width: 40, height: 32 },
-  pill: { position: "absolute", width: 40, height: 32 },
-  underline: { position: "absolute", top: -8, alignSelf: "center", width: 24, height: 2, borderRadius: 1 },
+  glassBackground: {
+    borderRadius: radii.radiusPill,
+    borderWidth: StyleSheet.hairlineWidth,
+    opacity: 0.94,
+    shadowColor: "#000000",
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 12,
+  },
+  pill: { position: "absolute", width: 40, height: 32, borderRadius: radii.radiusPill },
+  underline: { position: "absolute", bottom: -1, alignSelf: "center", width: 18, height: 2, borderRadius: 1 },
   dot: {
     position: "absolute",
     top: 3,
