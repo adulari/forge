@@ -57,6 +57,11 @@ jobs:
         run: npm run check
       - name: Export web app
         run: npx --no-install expo export -p web
+        env:
+          # Metro defaults to roughly one transform worker per CPU. On the
+          # memory-bounded self-hosted runners that exceeds the service cgroup
+          # before the export can finish, so use the same proven cap as OTA.
+          METRO_MAX_WORKERS: "2"
 
   tauri:
     name: Tauri tests, clippy, and audit
