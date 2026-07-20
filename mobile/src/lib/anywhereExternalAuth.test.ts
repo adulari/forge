@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   openBrowserAuthUrl,
   reserveBrowserAuthWindow,
-  resumePasskeyBrowserAfterPayload,
   runReservedBrowserFlow,
 } from "./anywhereExternalAuth";
 
@@ -50,13 +49,4 @@ describe("Anywhere browser authentication", () => {
     expect(reserved.navigate).not.toHaveBeenCalled();
   });
 
-  it("foregrounds the system browser after native sends the passkey payload", async () => {
-    const openUrl = vi.fn(async () => undefined);
-
-    await resumePasskeyBrowserAfterPayload("ios", "https://app.test/passkey", openUrl);
-    await resumePasskeyBrowserAfterPayload("web", "https://app.test/passkey", openUrl);
-
-    expect(openUrl).toHaveBeenCalledOnce();
-    expect(openUrl).toHaveBeenCalledWith("https://app.test/passkey");
-  });
 });

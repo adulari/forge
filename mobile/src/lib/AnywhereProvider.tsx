@@ -49,7 +49,6 @@ import { anywhereEnrollmentStore } from "./anywhereEnrollmentStore";
 import {
   openBrowserAuthUrl,
   reserveBrowserAuthWindow,
-  resumePasskeyBrowserAfterPayload,
   runReservedBrowserFlow,
   type ReservedBrowserAuthWindow,
 } from "./anywhereExternalAuth";
@@ -84,6 +83,7 @@ import {
   type PairingDetails,
 } from "./anywherePairing";
 import {
+  beginPasskeyRegistration,
   createPasskeySession,
   generatePasskeyExchange,
   getPasskeySession,
@@ -93,8 +93,6 @@ import {
   passkeyChannelKey,
   renamePasskey,
   revokePasskey,
-  sealPasskeySecret,
-  sendRegistrationEntropy,
   type AnywherePasskey,
 } from "./anywherePasskeys";
 import { acceptReplaySequences } from "./anywhereReplayWindow";
@@ -983,40 +981,19 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       }
       try {
         const token = await accessToken();
-        const exchange = generatePasskeyExchange();
-        const created = await createPasskeySession(
+        const { created } = await beginPasskeyRegistration(
           current.serviceUrl ?? SERVICE_URL,
           token,
-          "registration",
-          exchange.publicKey,
+          current.accountIdHex,
+          entropy,
+          async (url) => {
+            if (Platform.OS === "web") reserved?.navigate(url);
+            else await Linking.openURL(url);
+          },
         );
-        if (Platform.OS === "web") reserved?.navigate(created.browser_url);
-        else await Linking.openURL(created.browser_url);
-        let payloadSent = false;
         while (Date.now() < created.expires_at_ms) {
           const session = await getPasskeySession(current.serviceUrl ?? SERVICE_URL, created.session_token);
           if (session.account_id !== current.accountIdHex) throw new Error("Passkey session belongs to another account.");
-          if (session.browser_exchange_public_key && !payloadSent) {
-            const key = passkeyChannelKey(
-              exchange.privateKey,
-              fromBase64Url(session.browser_exchange_public_key),
-              current.accountIdHex,
-              created.session_token,
-            );
-            await sendRegistrationEntropy(
-              current.serviceUrl ?? SERVICE_URL,
-              token,
-              created.session_token,
-              sealPasskeySecret(
-                entropy,
-                key,
-                passkeyChannelAad(current.accountIdHex, "registration"),
-              ),
-            );
-            key.fill(0);
-            payloadSent = true;
-            await resumePasskeyBrowserAfterPayload(Platform.OS, created.browser_url, Linking.openURL);
-          }
           if (session.completed) {
             setPasskeys(await listPasskeys(current.serviceUrl ?? SERVICE_URL, token));
             return;

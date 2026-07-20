@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { base64Url } from "./anywhereApi";
 import {
+  beginPasskeyRegistration,
   browserPasskeyExchange,
   openPasskeySecret,
   passkeyChannelAad,
@@ -13,6 +14,45 @@ import {
 import { bytesToHex } from "./transport/anywhereEnvelope";
 
 describe("Anywhere passkey recovery channel", () => {
+  it("delivers registration entropy before opening the system browser", async () => {
+    const account = "30".repeat(16);
+    const sessionToken = base64Url(new Uint8Array(32).fill(0x31));
+    const entropy = new Uint8Array(16).fill(0x32);
+    const events: string[] = [];
+    let clientPublicKey: Uint8Array | undefined;
+
+    const result = await beginPasskeyRegistration(
+      "https://app.test",
+      "access-token",
+      account,
+      entropy,
+      async () => { events.push("open"); },
+      {
+        createSession: async (_serviceUrl, _token, kind, publicKey) => {
+          expect(kind).toBe("registration");
+          clientPublicKey = publicKey;
+          return {
+            version: 1,
+            session_token: sessionToken,
+            browser_url: "https://app.test/anywhere/passkey#session=test",
+            expires_at_ms: Date.now() + 60_000,
+          };
+        },
+        sendEntropy: async (_serviceUrl, _token, sentSessionToken, ciphertext) => {
+          expect(sentSessionToken).toBe(sessionToken);
+          const browser = browserPasskeyExchange(sessionToken);
+          const key = passkeyChannelKey(browser.privateKey, clientPublicKey!, account, sessionToken);
+          expect(openPasskeySecret(ciphertext, key, passkeyChannelAad(account, "registration")))
+            .toEqual(entropy);
+          events.push("deliver");
+        },
+      },
+    );
+
+    expect(result.created.session_token).toBe(sessionToken);
+    expect(events).toEqual(["deliver", "open"]);
+  });
+
   it("keeps the browser exchange key stable when a native ceremony URL is reopened", () => {
     const session = base64Url(new Uint8Array(32).fill(0x20));
     const first = browserPasskeyExchange(session);
