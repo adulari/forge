@@ -537,7 +537,14 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               onContentSizeChange={
                 Platform.OS === "web"
                   ? undefined
-                  : (e) => setHeight(clampComposerHeight(e.nativeEvent.contentSize.height))
+                  : (e) => {
+                      const contentHeight = e.nativeEvent.contentSize.height;
+                      // On iOS/Android, contentSize.height can sometimes be reported as 0 or very small
+                      // on initial render or when text is cleared. Ensure we don't collapse below MIN_HEIGHT.
+                      if (contentHeight > 0) {
+                        setHeight(clampComposerHeight(contentHeight));
+                      }
+                    }
               }
               multiline
               // Keep the browser textarea at one row initially; native must not receive this
@@ -549,7 +556,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               // itself, and both at once would double up.
               placeholder={showGhost ? undefined : "message…"}
               placeholderTextColor={tokens.ink3}
-              style={[type.body, styles.input, webInputTextStyle, { color: tokens.ink, height }]}
+              style={[type.body, styles.input, webInputTextStyle, { color: tokens.ink, height: height, minHeight: MIN_HEIGHT }]}
               accessibilityLabel="message"
               testID="composer-input"
             />
