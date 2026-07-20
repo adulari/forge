@@ -42,76 +42,47 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          # The guard compares the complete push range so a commit that mixes OTA-safe
-          # files with native/config files cannot publish an incompatible update.
+          # The guard validates the complete push range so a commit that mixes OTA-safe
+          # files with native/config files cannot publish an incompatible update. A push
+          # without a trustworthy base is refused rather than reduced to a partial diff.
           fetch-depth: 0
 
       - name: Guard OTA-safe diff
         id: guard
         working-directory: .
         env:
-          EVENT: ${{ github.event_name }}
-          BEFORE: ${{ github.event.before }}
-          AFTER: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          # Manual recovery (RELEASING.md §6) has no push range to diff — and "current main since
-          # the last release" always contains OTA-neutral non-mobile commits (version bump, this
-          # workflow), which the range diff would wrongly flag as native. The real delivery gate is
-          # the IOS_OTA_RUNTIME_VERSION pin below: an update only reaches binaries whose native
-          # runtime matches, so a stale native layer never receives it. Operator ensures a matching
-          # native build exists before dispatching.
-          if [ "$EVENT" = "workflow_dispatch" ]; then
-            echo "safe=true" >> "$GITHUB_OUTPUT"
-            echo "Manual dispatch — range diff skipped; delivery gated by IOS_OTA_RUNTIME_VERSION."
-            exit 0
-          fi
-
-          # Push events carry github.event.before; the all-zeros sentinel (and any empty value)
-          # falls back to the pushed commit's parent.
-          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-            BEFORE="$(git rev-parse "$AFTER^" 2>/dev/null || printf '%s' "$AFTER")"
-          fi
-
-          unsafe=()
-          while IFS= read -r path; do
-            case "$path" in
-              mobile/src/*|mobile/assets/*) ;;
-              *) unsafe+=("$path") ;;
-            esac
-          done <<< "$(git diff --name-only "$BEFORE" "$AFTER")"
-
-          if ((${#unsafe[@]})); then
-            echo "safe=false" >> "$GITHUB_OUTPUT"
-            printf 'Native/config changes detected; skipping OTA publication:\n%s\n' "${unsafe[*]}"
-          else
-            echo "safe=true" >> "$GITHUB_OUTPUT"
-            echo "All changed mobile files are OTA-safe."
-          fi
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: bash scripts/ci/eas-ota-safety.sh
 
       - name: Skip incompatible OTA
         if: steps.guard.outputs.safe != 'true'
-        run: echo 'Skipped; run the required native Xcode Cloud build before publishing an update.'
+        run: echo 'Skipped OTA publication because the push includes native, dependency, or build configuration changes. Run the required native Xcode Cloud build first.' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: No OTA content to publish
+        if: steps.guard.outputs.safe == 'true' && steps.guard.outputs.ota_changed != 'true'
+        run: echo 'No OTA publication was needed because the push contains no mobile source or asset changes.' >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        if: steps.guard.outputs.safe == 'true'
+        if: steps.guard.outputs.safe == 'true' && steps.guard.outputs.ota_changed == 'true'
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: mobile/package-lock.json
 
       - name: Install dependencies
-        if: steps.guard.outputs.safe == 'true'
+        if: steps.guard.outputs.safe == 'true' && steps.guard.outputs.ota_changed == 'true'
         run: npm ci
 
       - name: Require the installed archive runtime
-        if: steps.guard.outputs.safe == 'true'
+        if: steps.guard.outputs.safe == 'true' && steps.guard.outputs.ota_changed == 'true'
         env:
           RUNTIME: ${{ vars.IOS_OTA_RUNTIME_VERSION }}
         run: test -n "$RUNTIME" || { echo 'Set the IOS_OTA_RUNTIME_VERSION repository variable from the installed Xcode archive fingerprint.'; exit 1; }
 
       - name: Publish EAS Update (production channel, iOS only)
-        if: steps.guard.outputs.safe == 'true'
+        if: steps.guard.outputs.safe == 'true' && steps.guard.outputs.ota_changed == 'true'
         run: |
           # Isolate Metro's cache per run. These are persistent self-hosted runners where the
           # default os.tmpdir() cache (/tmp/metro-cache) is shared across runs and runner users;

@@ -44,6 +44,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash scripts/ci/changed-groups.sh
+      - name: Test EAS OTA safety classifier
+        run: bash scripts/ci/test-eas-ota-safety.sh
 
   anywhere-policy:
     name: anywhere plaintext-canary harness
