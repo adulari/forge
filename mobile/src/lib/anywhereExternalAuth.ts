@@ -16,6 +16,26 @@ export interface ReservedBrowserAuthWindow {
   close(): void;
 }
 
+export async function runReservedBrowserFlow<T>(
+  reserved: ReservedBrowserAuthWindow | null,
+  work: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await work();
+  } catch (reason) {
+    reserved?.close();
+    throw reason;
+  }
+}
+
+export async function resumePasskeyBrowserAfterPayload(
+  platform: string,
+  url: string,
+  openUrl: (url: string) => Promise<unknown>,
+): Promise<void> {
+  if (platform !== "web") await openUrl(url);
+}
+
 function defaultOpenWindow(url?: string, target?: string, features?: string): BrowserAuthWindow | null {
   if (typeof window === "undefined") return null;
   return window.open(url, target, features);

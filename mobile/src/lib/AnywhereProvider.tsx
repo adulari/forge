@@ -20,6 +20,8 @@ import {
   base64Url,
   fromBase64Url,
   idempotencyKey,
+  isAnywhereSessionInvalid,
+  observeAnywhereUnauthorized,
   preflightAnywhere,
 } from "./anywhereApi";
 import {
@@ -47,6 +49,8 @@ import { anywhereEnrollmentStore } from "./anywhereEnrollmentStore";
 import {
   openBrowserAuthUrl,
   reserveBrowserAuthWindow,
+  resumePasskeyBrowserAfterPayload,
+  runReservedBrowserFlow,
   type ReservedBrowserAuthWindow,
 } from "./anywhereExternalAuth";
 import {
@@ -71,6 +75,7 @@ import {
   pairingDetails,
   pairingSafetyCode,
   parsePairingChallenge,
+  PairingPollRateLimitError,
   pollPairing,
   preparePairingApproval,
   submitPairingApproval,
@@ -112,7 +117,7 @@ import {
   type StoredAnywhereCredentials,
 } from "./transport";
 import { bytesFromHex, bytesToHex } from "./transport/anywhereEnvelope";
-import { anywhereConsumersReady } from "./anywhereStartup";
+import { anywhereConsumersReady, phaseAfterSetupRestart } from "./anywhereStartup";
 
 const SERVICE_URL = process.env.EXPO_PUBLIC_FORGE_ANYWHERE_URL ?? DEFAULT_ANYWHERE_SERVICE_URL;
 const INITIAL_EPOCH = 1;
@@ -179,6 +184,7 @@ export type AnywherePhase =
   | "awaiting_approval"
   | "new_recovery"
   | "existing_recovery"
+  | "reauthentication_required"
   | "ready"
   | "error";
 
@@ -224,7 +230,7 @@ export interface AnywhereContextValue {
   approvePairing(challenge: string): Promise<void>;
   approvePendingDevice(pairingId: string): Promise<void>;
   denyPendingDevice(pairingId: string): Promise<void>;
-  refreshPendingApprovals(): Promise<void>;
+  refreshPendingApprovals(force?: boolean): Promise<void>;
   prepareLocalHost(name: string): Promise<"approval" | "activated">;
   confirmLocalHost(): Promise<void>;
   cancelLocalHost(): void;
@@ -261,6 +267,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const [passkeys, setPasskeys] = useState<AnywherePasskey[]>([]);
   const [pendingLocalHost, setPendingLocalHost] = useState<PendingLocalHost | null>(null);
   const [approvalError, setApprovalError] = useState<string | null>(null);
+  const approvalRetryAtMs = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [pushStatus, setPushStatus] = useState<AnywherePushStatus>("unsubscribed");
   const [remoteJobs, setRemoteJobs] = useState<PendingRemoteJob[]>([]);
@@ -275,9 +282,44 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     setCredentials(next);
   }, []);
 
+  const requireReauthentication = useCallback(async (rejectedAccessToken?: string) => {
+    const current = credentialsRef.current;
+    if (!current || (rejectedAccessToken && current.accessToken !== rejectedAccessToken)) return;
+    const next = current.reauthenticationRequired
+      ? current
+      : { ...current, reauthenticationRequired: true };
+    credentialsRef.current = next;
+    setCredentials(next);
+    setAccount(null);
+    setSubscription(null);
+    setHosts([]);
+    setDevices([]);
+    setPasskeys([]);
+    setPendingApprovalDetails([]);
+    setApprovalError(null);
+    setRemoteJobs([]);
+    setRegisteredRuntimeId(null);
+    setError(null);
+    setPhase("reauthentication_required");
+    await Promise.all([
+      credentialStore.save(next),
+      clearAnywhereHostCache(current.accountIdHex),
+      syncAnywhereHosts([]),
+    ]).catch(() => {
+      // The proven-invalid session remains disabled in memory even if optional cache cleanup fails.
+    });
+  }, [syncAnywhereHosts]);
+
+  useEffect(() => observeAnywhereUnauthorized((rejectedAccessToken) => {
+    void requireReauthentication(rejectedAccessToken);
+  }), [requireReauthentication]);
+
   const accessToken = useCallback(async (): Promise<string> => {
     const current = credentialsRef.current;
     if (!current) throw new Error("Forge Anywhere is not signed in");
+    if (current.reauthenticationRequired) {
+      throw new Error("This device's secure session expired. Reconnect with GitHub to continue.");
+    }
     if (current.accessExpiresAtMs > Date.now() + 30_000) return current.accessToken;
     let resolved = "";
     mutationQueue.current = mutationQueue.current.catch(() => undefined).then(async () => {
@@ -304,9 +346,14 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       }
       resolved = next.accessToken;
     });
-    await mutationQueue.current;
+    try {
+      await mutationQueue.current;
+    } catch (reason) {
+      if (isAnywhereSessionInvalid(reason)) await requireReauthentication();
+      throw reason;
+    }
     return resolved;
-  }, [persistCredentials]);
+  }, [persistCredentials, requireReauthentication]);
 
   const pushApi = useMemo<AnywherePushApi>(() => ({
     register: async (input) => {
@@ -473,11 +520,17 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       setError(null);
       setPhase("ready");
     } catch (reason) {
+      if (isAnywhereSessionInvalid(reason)) {
+        await requireReauthentication();
+        return;
+      }
       setError(message(reason));
       // An account-status refresh must not tear down already registered encrypted transports.
-      setPhase(credentialsRef.current ? "ready" : "error");
+      setPhase(credentialsRef.current?.reauthenticationRequired
+        ? "reauthentication_required"
+        : credentialsRef.current ? "ready" : "error");
     }
-  }, [accessToken, persistCredentials]);
+  }, [accessToken, persistCredentials, requireReauthentication]);
 
   useEffect(() => {
     let cancelled = false;
@@ -488,6 +541,12 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       credentialsRef.current = loaded;
       setCredentials(loaded);
       if (loaded) {
+        if (loaded.reauthenticationRequired) {
+          setHosts([]);
+          setPhase("reauthentication_required");
+          void syncAnywhereHosts([]);
+          return;
+        }
         setHosts(cachedHosts);
         setPhase("ready");
         void refresh();
@@ -526,7 +585,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       if (!cancelled) { setError(message(reason)); setPhase("error"); }
     });
     return () => { cancelled = true; };
-  }, [refresh]);
+  }, [refresh, syncAnywhereHosts]);
 
   const pushDeviceId = credentials?.deviceIdHex;
   useEffect(() => {
@@ -746,6 +805,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     if (phase !== "awaiting_approval" || !claimantPairing) return;
     let cancelled = false;
     let checking = false;
+    let retryAtMs = 0;
     const check = async () => {
       if (cancelled || checking) return;
       if (Date.now() >= claimantPairing.created.expires_at_ms) {
@@ -753,6 +813,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         setPhase("error");
         return;
       }
+      if (Date.now() < retryAtMs) return;
       checking = true;
       try {
         const result = await pollPairing(
@@ -783,6 +844,10 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         };
         await finishEnrollment(approvedLogin, opened.accountDataKey, opened.epoch, 0n);
       } catch (reason) {
+        if (reason instanceof PairingPollRateLimitError) {
+          retryAtMs = Date.now() + reason.retryAfterMs;
+          return;
+        }
         if (!cancelled) {
           setError(message(reason));
           setPhase("error");
@@ -906,60 +971,63 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     const current = credentialsRef.current;
     if (!current) throw new Error("Sign in to register a recovery passkey.");
     const reserved = Platform.OS === "web" ? reserveBrowserAuthWindow() : null;
-    const entropy = recoveryEntropyFromInput(
-      recoveryKit,
-      current.serviceUrl ?? SERVICE_URL,
-      current.accountIdHex,
-    );
-    if (Platform.OS === "web" && !reserved) {
-      entropy.fill(0);
-      throw new Error("Allow Forge to open a browser tab for passkey registration.");
-    }
-    try {
-      const token = await accessToken();
-      const exchange = generatePasskeyExchange();
-      const created = await createPasskeySession(
+    await runReservedBrowserFlow(reserved, async () => {
+      const entropy = recoveryEntropyFromInput(
+        recoveryKit,
         current.serviceUrl ?? SERVICE_URL,
-        token,
-        "registration",
-        exchange.publicKey,
+        current.accountIdHex,
       );
-      if (Platform.OS === "web") reserved?.navigate(created.browser_url);
-      else await Linking.openURL(created.browser_url);
-      let payloadSent = false;
-      while (Date.now() < created.expires_at_ms) {
-        const session = await getPasskeySession(current.serviceUrl ?? SERVICE_URL, created.session_token);
-        if (session.account_id !== current.accountIdHex) throw new Error("Passkey session belongs to another account.");
-        if (session.browser_exchange_public_key && !payloadSent) {
-          const key = passkeyChannelKey(
-            exchange.privateKey,
-            fromBase64Url(session.browser_exchange_public_key),
-            current.accountIdHex,
-            created.session_token,
-          );
-          await sendRegistrationEntropy(
-            current.serviceUrl ?? SERVICE_URL,
-            token,
-            created.session_token,
-            sealPasskeySecret(
-              entropy,
-              key,
-              passkeyChannelAad(current.accountIdHex, "registration"),
-            ),
-          );
-          key.fill(0);
-          payloadSent = true;
-        }
-        if (session.completed) {
-          setPasskeys(await listPasskeys(current.serviceUrl ?? SERVICE_URL, token));
-          return;
-        }
-        await delay(1_500);
+      if (Platform.OS === "web" && !reserved) {
+        entropy.fill(0);
+        throw new Error("Allow Forge to open a browser tab for passkey registration.");
       }
-      throw new Error("Passkey registration expired. Try again.");
-    } finally {
-      entropy.fill(0);
-    }
+      try {
+        const token = await accessToken();
+        const exchange = generatePasskeyExchange();
+        const created = await createPasskeySession(
+          current.serviceUrl ?? SERVICE_URL,
+          token,
+          "registration",
+          exchange.publicKey,
+        );
+        if (Platform.OS === "web") reserved?.navigate(created.browser_url);
+        else await Linking.openURL(created.browser_url);
+        let payloadSent = false;
+        while (Date.now() < created.expires_at_ms) {
+          const session = await getPasskeySession(current.serviceUrl ?? SERVICE_URL, created.session_token);
+          if (session.account_id !== current.accountIdHex) throw new Error("Passkey session belongs to another account.");
+          if (session.browser_exchange_public_key && !payloadSent) {
+            const key = passkeyChannelKey(
+              exchange.privateKey,
+              fromBase64Url(session.browser_exchange_public_key),
+              current.accountIdHex,
+              created.session_token,
+            );
+            await sendRegistrationEntropy(
+              current.serviceUrl ?? SERVICE_URL,
+              token,
+              created.session_token,
+              sealPasskeySecret(
+                entropy,
+                key,
+                passkeyChannelAad(current.accountIdHex, "registration"),
+              ),
+            );
+            key.fill(0);
+            payloadSent = true;
+            await resumePasskeyBrowserAfterPayload(Platform.OS, created.browser_url, Linking.openURL);
+          }
+          if (session.completed) {
+            setPasskeys(await listPasskeys(current.serviceUrl ?? SERVICE_URL, token));
+            return;
+          }
+          await delay(1_500);
+        }
+        throw new Error("Passkey registration expired. Try again.");
+      } finally {
+        entropy.fill(0);
+      }
+    });
   }, [accessToken]);
 
   const recoverWithPasskey = useCallback(async (passkeyId: string) => {
@@ -967,80 +1035,82 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       throw new Error("The encrypted recovery key is unavailable for this account.");
     }
     const reserved = Platform.OS === "web" ? reserveBrowserAuthWindow() : null;
-    const auth = await refreshPendingAnywhereAuth(
-      pending.auth,
-      (refreshToken) => anywhereRequest(SERVICE_URL, "/v1/auth/refresh", {
-        method: "POST",
-        body: JSON.stringify({ refresh_token: refreshToken }),
-      }),
-    );
-    const latestPending = auth === pending.auth ? pending : { ...pending, auth };
-    if (latestPending !== pending) setPending(latestPending);
-    const exchange = generatePasskeyExchange();
-    const created = await createPasskeySession(
-      SERVICE_URL,
-      auth.access_token,
-      "authentication",
-      exchange.publicKey,
-      passkeyId,
-    );
-    if (Platform.OS === "web") {
-      if (!reserved) throw new Error("Allow Forge to open a browser tab for passkey recovery.");
-      reserved.navigate(created.browser_url);
-    } else await Linking.openURL(created.browser_url);
-    while (Date.now() < created.expires_at_ms) {
-      const session = await getPasskeySession(SERVICE_URL, created.session_token);
-      if (session.account_id !== auth.account_id) throw new Error("Passkey session belongs to another account.");
-      if (session.to_client_ciphertext && session.browser_exchange_public_key) {
-        const key = passkeyChannelKey(
-          exchange.privateKey,
-          fromBase64Url(session.browser_exchange_public_key),
-          auth.account_id,
-          created.session_token,
-        );
-        const entropy = openPasskeySecret(
-          session.to_client_ciphertext,
-          key,
-          passkeyChannelAad(auth.account_id, "authentication"),
-        );
-        const recovered = openRecoveryWrapWithEntropy(
-          auth.recovery_wrap_envelope!,
-          auth.recovery_wrap_signing_public_key!,
-          entropy,
-          auth.account_id,
-        );
-        entropy.fill(0);
-        key.fill(0);
-        const accountId = bytesFromHex(auth.account_id);
-        const deviceId = bytesFromHex(auth.device_id);
-        const deviceKey = deriveSelfDeviceWrapKey(
-          latestPending.keys.exchangePrivateKey,
-          latestPending.keys.exchangePublicKey,
-          accountId,
-          recovered.epoch,
-        );
-        const wrap = makeKeyWrap(
-          recovered.dataKey,
-          deviceKey,
-          accountId,
-          deviceId,
-          1,
-          deviceId,
-          recovered.epoch,
-          0n,
-          latestPending.keys.signingPrivateKey,
-        );
-        await anywhereRequest(SERVICE_URL, `/v1/key-epochs/${recovered.epoch}/wraps`, {
+    await runReservedBrowserFlow(reserved, async () => {
+      const auth = await refreshPendingAnywhereAuth(
+        pending.auth,
+        (refreshToken) => anywhereRequest(SERVICE_URL, "/v1/auth/refresh", {
           method: "POST",
-          headers: { "Idempotency-Key": idempotencyKey() },
-          body: JSON.stringify({ epoch: recovered.epoch, device_wrap_envelope: base64Url(wrap) }),
-        }, auth.access_token);
-        await finishEnrollment(latestPending, recovered.dataKey, recovered.epoch, 1n, true);
-        return;
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        }),
+      );
+      const latestPending = auth === pending.auth ? pending : { ...pending, auth };
+      if (latestPending !== pending) setPending(latestPending);
+      const exchange = generatePasskeyExchange();
+      const created = await createPasskeySession(
+        SERVICE_URL,
+        auth.access_token,
+        "authentication",
+        exchange.publicKey,
+        passkeyId,
+      );
+      if (Platform.OS === "web") {
+        if (!reserved) throw new Error("Allow Forge to open a browser tab for passkey recovery.");
+        reserved.navigate(created.browser_url);
+      } else await Linking.openURL(created.browser_url);
+      while (Date.now() < created.expires_at_ms) {
+        const session = await getPasskeySession(SERVICE_URL, created.session_token);
+        if (session.account_id !== auth.account_id) throw new Error("Passkey session belongs to another account.");
+        if (session.to_client_ciphertext && session.browser_exchange_public_key) {
+          const key = passkeyChannelKey(
+            exchange.privateKey,
+            fromBase64Url(session.browser_exchange_public_key),
+            auth.account_id,
+            created.session_token,
+          );
+          const entropy = openPasskeySecret(
+            session.to_client_ciphertext,
+            key,
+            passkeyChannelAad(auth.account_id, "authentication"),
+          );
+          const recovered = openRecoveryWrapWithEntropy(
+            auth.recovery_wrap_envelope!,
+            auth.recovery_wrap_signing_public_key!,
+            entropy,
+            auth.account_id,
+          );
+          entropy.fill(0);
+          key.fill(0);
+          const accountId = bytesFromHex(auth.account_id);
+          const deviceId = bytesFromHex(auth.device_id);
+          const deviceKey = deriveSelfDeviceWrapKey(
+            latestPending.keys.exchangePrivateKey,
+            latestPending.keys.exchangePublicKey,
+            accountId,
+            recovered.epoch,
+          );
+          const wrap = makeKeyWrap(
+            recovered.dataKey,
+            deviceKey,
+            accountId,
+            deviceId,
+            1,
+            deviceId,
+            recovered.epoch,
+            0n,
+            latestPending.keys.signingPrivateKey,
+          );
+          await anywhereRequest(SERVICE_URL, `/v1/key-epochs/${recovered.epoch}/wraps`, {
+            method: "POST",
+            headers: { "Idempotency-Key": idempotencyKey() },
+            body: JSON.stringify({ epoch: recovered.epoch, device_wrap_envelope: base64Url(wrap) }),
+          }, auth.access_token);
+          await finishEnrollment(latestPending, recovered.dataKey, recovered.epoch, 1n, true);
+          return;
+        }
+        await delay(1_500);
       }
-      await delay(1_500);
-    }
-    throw new Error("Passkey recovery expired. Try again.");
+      throw new Error("Passkey recovery expired. Try again.");
+    });
   }, [finishEnrollment, pending]);
 
   const renameRecoveryPasskey = useCallback(async (passkeyId: string, name: string) => {
@@ -1085,7 +1155,10 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     setClaimantPairing(null);
     setError(null);
     void enrollmentStore.clear();
-    setPhase(credentialsRef.current ? "ready" : "signed_out");
+    setPhase(phaseAfterSetupRestart(
+      Boolean(credentialsRef.current),
+      credentialsRef.current?.reauthenticationRequired === true,
+    ));
   }, [claimantPairing]);
 
   const selectHost = useCallback((hostId: string) => setActive(`anywhere:${hostId}`), [setActive]);
@@ -1192,20 +1265,32 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     await refresh();
   }, [accessToken, persistCredentials, refresh]);
 
-  const refreshPendingApprovals = useCallback(async () => {
+  const refreshPendingApprovals = useCallback(async (force = false) => {
     if (!credentialsRef.current) {
       setPendingApprovalDetails([]);
       return;
     }
+    if (force) approvalRetryAtMs.current = 0;
+    if (Date.now() < approvalRetryAtMs.current) return;
     try {
       const token = await accessToken();
       const serviceUrl = credentialsRef.current?.serviceUrl ?? SERVICE_URL;
       setPendingApprovalDetails(await listPairings(serviceUrl, token));
+      approvalRetryAtMs.current = 0;
       setApprovalError(null);
     } catch (reason) {
-      setApprovalError(message(reason));
+      if (isAnywhereSessionInvalid(reason)) {
+        await requireReauthentication();
+        return;
+      }
+      if (reason instanceof AnywhereApiError && reason.status === 429) {
+        approvalRetryAtMs.current = Date.now() + (reason.retryAfterMs ?? 60_000);
+        setApprovalError("Approval inbox is busy. Forge will retry automatically.");
+        return;
+      }
+      setApprovalError("Approval inbox is temporarily unavailable. Your pending request is still safe.");
     }
-  }, [accessToken]);
+  }, [accessToken, requireReauthentication]);
 
   useEffect(() => {
     if (phase !== "ready" || !credentials?.deviceIdHex) {

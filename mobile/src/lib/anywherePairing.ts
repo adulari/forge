@@ -17,6 +17,13 @@ export type PairingPollResponse =
   | { version: 1; status: "denied" }
   | { version: 1; status: "approved"; account_id: string; device_id: string; access_token: string; refresh_token: string; access_expires_at_ms: number; epoch: number; device_wrap_envelope: string; signing_public_key: string; exchange_public_key: string };
 
+export class PairingPollRateLimitError extends Error {
+  constructor(readonly retryAfterMs: number) {
+    super("Device approval is busy. Forge will keep checking automatically.");
+    this.name = "PairingPollRateLimitError";
+  }
+}
+
 export function parsePairingChallenge(value: string, serviceUrl: string, now = Date.now()): PairingChallenge {
   let encoded = value.trim();
   if (encoded.startsWith("forge-anywhere://pair?")) encoded = new URL(encoded).searchParams.get("challenge") ?? "";
@@ -101,6 +108,7 @@ export async function pollPairing(serviceUrl: string, pairingId: string, pairing
   });
   if (!response.ok) {
     if (response.status === 404 || response.status === 410) throw new Error("Device approval request expired");
+    if (response.status === 429) throw new PairingPollRateLimitError(retryAfterMilliseconds(response.headers.get("retry-after")));
     throw new Error(`Device approval could not be checked (${response.status})`);
   }
   const result = await response.json() as PairingPollResponse;
@@ -108,6 +116,14 @@ export async function pollPairing(serviceUrl: string, pairingId: string, pairing
     throw new Error("Forge Anywhere returned an invalid pairing result");
   }
   return result;
+}
+
+function retryAfterMilliseconds(value: string | null): number {
+  if (!value) return 60_000;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.max(1_000, Math.ceil(seconds * 1_000));
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(1_000, date - Date.now()) : 60_000;
 }
 
 export async function listPairings(serviceUrl: string, token: string): Promise<PairingDetails[]> {
