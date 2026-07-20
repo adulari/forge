@@ -71,6 +71,7 @@ function SetupFlow() {
 
       {anywhere.phase === "loading" || anywhere.phase === "starting" ? <LoadingStep /> : null}
       {anywhere.phase === "signed_out" ? <WelcomeStep /> : null}
+      {anywhere.phase === "reauthentication_required" ? <ReauthenticationStep /> : null}
       {anywhere.phase === "authorizing" ? <GitHubStep /> : null}
       {anywhere.phase === "awaiting_approval" ? <ApprovalWaitingStep /> : null}
       {anywhere.phase === "new_recovery" ? <NewRecoveryStep /> : null}
@@ -82,7 +83,7 @@ function SetupFlow() {
 
 function SetupProgress({ phase }: { phase: ReturnType<typeof useAnywhere>["phase"] }) {
   const tokens = useTokens();
-  const active = phase === "signed_out" || phase === "starting" || phase === "authorizing" ? 0
+  const active = phase === "signed_out" || phase === "reauthentication_required" || phase === "starting" || phase === "authorizing" ? 0
     : phase === "awaiting_approval" || phase === "existing_recovery" || phase === "error" ? 1
       : phase === "new_recovery" ? 2 : 3;
   const labels = ["GitHub", "Approve", "Recovery", "Connected"];
@@ -99,6 +100,21 @@ function SetupProgress({ phase }: { phase: ReturnType<typeof useAnywhere>["phase
           <Text style={[typeScale.meta, { color: index === active ? tokens.ink : tokens.ink3 }]}>{label}</Text>
         </View>
       ))}
+    </View>
+  );
+}
+
+function ReauthenticationStep() {
+  const anywhere = useAnywhere();
+  const tokens = useTokens();
+  return (
+    <View style={styles.step}>
+      <View style={[styles.safetyPanel, { borderColor: tokens.warn, backgroundColor: tokens.warnBg }]}>
+        <View style={styles.safetyHeader}><KeyRound size={18} color={tokens.warn} /><Text style={[typeScale.bodyBold, { color: tokens.ink }]}>This browser&apos;s secure session expired</Text></View>
+        <Text accessibilityRole="alert" style={[typeScale.body, styles.measure, { color: tokens.ink2 }]}>Reconnect with GitHub, then approve this browser from an enrolled device. Cached hosts and devices are hidden until the connection is verified.</Text>
+      </View>
+      <Button label="Reconnect with GitHub" icon={<GithubMark size={18} color={tokens.onAccent} />} onPress={() => void anywhere.startLogin()} fullWidth />
+      <Text style={[typeScale.meta, styles.measure, { color: tokens.ink3 }]}>Your encrypted account keys remain protected on this browser. Direct and LAN connections are unchanged.</Text>
     </View>
   );
 }
@@ -334,7 +350,7 @@ function ReadyCenter() {
           <Text accessibilityRole="header" style={[typeScale.title, { color: tokens.ink }]}>Forge Anywhere</Text>
           <View style={styles.connectedLine}><View style={[styles.onlineDot, { backgroundColor: tokens.success }]} /><Text style={[typeScale.sub, { color: tokens.ink2 }]}>Connected{anywhere.credentials?.githubLogin ? ` as @${anywhere.credentials.githubLogin}` : ""}</Text></View>
         </View>
-        <Button label="Refresh" variant="ghost" icon={<RefreshCw size={16} color={tokens.ink2} />} onPress={() => void Promise.all([anywhere.refresh(), anywhere.refreshPendingApprovals()])} />
+        <Button label="Refresh" variant="ghost" icon={<RefreshCw size={16} color={tokens.ink2} />} onPress={() => void Promise.all([anywhere.refresh(), anywhere.refreshPendingApprovals(true)])} />
       </View>
 
       {anywhere.account?.pending_reset ? <Banner
@@ -347,8 +363,8 @@ function ReadyCenter() {
       {!anywhere.passkeys.length ? <Banner tone="neutral" message="Add a recovery passkey before connecting your first host for the quickest zero-knowledge recovery." actionLabel="Open Recovery Center" onAction={() => router.push("/anywhere/recovery-phrase")} style={styles.flushBanner} /> : null}
 
       <Section title="Approval inbox" meta={anywhere.pendingApprovals.length ? `${anywhere.pendingApprovals.length} pending` : "No pending requests"}>
-        {anywhere.approvalError ? <Banner tone="warn" message="Approval inbox is temporarily unavailable." actionLabel="Retry" onAction={() => void anywhere.refreshPendingApprovals()} style={styles.flushBanner} /> : null}
-        {anywhere.pendingApprovals.length ? anywhere.pendingApprovals.map((request) => <ApprovalRequest key={request.id} request={request} busy={actingId === request.id} onApprove={() => void decide(request, true)} onDeny={() => void decide(request, false)} />) : <EmptyLine icon={<ShieldCheck size={18} color={tokens.ink3} />} text="New device requests appear here automatically." />}
+        {anywhere.approvalError ? <Banner tone="warn" message={anywhere.approvalError} actionLabel="Retry" onAction={() => void anywhere.refreshPendingApprovals(true)} style={styles.flushBanner} /> : null}
+        {anywhere.pendingApprovals.length ? anywhere.pendingApprovals.map((request) => <ApprovalRequest key={request.id} request={request} busy={actingId === request.id} onApprove={() => void decide(request, true)} onDeny={() => void decide(request, false)} />) : !anywhere.approvalError ? <EmptyLine icon={<ShieldCheck size={18} color={tokens.ink3} />} text="New device requests appear here automatically." /> : null}
       </Section>
 
       <Section title="Hosts" meta={hostFleetSummary(anywhere.hosts)}>

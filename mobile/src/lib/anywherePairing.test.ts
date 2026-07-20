@@ -2,7 +2,7 @@ import { ed25519, x25519 } from "@noble/curves/ed25519.js";
 import { expect, it } from "vitest";
 import { base64Url, fromBase64Url } from "./anywhereApi";
 import { deriveDeviceWrapKey } from "./anywhereCrypto";
-import { openApprovedPairing, parsePairingChallenge, pairingCapability, pairingSafetyCode, preparePairingApproval } from "./anywherePairing";
+import { openApprovedPairing, parsePairingChallenge, pairingCapability, pairingSafetyCode, pollPairing, preparePairingApproval } from "./anywherePairing";
 import type { StoredAnywhereCredentials } from "./transport";
 import { bytesToHex, openEnvelope } from "./transport/anywhereEnvelope";
 
@@ -15,6 +15,19 @@ it("rejects expired and overlong QR challenges", () => {
   expect(() => parsePairingChallenge(challenge(701_000), "https://app.example", 100_000)).toThrow("expired");
 });
 it("gates services without a pairing API explicitly", async () => expect(await pairingCapability("https://app.example", "token", async () => new Response(null, { status: 404 }))).toEqual({ supported: false, message: expect.stringContaining("not enabled") }));
+
+it("exposes the service retry budget instead of turning a pairing 429 into a terminal failure", async () => {
+  const result = pollPairing(
+    "https://app.example",
+    pairingId,
+    base64Url(new Uint8Array(32).fill(0xcd)),
+    async () => new Response(JSON.stringify({ code: "rate_limited" }), {
+      status: 429,
+      headers: { "retry-after": "12", "content-type": "application/json" },
+    }),
+  );
+  await expect(result).rejects.toMatchObject({ retryAfterMs: 12_000 });
+});
 
 it("matches the CLI transcript-derived safety code", () => {
   expect(pairingSafetyCode({

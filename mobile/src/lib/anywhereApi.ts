@@ -131,13 +131,35 @@ export interface AnywhereDevice {
   exchange_public_key: string;
 }
 
-interface ApiErrorBody { code?: string; message?: string }
+interface ApiErrorBody {
+  code?: string;
+  message?: string;
+  error?: { code?: string; message?: string };
+}
 
 export class AnywhereApiError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string) {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    readonly retryAfterMs?: number,
+  ) {
     super(message);
     this.name = "AnywhereApiError";
   }
+}
+
+type AnywhereUnauthorizedListener = (rejectedAccessToken: string) => void;
+const unauthorizedListeners = new Set<AnywhereUnauthorizedListener>();
+
+export function isAnywhereSessionInvalid(reason: unknown): reason is AnywhereApiError {
+  return reason instanceof AnywhereApiError && reason.status === 401;
+}
+
+/** Observe authenticated 401s without ever putting bearer credentials in URLs or logs. */
+export function observeAnywhereUnauthorized(listener: AnywhereUnauthorizedListener): () => void {
+  unauthorizedListeners.add(listener);
+  return () => unauthorizedListeners.delete(listener);
 }
 
 export async function anywhereRequest<T>(
@@ -159,14 +181,28 @@ export async function anywhereRequest<T>(
   if (!response.ok) {
     let body: ApiErrorBody = {};
     try { body = await response.json() as ApiErrorBody; } catch { /* empty/non-JSON error */ }
-    throw new AnywhereApiError(
+    const detail = body.error ?? body;
+    const error = new AnywhereApiError(
       response.status,
-      body.code ?? "request_failed",
-      body.message ?? `Forge Anywhere request failed (${response.status})`,
+      detail.code ?? "request_failed",
+      detail.message ?? `Forge Anywhere request failed (${response.status})`,
+      response.status === 429 ? retryAfterMilliseconds(response.headers.get("retry-after")) : undefined,
     );
+    if (response.status === 401 && accessToken) {
+      for (const listener of unauthorizedListeners) listener(accessToken);
+    }
+    throw error;
   }
   if (response.status === 204) return undefined as T;
   return await response.json() as T;
+}
+
+function retryAfterMilliseconds(value: string | null): number {
+  if (!value) return 60_000;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.max(1_000, Math.ceil(seconds * 1_000));
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(1_000, date - Date.now()) : 60_000;
 }
 
 export function idempotencyKey(): string {

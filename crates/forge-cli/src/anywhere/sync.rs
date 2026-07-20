@@ -20,6 +20,7 @@ use super::{
 };
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(10);
+const MAX_SYNC_RETRY_DELAY: Duration = Duration::from_secs(5 * 60);
 const BATCH_SIZE: usize = 10;
 
 #[derive(Serialize)]
@@ -84,22 +85,33 @@ struct SyncIdentity {
 
 pub(super) fn spawn() -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(SYNC_INTERVAL);
+        let mut wait_before_next = Duration::ZERO;
+        let mut retry_delay = SYNC_INTERVAL;
         let mut last_error = String::new();
         loop {
-            interval.tick().await;
+            tokio::time::sleep(wait_before_next).await;
             match upload_batch().await {
-                Ok(()) => last_error.clear(),
+                Ok(()) => {
+                    last_error.clear();
+                    retry_delay = SYNC_INTERVAL;
+                    wait_before_next = SYNC_INTERVAL;
+                }
                 Err(error) => {
                     let message = format!("{error:#}");
                     if message != last_error {
                         eprintln!("⚠ Forge Anywhere sync paused: {message}");
                         last_error = message;
                     }
+                    wait_before_next = retry_delay;
+                    retry_delay = next_retry_delay(retry_delay);
                 }
             }
         }
     })
+}
+
+fn next_retry_delay(current: Duration) -> Duration {
+    current.saturating_mul(2).min(MAX_SYNC_RETRY_DELAY)
 }
 
 async fn upload_batch() -> Result<()> {
@@ -467,6 +479,23 @@ fn sync_idempotency_key(scope: &str, entry: &SyncJournalEntry) -> String {
 mod tests {
     use super::*;
     use forge_store::SyncJournalOperation;
+
+    #[test]
+    fn dependency_failures_back_off_without_abandoning_the_durable_journal() {
+        assert_eq!(next_retry_delay(SYNC_INTERVAL), Duration::from_secs(20));
+        assert_eq!(
+            next_retry_delay(Duration::from_secs(20)),
+            Duration::from_secs(40)
+        );
+        assert_eq!(
+            next_retry_delay(Duration::from_secs(160)),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            next_retry_delay(Duration::from_secs(300)),
+            Duration::from_secs(300)
+        );
+    }
 
     #[test]
     fn pending_snapshot_is_encrypted_once_and_cached_durably() {
