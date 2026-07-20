@@ -41,16 +41,14 @@ import {
   pickImages,
   type SentAttachment,
 } from "./attach";
+import {
+  clampComposerHeight,
+  COMPOSER_LINE_HEIGHT as LINE_HEIGHT,
+  COMPOSER_MAX_HEIGHT as MAX_HEIGHT,
+  COMPOSER_MIN_HEIGHT as MIN_HEIGHT,
+} from "./composerSizing";
 import { GoalSheet } from "./GoalSheet";
 import { VoiceRecordingPill } from "./VoiceRecordingPill";
-
-const MAX_LINES = 8;
-const LINE_HEIGHT = 22; // type.body line-height (DESIGN_SYSTEM §2)
-const MIN_HEIGHT = 44;
-// Vertical padding = what centers one 22px line in the 44px rest state; MAX adds the same
-// padding around MAX_LINES lines.
-const INPUT_V_PADDING = 44 - LINE_HEIGHT; // MIN_HEIGHT - LINE_HEIGHT (both sides combined)
-const MAX_HEIGHT = LINE_HEIGHT * MAX_LINES + INPUT_V_PADDING;
 
 export interface ComposerProps {
   sessionId: string;
@@ -110,7 +108,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     node.style.height = "0px";
     const content = node.scrollHeight;
     node.style.height = prev;
-    setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, content)));
+    setHeight(clampComposerHeight(content));
   }, [text]);
 
   useEffect(() => {
@@ -168,6 +166,14 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const commandHints = allCommands.filter((cmd) => !text.startsWith("/") || cmd.startsWith(text.toLowerCase()));
   const leadingCommand = text.match(/^\/(\S*)/)?.[0].toLowerCase();
   const recognizedCommand = leadingCommand != null && isKnownCommand(leadingCommand, skillCommands.map((s) => s.name));
+  const insertSuggestion = (suggestion: string) => {
+    setText(suggestion);
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setNativeProps({ selection: { start: suggestion.length, end: suggestion.length } });
+    });
+  };
+
   const insertCommand = (command: string) => {
     setText(command);
     setCommandFocusSignal((signal) => signal + 1);
@@ -428,7 +434,13 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
       ]}
     >
       {!recording && attachments.length > 0 ? (
-        <View style={styles.chipsRow}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.commandScroll}
+          contentContainerStyle={styles.chipsRow}
+          keyboardShouldPersistTaps="handled"
+        >
           {attachments.map((a) => (
             <Chip
               key={a.id}
@@ -444,7 +456,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               onPress={() => removeAttachment(a.id)}
             />
           ))}
-        </View>
+        </ScrollView>
       ) : null}
 
       {!recording ? (
@@ -466,7 +478,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               <Chip
                 label={activeSuggestion}
                 icon={<Sparkles size={14} strokeWidth={1.75} color={tokens.accent} />}
-                onPress={() => setText(activeSuggestion)}
+                onPress={() => insertSuggestion(activeSuggestion)}
                 testID="suggested-prompt-chip"
               />
             </Animated.View>
@@ -515,23 +527,22 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               onChangeText={setText}
               onFocus={() => setFocused(true)}
               onBlur={() => setFocused(false)}
-              returnKeyType="send"
-              autoCapitalize="none"
-              autoCorrect={false}
-              spellCheck={false}
+              returnKeyType="default"
+              autoCapitalize={text.startsWith("/") ? "none" : "sentences"}
+              autoCorrect={!text.startsWith("/")}
+              spellCheck={!text.startsWith("/")}
               // Native only: web growth is handled by the scrollHeight effect below — RNW
               // stops reporting content growth once an explicit height style is set, which
               // froze the composer at one line.
               onContentSizeChange={
                 Platform.OS === "web"
                   ? undefined
-                  : (e) => setHeight(Math.min(MAX_HEIGHT, Math.max(MIN_HEIGHT, e.nativeEvent.contentSize.height)))
+                  : (e) => setHeight(clampComposerHeight(e.nativeEvent.contentSize.height))
               }
               multiline
-              // Web: RNW maps this to the textarea's rows attribute. Without it the browser
-              // default (rows=2) makes an EMPTY composer measure two lines tall, inflating
-              // the pill and bottom-anchoring the icons against a phantom second line.
-              numberOfLines={1}
+              // Keep the browser textarea at one row initially; native must not receive this
+              // constraint or Android treats the multiline composer as a single-line input.
+              numberOfLines={Platform.OS === "web" ? 1 : undefined}
               scrollEnabled={height >= MAX_HEIGHT}
               textAlignVertical="top"
               // Hidden while the ghost is showing — it renders the same "empty state" copy
@@ -611,11 +622,14 @@ const styles = StyleSheet.create({
     paddingVertical: space.space4,
     overflow: "hidden",
   },
-  // No flex on the textarea itself: `flex: 1` made flex-basis (0%) own its height inside
-  // inputWrap's column, silently overriding the measured `height` style — the composer
-  // could never grow past one line on web. inputWrap already takes the row's free width.
-  input: { width: "100%", paddingHorizontal: space.space8, paddingVertical: (MIN_HEIGHT - LINE_HEIGHT) / 2, textAlignVertical: "top" },
-  inputWrap: { flex: 1, position: "relative", overflow: "visible" },
+  input: {
+    alignSelf: "stretch",
+    minWidth: 0,
+    paddingHorizontal: space.space8,
+    paddingVertical: (MIN_HEIGHT - LINE_HEIGHT) / 2,
+    textAlignVertical: "top",
+  },
+  inputWrap: { flex: 1, minWidth: 0, position: "relative", overflow: "visible" },
   commandRecognition: { position: "absolute", right: space.space8, top: space.space8, backgroundColor: "transparent" },
   // Mirrors `input`'s own padding exactly so the ghost text lines up with where a typed
   // caret would sit — only ever shown while the TextInput is empty (see `suggestionActive`).
