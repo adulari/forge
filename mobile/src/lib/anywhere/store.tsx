@@ -9,6 +9,7 @@ import { useAnywhere as useEncryptedAnywhere } from "../AnywhereProvider";
 import type { AnywhereClient } from "./client";
 import { MockAnywhereClient } from "./mockClient";
 import type { AnywhereAccount, AnywhereDevice, AnywhereHost, RemoteJob, StorageInfo } from "./types";
+import { normalizeEntitlementState } from "./format";
 
 /** Module-level singleton mock backend — every consumer shares one in-memory instance. */
 export const anywhereClient: AnywhereClient = new MockAnywhereClient();
@@ -32,7 +33,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     const used = encrypted.account?.storage_used_bytes ?? 0;
     return {
       githubLogin: encrypted.credentials.githubLogin ?? "signed-in account",
-      entitlement: legacyEntitlement(encrypted.account?.entitlement),
+      entitlement: normalizeEntitlementState(encrypted.account?.entitlement),
       relayConnected: true,
       lastSyncAt: null,
       storage: { usedBytes: used, quotaBytes: quota, state: quota > 0 && used >= quota ? "full" : "ok" },
@@ -124,11 +125,4 @@ export function useAnywhereStorage() {
     ? { usedBytes: used, quotaBytes: quota, state: quota > 0 && used >= quota ? "full" : "ok" }
     : null;
   return { storage, loading: encrypted.phase === "loading", refresh: encrypted.refresh };
-}
-
-function legacyEntitlement(value?: string): AnywhereAccount["entitlement"] {
-  switch (value) {
-    case "trial": case "active": case "grace": case "read-only": case "suspended": case "webhook-pending": return value;
-    default: return "not-started";
-  }
 }

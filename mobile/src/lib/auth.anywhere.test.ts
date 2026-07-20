@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { mergeAnywhereHosts, reconcileAnywhereHosts, type StoredServer } from "./serverTargets";
+import {
+  mergeAnywhereHosts,
+  reconcileAnywhereHosts,
+  unrepresentedAnywhereHosts,
+  type StoredServer,
+} from "./serverTargets";
 
 const direct: StoredServer = {
   id: "direct-1",
@@ -49,5 +54,12 @@ describe("Anywhere host target reconciliation", () => {
     finishLoad?.([direct]);
     await expect(reconciliation).resolves.toMatchObject([direct, { transport: "anywhere" }]);
     expect(saved[0]?.[0]).toEqual(direct);
+  });
+
+  it("does not render a managed host twice as a server and a Fleet host filter", () => {
+    const host = { id: "d".repeat(32), name: "archlinux" };
+    const managed = mergeAnywhereHosts([], [host], 40);
+    expect(unrepresentedAnywhereHosts(managed, [host])).toEqual([]);
+    expect(unrepresentedAnywhereHosts([direct], [host])).toEqual([host]);
   });
 });

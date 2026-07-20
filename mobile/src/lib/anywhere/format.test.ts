@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { entitlementBadge, formatBytes, hostStateText, syncGlyph } from "./format";
+import { entitlementBadge, formatBytes, hostStateText, normalizeEntitlementState, syncGlyph } from "./format";
 import type { AnywhereHost, SyncStatus } from "./types";
 
 describe("formatBytes", () => {
@@ -22,6 +22,12 @@ describe("formatBytes", () => {
 });
 
 describe("entitlementBadge", () => {
+  it("normalizes the service entitlement vocabulary", () => {
+    expect(normalizeEntitlementState("trialing")).toBe("trial");
+    expect(normalizeEntitlementState("trial_not_started")).toBe("not-started");
+    expect(normalizeEntitlementState("read_only")).toBe("read-only");
+  });
+
   it("renders trial with days remaining, warn tone", () => {
     expect(entitlementBadge({ entitlement: "trial", trialDaysLeft: 9 })).toEqual({
       label: "TRIAL · 9D",

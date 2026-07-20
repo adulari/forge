@@ -14,6 +14,19 @@ export interface ManagedAnywhereHost {
   name: string;
 }
 
+/** Hosts not already represented by the canonical managed server target list. */
+export function unrepresentedAnywhereHosts<T extends ManagedAnywhereHost>(
+  servers: readonly StoredServer[],
+  hosts: readonly T[],
+): T[] {
+  const represented = new Set(
+    servers
+      .filter((server) => server.transport === "anywhere")
+      .map((server) => server.id.replace(/^anywhere:/, "")),
+  );
+  return hosts.filter((host) => !represented.has(host.id));
+}
+
 /** Pure target reconciliation: direct/LAN rows are byte-for-byte preserved. */
 export function mergeAnywhereHosts(
   servers: readonly StoredServer[],

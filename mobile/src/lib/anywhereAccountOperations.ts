@@ -60,6 +60,28 @@ export async function refreshAnywhereCredentials(
   return next;
 }
 
+/**
+ * Refresh under a platform-provided exclusive lock and re-read protected storage after acquiring
+ * it. On web this prevents two tabs from rotating the same single-use refresh token concurrently.
+ */
+export async function refreshAnywhereCredentialsExclusively(
+  current: StoredAnywhereCredentials,
+  exclusive: <T>(work: () => Promise<T>) => Promise<T>,
+  load: () => Promise<StoredAnywhereCredentials | null>,
+  refresh: (refreshToken: string) => Promise<RefreshResponse>,
+  persist: (credentials: StoredAnywhereCredentials) => Promise<void>,
+  now = Date.now(),
+): Promise<StoredAnywhereCredentials> {
+  return exclusive(async () => {
+    const stored = await load();
+    const latest = stored?.accountIdHex === current.accountIdHex
+      && stored.deviceIdHex === current.deviceIdHex
+      ? stored
+      : current;
+    return refreshAnywhereCredentials(latest, refresh, persist, now);
+  });
+}
+
 export interface RevokeDeviceRequest {
   epoch: number;
   recovery_wrap_envelope: string;

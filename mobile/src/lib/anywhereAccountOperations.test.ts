@@ -8,6 +8,7 @@ import {
   commitPendingDeviceRevocation,
   prepareDeviceRevocation,
   refreshAnywhereCredentials,
+  refreshAnywhereCredentialsExclusively,
   refreshPendingAnywhereAuth,
   stagePreparedDeviceRevocation,
 } from "./anywhereAccountOperations";
@@ -49,6 +50,31 @@ describe("Anywhere account operations", () => {
     const result = await refreshAnywhereCredentials(credentials(), refresh, persist, 100);
     expect(result).toMatchObject({ accessToken: "new-access", refreshToken: "new-refresh", accessExpiresAtMs: 999_999 });
     expect(persist).toHaveBeenCalledOnce();
+  });
+
+  it("serializes browser tabs and adopts the token rotated by the first tab", async () => {
+    let stored = credentials();
+    let lock = Promise.resolve();
+    const exclusive = <T>(work: () => Promise<T>): Promise<T> => {
+      const result = lock.then(work);
+      lock = result.then(() => undefined, () => undefined);
+      return result;
+    };
+    const persist = vi.fn(async (next: StoredAnywhereCredentials) => { stored = next; });
+    const refresh = vi.fn(async () => ({
+      access_token: "shared-access",
+      refresh_token: "shared-refresh",
+      access_expires_at_ms: 999_999,
+    }));
+
+    const [first, second] = await Promise.all([
+      refreshAnywhereCredentialsExclusively(credentials(), exclusive, async () => stored, refresh, persist, 100),
+      refreshAnywhereCredentialsExclusively(credentials(), exclusive, async () => stored, refresh, persist, 100),
+    ]);
+
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(first.refreshToken).toBe("shared-refresh");
+    expect(second.refreshToken).toBe("shared-refresh");
   });
 
   it("rotates expired credentials before delayed recovery enrollment", async () => {

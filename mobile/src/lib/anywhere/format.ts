@@ -4,6 +4,19 @@
 import type { BadgeTone } from "../../components/ds/Badge";
 import type { AnywhereAccount, AnywhereHost, SyncStatus } from "./types";
 
+/** Translate the service's wire vocabulary into the UI state vocabulary. */
+export function normalizeEntitlementState(value?: string): AnywhereAccount["entitlement"] {
+  switch (value) {
+    case "trialing": case "trial": return "trial";
+    case "active": return "active";
+    case "grace": return "grace";
+    case "read_only": case "read-only": return "read-only";
+    case "suspended": return "suspended";
+    case "webhook_pending": case "webhook-pending": return "webhook-pending";
+    case "trial_not_started": case "not-started": default: return "not-started";
+  }
+}
+
 // Local copy of theme/typography.ts's formatRelativeTime — duplicated rather than
 // imported because typography.ts pulls in the real `react-native` package at
 // module-eval time (it uses `Platform`), and this project's vitest has no Flow/RN

@@ -26,7 +26,7 @@ import {
   billingCheckoutBody,
   commitPendingDeviceRevocation,
   prepareDeviceRevocation,
-  refreshAnywhereCredentials,
+  refreshAnywhereCredentialsExclusively,
   refreshPendingAnywhereAuth,
   stagePreparedDeviceRevocation,
 } from "./anywhereAccountOperations";
@@ -283,14 +283,25 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     mutationQueue.current = mutationQueue.current.catch(() => undefined).then(async () => {
       const latest = credentialsRef.current;
       if (!latest) throw new Error("Forge Anywhere is not signed in");
-      const next = await refreshAnywhereCredentials(
+      const exclusive = <T,>(work: () => Promise<T>): Promise<T> => (
+        Platform.OS === "web" && typeof navigator !== "undefined" && navigator.locks
+          ? navigator.locks.request("forge-anywhere-credential-refresh", () => work())
+          : work()
+      );
+      const next = await refreshAnywhereCredentialsExclusively(
         latest,
+        exclusive,
+        credentialStore.load,
         (refreshToken) => anywhereRequest(latest.serviceUrl ?? SERVICE_URL, "/v1/auth/refresh", {
           method: "POST",
           body: JSON.stringify({ refresh_token: refreshToken }),
         }),
         persistCredentials,
       );
+      if (credentialsRef.current?.refreshToken !== next.refreshToken) {
+        credentialsRef.current = next;
+        setCredentials(next);
+      }
       resolved = next.accessToken;
     });
     await mutationQueue.current;
