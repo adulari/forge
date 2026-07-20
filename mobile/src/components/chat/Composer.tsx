@@ -50,6 +50,9 @@ import {
 import { GoalSheet } from "./GoalSheet";
 import { VoiceRecordingPill } from "./VoiceRecordingPill";
 
+const INPUT_VERTICAL_PADDING = 44 - 22;
+
+
 export interface ComposerProps {
   sessionId: string;
   busy: boolean;
@@ -89,6 +92,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const [recording, setRecording] = useState(false);
   const [goalVisible, setGoalVisible] = useState(false);
   const [height, setHeight] = useState(MIN_HEIGHT);
+  const [nativeText, setNativeText] = useState(text);
   const [focused, setFocused] = useState(false);
   const [draftLoadedSession, setDraftLoadedSession] = useState<string | null>(null);
   const inputRef = useRef<TextInput>(null);
@@ -96,6 +100,10 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   useEffect(() => {
     textRef.current = text;
   }, [text]);
+
+  useEffect(() => {
+    if (Platform.OS !== "web" && text !== nativeText) setNativeText(text);
+  }, [nativeText, text]);
 
   // Web autosize: RNW's onContentSizeChange goes quiet once an explicit height style is set,
   // so measure the textarea's natural scrollHeight directly on every text change (collapse →
@@ -527,8 +535,11 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
           >
             <TextInput
               ref={inputRef}
-              value={text}
-              onChangeText={setText}
+              value={Platform.OS === "web" ? text : nativeText}
+              onChangeText={(next) => {
+                if (Platform.OS !== "web") setNativeText(next);
+                setText(next);
+              }}
               onFocus={() => setFocused(true)}
               onBlur={() => setFocused(false)}
               returnKeyType="default"
@@ -547,7 +558,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
                       // on initial render or when text is cleared. Ensure we don't collapse below MIN_HEIGHT.
                       if (contentHeight > 0) {
                         setHeight((previous) => {
-                          const next = clampComposerHeight(contentHeight);
+                          const next = clampComposerHeight(contentHeight + INPUT_VERTICAL_PADDING);
                           return next === previous ? previous : next;
                         });
                       }
@@ -646,7 +657,7 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     paddingHorizontal: space.space8,
-    paddingVertical: (MIN_HEIGHT - LINE_HEIGHT) / 2,
+    paddingVertical: 0,
     textAlignVertical: "top",
   },
   inputWrap: { flex: 1, minWidth: 0, position: "relative", overflow: "visible" },
