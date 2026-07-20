@@ -43,15 +43,14 @@ import {
 } from "./attach";
 import {
   clampComposerHeight,
+  composerInputVerticalPadding,
   COMPOSER_LINE_HEIGHT as LINE_HEIGHT,
   COMPOSER_MAX_HEIGHT as MAX_HEIGHT,
   COMPOSER_MIN_HEIGHT as MIN_HEIGHT,
+  nativeComposerHeightFromContent,
 } from "./composerSizing";
 import { GoalSheet } from "./GoalSheet";
 import { VoiceRecordingPill } from "./VoiceRecordingPill";
-
-const INPUT_VERTICAL_PADDING = 44 - 22;
-
 
 export interface ComposerProps {
   sessionId: string;
@@ -558,7 +557,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
                       // on initial render or when text is cleared. Ensure we don't collapse below MIN_HEIGHT.
                       if (contentHeight > 0) {
                         setHeight((previous) => {
-                          const next = clampComposerHeight(contentHeight + INPUT_VERTICAL_PADDING);
+                          const next = nativeComposerHeightFromContent(contentHeight);
                           return next === previous ? previous : next;
                         });
                       }
@@ -657,7 +656,7 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     paddingHorizontal: space.space8,
-    paddingVertical: 0,
+    paddingVertical: composerInputVerticalPadding(Platform.OS),
     textAlignVertical: "top",
   },
   inputWrap: { flex: 1, minWidth: 0, position: "relative", overflow: "visible" },
