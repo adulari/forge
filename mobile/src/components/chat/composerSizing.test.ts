@@ -5,6 +5,7 @@ import {
   COMPOSER_MAX_HEIGHT,
   COMPOSER_MAX_LINES,
   COMPOSER_MIN_HEIGHT,
+  nativeComposerHeightFromContent,
 } from "./composerSizing";
 
 describe("mobile composer sizing", () => {
@@ -21,5 +22,12 @@ describe("mobile composer sizing", () => {
     expect(COMPOSER_MAX_LINES).toBe(6);
     expect(COMPOSER_MAX_HEIGHT).toBe(154);
     expect(clampComposerHeight(220)).toBe(COMPOSER_MAX_HEIGHT);
+  });
+
+  it("does not compound native vertical inset across repeated layout measurements", () => {
+    for (const measuredHeight of [44, 66, 88, 110, 132, 154]) {
+      expect(nativeComposerHeightFromContent(measuredHeight)).toBe(measuredHeight);
+    }
+    expect(nativeComposerHeightFromContent(22)).toBe(COMPOSER_MIN_HEIGHT);
   });
 });

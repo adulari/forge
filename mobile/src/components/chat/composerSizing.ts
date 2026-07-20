@@ -7,3 +7,7 @@ export const COMPOSER_MAX_HEIGHT =
 export function clampComposerHeight(contentHeight: number): number {
   return Math.min(COMPOSER_MAX_HEIGHT, Math.max(COMPOSER_MIN_HEIGHT, contentHeight));
 }
+
+export function nativeComposerHeightFromContent(contentHeight: number): number {
+  return clampComposerHeight(contentHeight);
+}
