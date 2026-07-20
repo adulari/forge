@@ -6,11 +6,38 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-07-20
+
+Forge Anywhere now treats recovery words as an offline disaster-recovery fallback. Routine setup
+and returning-device enrollment happen in the shared app through GitHub sign-in, device approval,
+and transcript-bound safety-code comparison.
+
 ### Added
-- **Forge Anywhere Recovery Kit v2** (#811): new accounts use a mandatory, checksum-protected
-  12-word offline Recovery Kit with account-bound key derivation, while existing 24-word kits
-  remain supported. A resumable `forge anywhere setup` flow, privacy-safe doctor, hostname-based
-  host naming, and the clearer `forge serve --tunnel` command complete the first CLI rollout.
+- **UI-first Anywhere setup** (#820): one resumable setup and Recovery Center across web, desktop,
+  iOS, and the TUI's `/anywhere` surface. It includes automatic Approval inbox discovery, explicit
+  approve/deny controls, safety-code comparison, host naming and rename, connection verification,
+  device revocation, recovery-health warnings, and actionable failure states.
+- **Recovery Kit v2** (#811, #820): new accounts create and verify a checksum-protected 12-word
+  offline kit before first-host activation. Machine-readable `.forge-recovery` import and legacy
+  24-word recovery remain supported.
+- **Passkey recovery** (#820): system-browser WebAuthn PRF registration and recovery use an
+  ephemeral encrypted claimant channel. PRF output, recovery entropy, Account Data Keys, and
+  plaintext wraps never enter service storage, URLs, or logs.
+- **Account-bound enrollment and clean reset** (#820): returning devices receive restricted
+  ten-minute enrollment sessions, while total loss can schedule a cancellable seven-day encrypted
+  account reset without touching local Forge data.
+
+### Changed
+- **Faster pipelines** (#820): CI, mobile, and security workflows detect affected file groups and
+  run only the jobs required by each change.
+- **Tunnel naming** (#811): self-hosted quick tunnels use `forge serve --tunnel`; `--anywhere`
+  remains a deprecated compatibility alias while Forge Anywhere names the managed product.
+
+### Fixed
+- **Returning-device enrollment** (#818): GitHub sign-in no longer falls through to an empty
+  Recovery Kit prompt; enrolled devices can approve the account-bound request normally.
+- **Mobile OTA reliability** (#814, #816, #817, #819): manual production dispatch publishes again,
+  Metro caches are isolated per run, and worker count is capped to prevent runner OOM failures.
 
 ## [2.7.0] - 2026-07-19
 
@@ -2658,7 +2685,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.7.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.8.0...HEAD
+[2.8.0]: https://github.com/Adulari/forge/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/Adulari/forge/compare/v2.6.5...v2.7.0
 [2.6.5]: https://github.com/Adulari/forge/compare/v2.6.4...v2.6.5
 [2.6.4]: https://github.com/Adulari/forge/compare/v2.6.3...v2.6.4
