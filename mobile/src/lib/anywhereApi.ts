@@ -119,6 +119,7 @@ export interface AnywhereHost {
   name: string;
   created_at: string;
   last_heartbeat_at: string | null;
+  online?: boolean;
 }
 
 export interface AnywhereDevice {

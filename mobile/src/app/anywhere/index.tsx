@@ -26,6 +26,7 @@ import { Input } from "../../components/ds/Input";
 import { Screen } from "../../components/ds/Screen";
 import { useToast } from "../../components/ds/ToastHost";
 import { useAnywhere, type AnywherePendingApproval } from "../../lib/AnywhereProvider";
+import { hostFleetSummary, hostStatusText } from "../../lib/anywhereHostPresence";
 import { goBackOr } from "../../lib/nav";
 import { isTauri } from "../../lib/platform";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -350,8 +351,8 @@ function ReadyCenter() {
         {anywhere.pendingApprovals.length ? anywhere.pendingApprovals.map((request) => <ApprovalRequest key={request.id} request={request} busy={actingId === request.id} onApprove={() => void decide(request, true)} onDeny={() => void decide(request, false)} />) : <EmptyLine icon={<ShieldCheck size={18} color={tokens.ink3} />} text="New device requests appear here automatically." />}
       </Section>
 
-      <Section title="Hosts" meta={`${anywhere.hosts.length} connected`}>
-        {anywhere.hosts.map((host) => <Pressable key={host.id} onPress={() => router.push({ pathname: "/anywhere/host/[id]", params: { id: host.id } })} accessibilityRole="button" style={({ pressed }) => [styles.resourceRow, { borderBottomColor: tokens.hairline, opacity: pressed ? 0.7 : 1 }]}><Laptop size={18} color={tokens.info} /><View style={styles.resourceCopy}><Text style={[typeScale.bodyBold, { color: tokens.ink }]}>{host.name}</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{host.last_heartbeat_at ? `Last active ${new Date(host.last_heartbeat_at).toLocaleString()}` : "Waiting for first connection"}</Text></View></Pressable>)}
+      <Section title="Hosts" meta={hostFleetSummary(anywhere.hosts)}>
+        {anywhere.hosts.map((host) => <Pressable key={host.id} onPress={() => router.push({ pathname: "/anywhere/host/[id]", params: { id: host.id } })} accessibilityRole="button" style={({ pressed }) => [styles.resourceRow, { borderBottomColor: tokens.hairline, opacity: pressed ? 0.7 : 1 }]}><View style={[styles.hostPresenceDot, { backgroundColor: host.online === true ? tokens.success : tokens.ink4 }]} /><Laptop size={18} color={host.online === true ? tokens.info : tokens.ink3} /><View style={styles.resourceCopy}><Text style={[typeScale.bodyBold, { color: tokens.ink }]}>{host.name}</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>{hostStatusText(host)}</Text></View></Pressable>)}
         {!anywhere.hosts.length ? <HostEmpty /> : null}
       </Section>
 
@@ -457,6 +458,7 @@ const styles = StyleSheet.create({
   readyHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.space12 },
   connectedLine: { flexDirection: "row", alignItems: "center", gap: space.space8, marginTop: space.space4 },
   onlineDot: { width: 8, height: 8, borderRadius: 4 },
+  hostPresenceDot: { width: 8, height: 8, borderRadius: 4 },
   section: { gap: space.space8 },
   sectionHeader: { flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", gap: space.space12 },
   sectionBody: { borderTopWidth: 1, paddingTop: space.space4 },
