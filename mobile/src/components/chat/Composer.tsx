@@ -170,7 +170,6 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     setText(suggestion);
     requestAnimationFrame(() => {
       inputRef.current?.focus();
-      inputRef.current?.setNativeProps({ selection: { start: suggestion.length, end: suggestion.length } });
     });
   };
 
@@ -520,7 +519,12 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
             onPress={onAttachDocument}
             accessibilityLabel="attach file"
           />
-          <View style={styles.inputWrap}>
+          <View
+            style={[
+              styles.inputWrap,
+              Platform.OS !== "web" ? { height, minHeight: MIN_HEIGHT } : null,
+            ]}
+          >
             <TextInput
               ref={inputRef}
               value={text}
@@ -542,7 +546,10 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
                       // On iOS/Android, contentSize.height can sometimes be reported as 0 or very small
                       // on initial render or when text is cleared. Ensure we don't collapse below MIN_HEIGHT.
                       if (contentHeight > 0) {
-                        setHeight(clampComposerHeight(contentHeight));
+                        setHeight((previous) => {
+                          const next = clampComposerHeight(contentHeight);
+                          return next === previous ? previous : next;
+                        });
                       }
                     }
               }
@@ -556,7 +563,13 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               // itself, and both at once would double up.
               placeholder={showGhost ? undefined : "message…"}
               placeholderTextColor={tokens.ink3}
-              style={[type.body, styles.input, webInputTextStyle, { color: tokens.ink, height: height, minHeight: MIN_HEIGHT }]}
+              style={[
+                type.body,
+                styles.input,
+                webInputTextStyle,
+                { color: tokens.ink },
+                Platform.OS === "web" ? { height } : null,
+              ]}
               accessibilityLabel="message"
               testID="composer-input"
             />
@@ -630,7 +643,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   input: {
-    alignSelf: "stretch",
+    flex: 1,
     minWidth: 0,
     paddingHorizontal: space.space8,
     paddingVertical: (MIN_HEIGHT - LINE_HEIGHT) / 2,
