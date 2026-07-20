@@ -11,7 +11,7 @@ import {
   deriveRecoveryWrapKey,
   makeKeyWrap,
   openRecoveryWrap,
-  recoveryEntropy,
+  recoveryEntropyFromInput,
 } from "./anywhereCrypto";
 import type { PendingDeviceRevocation, StoredAnywhereCredentials } from "./transport";
 import { bytesFromHex, bytesToHex } from "./transport/anywhereEnvelope";
@@ -78,6 +78,7 @@ export function prepareDeviceRevocation(
   recoveryWords: string,
   currentRecovery: AnywhereRecoveryWrap,
   randomBytes: (length: number) => Uint8Array = (length) => crypto.getRandomValues(new Uint8Array(length)),
+  serviceUrl = "https://app.forge.adulari.dev",
 ): PreparedDeviceRevocation {
   if (targetDeviceId === credentials.deviceIdHex) throw new Error("Use logout to remove this device");
   if (!devices.some((device) => device.id === targetDeviceId)) throw new Error("That device is no longer enrolled");
@@ -88,6 +89,7 @@ export function prepareDeviceRevocation(
     currentRecovery.signing_public_key,
     recoveryWords,
     credentials.accountIdHex,
+    serviceUrl,
   );
   if (bytesToHex(recovered.dataKey) !== credentials.accountDataKeyHex) {
     throw new Error("Recovery phrase does not match this account; no device was revoked");
@@ -128,7 +130,11 @@ export function prepareDeviceRevocation(
       return { device_id: device.id, envelope: base64Url(envelope) };
     });
 
-  const recoveryKey = deriveRecoveryWrapKey(recoveryEntropy(recoveryWords), accountId, epoch);
+  const recoveryKey = deriveRecoveryWrapKey(
+    recoveryEntropyFromInput(recoveryWords, serviceUrl, credentials.accountIdHex),
+    accountId,
+    epoch,
+  );
   const recoveryWrap = makeKeyWrap(
     dataKey,
     recoveryKey,

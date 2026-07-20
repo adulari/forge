@@ -17,6 +17,8 @@ export interface StoredAnywhereCredentials {
   nextSequence: string;
   acceptedSequences: Record<string, string | string[]>;
   signingPublicKeys: Record<string, string>;
+  /** This device successfully verified or used the account Recovery Kit. */
+  recoveryKitVerified?: boolean;
   /** Exact protected retry journal for an ambiguously acknowledged atomic device revocation. */
   pendingDeviceRevocation?: PendingDeviceRevocation;
 }
@@ -62,6 +64,7 @@ export function parseStoredCredentials(value: string): StoredAnywhereCredentials
     || parsed.signingPublicKeys == null
     || (parsed.serviceUrl !== undefined && typeof parsed.serviceUrl !== "string")
     || (parsed.githubLogin !== undefined && typeof parsed.githubLogin !== "string")
+    || (parsed.recoveryKitVerified !== undefined && typeof parsed.recoveryKitVerified !== "boolean")
     || (parsed.pendingDeviceRevocation !== undefined && !isPendingRevocation(parsed.pendingDeviceRevocation))
   ) {
     throw new Error("stored Forge Anywhere credentials are invalid");

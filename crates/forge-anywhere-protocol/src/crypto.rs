@@ -1,7 +1,7 @@
 //! X25519 exchange and domain-separated HKDF-SHA256 derivation.
 
 use hkdf::Hkdf;
-use sha2::Sha256;
+use sha2::{Digest as _, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -10,6 +10,8 @@ use crate::AccountId;
 const DEVICE_WRAP_CONTEXT: &[u8] = b"forge-anywhere/v1/device-wrap";
 const RECOVERY_WRAP_CONTEXT: &[u8] = b"forge-anywhere/v1/recovery-wrap";
 const RECOVERY_WRAP_V2_CONTEXT: &[u8] = b"forge-anywhere/v2/recovery-wrap";
+const PASSKEY_PRF_WRAP_CONTEXT: &[u8] = b"forge-anywhere/v2/passkey-prf-wrap";
+const PASSKEY_CHANNEL_CONTEXT: &[u8] = b"forge-anywhere/v2/passkey-channel";
 
 /// A secret 256-bit symmetric key that is zeroed when dropped.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
@@ -85,6 +87,38 @@ pub fn derive_recovery_wrap_key_v2(
     derive_key(recovery_entropy, account_id, &context)
 }
 
+/// Derive a browser-local recovery-wrap key from WebAuthn PRF output.
+pub fn derive_passkey_prf_wrap_key(
+    prf_output: &[u8; 32],
+    prf_salt: &[u8; 32],
+    account_id: &AccountId,
+) -> Result<SecretKey, CryptoError> {
+    let mut context = Vec::with_capacity(PASSKEY_PRF_WRAP_CONTEXT.len() + prf_salt.len());
+    context.extend_from_slice(PASSKEY_PRF_WRAP_CONTEXT);
+    context.extend_from_slice(prf_salt);
+    derive_key(prf_output, account_id, &context)
+}
+
+/// Derive the ephemeral browser/claimant channel key for one passkey ceremony.
+pub fn derive_passkey_channel_key(
+    private_key: &[u8; 32],
+    peer_public_key: &[u8; 32],
+    account_id: &AccountId,
+    session_token: &[u8; 32],
+) -> Result<SecretKey, CryptoError> {
+    let private = StaticSecret::from(*private_key);
+    let peer = PublicKey::from(*peer_public_key);
+    let shared = private.diffie_hellman(&peer);
+    if !shared.was_contributory() {
+        return Err(CryptoError::NonContributoryExchange);
+    }
+    let session_hash = Sha256::digest(session_token);
+    let mut context = Vec::with_capacity(PASSKEY_CHANNEL_CONTEXT.len() + session_hash.len());
+    context.extend_from_slice(PASSKEY_CHANNEL_CONTEXT);
+    context.extend_from_slice(&session_hash);
+    derive_key(shared.as_bytes(), account_id, &context)
+}
+
 fn derive_key(
     input_key_material: &[u8],
     salt: &[u8],
@@ -143,6 +177,38 @@ mod tests {
         assert_eq!(
             hex::encode(v2.as_bytes()),
             "fe1e8aec769b9f6c31a63ceb7bb58b592738f19d2c6cdf45b6fe82b0e1b2e15f"
+        );
+    }
+
+    #[test]
+    fn passkey_prf_and_channel_vectors_are_domain_separated() {
+        let account = [0x51; 16];
+        let wrap = derive_passkey_prf_wrap_key(&[0x52; 32], &[0x53; 32], &account)
+            .expect("PRF wrap derivation");
+        let claimant = [0x54; 32];
+        let browser = [0x55; 32];
+        let claimant_channel = derive_passkey_channel_key(
+            &claimant,
+            &exchange_public_key(&browser),
+            &account,
+            &[0x56; 32],
+        )
+        .expect("claimant channel");
+        let browser_channel = derive_passkey_channel_key(
+            &browser,
+            &exchange_public_key(&claimant),
+            &account,
+            &[0x56; 32],
+        )
+        .expect("browser channel");
+        assert_eq!(claimant_channel.as_bytes(), browser_channel.as_bytes());
+        assert_eq!(
+            hex::encode(wrap.as_bytes()),
+            "9eee0c00da777ada020e5b00e7ba8815137b38a87a8e1bc264dc85c923c45a36"
+        );
+        assert_eq!(
+            hex::encode(claimant_channel.as_bytes()),
+            "e98671eb55a7ba76134fd9034b0afe92f8ee8314ae4c80fbbb747dbc63fec9b9"
         );
     }
 }

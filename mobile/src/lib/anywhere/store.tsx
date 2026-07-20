@@ -3,14 +3,12 @@
 // to "am I signed in" than to cacheable server data. Default is signed OUT: a fresh
 // install (no persisted `forge.anywhere.account`) never probes the client and lands
 // straight on the sign-in path, matching the design's "First use" application state.
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
+import { useAnywhere as useEncryptedAnywhere } from "../AnywhereProvider";
 import type { AnywhereClient } from "./client";
 import { MockAnywhereClient } from "./mockClient";
 import type { AnywhereAccount, AnywhereDevice, AnywhereHost, RemoteJob, StorageInfo } from "./types";
-
-const ACCOUNT_KEY = "forge.anywhere.account";
 
 /** Module-level singleton mock backend — every consumer shares one in-memory instance. */
 export const anywhereClient: AnywhereClient = new MockAnywhereClient();
@@ -26,39 +24,24 @@ interface AnywhereContextValue {
 const AnywhereContext = createContext<AnywhereContextValue | null>(null);
 
 export function AnywhereProvider({ children }: { children: React.ReactNode }) {
-  const [account, setAccount] = useState<AnywhereAccount | null>(null);
-  const [loading, setLoading] = useState(true);
+  const encrypted = useEncryptedAnywhere();
+  const loading = encrypted.phase === "loading" || encrypted.phase === "starting";
+  const account = useMemo<AnywhereAccount | null>(() => {
+    if (encrypted.phase !== "ready" || !encrypted.credentials) return null;
+    const quota = encrypted.account?.storage_limit_bytes ?? 0;
+    const used = encrypted.account?.storage_used_bytes ?? 0;
+    return {
+      githubLogin: encrypted.credentials.githubLogin ?? "signed-in account",
+      entitlement: legacyEntitlement(encrypted.account?.entitlement),
+      relayConnected: true,
+      lastSyncAt: null,
+      storage: { usedBytes: used, quotaBytes: quota, state: quota > 0 && used >= quota ? "full" : "ok" },
+    };
+  }, [encrypted.account, encrypted.credentials, encrypted.phase]);
 
   const refresh = useCallback(async () => {
-    const next = await anywhereClient.getAccount();
-    setAccount(next);
-    if (next) {
-      await AsyncStorage.setItem(ACCOUNT_KEY, JSON.stringify({ githubLogin: next.githubLogin }));
-    } else {
-      await AsyncStorage.removeItem(ACCOUNT_KEY);
-    }
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const stored = await AsyncStorage.getItem(ACCOUNT_KEY);
-        if (stored) {
-          const next = await anywhereClient.getAccount();
-          if (!cancelled) setAccount(next);
-        }
-      } catch {
-        // Fail open to signed-out — same posture as auth.tsx's boot-load failure handling.
-        if (!cancelled) setAccount(null);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    await encrypted.refresh();
+  }, [encrypted]);
 
   const value = useMemo<AnywhereContextValue>(
     () => ({ account, loading, client: anywhereClient, signedIn: account != null, refresh }),
@@ -75,55 +58,36 @@ export function useAnywhere(): AnywhereContextValue {
 }
 
 export function useAnywhereHosts() {
-  const { client, signedIn } = useAnywhere();
-  const [hosts, setHosts] = useState<AnywhereHost[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const refresh = useCallback(async () => {
-    if (!signedIn) {
-      setHosts([]);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    try {
-      setHosts(await client.listHosts());
-    } finally {
-      setLoading(false);
-    }
-  }, [client, signedIn]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  return { hosts, loading, refresh };
+  const encrypted = useEncryptedAnywhere();
+  const hosts = useMemo<AnywhereHost[]>(() => encrypted.hosts.map((host) => {
+    const heartbeat = host.last_heartbeat_at ? Date.parse(host.last_heartbeat_at) : 0;
+    const age = heartbeat ? 0 : Number.MAX_SAFE_INTEGER;
+    return {
+      id: host.id,
+      name: host.name,
+      fingerprint: "",
+      connectorVersion: "managed",
+      heartbeatAgeSec: age,
+      state: age <= 90 ? { kind: "online", activity: "idle" } : { kind: "offline", lastHeartbeatAt: heartbeat },
+      reachableVia: ["anywhere-relay"],
+      transportPreference: "auto",
+    };
+  }), [encrypted.hosts]);
+  return { hosts, loading: encrypted.phase === "loading", refresh: encrypted.refresh };
 }
 
 export function useAnywhereDevices() {
-  const { client, signedIn } = useAnywhere();
-  const [devices, setDevices] = useState<AnywhereDevice[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  const refresh = useCallback(async () => {
-    if (!signedIn) {
-      setDevices([]);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    try {
-      setDevices(await client.listDevices());
-    } finally {
-      setLoading(false);
-    }
-  }, [client, signedIn]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  return { devices, loading, refresh };
+  const encrypted = useEncryptedAnywhere();
+  const devices = useMemo<AnywhereDevice[]>(() => encrypted.devices.map((device) => ({
+    id: device.id,
+    name: device.name,
+    kind: /phone|iphone|android/i.test(device.name) ? "phone" : "laptop",
+    fingerprint: "",
+    enrolledAt: Date.parse(device.created_at),
+    lastSeenAt: device.last_seen_at ? Date.parse(device.last_seen_at) : Date.parse(device.created_at),
+    isThisDevice: device.id === encrypted.credentials?.deviceIdHex,
+  })), [encrypted.credentials?.deviceIdHex, encrypted.devices]);
+  return { devices, loading: encrypted.phase === "loading", refresh: encrypted.refresh };
 }
 
 export function useAnywhereJobs() {
@@ -153,27 +117,18 @@ export function useAnywhereJobs() {
 }
 
 export function useAnywhereStorage() {
-  const { client, signedIn } = useAnywhere();
-  const [storage, setStorage] = useState<StorageInfo | null>(null);
-  const [loading, setLoading] = useState(true);
+  const encrypted = useEncryptedAnywhere();
+  const quota = encrypted.account?.storage_limit_bytes ?? 0;
+  const used = encrypted.account?.storage_used_bytes ?? 0;
+  const storage: StorageInfo | null = encrypted.phase === "ready"
+    ? { usedBytes: used, quotaBytes: quota, state: quota > 0 && used >= quota ? "full" : "ok" }
+    : null;
+  return { storage, loading: encrypted.phase === "loading", refresh: encrypted.refresh };
+}
 
-  const refresh = useCallback(async () => {
-    if (!signedIn) {
-      setStorage(null);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    try {
-      setStorage(await client.getStorage());
-    } finally {
-      setLoading(false);
-    }
-  }, [client, signedIn]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
-
-  return { storage, loading, refresh };
+function legacyEntitlement(value?: string): AnywhereAccount["entitlement"] {
+  switch (value) {
+    case "trial": case "active": case "grace": case "read-only": case "suspended": case "webhook-pending": return value;
+    default: return "not-started";
+  }
 }

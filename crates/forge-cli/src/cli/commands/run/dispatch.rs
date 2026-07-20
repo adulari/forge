@@ -232,6 +232,7 @@ pub(crate) async fn dispatch_command(
             | CommandAction::Replay(_, _)
             | CommandAction::Usage
             | CommandAction::Remote { .. }
+            | CommandAction::Anywhere
             | CommandAction::Statusline(_)
             // /voice only fills the input box on completion — it never touches the running turn
             // or the session, so (like /usage) it must work while a turn is busy.
@@ -895,6 +896,19 @@ and keep going."
                 forge_tui::RemoteMode::Anywhere => remote::Exposure::Anywhere,
             };
             return Ok(DispatchOutcome::ToggleRemote { exposure });
+        }
+        CommandAction::Anywhere => {
+            match crate::anywhere::tui_status_summary() {
+                Ok(summary) => app.note(&summary),
+                Err(error) => app.note(&format!("⚠ Forge Anywhere status unavailable: {error}")),
+            }
+            let url = "https://app.forge.adulari.dev/anywhere";
+            match crate::cli::commands::mcp::open_browser(url) {
+                Ok(()) => {
+                    app.note("Opening Forge Anywhere setup, Recovery Center, and Approval inbox…")
+                }
+                Err(error) => app.note(&format!("⚠ could not open the system browser: {error}")),
+            }
         }
         // `/remember <text>` — save a durable memory for this project.
         CommandAction::Remember(text) => {

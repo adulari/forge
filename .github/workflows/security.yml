@@ -1,8 +1,8 @@
 name: security
 
-# Supply-chain gate: RUSTSEC advisories (cargo-audit) + licenses/bans/sources (cargo-deny).
-# Runs on every PR to main and weekly — a scheduled run catches advisories published AFTER a PR
-# merged, which a PR-only trigger would miss against a static Cargo.lock. No `push: branches:
+# Supply-chain gate: RUSTSEC advisories (cargo-audit) + licenses/bans/sources (cargo-deny). PRs run
+# only the checks affected by dependency metadata; weekly/manual runs remain comprehensive so they
+# catch advisories published after a lockfile was merged. No `push: branches:
 # [main]` trigger: every merge to main goes through a PR, so `pull_request` already validated the
 # exact same tree before merge — a push-triggered rerun on the post-squash commit would just
 # repeat that same check for free.
@@ -21,8 +21,29 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: detect affected jobs
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 5
+    outputs:
+      cargo_audit: ${{ steps.classify.outputs.cargo_audit }}
+      cargo_deny: ${{ steps.classify.outputs.cargo_deny }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+      - id: classify
+        name: Classify changed files
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/ci/changed-groups.sh
+
   audit:
     name: cargo audit (RUSTSEC)
+    needs: changes
+    if: needs.changes.outputs.cargo_audit == 'true'
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -48,6 +69,8 @@ jobs:
 
   deny:
     name: cargo deny (licenses + bans + advisories)
+    needs: changes
+    if: needs.changes.outputs.cargo_deny == 'true'
     runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
@@ -63,3 +86,23 @@ jobs:
       # subcommand, which broke `cargo deny check all` ("unrecognized subcommand 'all'").
       - run: cargo deny check
       - run: cargo deny --manifest-path vendor/genai-0.6.5/Cargo.toml check
+
+  security:
+    name: security checks
+    needs: [changes, audit, deny]
+    if: always()
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 5
+    steps:
+      - name: Check affected jobs passed
+        run: |
+          for result in \
+            "${{ needs.changes.result }}" \
+            "${{ needs.audit.result }}" \
+            "${{ needs.deny.result }}"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "An affected security job failed or was cancelled"; exit 1 ;;
+            esac
+          done
+          echo "All affected security jobs passed"

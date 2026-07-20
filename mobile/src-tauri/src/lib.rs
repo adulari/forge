@@ -27,6 +27,10 @@ pub fn run() {
             serve_discovery::detect_forge_serve,
             serve_discovery::forge_binary_available,
             serve_discovery::start_forge_serve,
+            serve_discovery::system_host_name,
+            serve_discovery::forge_anywhere_host_enrolled,
+            serve_discovery::install_forge_anywhere_host,
+            serve_discovery::activate_forge_anywhere_host,
         ])
         .setup(|app| {
             #[cfg(not(target_os = "macos"))]

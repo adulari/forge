@@ -3,13 +3,15 @@ import { describe, expect, it } from "vitest";
 
 import { base64Url, fromBase64Url } from "./anywhereApi";
 import {
+  createRecoveryKitV2,
   deriveRecoveryWrapKey,
   deriveSelfDeviceWrapKey,
   generateRecoveryPhrase,
   makeKeyWrap,
   recoveryEntropy,
+  recoveryEntropyFromInput,
 } from "./anywhereCrypto";
-import { openEnvelope } from "./transport/anywhereEnvelope";
+import { bytesToHex, openEnvelope } from "./transport/anywhereEnvelope";
 
 describe("Anywhere account cryptography", () => {
   it("round-trips URL-safe base64 without padding", () => {
@@ -19,11 +21,27 @@ describe("Anywhere account cryptography", () => {
     expect(fromBase64Url(encoded)).toEqual(bytes);
   });
 
-  it("creates exactly 24 valid recovery words from 256 bits", () => {
+  it("creates exactly 12 valid recovery words from 128 bits", () => {
     const recovery = generateRecoveryPhrase();
-    expect(recovery.words.split(" ")).toHaveLength(24);
+    expect(recovery.words.split(" ")).toHaveLength(12);
     expect(recoveryEntropy(recovery.words)).toEqual(recovery.entropy);
-    expect(() => recoveryEntropy("abandon abandon")).toThrow(/24-word/);
+    expect(() => recoveryEntropy("abandon abandon")).toThrow(/12-word/);
+  });
+
+  it("continues accepting legacy 24-word recovery phrases", () => {
+    const words = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+    expect(recoveryEntropy(words)).toHaveLength(32);
+  });
+
+  it("binds v2 Recovery Kit files to the service and account", () => {
+    const recovery = generateRecoveryPhrase();
+    const account = "11".repeat(16);
+    const kit = createRecoveryKitV2(recovery.words, "https://app.forge.test/", account);
+    expect(recoveryEntropyFromInput(kit, "https://app.forge.test", account)).toEqual(recovery.entropy);
+    expect(() => recoveryEntropyFromInput(kit, "https://other.forge.test", account)).toThrow("another Forge service");
+    expect(() => recoveryEntropyFromInput(kit, "https://app.forge.test", "22".repeat(16))).toThrow("another account");
+    const corrupted = kit.replace(/"checksum": "[0-9a-f]+"/, `"checksum": "${"00".repeat(32)}"`);
+    expect(() => recoveryEntropyFromInput(corrupted, "https://app.forge.test", account)).toThrow("corrupted");
   });
 
   it("derives and opens device and recovery key wraps", () => {
@@ -42,5 +60,8 @@ describe("Anywhere account cryptography", () => {
     const recoveryWrapKey = deriveRecoveryWrapKey(recovery, accountId, 9);
     const recoveryWrap = makeKeyWrap(dataKey, recoveryWrapKey, accountId, deviceId, 3, accountId, 9, 1n, signingPrivate);
     expect(openEnvelope(recoveryWrap, recoveryWrapKey, ed25519.getPublicKey(signingPrivate)).plaintext).toEqual(dataKey);
+
+    expect(bytesToHex(deriveRecoveryWrapKey(new Uint8Array(16).fill(0x42), accountId, 1)))
+      .toBe("fe1e8aec769b9f6c31a63ceb7bb58b592738f19d2c6cdf45b6fe82b0e1b2e15f");
   });
 });

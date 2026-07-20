@@ -186,6 +186,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/remote [--lan | --local | --anywhere]",
     },
     Command {
+        name: "anywhere",
+        desc: "set up and manage Forge Anywhere hosts, recovery, and device approvals",
+        usage: "/anywhere",
+    },
+    Command {
         name: "self-mcp",
         desc: "toggle self-MCP mode: start/stop a sub-Forge MCP agent so the session can call forge_chat / forge_assay as tools",
         usage: "/self-mcp [enable|disable]",
@@ -302,6 +307,8 @@ pub enum CommandAction {
     Remote {
         mode: RemoteMode,
     },
+    /// Show local Anywhere health and open the trusted controller surface for setup/approvals.
+    Anywhere,
     /// Toggle display of model reasoning/thinking blocks (`/thinking`).
     Thinking,
     /// Attach an image file to the next prompt (vision input) — `/image <path>`.
@@ -658,6 +665,7 @@ pub fn parse_command(line: &str) -> CommandAction {
             };
             CommandAction::Remote { mode }
         }
+        "anywhere" | "aw" => CommandAction::Anywhere,
         "thinking" | "think" => CommandAction::Thinking,
         "image" | "img" => CommandAction::Image(arg),
         "init" => CommandAction::Init,
@@ -766,7 +774,7 @@ pub fn command_category(name: &str) -> &'static str {
         | "uncompact" | "clear" => "Session",
         "model" | "models" | "mode" | "effort" | "thinking" | "mesh" | "usage" => "Model & usage",
         "assay" | "lattice" | "pr" => "Review & ship",
-        "mcp" | "remote" | "self-mcp" | "voice" | "image" => "Integrations",
+        "mcp" | "remote" | "anywhere" | "self-mcp" | "voice" | "image" => "Integrations",
         "config" | "statusline" | "keys" | "help" | "init" | "remember" | "memories" => {
             "Settings & help"
         }
@@ -1366,6 +1374,13 @@ mod tests {
                 mode: RemoteMode::Anywhere
             }
         );
+    }
+
+    #[test]
+    fn parses_anywhere_management_command() {
+        assert_eq!(parse_command("/anywhere"), CommandAction::Anywhere);
+        assert_eq!(parse_command("/aw"), CommandAction::Anywhere);
+        assert_eq!(command_category("anywhere"), "Integrations");
     }
 
     #[test]

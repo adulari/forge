@@ -385,6 +385,21 @@ struct EnrolledCredentials {
     next_sequence: u64,
 }
 
+#[derive(Deserialize)]
+struct ServiceCapabilities {
+    version: u8,
+    protocol_version: u8,
+    maximum_client_major: u8,
+    ready: bool,
+    features: ServiceFeatures,
+}
+
+#[derive(Deserialize)]
+struct ServiceFeatures {
+    account_bound_enrollment: bool,
+    recovery_kit_v2: bool,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum EnrollmentPath {
     Bootstrap,
@@ -671,6 +686,7 @@ async fn login(recovery: bool) -> Result<()> {
     let config = forge_config::load()?;
     let service_url = config.anywhere.service_url();
     let client = client()?;
+    preflight_service(&client, service_url).await?;
     let start: DeviceFlowStart = send_json(
         client
             .post(format!("{service_url}/v1/auth/github/start"))
@@ -804,6 +820,28 @@ async fn login(recovery: bool) -> Result<()> {
     Ok(())
 }
 
+async fn preflight_service(client: &Client, service_url: &str) -> Result<()> {
+    let capabilities: ServiceCapabilities =
+        send_json(client.get(format!("{service_url}/v1/capabilities")))
+            .await
+            .context("check Forge Anywhere service compatibility")?;
+    if capabilities.version != 1
+        || capabilities.protocol_version != 2
+        || capabilities.maximum_client_major < 2
+    {
+        bail!("update Forge before setting up Forge Anywhere");
+    }
+    if !capabilities.ready {
+        bail!(
+            "Forge Anywhere service dependency unavailable; local and LAN Forge remain available"
+        );
+    }
+    if !capabilities.features.account_bound_enrollment || !capabilities.features.recovery_kit_v2 {
+        bail!("Forge Anywhere is being updated; retry setup shortly");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn enroll_existing_account(
     client: &Client,
@@ -817,7 +855,8 @@ async fn enroll_existing_account(
     let signing_public = URL_SAFE_NO_PAD.encode(signing_public);
     let exchange_public_encoded = URL_SAFE_NO_PAD.encode(exchange_public);
     let response = client
-        .post(format!("{service_url}/v1/pairings"))
+        .post(format!("{service_url}/v1/enrollment-requests"))
+        .bearer_auth(&auth.access_token)
         .json(&PairingCreateRequest {
             version: PAIRING_VERSION,
             device_name,
@@ -1546,6 +1585,25 @@ async fn status() -> Result<()> {
         println!("Trial ends: {trial_end}");
     }
     Ok(())
+}
+
+pub(crate) fn tui_status_summary() -> Result<String> {
+    let state = StateStore::platform()?.load()?;
+    let config = forge_config::load()?;
+    let account = state
+        .github_login
+        .as_deref()
+        .map(|login| format!("signed in as {login}"))
+        .unwrap_or_else(|| "not enrolled".to_string());
+    Ok(format!(
+        "Forge Anywhere: {account} · connector {} · sync {}",
+        if config.anywhere.enabled {
+            "active"
+        } else {
+            "inactive"
+        },
+        if config.anywhere.sync { "on" } else { "off" },
+    ))
 }
 
 async fn doctor() -> Result<()> {

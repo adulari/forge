@@ -24,8 +24,31 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  changes:
+    name: detect affected jobs
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 5
+    outputs:
+      rust_fmt: ${{ steps.classify.outputs.rust_fmt }}
+      rust: ${{ steps.classify.outputs.rust }}
+      release_build: ${{ steps.classify.outputs.release_build }}
+      anywhere_policy: ${{ steps.classify.outputs.anywhere_policy }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+      - id: classify
+        name: Classify changed files
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/ci/changed-groups.sh
+
   anywhere-policy:
     name: anywhere plaintext-canary harness
+    needs: changes
+    if: needs.changes.outputs.anywhere_policy == 'true'
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 5
     steps:
@@ -33,6 +56,8 @@ jobs:
       - run: bash scripts/ci/test-anywhere-plaintext-canary.sh
 
   fmt:
+    needs: changes
+    if: needs.changes.outputs.rust_fmt == 'true'
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 15
     steps:
@@ -44,6 +69,8 @@ jobs:
       - run: cargo fmt --manifest-path vendor/genai-0.6.5/Cargo.toml -- --check
 
   clippy:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 45
     steps:
@@ -56,13 +83,15 @@ jobs:
       # would be pure overhead on top of an already-warm build dir.
       # `--locked` fails if Cargo.lock is out of sync with Cargo.toml. Without it, a version bump
       # that forgets to refresh the lock (e.g. `cargo update -p forge` — a no-op, the root crate is
-      # forge-cli) sails through every PR and only blows up at release time, where the build DOES use
-      # `--locked` (cost us a failed v0.4.42 release). Catch the drift here, on every PR.
+      # forge-cli) otherwise blows up only at release time, where the build DOES use `--locked`
+      # (cost us a failed v0.4.42 release). Catch the drift on every affected Rust PR.
       - run: cargo clippy --locked --all-targets --all-features
       - run: cargo clippy --locked --manifest-path vendor/genai-0.6.5/Cargo.toml --all-targets -- -D warnings
 
   test:
     name: test (archlinux)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     # 'heavy' = archlinux-1 only: workspace-wide compiles are the box's big memory consumers —
     # serializing them on one 12G-capped runner keeps concurrent PRs from OOMing the host
     # (30G machine; three 8G runners compiling at once repeatedly killed all runner services).
@@ -77,8 +106,10 @@ jobs:
   # Release-profile + `--locked` smoke on one platform. The release workflow builds with
   # `--release --locked`, and breakages there (LTO-only failures, a Cargo.lock that drifted from
   # Cargo.toml) surface only at tag time otherwise — exactly what failed v0.4.42's first release.
-  # Catch it on every PR. One platform keeps it cheap; the `lto = "thin"` link runs once.
+  # Catch it on every affected Rust PR. One platform keeps it cheap; the `lto = "thin"` link runs once.
   release-build:
+    needs: changes
+    if: needs.changes.outputs.release_build == 'true'
     # See `test` above: heavy jobs serialize on the one heavy runner.
     runs-on: [self-hosted, linux, x64, heavy]
     timeout-minutes: 90
@@ -92,19 +123,23 @@ jobs:
         run: scripts/release-upgrade-e2e.sh "" target/release/forge
 
   CI:
-    needs: [anywhere-policy, fmt, clippy, test, release-build]
+    needs: [changes, anywhere-policy, fmt, clippy, test, release-build]
     if: always()
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 5
     steps:
       - name: Check all jobs passed
         run: |
-          if [[ "${{ needs.anywhere-policy.result }}" != success \
-             || "${{ needs.fmt.result }}" != success \
-             || "${{ needs.clippy.result }}" != success \
-             || "${{ needs.test.result }}" != success \
-             || "${{ needs.release-build.result }}" != success ]]; then
-            echo "One or more required jobs failed, were cancelled, or were skipped"
-            exit 1
-          fi
-          echo "All jobs passed"
+          for result in \
+            "${{ needs.changes.result }}" \
+            "${{ needs.anywhere-policy.result }}" \
+            "${{ needs.fmt.result }}" \
+            "${{ needs.clippy.result }}" \
+            "${{ needs.test.result }}" \
+            "${{ needs.release-build.result }}"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "A required CI job failed or was cancelled"; exit 1 ;;
+            esac
+          done
+          echo "All affected CI jobs passed"
