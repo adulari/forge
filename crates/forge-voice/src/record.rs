@@ -134,7 +134,7 @@ impl Recorder {
 }
 
 /// Target sample rate whisper.cpp expects.
-#[cfg(any(feature = "microphone", target_os = "linux"))]
+#[cfg(any(feature = "microphone", test))]
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
 #[cfg(feature = "microphone")]
