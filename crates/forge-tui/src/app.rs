@@ -1999,7 +1999,7 @@ impl App {
                     &summary,
                     self.last_width.get(),
                 ));
-                if let Some(row) = self.subagents.iter_mut().find(|r| r.id == id) {
+                if let Some(row) = self.subagents.iter_mut().find(|r| r.id == id && !r.done) {
                     row.done = true;
                     row.ok = ok;
                     row.cost = cost_usd;
@@ -8769,6 +8769,49 @@ mod tests {
             !screen(&app).contains("activity ("),
             "panel collapses after on_turn_start: {s}"
         );
+    }
+
+    #[test]
+    fn follow_up_result_finishes_the_active_reused_id_row() {
+        let mut app = App::default();
+        app.apply(PresenterEvent::SubagentStart {
+            id: "persisted-child".into(),
+            agent: "reviewer".into(),
+            task: "review the diff".into(),
+            model: Some("anthropic::opus".into()),
+            phase: None,
+        });
+        app.apply(PresenterEvent::SubagentResult {
+            id: "persisted-child".into(),
+            agent: "reviewer".into(),
+            ok: true,
+            summary: "initial review complete".into(),
+            cost_usd: 0.001,
+        });
+
+        app.apply(PresenterEvent::SubagentStart {
+            id: "persisted-child".into(),
+            agent: "reviewer".into(),
+            task: "check the updated diff".into(),
+            model: Some("anthropic::opus".into()),
+            phase: None,
+        });
+
+        assert_eq!(app.subagents.len(), 2, "both historical rows are retained");
+        assert!(app.subagents[0].done, "the initial task remains complete");
+        assert!(!app.subagents[1].done, "the follow-up task is running");
+        assert_eq!(app.running_subagents(), 1);
+
+        app.apply(PresenterEvent::SubagentResult {
+            id: "persisted-child".into(),
+            agent: "reviewer".into(),
+            ok: true,
+            summary: "follow-up review complete".into(),
+            cost_usd: 0.001,
+        });
+
+        assert!(app.subagents.iter().all(|row| row.done));
+        assert_eq!(app.running_subagents(), 0);
     }
 
     #[test]
