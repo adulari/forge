@@ -8,10 +8,8 @@
 // /`prompt_seq` fields as any other question (ARCHITECTURE.md §3) — this card is
 // handed that slice by its caller (review.tsx) rather than reading the session
 // context itself, so it stays a plain, testable view over the plan + the
-// matching decision. Approve/Cancel look up the option whose label reads
-// "build"/"cancel" (case-insensitive) and answer with its 1-based index as a
-// string; if no matching options are present (server hasn't attached them yet)
-// they fall back to the conventional "1" (build)/"2" (cancel) ordering.
+// matching decision. Controls remain disabled until the live question names this
+// plan and contains explicit Build + Cancel options; option numbers are never guessed.
 //
 // HANDOFF(T3.3): ds/Button has no "danger-ghost" variant (only primary/secondary/
 // ghost/danger/allow) — Cancel uses `variant="ghost"` today. Add a danger-ghost
@@ -27,6 +25,7 @@ import { IconButton } from "../ds/IconButton";
 import { Input } from "../ds/Input";
 import { useToast } from "../ds/ToastHost";
 import { haptics } from "../../lib/haptics";
+import { resolvePlanDecision } from "../../lib/planDecision";
 import { type Plan, type QuestionOption, type RemoteInput } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -36,18 +35,14 @@ import { Send } from "lucide-react-native";
 
 export interface PlanCardProps {
   plan: Plan;
+  question: string | null;
   questionOptions: QuestionOption[];
   promptSeq: number;
   send: (input: RemoteInput) => boolean;
   onQueueAnswer?: (input: Extract<RemoteInput, { kind: "allow" | "answer" }>) => void;
 }
 
-function findOptionNumber(options: QuestionOption[], pattern: RegExp, fallback: string): string {
-  const idx = options.findIndex((o) => pattern.test(o.label));
-  return idx >= 0 ? String(idx + 1) : fallback;
-}
-
-export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer }: PlanCardProps) {
+export function PlanCard({ plan, question, questionOptions, promptSeq, send, onQueueAnswer }: PlanCardProps) {
   const tokens = useTokens();
   const toast = useToast();
   const reduced = useReducedMotion();
@@ -68,7 +63,8 @@ export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer
     setQueued(false);
   }, [promptSeq]);
 
-  const locked = lockedSeq === promptSeq;
+  const decision = resolvePlanDecision(plan.title, question, questionOptions, promptSeq);
+  const locked = decision != null && lockedSeq === decision.promptSeq;
 
   // The card's other actions fade to 0.4 once a choice locks in.
   const dim = useAnimatedStyle(() => ({
@@ -76,13 +72,13 @@ export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer
   }));
 
   const commit = (text: string, haptic: () => void, which?: "approve" | "cancel") => {
-    if (locked || text.trim().length === 0) return;
-    setLockedSeq(promptSeq);
+    if (!decision || locked || text.trim().length === 0) return;
+    setLockedSeq(decision.promptSeq);
     if (which) setCommitted(which);
     haptic();
-    if (!send({ kind: "answer", text, seq: promptSeq })) {
+    if (!send({ kind: "answer", text, seq: decision.promptSeq })) {
       if (onQueueAnswer) {
-        onQueueAnswer({ kind: "answer", text, seq: promptSeq });
+        onQueueAnswer({ kind: "answer", text, seq: decision.promptSeq });
         setQueued(true);
       } else {
         setLockedSeq(null);
@@ -92,9 +88,6 @@ export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer
       haptics.mergeConflict();
     }
   };
-
-  const approveNumber = findOptionNumber(questionOptions, /build/i, "1");
-  const cancelNumber = findOptionNumber(questionOptions, /cancel/i, "2");
 
   return (
     <Animated.View exiting={reduced ? undefined : FadeOut.duration(durations.gentle)}>
@@ -127,12 +120,15 @@ export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer
           ) : null}
 
           {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
+          {!decision ? (
+            <Text style={[typeScale.sub, { color: tokens.ink3 }]}>Waiting for approval request…</Text>
+          ) : null}
           <View style={styles.actions}>
             <Button
               label="Approve"
               variant="allow"
-              onPress={() => commit(approveNumber, haptics.allow, "approve")}
-              disabled={locked}
+              onPress={() => commit(decision?.build ?? "", haptics.allow, "approve")}
+              disabled={locked || !decision}
               icon={committed === "approve" ? <CommitIcon kind="check" color={tokens.onAccent} /> : undefined}
               style={styles.approveBtn}
             />
@@ -140,13 +136,13 @@ export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer
               label="Revise"
               variant="ghost"
               onPress={() => setRevising((v) => !v)}
-              disabled={locked}
+              disabled={locked || !decision}
             />
             <Button
               label="Cancel"
               variant="ghost"
-              onPress={() => commit(cancelNumber, haptics.deny, "cancel")}
-              disabled={locked}
+              onPress={() => commit(decision?.cancel ?? "", haptics.deny, "cancel")}
+              disabled={locked || !decision}
               icon={committed === "cancel" ? <CommitIcon kind="x" color={tokens.ink2} /> : undefined}
             />
           </View>
@@ -157,7 +153,7 @@ export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer
                 value={reviseText}
                 onChangeText={setReviseText}
                 placeholder="what should change?"
-                editable={!locked}
+                editable={!locked && decision != null}
                 onSubmitEditing={() => commit(reviseText, haptics.select)}
                 returnKeyType="send"
                 containerStyle={styles.reviseInput}
@@ -166,7 +162,7 @@ export function PlanCard({ plan, questionOptions, promptSeq, send, onQueueAnswer
               <IconButton
                 icon={<Send size={20} strokeWidth={1.75} color={tokens.ink} />}
                 onPress={() => commit(reviseText, haptics.select)}
-                disabled={locked || reviseText.trim().length === 0}
+                disabled={!decision || locked || reviseText.trim().length === 0}
                 accessibilityLabel="send revision"
               />
             </View>

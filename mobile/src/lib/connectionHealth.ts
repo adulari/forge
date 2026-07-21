@@ -16,3 +16,16 @@ export function connectionHealthFromFleet(query?: FleetQueryHealth): ConnectTest
   if (status === 0) return "unreachable";
   return "server-error";
 }
+
+export type DesktopFleetStatus = {
+  state: "online" | "loading" | "offline" | "error";
+  label: "online" | "connecting" | "offline" | "service unavailable";
+};
+
+export function desktopFleetStatusFromFleet(query: FleetQueryHealth): DesktopFleetStatus {
+  const health = connectionHealthFromFleet(query);
+  if (health === "ok") return { state: "online", label: "online" };
+  if (health === "testing" || health === "idle") return { state: "loading", label: "connecting" };
+  if (health === "unreachable") return { state: "offline", label: "offline" };
+  return { state: "error", label: "service unavailable" };
+}

@@ -61,7 +61,8 @@ pub(crate) fn to_llm(
         .filter(|m| m.visibility.is_llm())
         .cloned()
         .collect();
-    let normalized = normalize_tool_pairs(llm_only);
+    let bounded_system_context = normalize_system_context(llm_only);
+    let normalized = normalize_tool_pairs(bounded_system_context);
     let elided = elide_old_tool_results(
         &normalized.messages,
         &normalized.synthetic_tool_results,
@@ -69,6 +70,51 @@ pub(crate) fn to_llm(
         keep_recent_tool_results,
     );
     fit_messages_owned(elided, budget_tokens)
+}
+
+const TURN_CONTRACT_PREFIX: &str = "Turn contract:";
+
+/// Derive the provider's system-context view without rewriting the persisted transcript. A turn
+/// contract is scoped to one turn, so only the newest contract may remain authoritative. Exact
+/// repeated system guidance is likewise standing context, not cumulative evidence; keep its newest
+/// occurrence so its relative position beside the current turn remains correct.
+fn normalize_system_context(messages: Vec<Message>) -> Vec<Message> {
+    let newest_contract = messages.iter().rposition(|message| {
+        message.role == Role::System
+            && message
+                .content
+                .trim_start()
+                .starts_with(TURN_CONTRACT_PREFIX)
+    });
+    let mut newest_exact = std::collections::HashMap::<String, usize>::new();
+    for (index, message) in messages.iter().enumerate() {
+        if message.role == Role::System
+            && !message
+                .content
+                .trim_start()
+                .starts_with(TURN_CONTRACT_PREFIX)
+        {
+            newest_exact.insert(message.content.clone(), index);
+        }
+    }
+
+    messages
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            if message.role != Role::System {
+                return Some(message);
+            }
+            if message
+                .content
+                .trim_start()
+                .starts_with(TURN_CONTRACT_PREFIX)
+            {
+                return (Some(index) == newest_contract).then_some(message);
+            }
+            (newest_exact.get(&message.content) == Some(&index)).then_some(message)
+        })
+        .collect()
 }
 
 const INTERRUPTED_TOOL_RESULT: &str = "error: tool call interrupted before a result was recorded";
@@ -648,6 +694,81 @@ mod tests {
         assert_eq!(out.len(), 3);
         assert!(out.iter().all(|m| m.visibility.is_llm()));
         assert!(!out.iter().any(|m| m.content.contains("budget cap")));
+    }
+
+    #[test]
+    fn to_llm_keeps_only_the_newest_turn_contract_without_mutating_audit_messages() {
+        let messages = vec![
+            Message::system("Turn contract: planning only."),
+            Message::user("plan it"),
+            Message::assistant("plan"),
+            Message::system("Turn contract: this request explicitly requires an implementation."),
+            Message::user("build it"),
+        ];
+        let audit = serde_json::to_value(&messages).unwrap();
+
+        let output = to_llm(&messages, 10_000, 4_096, 2);
+
+        let contracts: Vec<&Message> = output
+            .iter()
+            .filter(|message| message.content.starts_with("Turn contract:"))
+            .collect();
+        assert_eq!(contracts.len(), 1);
+        assert!(contracts[0].content.contains("requires an implementation"));
+        assert_eq!(serde_json::to_value(&messages).unwrap(), audit);
+    }
+
+    #[test]
+    fn to_llm_keeps_only_the_newest_exact_system_guidance_copy() {
+        let messages = vec![
+            Message::system("standing workflow guidance"),
+            Message::user("first"),
+            Message::assistant("first answer"),
+            Message::system("standing workflow guidance"),
+            Message::user("second"),
+        ];
+
+        let output = to_llm(&messages, 10_000, 4_096, 2);
+
+        assert_eq!(
+            output
+                .iter()
+                .filter(|message| message.content == "standing workflow guidance")
+                .count(),
+            1
+        );
+        let guidance_index = output
+            .iter()
+            .position(|message| message.content == "standing workflow guidance")
+            .unwrap();
+        let second_user_index = output
+            .iter()
+            .position(|message| message.content == "second")
+            .unwrap();
+        assert!(
+            guidance_index < second_user_index,
+            "newest copy retains its order"
+        );
+    }
+
+    #[test]
+    fn repeated_contract_and_guidance_context_converges_to_a_bounded_provider_view() {
+        let mut messages = Vec::new();
+        for turn in 0..100 {
+            messages.push(Message::system(format!("Turn contract: turn {turn}")));
+            messages.push(Message::system("same standing guidance"));
+        }
+
+        let output = to_llm(&messages, 100_000, 4_096, 2);
+
+        assert_eq!(
+            output.len(),
+            2,
+            "one latest contract plus one guidance copy"
+        );
+        assert!(output
+            .iter()
+            .any(|message| message.content == "Turn contract: turn 99"));
     }
 
     #[test]

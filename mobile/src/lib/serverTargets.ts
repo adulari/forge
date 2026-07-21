@@ -7,6 +7,19 @@ export interface StoredServer {
   addedAt: number;
   /** Missing on legacy rows and therefore equivalent to the unchanged direct transport. */
   transport?: "direct" | "anywhere";
+  /** True only after the user explicitly chooses a display name. */
+  customName?: boolean;
+}
+
+export interface ServerIdentity {
+  hostname: string;
+}
+
+/** Apply daemon identity without ever confusing the transport endpoint with display identity. */
+export function applyServerIdentity(server: StoredServer, identity: ServerIdentity): StoredServer {
+  if (server.customName) return server;
+  const hostname = identity.hostname.trim();
+  return hostname && hostname !== server.name ? { ...server, name: hostname } : server;
 }
 
 export interface ManagedAnywhereHost {
@@ -41,12 +54,13 @@ export function mergeAnywhereHosts(
     const previous = existing.get(`anywhere:${host.id}`);
     return {
       id: `anywhere:${host.id}`,
-      name: host.name,
+      name: previous?.customName ? previous.name : host.name,
       baseUrl: `fany://${host.id}`,
       token: "",
       host: host.name,
       addedAt: previous?.addedAt ?? addedAt,
       transport: "anywhere" as const,
+      ...(previous?.customName ? { customName: true } : {}),
     };
   });
   return [...direct, ...managed];

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  applyServerIdentity,
   mergeAnywhereHosts,
   reconcileAnywhereHosts,
   unrepresentedAnywhereHosts,
@@ -17,6 +18,26 @@ const direct: StoredServer = {
 };
 
 describe("Anywhere host target reconciliation", () => {
+  it("uses daemon identity as the display name without changing the tunnel endpoint", () => {
+    expect(applyServerIdentity(direct, { hostname: "archlinux" })).toEqual({
+      ...direct,
+      name: "archlinux",
+    });
+  });
+
+  it("keeps an explicit rename while endpoint identity and managed metadata change", () => {
+    const renamed = { ...direct, name: "Studio workstation", customName: true };
+    expect(applyServerIdentity(renamed, { hostname: "archlinux" })).toBe(renamed);
+
+    const managed = {
+      ...mergeAnywhereHosts([], [{ id: "e".repeat(32), name: "archlinux" }], 50)[0],
+      name: "Studio workstation",
+      customName: true,
+    };
+    expect(mergeAnywhereHosts([managed], [{ id: "e".repeat(32), name: "renamed-at-service" }], 60)[0])
+      .toMatchObject({ name: "Studio workstation", customName: true, addedAt: 50 });
+  });
+
   it("preserves direct targets exactly while adding managed hosts", () => {
     const result = mergeAnywhereHosts([direct], [{ id: "a".repeat(32), name: "Laptop" }], 20);
     expect(result[0]).toBe(direct);

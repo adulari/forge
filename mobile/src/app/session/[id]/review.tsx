@@ -33,6 +33,7 @@ export default function Review() {
           {plan ? (
             <PlanCard
               plan={plan}
+              question={snapshot?.question ?? null}
               questionOptions={snapshot?.question_options ?? []}
               promptSeq={snapshot?.prompt_seq ?? 0}
               send={send}

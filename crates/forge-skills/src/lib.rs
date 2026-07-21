@@ -825,8 +825,8 @@ fn builtin_orchestrate_command() -> Command {
             "never skip one that fits.\n\n",
             "Task: $ARGUMENTS\n\n",
             "RESOURCE DECISION ORDER:\n\n",
-            "1. Skills (always first) — call `use_skill list` to see every available skill.\n",
-            "   A skill is a tested, project-aware methodology. If any skill covers this task\n",
+            "1. Skills (always first) — read the available skills already listed in the `use_skill`\n",
+            "   tool description. A skill is a tested, project-aware methodology. If any skill covers this task\n",
             "   (fully or partially) → invoke it via `use_skill <name>`. Don't implement from\n",
             "   scratch what a skill already does well.\n\n",
             "2. Subagents — use `spawn_agents` when 2+ subtasks are genuinely independent\n",
@@ -858,8 +858,8 @@ fn builtin_orchestrate_command() -> Command {
 pub fn orchestrate_system_guidance() -> &'static str {
     concat!(
         "Forge auto-orchestrate is active. Before executing any task, survey all resource categories:\n\n",
-        "1. Skills first — call `use_skill list` to see all available skills. Use a matching skill\n",
-        "   rather than implementing from scratch. Call `use_skill <name>` to invoke it.\n",
+        "1. Skills first — read the available skills in the `use_skill` tool description. Use a\n",
+        "   matching skill rather than implementing from scratch; invoke only its exact name.\n",
         "2. Subagents (`spawn_agents`) for 2+ independent parallel subtasks, not sequential steps.\n",
         "3. MCP tools for external integrations — prefer the correct tool over shell workarounds.\n",
         "4. Web (`web_search`/`web_fetch`) for current information not in the project.\n",

@@ -30,6 +30,10 @@ export interface ConfigResponse {
   fields: ConfigField[];
 }
 
+export interface HostIdentity {
+  hostname: string;
+}
+
 export interface ConfigField {
   key: string;
   group: string;
@@ -497,6 +501,10 @@ export function answer(baseUrl: string, body: AnswerRequest): Promise<OkResponse
 /** Connectivity/auth probe — 200 array = good token, 404 = wrong token. */
 export function probeConnection(baseUrl: string): Promise<SessionRow[]> {
   return getSessions(baseUrl);
+}
+
+export function getIdentity(baseUrl: string): Promise<HostIdentity> {
+  return request(baseUrl, "/api/identity");
 }
 
 /** 503 (`ApiError.status === 503`) when the daemon has no VAPID key configured. */

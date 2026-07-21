@@ -368,8 +368,8 @@ jobs:
           PY
       - name: Generate desktop checksums
         run: |
-          cd assets
-          sha256sum * > ../desktop-checksums.txt
+          (cd assets && sha256sum *) > desktop-checksums.txt
+          sha256sum latest.json >> desktop-checksums.txt
       - name: Attest desktop release provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373
         with:
@@ -386,21 +386,40 @@ jobs:
             latest.json
             desktop-checksums.txt
           fail_on_unmatched_files: true
-          # Only unified CLI + desktop v* releases own GitHub's Latest pointer. app-v* repair or
-          # preview releases must never break CLI installers or the desktop updater endpoint.
-          make_latest: ${{ startsWith(inputs.release_tag || github.ref_name, 'v') }}
-      - name: Verify updater is publicly readable
+          # Publication is deliberately non-promoting. The next step verifies the public CDN
+          # bytes before a v* release is allowed to own GitHub's Latest pointer.
+          make_latest: false
+      - name: Verify complete desktop release is publicly readable
         env:
           VERSION: ${{ inputs.release_tag || github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
-          url="https://github.com/${REPO}/releases/download/${VERSION}/latest.json"
+          set -euo pipefail
+          base="https://github.com/${REPO}/releases/download/${VERSION}"
           for attempt in 1 2 3 4 5; do
-            if curl --fail --silent --show-error --location "$url" -o published-latest.json; then
-              python -c 'import json; p=json.load(open("published-latest.json")); assert len(p["platforms"]) == 5'
-              exit 0
+            if curl --fail --silent --show-error --location \
+              "$base/desktop-checksums.txt" -o published-desktop-checksums.txt; then
+              break
             fi
             sleep $((attempt * 2))
           done
-          echo "updater health check failed: $url" >&2
-          exit 1
+          [ -s published-desktop-checksums.txt ] || {
+            echo "desktop checksum manifest is not publicly readable: $base/desktop-checksums.txt" >&2
+            exit 1
+          }
+          mkdir published-assets
+          while read -r digest filename; do
+            case "$filename" in
+              latest.json) output="published-assets/latest.json" ;;
+              *) output="published-assets/$filename" ;;
+            esac
+            curl --fail --silent --show-error --location "$base/$filename" -o "$output"
+          done < published-desktop-checksums.txt
+          (cd published-assets && sha256sum --check ../published-desktop-checksums.txt)
+          python -c 'import json; p=json.load(open("published-assets/latest.json")); assert len(p["platforms"]) == 5'
+      - name: Promote verified unified release to Latest
+        if: startsWith(inputs.release_tag || github.ref_name, 'v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.release_tag || github.ref_name }}
+        run: gh release edit "$VERSION" --latest

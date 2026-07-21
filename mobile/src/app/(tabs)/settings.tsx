@@ -23,24 +23,27 @@
 // added there as a prop; this mirrors its press/hover/focus/separator behavior
 // instead of forking a parallel "ListRow v2".
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import Constants from "expo-constants";
 import { router } from "expo-router";
-import { Bell, ChevronRight, Plus, Trash2 } from "lucide-react-native";
+import { Bell, ChevronRight, Pencil, Plus, Trash2 } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import Animated from "react-native-reanimated";
 
 import { EntitlementBadge } from "../../components/anywhere/EntitlementBadge";
 import { Badge, type BadgeTone } from "../../components/ds/Badge";
+import { Button } from "../../components/ds/Button";
 import { ConfirmDialog } from "../../components/ds/ConfirmDialog";
 import { IconButton } from "../../components/ds/IconButton";
+import { Input } from "../../components/ds/Input";
 import { ListRow } from "../../components/ds/ListRow";
 import { Screen } from "../../components/ds/Screen";
 import { SectionHeader } from "../../components/ds/SectionHeader";
+import { Sheet } from "../../components/ds/Sheet";
 import { Segmented } from "../../components/ds/Segmented";
 import { Switch } from "../../components/ds/Switch";
 import { useToast } from "../../components/ds/ToastHost";
 import { entitlementBadge } from "../../lib/anywhere/format";
+import { useAppVersion } from "../../lib/appVersion";
 import { useAnywhere } from "../../lib/anywhere/store";
 import { type StoredServer, useAuth } from "../../lib/auth";
 import { connectionHealthFromFleet } from "../../lib/connectionHealth";
@@ -132,7 +135,7 @@ const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] 
 export function SettingsNavRail({ active }: { active: string }) {
   const tokens = useTokens();
   const { account } = useAnywhere();
-  const appVersion = Constants.expoConfig?.version ?? "—";
+  const appVersion = useAppVersion();
   return (
     <View style={[railStyles.rail, { borderRightColor: tokens.border }]}>
       <Text style={[type.headingBold, railStyles.title, { color: tokens.ink }]}>Settings</Text>
@@ -286,7 +289,7 @@ export default function SettingsScreen() {
   const tokens = useTokens();
   const toast = useToast();
   const { preference, setScheme } = useTheme();
-  const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer } = useAuth();
+  const { baseUrl, servers, activeServerId, host, token: activeToken, setActive, removeServer, renameServer } = useAuth();
   const { account: anywhereAccount, signedIn: anywhereSignedIn } = useAnywhere();
 
   const serverQueries = useServerFleets(servers);
@@ -296,6 +299,8 @@ export default function SettingsScreen() {
   const [anonymousTelemetry, setAnonymousTelemetry] = useState(true);
   const [anonymousTelemetryLoaded, setAnonymousTelemetryLoaded] = useState(false);
   const [pendingRemove, setPendingRemove] = useState<StoredServer | null>(null);
+  const [pendingRename, setPendingRename] = useState<StoredServer | null>(null);
+  const [serverName, setServerName] = useState("");
   const [pushStatus, setPushStatus] = useState<PushSubscriptionState>("unsupported");
   const [pushLoaded, setPushLoaded] = useState(false);
   const [pushBusy, setPushBusy] = useState(false);
@@ -494,7 +499,7 @@ export default function SettingsScreen() {
     try { await desktopUpdate.install(); } catch { toast.show("couldn't install update.", { tone: "danger" }); }
     finally { setUpdateBusy(false); }
   }, [desktopUpdate, toast]);
-  const appVersion = Constants.expoConfig?.version ?? "—";
+  const appVersion = useAppVersion();
 
   return (
     <SettingsShell active="general">
@@ -519,6 +524,14 @@ export default function SettingsScreen() {
                 trailing={
                   <View style={styles.serverTrailing}>
                     <Text style={[type.monoMeta, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>{`${maskToken(server.token)} · ${waitingCount} waiting`}</Text>
+                    <IconButton
+                      icon={<Pencil size={16} strokeWidth={1.75} color={tokens.ink4} />}
+                      accessibilityLabel={`Rename server ${server.name}`}
+                      onPress={() => {
+                        setPendingRename(server);
+                        setServerName(server.name);
+                      }}
+                    />
                     <IconButton
                       icon={<Trash2 size={16} strokeWidth={1.75} color={tokens.ink4} />}
                       accessibilityLabel={`Remove server ${server.name}`}
@@ -687,6 +700,43 @@ export default function SettingsScreen() {
           }}
           onCancel={() => setPendingRemove(null)}
         />
+        <Sheet
+          visible={pendingRename != null}
+          onClose={() => setPendingRename(null)}
+          accessibilityLabel="Rename server"
+          snapPoints={[0.45]}
+        >
+          <View style={styles.renameSheet}>
+            <Text accessibilityRole="header" style={[type.heading, { color: tokens.ink }]}>Rename server</Text>
+            <Text style={[type.sub, { color: tokens.ink3 }]}>This changes only the name shown on this device. Connection details stay unchanged.</Text>
+            <Input
+              label="Server name"
+              value={serverName}
+              onChangeText={setServerName}
+              autoFocus
+              maxLength={80}
+              returnKeyType="done"
+              accessibilityLabel="Server name"
+            />
+            <View style={styles.renameActions}>
+              <Button label="Cancel" variant="ghost" onPress={() => setPendingRename(null)} style={styles.renameAction} />
+              <Button
+                label="Save name"
+                disabled={!serverName.trim()}
+                onPress={() => {
+                  if (!pendingRename) return;
+                  void renameServer(pendingRename.id, serverName)
+                    .then(() => {
+                      setPendingRename(null);
+                      toast.show("Server renamed.", { tone: "neutral" });
+                    })
+                    .catch((reason) => toast.show(reason instanceof Error ? reason.message : "Server could not be renamed.", { tone: "danger" }));
+                }}
+                style={styles.renameAction}
+              />
+            </View>
+          </View>
+        </Sheet>
       </Screen>
     </SettingsShell>
   );
@@ -712,6 +762,9 @@ const styles = StyleSheet.create({
   footerRow: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space16, paddingTop: space.space16 },
   footerFill: { flex: 1, minWidth: space.space8 },
   navLabel: { letterSpacing: -0.2 },
+  renameSheet: { paddingHorizontal: space.space16, paddingBottom: space.space24, gap: space.space12 },
+  renameActions: { flexDirection: "row", justifyContent: "flex-end", gap: space.space8 },
+  renameAction: { minWidth: 112 },
 });
 
 const railStyles = StyleSheet.create({

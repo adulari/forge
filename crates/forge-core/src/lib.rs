@@ -5,7 +5,10 @@
 
 use std::sync::Arc;
 
-use completion::{CompletionContract, CompletionDecision, CompletionEvidence};
+use completion::{
+    CompletionContract, CompletionDecision, CompletionEvidence, VerificationLedger,
+    VerificationObservation,
+};
 use forge_config::Config;
 use forge_index::Lattice;
 use forge_mesh::pricing::Pricing;
@@ -899,6 +902,9 @@ fn messages_to_replay_items(msgs: &[Message]) -> Vec<forge_types::ReplayItem> {
     let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut out = Vec::new();
     for m in msgs {
+        if !m.visibility.is_user_visible() {
+            continue;
+        }
         match m.role {
             Role::User => {
                 if !m.content.trim().is_empty() {
@@ -1356,6 +1362,22 @@ fn context_fill_tokens(model: &str, transcript_est: u64, reported_input: u64) ->
     }
 }
 
+/// A generic provider outage is shared health and should fail over immediately. The Codex backend's
+/// in-stream `provider request failed` is different: the request/transcript is valid and a manual
+/// `continue` was observed to resume it, so retry the same continuation through the existing bounded
+/// transient backoff before benching the model.
+fn should_retry_same_model_transient(model: &str, error: &forge_provider::ProviderError) -> bool {
+    match error {
+        forge_provider::ProviderError::Unavailable(message) => {
+            model.starts_with("codex-oauth::")
+                && message
+                    .to_ascii_lowercase()
+                    .contains("provider request failed")
+        }
+        _ => true,
+    }
+}
+
 // `message_tokens`, `fit_messages`, and `prune_tool_results` moved to [`context_pipeline`] — the
 // one seam between the transcript and a provider request (imported below for existing call sites).
 #[cfg(test)]
@@ -1452,6 +1474,10 @@ pub struct Session {
     config: Config,
     pricing: Pricing,
     mode: PermissionMode,
+    /// The exact non-Plan temper that was active before entering read-only planning. Kept only
+    /// while `mode == Plan`; approving or cancelling restores it. Older/resumed Plan sessions have
+    /// no captured value and deliberately fall back to Auto-edit when leaving Plan.
+    pre_plan_mode: Option<PermissionMode>,
     /// Resolved permission rules (built-in safety denies + configured), consulted per call.
     rules: Vec<PermissionRule>,
     transcript: Vec<Message>,
@@ -1930,6 +1956,7 @@ impl Session {
             config,
             pricing,
             mode,
+            pre_plan_mode: None,
             rules,
             transcript,
             seq,
@@ -2024,6 +2051,20 @@ impl Session {
             .add_message(&self.id, seq, Role::System, content, None)?;
         self.transcript.push(Message::system(content));
         pack.push(source, reason, content);
+        Ok(())
+    }
+
+    /// Publish the one accepted terminal answer. Provider-visible provisional completions stay in
+    /// the lossless transcript as `LlmOnly`; this UI-only copy is the sole conversation answer.
+    fn publish_terminal_answer(&mut self, content: &str) -> Result<(), CoreError> {
+        if content.trim().is_empty() {
+            return Ok(());
+        }
+        let seq = self.next_seq();
+        self.store
+            .add_ui_note(&self.id, seq, Role::Assistant, content)?;
+        self.transcript.push(Message::assistant(content).ui_only());
+        self.presenter.emit(PresenterEvent::AssistantDone);
         Ok(())
     }
 
@@ -2443,7 +2484,9 @@ impl Session {
         self.transcript
             .iter()
             .filter(|m| {
-                matches!(m.role, Role::User | Role::Assistant) && !m.content.trim().is_empty()
+                m.visibility.is_user_visible()
+                    && matches!(m.role, Role::User | Role::Assistant)
+                    && !m.content.trim().is_empty()
             })
             .map(|m| (m.role, m.content.clone()))
             .collect()
@@ -2835,6 +2878,11 @@ impl Session {
     /// Set the temper to a specific mode (the `/mode` picker), persist it, and return it. Unlike
     /// the cycle this can reach `Bypass`/Full, since the picker is an explicit, deliberate choice.
     pub fn set_temper(&mut self, mode: PermissionMode) -> PermissionMode {
+        if mode == PermissionMode::Plan && self.mode != PermissionMode::Plan {
+            self.pre_plan_mode = Some(self.mode);
+        } else if mode != PermissionMode::Plan {
+            self.pre_plan_mode = None;
+        }
         self.mode = mode;
         self.config.permission_mode = mode;
         let _ = self
@@ -4386,19 +4434,26 @@ prompt text, nothing else.";
         did_real_work: bool,
         no_change_required: bool,
         inspected_this_turn: bool,
+        unresolved_checks: Option<&str>,
     ) -> PostCheckDecision {
         let max_verify_attempts = CompletionContract::production().max_observation_requests();
         // Tool-name-neutral so the SAME nudge works for the bridge (tools are `mcp__forge__*`) and
         // the direct path (`shell`/`read_file`) — the model maps "run a shell command / read a file"
         // to whichever names its toolset exposes.
-        const VERIFY_NUDGE: &str = "You reported every task Done. Before this turn can end, you \
-             MUST PROVE it: call an inspection tool that reads the real state — run a shell command \
-             (`git log` / `git tag` / `gh run list` / `gh release view` / `ls` / `cat`) or read a \
-             file — and look at the actual output. Re-marking the task list is NOT verification; you \
-             must run a real check. If the output shows ANY task is not actually complete, mark it \
-             not done and finish it. (If a task has no external artifact to check — a pure analysis \
-             answer — say so and restate the result.) Only after confirming every task, state \
-             exactly what you checked and stop.";
+        let verify_nudge = match unresolved_checks {
+            Some(checks) => format!(
+                "You reported every task Done, but the latest {checks} check failed. Re-run the \
+                 matching {checks} command and fix it until that check succeeds. File reads, `ls`, \
+                 `cat`, and `git diff` do NOT clear a failed check. Re-marking the task list is not \
+                 verification. Only after the matching check succeeds, state exactly what passed."
+            ),
+            None => "You reported every task Done. Before this turn can end, prove it with the \
+                 relevant build, typecheck, lint, or test command. If no such check applies, inspect \
+                 the exact artifact or external state the task changed. Re-marking the task list is \
+                 not verification. If the check shows a gap, reopen the task and finish it; otherwise \
+                 state exactly what passed."
+                .to_string(),
+        };
         let intent = self
             .task_scope
             .as_ref()
@@ -4414,15 +4469,18 @@ prompt text, nothing else.";
         match decision {
             PostCheckDecision::RequestObservation => {
                 *verify_attempts += 1;
+                let pending = unresolved_checks
+                    .map(|checks| format!("; unresolved: {checks}"))
+                    .unwrap_or_default();
                 self.presenter.emit(PresenterEvent::Warning(format!(
-                    "all tasks reported done — verifying with a real state check before finishing ({}/{max_verify_attempts})",
-                    *verify_attempts,
+                    "all tasks reported done — verifying with a real state check before finishing ({}/{max_verify_attempts}){pending}",
+                    *verify_attempts
                 )));
                 let nseq = self.next_seq();
                 let _ = self
                     .store
-                    .add_message(&self.id, nseq, Role::System, VERIFY_NUDGE, None);
-                self.transcript.push(Message::system(VERIFY_NUDGE));
+                    .add_message(&self.id, nseq, Role::System, &verify_nudge, None);
+                self.transcript.push(Message::system(verify_nudge));
             }
             PostCheckDecision::AcceptNoArtifacts => {
                 self.presenter.emit(PresenterEvent::Warning(
@@ -4571,7 +4629,7 @@ prompt text, nothing else.";
         // An inspection that runs AFTER this point is the model responding to the request to verify
         // (on the direct path, tools run in separate steps from the text claim, so a step-local
         // signal can't see it). Carried across steps; reset implicitly by being re-stamped each nudge.
-        let mut inspect_at_last_verify: u64 = 0;
+        let mut verification_at_last_verify: u64 = 0;
         // Completed-task count observed at the last bridge re-drive check — the other half of the
         // progress signal (a re-run that closes a task but happens to run no fresh tool still counts
         // as progress).
@@ -4593,6 +4651,13 @@ prompt text, nothing else.";
         // Counts INSPECTION tools (anything except `update_tasks`/`present_plan`) — the verification
         // gate requires the bridge to actually CHECK real state, not just re-assert "done".
         let inspect_ran = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let verification_ledger =
+            std::sync::Arc::new(std::sync::Mutex::new(VerificationLedger::default()));
+        let bridge_observations =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+                String,
+                std::collections::VecDeque<VerificationObservation>,
+            >::new()));
         // Latched when a CLI-bridge completion reports `StreamEvent::ToolsUnavailable` — Forge's
         // `mcp-serve` tool server failed to start, so the model's write tools were never exposed
         // (wave 7). Read into the loop outcome so `run_turn` can classify + the harness can retry.
@@ -4634,7 +4699,6 @@ prompt text, nothing else.";
                     .push(Message::system(DEADLINE_RECONCILE_NUDGE));
             }
             let tools_before = tools_ran.load(std::sync::atomic::Ordering::Relaxed);
-            let inspect_before = inspect_ran.load(std::sync::atomic::Ordering::Relaxed);
             // Stream the reply, with transparent failover for this step's completion.
             let mut failover_hop = 0u32;
             let mut resp = loop {
@@ -4684,12 +4748,17 @@ prompt text, nothing else.";
                     let tools = std::sync::Arc::clone(&tools_ran);
                     let inspects = std::sync::Arc::clone(&inspect_ran);
                     let build_fight = std::sync::Arc::clone(&bridge_build_fight);
+                    let verification = std::sync::Arc::clone(&verification_ledger);
+                    let pending_observations = std::sync::Arc::clone(&bridge_observations);
                     let tools_unavailable = std::sync::Arc::clone(&mcp_tools_unavailable);
+                    let suppress_assistant_text = verify_attempts > 0;
                     let mut sink = |ev: StreamEvent| {
                         act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         match ev {
                             StreamEvent::Text(t) => {
-                                presenter.emit(PresenterEvent::AssistantDelta(t))
+                                if !suppress_assistant_text {
+                                    presenter.emit(PresenterEvent::AssistantDelta(t));
+                                }
                             }
                             StreamEvent::Reasoning(t) => {
                                 presenter.emit(PresenterEvent::Reasoning(t))
@@ -4709,9 +4778,22 @@ prompt text, nothing else.";
                                 if is_env_setup_command(&bridge_tool_command(&args)) {
                                     build_fight.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
+                                pending_observations
+                                    .lock()
+                                    .unwrap()
+                                    .entry(name.clone())
+                                    .or_default()
+                                    .push_back(completion::classify_tool(&name, &args));
                                 presenter.emit(PresenterEvent::ToolStart { name, args })
                             }
                             StreamEvent::ToolFinished { name, ok, summary } => {
+                                let observation = pending_observations
+                                    .lock()
+                                    .unwrap()
+                                    .get_mut(&name)
+                                    .and_then(std::collections::VecDeque::pop_front)
+                                    .unwrap_or(VerificationObservation::Generic);
+                                verification.lock().unwrap().observe(observation, ok);
                                 presenter.emit(PresenterEvent::ToolResult { name, ok, summary })
                             }
                             StreamEvent::SubagentStarted { id, agent, task } => {
@@ -4825,7 +4907,7 @@ prompt text, nothing else.";
                             tool_calls: r.tool_calls.len() as u32,
                             verified_completion: !r.wants_tools(),
                         });
-                        if !r.content.is_empty() {
+                        if !r.content.is_empty() && r.wants_tools() {
                             self.presenter.emit(PresenterEvent::AssistantDone);
                         }
                         break r;
@@ -4909,7 +4991,7 @@ prompt text, nothing else.";
                         // response is already a shared health signal: bench it and immediately
                         // advance the fallback chain instead of delaying every concurrent turn.
                         if transient_retries < MAX_TRANSIENT_RETRIES
-                            && !matches!(e, forge_provider::ProviderError::Unavailable(_))
+                            && should_retry_same_model_transient(&active_model, &e)
                             && !e.is_permanent()
                             && !e.is_rate_limited()
                             && !e.is_context_overflow()
@@ -5215,21 +5297,36 @@ prompt text, nothing else.";
                 resp.usage.input_tokens,
             );
 
-            self.transcript.push(Message::assistant_tool_calls(
-                &resp.content,
-                resp.tool_calls.clone(),
-            ));
+            let provisional_completion = !resp.wants_tools() && !resp.content.trim().is_empty();
+            let mut assistant_message =
+                Message::assistant_tool_calls(&resp.content, resp.tool_calls.clone());
+            if provisional_completion {
+                assistant_message = assistant_message.llm_only();
+            }
+            self.transcript.push(assistant_message);
 
             let seq = self.next_seq();
-            let msg_id = self.store.add_message_full(
-                &self.id,
-                seq,
-                Role::Assistant,
-                &resp.content,
-                Some(&active_model),
-                &resp.tool_calls,
-                None,
-            )?;
+            let msg_id = if provisional_completion {
+                self.store.add_llm_only_message_full(
+                    &self.id,
+                    seq,
+                    Role::Assistant,
+                    &resp.content,
+                    Some(&active_model),
+                    &resp.tool_calls,
+                    None,
+                )?
+            } else {
+                self.store.add_message_full(
+                    &self.id,
+                    seq,
+                    Role::Assistant,
+                    &resp.content,
+                    Some(&active_model),
+                    &resp.tool_calls,
+                    None,
+                )?
+            };
             // A successful Codex OAuth response carries a backend-authoritative plan header.
             // Persist its short-lived observation even for a model-pinned turn (which has no
             // auto-routing decision) so the next process's mesh inspector sees the same account.
@@ -5267,7 +5364,10 @@ prompt text, nothing else.";
                 bridge_input_accum = bridge_input_accum.saturating_add(resp.usage.input_tokens);
             }
 
-            if resp.wants_tools() {
+            let bridge_tool_progress = forge_provider::is_cli_bridge(&active_model)
+                && tools_ran.load(std::sync::atomic::Ordering::Relaxed) > tools_before;
+
+            if resp.wants_tools() || bridge_tool_progress {
                 empty_nudges = 0;
             }
 
@@ -5281,7 +5381,7 @@ prompt text, nothing else.";
                 // narrate-then-stall, or a transient empty completion). Rather than just stopping,
                 // nudge it to continue a bounded number of times — this recovers the common case
                 // where the model would have made progress on a retry.
-                if resp.content.trim().is_empty() {
+                if resp.content.trim().is_empty() && !bridge_tool_progress {
                     if completion_verification_empty_is_terminal(
                         verify_attempts,
                         &self.tasks,
@@ -5291,6 +5391,8 @@ prompt text, nothing else.";
                             "verification continuation returned no additional text — keeping the completed answer"
                                 .to_string(),
                         ));
+                        let accepted = final_text.clone();
+                        self.publish_terminal_answer(&accepted)?;
                         hit_step_cap = false;
                         break;
                     }
@@ -5387,6 +5489,8 @@ prompt text, nothing else.";
                              tail cost"
                         )));
                         final_text = resp.content;
+                        let accepted = final_text.clone();
+                        self.publish_terminal_answer(&accepted)?;
                         hit_step_cap = false;
                         break;
                     }
@@ -5457,8 +5561,6 @@ prompt text, nothing else.";
                     let made_progress = tools_this_turn > 0 || done_now > bridge_done_prev;
                     bridge_done_prev = done_now;
                     const MAX_BRIDGE_CONTINUE_NUDGES: usize = 8;
-                    let inspected_this_turn =
-                        inspect_ran.load(std::sync::atomic::Ordering::Relaxed) > inspect_before;
                     if !unfinished.is_empty() {
                         // Work is open again — any earlier "all done" verification is stale.
                         verify_attempts = 0;
@@ -5513,13 +5615,23 @@ prompt text, nothing else.";
                         // is whether the turn just observed ran an inspection tool.
                         let did_real_work =
                             inspect_ran.load(std::sync::atomic::Ordering::Relaxed) > 0;
+                        let (inspected_since_verify, unresolved_checks) = {
+                            let ledger = verification_ledger.lock().unwrap();
+                            (
+                                ledger.verified_since(verification_at_last_verify),
+                                ledger.unresolved_summary(),
+                            )
+                        };
                         if self.run_completion_gate(
                             &mut verify_attempts,
                             did_real_work,
                             completion_claims_no_change(&resp.content),
-                            inspected_this_turn,
+                            inspected_since_verify,
+                            unresolved_checks.as_deref(),
                         ) == PostCheckDecision::RequestObservation
                         {
+                            verification_at_last_verify =
+                                verification_ledger.lock().unwrap().checkpoint();
                             continue;
                         }
                         // else: accepted (clean / no-artifacts / unverified) — fall through to terminal.
@@ -5610,27 +5722,32 @@ prompt text, nothing else.";
                         // model runs each tool in a SEPARATE step from the text "done" claim. So a
                         // step-local "did this step inspect?" is ALWAYS false at this gate, which would
                         // wrongly flag a genuinely-verified turn as UNVERIFIED. Instead ask: did an
-                        // inspection run SINCE we last asked for verification? `inspect_at_last_verify`
-                        // is the inspect count captured when the verify nudge was (re)issued.
-                        let inspected_since_verify = inspect_ran
-                            .load(std::sync::atomic::Ordering::Relaxed)
-                            > inspect_at_last_verify;
+                        // successful, outcome-aware evidence SINCE the last verification request.
+                        // A generic read cannot clear an unresolved failed check family.
+                        let (inspected_since_verify, unresolved_checks) = {
+                            let ledger = verification_ledger.lock().unwrap();
+                            (
+                                ledger.verified_since(verification_at_last_verify),
+                                ledger.unresolved_summary(),
+                            )
+                        };
                         if self.run_completion_gate(
                             &mut verify_attempts,
                             did_real_work,
                             completion_claims_no_change(&resp.content),
                             inspected_since_verify,
+                            unresolved_checks.as_deref(),
                         ) == PostCheckDecision::RequestObservation
                         {
-                            // Mark where the next verification window starts: any inspection AFTER
-                            // this point counts as responding to the nudge.
-                            inspect_at_last_verify =
-                                inspect_ran.load(std::sync::atomic::Ordering::Relaxed);
+                            verification_at_last_verify =
+                                verification_ledger.lock().unwrap().checkpoint();
                             continue;
                         }
                     }
                 }
                 final_text = resp.content;
+                let accepted = final_text.clone();
+                self.publish_terminal_answer(&accepted)?;
                 hit_step_cap = false;
                 break;
             }
@@ -5749,7 +5866,11 @@ prompt text, nothing else.";
                 // batch that keeps failing the same way (different args each step) is caught instead
                 // of burning the budget to the step cap.
                 let classified = self.run_readonly_batch(&msg_id, &resp.tool_calls).await?;
-                for (name, kind) in classified {
+                for (call, (name, kind)) in resp.tool_calls.iter().zip(classified) {
+                    verification_ledger.lock().unwrap().observe(
+                        completion::classify_tool(&call.name, &call.args.to_string()),
+                        kind.is_none(),
+                    );
                     match kind {
                         Some(k) => *failure_counts.entry((name, k)).or_insert(0) += 1,
                         None => {
@@ -5776,7 +5897,12 @@ prompt text, nothing else.";
                 // Execute each requested tool through the permission broker, serially.
                 for call in &resp.tool_calls {
                     let result = self.invoke_tool(&msg_id, call).await?;
-                    match classify_tool_failure(&result) {
+                    let failure = classify_tool_failure(&result);
+                    verification_ledger.lock().unwrap().observe(
+                        completion::classify_tool(&call.name, &call.args.to_string()),
+                        failure.is_none(),
+                    );
+                    match failure {
                         Some(kind) => {
                             *failure_counts.entry((call.name.clone(), kind)).or_insert(0) += 1;
                         }
@@ -8458,11 +8584,21 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         Ok(result)
     }
 
-    /// Persist a plan, seed the task list from its steps, surface the tasks, and stash the plan for
-    /// the turn-end approval flow. Shared by the in-process `present_plan` handler and the CLI-bridge
-    /// ingestion in [`run_turn_with`]. Does NOT emit the plan card — the caller does (path-specific).
+    /// Persist and stash a proposed plan for the turn-end approval flow. A proposal is not active
+    /// work: its steps become tasks only after the user chooses Build.
     fn ingest_plan(&mut self, plan: forge_types::PlanProposal) {
+        // `present_plan` is authoritative even when a one-shot `/plan` expansion reached the
+        // provider without going through the interactive command dispatcher. Entering Plan here
+        // captures the actual current permission so approval can restore it exactly.
+        if self.mode != PermissionMode::Plan {
+            self.set_temper(PermissionMode::Plan);
+        }
         persist_plan(&self.id, &plan);
+        self.pending_plan = Some(plan);
+    }
+
+    /// Turn an approved plan into the active, persisted task list.
+    fn activate_plan_tasks(&mut self, plan: &forge_types::PlanProposal) {
         self.tasks = plan
             .steps
             .iter()
@@ -8474,7 +8610,16 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.persist_tasks();
         self.presenter
             .emit(PresenterEvent::Tasks(self.tasks.clone()));
-        self.pending_plan = Some(plan);
+    }
+
+    /// Leave read-only planning through the approval flow. New sessions restore the exact mode that
+    /// entered Plan; a resumed/legacy Plan session has no in-memory predecessor and uses Auto-edit.
+    fn restore_pre_plan_temper(&mut self) -> PermissionMode {
+        let mode = self
+            .pre_plan_mode
+            .take()
+            .unwrap_or(PermissionMode::AcceptEdits);
+        self.set_temper(mode)
     }
 
     /// Persist the current task list, surfacing a write failure as a Warning instead of silently
@@ -8499,10 +8644,14 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             plan.title.trim(),
             if n == 1 { "" } else { "s" }
         );
+        let build_mode = self
+            .pre_plan_mode
+            .unwrap_or(PermissionMode::AcceptEdits)
+            .label();
         let opts = [
             forge_types::QChoice {
                 label: "Build it".into(),
-                description: "Switch to Auto-edit and implement the plan now".into(),
+                description: format!("Return to {build_mode} and implement the plan now"),
             },
             forge_types::QChoice {
                 label: "Cancel".into(),
@@ -8515,21 +8664,25 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             || a.eq_ignore_ascii_case("build")
             || a.eq_ignore_ascii_case("yes")
         {
-            let label = self.set_temper(PermissionMode::AcceptEdits).label();
+            self.activate_plan_tasks(plan);
+            let label = self.restore_pre_plan_temper().label();
             self.presenter
                 .emit(PresenterEvent::Temper(label.to_string()));
-            self.presenter.emit(PresenterEvent::Warning(
-                "plan approved — building in Auto-edit".to_string(),
-            ));
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "plan approved — building with {label} permissions"
+            )));
             Some(PLAN_BUILD_PROMPT.to_string())
         } else if a.is_empty()
             || a == forge_types::NO_ANSWER
             || a.eq_ignore_ascii_case("Cancel")
             || a.eq_ignore_ascii_case("no")
         {
-            self.presenter.emit(PresenterEvent::Warning(
-                "plan cancelled — still in planning mode".to_string(),
-            ));
+            let label = self.restore_pre_plan_temper().label();
+            self.presenter
+                .emit(PresenterEvent::Temper(label.to_string()));
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "plan cancelled — restored {label} permissions"
+            )));
             None
         } else {
             // Free-text feedback → revise. Stay in planning mode so present_plan remains available.
@@ -11888,9 +12041,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_approval_build_switches_to_auto_edit() {
+    fn plan_approval_build_falls_back_to_auto_edit_without_a_captured_temper() {
         let mut s = scripted_session("Build it", Arc::new(Mutex::new(0)));
-        s.set_temper(PermissionMode::Plan);
+        s.mode = PermissionMode::Plan;
+        s.config.permission_mode = PermissionMode::Plan;
         let next = s.resolve_plan_approval(&one_step_plan());
         assert_eq!(next.as_deref(), Some(PLAN_BUILD_PROMPT));
         assert_eq!(
@@ -11901,11 +12055,64 @@ mod tests {
     }
 
     #[test]
-    fn plan_approval_cancel_stays_in_planning() {
+    fn plan_approval_build_restores_the_exact_previous_temper() {
+        for previous in [PermissionMode::Default, PermissionMode::Bypass] {
+            let mut s = scripted_session("Build it", Arc::new(Mutex::new(0)));
+            s.set_temper(previous);
+            s.set_temper(PermissionMode::Plan);
+
+            let next = s.resolve_plan_approval(&one_step_plan());
+
+            assert_eq!(next.as_deref(), Some(PLAN_BUILD_PROMPT));
+            assert_eq!(s.mode, previous, "Build must restore {previous:?}");
+        }
+    }
+
+    #[test]
+    fn plan_approval_cancel_restores_the_previous_temper() {
         let mut s = scripted_session("Cancel", Arc::new(Mutex::new(0)));
+        s.set_temper(PermissionMode::Bypass);
         s.set_temper(PermissionMode::Plan);
         assert!(s.resolve_plan_approval(&one_step_plan()).is_none());
-        assert_eq!(s.mode, PermissionMode::Plan, "cancel keeps planning mode");
+        assert_eq!(s.mode, PermissionMode::Bypass, "cancel restores Full");
+    }
+
+    #[test]
+    fn proposed_plan_does_not_activate_tasks_until_build_is_approved() {
+        let mut s = scripted_session("Build it", Arc::new(Mutex::new(0)));
+        let plan = one_step_plan();
+
+        s.ingest_plan(plan.clone());
+
+        assert!(s.tasks.is_empty(), "a proposal is not active work yet");
+        assert!(
+            s.store.tasks(s.id()).unwrap().is_empty(),
+            "unapproved steps must not reach persistent tasks"
+        );
+
+        s.set_temper(PermissionMode::Plan);
+        assert_eq!(
+            s.resolve_plan_approval(&plan).as_deref(),
+            Some(PLAN_BUILD_PROMPT)
+        );
+        assert_eq!(s.tasks.len(), 1, "Build activates the approved plan");
+        assert_eq!(s.store.tasks(s.id()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn presenting_a_plan_enters_plan_mode_and_captures_the_current_temper() {
+        let mut s = scripted_session("Build it", Arc::new(Mutex::new(0)));
+        s.set_temper(PermissionMode::Bypass);
+
+        s.ingest_plan(one_step_plan());
+
+        assert_eq!(s.mode, PermissionMode::Plan);
+        assert_eq!(s.pre_plan_mode, Some(PermissionMode::Bypass));
+        assert_eq!(
+            s.resolve_plan_approval(&one_step_plan()).as_deref(),
+            Some(PLAN_BUILD_PROMPT)
+        );
+        assert_eq!(s.mode, PermissionMode::Bypass);
     }
 
     #[test]
@@ -15758,6 +15965,60 @@ mod tests {
         assert!(store.current_benched().unwrap().is_benched("bad::model"));
     }
 
+    struct CodexRequestFailedOnce {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for CodexRequestFailedOnce {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                return Err(forge_provider::ProviderError::Unavailable(
+                    "provider request failed".into(),
+                ));
+            }
+            Ok(forge_provider::ModelResponse {
+                content: "recovered automatically".into(),
+                tool_calls: Vec::new(),
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_oauth_provider_request_failed_retries_the_same_continuation() {
+        let provider = Arc::new(CodexRequestFailedOnce {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "codex-oauth::gpt-5.5".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider.clone(), router);
+        session.config.recap.enabled = false;
+        session.config.suggest.enabled = false;
+        session.config.mesh.auto_memory = false;
+
+        let answer = session
+            .run_turn("continue the implementation")
+            .await
+            .unwrap();
+
+        assert_eq!(answer, "recovered automatically");
+        assert_eq!(
+            provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one recoverable failure must retry once without user input"
+        );
+    }
+
     /// Mimics a CLI bridge: returns text with NO structured tool calls (a bridge's tools run in
     /// its own process; only its narration comes back here). Emits a `shell` ToolStarted on the
     /// first `inspect_calls` invocations — that's both the "made progress" signal the re-drive gate
@@ -15782,6 +16043,11 @@ mod tests {
                 on_event(StreamEvent::ToolStarted {
                     name: "shell".into(),
                     args: "git status".into(),
+                });
+                on_event(StreamEvent::ToolFinished {
+                    name: "shell".into(),
+                    ok: true,
+                    summary: "working tree clean".into(),
                 });
             }
             on_event(StreamEvent::Text("working".into()));
@@ -15883,6 +16149,71 @@ mod tests {
         (store, session)
     }
 
+    struct ToolOnlyBridgeThenFinal {
+        calls: std::sync::atomic::AtomicUsize,
+        session: std::sync::Mutex<Option<(Arc<Store>, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for ToolOnlyBridgeThenFinal {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            on_event(StreamEvent::ToolStarted {
+                name: "shell".into(),
+                args: "git status".into(),
+            });
+            on_event(StreamEvent::ToolFinished {
+                name: "shell".into(),
+                ok: true,
+                summary: "clean".into(),
+            });
+            if n >= 3 {
+                if let Some((store, id)) = self.session.lock().unwrap().as_ref() {
+                    seed_tasks(store, id, &[("finish the implementation", true)]);
+                }
+            }
+            Ok(forge_provider::ModelResponse {
+                content: if n >= 3 { "finished and verified" } else { "" }.into(),
+                tool_calls: Vec::new(),
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_tool_only_steps_continue_without_empty_reply_recovery() {
+        let provider = Arc::new(ToolOnlyBridgeThenFinal {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            session: std::sync::Mutex::new(None),
+        });
+        let (store, mut session) = bridge_session(provider.clone());
+        *provider.session.lock().unwrap() = Some((Arc::clone(&store), session.id.clone()));
+        seed_tasks(&store, &session.id, &[("finish the implementation", false)]);
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+
+        let answer = session.run_turn("finish it").await.unwrap();
+
+        assert_eq!(answer, "finished and verified");
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+        let events = events.lock().unwrap();
+        assert!(events.iter().all(|event| {
+            !matches!(event, PresenterEvent::Warning(message) | PresenterEvent::Error(message)
+                if message.contains("empty response") || message.contains("last response was empty"))
+        }));
+        assert!(session.replay_items().iter().all(|item| {
+            !matches!(item, forge_types::ReplayItem::Assistant(text) if text.trim().is_empty())
+        }));
+    }
+
     #[tokio::test]
     async fn bridge_with_unfinished_tasks_but_no_progress_halts_without_spiraling() {
         // The anti-spiral guarantee: a bridge that yields with a task still open but did NOTHING
@@ -15932,6 +16263,9 @@ mod tests {
             inspect_calls: usize::MAX, // emits a `shell` ToolStarted each turn = a real inspection
         });
         let (store, mut session) = bridge_session(provider.clone());
+        let capture = CapturePresenter::default();
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
         seed_tasks(&store, &session.id, &[("ship the release", true)]);
         let answer = session.run_turn("release it").await.unwrap();
         assert_eq!(answer, "working");
@@ -15939,6 +16273,26 @@ mod tests {
             provider.calls.load(std::sync::atomic::Ordering::SeqCst),
             2,
             "an inspected verification is accepted after exactly one verification turn"
+        );
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|event| matches!(event, PresenterEvent::AssistantDone))
+                .count(),
+            1,
+            "only the accepted answer may finalize on the UI"
+        );
+        assert_eq!(
+            store
+                .load_history_page(&session.id, None, 100)
+                .unwrap()
+                .iter()
+                .filter(|row| row.role == Role::Assistant)
+                .count(),
+            1,
+            "provisional completion text must stay out of user history"
         );
     }
 

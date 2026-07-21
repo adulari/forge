@@ -687,6 +687,7 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
             get(list_sessions).post(create_session),
         )
         .route(&format!("{base}/api/projects"), get(project_catalog))
+        .route(&format!("{base}/api/identity"), get(identity))
         .route(&format!("{base}/api/projects/browse"), get(browse_projects))
         .route(&format!("{base}/api/sessions/past"), get(past_sessions))
         .route(&format!("{base}/api/sessions/tree"), get(session_tree))
@@ -763,6 +764,17 @@ fn daemon_router(state: Arc<DaemonState>) -> Router {
         // authed by the URL-path token, not cookies, so a permissive policy is safe.
         .layer(CorsLayer::very_permissive())
         .with_state(state)
+}
+
+#[derive(serde::Serialize)]
+struct HostIdentity {
+    hostname: String,
+}
+
+async fn identity() -> axum::Json<HostIdentity> {
+    axum::Json(HostIdentity {
+        hostname: crate::anywhere::default_host_name(),
+    })
 }
 
 async fn enable_anywhere_connector(State(state): State<Arc<DaemonState>>) -> Response {
@@ -3199,6 +3211,51 @@ fn parse_temper(raw: &str) -> Result<forge_types::PermissionMode, String> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn identity_route_is_token_scoped_and_returns_stable_system_hostname() {
+        use tower::ServiceExt;
+
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: "/tmp".into(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = daemon_router(state);
+
+        let unauthorized = router
+            .clone()
+            .oneshot(
+                axum::http::Request::get("/api/identity")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), axum::http::StatusCode::NOT_FOUND);
+
+        let response = router
+            .oneshot(
+                axum::http::Request::get("/tok/api/identity")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["hostname"], crate::anywhere::default_host_name());
+    }
+
     #[test]
     fn generic_attention_push_fires_only_on_waiting_transition() {
         assert!(attention_became_required(false, true));
@@ -5214,8 +5271,8 @@ export async function run() {}
 
     /// The plan card end to end over a REAL driver (mock provider): `/plan` → the snapshot
     /// carries `plan` + the approval question whose option 1 is "Build it" — and a remote
-    /// Answer("1") (exactly what the page's Approve button sends) approves it, switching the
-    /// temper and running the build turn, identical to a local choice.
+    /// Answer("1") (exactly what the page's Approve button sends) approves it, restoring the
+    /// exact pre-Plan temper and running the build turn, identical to a local choice.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn plan_card_projects_and_remote_approve_builds() {
         let _env = FORGE_DB_LOCK.lock().await;
@@ -5281,7 +5338,7 @@ export async function run() {}
         loop {
             let s = handle.snapshot_rx.borrow().snapshot.clone();
             let t = s.transcript.join("\n");
-            if !s.busy && t.contains("plan approved — building in Auto-edit") {
+            if !s.busy && t.contains("plan approved — building with Full permissions") {
                 break;
             }
             assert!(

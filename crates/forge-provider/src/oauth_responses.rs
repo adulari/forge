@@ -73,6 +73,7 @@ pub fn classify_stream_error(message: String) -> ProviderError {
     let unavailable = lower.contains("overload")
         || lower.contains("unavailable")
         || lower.contains("temporarily")
+        || lower.contains("provider request failed")
         || lower.contains(" 500")
         || lower.contains("500 ")
         || lower.contains(" 502")
@@ -500,6 +501,16 @@ mod tests {
             classify_stream_error("internal server error".into()),
             ProviderError::Unavailable(_)
         ));
+        for message in [
+            "provider request failed",
+            "Codex provider request failed",
+            "PROVIDER REQUEST FAILED: retry later",
+        ] {
+            assert!(matches!(
+                classify_stream_error(message.into()),
+                ProviderError::Unavailable(_)
+            ));
+        }
         // A genuine non-transient stream error stays a hard Request failure.
         assert!(matches!(
             classify_stream_error("invalid tool schema".into()),

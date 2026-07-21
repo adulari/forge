@@ -2580,7 +2580,7 @@ impl Store {
                     if payload.session_id.trim().is_empty()
                         || payload.seq < 0
                         || Role::parse(&payload.role).is_none()
-                        || !matches!(payload.visibility.as_str(), "llm" | "ui")
+                        || !matches!(payload.visibility.as_str(), "llm" | "llm_only" | "ui")
                     {
                         Err("message snapshot contains invalid fields")
                     } else if !transaction.query_row(
@@ -4260,6 +4260,31 @@ impl Store {
             tool_calls,
             tool_call_id,
             Visibility::Llm,
+        )
+    }
+
+    /// Append provider-continuity transcript that must not appear as a user-facing reply (for
+    /// example a provisional completion while Forge performs its verification continuation).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_llm_only_message_full(
+        &self,
+        session_id: &str,
+        seq: i64,
+        role: Role,
+        content: &str,
+        model: Option<&str>,
+        tool_calls: &[ToolCall],
+        tool_call_id: Option<&str>,
+    ) -> Result<String> {
+        self.insert_message(
+            session_id,
+            seq,
+            role,
+            content,
+            model,
+            tool_calls,
+            tool_call_id,
+            Visibility::LlmOnly,
         )
     }
 
@@ -6239,7 +6264,7 @@ impl Store {
              FROM message
              WHERE session_id = ?1
                AND (?2 IS NULL OR seq < ?2)
-               AND (role IN ('user', 'assistant') OR visibility = 'ui')
+               AND ((role IN ('user', 'assistant') AND visibility != 'llm_only') OR visibility = 'ui')
                AND content != ''
              ORDER BY seq DESC LIMIT ?3",
         )?;

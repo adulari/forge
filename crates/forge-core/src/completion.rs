@@ -6,6 +6,121 @@
 
 use crate::TaskIntent;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum VerificationFamily {
+    Typecheck,
+    Lint,
+    Test,
+    Build,
+}
+
+impl VerificationFamily {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Typecheck => "typecheck",
+            Self::Lint => "lint",
+            Self::Test => "test",
+            Self::Build => "build",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VerificationObservation {
+    Ignore,
+    Generic,
+    Check(VerificationFamily),
+}
+
+/// Outcome-aware evidence for the completion gate. Failed verification families remain unresolved
+/// until that same family succeeds; unrelated reads can add evidence but cannot erase a failure.
+#[derive(Debug, Default)]
+pub(crate) struct VerificationLedger {
+    unresolved: std::collections::BTreeSet<VerificationFamily>,
+    successful_observations: u64,
+}
+
+impl VerificationLedger {
+    pub(crate) const fn checkpoint(&self) -> u64 {
+        self.successful_observations
+    }
+
+    pub(crate) fn observe(&mut self, observation: VerificationObservation, ok: bool) {
+        match observation {
+            VerificationObservation::Ignore => {}
+            VerificationObservation::Generic => {
+                if ok {
+                    self.successful_observations = self.successful_observations.saturating_add(1);
+                }
+            }
+            VerificationObservation::Check(family) => {
+                if ok {
+                    self.unresolved.remove(&family);
+                    self.successful_observations = self.successful_observations.saturating_add(1);
+                } else {
+                    self.unresolved.insert(family);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn verified_since(&self, checkpoint: u64) -> bool {
+        self.unresolved.is_empty() && self.successful_observations > checkpoint
+    }
+
+    pub(crate) fn unresolved_summary(&self) -> Option<String> {
+        (!self.unresolved.is_empty()).then(|| {
+            self.unresolved
+                .iter()
+                .map(|family| family.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+    }
+}
+
+pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
+    if name.ends_with("update_tasks") || name.ends_with("present_plan") {
+        return VerificationObservation::Ignore;
+    }
+    if !name.ends_with("shell") && !name.ends_with("exec_command") {
+        return VerificationObservation::Generic;
+    }
+
+    let command = args.to_ascii_lowercase();
+    let family = if command.contains("tsc")
+        || command.contains("typecheck")
+        || command.contains("type-check")
+        || command.contains("cargo check")
+    {
+        Some(VerificationFamily::Typecheck)
+    } else if command.contains("eslint")
+        || command.contains("clippy")
+        || command.contains(" lint")
+        || command.contains("lint ")
+    {
+        Some(VerificationFamily::Lint)
+    } else if command.contains("test")
+        || command.contains("pytest")
+        || command.contains("vitest")
+        || command.contains("jest")
+        || command.contains("nextest")
+    {
+        Some(VerificationFamily::Test)
+    } else if command.contains("build")
+        || command.contains("compile")
+        || command.contains("xcodebuild")
+    {
+        Some(VerificationFamily::Build)
+    } else {
+        None
+    };
+    family.map_or(
+        VerificationObservation::Generic,
+        VerificationObservation::Check,
+    )
+}
+
 /// Evidence observed while a model claims that every tracked task is complete.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct CompletionEvidence {
@@ -160,5 +275,54 @@ mod tests {
             ),
             CompletionDecision::AcceptNoArtifacts
         );
+    }
+
+    #[test]
+    fn failed_typecheck_is_not_cleared_by_a_successful_file_read() {
+        let mut ledger = VerificationLedger::default();
+        ledger.observe(
+            classify_tool("shell", r#"{"command":"npx tsc --noEmit"}"#),
+            false,
+        );
+        let checkpoint = ledger.checkpoint();
+        ledger.observe(
+            classify_tool("read_file", r#"{"path":"package.json"}"#),
+            true,
+        );
+
+        assert!(!ledger.verified_since(checkpoint));
+        assert_eq!(ledger.unresolved_summary().as_deref(), Some("typecheck"));
+    }
+
+    #[test]
+    fn failed_lint_test_and_build_each_require_a_matching_success() {
+        for (failed, unrelated, matching, label) in [
+            ("npm run lint", "npm test", "npm run lint", "lint"),
+            ("cargo test", "git diff", "cargo test", "test"),
+            ("cargo build", "cat Cargo.toml", "cargo build", "build"),
+        ] {
+            let mut ledger = VerificationLedger::default();
+            ledger.observe(
+                classify_tool("shell", &format!(r#"{{"command":"{failed}"}}"#)),
+                false,
+            );
+            let checkpoint = ledger.checkpoint();
+            ledger.observe(
+                classify_tool("shell", &format!(r#"{{"command":"{unrelated}"}}"#)),
+                true,
+            );
+            assert!(
+                !ledger.verified_since(checkpoint),
+                "{label} cleared by {unrelated}"
+            );
+            ledger.observe(
+                classify_tool("shell", &format!(r#"{{"command":"{matching}"}}"#)),
+                true,
+            );
+            assert!(
+                ledger.verified_since(checkpoint),
+                "successful {label} did not clear failure"
+            );
+        }
     }
 }

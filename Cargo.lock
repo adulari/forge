@@ -2241,6 +2241,7 @@ dependencies = [
  "cpal",
  "futures",
  "hound",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

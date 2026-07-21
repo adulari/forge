@@ -41,15 +41,15 @@ impl Role {
     }
 }
 
-/// Who a transcript message is for. `Llm` (the default) messages are sent to the model;
-/// `UiOnly` messages exist for the user's benefit — turn-ending error notes, cards, gauges —
-/// and are stripped by the context pipeline before every provider call, so they never spend
-/// prompt tokens or leak harness chrome into the model's view (including after a resume).
+/// Who a transcript message is for. `Llm` is shared provider/user transcript, `LlmOnly` preserves
+/// provider continuity without publishing provisional text, and `UiOnly` is user-facing chrome
+/// that never spends provider context.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Visibility {
     #[default]
     Llm,
+    LlmOnly,
     UiOnly,
 }
 
@@ -57,17 +57,25 @@ impl Visibility {
     pub fn as_str(&self) -> &'static str {
         match self {
             Visibility::Llm => "llm",
+            Visibility::LlmOnly => "llm_only",
             Visibility::UiOnly => "ui",
         }
     }
     pub fn parse(s: &str) -> Visibility {
         match s {
             "ui" => Visibility::UiOnly,
+            "llm_only" => Visibility::LlmOnly,
             _ => Visibility::Llm,
         }
     }
     pub fn is_llm(&self) -> bool {
+        matches!(self, Visibility::Llm | Visibility::LlmOnly)
+    }
+    pub fn is_default(&self) -> bool {
         matches!(self, Visibility::Llm)
+    }
+    pub fn is_user_visible(&self) -> bool {
+        !matches!(self, Visibility::LlmOnly)
     }
 }
 
@@ -97,7 +105,7 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageAttachment>,
     /// Who this message is for. `UiOnly` messages are stripped before every provider call.
-    #[serde(default, skip_serializing_if = "Visibility::is_llm")]
+    #[serde(default, skip_serializing_if = "Visibility::is_default")]
     pub visibility: Visibility,
 }
 
@@ -157,6 +165,11 @@ impl Message {
     /// Mark this message as UI-only: shown to the user (and persisted), never sent to a model.
     pub fn ui_only(mut self) -> Self {
         self.visibility = Visibility::UiOnly;
+        self
+    }
+    /// Keep this provider-visible for continuation/replay, but hide it from user conversation.
+    pub fn llm_only(mut self) -> Self {
+        self.visibility = Visibility::LlmOnly;
         self
     }
 }
