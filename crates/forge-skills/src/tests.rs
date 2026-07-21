@@ -615,6 +615,23 @@ fn orchestrate_is_a_builtin_command_with_no_import() {
 }
 
 #[test]
+fn orchestrate_never_invents_a_use_skill_list_operation() {
+    let cat = Tmp::new().load();
+    let command = cat.command("orchestrate").expect("builtin command");
+
+    for guidance in [&command.body, orchestrate_system_guidance()] {
+        assert!(
+            !guidance.contains("use_skill list"),
+            "`list` is parsed as a skill name, not a discovery operation: {guidance}"
+        );
+        assert!(
+            guidance.contains("tool description"),
+            "guidance must point at the real discovery source"
+        );
+    }
+}
+
+#[test]
 fn subdir_command_gets_namespaced_name() {
     let t = Tmp::new();
     // Create commands/git/commit.md — should load as "git:commit"
