@@ -167,20 +167,21 @@ jobs:
           image='rust:1.88.0-bullseye@sha256:b315f988b86912bafa7afd39a6ded0a497bf850ec36578ca9a3bdd6a14d5db4e'
           artifact_dir="$GITHUB_WORKSPACE/target/$TARGET/release"
           cache_target="forge-release-bullseye-target-${TARGET//_/-}"
+          container_name="forge-release-${TARGET//_/-}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           mkdir -p "$artifact_dir"
 
           docker pull "$image"
-          docker run --rm \
+          # The release runner itself is containerized. Bind-mounting its
+          # `$GITHUB_WORKSPACE` into a sibling Docker container resolves that path on the
+          # Docker host and silently produces an empty `/workspace`. Copy the checkout through
+          # the Docker API instead; this works for both containerized and bare-metal runners.
+          docker create --name "$container_name" \
             --env CARGO_TARGET_DIR=/out \
             --env FORGE_DISTRIBUTION \
             --env FORGE_POSTHOG_HOST \
             --env FORGE_POSTHOG_KEY \
-            --env HOST_GID="$(id -g)" \
-            --env HOST_UID="$(id -u)" \
             --env LINUX_CROSS \
             --env TARGET \
-            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
-            --volume "$artifact_dir:/artifact" \
             --volume forge-release-cargo-git:/usr/local/cargo/git \
             --volume forge-release-cargo-registry:/usr/local/cargo/registry \
             --volume "$cache_target:/out" \
@@ -204,15 +205,18 @@ jobs:
               fi
 
               cargo build --release --locked --bin forge --target "$TARGET"
-              install -m 0755 "/out/$TARGET/release/forge" /artifact/forge
-              chown "$HOST_UID:$HOST_GID" /artifact/forge
 
               if [[ "$LINUX_CROSS" == true ]]; then
-                qemu-aarch64 -L /usr/aarch64-linux-gnu /artifact/forge --version
+                qemu-aarch64 -L /usr/aarch64-linux-gnu "/out/$TARGET/release/forge" --version
               else
-                /artifact/forge --version
+                "/out/$TARGET/release/forge" --version
               fi
             '
+          trap 'docker rm -f "$container_name" >/dev/null 2>&1 || true' EXIT
+          docker cp "$GITHUB_WORKSPACE/." "$container_name:/workspace"
+          docker start --attach "$container_name"
+          docker cp "$container_name:/out/$TARGET/release/forge" "$artifact_dir/forge"
+          chmod 0755 "$artifact_dir/forge"
 
       - name: Verify portable Linux runtime dependencies
         if: ${{ matrix.portable_linux }}

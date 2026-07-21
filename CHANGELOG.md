@@ -6,6 +6,14 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.8.2] - 2026-07-21
+
+### Fixed
+
+- Release portable Linux builds now copy the checked-out source through the Docker API, so
+  containerized self-hosted runners no longer mount an empty `/workspace` and fail before Cargo
+  can find the workspace manifest.
+
 ## [2.8.1] - 2026-07-21
 
 This release completes the live acceptance follow-up for Forge Anywhere and the shared app, and
@@ -2716,7 +2724,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.8.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.8.2...HEAD
+[2.8.2]: https://github.com/Adulari/forge/compare/v2.8.1...v2.8.2
 [2.8.1]: https://github.com/Adulari/forge/compare/v2.8.0...v2.8.1
 [2.8.0]: https://github.com/Adulari/forge/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/Adulari/forge/compare/v2.6.5...v2.7.0
