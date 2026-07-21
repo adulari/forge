@@ -5271,8 +5271,8 @@ export async function run() {}
 
     /// The plan card end to end over a REAL driver (mock provider): `/plan` → the snapshot
     /// carries `plan` + the approval question whose option 1 is "Build it" — and a remote
-    /// Answer("1") (exactly what the page's Approve button sends) approves it, switching the
-    /// temper and running the build turn, identical to a local choice.
+    /// Answer("1") (exactly what the page's Approve button sends) approves it, restoring the
+    /// exact pre-Plan temper and running the build turn, identical to a local choice.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn plan_card_projects_and_remote_approve_builds() {
         let _env = FORGE_DB_LOCK.lock().await;
@@ -5338,7 +5338,7 @@ export async function run() {}
         loop {
             let s = handle.snapshot_rx.borrow().snapshot.clone();
             let t = s.transcript.join("\n");
-            if !s.busy && t.contains("plan approved — building in Auto-edit") {
+            if !s.busy && t.contains("plan approved — building with Full permissions") {
                 break;
             }
             assert!(
