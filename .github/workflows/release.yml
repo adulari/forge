@@ -94,7 +94,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: [release, linux, x64, heavy]
+          - os: [forge-release-sandbox]
             target: x86_64-unknown-linux-gnu
             self_hosted: true
             portable_linux: true
@@ -103,7 +103,7 @@ jobs:
           # Keep ARM on the dedicated Arch release runner too. The pinned Bullseye container
           # supplies its aarch64 cross-linker and a glibc 2.31 sysroot, so this neither spends
           # hosted-runner quota nor inherits the rolling host's glibc/libstdc++ requirements.
-          - os: [release, linux, x64, heavy]
+          - os: [forge-release-sandbox]
             target: aarch64-unknown-linux-gnu
             self_hosted: true
             portable_linux: true

@@ -6,6 +6,13 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.8.3] - 2026-07-21
+
+### Fixed
+
+- Portable Linux release jobs now target the dedicated sandboxed release runner explicitly, so
+  general-purpose repository runners without Docker access cannot claim and fail those builds.
+
 ## [2.8.2] - 2026-07-21
 
 ### Fixed
@@ -2726,7 +2733,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.8.2...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.8.3...HEAD
+[2.8.3]: https://github.com/Adulari/forge/compare/v2.8.2...v2.8.3
 [2.8.2]: https://github.com/Adulari/forge/compare/v2.8.1...v2.8.2
 [2.8.1]: https://github.com/Adulari/forge/compare/v2.8.0...v2.8.1
 [2.8.0]: https://github.com/Adulari/forge/compare/v2.7.0...v2.8.0
