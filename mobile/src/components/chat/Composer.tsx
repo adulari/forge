@@ -11,7 +11,7 @@
 import { ArrowUp, Clock, FileText, Image as ImageIcon, Mic, RotateCcw, Sparkles, Square } from "lucide-react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import React, { useEffect, useRef, useState } from "react";
-import { Image, Platform, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { type ColorValue, Image, Platform, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
@@ -44,13 +44,35 @@ import {
 import {
   clampComposerHeight,
   composerInputVerticalPadding,
+  composerScrollEnabled,
+  composerUsesNativeMirror,
   COMPOSER_LINE_HEIGHT as LINE_HEIGHT,
   COMPOSER_MAX_HEIGHT as MAX_HEIGHT,
   COMPOSER_MIN_HEIGHT as MIN_HEIGHT,
-  nativeComposerHeightFromContent,
+  nativeComposerMirrorText,
 } from "./composerSizing";
 import { GoalSheet } from "./GoalSheet";
 import { VoiceRecordingPill } from "./VoiceRecordingPill";
+
+interface NativeComposerMirrorProps {
+  color: ColorValue;
+  text: string;
+}
+
+function NativeComposerMirror({ color, text }: NativeComposerMirrorProps) {
+  return (
+    <Text
+      pointerEvents="none"
+      accessible={false}
+      accessibilityElementsHidden
+      importantForAccessibility="no-hide-descendants"
+      style={[type.body, styles.inputTextMetrics, styles.nativeMirror, { color }]}
+      testID="composer-input-mirror"
+    >
+      {nativeComposerMirrorText(text)}
+    </Text>
+  );
+}
 
 export interface ComposerProps {
   sessionId: string;
@@ -67,6 +89,7 @@ export interface ComposerProps {
 export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onInterrupt }: ComposerProps) {
   const { scheme, tokens } = useTheme();
   const depth = scheme === "dark" ? depthDark : depthLight;
+  const usesNativeMirror = composerUsesNativeMirror(Platform.OS);
   const upload = useUpload();
   const insets = useSafeAreaInsets();
   const [commandFocusSignal, setCommandFocusSignal] = useState(0);
@@ -266,7 +289,7 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     setText("");
     void clearDraft(sessionId);
     setAttachments([]);
-    setHeight(MIN_HEIGHT);
+    if (Platform.OS === "web") setHeight(MIN_HEIGHT);
   };
   // `commit` closes over `onSend` (and whatever connection state it reads), so it's a new
   // function every render. The web keydown listener below is only bound once per session —
@@ -507,10 +530,15 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
             {
               backgroundColor: tokens.bg2,
               borderColor: focused ? tokens.accent : tokens.borderStrong,
-              // Rest state: one text line — center icons/text/send on the same axis (bottom-
-              // anchoring everything made the pill read as misaligned). Grown state: pin the
-              // controls to the bottom row so they stay by the newest line.
-              alignItems: height > MIN_HEIGHT ? "flex-end" : "center",
+              // Preserve the web rest-state centering, then pin controls beside the newest
+              // line once it grows. Native height belongs to the mirror, so controls stay
+              // bottom-aligned without feeding a measured height back through JavaScript.
+              alignItems:
+                Platform.OS === "web"
+                  ? height > MIN_HEIGHT
+                    ? "flex-end"
+                    : "center"
+                  : "flex-end",
             },
             shadowStyle(depth.sheet),
           ]}
@@ -529,9 +557,12 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
           <View
             style={[
               styles.inputWrap,
-              Platform.OS !== "web" ? { height, minHeight: MIN_HEIGHT } : null,
+              usesNativeMirror ? styles.nativeInputWrap : null,
             ]}
           >
+            {usesNativeMirror ? (
+              <NativeComposerMirror text={nativeText} color={tokens.ink} />
+            ) : null}
             <TextInput
               ref={inputRef}
               value={Platform.OS === "web" ? text : nativeText}
@@ -545,29 +576,11 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               autoCapitalize={text.startsWith("/") ? "none" : "sentences"}
               autoCorrect={!text.startsWith("/")}
               spellCheck={!text.startsWith("/")}
-              // Native only: web growth is handled by the scrollHeight effect below — RNW
-              // stops reporting content growth once an explicit height style is set, which
-              // froze the composer at one line.
-              onContentSizeChange={
-                Platform.OS === "web"
-                  ? undefined
-                  : (e) => {
-                      const contentHeight = e.nativeEvent.contentSize.height;
-                      // On iOS/Android, contentSize.height can sometimes be reported as 0 or very small
-                      // on initial render or when text is cleared. Ensure we don't collapse below MIN_HEIGHT.
-                      if (contentHeight > 0) {
-                        setHeight((previous) => {
-                          const next = nativeComposerHeightFromContent(contentHeight);
-                          return next === previous ? previous : next;
-                        });
-                      }
-                    }
-              }
               multiline
               // Keep the browser textarea at one row initially; native must not receive this
               // constraint or Android treats the multiline composer as a single-line input.
               numberOfLines={Platform.OS === "web" ? 1 : undefined}
-              scrollEnabled={height >= MAX_HEIGHT}
+              scrollEnabled={composerScrollEnabled(Platform.OS, height)}
               textAlignVertical="top"
               // Hidden while the ghost is showing — it renders the same "empty state" copy
               // itself, and both at once would double up.
@@ -576,9 +589,10 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
               style={[
                 type.body,
                 styles.input,
+                styles.inputTextMetrics,
                 webInputTextStyle,
                 { color: tokens.ink },
-                Platform.OS === "web" ? { height } : null,
+                Platform.OS === "web" ? { height } : StyleSheet.absoluteFill,
               ]}
               accessibilityLabel="message"
               testID="composer-input"
@@ -655,9 +669,20 @@ const styles = StyleSheet.create({
   input: {
     flex: 1,
     minWidth: 0,
+    textAlignVertical: "top",
+  },
+  inputTextMetrics: {
     paddingHorizontal: space.space8,
     paddingVertical: composerInputVerticalPadding(Platform.OS),
-    textAlignVertical: "top",
+  },
+  nativeMirror: {
+    width: "100%",
+    opacity: 0,
+  },
+  nativeInputWrap: {
+    minHeight: MIN_HEIGHT,
+    maxHeight: MAX_HEIGHT,
+    overflow: "hidden",
   },
   inputWrap: { flex: 1, minWidth: 0, position: "relative", overflow: "visible" },
   commandRecognition: { position: "absolute", right: space.space8, top: space.space8, backgroundColor: "transparent" },

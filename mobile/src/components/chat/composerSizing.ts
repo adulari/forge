@@ -8,8 +8,16 @@ export function clampComposerHeight(contentHeight: number): number {
   return Math.min(COMPOSER_MAX_HEIGHT, Math.max(COMPOSER_MIN_HEIGHT, contentHeight));
 }
 
-export function nativeComposerHeightFromContent(contentHeight: number): number {
-  return clampComposerHeight(contentHeight);
+export function composerUsesNativeMirror(platform: string): boolean {
+  return platform !== "web";
+}
+
+export function nativeComposerMirrorText(text: string): string {
+  return `${text}\u200b`;
+}
+
+export function composerScrollEnabled(platform: string, webHeight: number): boolean {
+  return platform === "web" ? webHeight >= COMPOSER_MAX_HEIGHT : true;
 }
 
 export function composerInputVerticalPadding(platform: string): number {
