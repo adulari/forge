@@ -9,10 +9,12 @@ import React, { useCallback, useMemo, useState } from "react";
 import { ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { EmptyState } from "../ds/EmptyState";
+import { Button } from "../ds/Button";
 import { IconButton } from "../ds/IconButton";
 import { TaskComposer } from "../ds/TaskComposer";
 import { SessionCard } from "./SessionCard";
 import { useAuth } from "../../lib/auth";
+import { desktopFleetStatusFromFleet } from "../../lib/connectionHealth";
 import { useSessions } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
@@ -36,7 +38,9 @@ export function ExpandedFleetRail() {
   const tokens = useTokens();
   const pathname = usePathname();
   const { servers, activeServerId } = useAuth();
-  const { data: sessions } = useSessions();
+  const sessionsQuery = useSessions();
+  const sessions = sessionsQuery.data;
+  const fleetStatus = desktopFleetStatusFromFleet(sessionsQuery);
   const rows = useMemo(() => sessions ?? [], [sessions]);
   const waitingCount = useMemo(() => rows.filter((row) => row.waiting).length, [rows]);
   const busyCount = useMemo(() => rows.filter((row) => row.busy).length, [rows]);
@@ -44,6 +48,12 @@ export function ExpandedFleetRail() {
   const activeServer = servers.find((server) => server.id === activeServerId);
   const selectedSessionId = pathname.match(/^\/session\/([^/]+)/)?.[1];
   const [composerText, setComposerText] = useState("");
+  const statusColor =
+    fleetStatus.state === "online"
+      ? tokens.success
+      : fleetStatus.state === "loading"
+        ? tokens.accent
+        : tokens.danger;
   const onComposerSubmit = useCallback((text: string) => {
     setComposerText("");
     router.push({ pathname: "/new-session", params: { title: text } });
@@ -82,7 +92,7 @@ export function ExpandedFleetRail() {
       <ScrollView style={styles.list} contentContainerStyle={styles.listContent}>
         {activeServer ? (
           <View style={styles.serverHeader}>
-            <View style={[styles.serverDot, { backgroundColor: tokens.success }]} />
+            <View style={[styles.serverDot, { backgroundColor: statusColor }]} />
             <Text style={[typeScale.section, { color: tokens.ink3 }]}>{activeServer.name}</Text>
             <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>
               {rows.length}
@@ -90,7 +100,14 @@ export function ExpandedFleetRail() {
             <View style={[styles.serverRule, { backgroundColor: tokens.hairline }]} />
           </View>
         ) : null}
-        {rows.length === 0 ? (
+        {sessionsQuery.isError && !sessionsQuery.data ? (
+          <View style={styles.connectionFailure}>
+            <EmptyState icon={Flame} message="Host is offline or unavailable." />
+            <Button label="Retry connection" variant="secondary" onPress={() => void sessionsQuery.refetch()} />
+          </View>
+        ) : sessionsQuery.isLoading && !sessionsQuery.data ? (
+          <EmptyState icon={Flame} message="Connecting to host…" />
+        ) : rows.length === 0 ? (
           <EmptyState icon={Flame} message="No sessions — forge one above." />
         ) : (
           rows.map((row, index) => <SessionCard key={row.id} row={row} index={index} selected={row.id === selectedSessionId} />)
@@ -103,7 +120,7 @@ export function ExpandedFleetRail() {
         <RailFooterIcon href="/settings" icon={<Settings2 size={16} strokeWidth={1.75} color={tokens.ink2} />} label="Settings" />
         <View style={styles.footerSpacer} />
         <Text style={[typeScale.monoMeta, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>
-          {servers.length} server{servers.length === 1 ? "" : "s"} · ok
+          {servers.length} server{servers.length === 1 ? "" : "s"} · {fleetStatus.label}
         </Text>
       </View>
     </View>
@@ -122,6 +139,7 @@ const styles = StyleSheet.create({
   composer: { marginHorizontal: space.space12, marginTop: space.space12 },
   list: { flex: 1 },
   listContent: { paddingBottom: space.space16 },
+  connectionFailure: { alignItems: "center", gap: space.space12, paddingHorizontal: space.space16 },
   serverHeader: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space16, paddingTop: space.space12, paddingBottom: space.space8 },
   serverDot: { width: 6, height: 6, borderRadius: 3 },
   serverRule: { flex: 1, height: StyleSheet.hairlineWidth },

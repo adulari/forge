@@ -34,8 +34,9 @@ import { DesktopDrillDown } from "../../components/fleet/DesktopDrillDown";
 import { useAuth } from "../../lib/auth";
 import { haptics } from "../../lib/haptics";
 import { type PlanRow } from "../../lib/api";
+import { resolvePlanDecision } from "../../lib/planDecision";
 import { usePlans } from "../../lib/queries";
-import { type QuestionOption, type SnapshotTask, useSessionSocket } from "../../lib/ws";
+import { type SnapshotTask, useSessionSocket } from "../../lib/ws";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space, tapTarget } from "../../theme/tokens";
 import { tabularNums, type } from "../../theme/typography";
@@ -57,11 +58,6 @@ function stepStateFor(title: string, tasks: SnapshotTask[]): StepState {
   });
   if (!match) return "pending";
   return match.status === "done" ? "done" : match.status === "in_progress" ? "running" : "pending";
-}
-
-function findOptionNumber(options: QuestionOption[], pattern: RegExp, fallback: string): string {
-  const idx = options.findIndex((option) => pattern.test(option.label));
-  return idx >= 0 ? String(idx + 1) : fallback;
 }
 
 function StepMedallion({ state }: { state: StepState }) {
@@ -99,7 +95,7 @@ function FeaturedPlanCard({ plan }: { plan: PlanRow }) {
   const question = snapshot?.question ?? null;
   const options = snapshot?.question_options ?? [];
   const promptSeq = snapshot?.prompt_seq ?? 0;
-  const canApprove = question != null && livePlan != null;
+  const decision = resolvePlanDecision(livePlan?.title ?? plan.title, question, options, promptSeq);
 
   useEffect(() => {
     setLockedSeq(null);
@@ -107,20 +103,17 @@ function FeaturedPlanCard({ plan }: { plan: PlanRow }) {
     setReviseText("");
   }, [promptSeq]);
 
-  const locked = lockedSeq != null && lockedSeq === promptSeq;
+  const locked = decision != null && lockedSeq === decision.promptSeq;
 
   const answer = (text: string, haptic: () => void) => {
-    if (locked || text.trim().length === 0) return;
-    setLockedSeq(promptSeq);
+    if (!decision || locked || text.trim().length === 0) return;
+    setLockedSeq(decision.promptSeq);
     haptic();
-    if (!send({ kind: "answer", text, seq: promptSeq })) {
+    if (!send({ kind: "answer", text, seq: decision.promptSeq })) {
       setLockedSeq(null);
       toast.show("not sent — reconnect and try again", { tone: "danger" });
     }
   };
-
-  const approveNumber = findOptionNumber(options, /build/i, "1");
-  const cancelNumber = findOptionNumber(options, /cancel/i, "2");
 
   return (
     <Card heatEdge="waiting" style={styles.featured}>
@@ -161,18 +154,18 @@ function FeaturedPlanCard({ plan }: { plan: PlanRow }) {
         })}
       </View>
 
-      {canApprove ? (
+      {decision && livePlan ? (
         <>
           <View style={styles.actions}>
             <Button
               label="Approve"
               variant="allow"
-              onPress={() => answer(approveNumber, haptics.allow)}
+              onPress={() => answer(decision.build, haptics.allow)}
               disabled={locked}
               style={styles.approve}
             />
             <Button label="Revise" variant="ghost" onPress={() => setRevising((value) => !value)} disabled={locked} />
-            <Button label="Cancel" variant="ghost" onPress={() => answer(cancelNumber, haptics.deny)} disabled={locked} />
+            <Button label="Cancel" variant="ghost" onPress={() => answer(decision.cancel, haptics.deny)} disabled={locked} />
           </View>
           {revising ? (
             <View style={styles.reviseRow}>
@@ -197,6 +190,9 @@ function FeaturedPlanCard({ plan }: { plan: PlanRow }) {
         </>
       ) : (
         <View style={styles.actions}>
+          {livePlan ? (
+            <Text style={[type.sub, { color: tokens.ink3 }]}>Waiting for approval request…</Text>
+          ) : null}
           <Button
             label="Open session to review"
             variant="secondary"

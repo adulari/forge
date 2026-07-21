@@ -2286,7 +2286,7 @@ fn recovery_wrap_key_from_input(
     }
 }
 
-fn default_host_name() -> String {
+pub(crate) fn default_host_name() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .ok()

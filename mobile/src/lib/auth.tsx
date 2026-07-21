@@ -12,10 +12,10 @@ import React, {
   useState,
 } from "react";
 
-import { probeConnection } from "./api";
+import { getIdentity, probeConnection } from "./api";
 import { deleteSecureItem, getSecureItem, setSecureItem } from "./secureStore";
 import { parseConnectUrl } from "./connectUrl";
-import { reconcileAnywhereHosts, type ManagedAnywhereHost, type StoredServer } from "./serverTargets";
+import { applyServerIdentity, reconcileAnywhereHosts, type ManagedAnywhereHost, type StoredServer } from "./serverTargets";
 export { parseConnectUrl, type ParsedConnectUrl } from "./connectUrl";
 export { type StoredServer } from "./serverTargets";
 
@@ -65,6 +65,7 @@ interface AuthContextValue {
    * without hijacking whatever server the user is currently connected to. */
   addServer: (connectUrl: string, options?: { setActive?: boolean }) => Promise<StoredServer>;
   removeServer: (id: string) => Promise<void>;
+  renameServer: (id: string, name: string) => Promise<void>;
   setActive: (id: string) => void;
   syncAnywhereHosts: (hosts: readonly ManagedAnywhereHost[]) => Promise<void>;
   /** @deprecated legacy single-server alias for `addServer` — kept for the old Connect screen. */
@@ -140,7 +141,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!parsed) {
         throw new Error("Not a valid Forge connect URL");
       }
-      const server: StoredServer = {
+      let server: StoredServer = {
         id: makeServerId(),
         name: parsed.host,
         baseUrl: parsed.baseUrl,
@@ -148,17 +149,48 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         host: parsed.host,
         addedAt: Date.now(),
       };
+      try {
+        server = applyServerIdentity(server, await getIdentity(parsed.baseUrl));
+      } catch {
+        // Older/offline daemons still pair normally; their endpoint remains only a fallback label.
+      }
       return enqueueMutation(serverMutationQueue, async () => {
         const current = await loadServers();
-        const existing = current.find((item) => item.baseUrl === server.baseUrl);
-        const replacement = existing ? { ...server, id: existing.id, addedAt: existing.addedAt } : server;
-        const next = [...current.filter((item) => item.baseUrl !== replacement.baseUrl), replacement];
+        const existing = current.find((item) =>
+          item.baseUrl === server.baseUrl || (server.token.length > 0 && item.token === server.token),
+        );
+        const replacement = existing
+          ? {
+              ...server,
+              id: existing.id,
+              addedAt: existing.addedAt,
+              ...(existing.customName ? { name: existing.name, customName: true } : {}),
+            }
+          : server;
+        const next = [...current.filter((item) => item.id !== replacement.id), replacement];
         await saveServers(next);
         const shouldActivate = options?.setActive ?? true;
         if (shouldActivate) await setSecureItem(ACTIVE_SERVER_KEY, replacement.id);
         setServers(next);
         if (shouldActivate) setActiveServerId(replacement.id);
         return replacement;
+      });
+    },
+    [],
+  );
+
+  const renameServer = useCallback(
+    async (id: string, name: string): Promise<void> => {
+      const trimmed = name.trim();
+      if (!trimmed) throw new Error("Server name cannot be empty");
+      await enqueueMutation(serverMutationQueue, async () => {
+        const current = await loadServers();
+        if (!current.some((server) => server.id === id)) throw new Error("Server is no longer available");
+        const next = current.map((server) =>
+          server.id === id ? { ...server, name: trimmed, customName: true } : server,
+        );
+        await saveServers(next);
+        setServers(next);
       });
     },
     [],
@@ -258,6 +290,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       activeServerId,
       addServer,
       removeServer,
+      renameServer,
       setActive,
       syncAnywhereHosts,
       pair,
@@ -271,6 +304,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       activeServerId,
       addServer,
       removeServer,
+      renameServer,
       setActive,
       syncAnywhereHosts,
       pair,
