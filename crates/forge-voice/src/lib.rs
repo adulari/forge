@@ -32,9 +32,7 @@ pub enum VoiceError {
     Decode(String),
     #[error("microphone recording failed: {0}")]
     Record(String),
-    #[error(
-        "microphone capture is unavailable in this build; on Linux, install the ALSA development libraries and rebuild Forge with `--features microphone`"
-    )]
+    #[error("microphone capture is unavailable in this build")]
     MicrophoneUnavailable,
     #[error("no input (microphone) device available")]
     NoInputDevice,
