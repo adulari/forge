@@ -4,6 +4,7 @@ set -euo pipefail
 python3 - <<'PY'
 from pathlib import Path
 import re
+import shlex
 
 
 def workflow(path: str) -> str:
@@ -46,6 +47,19 @@ for option in (
 ):
     if option not in release:
         raise SystemExit(f"release Docker builder is missing resource limit: {option}")
+
+dispatch_loop = re.search(r"for workflow in ([^;]+); do", release)
+if not dispatch_loop:
+    raise SystemExit("release.yml is missing the package-manifest check dispatch loop")
+for workflow_name in shlex.split(dispatch_loop.group(1)):
+    workflow_path = Path(".github/workflows") / workflow_name
+    if not workflow_path.is_file():
+        raise SystemExit(
+            f"release.yml dispatches missing workflow {workflow_path}; "
+            "GitHub-managed workflows cannot be dispatched by filename"
+        )
+    if "workflow_dispatch:" not in workflow_path.read_text():
+        raise SystemExit(f"{workflow_path} must support workflow_dispatch")
 
 print("runner resource budgets are enforced")
 PY
