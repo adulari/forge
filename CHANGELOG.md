@@ -6,6 +6,15 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.8.4] - 2026-07-21
+
+### Fixed
+
+- Self-hosted CI now serializes every Rust-heavy job on the dedicated heavy runner and caps Cargo
+  parallelism, preventing simultaneous PR checks from exhausting workstation memory and swap.
+- Portable Docker release builds now enforce CPU, memory, swap, and process limits. The sandboxed
+  release-runner service has matching persistent cgroup limits so a release cannot freeze its host.
+
 ## [2.8.3] - 2026-07-21
 
 ### Fixed
@@ -2733,7 +2742,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.8.3...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.8.4...HEAD
+[2.8.4]: https://github.com/Adulari/forge/compare/v2.8.3...v2.8.4
 [2.8.3]: https://github.com/Adulari/forge/compare/v2.8.2...v2.8.3
 [2.8.2]: https://github.com/Adulari/forge/compare/v2.8.1...v2.8.2
 [2.8.1]: https://github.com/Adulari/forge/compare/v2.8.0...v2.8.1

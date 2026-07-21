@@ -17,6 +17,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_BUILD_JOBS: "4"
+
 jobs:
   preflight:
     name: verify release provenance
@@ -176,7 +179,13 @@ jobs:
           # Docker host and silently produces an empty `/workspace`. Copy the checkout through
           # the Docker API instead; this works for both containerized and bare-metal runners.
           docker create --name "$container_name" \
+            --memory-reservation 6g \
+            --memory 8g \
+            --memory-swap 9g \
+            --cpus 4 \
+            --pids-limit 2048 \
             --env CARGO_TARGET_DIR=/out \
+            --env CARGO_BUILD_JOBS \
             --env FORGE_DISTRIBUTION \
             --env FORGE_POSTHOG_HOST \
             --env FORGE_POSTHOG_KEY \
