@@ -260,15 +260,20 @@ fn linux_backend_unavailable() -> VoiceError {
 
 #[cfg(all(target_os = "linux", not(feature = "microphone")))]
 fn select_linux_backend(directory: &std::path::Path) -> Result<LinuxBackend> {
+    use std::os::unix::fs::PermissionsExt;
+    let executable = |path: &std::path::Path| {
+        path.metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    };
     let pipewire = directory.join("pw-record");
-    if pipewire.is_file() {
+    if executable(&pipewire) {
         return Ok(LinuxBackend {
             kind: LinuxBackendKind::PipeWire,
             program: pipewire,
         });
     }
     let alsa = directory.join("arecord");
-    if alsa.is_file() {
+    if executable(&alsa) {
         return Ok(LinuxBackend {
             kind: LinuxBackendKind::Alsa,
             program: alsa,
@@ -526,15 +531,25 @@ mod tests {
     #[cfg(all(target_os = "linux", not(feature = "microphone")))]
     #[test]
     fn portable_linux_backend_prefers_pipewire_then_falls_back_to_alsa() {
+        use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let pw = root.path().join("pw-record");
         let alsa = root.path().join("arecord");
         std::fs::write(&pw, "").unwrap();
         std::fs::write(&alsa, "").unwrap();
+        std::fs::set_permissions(&pw, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&alsa, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(select_linux_backend(root.path()).unwrap().program, pw);
         std::fs::remove_file(&pw).unwrap();
         assert_eq!(select_linux_backend(root.path()).unwrap().program, alsa);
+        std::fs::write(&pw, "").unwrap();
+        assert_eq!(
+            select_linux_backend(root.path()).unwrap().program,
+            alsa,
+            "a non-executable pw-record must not mask a working arecord"
+        );
         std::fs::remove_file(&alsa).unwrap();
+        std::fs::remove_file(&pw).unwrap();
         let error = select_linux_backend(root.path()).unwrap_err().to_string();
         assert!(error.contains("pw-record"), "{error}");
         assert!(error.contains("arecord"), "{error}");
