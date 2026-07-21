@@ -6,6 +6,37 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.8.1] - 2026-07-21
+
+This release completes the live acceptance follow-up for Forge Anywhere and the shared app, and
+ships the session, Desktop, Voice, and release fixes found while using the new flow end to end.
+
+### Changed
+- **Stable session context** (#834, #841): provider payloads retain only the newest turn contract
+  and one copy of standing guidance while the persisted audit history remains complete.
+- **Stable host identity** (#840): direct and tunneled servers use the system hostname for display,
+  preserve user renames across reconnects, and keep display identity separate from transport URLs.
+
+### Fixed
+- **Plan execution** (#832, #833): approval restores the exact prior permission mode, commits tasks
+  only after Build, and binds controls to the matching live decision instead of stale questions.
+- **Agent completion** (#835, #836, #842, #843, #844, #845): orchestration no longer calls a
+  nonexistent skill-list operation; failed verification cannot be cleared by unrelated reads;
+  tool-only bridge turns continue without blank replies; final answers remain singular; and
+  recoverable Codex OAuth continuation failures retry automatically.
+- **Desktop status and delivery** (#837, #838, #839): Settings reads the installed bundle version,
+  Fleet health reflects the reachable host instead of cached pairing metadata, and releases become
+  Latest only after every Desktop asset and public checksum verifies.
+- **Voice** (#850): portable Linux CLI/TUI builds capture through `pw-record` with an `arecord`
+  fallback, while shared clients append transcriptions to the existing draft without sending.
+- **Mobile and Anywhere reliability** (#824–#829, #846–#848, #853, #860, #863): Hermes secure
+  randomness, account/passkey recovery, host reconciliation, connection state, and the native
+  multiline composer now remain stable through real reconnect and foreground cycles.
+- **Long-running subagents** (#852, #862): terminal loop guards and completed follow-up rows no
+  longer leave sessions looking active after work has stopped.
+- **OTA publication** (#861): the safety guard distinguishes runtime, native/config, neutral, and
+  unknown mobile changes so compatible source updates publish without being blocked by docs.
+
 ## [2.8.0] - 2026-07-20
 
 Forge Anywhere now treats recovery words as an offline disaster-recovery fallback. Routine setup
@@ -2685,7 +2716,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.8.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.8.1...HEAD
+[2.8.1]: https://github.com/Adulari/forge/compare/v2.8.0...v2.8.1
 [2.8.0]: https://github.com/Adulari/forge/compare/v2.7.0...v2.8.0
 [2.7.0]: https://github.com/Adulari/forge/compare/v2.6.5...v2.7.0
 [2.6.5]: https://github.com/Adulari/forge/compare/v2.6.4...v2.6.5
