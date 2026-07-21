@@ -361,7 +361,9 @@ jobs:
           body_path: dist/RELEASE_NOTES.md
           generate_release_notes: true
           fail_on_unmatched_files: false
-          make_latest: true
+          # Desktop artifacts and updater metadata are published by app-desktop.yml. That
+          # workflow moves Latest only after their public bytes and checksums verify.
+          make_latest: false
 
       # Keep Homebrew, AUR metadata, and Scoop in step with THIS release's just-built checksums (no "sha
       # race" against assets that don't exist yet). Opens a PR because main is branch-protected.
