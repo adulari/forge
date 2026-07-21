@@ -8587,6 +8587,12 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
     /// Persist and stash a proposed plan for the turn-end approval flow. A proposal is not active
     /// work: its steps become tasks only after the user chooses Build.
     fn ingest_plan(&mut self, plan: forge_types::PlanProposal) {
+        // `present_plan` is authoritative even when a one-shot `/plan` expansion reached the
+        // provider without going through the interactive command dispatcher. Entering Plan here
+        // captures the actual current permission so approval can restore it exactly.
+        if self.mode != PermissionMode::Plan {
+            self.set_temper(PermissionMode::Plan);
+        }
         persist_plan(&self.id, &plan);
         self.pending_plan = Some(plan);
     }
@@ -12087,6 +12093,22 @@ mod tests {
         );
         assert_eq!(s.tasks.len(), 1, "Build activates the approved plan");
         assert_eq!(s.store.tasks(s.id()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn presenting_a_plan_enters_plan_mode_and_captures_the_current_temper() {
+        let mut s = scripted_session("Build it", Arc::new(Mutex::new(0)));
+        s.set_temper(PermissionMode::Bypass);
+
+        s.ingest_plan(one_step_plan());
+
+        assert_eq!(s.mode, PermissionMode::Plan);
+        assert_eq!(s.pre_plan_mode, Some(PermissionMode::Bypass));
+        assert_eq!(
+            s.resolve_plan_approval(&one_step_plan()).as_deref(),
+            Some(PLAN_BUILD_PROMPT)
+        );
+        assert_eq!(s.mode, PermissionMode::Bypass);
     }
 
     #[test]
