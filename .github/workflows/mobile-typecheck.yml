@@ -13,6 +13,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_BUILD_JOBS: "4"
+
 jobs:
   changes:
     name: detect affected jobs
@@ -67,7 +70,7 @@ jobs:
     name: Tauri tests, clippy, and audit
     needs: changes
     if: needs.changes.outputs.mobile_tauri == 'true'
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [self-hosted, linux, x64, heavy]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4

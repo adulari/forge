@@ -21,6 +21,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "4"
   RUSTFLAGS: "-D warnings"
 
 jobs:
@@ -46,6 +47,8 @@ jobs:
         run: bash scripts/ci/changed-groups.sh
       - name: Test EAS OTA safety classifier
         run: bash scripts/ci/test-eas-ota-safety.sh
+      - name: Test runner resource budgets
+        run: bash scripts/ci/test-runner-resource-budget.sh
 
   anywhere-policy:
     name: anywhere plaintext-canary harness
@@ -73,7 +76,9 @@ jobs:
   clippy:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: [self-hosted, linux, x64]
+    # Serialize every workspace-wide Rust compile on archlinux-1. Running clippy beside the
+    # test/release/Tauri builds exhausted host swap and hard-froze the workstation.
+    runs-on: [self-hosted, linux, x64, heavy]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
