@@ -34,9 +34,15 @@ pub fn run() {
         ])
         .setup(|app| {
             #[cfg(not(target_os = "macos"))]
-            app.get_webview_window("main")
-                .ok_or_else(|| std::io::Error::other("main window is missing"))?
-                .set_decorations(false)?;
+            {
+                let main_window = app
+                    .get_webview_window("main")
+                    .ok_or_else(|| std::io::Error::other("main window is missing"))?;
+                main_window.set_decorations(false)?;
+
+                #[cfg(target_os = "linux")]
+                install_linux_microphone_permission(&main_window)?;
+            }
 
             #[cfg(target_os = "macos")]
             install_macos_menu(app)?;
@@ -53,6 +59,32 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// WebKitGTK denies `getUserMedia()` unless the embedder handles its permission signal. Forge's
+/// only user-media request is the composer's microphone recorder, so grant audio-only requests
+/// from the bundled application webview and leave camera or unrelated permissions to WebKit's
+/// default denial path.
+#[cfg(target_os = "linux")]
+fn install_linux_microphone_permission(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    window.with_webview(|webview| {
+        use webkit2gtk::{
+            glib::prelude::Cast, PermissionRequestExt, UserMediaPermissionRequest,
+            UserMediaPermissionRequestExt, WebViewExt,
+        };
+
+        webview.inner().connect_permission_request(|_, request| {
+            let Some(user_media) = request.downcast_ref::<UserMediaPermissionRequest>() else {
+                return false;
+            };
+            if !user_media.is_for_audio_device() || user_media.is_for_video_device() {
+                return false;
+            }
+            request.allow();
+            true
+        });
+    })?;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

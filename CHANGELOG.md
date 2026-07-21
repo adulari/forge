@@ -13,6 +13,8 @@ All notable changes to Forge are documented here. The format follows
 - Release portable Linux builds now copy the checked-out source through the Docker API, so
   containerized self-hosted runners no longer mount an empty `/workspace` and fail before Cargo
   can find the workspace manifest.
+- Forge Desktop on Linux now grants WebKitGTK's audio-only user-media request, allowing Voice to
+  record and append transcriptions while continuing to deny camera and unrelated permissions.
 
 ## [2.8.1] - 2026-07-21
 
