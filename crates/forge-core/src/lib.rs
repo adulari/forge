@@ -8644,10 +8644,14 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             plan.title.trim(),
             if n == 1 { "" } else { "s" }
         );
+        let build_mode = self
+            .pre_plan_mode
+            .unwrap_or(PermissionMode::AcceptEdits)
+            .label();
         let opts = [
             forge_types::QChoice {
                 label: "Build it".into(),
-                description: "Switch to Auto-edit and implement the plan now".into(),
+                description: format!("Return to {build_mode} and implement the plan now"),
             },
             forge_types::QChoice {
                 label: "Cancel".into(),
