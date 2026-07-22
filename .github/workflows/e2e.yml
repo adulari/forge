@@ -47,7 +47,7 @@ jobs:
       # GitHub Models authentication uses only this run's short-lived, read-only workflow token.
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       # Ephemeral GitHub-hosted legs have no warm target/ dir, so the cache earns its keep.
       # The self-hosted Arch leg skips it: target/ already persists on that box's local disk

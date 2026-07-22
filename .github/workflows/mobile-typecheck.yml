@@ -13,6 +13,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_BUILD_JOBS: "4"
+
 jobs:
   changes:
     name: detect affected jobs
@@ -22,7 +25,7 @@ jobs:
       mobile_app: ${{ steps.classify.outputs.mobile_app }}
       mobile_tauri: ${{ steps.classify.outputs.mobile_tauri }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
       - id: classify
@@ -42,7 +45,7 @@ jobs:
       run:
         working-directory: mobile
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -67,9 +70,9 @@ jobs:
     name: Tauri tests, clippy, and audit
     needs: changes
     if: needs.changes.outputs.mobile_tauri == 'true'
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [self-hosted, linux, x64, heavy]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: clippy

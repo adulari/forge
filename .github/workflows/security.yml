@@ -20,6 +20,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CARGO_BUILD_JOBS: "4"
+
 jobs:
   changes:
     name: detect affected jobs
@@ -29,7 +32,7 @@ jobs:
       cargo_audit: ${{ steps.classify.outputs.cargo_audit }}
       cargo_deny: ${{ steps.classify.outputs.cargo_deny }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
       - id: classify
@@ -44,9 +47,9 @@ jobs:
     name: cargo audit (RUSTSEC)
     needs: changes
     if: needs.changes.outputs.cargo_audit == 'true'
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [self-hosted, linux, x64, heavy]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       # install-action's checksum metadata can briefly lag a binary release. Compile the pinned
       # tool once per persistent Arch runner instead of trusting that external file every run.
       - name: Ensure cargo-audit is installed
@@ -71,9 +74,9 @@ jobs:
     name: cargo deny (licenses + bans + advisories)
     needs: changes
     if: needs.changes.outputs.cargo_deny == 'true'
-    runs-on: [self-hosted, linux, x64]
+    runs-on: [self-hosted, linux, x64, heavy]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       # Need a real toolchain: `cargo deny check` runs `cargo metadata` under the hood.
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       - name: Ensure cargo-deny is installed

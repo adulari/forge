@@ -21,6 +21,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "4"
   RUSTFLAGS: "-D warnings"
 
 jobs:
@@ -34,7 +35,7 @@ jobs:
       release_build: ${{ steps.classify.outputs.release_build }}
       anywhere_policy: ${{ steps.classify.outputs.anywhere_policy }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
       - id: classify
@@ -46,6 +47,8 @@ jobs:
         run: bash scripts/ci/changed-groups.sh
       - name: Test EAS OTA safety classifier
         run: bash scripts/ci/test-eas-ota-safety.sh
+      - name: Test runner resource budgets
+        run: bash scripts/ci/test-runner-resource-budget.sh
 
   anywhere-policy:
     name: anywhere plaintext-canary harness
@@ -54,7 +57,7 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - run: bash scripts/ci/test-anywhere-plaintext-canary.sh
 
   fmt:
@@ -63,7 +66,7 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: rustfmt
@@ -73,10 +76,12 @@ jobs:
   clippy:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
-    runs-on: [self-hosted, linux, x64]
+    # Serialize every workspace-wide Rust compile on archlinux-1. Running clippy beside the
+    # test/release/Tauri builds exhausted host swap and hard-froze the workstation.
+    runs-on: [self-hosted, linux, x64, heavy]
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           components: clippy
@@ -100,7 +105,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, heavy]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       - run: cargo test --locked --all --all-features
       - run: cargo test --locked --manifest-path vendor/genai-0.6.5/Cargo.toml
@@ -116,7 +121,7 @@ jobs:
     runs-on: [self-hosted, linux, x64, heavy]
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
       - run: cargo build --release --locked --bin forge
       - name: Verify upgrade, reconnect, and rollback from latest release
