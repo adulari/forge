@@ -3851,6 +3851,10 @@ Rules:\n\
         self.presenter.emit(PresenterEvent::Cost {
             session_total_usd,
             session_in,
+            session_cached_in: self
+                .store
+                .session_cached_input_tokens(&self.id)
+                .unwrap_or(0),
             session_out,
             context_tokens: self.estimated_transcript_tokens(),
             // The gauge denominator is the model's REAL window, not the transient overflow cap.
@@ -7027,6 +7031,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.presenter.emit(PresenterEvent::Cost {
             session_total_usd: self.store.session_cost(&self.id)?,
             session_in,
+            session_cached_in: self.store.session_cached_input_tokens(&self.id)?,
             session_out,
             context_tokens,
             context_limit: Some(self.effective_context_window(&active_model)),

@@ -18,7 +18,7 @@ pub use memory::Memory;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 17;
+const SCHEMA_VERSION: i64 = 18;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -309,6 +309,7 @@ const USAGE_PROVIDER_EXPR: &str = "COALESCE(NULLIF(CASE WHEN instr(m.model, '::'
 pub struct ProviderUsage {
     pub provider: String,
     pub input_tokens: u64,
+    pub cached_input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: f64,
 }
@@ -761,6 +762,16 @@ fn migration_0017(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Preserve provider-reported prompt-cache reads. `Usage` has carried this field across every
+/// provider and sync payload, but the SQL row historically discarded it, making real cache hits
+/// invisible to the CLI/TUI and remote usage surfaces.
+fn migration_0018(conn: &Connection) -> rusqlite::Result<()> {
+    add_column_if_missing(
+        conn,
+        "ALTER TABLE usage ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0",
+    )
+}
+
 /// Ordered migration steps. Index `i` upgrades the DB from `user_version = i` to `i + 1`. Append
 /// new steps here and bump [`SCHEMA_VERSION`]; never reorder or rewrite an already-shipped step.
 const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
@@ -781,6 +792,7 @@ const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0015,
     migration_0016,
     migration_0017,
+    migration_0018,
 ];
 
 /// Apply every migration the DB hasn't seen yet, bumping `PRAGMA user_version` after each so a
@@ -794,8 +806,11 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     // database after rollback. Repair only those known pre-release markers; truly newer versions
     // remain rejected below.
     if (18..=21).contains(&current) {
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        current = SCHEMA_VERSION;
+        // Re-run the public migrations from the last unambiguous public version. Every affected
+        // step is additive/idempotent, including migration 18, so this also safely distinguishes
+        // a real v18 cache-metrics database from the old pre-release Anywhere markers.
+        conn.pragma_update(None, "user_version", 17i64)?;
+        current = 17;
     }
     if current > SCHEMA_VERSION {
         return Err(StoreError::SchemaTooNew {
@@ -1075,6 +1090,8 @@ struct RemoteUsagePayload {
     id: String,
     message_id: String,
     input_tokens: i64,
+    #[serde(default)]
+    cached_input_tokens: i64,
     output_tokens: i64,
     cost_usd: f64,
 }
@@ -2726,6 +2743,7 @@ impl Store {
                 HistoryMutation::Usage(payload) => {
                     if payload.message_id.trim().is_empty()
                         || payload.input_tokens < 0
+                        || payload.cached_input_tokens < 0
                         || payload.output_tokens < 0
                         || !payload.cost_usd.is_finite()
                         || payload.cost_usd < 0.0
@@ -2746,12 +2764,13 @@ impl Store {
                     } else {
                         transaction.execute(
                             "INSERT INTO usage
-                             (id, message_id, input_tokens, output_tokens, cost_usd)
-                             VALUES (?1, ?2, ?3, ?4, ?5)",
+                             (id, message_id, input_tokens, cached_input_tokens, output_tokens, cost_usd)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                             rusqlite::params![
                                 payload.id,
                                 payload.message_id,
                                 payload.input_tokens,
+                                payload.cached_input_tokens,
                                 payload.output_tokens,
                                 payload.cost_usd
                             ],
@@ -4396,12 +4415,14 @@ impl Store {
             let mut conn = self.lock()?;
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute(
-                "INSERT INTO usage (id, message_id, input_tokens, output_tokens, cost_usd)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO usage
+                 (id, message_id, input_tokens, cached_input_tokens, output_tokens, cost_usd)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 (
                     &id,
                     message_id,
                     usage.input_tokens as i64,
+                    usage.cached_input_tokens as i64,
                     usage.output_tokens as i64,
                     usage.cost_usd,
                 ),
@@ -4464,12 +4485,14 @@ impl Store {
                 }
             }
             tx.execute(
-                "INSERT INTO usage (id, message_id, input_tokens, output_tokens, cost_usd) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO usage \
+                 (id, message_id, input_tokens, cached_input_tokens, output_tokens, cost_usd) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 (
                     &usage_id,
                     msg_id.as_str(),
                     usage.input_tokens as i64,
+                    usage.cached_input_tokens as i64,
                     usage.output_tokens as i64,
                     usage.cost_usd,
                 ),
@@ -4590,6 +4613,20 @@ impl Store {
         Ok((i.max(0) as u64, o.max(0) as u64))
     }
 
+    /// Provider-reported prompt tokens served from cache across active calls in a session.
+    /// This is a subset of `input_tokens`, not an additional token charge.
+    pub fn session_cached_input_tokens(&self, session_id: &str) -> Result<u64> {
+        let conn = self.lock()?;
+        let cached: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(u.cached_input_tokens), 0)
+             FROM usage u JOIN message m ON m.id = u.message_id
+             WHERE m.session_id = ?1 AND m.active = 1",
+            [session_id],
+            |r| r.get(0),
+        )?;
+        Ok(cached.max(0) as u64)
+    }
+
     /// Number of provider calls (model steps) recorded in a session — one `usage` row per call.
     /// The Lattice benchmark uses this as the "steps" metric: fewer tool-exploration round-trips
     /// means fewer steps and fewer tokens.
@@ -4626,7 +4663,7 @@ impl Store {
         let conn = self.lock()?;
         // Provider derived from `message.model` (see `usage_query`) — `usage.provider` is NULL.
         let sql = format!(
-            "SELECT {USAGE_PROVIDER_EXPR} AS prov, COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cost_usd), 0.0) \
+            "SELECT {USAGE_PROVIDER_EXPR} AS prov, COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.cached_input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cost_usd), 0.0) \
              FROM usage u JOIN message m ON m.id = u.message_id WHERE m.session_id = ?1 GROUP BY prov \
              ORDER BY SUM(u.cost_usd) DESC, SUM(u.input_tokens + u.output_tokens) DESC"
         );
@@ -4635,8 +4672,9 @@ impl Store {
             Ok(ProviderUsage {
                 provider: r.get(0)?,
                 input_tokens: r.get::<_, i64>(1)? as u64,
-                output_tokens: r.get::<_, i64>(2)? as u64,
-                cost_usd: r.get(3)?,
+                cached_input_tokens: r.get::<_, i64>(2)? as u64,
+                output_tokens: r.get::<_, i64>(3)? as u64,
+                cost_usd: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -4654,14 +4692,15 @@ impl Store {
         // `message.model` IS populated (e.g. `codex-oauth::gpt-5.6-terra`); the namespace before
         // `::` is the provider. GROUP BY the alias `prov`, never a bare `provider` (that binds to
         // the still-NULL column, not this expression).
-        let sql = format!("SELECT {USAGE_PROVIDER_EXPR} AS prov, COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cost_usd), 0.0) FROM usage u JOIN message m ON m.id = u.message_id {predicate} GROUP BY prov ORDER BY SUM(u.cost_usd) DESC, SUM(u.input_tokens + u.output_tokens) DESC");
+        let sql = format!("SELECT {USAGE_PROVIDER_EXPR} AS prov, COALESCE(SUM(u.input_tokens), 0), COALESCE(SUM(u.cached_input_tokens), 0), COALESCE(SUM(u.output_tokens), 0), COALESCE(SUM(u.cost_usd), 0.0) FROM usage u JOIN message m ON m.id = u.message_id {predicate} GROUP BY prov ORDER BY SUM(u.cost_usd) DESC, SUM(u.input_tokens + u.output_tokens) DESC");
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params, |r| {
             Ok(ProviderUsage {
                 provider: r.get(0)?,
                 input_tokens: r.get::<_, i64>(1)? as u64,
-                output_tokens: r.get::<_, i64>(2)? as u64,
-                cost_usd: r.get(3)?,
+                cached_input_tokens: r.get::<_, i64>(2)? as u64,
+                output_tokens: r.get::<_, i64>(3)? as u64,
+                cost_usd: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -7721,7 +7760,7 @@ mod tests {
                 &Usage {
                     input_tokens: 10,
                     output_tokens: 5,
-                    cached_input_tokens: 0,
+                    cached_input_tokens: 7,
                     cost_usd: 0.02,
                 },
             )
@@ -7732,6 +7771,7 @@ mod tests {
 
         assert_eq!(store.message_count(&sid).unwrap(), 1);
         assert!((store.session_cost(&sid).unwrap() - 0.02).abs() < 1e-9);
+        assert_eq!(store.session_cached_input_tokens(&sid).unwrap(), 7);
     }
 
     fn record_cost(store: &Store, cost: f64) {
@@ -8025,10 +8065,10 @@ mod tests {
         // collapsed every row into one bucket and read back as "no usage yet").
         let store = Store::open_in_memory().unwrap();
         let sid = store.create_session("/x", "default").unwrap();
-        let usage = |i: u64, o: u64| Usage {
+        let usage = |i: u64, o: u64, cached: u64| Usage {
             input_tokens: i,
             output_tokens: o,
-            cached_input_tokens: 0,
+            cached_input_tokens: cached,
             cost_usd: 0.0,
         };
         let m0 = store
@@ -8040,7 +8080,7 @@ mod tests {
                 Some("codex-oauth::gpt-5.6-terra"),
             )
             .unwrap();
-        store.record_usage(&sid, &m0, &usage(100, 10)).unwrap();
+        store.record_usage(&sid, &m0, &usage(100, 10, 60)).unwrap();
         let m1 = store
             .add_message(
                 &sid,
@@ -8050,13 +8090,13 @@ mod tests {
                 Some("codex-oauth::gpt-5.6-terra"),
             )
             .unwrap();
-        store.record_usage(&sid, &m1, &usage(50, 5)).unwrap();
+        store.record_usage(&sid, &m1, &usage(50, 5, 25)).unwrap();
         let m2 = store
             .add_message(&sid, 2, Role::Assistant, "c", Some("nvidia::z-ai/glm-5.2"))
             .unwrap();
-        store.record_usage(&sid, &m2, &usage(30, 3)).unwrap();
+        store.record_usage(&sid, &m2, &usage(30, 3, 15)).unwrap();
         store
-            .record_side_call_usage(&sid, "compact", &usage(20, 2))
+            .record_side_call_usage(&sid, "compact", &usage(20, 2, 10))
             .unwrap();
 
         let week = store.usage_by_provider_since(0).unwrap();
@@ -8065,6 +8105,7 @@ mod tests {
             .find(|r| r.provider == "codex-oauth")
             .expect("codex-oauth provider derived from model namespace");
         assert_eq!(terra.input_tokens, 150, "both terra turns summed");
+        assert_eq!(terra.cached_input_tokens, 85);
         assert_eq!(terra.output_tokens, 15);
         let nvidia = week
             .iter()
@@ -8075,6 +8116,7 @@ mod tests {
             "side-call usage inherits nearest provider"
         );
         assert_eq!(nvidia.output_tokens, 5);
+        assert_eq!(nvidia.cached_input_tokens, 25);
 
         let session = store.usage_by_provider_for_session(&sid).unwrap();
         assert_eq!(session.len(), 2, "two distinct providers in the session");
@@ -9969,6 +10011,53 @@ mod tests {
                 [],
             )
             .unwrap();
+        }
+        cleanup(&path);
+    }
+
+    #[test]
+    fn migration_0018_preserves_v17_usage_and_adds_cached_input_tokens() {
+        let path = temp_db_path();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE usage (
+                     id TEXT PRIMARY KEY,
+                     message_id TEXT NOT NULL,
+                     provider TEXT,
+                     model TEXT,
+                     input_tokens INTEGER NOT NULL,
+                     output_tokens INTEGER NOT NULL,
+                     cost_usd REAL NOT NULL,
+                     created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                 );
+                 INSERT INTO usage
+                     (id, message_id, provider, model, input_tokens, output_tokens, cost_usd)
+                 VALUES ('u17', 'm17', 'provider', 'model', 123, 45, 0.67);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 17i64).unwrap();
+        }
+
+        for pass in ["first open (migrates)", "second open (idempotent)"] {
+            let store = Store::open(&path).unwrap_or_else(|e| panic!("{pass}: {e:?}"));
+            let conn = store.lock().unwrap();
+            assert_eq!(
+                conn.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION,
+                "{pass}: upgraded to the current version"
+            );
+            let (input, cached, output, cost): (i64, i64, i64, f64) = conn
+                .query_row(
+                    "SELECT input_tokens, cached_input_tokens, output_tokens, cost_usd
+                     FROM usage WHERE id = 'u17'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .unwrap();
+            assert_eq!((input, cached, output), (123, 0, 45), "{pass}");
+            assert!((cost - 0.67).abs() < f64::EPSILON, "{pass}");
         }
         cleanup(&path);
     }

@@ -58,6 +58,8 @@ pub enum PresenterEvent {
     Cost {
         session_total_usd: f64,
         session_in: u64,
+        /// Provider-reported cached prompt-token reads (a subset of `session_in`).
+        session_cached_in: u64,
         session_out: u64,
         context_tokens: u64,
         context_limit: Option<u32>,

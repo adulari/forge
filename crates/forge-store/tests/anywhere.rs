@@ -482,6 +482,58 @@ fn staged_history_applies_in_dependency_order_without_replacing_host_paths() {
         1
     );
     assert_eq!(store.session_cost(&session_id).expect("session cost"), 0.25);
+    assert_eq!(
+        store
+            .session_cached_input_tokens(&session_id)
+            .expect("cached input tokens"),
+        2
+    );
+}
+
+#[test]
+fn legacy_remote_usage_without_cached_tokens_remains_importable() {
+    let store = Store::open_in_memory().expect("open store");
+    let session_id = store
+        .create_session("/safe/local/repo", "accept_edits")
+        .expect("create session");
+    let message_id = store
+        .add_message(
+            &session_id,
+            0,
+            Role::Assistant,
+            "legacy remote response",
+            Some("provider::model"),
+        )
+        .expect("add message");
+    let record = remote_history(
+        1,
+        "usage",
+        "legacy-usage",
+        1,
+        serde_json::json!({
+            "id": "legacy-usage",
+            "message_id": message_id,
+            "input_tokens": 34,
+            "output_tokens": 5,
+            "cost_usd": 0.12
+        }),
+    );
+    store
+        .stage_remote_sync_record(&record)
+        .expect("stage legacy usage");
+    let summary = store
+        .apply_staged_history_records([0x81; 16], 10)
+        .expect("apply legacy usage");
+    assert_eq!(summary.applied, 1);
+    assert_eq!(summary.conflicts, 0);
+    assert_eq!(summary.deferred, 0);
+    assert_eq!(store.session_cost(&session_id).expect("session cost"), 0.12);
+    assert_eq!(
+        store
+            .session_cached_input_tokens(&session_id)
+            .expect("cached input tokens"),
+        0
+    );
 }
 
 #[test]

@@ -446,6 +446,8 @@ pub struct App {
     pub cost_usd: f64,
     /// Live token counter (tui-token-counter.md): session totals + current context fill.
     pub session_in: u64,
+    /// Prompt tokens served from provider cache (subset of `session_in`).
+    pub session_cached_in: u64,
     pub session_out: u64,
     pub context_tokens: u64,
     pub context_limit: Option<u32>,
@@ -456,9 +458,11 @@ pub struct App {
     /// Input/output tokens attributed to the current/last turn (session totals minus the snapshot
     /// taken at turn start). Shown alongside the timer; the session totals stay on their own.
     pub turn_in: u64,
+    pub turn_cached_in: u64,
     pub turn_out: u64,
     /// Session in/out totals captured at turn start, so `turn_in/out` are deltas from here.
     turn_base_in: u64,
+    turn_base_cached_in: u64,
     turn_base_out: u64,
     /// True once at least one turn has started this session — so the turn timer/token segment shows
     /// the last turn's frozen stats even for a sub-second turn (where `turn_elapsed_secs` is 0).
@@ -1998,17 +2002,20 @@ impl App {
             PresenterEvent::Cost {
                 session_total_usd,
                 session_in,
+                session_cached_in,
                 session_out,
                 context_tokens,
                 context_limit,
             } => {
                 self.cost_usd = session_total_usd;
                 self.session_in = session_in;
+                self.session_cached_in = session_cached_in;
                 self.session_out = session_out;
                 self.context_tokens = context_tokens;
                 self.context_limit = context_limit;
                 // Per-turn token deltas from the baseline snapshotted in `on_turn_start`.
                 self.turn_in = session_in.saturating_sub(self.turn_base_in);
+                self.turn_cached_in = session_cached_in.saturating_sub(self.turn_base_cached_in);
                 self.turn_out = session_out.saturating_sub(self.turn_base_out);
             }
             PresenterEvent::SubagentStart {
@@ -2473,8 +2480,10 @@ impl App {
         // turn's in/out are measured as a delta from here.
         self.turn_elapsed_secs = 0;
         self.turn_in = 0;
+        self.turn_cached_in = 0;
         self.turn_out = 0;
         self.turn_base_in = self.session_in;
+        self.turn_base_cached_in = self.session_cached_in;
         self.turn_base_out = self.session_out;
         self.turn_ran = true;
         self.turn_activity = TurnActivity {
@@ -6799,12 +6808,22 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
             // suppress the ↑/↓ counts when both are zero to avoid showing stale "↑0 ↓0".
             let has_token_data = app.turn_in > 0 || app.turn_out > 0;
             let turn_label = if has_token_data {
-                format!(
-                    "⧖ {} ↑{} ↓{}",
-                    fmt_dur(app.turn_elapsed_secs),
-                    human(app.turn_in),
-                    human(app.turn_out)
-                )
+                if app.turn_cached_in > 0 {
+                    format!(
+                        "⧖ {} ↑{} (↻{}) ↓{}",
+                        fmt_dur(app.turn_elapsed_secs),
+                        human(app.turn_in),
+                        human(app.turn_cached_in),
+                        human(app.turn_out)
+                    )
+                } else {
+                    format!(
+                        "⧖ {} ↑{} ↓{}",
+                        fmt_dur(app.turn_elapsed_secs),
+                        human(app.turn_in),
+                        human(app.turn_out)
+                    )
+                }
             } else {
                 format!("⧖ {}", fmt_dur(app.turn_elapsed_secs))
             };
@@ -6827,13 +6846,25 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         // is too narrow this is what gets clipped, not the gauge.
         // Only show when session differs from turn delta: on the first turn turn_base_in=0 so
         // turn_in == session_in — showing both would be identical, useless duplication.
-        let session_differs = app.session_in != app.turn_in || app.session_out != app.turn_out;
+        let session_differs = app.session_in != app.turn_in
+            || app.session_cached_in != app.turn_cached_in
+            || app.session_out != app.turn_out;
         if (app.session_in > 0 || app.session_out > 0) && (!show_turn || session_differs) {
             if line2.len() > 1 {
                 line2.push(sep("  │  "));
             }
+            let total_label = if app.session_cached_in > 0 {
+                format!(
+                    "Σ ↑{} (↻{}) ↓{}",
+                    human(app.session_in),
+                    human(app.session_cached_in),
+                    human(app.session_out)
+                )
+            } else {
+                format!("Σ ↑{} ↓{}", human(app.session_in), human(app.session_out))
+            };
             line2.push(Span::styled(
-                format!("Σ ↑{} ↓{}", human(app.session_in), human(app.session_out)),
+                total_label,
                 Style::default().fg(DIM).bg(STATUSBG),
             ));
         }
@@ -8490,6 +8521,7 @@ mod tests {
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.0033,
             session_in: 0,
+            session_cached_in: 0,
             session_out: 0,
             context_tokens: 0,
             context_limit: None,
@@ -8511,12 +8543,14 @@ mod tests {
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.01,
             session_in: 12_300,
+            session_cached_in: 6_000,
             session_out: 4_100,
             context_tokens: 18_200,
             context_limit: Some(200_000),
         });
         let wide = screen_wh(&app, 120, LIVE_H);
         assert!(wide.contains("↑12.3k"), "token counter shown: {wide}");
+        assert!(wide.contains("↻6.0k"), "cached input shown: {wide}");
         assert!(wide.contains("↓4.1k"));
         assert!(wide.contains("18.2k/200.0k"), "context gauge shown: {wide}");
         assert!(wide.contains("9%"), "context percentage: {wide}");
@@ -8526,6 +8560,7 @@ mod tests {
     fn statusline_shows_live_turn_timer_and_per_turn_tokens() {
         let mut app = App {
             session_in: 1_000,
+            session_cached_in: 400,
             session_out: 200,
             ..Default::default()
         };
@@ -8535,8 +8570,9 @@ mod tests {
         app.turn_elapsed_secs = 73; // 1m13s
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.02,
-            session_in: 2_200, // +1.2k this turn
-            session_out: 540,  // +340 this turn
+            session_in: 2_200,      // +1.2k this turn
+            session_cached_in: 700, // +300 cached this turn
+            session_out: 540,       // +340 this turn
             context_tokens: 0,
             context_limit: None,
         });
@@ -8556,11 +8592,16 @@ mod tests {
             "single turn-timer segment on row 2: {s}"
         );
         assert!(
-            s.contains("↑1.2k") && s.contains("↓340"),
+            s.contains("↑1.2k") && s.contains("↻300") && s.contains("↓340"),
             "per-turn token deltas: {s}"
         );
+        app.on_turn_start();
+        assert_eq!(
+            app.turn_cached_in, 0,
+            "a new turn clears the prior cache delta"
+        );
         assert!(
-            s.contains("Σ ↑2.2k ↓540"),
+            s.contains("Σ ↑2.2k (↻700) ↓540"),
             "session totals relabeled Σ: {s}"
         );
     }
@@ -8603,6 +8644,7 @@ mod tests {
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.01,
             session_in: 5_000,
+            session_cached_in: 0,
             session_out: 1_000,
             context_tokens: 6_000,
             context_limit: None,
@@ -8702,6 +8744,7 @@ mod tests {
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.0033,
             session_in: 12_300,
+            session_cached_in: 0,
             session_out: 4_100,
             context_tokens: 18_200,
             context_limit: Some(200_000),

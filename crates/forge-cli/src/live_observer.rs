@@ -26,6 +26,8 @@ pub enum LiveEvent {
     Cost {
         session_total_usd: f64,
         session_in: u64,
+        #[serde(default)]
+        session_cached_in: u64,
         session_out: u64,
         context_tokens: u64,
         context_limit: Option<u32>,
@@ -89,12 +91,14 @@ pub fn to_live_event(event: &PresenterEvent) -> Option<LiveEvent> {
         PresenterEvent::Cost {
             session_total_usd,
             session_in,
+            session_cached_in,
             session_out,
             context_tokens,
             context_limit,
         } => Some(LiveEvent::Cost {
             session_total_usd: *session_total_usd,
             session_in: *session_in,
+            session_cached_in: *session_cached_in,
             session_out: *session_out,
             context_tokens: *context_tokens,
             context_limit: *context_limit,
@@ -167,12 +171,14 @@ pub fn live_event_to_presenter(event: LiveEvent) -> Option<PresenterEvent> {
         LiveEvent::Cost {
             session_total_usd,
             session_in,
+            session_cached_in,
             session_out,
             context_tokens,
             context_limit,
         } => Some(PresenterEvent::Cost {
             session_total_usd,
             session_in,
+            session_cached_in,
             session_out,
             context_tokens,
             context_limit,
