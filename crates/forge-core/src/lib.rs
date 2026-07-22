@@ -3252,6 +3252,13 @@ impl Session {
                 schema: s.schema,
             }));
         }
+        // ToolRegistry is backed by a HashMap, whose iteration order is deliberately randomized
+        // per process. A resumed `forge run` therefore used to reshuffle the complete tool-schema
+        // prefix even when the session, model, and tools were unchanged. Provider prompt caches
+        // hash the serialized prefix, so that harmless ordering drift forced a full cache miss on
+        // every cross-process resume. Sort the final combined surface (built-ins, virtual tools,
+        // skills, and MCP) so every provider receives a byte-stable catalog.
+        specs.sort_by(|left, right| left.name.cmp(&right.name));
         specs
     }
 
@@ -10399,6 +10406,10 @@ mod tests {
         assert!(names
             .iter()
             .all(|n| !n.starts_with("mcp_") && !n.contains("__")));
+        assert!(
+            names.windows(2).all(|pair| pair[0] <= pair[1]),
+            "advertised tools must be deterministic for cross-process prompt caching: {names:?}"
+        );
     }
 
     #[test]
