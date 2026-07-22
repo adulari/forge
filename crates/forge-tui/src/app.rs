@@ -378,6 +378,7 @@ enum TurnPhase {
     Responding,
     RunningTool,
     ProcessingToolResult,
+    Auxiliary,
     Recovering,
     Coordinating,
     Compacting,
@@ -393,6 +394,7 @@ impl TurnPhase {
             Self::Responding => "streaming response",
             Self::RunningTool => "running tool",
             Self::ProcessingToolResult => "processing tool result",
+            Self::Auxiliary => "auxiliary model work",
             Self::Recovering => "recovering provider",
             Self::Coordinating => "coordinating work",
             Self::Compacting => "compacting context",
@@ -408,6 +410,7 @@ impl TurnPhase {
             Self::Responding => "responding…",
             Self::RunningTool => "running tool…",
             Self::ProcessingToolResult => "processing result…",
+            Self::Auxiliary => "running side-call…",
             Self::Recovering => "recovering…",
             Self::Coordinating => "coordinating…",
             Self::Compacting => "compacting…",
@@ -429,6 +432,7 @@ struct TurnActivity {
     model: Option<String>,
     last_event_tick: usize,
     reasoning_chars: usize,
+    auxiliary_chars: usize,
     response_chars: usize,
     tool_calls: usize,
 }
@@ -1884,6 +1888,22 @@ impl App {
                     ),
                 );
             }
+            PresenterEvent::AuxiliaryRequest { model, purpose } => {
+                self.turn_activity.model = Some(model);
+                self.turn_activity.auxiliary_chars = 0;
+                self.set_turn_activity(TurnPhase::Auxiliary, purpose);
+            }
+            PresenterEvent::AuxiliaryProgress { chars } => {
+                self.turn_activity.auxiliary_chars =
+                    self.turn_activity.auxiliary_chars.saturating_add(chars);
+                self.set_turn_activity(
+                    TurnPhase::Auxiliary,
+                    format!(
+                        "internal model streamed {} chars",
+                        human(self.turn_activity.auxiliary_chars as u64)
+                    ),
+                );
+            }
             // Failover in progress: keep a single animated indicator instead of one warning per
             // hop. The model that just failed is recorded only for the (dim) hint; the status bar's
             // own routing line shows the model now being tried.
@@ -1991,6 +2011,10 @@ impl App {
                 diagnosis,
                 fix,
             } => {
+                self.set_turn_activity(
+                    TurnPhase::ProcessingToolResult,
+                    "shell diagnosis ready; sending the result back to the model",
+                );
                 self.pending_shell_fix = fix.clone();
                 self.flush.extend(shell_diagnosis_lines(
                     &command,
@@ -8832,6 +8856,39 @@ mod tests {
         assert!(
             text.contains("event now"),
             "stream heartbeat is live: {text}"
+        );
+    }
+
+    #[test]
+    fn auxiliary_model_work_replaces_the_stale_tool_result_phase() {
+        let mut app = App::default();
+        app.on_turn_start();
+        app.busy = true;
+        app.apply(PresenterEvent::ToolResult {
+            name: "shell".into(),
+            ok: false,
+            summary: "exit 1".into(),
+        });
+        app.apply(PresenterEvent::AuxiliaryRequest {
+            model: "codex-oauth::gpt-5.6-luna".into(),
+            purpose: "diagnosing the failed shell command".into(),
+        });
+        let started = screen_wh(&app, 150, LIVE_H);
+        assert!(started.contains("auxiliary model work"), "phase: {started}");
+        assert!(
+            started.contains("diagnosing the failed shell command"),
+            "purpose: {started}"
+        );
+        assert!(
+            started.contains("gpt-5.6-luna"),
+            "side-call model: {started}"
+        );
+
+        app.apply(PresenterEvent::AuxiliaryProgress { chars: 1_250 });
+        let progressing = screen_wh(&app, 150, LIVE_H);
+        assert!(
+            progressing.contains("internal model streamed 1.2k chars"),
+            "side-call heartbeat: {progressing}"
         );
     }
 

@@ -282,6 +282,10 @@ impl Presenter for HeadlessPresenter {
                     "  ⌬ lattice → injected {symbols} symbols · {files} files (~{tokens} tok)"
                 );
             }
+            PresenterEvent::AuxiliaryRequest { model, purpose } => {
+                println!("  ◇ {purpose} via {model}…");
+            }
+            PresenterEvent::AuxiliaryProgress { .. } => {}
             PresenterEvent::ShellDiagnosis {
                 command,
                 diagnosis,

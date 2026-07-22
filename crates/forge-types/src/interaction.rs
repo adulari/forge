@@ -36,6 +36,18 @@ pub enum PresenterEvent {
         /// Zero-based agentic model/tool-loop step.
         step: usize,
     },
+    /// A best-effort internal model call (for example shell-error diagnosis) has started. These
+    /// calls happen inside a tool-result boundary, so exposing their purpose prevents the UI from
+    /// appearing stuck on the completed tool while another model is genuinely working.
+    AuxiliaryRequest {
+        model: String,
+        purpose: String,
+    },
+    /// Characters streamed by the active auxiliary call. Kept separate from assistant reasoning
+    /// so internal diagnostics never leak into or pollute the conversation transcript.
+    AuxiliaryProgress {
+        chars: usize,
+    },
     AssistantText(String),
     AssistantDelta(String),
     Reasoning(String),

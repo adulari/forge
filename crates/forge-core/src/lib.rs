@@ -3606,6 +3606,17 @@ Rules:\n\
         (!forge_provider::is_cli_bridge(&model)).then_some(model)
     }
 
+    /// Side calls are deliberately cheap/low-reasoning, but their answer length remains native and
+    /// uncapped. A stable purpose-scoped key enables the same automatic provider prefix caching as
+    /// the main loop instead of silently bypassing it for compaction, memory, recap, and diagnosis.
+    fn auxiliary_completion_options(session_id: &str, purpose: &str) -> CompletionOptions {
+        CompletionOptions {
+            effort: Some(EffortLevel::Low),
+            prompt_cache_key: Some(format!("{session_id}:{purpose}")),
+            ..CompletionOptions::default()
+        }
+    }
+
     /// Run the PLAN phase of the architect pipeline.
     ///
     /// Calls the planner model with the current transcript and NO tools advertised, streams its
@@ -3996,11 +4007,12 @@ Rules:\n\
             });
         let mut chain = candidates.into_iter();
         let mut model = chain.next().expect("compact_candidate_chain is non-empty");
+        let completion_opts = Self::auxiliary_completion_options(&self.id, "compact");
         let resp = loop {
             let mut sink = |_: StreamEvent| {};
             match self
                 .provider
-                .complete(&model, &messages, &[], &mut sink)
+                .complete_with(&model, &messages, &[], &completion_opts, &mut sink)
                 .await
             {
                 Ok(r) => break r,
@@ -4158,8 +4170,15 @@ prompt text, nothing else.";
                 )),
             ];
             let mut on_event = |_: StreamEvent| {};
+            let completion_opts = Session::auxiliary_completion_options(&id, "memory");
             let Ok(r) = provider
-                .complete(&decision.model, &messages, &[], &mut on_event)
+                .complete_with(
+                    &decision.model,
+                    &messages,
+                    &[],
+                    &completion_opts,
+                    &mut on_event,
+                )
                 .await
             else {
                 return;
@@ -4267,8 +4286,9 @@ prompt text, nothing else.";
             Some(mut sink) => {
                 tokio::spawn(async move {
                     let mut on_event = |_: StreamEvent| {};
+                    let completion_opts = Session::auxiliary_completion_options(&id, "recap");
                     if let Ok(r) = provider
-                        .complete(&model, &messages, &[], &mut on_event)
+                        .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                         .await
                     {
                         let _ = store.record_side_call_usage(&id, "recap", &r.usage);
@@ -4280,8 +4300,9 @@ prompt text, nothing else.";
             }
             None => {
                 let mut on_event = |_: StreamEvent| {};
+                let completion_opts = Session::auxiliary_completion_options(&id, "recap");
                 if let Ok(r) = provider
-                    .complete(&model, &messages, &[], &mut on_event)
+                    .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                     .await
                 {
                     let _ = store.record_side_call_usage(&id, "recap", &r.usage);
@@ -4360,8 +4381,9 @@ prompt text, nothing else.";
             Some(mut sink) => {
                 tokio::spawn(async move {
                     let mut on_event = |_: StreamEvent| {};
+                    let completion_opts = Session::auxiliary_completion_options(&id, "suggest");
                     if let Ok(r) = provider
-                        .complete(&model, &messages, &[], &mut on_event)
+                        .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                         .await
                     {
                         let _ = store.record_side_call_usage(&id, "suggest", &r.usage);
@@ -4373,8 +4395,9 @@ prompt text, nothing else.";
             }
             None => {
                 let mut on_event = |_: StreamEvent| {};
+                let completion_opts = Session::auxiliary_completion_options(&id, "suggest");
                 if let Ok(r) = provider
-                    .complete(&model, &messages, &[], &mut on_event)
+                    .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                     .await
                 {
                     let _ = store.record_side_call_usage(&id, "suggest", &r.usage);
@@ -4439,10 +4462,23 @@ prompt text, nothing else.";
             Message::system(SHELL_DIAGNOSE_SYSTEM),
             Message::user(format!("Command:\n{command}\n\nResult:\n{result}")),
         ];
-        let mut sink = |_: StreamEvent| {};
-        if let Ok(r) = self
-            .provider
-            .complete(&model, &messages, &[], &mut sink)
+        self.presenter.emit(PresenterEvent::AuxiliaryRequest {
+            model: model.clone(),
+            purpose: "diagnosing the failed shell command".to_string(),
+        });
+        let provider = self.provider.clone();
+        let completion_opts = Self::auxiliary_completion_options(&self.id, "shell-diagnose");
+        let presenter = &mut self.presenter;
+        let mut sink = |event: StreamEvent| match event {
+            StreamEvent::Text(delta) | StreamEvent::Reasoning(delta) if !delta.is_empty() => {
+                presenter.emit(PresenterEvent::AuxiliaryProgress {
+                    chars: delta.chars().count(),
+                });
+            }
+            _ => {}
+        };
+        if let Ok(r) = provider
+            .complete_with(&model, &messages, &[], &completion_opts, &mut sink)
             .await
         {
             let _ = self
@@ -11238,6 +11274,17 @@ mod tests {
     }
 
     #[test]
+    fn auxiliary_calls_use_low_effort_and_a_stable_cache_key() {
+        let opts = Session::auxiliary_completion_options("session-7", "shell-diagnose");
+        assert_eq!(opts.effort, Some(EffortLevel::Low));
+        assert_eq!(
+            opts.prompt_cache_key.as_deref(),
+            Some("session-7:shell-diagnose")
+        );
+        assert!(opts.response_format.is_none());
+    }
+
+    #[test]
     fn completion_verification_empty_only_accepts_completed_turn_with_prior_answer() {
         let done = vec![forge_types::TodoItem {
             title: "ship".into(),
@@ -12529,7 +12576,9 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     id: new_id(),
                     name: "shell".into(),
-                    args: serde_json::json!({ "command": "definitelynotacommand_xyz" }),
+                    args: serde_json::json!({
+                        "command": "printf opaque_failure_xyz >&2; exit 9"
+                    }),
                 }],
                 usage,
                 quotas: Vec::new(),
@@ -12561,13 +12610,26 @@ mod tests {
 
         session.run_turn("build the project").await.unwrap();
 
-        let diagnosed = events.lock().unwrap().iter().any(|e| {
+        let events = events.lock().unwrap();
+        let started = events.iter().position(|event| {
+            matches!(event, PresenterEvent::AuxiliaryRequest { purpose, .. }
+                if purpose.contains("diagnosing"))
+        });
+        let diagnosed = events.iter().position(|e| {
             matches!(e, PresenterEvent::ShellDiagnosis { command, diagnosis, .. }
-                if command.contains("definitelynotacommand_xyz") && diagnosis.contains("install"))
+                if command.contains("opaque_failure_xyz") && diagnosis.contains("install"))
         });
         assert!(
-            diagnosed,
+            started.is_some(),
+            "the UI is told why an internal model call started"
+        );
+        assert!(
+            diagnosed.is_some(),
             "a ShellDiagnosis event was emitted for the failed command"
+        );
+        assert!(
+            started < diagnosed,
+            "the start event precedes the completed diagnosis"
         );
     }
 

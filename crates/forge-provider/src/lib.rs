@@ -814,8 +814,8 @@ pub struct CompletionOptions {
     /// the base `complete` path, which fall back to inherited process env for legacy compatibility.
     pub checkpoint: Option<CheckpointContext>,
     /// Stable conversation identity for provider-side prompt caching. Main turns populate this via
-    /// [`CheckpointContext::session`]; auxiliary calls leave it unset and therefore cannot consume
-    /// a pinned session's subscription cache namespace.
+    /// [`CheckpointContext::session`]; Forge's auxiliary calls use a purpose-scoped derivative so
+    /// compaction/recap/diagnosis prefixes cache automatically without colliding with the main loop.
     pub prompt_cache_key: Option<String>,
     /// Structured-output request (OpenAI `response_format`). `None` = provider default (free text).
     pub response_format: Option<ResponseFormat>,
