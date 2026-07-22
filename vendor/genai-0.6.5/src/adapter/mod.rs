@@ -23,6 +23,16 @@ pub(crate) use dispatcher::*;
 
 pub use adapter_kind::*;
 
+/// Build the stable Gemini request configuration (`systemInstruction` + `tools`) in the exact
+/// wire format used by the Gemini adapter. Callers can store this in Google's `cachedContents`
+/// API and then reference it from generation requests.
+pub fn gemini_cache_config(
+	model_iden: &crate::ModelIden,
+	chat_req: crate::chat::ChatRequest,
+) -> crate::Result<serde_json::Value> {
+	adapters::gemini::GeminiAdapter::build_cache_config(model_iden, chat_req)
+}
+
 // -- Crate modules
 pub(crate) mod inter_stream;
 

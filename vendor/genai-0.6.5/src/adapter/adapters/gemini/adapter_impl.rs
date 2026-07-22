@@ -487,7 +487,27 @@ impl GeminiAdapter {
 			payload.x_insert("/generationConfig/topP", top_p)?;
 		}
 
+		// Provider-specific fields such as `cachedContent`. Merge last so an explicit caller
+		// override has the same precedence as the OpenAI adapters' `extra_body` contract.
+		if let Some(extra_body) = options_set.extra_body() {
+			payload.x_merge(extra_body.clone())?;
+		}
+
 		Ok((payload, provider_model_name.to_string()))
+	}
+
+	/// Stable Gemini configuration suitable for the `cachedContents` create API. Reuse the normal
+	/// adapter conversion so cached tool schemas are byte-for-byte compatible with uncached calls.
+	pub(in crate::adapter) fn build_cache_config(model: &ModelIden, chat_req: ChatRequest) -> Result<Value> {
+		let GeminiChatRequestParts { system, tools, .. } = Self::into_gemini_request_parts(model, chat_req)?;
+		let mut config = json!({});
+		if let Some(system) = system {
+			config.x_insert("systemInstruction", json!({ "parts": [{ "text": system }] }))?;
+		}
+		if let Some(tools) = tools {
+			config.x_insert("tools", tools)?;
+		}
+		Ok(config)
 	}
 
 	/// See gemini doc: https://ai.google.dev/api/generate-content#UsageMetadata
@@ -1010,6 +1030,39 @@ mod tests {
 
 		assert_eq!(function_response["name"], "get_weather");
 		assert_eq!(function_response["response"]["name"], "get_weather");
+	}
+
+	#[test]
+	fn explicit_cache_config_reuses_normal_system_and_tool_mapping() {
+		let model_iden = ModelIden::new(AdapterKind::Gemini, "gemini-2.5-flash");
+		let chat_req = ChatRequest::new(vec![
+			ChatMessage::system("stable system"),
+			ChatMessage::user("dynamic question"),
+		])
+		.with_tools(vec![Tool::new("get_weather")
+			.with_description("weather")
+			.with_schema(json!({"type":"object"}))]);
+
+		let config = GeminiAdapter::build_cache_config(&model_iden, chat_req).unwrap();
+		assert_eq!(config["systemInstruction"]["parts"][0]["text"], "stable system");
+		assert_eq!(config["tools"][0]["functionDeclarations"][0]["name"], "get_weather");
+		assert!(config.get("contents").is_none(), "dynamic conversation is not cached");
+	}
+
+	#[test]
+	fn cached_content_extra_body_reaches_generation_payload() {
+		let model_iden = ModelIden::new(AdapterKind::Gemini, "gemini-2.5-flash");
+		let options = ChatOptions::default()
+			.with_extra_body(json!({"cachedContent":"cachedContents/forge-123"}));
+		let options_set = ChatOptionsSet::default().with_chat_options(Some(&options));
+		let (payload, _) = GeminiAdapter::build_gemini_request_payload(
+			&model_iden,
+			"gemini-2.5-flash",
+			ChatRequest::from_user("dynamic question"),
+			options_set,
+		)
+		.unwrap();
+		assert_eq!(payload["cachedContent"], "cachedContents/forge-123");
 	}
 
 	#[test]

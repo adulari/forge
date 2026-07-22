@@ -151,6 +151,9 @@ impl Presenter for HeadlessPresenter {
             } => {
                 println!("⚒ mesh → [{tier}] {model}  ({rationale})");
             }
+            // Interactive surfaces use this exact request boundary for their live heartbeat.
+            // Headless already printed the route and streams the next provider event directly.
+            PresenterEvent::ProviderRequest { .. } => {}
             PresenterEvent::AssistantText(text) => {
                 println!("\n{text}");
             }

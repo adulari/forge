@@ -87,9 +87,27 @@ impl BenchmarkScores {
         self.by_canon.get(&canon(&want)).copied()
     }
 
-    /// The score for a Forge `provider::model` id, or `None` if no confident match exists.
+    /// The effective score for a Forge `provider::model` id, including explicitly approved
+    /// predecessor inheritance for a newly released model that has no source row yet.
+    ///
+    /// A directly published source score always wins. [`Self::source_score_for`] intentionally
+    /// excludes inheritance so the benchmark cache can keep checking for the new model's own row.
     /// Documented in docs/features/mesh-routing.md.
     pub fn score_for(&self, id: &str) -> Option<BenchScore> {
+        if let Some(predecessor) = Self::predecessor_canon(id) {
+            return self
+                .exact_score_for(id)
+                .or_else(|| self.by_canon.get(&predecessor).copied());
+        }
+        self.source_score_for(id)
+    }
+
+    /// The score matched directly from a benchmark-source row, without predecessor inheritance.
+    /// Cache refresh logic uses this to distinguish measured data from a temporary routing prior.
+    pub fn source_score_for(&self, id: &str) -> Option<BenchScore> {
+        if Self::predecessor_canon(id).is_some() {
+            return self.exact_score_for(id);
+        }
         if self.entries.is_empty() {
             return None;
         }
@@ -152,6 +170,18 @@ impl BenchmarkScores {
             }
         }
         best.map(|(_, _, s)| s)
+    }
+
+    /// Resolve narrowly scoped, product-reviewed benchmark inheritance to the predecessor's exact
+    /// canonical key. Generic cross-version fuzzy matching is deliberately bypassed for these
+    /// successors so a preview cannot select whichever older sibling has the highest score.
+    fn predecessor_canon(id: &str) -> Option<String> {
+        const PREDECESSORS: &[(&str, &str)] = &[("qwen3.8-max-preview", "qwen3.7-max")];
+
+        let want = canon(&id_tokens(id));
+        PREDECESSORS.iter().find_map(|(successor, predecessor)| {
+            (want == canon(&tokens(successor))).then(|| canon(&tokens(predecessor)))
+        })
     }
 }
 
@@ -425,5 +455,48 @@ mod tests {
         b.insert("GPT-5.5 (medium)", 47.1, 47.1);
         let s = b.score_for("openai::gpt-5.5").unwrap();
         assert_eq!(s.intelligence, 54.8, "best effort represents the model");
+    }
+
+    #[test]
+    fn qwen_3_8_max_preview_inherits_3_7_max_until_its_own_row_exists() {
+        let mut b = BenchmarkScores::new();
+        b.insert("Qwen3.5 Max", 90.0, 90.0);
+        b.insert("Qwen3.6 Max Preview", 40.0, 40.0);
+        b.insert("Qwen3.7 Max", 46.0, 66.0);
+
+        assert!(
+            b.source_score_for("qwencloud::qwen3.8-max-preview")
+                .is_none(),
+            "inheritance must not hide the missing source row from cache refresh logic"
+        );
+
+        for id in [
+            "qwencloud::qwen3.8-max-preview",
+            "openrouter::qwen/qwen3.8-max-preview",
+        ] {
+            let inherited = b.score_for(id).expect("Qwen 3.8 should inherit a score");
+            assert_eq!(
+                inherited,
+                BenchScore {
+                    intelligence: 46.0,
+                    coding: 66.0,
+                },
+                "{id} must inherit Qwen3.7 Max, not the fuzzier Qwen3.6 preview row"
+            );
+        }
+
+        // Once the benchmark source publishes a Qwen 3.8 row, it wins even if its measured score
+        // is lower than the temporary predecessor score. Published data always beats inheritance.
+        b.insert("Qwen3.8 Max (Preview)", 39.0, 38.0);
+        assert!(b
+            .source_score_for("qwencloud::qwen3.8-max-preview")
+            .is_some());
+        assert_eq!(
+            b.score_for("qwencloud::qwen3.8-max-preview"),
+            Some(BenchScore {
+                intelligence: 39.0,
+                coding: 38.0,
+            })
+        );
     }
 }

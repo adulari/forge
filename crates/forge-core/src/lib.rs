@@ -97,8 +97,9 @@ Tools:
 match exactly once, and read the file first so whitespace matches. To change one file in several \
 places at once, multi_edit applies a list of edits atomically. For a large or multi-file change, \
 apply_patch takes a unified diff. For a Jupyter notebook (.ipynb) use notebook_edit (cell-level) \
-— edit_file would corrupt its JSON. Use write_file for new files or full rewrites; don't \
-blind-overwrite a file you haven't read.
+— edit_file would corrupt its JSON. Use write_file for new files or full rewrites. When generated \
+content is too large for one reliable tool call, write the first coherent chunk and use append_file \
+for the rest. Don't blind-overwrite a file you haven't read.
 - A tool result starting with `error:` means it failed — read the message, fix the cause, and \
 retry differently rather than repeating the same call.
 
@@ -498,6 +499,23 @@ const MAX_RATE_LIMIT_WAITS: u32 = 2;
 /// keeps the latter — mesh auto-rotation stays fully enabled, it just never lands on a window that
 /// can't hold the work (which would otherwise trip the "too small, compact?" prompt every turn).
 const MIN_CODING_CONTEXT: u32 = 32_000;
+
+/// Reply room used only for context fitting when the provider output is intentionally unbounded.
+///
+/// `mesh.max_output_tokens = 0` means Forge omits the provider request cap and lets the model use
+/// its native maximum. Context planning still needs a realistic amount of reply room, otherwise a
+/// nearly-full transcript can be admitted with only the historical 1K-token cushion. This value is
+/// never sent to a provider and therefore cannot truncate a response.
+const UNBOUNDED_OUTPUT_PLANNING_RESERVE: u32 = 8_192;
+const MIN_OUTPUT_PLANNING_RESERVE: u32 = 1_024;
+
+fn output_planning_reserve_tokens(configured_cap: u32) -> u32 {
+    if configured_cap == 0 {
+        UNBOUNDED_OUTPUT_PLANNING_RESERVE
+    } else {
+        configured_cap.max(MIN_OUTPUT_PLANNING_RESERVE)
+    }
+}
 
 /// Minimum context window the router must require for the next turn. Two terms, max-combined:
 /// 1. The current transcript must clear `Session::transcript_fits`' bar (transcript ≤ 80% of the
@@ -958,6 +976,12 @@ fn validate_tool_args(schema: &serde_json::Value, args: &serde_json::Value) -> R
     let Some(obj) = args.as_object() else {
         return Err("arguments must be a JSON object".to_string());
     };
+    if let Some(reason) = obj
+        .get(forge_provider::TRUNCATED_TOOL_ARGS_KEY)
+        .and_then(|value| value.as_str())
+    {
+        return Err(reason.to_string());
+    }
     let required = schema
         .get("required")
         .and_then(|r| r.as_array())
@@ -1022,6 +1046,54 @@ enum CompletionGate {
 /// evidence get one verification chance.
 fn completion_claims_no_change(text: &str) -> bool {
     completion::claims_no_change(text)
+}
+
+/// A response that explicitly promises another agent action and then stops at an open-ended marker
+/// is not a final answer. Keep this deliberately narrow: headings such as `What changed:` are valid
+/// prose, while `Let me verify ...:` means the model yielded before doing what it just promised.
+fn completion_promises_followup(text: &str) -> bool {
+    let trimmed = text.trim();
+    if !(trimmed.ends_with(':') || trimmed.ends_with("...") || trimmed.ends_with('…')) {
+        return false;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let tail_reversed: String = lower.chars().rev().take(320).collect();
+    let tail: String = tail_reversed.chars().rev().collect();
+    let intent_at = [
+        "let me ",
+        "i'll ",
+        "i will ",
+        "i'm going to ",
+        "i’m going to ",
+        "i need to ",
+        "now i ",
+        "next i ",
+    ]
+    .iter()
+    .filter_map(|marker| tail.rfind(marker))
+    .max();
+    let Some(intent) = intent_at.map(|at| &tail[at..]) else {
+        return false;
+    };
+    [
+        "check",
+        "verify",
+        "test",
+        "run",
+        "inspect",
+        "review",
+        "investigate",
+        "fix",
+        "edit",
+        "write",
+        "create",
+        "update",
+        "continue",
+        "try",
+    ]
+    .iter()
+    .any(|action| intent.contains(action))
 }
 
 #[cfg(test)]
@@ -3342,18 +3414,20 @@ impl Session {
         })
     }
 
-    /// The context window (tokens) to assume for `model`: a fetched per-model window (provider API,
-    /// persisted in the store) first, then the family heuristic, then a conservative floor. Always
-    /// returns a usable number so a turn can be bounded even for a model we've never seen.
-    /// The model's REAL context window (fetched per-model window → family heuristic → conservative
-    /// floor), ignoring any transient overflow self-heal cap. This is the honest denominator for the
-    /// context gauge — the cap only shrinks what we SEND, not the model's actual limit.
+    /// The context window (tokens) to assume for `model`: a narrow authoritative override first,
+    /// then a fetched per-model window (provider API, persisted in the store), the family heuristic,
+    /// and finally a conservative floor. Always returns a usable number so a turn can be bounded
+    /// even for a model we've never seen. The cap only shrinks what we SEND, not the model's actual
+    /// limit.
     fn base_context_window(&self, model: &str) -> u32 {
-        self.store
-            .model_context(model)
-            .ok()
-            .flatten()
-            .filter(|w| *w > 0)
+        forge_mesh::pricing::authoritative_context_limit(model)
+            .or_else(|| {
+                self.store
+                    .model_context(model)
+                    .ok()
+                    .flatten()
+                    .filter(|w| *w > 0)
+            })
             .or_else(|| forge_mesh::pricing::context_limit(model))
             .unwrap_or(forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW)
     }
@@ -3375,7 +3449,7 @@ impl Session {
     /// active model each step so failover to a smaller-window model re-trims appropriately.
     fn transcript_for(&self, model: &str) -> Vec<Message> {
         let window = self.effective_context_window(model) as usize;
-        let reserve = self.config.mesh.max_output_tokens.max(1024) as usize;
+        let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as usize;
         // Real-token budget: window minus the reply reservation, with 5% headroom for the small
         // magnitude difference between our o200k counter and the target model's own tokenizer.
         let budget_tokens = window.saturating_sub(reserve) * 95 / 100;
@@ -3420,7 +3494,7 @@ impl Session {
     fn transcript_with_preamble(&self, model: &str) -> Vec<Message> {
         let preamble = self.system_preamble();
         let window = self.effective_context_window(model) as usize;
-        let reserve = self.config.mesh.max_output_tokens.max(1024) as usize;
+        let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as usize;
         let preamble_tokens: usize = preamble.iter().map(message_tokens).sum();
         let budget_tokens = window
             .saturating_sub(reserve)
@@ -3580,7 +3654,9 @@ Rules:\n\
             temperature: Some(CODING_TEMPERATURE),
             // The planner runs with no tools (it can't edit files), so it needs no checkpoint context.
             checkpoint: None,
-            prompt_cache_key: None,
+            // Planning repeatedly reuses the same standing prompt/transcript. Keep it in a
+            // session-specific provider cache shard even though the planner has no tool checkpoint.
+            prompt_cache_key: Some(format!("{}:architect", self.id)),
             response_format: None,
         };
 
@@ -3597,6 +3673,10 @@ Rules:\n\
             // the planner system prompt.
             let mut planner_msgs = self.transcript_for(&model);
             planner_msgs.insert(0, Message::system(Self::ARCHITECT_PLANNER_SYSTEM));
+            self.presenter.emit(PresenterEvent::ProviderRequest {
+                model: model.clone(),
+                step: 0,
+            });
 
             // Collect plan text while streaming it live to the presenter.
             let mut plan_text = String::new();
@@ -3679,7 +3759,8 @@ Rules:\n\
     /// Context-window floor to hand the router for the next turn, so mesh auto-rotation never picks
     /// a window this turn will immediately overflow. See [`routing_min_context_tokens`].
     fn routing_min_context(&self) -> u32 {
-        let reserve = self.config.mesh.effective_max_output_tokens().max(1024);
+        let reserve =
+            output_planning_reserve_tokens(self.config.mesh.effective_max_output_tokens());
         let transcript = self.estimated_transcript_tokens().min(u32::MAX as u64) as u32;
         routing_min_context_tokens(transcript, reserve)
     }
@@ -3689,7 +3770,7 @@ Rules:\n\
     /// a model that fails this check triggers the consent prompt).
     fn transcript_fits(&self, model: &str) -> bool {
         let window = self.effective_context_window(model) as u64;
-        let reserve = self.config.mesh.max_output_tokens.max(1024) as u64;
+        let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as u64;
         let usable = window.saturating_sub(reserve) * 8 / 10;
         self.estimated_transcript_tokens() <= usable
     }
@@ -4592,6 +4673,10 @@ prompt text, nothing else.";
         // turn mid-task. `doom_nudged`: the doom-loop fires a "change approach" nudge BEFORE it
         // ever hard-stops, so a repeated call doesn't kill an otherwise-recoverable turn.
         let mut continue_nudges = 0usize;
+        // A model can mark every task done, pass the verification gate, then yield a sentence such
+        // as "Let me verify runtime issues:" with no tool call. That is explicit unfinished intent,
+        // not a final answer. Give it one bounded chance to perform the promised action.
+        let mut followup_intent_nudges = 0usize;
         let mut doom_nudged = false;
         // Failure-loop guard (complements the identical-call doom-loop): counts tool failures by
         // (tool name, error kind) ACROSS the turn, so a model retrying the same KIND of error with
@@ -4738,6 +4823,10 @@ prompt text, nothing else.";
                         forge_config::provider_of(&active_model)
                     )))
                 } else {
+                    self.presenter.emit(PresenterEvent::ProviderRequest {
+                        model: active_model.clone(),
+                        step,
+                    });
                     let provider = &self.provider;
                     let presenter = &mut self.presenter;
                     // Bump on every stream event so the idle watchdog can distinguish a live
@@ -5454,6 +5543,28 @@ prompt text, nothing else.";
                         "model returned an empty response (no text, no tool call) — stopping the turn"
                             .to_string(),
                     ));
+                } else if completion_promises_followup(&resp.content) && followup_intent_nudges == 0
+                {
+                    followup_intent_nudges += 1;
+                    self.presenter.emit(PresenterEvent::Warning(
+                        "model promised another action but stopped before doing it — continuing once"
+                            .to_string(),
+                    ));
+                    const FOLLOWUP_INTENT_NUDGE: &str = "Your last response explicitly promised a \
+                        next action but ended before doing it. Do not narrate future work and stop. \
+                        Call the required tool now and complete/check the action, or, if nothing \
+                        remains, give a self-contained final answer stating exactly what already \
+                        passed.";
+                    let nseq = self.next_seq();
+                    let _ = self.store.add_message(
+                        &self.id,
+                        nseq,
+                        Role::System,
+                        FOLLOWUP_INTENT_NUDGE,
+                        None,
+                    );
+                    self.transcript.push(Message::system(FOLLOWUP_INTENT_NUDGE));
+                    continue;
                 } else if forge_provider::is_cli_bridge(&active_model) {
                     // Bridge cost ceiling (wave 5, fixes 1 + 2). This is the observation boundary a
                     // bridge turn actually has: its tools ran inside the subprocess and it has now
@@ -6929,13 +7040,22 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 StopReason::FinalAnswer
             },
         });
+        // A channel-backed interactive surface can keep receiving detached auxiliary results after
+        // the main turn is done. Remember that capability before launching the side calls so the
+        // input is never held hostage by recap/suggestion/memory provider latency.
+        let detach_post_turn_work = self.presenter.recap_sink().is_some();
         self.generate_recap(prompt, &final_text, &recap_tasks_before)
             .await;
         self.generate_suggestion(prompt, &final_text).await;
-        // Await the handle so one-shot (forge run) exits only after capture completes. In
-        // interactive mode the spinner is already cleared and this is a brief background wait.
+        // One-shot/headless mode must await memory persistence before the process exits. In the
+        // interactive TUI, dropping a Tokio JoinHandle detaches (does not cancel) the capture, so
+        // the completed answer and input become usable immediately while persistence finishes.
         if let Some(handle) = self.capture_memories(prompt, &final_text) {
-            let _ = handle.await;
+            if detach_post_turn_work {
+                drop(handle);
+            } else {
+                let _ = handle.await;
+            }
         }
         Ok(if hit_step_cap {
             LoopOutcome::max_steps(final_text)
@@ -9450,6 +9570,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn output_planning_reserve_does_not_turn_unbounded_output_into_a_cap() {
+        assert_eq!(
+            output_planning_reserve_tokens(0),
+            UNBOUNDED_OUTPUT_PLANNING_RESERVE
+        );
+        assert_eq!(output_planning_reserve_tokens(256), 1_024);
+        assert_eq!(output_planning_reserve_tokens(12_345), 12_345);
+    }
+
     // ── Routing context floor — mesh auto-rotation must never pick a too-small window ──────────
     #[test]
     fn routing_min_context_floors_at_coding_baseline_when_transcript_is_small() {
@@ -9789,6 +9919,14 @@ mod tests {
         let err = validate_tool_args(&schema, &serde_json::json!({"path": "a"})).unwrap_err();
         assert!(err.contains("content"), "names the missing field: {err}");
         assert!(validate_tool_args(&schema, &serde_json::json!("nope")).is_err());
+        let truncated = serde_json::json!({
+            forge_provider::TRUNCATED_TOOL_ARGS_KEY: "native output limit interrupted the call"
+        });
+        let err = validate_tool_args(&schema, &truncated).unwrap_err();
+        assert!(
+            err.contains("output limit"),
+            "preserves actionable cause: {err}"
+        );
         // A schema with no `required` accepts any object.
         assert!(validate_tool_args(
             &serde_json::json!({"type": "object"}),
@@ -11122,6 +11260,23 @@ mod tests {
         ));
         assert!(!completion_claims_no_change(
             "Goal complete: implemented the requested change."
+        ));
+    }
+
+    #[test]
+    fn completion_followup_intent_catches_open_ended_agent_promises_only() {
+        assert!(completion_promises_followup(
+            "Syntax passes. Let me verify a few runtime issues that syntax would not catch:"
+        ));
+        assert!(completion_promises_followup(
+            "The file is written. I'll now run the browser checks..."
+        ));
+        assert!(!completion_promises_followup(
+            "Implemented and verified the fix: all targeted tests pass."
+        ));
+        assert!(!completion_promises_followup("What changed:"));
+        assert!(!completion_promises_followup(
+            "I will keep this constraint in mind."
         ));
     }
 
@@ -12715,6 +12870,16 @@ mod tests {
         // A cap armed for a DIFFERENT model is ignored (failover to a larger-window model).
         session.overflow_window_cap = Some(("some::other-model".to_string(), base / 8));
         assert_eq!(session.effective_context_window(model), base);
+    }
+
+    #[test]
+    fn authoritative_context_window_beats_stale_cached_metadata() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let model = "qwencloud::qwen3.8-max-preview";
+        store.set_model_context(model, 32_000).unwrap();
+        let session = probe_session(store, Config::default());
+
+        assert_eq!(session.base_context_window(model), 1_000_000);
     }
 
     #[tokio::test]

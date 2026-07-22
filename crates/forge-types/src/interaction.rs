@@ -29,6 +29,13 @@ pub enum PresenterEvent {
         model: String,
         rationale: String,
     },
+    /// A concrete provider request is about to start. Unlike `Routing` (which can precede context
+    /// assembly), this marks the exact model-loop boundary used by live progress surfaces.
+    ProviderRequest {
+        model: String,
+        /// Zero-based agentic model/tool-loop step.
+        step: usize,
+    },
     AssistantText(String),
     AssistantDelta(String),
     Reasoning(String),

@@ -4,7 +4,9 @@
 //! leaves the machine. This exercises the streaming/usage/tool-call branches that the
 //! `MockProvider` tests cannot reach.
 
-use forge_provider::{GenAiProvider, Provider, ProviderError, StreamEvent, ToolSpec};
+use forge_provider::{
+    CompletionOptions, GenAiProvider, Provider, ProviderError, StreamEvent, ToolSpec,
+};
 use forge_types::Message;
 use genai::resolver::{AuthData, Endpoint};
 use genai::{Client, ServiceTarget};
@@ -121,4 +123,58 @@ async fn http_500_maps_to_unavailable_for_failover() {
         .expect_err("a 500 must surface as an error");
     assert!(err.is_retryable(), "5xx should be retryable: {err:?}");
     assert!(matches!(err, ProviderError::Unavailable(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn strict_openai_gateway_retries_without_prompt_cache_key() {
+    let server = MockServer::start_async().await;
+    let rejected = server.mock(|when, then| {
+        when.method(POST)
+            .path("/chat/completions")
+            .body_includes("prompt_cache_key");
+        then.status(400)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Unsupported parameter: prompt_cache_key"
+                }
+            }));
+    });
+    let accepted = server.mock(|when, then| {
+        when.method(POST)
+            .path("/chat/completions")
+            .body_excludes("prompt_cache_key");
+        then.status(200).header("content-type", SSE_CT).body(concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1,\"total_tokens\":6}}\n\n",
+            "data: [DONE]\n\n",
+        ));
+    });
+
+    let provider = GenAiProvider::with_client(client_pointed_at(server.base_url()));
+    let result = provider
+        .complete_with(
+            "openai::strict-compatible-model",
+            &[Message::user("hi")],
+            &[],
+            &CompletionOptions {
+                prompt_cache_key: Some("forge-session-1".into()),
+                ..Default::default()
+            },
+            &mut |_| {},
+        )
+        .await;
+    let response = result.unwrap_or_else(|error| {
+        panic!(
+            "unsupported cache field should degrade to the compatible request; error={error:?}, rejected_calls={}, accepted_calls={}",
+            rejected.calls(),
+            accepted.calls()
+        )
+    });
+
+    assert_eq!(response.content, "ok");
+    assert_eq!(rejected.calls(), 1);
+    assert_eq!(accepted.calls(), 1);
 }

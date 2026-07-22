@@ -34,6 +34,7 @@ use forge_mesh::{BudgetState, Router as MeshRouter};
 use forge_provider::{CompletionOptions, Provider, ResponseFormat, StreamEvent, ToolSpec};
 use forge_types::{EffortLevel, Message, ProjectContext, Role};
 use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 
 /// Default listen port for `forge api`. Distinct from `forge serve`'s 7420 so both can run at once.
 const DEFAULT_PORT: u16 = 8787;
@@ -222,11 +223,22 @@ struct ChatCompletionRequest {
     messages: Vec<IncomingMessage>,
     #[serde(default)]
     stream: bool,
+    /// OpenAI streaming option. When requested, Forge emits a final usage-only chunk, including
+    /// provider-reported cached prompt tokens.
+    #[serde(default)]
+    stream_options: Option<StreamOptions>,
     #[serde(default)]
     temperature: Option<f32>,
     /// OpenAI's reasoning-effort hint (`low`/`medium`/`high`); also accepts Forge's `xhigh`.
     #[serde(default)]
     reasoning_effort: Option<String>,
+    /// OpenAI prompt-cache routing key. Forwarded unchanged when supplied; when omitted Forge
+    /// derives a privacy-preserving stable key from the standing conversation prefix.
+    #[serde(default)]
+    prompt_cache_key: Option<String>,
+    /// Deprecated OpenAI end-user identifier, still accepted as stable cache-key input.
+    #[serde(default)]
+    user: Option<String>,
     /// Advertised tools (OpenAI function shape). Forwarded to the model; any `tool_calls` it makes
     /// come back in the response (the client runs its own tool loop, as with the OpenAI API).
     #[serde(default)]
@@ -235,6 +247,59 @@ struct ChatCompletionRequest {
     /// Forwarded to the provider's JSON mode so a caller asking for JSON actually gets JSON.
     #[serde(default)]
     response_format: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Default)]
+struct StreamOptions {
+    #[serde(default)]
+    include_usage: bool,
+}
+
+/// Stable cache identity for stateless `/v1/chat/completions` callers. SDKs that expose OpenAI's
+/// `prompt_cache_key` retain full control. Older clients get an automatic SHA-256 key derived from
+/// the model/user plus the leading system messages and first conversation message — the portion
+/// that remains unchanged as a client resends a growing transcript. No prompt text leaks into the
+/// provider-visible key.
+fn api_prompt_cache_key(req: &ChatCompletionRequest) -> String {
+    if let Some(explicit) = req
+        .prompt_cache_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        return explicit.to_string();
+    }
+
+    let mut hash = Sha256::new();
+    hash.update(b"forge-api-cache-v1\0");
+    hash.update(req.model.as_deref().unwrap_or("auto").as_bytes());
+    hash.update(b"\0");
+    if let Some(user) = req.user.as_deref() {
+        hash.update(user.as_bytes());
+    }
+    hash.update(b"\0");
+
+    let mut included_conversation_message = false;
+    for message in &req.messages {
+        let standing = matches!(message.role.as_str(), "system" | "developer");
+        if !standing && included_conversation_message {
+            break;
+        }
+        hash.update(message.role.as_bytes());
+        hash.update(b"\0");
+        hash.update(content_text(&message.content).as_bytes());
+        hash.update(b"\0");
+        if !standing {
+            included_conversation_message = true;
+        }
+    }
+
+    let digest = hash.finalize();
+    let short = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("forge-api-{short}")
 }
 
 #[derive(Deserialize)]
@@ -505,6 +570,7 @@ async fn chat_completions(
         );
     }
 
+    let prompt_cache_key = api_prompt_cache_key(&req);
     let messages = to_forge_messages(&req.messages);
     let tools = to_tool_specs(&req.tools);
     // Resolve the pin BEFORE any routing: an explicit `model` that this server can't route to is a
@@ -518,7 +584,7 @@ async fn chat_completions(
         effort,
         temperature: req.temperature,
         checkpoint: None,
-        prompt_cache_key: None,
+        prompt_cache_key: Some(prompt_cache_key),
         response_format: parse_response_format(&req.response_format),
     };
 
@@ -557,7 +623,11 @@ async fn chat_completions(
 
     let wants_json = opts.response_format.is_some();
     if req.stream {
-        stream_completion(state, messages, tools, opts, decision)
+        let include_usage = req
+            .stream_options
+            .as_ref()
+            .is_some_and(|options| options.include_usage);
+        stream_completion(state, messages, tools, opts, decision, include_usage)
     } else {
         match run_completion(&state, &messages, &tools, &opts, &decision).await {
             Ok(mut done) => {
@@ -623,6 +693,9 @@ fn non_stream_response(state: &ApiState, done: Completed) -> impl IntoResponse {
         }],
         "usage": {
             "prompt_tokens": usage.input_tokens,
+            "prompt_tokens_details": {
+                "cached_tokens": usage.cached_input_tokens,
+            },
             "completion_tokens": usage.output_tokens,
             "total_tokens": usage.total_tokens(),
         },
@@ -681,6 +754,7 @@ fn stream_completion(
     tools: Vec<ToolSpec>,
     opts: CompletionOptions,
     chain: Vec<String>,
+    include_usage: bool,
 ) -> Response {
     let (tx, rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<axum::body::Bytes, std::io::Error>>();
@@ -780,6 +854,25 @@ fn stream_completion(
                             Some(finish_reason),
                         ),
                     );
+                    if include_usage {
+                        let usage = &response.usage;
+                        let usage_chunk = serde_json::json!({
+                            "id": id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": model,
+                            "choices": [],
+                            "usage": {
+                                "prompt_tokens": usage.input_tokens,
+                                "prompt_tokens_details": {
+                                    "cached_tokens": usage.cached_input_tokens,
+                                },
+                                "completion_tokens": usage.output_tokens,
+                                "total_tokens": usage.total_tokens(),
+                            }
+                        });
+                        send(&tx, format!("data: {usage_chunk}\n\n"));
+                    }
                     succeeded = true;
                     break;
                 }
@@ -963,6 +1056,7 @@ mod tests {
             .oneshot(post_chat(serde_json::json!({
                 "model": "auto",
                 "stream": true,
+                "stream_options": {"include_usage": true},
                 "messages": [{"role": "user", "content": "mock:code snippet"}],
             })))
             .await
@@ -980,6 +1074,8 @@ mod tests {
         assert!(text.contains("\"role\":\"assistant\""));
         assert!(text.contains("\"content\":"));
         assert!(text.contains("\"finish_reason\":\"stop\""));
+        assert!(text.contains("\"prompt_tokens_details\":{"));
+        assert!(text.contains("\"cached_tokens\":0"));
         assert!(text.trim_end().ends_with("data: [DONE]"));
     }
 
@@ -1064,6 +1160,48 @@ mod tests {
         assert_eq!(content_text(&v), "hello world");
         assert_eq!(content_text(&serde_json::json!("plain")), "plain");
         assert_eq!(content_text(&serde_json::Value::Null), "");
+    }
+
+    #[test]
+    fn api_cache_key_is_explicit_or_stable_for_a_growing_transcript() {
+        let parse = |value| serde_json::from_value::<ChatCompletionRequest>(value).unwrap();
+        let explicit = parse(serde_json::json!({
+            "model": "openai::gpt-5",
+            "prompt_cache_key": "caller-session-7",
+            "messages": [{"role": "user", "content": "hello"}]
+        }));
+        assert_eq!(api_prompt_cache_key(&explicit), "caller-session-7");
+
+        let first = parse(serde_json::json!({
+            "model": "openai::gpt-5",
+            "user": "account-42",
+            "messages": [
+                {"role": "system", "content": "stable instructions"},
+                {"role": "user", "content": "first question"}
+            ]
+        }));
+        let grown = parse(serde_json::json!({
+            "model": "openai::gpt-5",
+            "user": "account-42",
+            "messages": [
+                {"role": "system", "content": "stable instructions"},
+                {"role": "user", "content": "first question"},
+                {"role": "assistant", "content": "first answer"},
+                {"role": "user", "content": "follow-up"}
+            ]
+        }));
+        assert_eq!(api_prompt_cache_key(&first), api_prompt_cache_key(&grown));
+        assert!(api_prompt_cache_key(&first).starts_with("forge-api-"));
+
+        let changed = parse(serde_json::json!({
+            "model": "openai::gpt-5",
+            "user": "account-42",
+            "messages": [
+                {"role": "system", "content": "stable instructions"},
+                {"role": "user", "content": "different first question"}
+            ]
+        }));
+        assert_ne!(api_prompt_cache_key(&first), api_prompt_cache_key(&changed));
     }
 
     #[test]

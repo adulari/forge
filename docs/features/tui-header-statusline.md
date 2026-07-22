@@ -22,7 +22,7 @@ the live Model-Mesh state (the product's differentiator) is the daily experience
 **Must have**
 - As a user, I see a striking ASCII-art **FORGE** wordmark (brand orange) as a welcome
   banner when a chat session opens (empty conversation), so the tool feels polished.
-- As a user, I see a dedicated **statusline** (bottom bar) with: working/spinner state,
+- As a user, I see a dedicated **statusline** (bottom bar) with: concrete live phase/spinner,
   mesh tier + model, running cost, permission mode, and key hints — clear hierarchy.
 - As a user on a narrow terminal, the banner and statusline **degrade gracefully** (no
   overflow/wrap garbage): banner falls back to a compact wordmark; statusline drops
@@ -58,7 +58,7 @@ And the conversation transcript is shown
 
 Given any session
 When the TUI renders
-Then a statusline row shows: [spinner when busy] · [tier] model · $cost · mode · hints
+Then a statusline row shows: [live phase + spinner when busy] · [tier] model · $cost · mode · hints
 And the model + cost segments are always present (highest priority)
 
 Given a terminal narrower than the wordmark (< ~46 cols)
@@ -72,7 +72,9 @@ Then lower-priority segments (hints, mode, session) are dropped before model/cos
 
 ## 4. Impact analysis
 
-Single crate, single concern (rendering). No core/store/provider/mesh changes.
+The original banner/statusline was a single-crate rendering change. The live turn heartbeat also
+uses one additive core event (`ProviderRequest`) so the UI can distinguish context assembly from
+the exact provider-request boundary.
 
 | Layer | Insertion point |
 |-------|-----------------|
@@ -104,13 +106,30 @@ Non-empty conversation → compact header row: ` ⚒ FORGE   <session>`.
 Segments, separated by ` · `, left→right by priority; right side reserved for hints:
 
 ```
- ⠙ working   [complex] ollama::llama3.2   $0.0033   default          ↵ send · esc quit
+ ⠙ model reasoning   [complex] qwen3.8-max-preview   $0.0033         esc stop · Ctrl↑ escalate
 ```
-- spinner segment only when `busy`.
+- phase/spinner segment only when `busy`.
 - `[tier] model` from `app.routing`.
 - `$cost` from `app.cost_usd`.
 - `mode` (permission) — optional v1.
 - hints right-aligned; dropped first when width is tight.
+
+### Live turn activity heartbeat
+
+While a turn is busy, a dedicated row above the input reports event-backed progress rather than a
+generic `working…` label:
+
+```text
+ ⠹ model reasoning  ·  qwen3.8-max-preview  ·  thought 42.8k chars  ·  event now
+```
+
+The phase follows real presenter events: preparing context, provider request/first-event wait,
+reasoning, response streaming, tool execution, tool-result processing, provider recovery,
+subagent/workflow coordination, compaction, and finalization. Hidden reasoning still increments a
+visible character counter. The row shows `quiet Ns` after 15 seconds without an event and an amber
+`⚠ no events for …` warning after 60 seconds. This is deliberately a heartbeat, not fabricated
+percentage progress: a provider that is still computing is distinguishable from an actively
+streaming model, but Forge does not claim how close either one is to completion.
 
 Width handling: compute available cols; build segments in priority order
 (model+cost, then tier, then mode, then hints) and stop adding when they won't fit.

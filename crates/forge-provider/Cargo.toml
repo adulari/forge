@@ -23,6 +23,7 @@ futures.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 reqwest.workspace = true
+sha2.workspace = true
 webpki-root-certs = "1"
 # WS transport for codex-oauth's "v1"-tagged models (Luna) — the ChatGPT backend serves them
 # ONLY over wss://, never plain HTTPS POST. rustls-tls-webpki-roots matches the rustls +

@@ -19,8 +19,8 @@ mod sandbox;
 mod shell;
 mod web;
 pub use core_tools::{
-    ApplyPatchTool, DeleteFileTool, EditFileTool, GlobTool, ListDirTool, MultiEditTool,
-    NotebookEditTool, ReadFileTool, SearchTool, WriteFileTool,
+    AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, GlobTool, ListDirTool,
+    MultiEditTool, NotebookEditTool, ReadFileTool, SearchTool, WriteFileTool,
 };
 pub use lattice_tool::LatticeTool;
 pub use sandbox::{ApplyResult, SandboxPolicy};
@@ -236,6 +236,7 @@ impl ToolRegistry {
         let mut r = Self::new();
         r.register(Box::new(ReadFileTool));
         r.register(Box::new(WriteFileTool));
+        r.register(Box::new(AppendFileTool));
         r.register(Box::new(EditFileTool));
         r.register(Box::new(MultiEditTool));
         r.register(Box::new(ApplyPatchTool));
@@ -474,6 +475,7 @@ mod tests {
         for name in [
             "read_file",
             "write_file",
+            "append_file",
             "edit_file",
             "delete_file",
             "shell",
@@ -503,6 +505,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_file_adds_verbatim_chunks_and_previews_the_combined_file() {
+        let path = std::env::temp_dir().join(format!("forge-append-{}.txt", forge_types::new_id()));
+        std::fs::write(&path, "first\n").unwrap();
+        let args = serde_json::json!({ "path": path, "content": "second\n" });
+        let diff = AppendFileTool.preview(&args).await.expect("append preview");
+        assert_eq!(diff.old.as_deref(), Some("first\n"));
+        assert_eq!(diff.new.as_deref(), Some("first\nsecond\n"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\n");
+
+        AppendFileTool.run(&args).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\nsecond\n");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn read_only_tool_has_no_preview() {
         assert!(ReadFileTool
             .preview(&serde_json::json!({"path":"x"}))
@@ -519,6 +536,10 @@ mod tests {
         );
         assert_eq!(
             r.get("write_file").unwrap().side_effect(),
+            SideEffect::Write
+        );
+        assert_eq!(
+            r.get("append_file").unwrap().side_effect(),
             SideEffect::Write
         );
         assert_eq!(r.get("shell").unwrap().side_effect(), SideEffect::Shell);

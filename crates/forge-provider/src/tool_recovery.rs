@@ -314,8 +314,24 @@ pub fn repair_malformed_args(raw: Value) -> Value {
 
     if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) {
         if start <= end {
-            if let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(&s[start..=end]) {
+            let candidate = &s[start..=end];
+            if let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(candidate) {
                 return v;
+            }
+
+            // Some OpenAI-compatible models (observed with Qwen 3.8 tool streams) escape the
+            // function-arguments payload one layer too many. A multiline HTML argument then
+            // arrives as `\\n` and `\\"` inside the raw JSON object. Besides sending literal
+            // backslash-n text to the tool, the doubled backslash before a quote makes the JSON
+            // formally invalid; the fragment scraper below can consequently preserve only the
+            // prefix before the first HTML attribute. Remove exactly one duplicated transport
+            // escape layer and accept it only if the result is a complete JSON object. Correctly
+            // encoded objects already returned above and are never modified.
+            let one_layer = candidate.replace("\\\\", "\\");
+            if one_layer != candidate {
+                if let Ok(v @ Value::Object(_)) = serde_json::from_str::<Value>(&one_layer) {
+                    return v;
+                }
             }
         }
     }
@@ -770,6 +786,21 @@ mod tests {
         // `query` is genuinely gone — not fabricated — so a downstream required-field check still
         // correctly reports it missing instead of the call silently "succeeding" with bad data.
         assert!(repaired.get("query").is_none());
+    }
+
+    #[test]
+    fn repair_removes_one_overescaped_qwen_transport_layer() {
+        let raw = Value::String(
+            r###"{"command":"cat > index.html <<'EOF'\\n<!DOCTYPE html>\\n<html lang=\\"en\\">\\nEOF","cwd":"/tmp/game"}"###
+                .into(),
+        );
+
+        let repaired = repair_malformed_args(raw);
+        assert_eq!(
+            repaired["command"],
+            "cat > index.html <<'EOF'\n<!DOCTYPE html>\n<html lang=\"en\">\nEOF"
+        );
+        assert_eq!(repaired["cwd"], "/tmp/game");
     }
 
     #[test]

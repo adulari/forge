@@ -17,6 +17,7 @@ use genai::chat::{
 };
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, Headers, ModelIden, ServiceTarget};
+use sha2::{Digest as _, Sha256};
 
 use crate::{
     CompletionOptions, EventSink, ModelResponse, Provider, ProviderError, ResponseFormat,
@@ -25,10 +26,21 @@ use crate::{
 
 pub struct GenAiProvider {
     client: Client,
+    http: reqwest::Client,
     pool: std::sync::Arc<KeyPool>,
-    /// Per-completion output cap (`mesh.max_output_tokens`). `None` → no cap (provider default,
-    /// often a model's full 65k max — too much for a free/low-credit account, see the 402 churn).
+    gemini_caches: tokio::sync::Mutex<std::collections::HashMap<String, GeminiCacheState>>,
+    /// Explicit per-completion output cap (`mesh.max_output_tokens`). `None` uses the provider and
+    /// model's native maximum; Forge never installs a smaller default implicitly.
     max_output_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+enum GeminiCacheState {
+    Ready {
+        name: String,
+        usable_until: std::time::Instant,
+    },
+    RetryAfter(std::time::Instant),
 }
 
 impl Default for GenAiProvider {
@@ -46,7 +58,9 @@ impl GenAiProvider {
         let pool = std::sync::Arc::new(KeyPool::from_config());
         Self {
             client: build_client_with(std::sync::Arc::clone(&pool)),
+            http: build_reqwest_client(),
             pool,
+            gemini_caches: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             max_output_tokens: None,
         }
     }
@@ -56,7 +70,9 @@ impl GenAiProvider {
     pub fn with_client(client: Client) -> Self {
         Self {
             client,
+            http: build_reqwest_client(),
             pool: std::sync::Arc::new(KeyPool::default()),
+            gemini_caches: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             max_output_tokens: None,
         }
     }
@@ -65,6 +81,155 @@ impl GenAiProvider {
     pub fn with_max_output_tokens(mut self, cap: u32) -> Self {
         self.max_output_tokens = (cap > 0).then_some(cap);
         self
+    }
+
+    /// Create or reuse a Gemini explicit-cache resource for the stable system prompt and tools.
+    /// Returns `true` only after mutating `req`/`options` to reference a live resource. Failure is
+    /// deliberately soft: Gemini's normal request still runs and may receive implicit caching.
+    async fn apply_gemini_explicit_cache(
+        &self,
+        model: &str,
+        req: &mut ChatRequest,
+        options: &mut ChatOptions,
+        session_key: &str,
+    ) -> bool {
+        let Some((namespace, bare_model)) = model.split_once("::") else {
+            return false;
+        };
+        if namespace != "gemini" {
+            return false;
+        }
+
+        // A cachedContents name is scoped to the Google project behind its API key. With several
+        // configured keys the request resolver intentionally rotates projects, so no one resource
+        // is universally valid. Retain provider-managed implicit caching in that configuration.
+        let keys = forge_config::api_keys("gemini");
+        let [api_key] = keys.as_slice() else {
+            return false;
+        };
+
+        let model_iden = ModelIden::new(AdapterKind::Gemini, bare_model.to_string());
+        let Ok(mut config) = genai::adapter::gemini_cache_config(&model_iden, req.clone()) else {
+            return false;
+        };
+        let config_bytes = serde_json::to_vec(&config).unwrap_or_default();
+        // Gemini enforces a model-dependent minimum (commonly 1,024 tokens). Avoid a guaranteed
+        // cache-create 400 for short prompts; ~4 chars/token is a conservative gate.
+        if config_bytes.len() < 4_096 {
+            return false;
+        }
+
+        let mut digest = Sha256::new();
+        digest.update(b"forge-gemini-cache-v1\0");
+        digest.update(session_key.as_bytes());
+        digest.update(b"\0");
+        digest.update(bare_model.as_bytes());
+        digest.update(b"\0");
+        digest.update(&config_bytes);
+        let cache_id = digest
+            .finalize()
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+
+        let now = std::time::Instant::now();
+        let mut caches = self.gemini_caches.lock().await;
+        let name = match caches.get(&cache_id) {
+            Some(GeminiCacheState::Ready { name, usable_until }) if *usable_until > now => {
+                Some(name.clone())
+            }
+            Some(GeminiCacheState::RetryAfter(retry_after)) if *retry_after > now => None,
+            _ => {
+                config["model"] = serde_json::json!(format!("models/{bare_model}"));
+                config["ttl"] = serde_json::json!("300s");
+                config["displayName"] = serde_json::json!(format!("forge-{cache_id}"));
+                // CachedContent requires at least one content part. A single whitespace seed keeps
+                // the actual standing instructions in `systemInstruction` (preserving their role)
+                // while satisfying the resource schema; it has no semantic payload of its own.
+                config["contents"] = serde_json::json!([{
+                    "role": "user",
+                    "parts": [{"text": " "}],
+                }]);
+                let created = tokio::time::timeout(
+                    std::time::Duration::from_secs(20),
+                    self.http
+                        .post("https://generativelanguage.googleapis.com/v1beta/cachedContents")
+                        .header("x-goog-api-key", api_key)
+                        .json(&config)
+                        .send(),
+                )
+                .await;
+                let name = match created {
+                    Ok(Ok(response)) if response.status().is_success() => response
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()
+                        .and_then(|body| {
+                            body.get("name")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_string)
+                        }),
+                    Ok(Ok(response)) => {
+                        let status = response.status();
+                        let reason = response
+                            .text()
+                            .await
+                            .map(|body| short(&body))
+                            .unwrap_or_else(|_| "response body unavailable".into());
+                        tracing::warn!(
+                            model = bare_model,
+                            %status,
+                            %reason,
+                            "Gemini explicit cache creation was declined; using the normal request"
+                        );
+                        None
+                    }
+                    Ok(Err(error)) => {
+                        tracing::debug!(model = bare_model, %error, "Gemini cache creation failed");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::debug!(model = bare_model, "Gemini cache creation timed out");
+                        None
+                    }
+                };
+                if let Some(name) = name.as_ref() {
+                    caches.insert(
+                        cache_id.clone(),
+                        GeminiCacheState::Ready {
+                            name: name.clone(),
+                            // Stay comfortably inside the server-side five-minute TTL.
+                            usable_until: now + std::time::Duration::from_secs(270),
+                        },
+                    );
+                } else {
+                    caches.insert(
+                        cache_id.clone(),
+                        GeminiCacheState::RetryAfter(now + std::time::Duration::from_secs(60)),
+                    );
+                }
+                name
+            }
+        };
+        drop(caches);
+
+        let Some(name) = name else {
+            return false;
+        };
+        // The cache resource owns these stable fields. Sending them again with `cachedContent`
+        // violates Gemini's request contract; dynamic conversation messages remain in the call.
+        req.system = None;
+        req.messages
+            .retain(|message| message.role != ChatRole::System);
+        req.tools = None;
+        let mut extra = options
+            .extra_body
+            .take()
+            .unwrap_or_else(|| serde_json::json!({}));
+        extra["cachedContent"] = serde_json::json!(name);
+        options.extra_body = Some(extra);
+        true
     }
 }
 
@@ -140,12 +305,23 @@ pub async fn list_custom_models(namespace: &str) -> Result<Vec<String>, Provider
         Ok(k) if !k.is_empty() => k,
         _ => LOCAL_PLACEHOLDER_KEY.to_string(),
     };
-    let url = format!("{}models", cp.endpoint);
+    list_custom_models_at(namespace, cp.endpoint, &key).await
+}
+
+/// HTTP seam for custom-provider discovery. Kept separate from registry/keyring lookup so the
+/// authenticated `/models` contract can be verified against a loopback server without changing
+/// process-global provider configuration or exposing a real credential.
+async fn list_custom_models_at(
+    namespace: &str,
+    endpoint: &str,
+    key: &str,
+) -> Result<Vec<String>, ProviderError> {
+    let url = format!("{endpoint}models");
     // Bound the whole call so a hung load balancer can't stall catalog refresh / startup.
     with_discovery_timeout(&format!("{namespace} `/models` listing"), async move {
         let resp = build_reqwest_client()
             .get(&url)
-            .bearer_auth(&key)
+            .bearer_auth(key)
             .send()
             .await
             .map_err(|e| ProviderError::Request(e.to_string()))?;
@@ -599,10 +775,19 @@ fn classify_genai_error(err: &genai::Error) -> ProviderError {
         // Streaming path: genai gives no typed HTTP status, only a string. Prefer a STRUCTURED read
         // when the cause is (or embeds) a JSON error body — classify on `error.code`/`error.status`/
         // `error.type` instead of substring-guessing — and fall back to text scanning otherwise.
-        genai::Error::WebStream { cause, .. } => parse_embedded_json(cause)
-            .as_ref()
-            .and_then(classify_error_body)
-            .unwrap_or_else(|| classify_text(cause, err.to_string())),
+        genai::Error::WebStream { cause, error, .. } => {
+            // WebStream boxes the initial HTTP failure (including status + response body). Preserve
+            // that typed error instead of collapsing it to a generic stream outage; cache-field
+            // compatibility fallback and normal 4xx/429/5xx classification both depend on it.
+            if let Some(inner) = error.downcast_ref::<genai::Error>() {
+                classify_genai_error(inner)
+            } else {
+                parse_embedded_json(cause)
+                    .as_ref()
+                    .and_then(classify_error_body)
+                    .unwrap_or_else(|| classify_text(cause, err.to_string()))
+            }
+        }
         // In-stream error event with a STRUCTURED JSON body — classify on its typed fields first.
         genai::Error::ChatResponse { body, .. } => classify_error_body(body)
             .unwrap_or_else(|| classify_text(&body.to_string(), err.to_string())),
@@ -839,7 +1024,21 @@ fn classify_status(
     retry_after: Option<std::time::Duration>,
 ) -> ProviderError {
     let exhausted = quota_is_exhausted(&message) || quota_is_exhausted(body);
-    let message = short(&message);
+    // Prefer the provider's JSON error message over genai's generic "HTTP error" wrapper. Besides
+    // producing useful diagnostics, this preserves optional-field names such as
+    // `prompt_cache_key`, which lets the caller safely retry a strict compatible endpoint without
+    // that optimization.
+    let provider_message = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .unwrap_or(&value)
+                .get("message")
+                .and_then(|message| message.as_str())
+                .map(str::to_string)
+        });
+    let message = short(provider_message.as_deref().unwrap_or(&message));
     // A permanent incapability (no tool support / unaffordable) regardless of status code: 402
     // is always "can't afford", and 400/404 bodies often carry "tool calling not supported".
     if code == 402 || is_capability_failure(body) || is_capability_failure(&message) {
@@ -950,6 +1149,32 @@ fn model_benefits_from_effort(model: &str) -> bool {
         || m == "deepseek-r1"
 }
 
+/// Qwen 3.8 Max Preview is thinking-only on the Token Plan endpoint (the API rejects
+/// `enable_thinking=false`). Bound its private reasoning phase independently from the answer/tool
+/// payload so a difficult coding turn cannot spend many minutes re-planning before its first tool
+/// call. This is deliberately *not* `max_tokens`: the final response remains at the model's native
+/// output limit.
+fn qwencloud_thinking_budget(effort: Option<EffortLevel>) -> u32 {
+    match effort.unwrap_or(EffortLevel::Medium) {
+        EffortLevel::Low => 1_024,
+        EffortLevel::Medium => 4_096,
+        EffortLevel::High => 8_192,
+        EffortLevel::XHigh | EffortLevel::WhiteHot => 16_384,
+    }
+}
+
+fn normalize_tool_arguments(
+    raw: serde_json::Value,
+    output_limit_reached: bool,
+) -> serde_json::Value {
+    if output_limit_reached && raw.is_string() {
+        return serde_json::json!({
+            crate::TRUNCATED_TOOL_ARGS_KEY: "the model's native output limit interrupted this tool call before its JSON arguments were complete; retry with a smaller payload (split a large file into coherent chunks)"
+        });
+    }
+    crate::repair_malformed_args(raw)
+}
+
 #[async_trait]
 impl Provider for GenAiProvider {
     async fn complete(
@@ -991,13 +1216,28 @@ impl Provider for GenAiProvider {
             .with_capture_usage(true)
             .with_capture_content(true)
             .with_capture_tool_calls(true);
-        // Bound the output so a free / low-credit account isn't billed (or 402'd) for a model's
-        // full max-token default (mesh.max_output_tokens).
+        // Only an explicitly positive mesh.max_output_tokens value may bound model output.
         if let Some(cap) = self.max_output_tokens {
             options = options.with_max_tokens(cap);
         }
+        // Keep this scoped to the preview model whose endpoint contract we have verified. Other
+        // Token Plan models may be non-thinking or expose different optional parameters.
+        let qwencloud_thinking = model_name == "qwencloud::qwen3.8-max-preview";
+        if qwencloud_thinking {
+            options = options.with_extra_body(serde_json::json!({
+                "enable_thinking": true,
+                "thinking_budget": qwencloud_thinking_budget(opts.effort),
+            }));
+        }
+        // Keep repeated prefixes in the same provider-side cache shard for every API-backed
+        // OpenAI-compatible model (native or custom). Providers that implement automatic prefix
+        // caching can ignore the hint; compatible providers that expose `prompt_cache_key` use the
+        // stable Forge session id supplied by the core.
+        if let Some(cache_key) = opts.prompt_cache_key.as_deref() {
+            options = options.with_prompt_cache_key(cache_key);
+        }
 
-        let mut reasoning_engaged = false;
+        let mut reasoning_engaged = qwencloud_thinking;
         // Apply the caller's reasoning-effort hint when set (e.g. from `/effort high`).
         if let Some(effort) = opts.effort {
             if model_benefits_from_effort(&model_name) {
@@ -1035,10 +1275,18 @@ impl Provider for GenAiProvider {
             options = options.with_response_format(genai_rf);
         }
 
+        let uncached_req = req.clone();
+        let gemini_cache_applied = if let Some(cache_key) = opts.prompt_cache_key.as_deref() {
+            self.apply_gemini_explicit_cache(&model_name, &mut req, &mut options, cache_key)
+                .await
+        } else {
+            false
+        };
+
         // Stall guards: a hung connection or a stream that goes silent must not freeze the
         // turn forever. A timeout surfaces as `Unavailable` (retryable), so the mesh fails over
         // to the next model instead of spinning indefinitely (docs/features/mesh-routing.md).
-        let first = tokio::time::timeout(
+        let mut first = tokio::time::timeout(
             CONNECT_TIMEOUT,
             self.client
                 .exec_chat_stream(model_name.as_str(), req.clone(), Some(&options)),
@@ -1046,6 +1294,77 @@ impl Provider for GenAiProvider {
         .await
         .map_err(|_| stall_error("no response while connecting", CONNECT_TIMEOUT))?
         .map_err(|e| classify_genai_error(&e));
+
+        // `prompt_cache_key` is implemented by OpenAI and some compatible providers (including
+        // Qwen Cloud), while strict compatible gateways reject unknown fields instead of ignoring
+        // them. Keep caching opportunistic and compatibility universal: retry once without only
+        // that hint when the provider names it as an unsupported request parameter. This occurs
+        // before a stream is accepted, so no text/tool event can be duplicated.
+        if options.prompt_cache_key.is_some()
+            && first
+                .as_ref()
+                .is_err_and(crate::prompt_cache_key_unsupported)
+        {
+            tracing::debug!(
+                provider = model.split("::").next().unwrap_or(""),
+                "provider rejected prompt_cache_key; retrying with automatic prefix caching"
+            );
+            options.prompt_cache_key = None;
+            first = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                self.client
+                    .exec_chat_stream(model_name.as_str(), req.clone(), Some(&options)),
+            )
+            .await
+            .map_err(|_| stall_error("no response while connecting", CONNECT_TIMEOUT))?
+            .map_err(|e| classify_genai_error(&e));
+        }
+
+        // Anthropic-style breakpoints and Bedrock Converse cachePoint blocks are also optional
+        // capabilities. Older models/endpoints can reject them. Strip only the per-message cache
+        // controls and retry once when the validation response identifies that cache hint; tools,
+        // transcript content, sampling, and every other option remain byte-for-byte equivalent.
+        if first.as_ref().is_err_and(crate::cache_control_unsupported) {
+            tracing::debug!(
+                provider = model.split("::").next().unwrap_or(""),
+                "provider rejected explicit cache controls; retrying with automatic prefix caching"
+            );
+            for message in &mut req.messages {
+                message.options = None;
+            }
+            first = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                self.client
+                    .exec_chat_stream(model_name.as_str(), req.clone(), Some(&options)),
+            )
+            .await
+            .map_err(|_| stall_error("no response while connecting", CONNECT_TIMEOUT))?
+            .map_err(|e| classify_genai_error(&e));
+        }
+
+        if gemini_cache_applied
+            && first
+                .as_ref()
+                .is_err_and(crate::gemini_cached_content_rejected)
+        {
+            tracing::debug!(
+                model = model,
+                "Gemini rejected cachedContent; retrying with the complete uncached request"
+            );
+            self.gemini_caches.lock().await.clear();
+            req = uncached_req.clone();
+            if let Some(extra) = options.extra_body.as_mut().and_then(|v| v.as_object_mut()) {
+                extra.remove("cachedContent");
+            }
+            first = tokio::time::timeout(
+                CONNECT_TIMEOUT,
+                self.client
+                    .exec_chat_stream(model_name.as_str(), req.clone(), Some(&options)),
+            )
+            .await
+            .map_err(|_| stall_error("no response while connecting", CONNECT_TIMEOUT))?
+            .map_err(|e| classify_genai_error(&e));
+        }
 
         // On 429: if this provider has ≥2 keys, retry once with the next key — the pool's
         // AtomicUsize has already advanced so the service-target resolver picks the other key
@@ -1058,8 +1377,11 @@ impl Provider for GenAiProvider {
                     // the service-target resolver picks the other key automatically.
                     tokio::time::timeout(
                         CONNECT_TIMEOUT,
-                        self.client
-                            .exec_chat_stream(model_name.as_str(), req, Some(&options)),
+                        self.client.exec_chat_stream(
+                            model_name.as_str(),
+                            req.clone(),
+                            Some(&options),
+                        ),
                     )
                     .await
                     .map_err(|_| stall_error("no response while connecting", CONNECT_TIMEOUT))?
@@ -1077,6 +1399,11 @@ impl Provider for GenAiProvider {
         let mut content = String::new();
         let mut usage = Usage::default();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut emitted_output = false;
+        let mut cache_key_fallback_done = options.prompt_cache_key.is_none();
+        let mut cache_control_fallback_done =
+            !req.messages.iter().any(|message| message.options.is_some());
+        let mut gemini_cache_fallback_done = !gemini_cache_applied;
         // Whether a proper finish/`End` event arrived. A stream that closes gracefully mid-generation
         // yields `next() == None` with NO `End` — partial text, no tool calls, no usage — which is
         // otherwise indistinguishable from a real completion. Track this so a silent truncation can
@@ -1089,33 +1416,117 @@ impl Provider for GenAiProvider {
             .await
             .map_err(|_| stall_error("stream stalled", IDLE_TIMEOUT))?
         {
-            match event.map_err(|e| classify_genai_error(&e))? {
+            let event = match event {
+                Ok(event) => event,
+                Err(raw) => {
+                    let error = classify_genai_error(&raw);
+                    let can_reconnect = !emitted_output
+                        && content.is_empty()
+                        && tool_calls.is_empty()
+                        && usage.input_tokens == 0
+                        && usage.output_tokens == 0;
+                    if can_reconnect
+                        && !cache_key_fallback_done
+                        && crate::prompt_cache_key_unsupported(&error)
+                    {
+                        cache_key_fallback_done = true;
+                        options.prompt_cache_key = None;
+                        tracing::debug!(
+                            provider = model.split("::").next().unwrap_or(""),
+                            "stream rejected prompt_cache_key; reconnecting without the optional hint"
+                        );
+                        stream = tokio::time::timeout(
+                            CONNECT_TIMEOUT,
+                            self.client.exec_chat_stream(
+                                model_name.as_str(),
+                                req.clone(),
+                                Some(&options),
+                            ),
+                        )
+                        .await
+                        .map_err(|_| stall_error("no response while connecting", CONNECT_TIMEOUT))?
+                        .map_err(|e| classify_genai_error(&e))?
+                        .stream;
+                        continue;
+                    }
+                    if can_reconnect
+                        && !cache_control_fallback_done
+                        && crate::cache_control_unsupported(&error)
+                    {
+                        cache_control_fallback_done = true;
+                        for message in &mut req.messages {
+                            message.options = None;
+                        }
+                        tracing::debug!(
+                            provider = model.split("::").next().unwrap_or(""),
+                            "stream rejected explicit cache controls; reconnecting without the optional hints"
+                        );
+                        stream = tokio::time::timeout(
+                            CONNECT_TIMEOUT,
+                            self.client.exec_chat_stream(
+                                model_name.as_str(),
+                                req.clone(),
+                                Some(&options),
+                            ),
+                        )
+                        .await
+                        .map_err(|_| stall_error("no response while connecting", CONNECT_TIMEOUT))?
+                        .map_err(|e| classify_genai_error(&e))?
+                        .stream;
+                        continue;
+                    }
+                    if can_reconnect
+                        && !gemini_cache_fallback_done
+                        && crate::gemini_cached_content_rejected(&error)
+                    {
+                        gemini_cache_fallback_done = true;
+                        self.gemini_caches.lock().await.clear();
+                        req = uncached_req.clone();
+                        if let Some(extra) =
+                            options.extra_body.as_mut().and_then(|v| v.as_object_mut())
+                        {
+                            extra.remove("cachedContent");
+                        }
+                        tracing::debug!(
+                            model = model,
+                            "Gemini stream rejected cachedContent; reconnecting with the complete request"
+                        );
+                        stream = tokio::time::timeout(
+                            CONNECT_TIMEOUT,
+                            self.client.exec_chat_stream(
+                                model_name.as_str(),
+                                req.clone(),
+                                Some(&options),
+                            ),
+                        )
+                        .await
+                        .map_err(|_| stall_error("no response while connecting", CONNECT_TIMEOUT))?
+                        .map_err(|e| classify_genai_error(&e))?
+                        .stream;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
+            match event {
                 ChatStreamEvent::Chunk(chunk) => {
+                    emitted_output = true;
                     content.push_str(&chunk.content);
                     on_event(StreamEvent::Text(chunk.content.clone()));
                 }
                 ChatStreamEvent::ReasoningChunk(chunk) => {
+                    emitted_output = true;
                     // Extended-thinking delta: streamed for display, not part of the answer.
                     on_event(StreamEvent::Reasoning(chunk.content.clone()));
                 }
                 ChatStreamEvent::End(end) => {
                     saw_end = true;
+                    let output_limit_reached = end
+                        .captured_stop_reason
+                        .as_ref()
+                        .is_some_and(genai::chat::StopReason::is_max_tokens);
                     if let Some(u) = &end.captured_usage {
-                        // Cache-read tokens (subset of prompt_tokens) are billed at a fraction of
-                        // the input rate; capture them so the mesh prices them correctly instead of
-                        // charging the full rate (which diverges from the provider's actual bill).
-                        let cached = u
-                            .prompt_tokens_details
-                            .as_ref()
-                            .and_then(|d| d.cached_tokens)
-                            .unwrap_or(0)
-                            .max(0) as u64;
-                        usage = Usage {
-                            input_tokens: u.prompt_tokens.unwrap_or(0).max(0) as u64,
-                            output_tokens: u.completion_tokens.unwrap_or(0).max(0) as u64,
-                            cached_input_tokens: cached,
-                            cost_usd: 0.0, // priced by the mesh from token counts (FR-5)
-                        };
+                        usage = normalize_usage(u);
                     }
                     // Some providers deliver text only at the end (not chunked).
                     if content.is_empty() {
@@ -1134,7 +1545,10 @@ impl Provider for GenAiProvider {
                                 // end-of-stream parse fails (a dropped/duplicated chunk); repair
                                 // it here so a malformed call can never be stored/replayed as-is
                                 // (see `repair_malformed_args` doc comment for why that matters).
-                                args: crate::repair_malformed_args(tc.fn_arguments),
+                                args: normalize_tool_arguments(
+                                    tc.fn_arguments,
+                                    output_limit_reached,
+                                ),
                             })
                             .collect();
                     }
@@ -1175,6 +1589,24 @@ impl Provider for GenAiProvider {
             usage,
             quotas: Vec::new(),
         })
+    }
+}
+
+/// Normalize genai's provider-independent usage into Forge accounting. OpenAI-compatible APIs
+/// report prompt-cache hits under `prompt_tokens_details.cached_tokens`; preserving that subset
+/// lets every API-key provider receive the correct discounted cache-read pricing when known.
+fn normalize_usage(usage: &genai::chat::Usage) -> Usage {
+    let cached = usage
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|details| details.cached_tokens)
+        .unwrap_or(0)
+        .max(0) as u64;
+    Usage {
+        input_tokens: usage.prompt_tokens.unwrap_or(0).max(0) as u64,
+        output_tokens: usage.completion_tokens.unwrap_or(0).max(0) as u64,
+        cached_input_tokens: cached,
+        cost_usd: 0.0, // priced by the mesh from token counts (FR-5)
     }
 }
 
@@ -1335,6 +1767,29 @@ mod tests {
         assert!(empty.is_empty());
     }
 
+    #[test]
+    fn openai_compatible_cached_tokens_are_preserved_in_forge_usage() {
+        let provider_usage = genai::chat::Usage {
+            prompt_tokens: Some(12_056),
+            prompt_tokens_details: Some(genai::chat::PromptTokensDetails {
+                cached_tokens: Some(11_520),
+                ..Default::default()
+            }),
+            completion_tokens: Some(35),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            normalize_usage(&provider_usage),
+            Usage {
+                input_tokens: 12_056,
+                output_tokens: 35,
+                cached_input_tokens: 11_520,
+                cost_usd: 0.0,
+            }
+        );
+    }
+
     /// Live reproduction (needs an OpenRouter key; run with `--ignored`). Proves both halves of the
     /// context-overflow diagnosis against the SAME model from the failed turn
     /// (`cohere/north-mini-code:free`, which appeared as "unavailable" in the user's log):
@@ -1476,6 +1931,37 @@ mod tests {
     fn to_genai_model_without_prefix_is_verbatim() {
         assert_eq!(to_genai_model("claude-3-5-sonnet"), "claude-3-5-sonnet");
         assert_eq!(to_genai_model(""), "");
+    }
+
+    #[test]
+    fn qwencloud_reasoning_budget_is_separate_from_output_limit() {
+        assert_eq!(qwencloud_thinking_budget(None), 4_096);
+        assert_eq!(qwencloud_thinking_budget(Some(EffortLevel::Low)), 1_024);
+        assert_eq!(qwencloud_thinking_budget(Some(EffortLevel::High)), 8_192);
+        assert_eq!(
+            qwencloud_thinking_budget(Some(EffortLevel::WhiteHot)),
+            16_384
+        );
+    }
+
+    #[test]
+    fn native_output_limit_never_executes_a_salvaged_tool_prefix() {
+        let raw =
+            serde_json::Value::String(r#"{"content":"<!DOCTYPE html>\n<html lang=\"en\""#.into());
+        let repaired = normalize_tool_arguments(raw.clone(), false);
+        assert!(
+            repaired.is_object(),
+            "ordinary malformed calls use recovery"
+        );
+
+        let blocked = normalize_tool_arguments(raw, true);
+        assert!(
+            blocked
+                .get(crate::TRUNCATED_TOOL_ARGS_KEY)
+                .and_then(|value| value.as_str())
+                .is_some(),
+            "a max-token stop is surfaced as an error instead of a partial write"
+        );
     }
 
     #[test]
@@ -1852,6 +2338,37 @@ mod tests {
     async fn discovery_timeout_passes_through_a_fast_result() {
         let ok = async { Ok::<u8, ProviderError>(7) };
         assert_eq!(with_discovery_timeout("x", ok).await.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn qwencloud_style_discovery_authenticates_and_namespaces_chat_models() {
+        let server = httpmock::MockServer::start();
+        let listing = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/compatible-mode/v1/models")
+                .header("authorization", "Bearer redacted-test-key");
+            then.status(200).json_body(json!({
+                "data": [
+                    {"id": "qwen3.8-max-preview"},
+                    {"id": "deepseek-v4-pro"},
+                    {"id": "wan2.7-image-pro"}
+                ]
+            }));
+        });
+
+        let endpoint = format!("{}/compatible-mode/v1/", server.base_url());
+        let models = list_custom_models_at("qwencloud", &endpoint, "redacted-test-key")
+            .await
+            .expect("authenticated OpenAI-compatible discovery should succeed");
+
+        listing.assert();
+        assert_eq!(
+            models,
+            vec![
+                "qwencloud::qwen3.8-max-preview".to_string(),
+                "qwencloud::deepseek-v4-pro".to_string(),
+            ]
+        );
     }
 
     // --- Per-provider error-classification contract tests ---

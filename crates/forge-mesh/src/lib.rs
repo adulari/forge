@@ -2932,11 +2932,12 @@ mod tests {
     }
 
     #[test]
-    fn cost_rank_treats_codex_oauth_and_xai_oauth_as_subscription() {
+    fn cost_rank_prefers_every_subscription_surface() {
         // Fix 1: `cost_rank` used to build its ranking key from forge-mesh's private
         // `is_subscription`, which only knew the three CLI bridges. Every call site (incl.
         // `cost_rank`) now delegates to the public `catalog::is_subscription`, which covers all
-        // five surfaces — so with `prefer_subscription` on, codex-oauth and xai-oauth must sort
+        // all subscription surfaces — so with `prefer_subscription` on, OAuth and API-key plans
+        // must sort
         // rank 0 (preferred), same as the CLI bridges, not rank 1 (behind) as before.
         let mut c = Config::default();
         c.mesh.prefer_subscription = true;
@@ -2947,6 +2948,7 @@ mod tests {
             "agy-cli::gemini-pro",
             "codex-oauth::gpt-5.6-sol",
             "xai-oauth::grok-4",
+            "qwencloud::qwen3.8-max-preview",
         ] {
             assert_eq!(
                 r.cost_rank(id).0,

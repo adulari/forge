@@ -1613,12 +1613,12 @@ pub struct MeshConfig {
     /// (use the provider default).
     #[serde(default = "default_max_output_tokens")]
     pub max_output_tokens: u32,
-    /// How aggressively to conserve metered API credits. Default = Normal (no restriction).
-    /// Frugal caps output tokens at 2048. Strict caps at 1024 AND restricts auto-routing + failover
-    /// to free + subscription models only — a paid, metered model (incl. a priced "free-tier" model
-    /// that could bill once its quota runs out) is dropped from the candidate set, so neither the
-    /// primary pick nor the failover chain can ever spend API credit without an explicit `--model`
-    /// pin. (Enforced in `HeuristicRouter::allowed_under_credit_mode`.)
+    /// How aggressively to conserve metered API credits. This changes routing policy only; it
+    /// never truncates a model response. Strict restricts auto-routing + failover to free +
+    /// subscription models — a paid, metered model (including a priced "free-tier" model that
+    /// could bill once its quota runs out) is dropped from the candidate set, so neither the
+    /// primary pick nor the failover chain can spend API credit without an explicit `--model` pin.
+    /// (Enforced in `HeuristicRouter::allowed_under_credit_mode`.)
     #[serde(default)]
     pub credit_mode: CreditMode,
     /// Auto-memory: capture durable facts (preferences/decisions/conventions) at the end of a turn
@@ -1656,13 +1656,10 @@ pub struct MeshConfig {
 }
 
 impl MeshConfig {
-    /// Effective per-completion output token cap, accounting for credit_mode overrides.
+    /// Effective per-completion output token cap. Credit conservation affects routing only; a
+    /// response limit exists solely when the user explicitly configures this field above zero.
     pub fn effective_max_output_tokens(&self) -> u32 {
-        match self.credit_mode {
-            CreditMode::Normal => self.max_output_tokens,
-            CreditMode::Frugal => self.max_output_tokens.min(2048),
-            CreditMode::Strict => self.max_output_tokens.min(1024),
-        }
+        self.max_output_tokens
     }
 }
 
@@ -1679,10 +1676,12 @@ fn default_auto_discover() -> bool {
     true
 }
 
-/// Default per-completion output cap. 8192 is comfortably above any single agent step's real
-/// output yet small enough that a free / low-credit account can afford it (avoids the 402 churn).
+/// Do not truncate model output unless the user explicitly configures a positive cap. Providers
+/// already enforce each model's native output limit; silently imposing a smaller Forge default can
+/// cut a structured tool call in the middle of its JSON payload and turn a valid large file write
+/// into a corrupt partial write.
 fn default_max_output_tokens() -> u32 {
-    8192
+    0
 }
 
 /// Default per-turn step cap (runaway guard). 100 model↔tool rounds is far above what a normal
@@ -3071,7 +3070,9 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "mesh.classifier_model" => "Model the llm classifier calls — pick a $0/local one (e.g. ollama::… or a CLI bridge).",
         "mesh.bridge_mcp_external" => "Connect external project MCP servers (dual-graph/helm/…) inside the CLI bridge. On by default; servers connect concurrently in the background with a timeout, so slow servers are skipped instead of stalling turns. Set false to disable. Forge core tools stay either way.",
         "mesh.prefer_subscription" => "Prefer $0 CLI-bridge subscriptions over a metered API model on a tie.",
-        "mesh.max_output_tokens" => "Cap on tokens a model may generate per call.",
+        "mesh.max_output_tokens" => {
+            "Explicit cap on tokens a model may generate per call (0 = provider/model maximum)."
+        }
         "mesh.architect_mode" => "Use a stronger 'architect' model to plan, a cheaper one to edit.",
         "mesh.architect_model" => "Model used for the architect/planning pass when architect_mode is on.",
         "mesh.editor_model" => "Model used to apply edits when architect_mode is on.",
@@ -3479,6 +3480,16 @@ pub struct CustomProvider {
 /// flag, and curated seed models — every key/discovery accessor chains this with
 /// [`PROVIDER_ENV_VARS`]. Add a provider by appending one row.
 pub const CUSTOM_OPENAI_PROVIDERS: &[CustomProvider] = &[
+    CustomProvider {
+        namespace: "qwencloud",
+        endpoint: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/",
+        env_var: "QWENCLOUD_API_KEY",
+        free: false,
+        label: "Qwen Cloud — individual Token Plan (Singapore)",
+        // Token-plan availability is subscription-specific; authenticated `/models` discovery is
+        // authoritative, so do not route to speculative fallback ids when discovery fails.
+        seed_models: &[],
+    },
     CustomProvider {
         namespace: "cerebras",
         endpoint: "https://api.cerebras.ai/v1/",
@@ -3993,6 +4004,9 @@ pub fn is_non_chat_model(id: &str) -> bool {
         "flux",
         "text-to-image",
         "image-generation",
+        // Alibaba Wan is a dedicated image/video generation family exposed beside Qwen chat
+        // models by Token Plan discovery.
+        "wan2.",
         // Audio / speech / TTS.
         "whisper",
         "voxtral",
@@ -4451,6 +4465,19 @@ enabled = false
     }
 
     #[test]
+    fn output_is_uncapped_by_default_and_credit_mode_never_changes_it() {
+        let mut mesh = Config::default().mesh;
+        assert_eq!(mesh.max_output_tokens, 0);
+        for mode in [CreditMode::Normal, CreditMode::Frugal, CreditMode::Strict] {
+            mesh.credit_mode = mode;
+            assert_eq!(mesh.effective_max_output_tokens(), 0);
+        }
+        mesh.max_output_tokens = 12_345;
+        mesh.credit_mode = CreditMode::Strict;
+        assert_eq!(mesh.effective_max_output_tokens(), 12_345);
+    }
+
+    #[test]
     fn config_accepts_anonymous_telemetry_opt_out() {
         let config: Config = Figment::from(Serialized::defaults(Config::default()))
             .merge(Toml::string("[telemetry]\nenabled = false"))
@@ -4886,6 +4913,8 @@ auto = "local"
             "openrouter::meta-llama/llama-guard-4-12b",
             "xai-oauth::grok-imagine-image",
             "xai-oauth::grok-imagine-video",
+            "qwencloud::wan2.7-image-pro",
+            "qwencloud::wan2.7-image",
         ] {
             assert!(is_non_chat_model(id), "{id} should be non-chat");
         }
@@ -4908,16 +4937,26 @@ auto = "local"
     #[test]
     fn custom_providers_are_known_and_seed_models() {
         let providers: Vec<_> = known_key_providers().collect();
-        for p in ["nvidia", "sambanova", "mistral", "cerebras"] {
+        for p in ["qwencloud", "nvidia", "sambanova", "mistral", "cerebras"] {
             assert!(providers.contains(&p), "{p} should be a known key provider");
             let cp = custom_provider(p).unwrap_or_else(|| panic!("{p} registered"));
-            assert!(cp.free, "{p} seeded as free");
-            assert!(!cp.seed_models.is_empty(), "{p} has seed models");
+            assert_eq!(cp.free, p != "qwencloud", "{p} free/paid classification");
+            assert_eq!(
+                cp.seed_models.is_empty(),
+                p == "qwencloud",
+                "{p} discovery/seed policy"
+            );
             assert!(
                 cp.endpoint.ends_with('/'),
                 "{p} endpoint has trailing slash"
             );
         }
+        let qwencloud = custom_provider("qwencloud").unwrap();
+        assert_eq!(
+            qwencloud.endpoint,
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/"
+        );
+        assert_eq!(qwencloud.env_var, "QWENCLOUD_API_KEY");
         // cohere is a native adapter, not a custom-endpoint provider.
         assert!(custom_provider("cohere").is_none());
     }
@@ -4925,6 +4964,7 @@ auto = "local"
     #[test]
     fn provider_for_env_var_reverses_the_mapping() {
         assert_eq!(provider_for_env_var("GROQ_API_KEY"), Some("groq"));
+        assert_eq!(provider_for_env_var("QWENCLOUD_API_KEY"), Some("qwencloud"));
         assert_eq!(provider_for_env_var("NVIDIA_API_KEY"), Some("nvidia"));
         assert_eq!(provider_for_env_var("MISTRAL_API_KEY"), Some("mistral"));
         assert_eq!(
@@ -5311,6 +5351,16 @@ reason = "no privilege escalation"
                 label: "".into(),
                 seed_models: vec![],
             },
+            // The temporary machine-local Qwen row used before the built-in integration must
+            // likewise lose to the reviewed endpoint while remaining removable from user config.
+            RuntimeCustomProvider {
+                namespace: "qwencloud".into(),
+                endpoint: "http://stale-local-registration/".into(),
+                env_var: "STALE_QWEN_KEY".into(),
+                free: true,
+                label: "".into(),
+                seed_models: vec!["stale-model".into()],
+            },
             // Collides with a NATIVE provider — also dropped.
             RuntimeCustomProvider {
                 namespace: "openai".into(),
@@ -5338,6 +5388,14 @@ reason = "no privilege escalation"
             find("cerebras").unwrap().endpoint,
             "https://api.cerebras.ai/v1/"
         );
+        let qwencloud = find("qwencloud").expect("built-in Qwen Cloud row survives collision");
+        assert_eq!(
+            qwencloud.endpoint,
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/"
+        );
+        assert_eq!(qwencloud.env_var, "QWENCLOUD_API_KEY");
+        assert!(!qwencloud.free);
+        assert!(qwencloud.seed_models.is_empty());
         // The native-provider collision was rejected (not added as a custom row).
         assert!(find("openai").is_none());
     }
