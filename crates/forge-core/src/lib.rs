@@ -4698,10 +4698,9 @@ prompt text, nothing else.";
         // `continue` would.
         let mut bridge_continue_nudges = 0usize;
         // Verification gate: when a bridge reports every task Done, completion is NOT accepted on
-        // its say-so — forge forces ONE tool-grounded verification turn (check the real state: git,
-        // gh, files) before the turn can end. Reset to false whenever work reopens, so each fresh
-        // "all done" claim is re-verified. This is the completion AUTHORITY: "done" means forge made
-        // the model prove it with tools, not that the model asserted it.
+        // its say-so. Fresh tool-grounded evidence newer than the last artifact mutation is enough;
+        // otherwise Forge requests a verification turn. This is the completion AUTHORITY: "done"
+        // means Forge observed proof, not merely that the model asserted it.
         // Verification attempts spent on the current "all done" claim. 0 = not yet verifying. The
         // gate forces the bridge to PROVE completion with a real inspection tool; a verification
         // turn that just re-marks `update_tasks` without inspecting doesn't count (the C8 hole — a
@@ -5713,11 +5712,11 @@ prompt text, nothing else.";
                     } else if !self.tasks.is_empty() {
                         // The bridge reports every task Done — but a self-reported status is exactly
                         // what produced the phantom release (claimed merged + tagged; nothing ran).
-                        // Force ONE tool-grounded verification turn when work changed external
-                        // state. A read-only completion is already evidenced by its inspection;
-                        // a reasoned no-op is accepted without demanding a meaningless edit.
-                        //   * If the turn ran an inspection, completion is accepted after the one
-                        //     verification turn also inspects.
+                        // Require fresh tool-grounded evidence when work changed external state.
+                        // A successful check newer than the last artifact mutation is accepted
+                        // immediately; otherwise the gate requests a verification turn.
+                        // A read-only completion is already evidenced by its inspection; a reasoned
+                        // no-op is accepted without demanding a meaningless edit.
                         //   * If the turn did NO inspectable work (a pure reasoning/analysis plan —
                         //     the deliverable is the answer text, there is no external state to
                         //     check), requiring a tool inspection would over-fire. Accept with a
@@ -5823,9 +5822,9 @@ prompt text, nothing else.";
                         )));
                     } else if !self.tasks.is_empty() {
                         // Every tracked task reported Done — same completion authority as the bridge:
-                        // don't accept the model's say-so, force ONE tool-grounded state check first.
-                        // A self-reported "done" without an inspection is exactly the phantom-completion
-                        // the bridge gate guards against; the direct path had no such guard before.
+                        // accept fresh evidence newer than the last mutation, otherwise request a
+                        // tool-grounded state check. A self-reported "done" without an inspection is
+                        // exactly the phantom-completion the bridge gate guards against.
                         let did_real_work =
                             inspect_ran.load(std::sync::atomic::Ordering::Relaxed) > 0;
                         // Unlike the bridge (which runs its whole tool loop INSIDE one `complete()`
@@ -16368,7 +16367,7 @@ mod tests {
         let answer = session.run_turn("finish it").await.unwrap();
 
         assert_eq!(answer, "finished and verified");
-        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 4);
         let events = events.lock().unwrap();
         assert!(events.iter().all(|event| {
             !matches!(event, PresenterEvent::Warning(message) | PresenterEvent::Error(message)
@@ -16419,10 +16418,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_completion_accepted_when_verification_runs_a_real_inspection() {
-        // "All tasks Done" must pass a tool-grounded verification turn. Here the bridge runs an
-        // inspection tool (shell) on the verification turn → genuinely verified → accept after
-        // exactly 2 invocations (the claim + the verifying check).
+    async fn bridge_completion_accepts_fresh_inspection_without_a_redundant_turn() {
+        // "All tasks Done" must have fresh tool-grounded evidence. Here the bridge runs an
+        // inspection tool (shell) in the same turn as its completion claim, so the claim is already
+        // genuinely verified and no redundant second invocation is needed.
         let provider = Arc::new(BridgeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
             inspect_calls: usize::MAX, // emits a `shell` ToolStarted each turn = a real inspection
@@ -16436,8 +16435,8 @@ mod tests {
         assert_eq!(answer, "working");
         assert_eq!(
             provider.calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "an inspected verification is accepted after exactly one verification turn"
+            1,
+            "fresh evidence in the completion turn must be accepted immediately"
         );
         assert_eq!(
             events
@@ -16502,12 +16501,46 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_completion_flagged_unverified_when_work_done_but_never_re_checked() {
-        // The C8 hole, properly scoped: the turn DID real work (inspect_calls: 1 → a tool ran on the
-        // first turn), then claimed done but never re-inspected on verification. Forge forces the
-        // verification cap and ends LOUDLY flagging UNVERIFIED — never a silent success.
-        let provider = Arc::new(BridgeProvider {
+        // The C8 hole, properly scoped: the turn DID mutate an artifact, then claimed done but
+        // never inspected it. Forge forces the verification cap and ends LOUDLY flagging
+        // UNVERIFIED — never a silent success. A plain `git status` inspection is deliberately not
+        // used here: fresh inspection evidence should now be accepted without a redundant pass.
+        struct MutatingBridgeWithoutVerification {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl Provider for MutatingBridgeWithoutVerification {
+            async fn complete(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolSpec],
+                on_event: &mut forge_provider::EventSink<'_>,
+            ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+                let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    on_event(StreamEvent::ToolStarted {
+                        name: "write_file".into(),
+                        args: r#"{"path":"artifact.txt","content":"changed"}"#.into(),
+                    });
+                    on_event(StreamEvent::ToolFinished {
+                        name: "write_file".into(),
+                        ok: true,
+                        summary: "wrote artifact.txt".into(),
+                    });
+                }
+                on_event(StreamEvent::Text("working".into()));
+                Ok(forge_provider::ModelResponse {
+                    content: "working".into(),
+                    tool_calls: vec![],
+                    usage: forge_types::Usage::default(),
+                    quotas: Vec::new(),
+                })
+            }
+        }
+
+        let provider = Arc::new(MutatingBridgeWithoutVerification {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            inspect_calls: 1, // real work on turn 1, no inspection on the verification turns
         });
         let (store, mut session) = bridge_session(provider.clone());
         let capture = CapturePresenter::default();
@@ -17940,9 +17973,11 @@ mod tests {
             completion_gate(1, MAX, false, false, false),
             CompletionGate::AcceptNoArtifacts
         );
+        // Fresh tool-grounded evidence newer than the last artifact mutation is already the proof
+        // the gate would request; do not force a redundant model pass after `update_tasks`.
         assert_eq!(
             completion_gate(0, MAX, true, false, true),
-            CompletionGate::Reverify
+            CompletionGate::AcceptClean
         );
         assert_eq!(
             completion_gate(1, MAX, true, false, true),

@@ -1031,17 +1031,23 @@ fn classify_status(
     let provider_message = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|value| {
-            value
-                .get("error")
-                .unwrap_or(&value)
+            let error = value.get("error").unwrap_or(&value);
+            error
                 .get("message")
+                .or_else(|| value.get("message"))
+                .or_else(|| error.get("detail"))
+                .or_else(|| value.get("detail"))
                 .and_then(|message| message.as_str())
                 .map(str::to_string)
         });
     let message = short(provider_message.as_deref().unwrap_or(&message));
     // A permanent incapability (no tool support / unaffordable) regardless of status code: 402
     // is always "can't afford", and 400/404 bodies often carry "tool calling not supported".
-    if code == 402 || is_capability_failure(body) || is_capability_failure(&message) {
+    if code == 402
+        || model_endpoint_is_missing(code, body)
+        || is_capability_failure(body)
+        || is_capability_failure(&message)
+    {
         return ProviderError::Capability(message);
     }
     match code {
@@ -1053,6 +1059,21 @@ fn classify_status(
         500..=599 => ProviderError::Unavailable(message),
         _ => ProviderError::Request(message),
     }
+}
+
+/// NVIDIA's hosted NIM catalog maps model ids to account-scoped NVCF function ids. Catalog churn
+/// can leave a cached model pointing at a removed function; the endpoint then returns a 404 such
+/// as `Function '<uuid>': Not found for account '<id>'`. That is a model-specific incapability,
+/// not a malformed turn: bench this stale model and let the mesh try another candidate.
+fn model_endpoint_is_missing(code: u16, body: &str) -> bool {
+    if code != 404 {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("not found for account")
+        && (lower.contains("function '")
+            || lower.contains("function \"")
+            || lower.contains("model"))
 }
 
 /// Classify from a free-text error (the streaming case, where genai gives no typed status).
@@ -1163,6 +1184,18 @@ fn qwencloud_thinking_budget(effort: Option<EffortLevel>) -> u32 {
     }
 }
 
+/// Whether to attach OpenAI's optional cache-sharding hint to this request.
+///
+/// NVIDIA NIM enables prefix caching at the deployment/server layer and rejects
+/// `prompt_cache_key` as an unknown body field. Sending it there adds a guaranteed failed request
+/// before every useful completion (the hosted endpoint may take close to a minute to return that
+/// validation response). Other OpenAI-compatible endpoints remain optimistic and retain the
+/// narrow validation fallback below, which is required for custom endpoints whose capabilities
+/// cannot be known ahead of time.
+fn should_send_prompt_cache_key(model: &str) -> bool {
+    !matches!(model.split_once("::"), Some(("nvidia", _)))
+}
+
 fn normalize_tool_arguments(
     raw: serde_json::Value,
     output_limit_reached: bool,
@@ -1229,11 +1262,14 @@ impl Provider for GenAiProvider {
                 "thinking_budget": qwencloud_thinking_budget(opts.effort),
             }));
         }
-        // Keep repeated prefixes in the same provider-side cache shard for every API-backed
-        // OpenAI-compatible model (native or custom). Providers that implement automatic prefix
-        // caching can ignore the hint; compatible providers that expose `prompt_cache_key` use the
-        // stable Forge session id supplied by the core.
-        if let Some(cache_key) = opts.prompt_cache_key.as_deref() {
+        // Keep repeated prefixes in the same provider-side cache shard when the endpoint exposes
+        // that control. Known server-managed caches (NVIDIA NIM) deliberately omit the field;
+        // unknown/custom compatible endpoints stay optimistic and use the narrow fallback below.
+        if let Some(cache_key) = opts
+            .prompt_cache_key
+            .as_deref()
+            .filter(|_| should_send_prompt_cache_key(&model_name))
+        {
             options = options.with_prompt_cache_key(cache_key);
         }
 
@@ -2182,6 +2218,30 @@ mod tests {
         let bad = classify_status(400, "x".into(), "", None);
         assert!(matches!(bad, ProviderError::Request(_)));
         assert!(!bad.is_retryable());
+    }
+
+    #[test]
+    fn nvidia_missing_function_is_a_model_capability_failure() {
+        let body = r#"{"status":404,"title":"Not Found","detail":"Function '23d4f03a-b8a6-4adb-a183-7daa083a09cc': Not found for account 'acct'"}"#;
+        let error = classify_status(404, "HTTP error".into(), body, None);
+
+        assert!(matches!(error, ProviderError::Capability(_)));
+        assert!(error.is_permanent());
+        assert!(error.is_retryable(), "the mesh must try another model");
+        assert!(
+            error.to_string().contains("Function '23d4f03a"),
+            "the provider's detail should survive instead of collapsing to HTTP error: {error}"
+        );
+    }
+
+    #[test]
+    fn prompt_cache_key_is_capability_gated_for_nvidia_nim() {
+        assert!(!should_send_prompt_cache_key("nvidia::z-ai/glm-5.2"));
+        assert!(should_send_prompt_cache_key(
+            "qwencloud::qwen3.8-max-preview"
+        ));
+        assert!(should_send_prompt_cache_key("openai::gpt-5.4"));
+        assert!(should_send_prompt_cache_key("custom::strict-gateway"));
     }
 
     #[test]
