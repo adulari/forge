@@ -59,6 +59,39 @@ async function main() {
         + legacyMarker,
     )
     : source;
+  const scopeBridge = `
+window.__FORGE_NATIVE_STATE__ ??= () => {
+  if (typeof S !== 'undefined') return S;
+  if (typeof game !== 'undefined') return game;
+  if (typeof G !== 'undefined') return G;
+  if (typeof state !== 'undefined' && typeof state !== 'function') return state;
+  return null;
+};
+window.__FORGE_NATIVE_SELECT_MOVE__ ??= (unit, x, y) => {
+  const native = window.__FORGE_NATIVE_STATE__?.();
+  if (Array.isArray(native?.selection) && typeof setOrder === 'function') {
+    for (const selected of native.selection) selected.selected = false;
+    native.selection.splice(0, native.selection.length, unit);
+    unit.selected = true;
+    setOrder([unit], 'move', x, y);
+    return true;
+  }
+  if (Array.isArray(native?.selected) && typeof commandMove === 'function') {
+    native.selected.splice(0, native.selected.length, unit.id);
+    commandMove([unit], x, y);
+    return true;
+  }
+  return false;
+};
+`;
+  const closingScript = sourceWithLegacyExports.lastIndexOf('</script>');
+  const closingIife = closingScript < 0
+    ? -1
+    : sourceWithLegacyExports.lastIndexOf('})();', closingScript);
+  const sourceWithScopeExports = closingIife < 0
+    ? sourceWithLegacyExports
+    : `${sourceWithLegacyExports.slice(0, closingIife)}${scopeBridge}`
+      + sourceWithLegacyExports.slice(closingIife);
   const adapter = `<script>
 (() => {
   const value = (name, fallback) => {
@@ -66,15 +99,24 @@ async function main() {
     catch (_) { return fallback; }
   };
   const state = () => {
-    const native = window.__FORGE_NATIVE_STATE__?.() ?? value('S', null);
+    const native = window.__FORGE_NATIVE_STATE__?.()
+      ?? value('S', null)
+      ?? value('game', null)
+      ?? value('G', null);
     const currentUnits = native?.units ?? value('units', []);
     const currentBuildings = native?.buildings ?? value('buildings', []);
     const currentFields = native?.crystals ?? value('resources', []);
     const currentNodes = native?.nodes ?? value('nodes', []);
-    const currentSelection = native?.selected ?? value('selection', []);
-    const isPaused = Boolean(native?.mode === 'paused' || value('paused', false));
-    const isEnded = Boolean(native?.mode === 'ended' || value('ended', false));
-    const isRunning = Boolean(native?.mode === 'play' || value('running', false));
+    const currentSelection = native?.selected ?? native?.selection ?? value('selection', []);
+    const isPaused = Boolean(
+      native?.mode === 'paused' || native?.paused || value('paused', false)
+    );
+    const isEnded = Boolean(
+      native?.mode === 'ended' || native?.ended || value('ended', false)
+    );
+    const isRunning = Boolean(
+      native?.mode === 'play' || native?.running || value('running', false)
+    );
     const own = value('player', null);
     const enemy = value('enemy', null);
     return {
@@ -85,11 +127,17 @@ async function main() {
       fields: currentFields,
       nodes: currentNodes,
       selectedCount: currentSelection.length,
-      credits: native?.credits ?? [own?.credits ?? 0, enemy?.credits ?? 0],
+      credits: native?.credits
+        ?? native?.resources
+        ?? [own?.credits ?? 0, enemy?.credits ?? 0],
     };
   };
   const selectMove = (unit, x, y) => {
     const native = window.__FORGE_NATIVE_STATE__?.() ?? value('S', null);
+    if (typeof window.__FORGE_NATIVE_SELECT_MOVE__ === 'function'
+      && window.__FORGE_NATIVE_SELECT_MOVE__(unit, x, y)) {
+      return true;
+    }
     if (typeof window.__FORGE_NATIVE_MOVE__ === 'function') {
       native.selected = [unit.id];
       window.__FORGE_NATIVE_MOVE__(unit, x, y);
@@ -108,20 +156,31 @@ async function main() {
       issueMoveFn(x, y);
       return true;
     }
+    const nativeSelection = native?.selection;
+    const setOrderFn = value('setOrder', null);
+    if (Array.isArray(nativeSelection) && typeof setOrderFn === 'function') {
+      for (const selected of nativeSelection) selected.selected = false;
+      nativeSelection.splice(0, nativeSelection.length, unit);
+      unit.selected = true;
+      setOrderFn([unit], 'move', x, y);
+      return true;
+    }
     return false;
   };
   const selfCheck = () => {
-    const check = window.__AETHERFRONT_SELF_CHECK__ ?? window.Aetherfront?.selfCheck;
-    return typeof check === 'function'
-      ? check()
-      : { ok: false, errors: ['missing embedded Aetherfront self-check'] };
+    const check = window.__AETHERFRONT_SELF_CHECK__
+      ?? window.AETHERFRONT_SELF_CHECK
+      ?? window.Aetherfront?.selfCheck;
+    if (typeof check === 'function') return check();
+    if (check && typeof check === 'object') return check;
+    return { ok: false, errors: ['missing embedded Aetherfront self-check'] };
   };
   window.__FORGE_AETHERFRONT_ADAPTER__ = { state, selectMove, selfCheck };
 })();
 </script>`;
-  const instrumented = sourceWithLegacyExports.includes('</body>')
-    ? sourceWithLegacyExports.replace('</body>', `${adapter}</body>`)
-    : `${sourceWithLegacyExports}${adapter}`;
+  const instrumented = sourceWithScopeExports.includes('</body>')
+    ? sourceWithScopeExports.replace('</body>', `${adapter}</body>`)
+    : `${sourceWithScopeExports}${adapter}`;
   fs.writeFileSync(instrumentedPath, instrumented);
   const client = await connect();
   const { Page, Runtime, Log } = client;
@@ -193,6 +252,10 @@ async function main() {
 
   const running = await evaluate(`(() => {
     const adapter = window.__FORGE_AETHERFRONT_ADAPTER__;
+    const canvas = ['game', 'world', 'field', 'gameCanvas']
+      .map(id => document.getElementById(id))
+      .find(element => element instanceof HTMLCanvasElement)
+      ?? document.querySelector('canvas');
     let state = adapter.state();
     const player = state.units.find(unit => (unit.team ?? unit.side) === 0);
     if (player) adapter.selectMove(player, player.x + 80, player.y + 40);
@@ -201,14 +264,15 @@ async function main() {
     const pauseButton = document.getElementById('menuBtn') ?? document.getElementById('pauseBtn');
     pauseButton?.click();
     state = adapter.state();
-    const pauseScreen = document.getElementById('pause');
+    const pauseScreen = document.getElementById('pause')
+      ?? document.getElementById('pauseMenu');
     const pauseVisible = Boolean(pauseScreen
       && getComputedStyle(pauseScreen).display !== 'none'
       && getComputedStyle(pauseScreen).visibility !== 'hidden');
     const paused = state.mode === 'paused' && pauseVisible;
     document.getElementById('resumeBtn').click();
     state = adapter.state();
-    document.getElementById('game').dispatchEvent(new PointerEvent('pointermove', {
+    canvas?.dispatchEvent(new PointerEvent('pointermove', {
       clientX: innerWidth / 2,
       clientY: innerHeight / 2,
       bubbles: true
@@ -234,7 +298,7 @@ async function main() {
         const hud = document.getElementById('gameScreen') ?? document.getElementById('hud');
         return Boolean(hud && getComputedStyle(hud).display !== 'none');
       })(),
-      canvas: [document.getElementById('game').width, document.getElementById('game').height],
+      canvas: [canvas?.width ?? 0, canvas?.height ?? 0],
       resources: state.credits,
     };
   })()`);
@@ -268,6 +332,8 @@ async function main() {
     && running.selected === 1
     && running.titleHidden
     && running.hudVisible
+    && running.canvas[0] > 0
+    && running.canvas[1] > 0
     && errors.length === 0;
   const report = { valid, ...result };
   fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);

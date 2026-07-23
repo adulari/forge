@@ -21,3 +21,22 @@ simulation advance, both armies, economy/world entities, pause/resume, selection
 visible HUD, and zero runtime exceptions. The HTML, screenshot, TUI timeline, and session are
 retained as `aetherfront-20260723T025111Z-1833126` in Forge's persistent `manual-e2e-runs/`
 directory.
+
+## Second verified unpinned-mesh result (2026-07-23)
+
+A second fresh run produced another distinct 46.5 KB implementation through an unpinned Codex
+mesh, using two parent models plus independent `game-designer` and `qa-reviewer` children. Forge
+preserved an eight-minute child provider wait with an explicit no-event warning, then completed a
+13,006-byte `write_file` and four coherent `append_file` operations without truncation or malformed
+JSON. All 23 parent and 1 child tool executions were OK; usage recorded 25.4k output tokens and
+215.7k cached input tokens.
+
+The first outer browser run exposed verifier overfitting rather than a game defect: this game keeps
+state in an IIFE-local `game`, exports `window.AETHERFRONT_SELF_CHECK`, uses `#field` for its Canvas,
+and names its pause overlay `#pauseMenu`. The verifier now injects a scope-local behavior adapter,
+accepts object or function self-checks, normalizes selection/movement and overlay variants, and
+requires a nonzero Canvas. Both the committed reference and the new game independently pass with
+live simulation advancement, both armies, 6 building types, 8 crystal fields, exactly 3 control
+points, pause/resume, selection/movement, tutorial behavior, a 1440×757 Canvas, and zero browser
+exceptions. The playable result, screenshot, reports, session, and timeline are retained as
+`aetherfront-20260723T034609Z-1910381` in Forge's persistent `manual-e2e-runs/` directory.
