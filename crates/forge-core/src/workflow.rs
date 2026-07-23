@@ -886,9 +886,18 @@ mod tests {
 
         assert!(ok);
         assert_eq!(value, serde_json::Value::String("child done".to_string()));
-        assert_eq!(evs.len(), 2, "one Start + one Done event");
+        assert_eq!(
+            evs.len(),
+            3,
+            "one Start + one model-wait Progress + one Done event"
+        );
         assert!(matches!(evs[0], WorkflowEvent::AgentStart { .. }));
-        assert!(matches!(evs[1], WorkflowEvent::AgentDone { ok: true, .. }));
+        assert!(matches!(
+            &evs[1],
+            WorkflowEvent::AgentProgress { snippet, .. }
+                if snippet.contains("waiting for `openai::gpt-test`")
+        ));
+        assert!(matches!(evs[2], WorkflowEvent::AgentDone { ok: true, .. }));
     }
 
     #[tokio::test]

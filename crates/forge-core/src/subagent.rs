@@ -505,6 +505,11 @@ async fn run_agent_loop(
         // Forward the child's streamed deltas so the orchestrator can show live per-child
         // activity (RFC subagent-orchestration Phase 3b), with transparent failover.
         let mut resp = loop {
+            on_delta(StreamEvent::Reasoning(format!(
+                "model step {}/{}: waiting for `{active_model}`",
+                step + 1,
+                max_steps
+            )));
             let activity = Arc::new(std::sync::atomic::AtomicU64::new(0));
             let sink_activity = Arc::clone(&activity);
             let mut sink = |ev: StreamEvent| {
@@ -568,6 +573,12 @@ async fn run_agent_loop(
         }
 
         for call in &resp.tool_calls {
+            on_delta(StreamEvent::Reasoning(format!(
+                "model step {}/{}: running tool `{}`",
+                step + 1,
+                max_steps,
+                call.name
+            )));
             let result = if call.name == SPAWN_AGENTS_TOOL && can_recurse {
                 // The child delegates further: recurse one level deeper (bounded by max_depth).
                 // Grandchildren aren't shown in the live panel — they roll up into this result.
@@ -580,7 +591,19 @@ async fn run_agent_loop(
             // workflow run: an agent's first read_file errored on a bad path, it recovered by
             // reading the right file and answering well — the old latch still marked it ✗, while
             // siblings that failed without ever touching a tool showed ✓.)
-            ok = !tool_result_failed(&result);
+            let failed = tool_result_failed(&result);
+            ok = !failed;
+            on_delta(StreamEvent::Reasoning(format!(
+                "model step {}/{}: tool `{}` {}",
+                step + 1,
+                max_steps,
+                call.name,
+                if failed {
+                    "failed; continuing"
+                } else {
+                    "finished"
+                }
+            )));
             ctx.store.add_message_full(
                 child_id,
                 next_seq(),
@@ -1376,6 +1399,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
+                .any(|line| line.contains("waiting for `stalled::model`")),
+            "the live activity row should identify the provider being awaited"
+        );
+        assert!(
+            progress
+                .lock()
+                .unwrap()
+                .iter()
                 .any(|line| line.contains("failing over to `good::model`")),
             "the live activity row should explain the automatic failover"
         );
@@ -1456,7 +1487,13 @@ mod tests {
             tier: None,
             pinned_model: None,
         };
-        let mut sink = |_: StreamEvent| {};
+        let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = Arc::clone(&progress);
+        let mut sink = move |event: StreamEvent| {
+            if let StreamEvent::Reasoning(text) = event {
+                captured.lock().unwrap().push(text);
+            }
+        };
         let decision = route_child(&ctx, &agent, BudgetState::default()).await;
         let out = run_subagent(
             &ctx,
@@ -1472,6 +1509,25 @@ mod tests {
         assert!(
             out.ok,
             "one failed tool call followed by a successful one is a recovery, not a failed child"
+        );
+        let progress = progress.lock().unwrap();
+        assert!(
+            progress
+                .iter()
+                .any(|line| line.contains("running tool `read_file`")),
+            "the live activity row should identify child tools while they run"
+        );
+        assert!(
+            progress
+                .iter()
+                .any(|line| line.contains("tool `read_file` failed; continuing")),
+            "recoverable child tool failures should be visible"
+        );
+        assert!(
+            progress
+                .iter()
+                .any(|line| line.contains("tool `read_file` finished")),
+            "successful child tool recovery should be visible"
         );
     }
 
