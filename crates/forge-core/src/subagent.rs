@@ -496,6 +496,7 @@ async fn run_agent_loop(
     // child whose model rate-limits/stalls doesn't kill the whole spawn.
     let failover_enabled = ctx.config.mesh.failover;
     let default_cooldown = std::time::Duration::from_secs(ctx.config.mesh.failover_cooldown_secs);
+    let stream_idle = std::time::Duration::from_secs(ctx.config.mesh.stream_idle_timeout_secs);
     let mut chain = decision.fallbacks.clone().into_iter();
     let mut active_model = decision.model.clone();
 
@@ -504,12 +505,16 @@ async fn run_agent_loop(
         // Forward the child's streamed deltas so the orchestrator can show live per-child
         // activity (RFC subagent-orchestration Phase 3b), with transparent failover.
         let mut resp = loop {
-            let mut sink = |ev: StreamEvent| on_delta(ev);
-            match ctx
+            let activity = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let sink_activity = Arc::clone(&activity);
+            let mut sink = |ev: StreamEvent| {
+                sink_activity.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                on_delta(ev);
+            };
+            let completion = ctx
                 .provider
-                .complete(&active_model, &transcript, &specs, &mut sink)
-                .await
-            {
+                .complete(&active_model, &transcript, &specs, &mut sink);
+            match crate::stream_with_idle_timeout(completion, &activity, stream_idle).await {
                 Ok(r) => break r,
                 Err(e) if failover_enabled && e.is_retryable() => {
                     let _ = ctx.store.bench_for(
@@ -519,6 +524,9 @@ async fn run_agent_loop(
                     );
                     match chain.next() {
                         Some(next) => {
+                            on_delta(StreamEvent::Reasoning(format!(
+                                "provider `{active_model}` failed ({e}); failing over to `{next}`"
+                            )));
                             tracing::debug!("subagent failover {active_model} -> {next}: {e}");
                             active_model = next;
                             continue;
@@ -1288,6 +1296,95 @@ mod tests {
         assert!(
             store.current_benched().unwrap().is_benched("bad::model"),
             "the rate-limited model was benched"
+        );
+    }
+
+    struct StalledThenGoodProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for StalledThenGoodProvider {
+        async fn complete(
+            &self,
+            model: &str,
+            _messages: &[forge_types::Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            if model == "stalled::model" {
+                std::future::pending().await
+            } else {
+                Ok(forge_provider::ModelResponse {
+                    content: "child recovered after stall".into(),
+                    tool_calls: vec![],
+                    usage: forge_types::Usage::default(),
+                    quotas: Vec::new(),
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_idle_stream_watchdog_fails_over_instead_of_hanging() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let child = store
+            .create_child_session(".", "default", "parent")
+            .unwrap();
+        let router = Arc::new(FixedRouter {
+            model: "stalled::model".into(),
+            fallbacks: vec!["good::model".into()],
+        });
+        let mut ctx = ctx_with(
+            Arc::new(StalledThenGoodProvider),
+            router,
+            Arc::clone(&store),
+        );
+        ctx.config.mesh.stream_idle_timeout_secs = 1;
+        let agent = ResolvedAgent {
+            name: "general".into(),
+            task: "inspect the package".into(),
+            system_prompt: "you are a subagent".into(),
+            tools: Vec::new(),
+            tier: None,
+            pinned_model: None,
+        };
+        let progress = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = Arc::clone(&progress);
+        let mut sink = move |event: StreamEvent| {
+            if let StreamEvent::Reasoning(text) = event {
+                captured.lock().unwrap().push(text);
+            }
+        };
+        let decision = route_child(&ctx, &agent, BudgetState::default()).await;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_subagent(
+                &ctx,
+                &child,
+                &agent,
+                decision,
+                BudgetState::default(),
+                &mut sink,
+            ),
+        )
+        .await
+        .expect("subagent watchdog must bound a silent provider")
+        .expect("subagent must recover through its fallback");
+        assert!(out.ok);
+        assert_eq!(out.final_text, "child recovered after stall");
+        assert!(
+            progress
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|line| line.contains("failing over to `good::model`")),
+            "the live activity row should explain the automatic failover"
+        );
+        assert!(
+            store
+                .current_benched()
+                .unwrap()
+                .is_benched("stalled::model"),
+            "the stalled model must be benched"
         );
     }
 
