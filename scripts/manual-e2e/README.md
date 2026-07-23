@@ -46,3 +46,24 @@ screenshot.
 
 Provider-backed runs consume real quota. The default is mesh-unpinned; set `FORGE_BIN`, not a model,
 when comparing development binaries so routing and failover remain part of the test.
+
+## Provider cache probe
+
+`cache_session_probe.js` runs two real headless turns against one explicitly selected model. The
+first turn sends a long, meaningful stable prefix; the second resumes the same Forge session and
+checks exact responses, session identity, usage telemetry, and provider-reported cached input. Its
+JSON report is retained beside the run under `scripts/.manual-e2e-out/`.
+
+```bash
+FORGE_BIN=/home/floris/.local/bin/forge \
+  scripts/manual-e2e/cache_session_probe.js qwencloud::qwen3.8-max-preview --require-cache-hit
+
+scripts/manual-e2e/cache_session_probe.js \
+  nvidia::nvidia/nemotron-3-super-120b-a12b
+
+scripts/manual-e2e/cache_session_probe.js gemini::gemini-3.5-flash --require-cache-hit
+```
+
+Use `--require-cache-hit` only where the provider exposes cache-read accounting. Without that flag,
+the probe still requires two successful resumed turns and complete usage telemetry, while recording
+zero if an otherwise compatible provider does not report cache hits.
