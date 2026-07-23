@@ -92,7 +92,17 @@ case "$SCENARIO" in
     (cd "$WORKSPACE" && python3 -m unittest discover -v)
     ;;
   go-ordered-pipeline)
-    (cd "$WORKSPACE" && gofmt -d pipeline/pipeline.go && go vet ./... && go test -race ./...)
+    (
+      cd "$WORKSPACE"
+      UNFORMATTED="$(gofmt -l pipeline/pipeline.go)"
+      if [[ -n "$UNFORMATTED" ]]; then
+        echo "gofmt required for:" >&2
+        echo "$UNFORMATTED" >&2
+        exit 1
+      fi
+      go vet ./...
+      go test -race ./...
+    )
     ;;
   typescript-config-recovery)
     (cd "$WORKSPACE" && npm test && npm run lint)
