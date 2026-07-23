@@ -374,6 +374,7 @@ enum TurnPhase {
     #[default]
     Preparing,
     ContactingModel,
+    ReceivingProvider,
     Reasoning,
     Responding,
     RunningTool,
@@ -390,6 +391,7 @@ impl TurnPhase {
         match self {
             Self::Preparing => "preparing turn",
             Self::ContactingModel => "waiting for model",
+            Self::ReceivingProvider => "receiving provider stream",
             Self::Reasoning => "model reasoning",
             Self::Responding => "streaming response",
             Self::RunningTool => "running tool",
@@ -406,6 +408,7 @@ impl TurnPhase {
         match self {
             Self::Preparing => "preparing…",
             Self::ContactingModel => "waiting for model…",
+            Self::ReceivingProvider => "receiving…",
             Self::Reasoning => "reasoning…",
             Self::Responding => "responding…",
             Self::RunningTool => "running tool…",
@@ -434,6 +437,7 @@ struct TurnActivity {
     reasoning_chars: usize,
     auxiliary_chars: usize,
     response_chars: usize,
+    provider_events: usize,
     tool_calls: usize,
 }
 
@@ -1885,6 +1889,18 @@ impl App {
                     format!(
                         "provider request for model-loop step {} sent; waiting for the first event",
                         step + 1
+                    ),
+                );
+            }
+            PresenterEvent::ProviderProgress => {
+                self.model_search = None;
+                self.turn_activity.provider_events =
+                    self.turn_activity.provider_events.saturating_add(1);
+                self.set_turn_activity(
+                    TurnPhase::ReceivingProvider,
+                    format!(
+                        "provider stream active; {} buffered event(s) received",
+                        self.turn_activity.provider_events
                     ),
                 );
             }
@@ -4274,6 +4290,13 @@ fn render_turn_activity(frame: &mut Frame, area: Rect, app: &App) {
                     "answer {} chars",
                     human(app.turn_activity.response_chars as u64)
                 ),
+                Style::default().fg(DIM),
+            ));
+        }
+        if app.turn_activity.provider_events > 0 {
+            spans.push(Span::styled("  ·  ", Style::default().fg(SEPCOL)));
+            spans.push(Span::styled(
+                format!("{} buffered events", app.turn_activity.provider_events),
                 Style::default().fg(DIM),
             ));
         }
@@ -8857,6 +8880,30 @@ mod tests {
             text.contains("event now"),
             "stream heartbeat is live: {text}"
         );
+    }
+
+    #[test]
+    fn buffered_provider_events_keep_large_tool_stream_visibly_alive() {
+        let mut app = App::default();
+        app.on_turn_start();
+        app.busy = true;
+        app.apply(PresenterEvent::ProviderRequest {
+            model: "qwencloud::qwen3.8-max-preview".into(),
+            step: 1,
+        });
+        app.apply(PresenterEvent::ProviderProgress);
+        app.apply(PresenterEvent::ProviderProgress);
+
+        let text = screen_wh(&app, 150, LIVE_H);
+        assert!(
+            text.contains("receiving provider stream"),
+            "buffered stream phase: {text}"
+        );
+        assert!(
+            text.contains("2 buffered events"),
+            "provider heartbeat count: {text}"
+        );
+        assert!(text.contains("event now"), "stream is visibly live: {text}");
     }
 
     #[test]

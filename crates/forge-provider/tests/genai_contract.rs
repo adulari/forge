@@ -68,7 +68,9 @@ async fn streaming_accumulates_deltas_and_usage() {
 async fn tool_call_is_translated() {
     let server = MockServer::start_async().await;
     let body = concat!(
-        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"Cargo.toml\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
         "data: [DONE]\n\n",
     );
@@ -83,12 +85,17 @@ async fn tool_call_is_translated() {
         schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
     }];
     let provider = GenAiProvider::with_client(client_pointed_at(server.base_url()));
+    let mut provider_activity = 0usize;
     let res = provider
         .complete(
             "openai::gpt-4o-mini",
             &[Message::user("read it")],
             &tools,
-            &mut |_| {},
+            &mut |event| {
+                if event == StreamEvent::ProviderActivity {
+                    provider_activity += 1;
+                }
+            },
         )
         .await
         .expect("complete should succeed");
@@ -99,6 +106,10 @@ async fn tool_call_is_translated() {
     assert_eq!(call.id, "call_abc");
     assert_eq!(call.name, "read_file");
     assert_eq!(call.args["path"], "Cargo.toml");
+    assert!(
+        provider_activity >= 3,
+        "every buffered tool-argument delta should keep the caller's watchdog alive"
+    );
 }
 
 #[tokio::test]

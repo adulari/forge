@@ -154,6 +154,8 @@ impl Presenter for HeadlessPresenter {
             // Interactive surfaces use this exact request boundary for their live heartbeat.
             // Headless already printed the route and streams the next provider event directly.
             PresenterEvent::ProviderRequest { .. } => {}
+            // Content-free heartbeat used only by interactive progress surfaces.
+            PresenterEvent::ProviderProgress => {}
             PresenterEvent::AssistantText(text) => {
                 println!("\n{text}");
             }

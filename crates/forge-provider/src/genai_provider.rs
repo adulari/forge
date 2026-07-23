@@ -1547,8 +1547,15 @@ impl Provider for GenAiProvider {
             match event {
                 ChatStreamEvent::Chunk(chunk) => {
                     emitted_output = true;
-                    content.push_str(&chunk.content);
-                    on_event(StreamEvent::Text(chunk.content.clone()));
+                    if chunk.content.is_empty() {
+                        // OpenAI-compatible function-argument deltas are represented by genai as
+                        // empty text chunks while it accumulates their native payload internally.
+                        // Count them as provider progress instead of fake zero-length answer text.
+                        on_event(StreamEvent::ProviderActivity);
+                    } else {
+                        content.push_str(&chunk.content);
+                        on_event(StreamEvent::Text(chunk.content.clone()));
+                    }
                 }
                 ChatStreamEvent::ReasoningChunk(chunk) => {
                     emitted_output = true;
@@ -1589,7 +1596,11 @@ impl Provider for GenAiProvider {
                             .collect();
                     }
                 }
-                _ => {}
+                // genai buffers provider-native tool-call argument deltas until `End`, where the
+                // complete JSON is decoded above. They still prove the connection is making
+                // progress; forward a content-free heartbeat so forge-core's independent idle
+                // watchdog does not mistake a long, healthy tool argument for a dead stream.
+                _ => on_event(StreamEvent::ProviderActivity),
             }
         }
 

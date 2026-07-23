@@ -710,6 +710,12 @@ impl ModelResponse {
 /// the answer but the model's *reasoning* and (for the agentic CLI bridge) its tool activity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
+    /// A provider-native stream event arrived but does not yet form user-visible text, reasoning,
+    /// or a complete tool call. OpenAI-compatible adapters can stream a large function argument
+    /// through many such deltas while buffering it for safe end-of-stream JSON decoding. Keeping
+    /// this private heartbeat separate prevents the core idle watchdog from aborting healthy
+    /// large tool calls without ever exposing or executing partial arguments.
+    ProviderActivity,
     /// A delta of the assistant's answer text (accumulates into [`ModelResponse::content`]).
     Text(String),
     /// A delta of the model's reasoning/thinking — shown live but NOT part of the final answer.

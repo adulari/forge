@@ -36,6 +36,10 @@ pub enum PresenterEvent {
         /// Zero-based agentic model/tool-loop step.
         step: usize,
     },
+    /// A provider stream is actively delivering non-text events (most importantly buffered
+    /// function-call argument deltas). Surfaces use this as a live heartbeat only; no partial
+    /// provider payload is exposed or persisted.
+    ProviderProgress,
     /// A best-effort internal model call (for example shell-error diagnosis) has started. These
     /// calls happen inside a tool-result boundary, so exposing their purpose prevents the UI from
     /// appearing stuck on the completed tool while another model is genuinely working.

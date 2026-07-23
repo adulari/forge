@@ -4919,6 +4919,9 @@ prompt text, nothing else.";
                     let mut sink = |ev: StreamEvent| {
                         act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         match ev {
+                            StreamEvent::ProviderActivity => {
+                                presenter.emit(PresenterEvent::ProviderProgress)
+                            }
                             StreamEvent::Text(t) => {
                                 if !suppress_assistant_text {
                                     presenter.emit(PresenterEvent::AssistantDelta(t));
@@ -13005,6 +13008,30 @@ mod tests {
         }
     }
 
+    /// Emits content-free provider heartbeats while a buffered tool/result payload is arriving,
+    /// then completes. This models genai's OpenAI-compatible tool-call stream, where partial JSON
+    /// must not be surfaced as a ToolStarted event before the final envelope is valid.
+    struct HeartbeatThenFinishProvider;
+    #[async_trait::async_trait]
+    impl Provider for HeartbeatThenFinishProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            for _ in 0..4 {
+                on_event(StreamEvent::ProviderActivity);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Ok(forge_provider::ModelResponse {
+                content: "buffered stream completed".to_string(),
+                ..Default::default()
+            })
+        }
+    }
+
     #[tokio::test]
     async fn stalled_stream_times_out_instead_of_hanging() {
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -13035,6 +13062,33 @@ mod tests {
             res.unwrap().is_err(),
             "a stalled stream should surface an error, not a silent hang"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_activity_keeps_a_buffered_stream_alive() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut config = Config::default();
+        config.mesh.stream_idle_timeout_secs = 1;
+        config.mesh.failover = false;
+        let mut session = Session::start(
+            store,
+            Arc::new(HeartbeatThenFinishProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            session.run_turn("wait for the buffered provider stream"),
+        )
+        .await
+        .expect("heartbeat stream should finish within the test bound")
+        .expect("provider heartbeats must prevent a false idle timeout");
+        assert_eq!(result, "buffered stream completed");
     }
 
     #[tokio::test]
