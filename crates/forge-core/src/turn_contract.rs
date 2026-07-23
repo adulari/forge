@@ -41,6 +41,15 @@ impl TurnContract {
                 requires_changed_artifact: false,
             };
         }
+        // A harness expectation is an explicit caller contract. It must win over incidental
+        // wording in a generated prompt that asks for inspection before implementation.
+        if expect_code_change {
+            return Self {
+                intent: TaskIntent::Mutating,
+                source: ContractSource::HarnessExpectation,
+                requires_changed_artifact: true,
+            };
+        }
         if explicitly_read_only(prompt) {
             return Self {
                 intent: TaskIntent::ReadOnlyReview,
@@ -48,12 +57,10 @@ impl TurnContract {
                 requires_changed_artifact: false,
             };
         }
-        let explicit_change = expect_code_change || explicitly_requests_change(prompt);
+        let explicit_change = explicitly_requests_change(prompt);
         Self {
             intent: TaskIntent::Mutating,
-            source: if expect_code_change {
-                ContractSource::HarnessExpectation
-            } else if explicit_change {
+            source: if explicit_change {
                 ContractSource::ExplicitChange
             } else {
                 ContractSource::Unspecified
@@ -180,5 +187,18 @@ mod tests {
         );
         assert_eq!(contract.intent(), TaskIntent::ReadOnlyReview);
         assert!(!contract.requires_changed_artifact());
+    }
+
+    #[test]
+    fn harness_change_expectation_overrides_incidental_read_only_wording() {
+        let contract = TurnContract::derive(
+            "Inspect with read-only tools, then implement the fix",
+            PermissionMode::AcceptEdits,
+            true,
+        );
+
+        assert_eq!(contract.intent(), TaskIntent::Mutating);
+        assert_eq!(contract.source(), ContractSource::HarnessExpectation);
+        assert!(contract.requires_changed_artifact());
     }
 }
