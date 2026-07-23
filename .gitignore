@@ -33,6 +33,13 @@ graphify-out/
 **/.forge/
 .dual-graph/
 
+# Share project agent definitions; keep every other root .forge artifact local.
+!/.forge/
+/.forge/*
+!/.forge/agents/
+/.forge/agents/*
+!/.forge/agents/*.md
+
 # E2E battery scratch output (scripts/e2e-battery.sh)
 scripts/.e2e-out/
 
