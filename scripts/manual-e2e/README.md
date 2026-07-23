@@ -37,6 +37,7 @@ specific binary, `FORGE_E2E_TIMEOUT` to change the 1,500-second turn timeout, or
 | `go-ordered-pipeline` | Ordering, panic attribution, cancellation, backpressure, race detector | Corrected bounded concurrent pipeline |
 | `typescript-config-recovery` | Broken build config, package exports, secure deep merge, public API | Strictly typed package with passing Node tests |
 | `rust-transaction-ledger` | Transactional rollback, overflow, idempotency conflicts, stable ordering | Corrected standard-library Rust crate |
+| `interrupt-resume-large-write` | Forced mid-turn interruption, large tool arguments, same-session recovery | Strictly verified 321-line artifact retained with the run |
 
 The reference directory is evidence and something to inspect or run manually; the fixture is the
 replayable pre-fix starting point. Aetherfront intentionally starts from an empty workspace because
@@ -67,3 +68,19 @@ scripts/manual-e2e/cache_session_probe.js gemini::gemini-3.5-flash --require-cac
 Use `--require-cache-hit` only where the provider exposes cache-read accounting. Without that flag,
 the probe still requires two successful resumed turns and complete usage telemetry, while recording
 zero if an otherwise compatible provider does not report cache hits.
+
+## Interrupt/resume large-write probe
+
+This scenario intentionally interrupts Forge while a model is producing a large one-call
+`write_file` payload, resumes the same session, and rejects partial, malformed, or misnumbered
+output. It needs `jq` in addition to the normal Python/TUI prerequisites.
+
+```bash
+FORGE_BIN=/home/floris/.local/bin/forge \
+FORGE_MODEL=qwencloud::qwen3.8-max-preview \
+  scripts/manual-e2e/run.sh interrupt-resume-large-write
+```
+
+Set `FORGE_E2E_INTERRUPT_AFTER` to adjust the default 25-second fault-injection point. Both TUI
+timelines, the interrupted session ID, resumed transcript, workspace, verified artifact, and a
+credential-free persisted tool-envelope integrity report remain under `scripts/.manual-e2e-out/`.

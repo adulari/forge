@@ -59,6 +59,11 @@ else
   FORGE_COMMAND="$(command -v forge)"
 fi
 
+FORGE_CHAT_COMMAND=("$FORGE_COMMAND" chat)
+if [[ -n "${FORGE_MODEL:-}" ]]; then
+  FORGE_CHAT_COMMAND+=(--model "$FORGE_MODEL")
+fi
+
 echo "scenario:  $SCENARIO"
 echo "workspace: $WORKSPACE"
 echo "prompt:    $SCENARIO_DIR/prompt.txt"
@@ -69,7 +74,7 @@ if [[ "$MODE" == "--manual" ]]; then
   echo "Paste this prompt into Forge:"
   sed 's/^/  /' "$SCENARIO_DIR/prompt.txt"
   cd "$WORKSPACE"
-  exec "$FORGE_COMMAND" chat
+  exec "${FORGE_CHAT_COMMAND[@]}"
 fi
 
 if [[ "$MODE" != "--auto" ]]; then
@@ -77,12 +82,41 @@ if [[ "$MODE" != "--auto" ]]; then
   exit 2
 fi
 
-python3 "$SUITE/pty_chat_harness.py" \
-  --cwd "$WORKSPACE" \
-  --prompt-file "$SCENARIO_DIR/prompt.txt" \
-  --log-prefix "$RUN_DIR/live" \
-  --timeout "${FORGE_E2E_TIMEOUT:-1500}" \
-  -- "$FORGE_COMMAND" chat
+if [[ "$SCENARIO" == "interrupt-resume-large-write" ]]; then
+  FIRST_SUMMARY="$RUN_DIR/interrupt-summary.jsonl"
+  python3 "$SUITE/pty_chat_harness.py" \
+    --cwd "$WORKSPACE" \
+    --prompt-file "$SCENARIO_DIR/prompt.txt" \
+    --log-prefix "$RUN_DIR/interrupt" \
+    --timeout "${FORGE_E2E_TIMEOUT:-1500}" \
+    --interrupt-after "${FORGE_E2E_INTERRUPT_AFTER:-25}" \
+    -- "${FORGE_CHAT_COMMAND[@]}" | tee "$FIRST_SUMMARY"
+  jq -e 'select(.interrupt_sent == true and .timed_out == false)' "$FIRST_SUMMARY" >/dev/null
+  SESSION_ID="$(jq -er 'select(.session_id != null) | .session_id' "$FIRST_SUMMARY" | tail -1)"
+
+  RESUME_COMMAND=("$FORGE_COMMAND" chat --resume "$SESSION_ID")
+  if [[ -n "${FORGE_MODEL:-}" ]]; then
+    RESUME_COMMAND+=(--model "$FORGE_MODEL")
+  fi
+  python3 "$SUITE/pty_chat_harness.py" \
+    --cwd "$WORKSPACE" \
+    --prompt-file "$SCENARIO_DIR/resume.txt" \
+    --log-prefix "$RUN_DIR/resume" \
+    --session-id "$SESSION_ID" \
+    --timeout "${FORGE_E2E_TIMEOUT:-1500}" \
+    -- "${RESUME_COMMAND[@]}"
+
+  FORGE_DB_PATH="${FORGE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/forge/forge.db}"
+  python3 "$SUITE/verify_session_tools.py" "$FORGE_DB_PATH" "$SESSION_ID" \
+    | tee "$RUN_DIR/session-tool-integrity.json"
+else
+  python3 "$SUITE/pty_chat_harness.py" \
+    --cwd "$WORKSPACE" \
+    --prompt-file "$SCENARIO_DIR/prompt.txt" \
+    --log-prefix "$RUN_DIR/live" \
+    --timeout "${FORGE_E2E_TIMEOUT:-1500}" \
+    -- "${FORGE_CHAT_COMMAND[@]}"
+fi
 
 case "$SCENARIO" in
   aetherfront)
@@ -109,6 +143,9 @@ case "$SCENARIO" in
     ;;
   rust-transaction-ledger)
     (cd "$WORKSPACE" && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --all-targets)
+    ;;
+  interrupt-resume-large-write)
+    python3 "$SCENARIO_DIR/verify.py" "$WORKSPACE/interrupted.txt"
     ;;
 esac
 

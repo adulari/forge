@@ -1,0 +1,5 @@
+This is a fault-injection test. Do not use skills or subagents.
+
+Create `interrupted.txt` with the `write_file` tool only. Its content must be a header `INTERRUPT_RESUME_PROBE`, followed by exactly 320 numbered data lines. Every data line must start with its exactly four-digit zero-padded line number (`0001` through `0320`), a colon, and a deterministic repeated alphanumeric payload at least 90 characters long. Do not use shell, compression, generated loops, or append_file for the initial write; emit the complete literal file through one `write_file` call. Track one task, then verify the final line count and both boundary lines after the write.
+
+Do not shorten the requested payload. Finish only after the full file exists and verification passes.
