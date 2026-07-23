@@ -63,6 +63,11 @@ Line 1: the most likely cause in one terse sentence (no preamble, no restating t
 Line 2 (optional): if a single shell command fixes it, write exactly: FIX: <the command>. \
 Omit line 2 if no single command fixes it.";
 
+/// Shell diagnosis is optional context, never part of the user's requested work. Bound both its
+/// silent-stream interval and total wall time so an unhealthy auxiliary provider cannot hold the
+/// primary model loop (and therefore the entire TUI) hostage.
+const SHELL_DIAGNOSE_MAX_SECS: u64 = 30;
+
 /// Default sampling temperature for coding turns: low, so edits/patches are deterministic rather
 /// than creatively varied. Only takes effect when reasoning/effort isn't engaged (thinking models
 /// reject a custom temperature) — see `genai_provider`.
@@ -4476,18 +4481,31 @@ prompt text, nothing else.";
         let provider = self.provider.clone();
         let completion_opts = Self::auxiliary_completion_options(&self.id, "shell-diagnose");
         let presenter = &mut self.presenter;
+        let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let activity_for_sink = std::sync::Arc::clone(&activity);
         let mut sink = |event: StreamEvent| match event {
             StreamEvent::Text(delta) | StreamEvent::Reasoning(delta) if !delta.is_empty() => {
+                activity_for_sink.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 presenter.emit(PresenterEvent::AuxiliaryProgress {
                     chars: delta.chars().count(),
                 });
             }
             _ => {}
         };
-        if let Ok(r) = provider
-            .complete_with(&model, &messages, &[], &completion_opts, &mut sink)
-            .await
-        {
+        let configured_idle = self.config.mesh.stream_idle_timeout_secs;
+        let idle = std::time::Duration::from_secs(if configured_idle == 0 {
+            SHELL_DIAGNOSE_MAX_SECS
+        } else {
+            configured_idle.min(SHELL_DIAGNOSE_MAX_SECS)
+        });
+        let completion =
+            provider.complete_with(&model, &messages, &[], &completion_opts, &mut sink);
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(SHELL_DIAGNOSE_MAX_SECS),
+            stream_with_idle_timeout(completion, &activity, idle),
+        )
+        .await;
+        if let Ok(Ok(r)) = response {
             let _ = self
                 .store
                 .record_side_call_usage(&self.id, "shell/diagnose", &r.usage);
@@ -4521,6 +4539,15 @@ prompt text, nothing else.";
                     fix,
                 });
             }
+        } else {
+            let detail = if response.is_err() {
+                format!("timed out after {SHELL_DIAGNOSE_MAX_SECS}s")
+            } else {
+                "provider unavailable".to_string()
+            };
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "optional shell diagnosis {detail} — continuing without it"
+            )));
         }
     }
 
@@ -12642,6 +12669,98 @@ mod tests {
             started < diagnosed,
             "the start event precedes the completed diagnosis"
         );
+    }
+
+    /// The main loop responds normally, but the optional shell-diagnosis request never emits an
+    /// event and never returns. This reproduces a real TUI run that remained stuck in
+    /// "auxiliary model work" for more than six minutes after a failing test command.
+    #[cfg(unix)]
+    struct StallingShellDiagnosisProvider;
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl Provider for StallingShellDiagnosisProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_provider::ModelResponse;
+            use forge_types::{new_id, ToolCall, Usage};
+            if messages
+                .iter()
+                .any(|m| m.role == Role::System && m.content.starts_with("A shell command run by"))
+            {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                unreachable!("the auxiliary watchdog must abort this request")
+            }
+            if messages.iter().any(|m| m.role == Role::Tool) {
+                return Ok(ModelResponse {
+                    content: "done".into(),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                    quotas: Vec::new(),
+                });
+            }
+            Ok(ModelResponse {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: new_id(),
+                    name: "shell".into(),
+                    args: serde_json::json!({
+                        "command": "printf opaque_auxiliary_stall >&2; exit 23"
+                    }),
+                }],
+                usage: Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stalled_shell_diagnosis_times_out_and_main_turn_continues() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut config = Config {
+            permission_mode: forge_types::PermissionMode::Bypass,
+            ..Config::default()
+        };
+        config.mesh.stream_idle_timeout_secs = 1;
+        let presenter = CapturePresenter::default();
+        let events = presenter.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(StallingShellDiagnosisProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(presenter),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            session.run_turn("run the failing test and repair it"),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "the optional diagnosis held the turn hostage"
+        );
+        assert_eq!(result.unwrap().unwrap(), "done");
+
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| {
+            matches!(event, PresenterEvent::AuxiliaryRequest { purpose, .. }
+                if purpose.contains("diagnosing"))
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(event, PresenterEvent::Warning(message)
+                if message.contains("optional shell diagnosis")
+                    && message.contains("continuing without it"))
+        }));
     }
 
     #[cfg(unix)]
