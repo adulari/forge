@@ -6,6 +6,8 @@ import * as SplashScreen from "expo-splash-screen";
 import React from "react";
 import { Platform, Pressable, StyleSheet, Text, View } from "react-native";
 
+import { markAnonymousTelemetryAppError } from "../lib/anonymousTelemetry";
+
 interface ErrorBoundaryProps {
   children: React.ReactNode;
 }
@@ -23,6 +25,7 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
   }
 
   componentDidCatch(error: Error): void {
+    markAnonymousTelemetryAppError("react_render");
     console.error("[ErrorBoundary] caught render error:", error);
     // A crash before RootNavigator's normal `isLoading` effect runs would otherwise leave
     // the native splash screen up forever, hiding this fallback behind it.

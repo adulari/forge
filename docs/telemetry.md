@@ -27,12 +27,15 @@ locally queued counters and does not change product functionality.
 | `forge_active_window` | Once per UTC 30-minute window | Recently active installation |
 | `forge_run_succeeded` / `forge_run_failed` | Once per completed CLI/TUI run | Run reliability |
 | `forge_activated` | Once | First successful CLI/TUI run or app pairing |
+| `forge_app_error` | Once per caught root render failure | App-shell render reliability |
 | `forge_feature_*` | Once per explicit feature command | Anonymous feature adoption |
 | `forge_distribution_snapshot` | Once daily, from GitHub Actions | Aggregate public release downloads |
 
 Application events contain only `surface`, released app `version`, operating-system family,
 architecture where available, distribution label, coarse period, and schema version. Distribution
 snapshots contain only public GitHub release/download totals and the latest public release tag.
+`forge_app_error` additionally contains one closed `error_code` value (`react_render`); its API
+cannot accept an error object, message, stack, route, or arbitrary property.
 
 Forge never sends prompts, responses, commands, repository names, filenames, paths, session IDs,
 provider/model choices, API keys, account data, error messages, IP-derived location, or arbitrary
@@ -98,6 +101,7 @@ client-deduplicated, so every chart uses **Total events**, not unique users:
 | Version adoption | `forge_active_month` | `version` |
 | First successful run | `forge_activated` | `surface` |
 | Run reliability | Formula: `forge_run_succeeded / (succeeded + failed)` | `surface` |
+| App render failures | `forge_app_error` | `version` (filter by `surface`, `error_code`) |
 | Feature adoption | All `forge_feature_*` events | Event name |
 
 For downloads, create a **SQL** insight using the latest aggregate snapshot:

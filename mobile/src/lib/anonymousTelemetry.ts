@@ -19,7 +19,10 @@ type EventName =
   | "forge_active_week"
   | "forge_active_day"
   | "forge_active_window"
-  | "forge_activated";
+  | "forge_activated"
+  | "forge_app_error";
+
+export type AnonymousAppErrorCode = "react_render";
 
 const ALLOWED_EVENTS = new Set<EventName>([
   "forge_installed",
@@ -28,12 +31,14 @@ const ALLOWED_EVENTS = new Set<EventName>([
   "forge_active_day",
   "forge_active_window",
   "forge_activated",
+  "forge_app_error",
 ]);
 
 interface PendingEvent {
   event: EventName;
   period: string;
   localId: string;
+  errorCode?: AnonymousAppErrorCode;
 }
 
 interface TelemetryState {
@@ -61,6 +66,7 @@ let preferenceGeneration = 0;
 let activeController: AbortController | null = null;
 let recording: Promise<void> | null = null;
 let activationRequested = false;
+const pendingAppErrors: AnonymousAppErrorCode[] = [];
 
 function apiKey(): string | undefined {
   const key = process.env.EXPO_PUBLIC_POSTHOG_KEY;
@@ -135,10 +141,21 @@ export function markAnonymousTelemetryActivated(): void {
   void scheduleActivity();
 }
 
+/**
+ * Record a bounded app failure category without accepting the Error, message, stack, route, or
+ * other user-controlled data.
+ */
+export function markAnonymousTelemetryAppError(code: AnonymousAppErrorCode): void {
+  pendingAppErrors.push(code);
+  void scheduleActivity();
+}
+
 function scheduleActivity(): Promise<void> {
   if (recording) return recording;
   recording = recordActivity().finally(() => {
     recording = null;
+    // An error may have arrived while storage or the network was in flight.
+    if (pendingAppErrors.length > 0) void scheduleActivity();
   });
   return recording;
 }
@@ -162,10 +179,27 @@ function queue(state: TelemetryState, event: EventName, period: string) {
   }
 }
 
+function queueAppError(
+  state: TelemetryState,
+  code: AnonymousAppErrorCode,
+  period: string,
+): void {
+  state.pending.push({
+    event: "forge_app_error",
+    period,
+    localId: `${Date.now()}-${Math.random()}`,
+    errorCode: code,
+  });
+}
+
 async function recordActivity(): Promise<void> {
   const generation = preferenceGeneration;
   const key = apiKey();
-  if (!key || !(await isAnonymousTelemetryEnabled())) return;
+  if (!key || !(await isAnonymousTelemetryEnabled())) {
+    pendingAppErrors.length = 0;
+    return;
+  }
+  const appErrors = pendingAppErrors.splice(0);
 
   const raw = await AsyncStorage.getItem(STATE_KEY);
   let state: TelemetryState = { ...EMPTY_STATE, pending: [] };
@@ -179,6 +213,7 @@ async function recordActivity(): Promise<void> {
   if (generation !== preferenceGeneration || !(await isAnonymousTelemetryEnabled())) return;
 
   const periods = utcPeriods(new Date());
+  for (const code of appErrors) queueAppError(state, code, periods.window);
   if (!state.installed) queue(state, "forge_installed", "once");
   state.installed = true;
   if (activationRequested && !state.activated) {
@@ -233,7 +268,7 @@ async function send(key: string, events: PendingEvent[]): Promise<boolean> {
       signal: controller.signal,
       body: JSON.stringify({
         api_key: key,
-        batch: events.map(({ event, period }) => ({
+        batch: events.map(({ event, period, errorCode }) => ({
           event,
           properties: {
             distinct_id: DISTINCT_ID,
@@ -244,6 +279,7 @@ async function send(key: string, events: PendingEvent[]): Promise<boolean> {
             os: Platform.OS,
             distribution: isTauri ? "desktop-release" : "app",
             period,
+            ...(errorCode ? { error_code: errorCode } : {}),
             schema: 1,
           },
         })),
