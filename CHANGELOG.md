@@ -6,6 +6,26 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.8.5] - 2026-07-23
+
+### Added
+
+- QwenCloud Token Plan registration and API-key authentication through its OpenAI-compatible endpoint.
+- Dynamic TUI progress reporting for provider requests, streamed output, tool execution, and subagent activity.
+- Persistent manual end-to-end scenarios, including saved playable browser-game results.
+
+### Changed
+
+- Qwen 3.8 Max preview now uses its 1M-token context window and temporarily inherits Qwen 3.7 Max benchmark statistics until native results are available.
+- Prompt caching is capability-aware across OpenAI-compatible APIs, Gemini, OAuth/Codex, and CLI bridges.
+- Provider responses are no longer given implicit output caps, including in credit mode.
+
+### Fixed
+
+- Large streamed tool calls retain complete arguments instead of truncating or corrupting file writes.
+- Rejected workspace paths recover cleanly instead of leaving the agent stalled.
+- Long-running chat work exposes meaningful live progress instead of an indefinite generic working indicator.
+
 ## [2.8.4] - 2026-07-21
 
 ### Fixed
