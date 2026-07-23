@@ -531,10 +531,7 @@ mod cache_tests {
 		assert_eq!(system[0]["text"], "stable system");
 		assert_eq!(system[1]["cachePoint"]["type"], "default");
 		assert_eq!(parts.messages[0]["content"][0]["text"], "stable user prefix");
-		assert_eq!(
-			parts.messages[0]["content"][1]["cachePoint"]["type"],
-			"default"
-		);
+		assert_eq!(parts.messages[0]["content"][1]["cachePoint"]["type"], "default");
 	}
 
 	#[test]

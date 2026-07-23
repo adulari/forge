@@ -1039,9 +1039,11 @@ mod tests {
 			ChatMessage::system("stable system"),
 			ChatMessage::user("dynamic question"),
 		])
-		.with_tools(vec![Tool::new("get_weather")
-			.with_description("weather")
-			.with_schema(json!({"type":"object"}))]);
+		.with_tools(vec![
+			Tool::new("get_weather")
+				.with_description("weather")
+				.with_schema(json!({"type":"object"})),
+		]);
 
 		let config = GeminiAdapter::build_cache_config(&model_iden, chat_req).unwrap();
 		assert_eq!(config["systemInstruction"]["parts"][0]["text"], "stable system");
@@ -1052,8 +1054,7 @@ mod tests {
 	#[test]
 	fn cached_content_extra_body_reaches_generation_payload() {
 		let model_iden = ModelIden::new(AdapterKind::Gemini, "gemini-2.5-flash");
-		let options = ChatOptions::default()
-			.with_extra_body(json!({"cachedContent":"cachedContents/forge-123"}));
+		let options = ChatOptions::default().with_extra_body(json!({"cachedContent":"cachedContents/forge-123"}));
 		let options_set = ChatOptionsSet::default().with_chat_options(Some(&options));
 		let (payload, _) = GeminiAdapter::build_gemini_request_payload(
 			&model_iden,

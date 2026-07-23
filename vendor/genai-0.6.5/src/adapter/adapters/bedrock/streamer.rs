@@ -502,9 +502,7 @@ mod tests {
 		}));
 
 		assert_eq!(usage.prompt_tokens, Some(12_000));
-		let details = usage
-			.prompt_tokens_details
-			.expect("Bedrock cache usage details");
+		let details = usage.prompt_tokens_details.expect("Bedrock cache usage details");
 		assert_eq!(details.cached_tokens, Some(10_240));
 		assert_eq!(details.cache_creation_tokens, Some(1_024));
 	}
