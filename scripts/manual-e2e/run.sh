@@ -107,7 +107,7 @@ if [[ "$SCENARIO" == "interrupt-resume-large-write" ]]; then
     -- "${RESUME_COMMAND[@]}"
 
   FORGE_DB_PATH="${FORGE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/forge/forge.db}"
-  python3 "$SUITE/verify_session_tools.py" "$FORGE_DB_PATH" "$SESSION_ID" \
+  python3 "$SUITE/verify_session_tools.py" "$FORGE_DB_PATH" "$SESSION_ID" --require-all-ok \
     | tee "$RUN_DIR/session-tool-integrity.json"
 else
   python3 "$SUITE/pty_chat_harness.py" \

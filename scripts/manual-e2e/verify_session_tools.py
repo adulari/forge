@@ -14,6 +14,11 @@ def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("database", type=Path)
     parser.add_argument("session_id")
+    parser.add_argument(
+        "--require-all-ok",
+        action="store_true",
+        help="reject sessions containing a failed/denied tool outcome",
+    )
     return parser.parse_args()
 
 
@@ -22,6 +27,7 @@ def main() -> int:
     errors: list[str] = []
     envelope_count = 0
     execution_count = 0
+    non_ok_execution_count = 0
     tool_result_ids: set[str] = set()
     messages: list[tuple[object, ...]] = []
 
@@ -99,6 +105,8 @@ def main() -> int:
                 if not isinstance(persisted_args, dict):
                     errors.append(f"message {seq} execution {row_index} args are not an object")
                 if status != "ok":
+                    non_ok_execution_count += 1
+                if args.require_all_ok and status != "ok":
                     errors.append(
                         f"message {seq} execution {row_index} has non-ok status {status!r}"
                     )
@@ -121,6 +129,7 @@ def main() -> int:
         "message_count": len(messages),
         "tool_envelope_count": envelope_count,
         "tool_execution_count": execution_count,
+        "non_ok_tool_execution_count": non_ok_execution_count,
         "errors": errors,
     }
     print(json.dumps(report, indent=2))
