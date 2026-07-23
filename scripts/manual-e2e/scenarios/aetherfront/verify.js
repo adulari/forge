@@ -49,11 +49,80 @@ async function connect() {
 async function main() {
   if (!fs.existsSync(pagePath)) throw new Error(`missing page: ${pagePath}`);
   const source = fs.readFileSync(pagePath, 'utf8');
-  const marker = 'window.__AETHERFRONT_SELF_CHECK__=';
-  if (!source.includes(marker)) throw new Error('missing Aetherfront self-check hook');
   const instrumentedPath = path.join(profile, 'instrumented.html');
-  fs.writeFileSync(instrumentedPath, source.replace(marker,
-    'window.__FORGE_TEST_STATE__=()=>S;window.__FORGE_TEST_MOVE__=(unit,x,y)=>commandMove([unit],x,y);' + marker));
+  const legacyMarker = 'window.__AETHERFRONT_SELF_CHECK__=';
+  const sourceWithLegacyExports = source.includes(legacyMarker)
+    ? source.replace(
+      legacyMarker,
+      'window.__FORGE_NATIVE_STATE__=()=>S;'
+        + 'window.__FORGE_NATIVE_MOVE__=(unit,x,y)=>commandMove([unit],x,y);'
+        + legacyMarker,
+    )
+    : source;
+  const adapter = `<script>
+(() => {
+  const value = (name, fallback) => {
+    try { return (0, eval)(\`typeof \${name} === 'undefined' ? undefined : \${name}\`) ?? fallback; }
+    catch (_) { return fallback; }
+  };
+  const state = () => {
+    const native = window.__FORGE_NATIVE_STATE__?.() ?? value('S', null);
+    const currentUnits = native?.units ?? value('units', []);
+    const currentBuildings = native?.buildings ?? value('buildings', []);
+    const currentFields = native?.crystals ?? value('resources', []);
+    const currentNodes = native?.nodes ?? value('nodes', []);
+    const currentSelection = native?.selected ?? value('selection', []);
+    const isPaused = Boolean(native?.mode === 'paused' || value('paused', false));
+    const isEnded = Boolean(native?.mode === 'ended' || value('ended', false));
+    const isRunning = Boolean(native?.mode === 'play' || value('running', false));
+    const own = value('player', null);
+    const enemy = value('enemy', null);
+    return {
+      mode: isEnded ? 'ended' : isPaused ? 'paused' : isRunning ? 'play' : (native?.mode ?? 'title'),
+      time: native?.time ?? value('simTime', 0),
+      units: currentUnits,
+      buildings: currentBuildings,
+      fields: currentFields,
+      nodes: currentNodes,
+      selectedCount: currentSelection.length,
+      credits: native?.credits ?? [own?.credits ?? 0, enemy?.credits ?? 0],
+    };
+  };
+  const selectMove = (unit, x, y) => {
+    const native = window.__FORGE_NATIVE_STATE__?.() ?? value('S', null);
+    if (typeof window.__FORGE_NATIVE_MOVE__ === 'function') {
+      native.selected = [unit.id];
+      window.__FORGE_NATIVE_MOVE__(unit, x, y);
+      return true;
+    }
+    const commandMoveFn = value('commandMove', null);
+    if (native && typeof commandMoveFn === 'function') {
+      native.selected = [unit.id];
+      commandMoveFn([unit], x, y);
+      return true;
+    }
+    const currentSelection = value('selection', null);
+    const issueMoveFn = value('issueMove', null);
+    if (Array.isArray(currentSelection) && typeof issueMoveFn === 'function') {
+      currentSelection.splice(0, currentSelection.length, unit);
+      issueMoveFn(x, y);
+      return true;
+    }
+    return false;
+  };
+  const selfCheck = () => {
+    const check = window.__AETHERFRONT_SELF_CHECK__ ?? window.Aetherfront?.selfCheck;
+    return typeof check === 'function'
+      ? check()
+      : { ok: false, errors: ['missing embedded Aetherfront self-check'] };
+  };
+  window.__FORGE_AETHERFRONT_ADAPTER__ = { state, selectMove, selfCheck };
+})();
+</script>`;
+  const instrumented = sourceWithLegacyExports.includes('</body>')
+    ? sourceWithLegacyExports.replace('</body>', `${adapter}</body>`)
+    : `${sourceWithLegacyExports}${adapter}`;
+  fs.writeFileSync(instrumentedPath, instrumented);
   const client = await connect();
   const { Page, Runtime, Log } = client;
   const errors = [];
@@ -84,40 +153,61 @@ async function main() {
   await loaded;
   await sleep(700);
 
-  const before = await evaluate(`({
-    readyState: document.readyState,
-    title: document.title,
-    selfCheck: window.__AETHERFRONT_SELF_CHECK__(),
-    titleVisible: document.getElementById('titleScreen').classList.contains('active'),
-    startLabel: document.getElementById('startBtn').textContent.trim()
-  })`);
+  const before = await evaluate(`(() => {
+    const visible = element => Boolean(element
+      && getComputedStyle(element).display !== 'none'
+      && getComputedStyle(element).visibility !== 'hidden');
+    const titleScreen = document.getElementById('titleScreen') ?? document.getElementById('title');
+    const start = document.getElementById('startBtn');
+    return {
+      readyState: document.readyState,
+      title: document.title,
+      selfCheck: window.__FORGE_AETHERFRONT_ADAPTER__.selfCheck(),
+      titleVisible: visible(titleScreen),
+      startLabel: start?.textContent.trim() ?? ''
+    };
+  })()`);
 
   const tutorialRoundTrip = await evaluate(`(() => {
-    document.getElementById('tutorialBtn').click();
-    const opened = document.getElementById('tutorial').classList.contains('active');
-    document.getElementById('closeTutorial').click();
-    return opened && !document.getElementById('tutorial').classList.contains('active');
+    const visible = element => Boolean(element
+      && getComputedStyle(element).display !== 'none'
+      && getComputedStyle(element).visibility !== 'hidden');
+    const tutorial = document.getElementById('tutorial');
+    const open = document.getElementById('tutorialBtn');
+    const close = document.getElementById('closeTutorial')
+      ?? document.getElementById('tutorialClose');
+    if (!tutorial || !open || !close) return false;
+    open.click();
+    const opened = visible(tutorial);
+    close.click();
+    return opened && !visible(tutorial);
   })()`);
 
   await evaluate(`(() => {
-    document.getElementById('difficulty').value = 'easy';
+    const difficulty = document.getElementById('difficulty');
+    if (difficulty) difficulty.selectedIndex = 0;
     document.getElementById('startBtn').click();
     return true;
   })()`);
   await sleep(3500);
 
   const running = await evaluate(`(() => {
-    const state = window.__FORGE_TEST_STATE__();
-    const player = state.units.find(unit => unit.team === 0);
-    state.selected = player ? [player.id] : [];
-    if (player) window.__FORGE_TEST_MOVE__(player, player.x + 80, player.y + 40);
+    const adapter = window.__FORGE_AETHERFRONT_ADAPTER__;
+    let state = adapter.state();
+    const player = state.units.find(unit => (unit.team ?? unit.side) === 0);
+    if (player) adapter.selectMove(player, player.x + 80, player.y + 40);
+    state = adapter.state();
     const timeBeforePause = state.time;
-    document.getElementById('menuBtn').click();
-    const paused = state.mode === 'paused'
-      && document.getElementById('pause').classList.contains('active');
+    const pauseButton = document.getElementById('menuBtn') ?? document.getElementById('pauseBtn');
+    pauseButton?.click();
+    state = adapter.state();
+    const pauseScreen = document.getElementById('pause');
+    const pauseVisible = Boolean(pauseScreen
+      && getComputedStyle(pauseScreen).display !== 'none'
+      && getComputedStyle(pauseScreen).visibility !== 'hidden');
+    const paused = state.mode === 'paused' && pauseVisible;
     document.getElementById('resumeBtn').click();
-    state.cam.x = 0;
-    state.cam.y = 700;
+    state = adapter.state();
     document.getElementById('game').dispatchEvent(new PointerEvent('pointermove', {
       clientX: innerWidth / 2,
       clientY: innerHeight / 2,
@@ -129,22 +219,28 @@ async function main() {
       sim: state.time,
       simBeforePause: timeBeforePause,
       units: state.units.length,
-      playerUnits: state.units.filter(unit => unit.team === 0).length,
-      enemyUnits: state.units.filter(unit => unit.team === 1).length,
+      playerUnits: state.units.filter(unit => (unit.team ?? unit.side) === 0).length,
+      enemyUnits: state.units.filter(unit => (unit.team ?? unit.side) === 1).length,
       buildings: state.buildings.length,
-      fields: state.crystals.length,
+      fields: state.fields.length,
       controlPoints: state.nodes.length,
       pausedRoundTrip: paused && state.mode === 'play',
-      selected: state.selected.length,
-      titleHidden: !document.getElementById('titleScreen').classList.contains('active'),
-      hudVisible: document.getElementById('gameScreen').classList.contains('active'),
+      selected: state.selectedCount,
+      titleHidden: (() => {
+        const title = document.getElementById('titleScreen') ?? document.getElementById('title');
+        return !title || getComputedStyle(title).display === 'none';
+      })(),
+      hudVisible: (() => {
+        const hud = document.getElementById('gameScreen') ?? document.getElementById('hud');
+        return Boolean(hud && getComputedStyle(hud).display !== 'none');
+      })(),
       canvas: [document.getElementById('game').width, document.getElementById('game').height],
-      resources: state.credits.slice(),
+      resources: state.credits,
     };
   })()`);
   await sleep(1500);
   const after = await evaluate(`(() => {
-    const state = window.__FORGE_TEST_STATE__();
+    const state = window.__FORGE_AETHERFRONT_ADAPTER__.state();
     return { sim: state.time, running: state.mode === 'play', ended: state.mode === 'ended' };
   })()`);
 
@@ -152,7 +248,8 @@ async function main() {
   fs.writeFileSync(screenshotPath, Buffer.from(shot.data, 'base64'));
 
   await client.close();
-  const result = { before, tutorialRoundTrip, running, after, errors, screenshotPath };
+  const reportPath = screenshotPath.replace(/\.png$/i, '.verification.json');
+  const result = { before, tutorialRoundTrip, running, after, errors, screenshotPath, reportPath };
   const valid = before.readyState === 'complete'
     && before.selfCheck.ok
     && before.titleVisible
@@ -172,7 +269,9 @@ async function main() {
     && running.titleHidden
     && running.hudVisible
     && errors.length === 0;
-  console.log(JSON.stringify({ valid, ...result }, null, 2));
+  const report = { valid, ...result };
+  fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  console.log(JSON.stringify(report, null, 2));
   if (!valid) process.exitCode = 1;
 }
 

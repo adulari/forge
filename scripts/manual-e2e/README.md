@@ -44,6 +44,7 @@ replayable pre-fix starting point. Aetherfront intentionally starts from an empt
 the assignment is generative. Its `verify.js` launches real headless Chrome, exercises the title,
 tutorial, start, pause/resume, simulation, entity counts, and runtime-error path, then saves a
 screenshot.
+Each Aetherfront run also keeps a machine-readable `screenshot.verification.json` beside the PNG.
 
 Provider-backed runs consume real quota. The default is mesh-unpinned; set `FORGE_BIN`, not a model,
 when comparing development binaries so routing and failover remain part of the test.
