@@ -7,7 +7,7 @@ through `0320` records, and an alphanumeric payload of at least 90 characters on
 
 Each run retains the interrupted and resumed raw terminal logs, timelines, session ID, final file,
 artifact verifier output, and credential-free persisted tool-envelope integrity report under
-`scripts/.manual-e2e-out/interrupt-resume-large-write-*`.
+Forge's persistent `manual-e2e-runs/interrupt-resume-large-write-*` directory.
 
 ## Verified live result (2026-07-23)
 

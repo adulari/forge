@@ -23,8 +23,11 @@ Locate a saved result without running a provider:
 scripts/manual-e2e/run.sh aetherfront --reference
 ```
 
-Runs are retained under `scripts/.manual-e2e-out/` and ignored by Git. Set `FORGE_BIN` to test a
-specific binary, `FORGE_E2E_TIMEOUT` to change the 1,500-second turn timeout, or
+Runs are retained outside disposable worktrees under
+`${XDG_DATA_HOME:-$HOME/.local/share}/forge/manual-e2e-runs/`. Each automatic run keeps the exact
+fixture result, TUI transcript and progress timeline, harness summary with its resumable Forge
+session ID, and a credential-free persisted tool-envelope integrity report. Set `FORGE_BIN` to test
+a specific binary, `FORGE_E2E_TIMEOUT` to change the 1,500-second turn timeout, or
 `FORGE_MANUAL_E2E_OUT` to store runs elsewhere. By default the runner prefers this checkout's
 `target/debug/forge`, so it exercises the current development build.
 
@@ -43,8 +46,8 @@ The reference directory is evidence and something to inspect or run manually; th
 replayable pre-fix starting point. Aetherfront intentionally starts from an empty workspace because
 the assignment is generative. Its `verify.js` launches real headless Chrome, exercises the title,
 tutorial, start, pause/resume, simulation, entity counts, and runtime-error path, then saves a
-screenshot.
-Each Aetherfront run also keeps a machine-readable `screenshot.verification.json` beside the PNG.
+screenshot. Each Aetherfront run also keeps a machine-readable `screenshot.verification.json`
+beside the PNG.
 
 Provider-backed runs consume real quota. The default is mesh-unpinned; set `FORGE_BIN`, not a model,
 when comparing development binaries so routing and failover remain part of the test.
@@ -54,7 +57,7 @@ when comparing development binaries so routing and failover remain part of the t
 `cache_session_probe.js` runs two real headless turns against one explicitly selected model. The
 first turn sends a long, meaningful stable prefix; the second resumes the same Forge session and
 checks exact responses, session identity, usage telemetry, and provider-reported cached input. Its
-JSON report is retained beside the run under `scripts/.manual-e2e-out/`.
+JSON report is retained beside the run under Forge's persistent `manual-e2e-runs/` directory.
 
 ```bash
 FORGE_BIN=/home/floris/.local/bin/forge \
@@ -84,4 +87,5 @@ FORGE_MODEL=qwencloud::qwen3.8-max-preview \
 
 Set `FORGE_E2E_INTERRUPT_AFTER` to adjust the default 25-second fault-injection point. Both TUI
 timelines, the interrupted session ID, resumed transcript, workspace, verified artifact, and a
-credential-free persisted tool-envelope integrity report remain under `scripts/.manual-e2e-out/`.
+credential-free persisted tool-envelope integrity report remain under Forge's persistent
+`manual-e2e-runs/` directory.

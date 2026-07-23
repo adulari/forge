@@ -33,7 +33,7 @@ if [[ "$MODE" == "--reference" ]]; then
   exit 0
 fi
 
-OUT_ROOT="${FORGE_MANUAL_E2E_OUT:-$ROOT/scripts/.manual-e2e-out}"
+OUT_ROOT="${FORGE_MANUAL_E2E_OUT:-${XDG_DATA_HOME:-$HOME/.local/share}/forge/manual-e2e-runs}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="$OUT_ROOT/$SCENARIO-$STAMP-$$"
 WORKSPACE="$RUN_DIR/workspace"
@@ -110,12 +110,29 @@ if [[ "$SCENARIO" == "interrupt-resume-large-write" ]]; then
   python3 "$SUITE/verify_session_tools.py" "$FORGE_DB_PATH" "$SESSION_ID" --require-all-ok \
     | tee "$RUN_DIR/session-tool-integrity.json"
 else
+  RUN_SUMMARY="$RUN_DIR/harness-summary.jsonl"
   python3 "$SUITE/pty_chat_harness.py" \
     --cwd "$WORKSPACE" \
     --prompt-file "$SCENARIO_DIR/prompt.txt" \
     --log-prefix "$RUN_DIR/live" \
     --timeout "${FORGE_E2E_TIMEOUT:-1500}" \
-    -- "${FORGE_CHAT_COMMAND[@]}"
+    -- "${FORGE_CHAT_COMMAND[@]}" | tee "$RUN_SUMMARY"
+
+  SESSION_ID="$(python3 - "$RUN_SUMMARY" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as summaries:
+    records = [json.loads(line) for line in summaries if line.strip()]
+session_ids = [record.get("session_id") for record in records if record.get("session_id")]
+if not session_ids:
+    raise SystemExit("TUI harness did not report a Forge session ID")
+print(session_ids[-1])
+PY
+)"
+  FORGE_DB_PATH="${FORGE_DB:-${XDG_DATA_HOME:-$HOME/.local/share}/forge/forge.db}"
+  python3 "$SUITE/verify_session_tools.py" "$FORGE_DB_PATH" "$SESSION_ID" \
+    | tee "$RUN_DIR/session-tool-integrity.json"
 fi
 
 case "$SCENARIO" in

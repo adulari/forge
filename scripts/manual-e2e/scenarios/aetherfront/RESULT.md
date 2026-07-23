@@ -18,5 +18,6 @@ design/verification work to Codex and NVIDIA NIM models. It produced a distinct 
 implementation. The implementation-independent browser verifier confirmed its embedded self-check
 (6 unit types, 7 building types, 3 abilities, and 3 control points), tutorial round trip, start,
 simulation advance, both armies, economy/world entities, pause/resume, selection and movement,
-visible HUD, and zero runtime exceptions. The HTML, screenshot, TUI timeline, and session remain
-under `scripts/.manual-e2e-out/aetherfront-20260723T025111Z-1833126/`.
+visible HUD, and zero runtime exceptions. The HTML, screenshot, TUI timeline, and session are
+retained as `aetherfront-20260723T025111Z-1833126` in Forge's persistent `manual-e2e-runs/`
+directory.

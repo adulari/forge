@@ -18,5 +18,6 @@ recovered one empty response plus an A→B→A tool-loop warning. The model reje
 non-atomic fix, replaced in-place mutation with a working-copy commit, and then passed formatting,
 strict Clippy, and all 8 tests; the scenario runner independently repeated the checks. All 33
 persisted tool envelopes/execution records were valid. Two non-OK tool outcomes were expected,
-observed checks that the turn subsequently corrected. The full workspace and TUI timeline remain
-under `scripts/.manual-e2e-out/rust-transaction-ledger-20260723T031211Z-1860574/`.
+observed checks that the turn subsequently corrected. The full workspace and TUI timeline are
+retained as `rust-transaction-ledger-20260723T031211Z-1860574` in Forge's persistent
+`manual-e2e-runs/` directory.

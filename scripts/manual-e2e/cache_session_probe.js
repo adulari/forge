@@ -3,6 +3,7 @@
 
 const { spawn } = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const argv = process.argv.slice(2);
@@ -16,7 +17,11 @@ if (!model) {
 
 const repoRoot = path.resolve(__dirname, '../..');
 const outRoot = process.env.FORGE_MANUAL_E2E_OUT
-  || path.join(repoRoot, 'scripts', '.manual-e2e-out');
+  || path.join(
+    process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'),
+    'forge',
+    'manual-e2e-runs',
+  );
 const safeModel = model.replace(/[^a-zA-Z0-9_.-]+/g, '-').replace(/^-|-$/g, '');
 fs.mkdirSync(outRoot, { recursive: true });
 const cwd = positional[1]
