@@ -31,9 +31,9 @@ Every prompt goes through the same deterministic pipeline (no model call is spen
 itself, unless the opt-in LLM classifier is configured):
 
 ```
-prompt
+prompt + bounded prior-turn RoutingContext
   │ 1. classify → TaskTier (Trivial | Standard | Complex)         §2
-  │ 2. derive RouteHints: code_heavy + a stable per-prompt seed   §2.4
+  │ 2. derive RouteHints: code_heavy + a stable active-task seed  §2.4
   │ 3. candidate set: the discovered catalog (or [mesh.models])   §3
   │ 4. conservation decision: spread this prompt off the subs?    §6
   │ 5. score every routable candidate (route_score)               §4
@@ -55,6 +55,9 @@ the single selection path — pins, budget pressure, and chain building all live
 `route_hinted` (`lib.rs:1115`) lets a command/skill `tier:` frontmatter replace classification
 (the rest of the path is identical); `route_candidates` (`lib.rs:1146`) returns the top-n
 distinct-provider decisions for `/duel`.
+The main session path uses `route_contextual`: it supplies a bounded `RoutingContext` built from
+the transcript before the current user message is appended. Routers that do not need history retain
+the old behavior through the trait's default delegation.
 
 To see all of this live for a real prompt, run `forge mesh "<your task>"` (§11).
 
@@ -83,6 +86,7 @@ Otherwise, points accumulate:
 | Any `ERROR_MARKERS` hit ("panic", "traceback", "error[", …) | +1 | `lib.rs:323`, `lib.rs:541` |
 | Each `ANALYSIS_TERMS` hit ("performance", "security", "review", …) | +3 each | `lib.rs:271`, `lib.rs:545` |
 | Self-hosting infra term while working on Forge's own source (`SELF_HOSTING_INFRA_TERMS`, gated on `ProjectContext::is_self_hosting`) | +5 | `lib.rs:258`, `lib.rs:550` |
+| Short factual HTTP status-code explanation (for example, "explain what HTTP 429 means") | −8 | `is_simple_http_status_explanation` |
 | Any `TRIVIAL_HINTS` hit ("quick", "simple", "one-liner", …) | −5 | `lib.rs:203`, `lib.rs:556` |
 | Any `TRIVIAL_PATTERNS` hit ("typo", "rename", "add a comment", …), whole-word matched | −8 | `lib.rs:301`, `lib.rs:560` |
 
@@ -93,23 +97,50 @@ Word-boundary matching: `contains_word_boundary` (`lib.rs:423`) stops "port " ma
 "report "; `contains_whole_word` (`lib.rs:448`) additionally checks the trailing boundary so
 "rename" doesn't fire inside "renames".
 
+### 2.2 Contextual follow-ups
+
+`RoutingContext::from_messages` retains only routing-relevant, bounded history: the most recent
+standalone user task (4,000 characters), up to three later user refinements (1,500 characters
+each), the last assistant status (1,500 characters), and a Forge compaction summary when present
+(4,000 characters). Tool messages and `UiOnly` chrome are excluded. The current classifier turn is
+bounded to 8,000 characters.
+
+Short dependent turns such as `continue`, `go on`, `do it`, `fix that`, `test it`, `retry`, and
+referential prompts using `it`/`that`/`this` inherit the active task as a deterministic tier floor.
+Repeated continuations scan past earlier continuation turns to the last standalone task. Explicit
+new work such as `new task: ...` and standalone requests such as `fix this typo` are classified on
+their own; terminal acknowledgements (`thanks`, `got it`, `great`) remain Trivial. A retained
+`[Earlier conversation summarized to save context]` system message can anchor the tier after
+compaction even when the original user task is no longer present.
+
+The same active-task material drives `RouteHints`, so a coding task followed by `continue` remains
+`code_heavy` and uses a seed derived from the active task plus the current turn, rather than every
+unrelated `continue` sharing one seed.
+
 ### 2.3 Classifier kinds
 
 `mesh.classifier` (`crates/forge-config/src/lib.rs:1698`) selects:
 
 - `heuristic` — explicit opt-in, `score_prompt` only, zero added cost/latency.
-- `llm` (default) — `LlmRouter` tries the explicit override first, then up to three fast free
-  Standard-tier catalog choices, finally the configured trivial model. Health is checked per turn;
+- `llm` (default) — `LlmRouter` tries the explicit override first, then up to three fast, capable,
+  free Standard-tier catalog choices, finally the configured trivial model. A benchmarked
+  classifier must meet `CAPABLE_BENCH_THRESHOLD` (8.0 intelligence); an unbenchmarked candidate
+  must meet the capable family prior. Weak free candidates are used only when no capable free
+  classifier exists. Health is checked per turn;
   benched models are skipped. Each candidate has a 5-second timeout and the total classification
   budget is 15 seconds. The first parseable answer wins. Only when every candidate fails, times
-  out, or returns an unparseable reply does the mesh fall back to the heuristic.
+  out, or returns an unparseable reply does the mesh fall back to the heuristic. The LLM can
+  upgrade the deterministic contextual tier but cannot downgrade it; this prevents a weak
+  classifier from turning a known Complex task's `continue` into Trivial. Its cache key covers the
+  bounded prior context as well as the full current prompt.
 - `hybrid` — legacy alias for `llm`; it no longer skips LLM classification on any normal turn.
 
 All classifiers feed the same `HeuristicRouter::decide` selection path.
 
 ### 2.4 RouteHints: code-heaviness and the per-prompt seed
 
-`RouteHints::from_prompt` (`crates/forge-mesh/src/lib.rs:401`) derives:
+`RouteHints::from_prompt` derives standalone-turn hints; `RouteHints::from_context` substitutes the
+active task material for dependent follow-ups:
 
 - `code_heavy` — `is_code_heavy` (`lib.rs:474`): a ``` fence, a `CODE_TOKENS` symbol, or an
   `ACTION_VERBS` hit. Switches the benchmark quality term to the *coding* index and enables the

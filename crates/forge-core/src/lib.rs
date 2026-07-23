@@ -12,7 +12,9 @@ use completion::{
 use forge_config::Config;
 use forge_index::Lattice;
 use forge_mesh::pricing::Pricing;
-use forge_mesh::{BudgetState, BudgetStatus, HeuristicRouter, ModelCatalog, Router};
+use forge_mesh::{
+    BudgetState, BudgetStatus, HeuristicRouter, ModelCatalog, Router, RoutingContext,
+};
 use forge_provider::{CompletionOptions, Provider, StreamEvent, ToolSpec};
 use forge_store::{MeshOutcome, Store};
 use forge_tools::ToolRegistry;
@@ -6296,9 +6298,12 @@ prompt text, nothing else.";
         // Whether THIS turn has image attachments queued (vision input) — route around a
         // text-only model so an image doesn't land on a provider that 404s on it.
         let has_images = !self.pending_images.is_empty();
+        // Routing happens before the current user message is appended, so the transcript is
+        // exactly the bounded prior-turn context needed to interpret "continue", "fix that", etc.
+        let routing_context = RoutingContext::from_messages(&self.transcript);
         let decision = self
             .router
-            .route_hinted(
+            .route_contextual(
                 prompt,
                 has_images,
                 budget,
@@ -6307,6 +6312,7 @@ prompt text, nothing else.";
                 effective_tier,
                 self.pinned_effort,
                 &self.project,
+                &routing_context,
             )
             .await;
         // `/model <id>` override: use the pinned model instead of the mesh-routed pick; mesh still
