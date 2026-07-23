@@ -2441,6 +2441,7 @@ struct UsageParams {
 #[serde(rename_all = "camelCase")]
 struct UsageTotals {
     input_tokens: u64,
+    cached_input_tokens: u64,
     output_tokens: u64,
     cost_usd: f64,
 }
@@ -2450,6 +2451,7 @@ struct UsageProvider {
     provider: String,
     kind: String,
     input_tokens: u64,
+    cached_input_tokens: u64,
     output_tokens: u64,
     cost_usd: f64,
 }
@@ -2497,11 +2499,13 @@ fn usage_providers(rows: Vec<forge_store::ProviderUsage>) -> (UsageTotals, Vec<U
     let total = rows.iter().fold(
         UsageTotals {
             input_tokens: 0,
+            cached_input_tokens: 0,
             output_tokens: 0,
             cost_usd: 0.0,
         },
         |mut t, r| {
             t.input_tokens += r.input_tokens;
+            t.cached_input_tokens += r.cached_input_tokens;
             t.output_tokens += r.output_tokens;
             t.cost_usd += r.cost_usd;
             t
@@ -2513,6 +2517,7 @@ fn usage_providers(rows: Vec<forge_store::ProviderUsage>) -> (UsageTotals, Vec<U
             kind: provider_kind(&r.provider).into(),
             provider: r.provider,
             input_tokens: r.input_tokens,
+            cached_input_tokens: r.cached_input_tokens,
             output_tokens: r.output_tokens,
             cost_usd: r.cost_usd,
         })

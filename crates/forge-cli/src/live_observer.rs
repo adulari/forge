@@ -23,9 +23,18 @@ pub enum LiveEvent {
         model: String,
         rationale: String,
     },
+    AuxiliaryRequest {
+        model: String,
+        purpose: String,
+    },
+    AuxiliaryProgress {
+        chars: usize,
+    },
     Cost {
         session_total_usd: f64,
         session_in: u64,
+        #[serde(default)]
+        session_cached_in: u64,
         session_out: u64,
         context_tokens: u64,
         context_limit: Option<u32>,
@@ -86,15 +95,24 @@ pub fn to_live_event(event: &PresenterEvent) -> Option<LiveEvent> {
             model: model.clone(),
             rationale: rationale.clone(),
         }),
+        PresenterEvent::AuxiliaryRequest { model, purpose } => Some(LiveEvent::AuxiliaryRequest {
+            model: model.clone(),
+            purpose: purpose.clone(),
+        }),
+        PresenterEvent::AuxiliaryProgress { chars } => {
+            Some(LiveEvent::AuxiliaryProgress { chars: *chars })
+        }
         PresenterEvent::Cost {
             session_total_usd,
             session_in,
+            session_cached_in,
             session_out,
             context_tokens,
             context_limit,
         } => Some(LiveEvent::Cost {
             session_total_usd: *session_total_usd,
             session_in: *session_in,
+            session_cached_in: *session_cached_in,
             session_out: *session_out,
             context_tokens: *context_tokens,
             context_limit: *context_limit,
@@ -164,15 +182,21 @@ pub fn live_event_to_presenter(event: LiveEvent) -> Option<PresenterEvent> {
             model,
             rationale,
         }),
+        LiveEvent::AuxiliaryRequest { model, purpose } => {
+            Some(PresenterEvent::AuxiliaryRequest { model, purpose })
+        }
+        LiveEvent::AuxiliaryProgress { chars } => Some(PresenterEvent::AuxiliaryProgress { chars }),
         LiveEvent::Cost {
             session_total_usd,
             session_in,
+            session_cached_in,
             session_out,
             context_tokens,
             context_limit,
         } => Some(PresenterEvent::Cost {
             session_total_usd,
             session_in,
+            session_cached_in,
             session_out,
             context_tokens,
             context_limit,
@@ -212,5 +236,32 @@ pub fn live_event_to_presenter(event: LiveEvent) -> Option<PresenterEvent> {
         LiveEvent::WorkflowFinished { ok, summary } => {
             Some(PresenterEvent::WorkflowFinished { ok, summary })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auxiliary_activity_survives_live_observer_round_trip() {
+        let request = PresenterEvent::AuxiliaryRequest {
+            model: "codex-oauth::gpt-5.6-luna".into(),
+            purpose: "diagnosing the failed shell command".into(),
+        };
+        let encoded = to_live_event(&request).expect("request is remotely observable");
+        assert!(matches!(
+            live_event_to_presenter(encoded),
+            Some(PresenterEvent::AuxiliaryRequest { model, purpose })
+                if model == "codex-oauth::gpt-5.6-luna"
+                    && purpose == "diagnosing the failed shell command"
+        ));
+
+        let progress = PresenterEvent::AuxiliaryProgress { chars: 1_024 };
+        let encoded = to_live_event(&progress).expect("progress is remotely observable");
+        assert!(matches!(
+            live_event_to_presenter(encoded),
+            Some(PresenterEvent::AuxiliaryProgress { chars: 1_024 })
+        ));
     }
 }

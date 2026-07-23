@@ -622,7 +622,8 @@ impl Tool for WriteFileTool {
         "Write content to a file at the given path, creating it or OVERWRITING it whole. For an \
          existing file, read it first and prefer edit_file for targeted changes — write_file \
          replaces the entire file, so any content you omit is lost. Best for new files or full \
-         rewrites."
+         rewrites. For a very large generated file, write one coherent first chunk and continue \
+         with append_file rather than risking an oversized single call."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::Write
@@ -631,7 +632,10 @@ impl Tool for WriteFileTool {
         json!({
             "type": "object",
             "properties": {
-                "path": { "type": "string" },
+                "path": {
+                    "type": "string",
+                    "description": "Destination file. Emit this field before content."
+                },
                 "content": { "type": "string" }
             },
             "required": ["path", "content"]
@@ -660,6 +664,79 @@ impl Tool for WriteFileTool {
             kind,
             old,
             new: Some(content.to_string()),
+            lang: lang_from_path(path),
+            binary: false,
+        })
+    }
+}
+
+/// Append text to a file, creating it when absent. This gives models a structured, permissioned
+/// alternative to giant one-shot writes or shell heredocs when generating large artifacts.
+pub struct AppendFileTool;
+
+#[async_trait]
+impl Tool for AppendFileTool {
+    fn name(&self) -> &str {
+        "append_file"
+    }
+
+    fn description(&self) -> &str {
+        "Append content verbatim to the end of a file, creating it if absent. Use write_file for \
+         the first chunk, then append_file for subsequent coherent chunks of a large generated \
+         file. This never replaces or deduplicates existing text, so do not retry an append unless \
+         you verified the previous call failed."
+    }
+
+    fn side_effect(&self) -> SideEffect {
+        SideEffect::Write
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "File to append to. Emit this field before content."
+                },
+                "content": { "type": "string", "description": "Text to append verbatim." }
+            },
+            "required": ["path", "content"]
+        })
+    }
+
+    async fn run(&self, args: &Value) -> Result<String, ToolError> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let path = str_arg(args, "path")?;
+        let content = str_arg(args, "content")?;
+        confine(path)?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .await?;
+        file.write_all(content.as_bytes()).await?;
+        file.flush().await?;
+        Ok(format!("appended {} bytes to {path}", content.len()))
+    }
+
+    async fn preview(&self, args: &Value) -> Option<FileDiff> {
+        let path = str_arg(args, "path").ok()?;
+        let addition = str_arg(args, "content").ok()?;
+        confine(path).ok()?;
+        let old = tokio::fs::read_to_string(path).await.ok();
+        let mut new = old.clone().unwrap_or_default();
+        new.push_str(addition);
+        Some(FileDiff {
+            path: path.to_string(),
+            kind: if old.is_some() {
+                DiffKind::Modified
+            } else {
+                DiffKind::Created
+            },
+            old,
+            new: Some(new),
             lang: lang_from_path(path),
             binary: false,
         })

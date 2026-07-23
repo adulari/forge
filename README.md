@@ -182,6 +182,17 @@ Forge-only.
 
 ---
 
+## 🔑 Subscription API plans
+
+Qwen Cloud's individual Token Plan is built in through its Singapore OpenAI-compatible endpoint.
+Store the plan key with `forge auth qwencloud`, then select a discovered model such as
+`qwencloud::qwen3.8-max-preview` from `/model` or the model picker. Forge discovers the models
+included in the subscription live; it does not guess fallback model IDs when discovery is
+unavailable. Qwen 3.8 Preview's mandatory private thinking phase has its own bounded budget so it
+cannot spend minutes re-planning before the first tool call; this does not truncate answer or file
+content. Forge itself applies no output-token cap unless `mesh.max_output_tokens` is explicitly set
+above zero.
+
 <a id="free-providers"></a>
 
 ## 🆓 Recommended free providers
@@ -317,8 +328,9 @@ no API keys, same output every time. Re-record them with `scripts/demo/record.sh
   exit status; `web_fetch` and `web_search` are permission-gated and SSRF-protected
 
 **🔌 Ecosystem / Interop**
-- 17+ providers including Anthropic, OpenAI, Ollama, Groq, Gemini, DeepSeek, OpenRouter, NVIDIA NIM,
-  SambaNova, Mistral, Cohere, xAI, Cerebras — any OpenAI-compatible endpoint in one config row
+- 18+ providers including Anthropic, OpenAI, Qwen Cloud Token Plan, Ollama, Groq, Gemini, DeepSeek,
+  OpenRouter, NVIDIA NIM, SambaNova, Mistral, Cohere, xAI, Cerebras — any OpenAI-compatible endpoint
+  in one config row
 - Subscription bridges: Claude Code CLI, Codex CLI, Antigravity CLI (free Gemini)
 - Persistent Claude bridge transport keeps re-drives warm; unsupported bridge CLIs fall back to the
   safe one-process-per-turn path without double-executing tools
@@ -929,6 +941,7 @@ uses a model turn and its configured quota.
 daily_budget_usd = 5.0
 monthly_cap_usd = 50.0
 credit_mode = "strict"        # route to free + subscription only
+max_output_tokens = 0         # provider/model native output maximum (positive = explicit cap)
 auto_orchestrate = true       # apply the orchestration framework on every turn
 ```
 

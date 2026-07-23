@@ -86,9 +86,9 @@ fn de_named_models<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>
     Ok(models)
 }
 
-/// A $0-marginal subscription bridge (the locally-installed claude/codex CLI) or subscription
-/// OAuth provider (`xai-oauth::`), as opposed to a metered or genuinely-free API. Kept separate
-/// from "free" in the overview counts.
+/// A $0-marginal subscription bridge (the locally-installed claude/codex CLI), subscription OAuth
+/// provider (`xai-oauth::`), or API-key subscription surface (`qwencloud::`), as opposed to a
+/// metered or genuinely-free API. Kept separate from "free" in the overview counts.
 /// Documented in docs/features/mesh-routing.md.
 pub fn is_subscription(id: &str) -> bool {
     id.starts_with("claude-cli::")
@@ -96,6 +96,7 @@ pub fn is_subscription(id: &str) -> bool {
         || id.starts_with("agy-cli::")
         || id.starts_with("xai-oauth::")
         || id.starts_with("codex-oauth::")
+        || id.starts_with("qwencloud::")
 }
 
 /// Whether a model is genuinely free to call. "Free" needs *positive* evidence, not just a missing
@@ -1248,11 +1249,15 @@ mod tests {
     }
 
     #[test]
-    fn xai_oauth_is_subscription_not_free() {
-        assert!(is_subscription("xai-oauth::grok-4"));
-        assert!(!is_free("xai-oauth::grok-4", 0.0, true));
-        assert!(is_subscription("codex-oauth::gpt-5.5"));
-        assert!(!is_free("codex-oauth::gpt-5.5", 0.0, true));
+    fn oauth_and_api_key_plans_are_subscription_not_free() {
+        for id in [
+            "xai-oauth::grok-4",
+            "codex-oauth::gpt-5.5",
+            "qwencloud::qwen3.8-max-preview",
+        ] {
+            assert!(is_subscription(id));
+            assert!(!is_free(id, 0.0, true));
+        }
     }
 
     #[test]

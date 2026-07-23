@@ -63,6 +63,11 @@ Line 1: the most likely cause in one terse sentence (no preamble, no restating t
 Line 2 (optional): if a single shell command fixes it, write exactly: FIX: <the command>. \
 Omit line 2 if no single command fixes it.";
 
+/// Shell diagnosis is optional context, never part of the user's requested work. Bound both its
+/// silent-stream interval and total wall time so an unhealthy auxiliary provider cannot hold the
+/// primary model loop (and therefore the entire TUI) hostage.
+const SHELL_DIAGNOSE_MAX_SECS: u64 = 30;
+
 /// Default sampling temperature for coding turns: low, so edits/patches are deterministic rather
 /// than creatively varied. Only takes effect when reasoning/effort isn't engaged (thinking models
 /// reject a custom temperature) — see `genai_provider`.
@@ -80,6 +85,8 @@ tools provided, then stop.
 Approach:
 - Work from evidence, not assumption. Before editing, read the relevant files and search the \
 codebase so your change fits the existing structure, naming, and conventions.
+- Keep verification exit codes trustworthy: run checks separately or join them with `&&`; do not \
+mask failures behind `;`, `||`, or a pipeline into `head`/`tail`/`tee` without pipe-failure handling.
 - For any non-trivial task, make a short plan and keep it current with the update_tasks tool. \
 Do the work; don't just describe it.
 - Make the smallest change that fully solves the task. Match the surrounding code's style. Do NOT \
@@ -97,8 +104,9 @@ Tools:
 match exactly once, and read the file first so whitespace matches. To change one file in several \
 places at once, multi_edit applies a list of edits atomically. For a large or multi-file change, \
 apply_patch takes a unified diff. For a Jupyter notebook (.ipynb) use notebook_edit (cell-level) \
-— edit_file would corrupt its JSON. Use write_file for new files or full rewrites; don't \
-blind-overwrite a file you haven't read.
+— edit_file would corrupt its JSON. Use write_file for new files or full rewrites. When generated \
+content is too large for one reliable tool call, write the first coherent chunk and use append_file \
+for the rest. Don't blind-overwrite a file you haven't read.
 - A tool result starting with `error:` means it failed — read the message, fix the cause, and \
 retry differently rather than repeating the same call.
 
@@ -498,6 +506,23 @@ const MAX_RATE_LIMIT_WAITS: u32 = 2;
 /// keeps the latter — mesh auto-rotation stays fully enabled, it just never lands on a window that
 /// can't hold the work (which would otherwise trip the "too small, compact?" prompt every turn).
 const MIN_CODING_CONTEXT: u32 = 32_000;
+
+/// Reply room used only for context fitting when the provider output is intentionally unbounded.
+///
+/// `mesh.max_output_tokens = 0` means Forge omits the provider request cap and lets the model use
+/// its native maximum. Context planning still needs a realistic amount of reply room, otherwise a
+/// nearly-full transcript can be admitted with only the historical 1K-token cushion. This value is
+/// never sent to a provider and therefore cannot truncate a response.
+const UNBOUNDED_OUTPUT_PLANNING_RESERVE: u32 = 8_192;
+const MIN_OUTPUT_PLANNING_RESERVE: u32 = 1_024;
+
+fn output_planning_reserve_tokens(configured_cap: u32) -> u32 {
+    if configured_cap == 0 {
+        UNBOUNDED_OUTPUT_PLANNING_RESERVE
+    } else {
+        configured_cap.max(MIN_OUTPUT_PLANNING_RESERVE)
+    }
+}
 
 /// Minimum context window the router must require for the next turn. Two terms, max-combined:
 /// 1. The current transcript must clear `Session::transcript_fits`' bar (transcript ≤ 80% of the
@@ -958,6 +983,12 @@ fn validate_tool_args(schema: &serde_json::Value, args: &serde_json::Value) -> R
     let Some(obj) = args.as_object() else {
         return Err("arguments must be a JSON object".to_string());
     };
+    if let Some(reason) = obj
+        .get(forge_provider::TRUNCATED_TOOL_ARGS_KEY)
+        .and_then(|value| value.as_str())
+    {
+        return Err(reason.to_string());
+    }
     let required = schema
         .get("required")
         .and_then(|r| r.as_array())
@@ -1022,6 +1053,54 @@ enum CompletionGate {
 /// evidence get one verification chance.
 fn completion_claims_no_change(text: &str) -> bool {
     completion::claims_no_change(text)
+}
+
+/// A response that explicitly promises another agent action and then stops at an open-ended marker
+/// is not a final answer. Keep this deliberately narrow: headings such as `What changed:` are valid
+/// prose, while `Let me verify ...:` means the model yielded before doing what it just promised.
+fn completion_promises_followup(text: &str) -> bool {
+    let trimmed = text.trim();
+    if !(trimmed.ends_with(':') || trimmed.ends_with("...") || trimmed.ends_with('…')) {
+        return false;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let tail_reversed: String = lower.chars().rev().take(320).collect();
+    let tail: String = tail_reversed.chars().rev().collect();
+    let intent_at = [
+        "let me ",
+        "i'll ",
+        "i will ",
+        "i'm going to ",
+        "i’m going to ",
+        "i need to ",
+        "now i ",
+        "next i ",
+    ]
+    .iter()
+    .filter_map(|marker| tail.rfind(marker))
+    .max();
+    let Some(intent) = intent_at.map(|at| &tail[at..]) else {
+        return false;
+    };
+    [
+        "check",
+        "verify",
+        "test",
+        "run",
+        "inspect",
+        "review",
+        "investigate",
+        "fix",
+        "edit",
+        "write",
+        "create",
+        "update",
+        "continue",
+        "try",
+    ]
+    .iter()
+    .any(|action| intent.contains(action))
 }
 
 #[cfg(test)]
@@ -3180,6 +3259,13 @@ impl Session {
                 schema: s.schema,
             }));
         }
+        // ToolRegistry is backed by a HashMap, whose iteration order is deliberately randomized
+        // per process. A resumed `forge run` therefore used to reshuffle the complete tool-schema
+        // prefix even when the session, model, and tools were unchanged. Provider prompt caches
+        // hash the serialized prefix, so that harmless ordering drift forced a full cache miss on
+        // every cross-process resume. Sort the final combined surface (built-ins, virtual tools,
+        // skills, and MCP) so every provider receives a byte-stable catalog.
+        specs.sort_by(|left, right| left.name.cmp(&right.name));
         specs
     }
 
@@ -3342,18 +3428,20 @@ impl Session {
         })
     }
 
-    /// The context window (tokens) to assume for `model`: a fetched per-model window (provider API,
-    /// persisted in the store) first, then the family heuristic, then a conservative floor. Always
-    /// returns a usable number so a turn can be bounded even for a model we've never seen.
-    /// The model's REAL context window (fetched per-model window → family heuristic → conservative
-    /// floor), ignoring any transient overflow self-heal cap. This is the honest denominator for the
-    /// context gauge — the cap only shrinks what we SEND, not the model's actual limit.
+    /// The context window (tokens) to assume for `model`: a narrow authoritative override first,
+    /// then a fetched per-model window (provider API, persisted in the store), the family heuristic,
+    /// and finally a conservative floor. Always returns a usable number so a turn can be bounded
+    /// even for a model we've never seen. The cap only shrinks what we SEND, not the model's actual
+    /// limit.
     fn base_context_window(&self, model: &str) -> u32 {
-        self.store
-            .model_context(model)
-            .ok()
-            .flatten()
-            .filter(|w| *w > 0)
+        forge_mesh::pricing::authoritative_context_limit(model)
+            .or_else(|| {
+                self.store
+                    .model_context(model)
+                    .ok()
+                    .flatten()
+                    .filter(|w| *w > 0)
+            })
             .or_else(|| forge_mesh::pricing::context_limit(model))
             .unwrap_or(forge_mesh::pricing::CONSERVATIVE_CONTEXT_WINDOW)
     }
@@ -3375,7 +3463,7 @@ impl Session {
     /// active model each step so failover to a smaller-window model re-trims appropriately.
     fn transcript_for(&self, model: &str) -> Vec<Message> {
         let window = self.effective_context_window(model) as usize;
-        let reserve = self.config.mesh.max_output_tokens.max(1024) as usize;
+        let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as usize;
         // Real-token budget: window minus the reply reservation, with 5% headroom for the small
         // magnitude difference between our o200k counter and the target model's own tokenizer.
         let budget_tokens = window.saturating_sub(reserve) * 95 / 100;
@@ -3420,7 +3508,7 @@ impl Session {
     fn transcript_with_preamble(&self, model: &str) -> Vec<Message> {
         let preamble = self.system_preamble();
         let window = self.effective_context_window(model) as usize;
-        let reserve = self.config.mesh.max_output_tokens.max(1024) as usize;
+        let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as usize;
         let preamble_tokens: usize = preamble.iter().map(message_tokens).sum();
         let budget_tokens = window
             .saturating_sub(reserve)
@@ -3532,6 +3620,17 @@ Rules:\n\
         (!forge_provider::is_cli_bridge(&model)).then_some(model)
     }
 
+    /// Side calls are deliberately cheap/low-reasoning, but their answer length remains native and
+    /// uncapped. A stable purpose-scoped key enables the same automatic provider prefix caching as
+    /// the main loop instead of silently bypassing it for compaction, memory, recap, and diagnosis.
+    fn auxiliary_completion_options(session_id: &str, purpose: &str) -> CompletionOptions {
+        CompletionOptions {
+            effort: Some(EffortLevel::Low),
+            prompt_cache_key: Some(format!("{session_id}:{purpose}")),
+            ..CompletionOptions::default()
+        }
+    }
+
     /// Run the PLAN phase of the architect pipeline.
     ///
     /// Calls the planner model with the current transcript and NO tools advertised, streams its
@@ -3580,7 +3679,9 @@ Rules:\n\
             temperature: Some(CODING_TEMPERATURE),
             // The planner runs with no tools (it can't edit files), so it needs no checkpoint context.
             checkpoint: None,
-            prompt_cache_key: None,
+            // Planning repeatedly reuses the same standing prompt/transcript. Keep it in a
+            // session-specific provider cache shard even though the planner has no tool checkpoint.
+            prompt_cache_key: Some(format!("{}:architect", self.id)),
             response_format: None,
         };
 
@@ -3597,6 +3698,10 @@ Rules:\n\
             // the planner system prompt.
             let mut planner_msgs = self.transcript_for(&model);
             planner_msgs.insert(0, Message::system(Self::ARCHITECT_PLANNER_SYSTEM));
+            self.presenter.emit(PresenterEvent::ProviderRequest {
+                model: model.clone(),
+                step: 0,
+            });
 
             // Collect plan text while streaming it live to the presenter.
             let mut plan_text = String::new();
@@ -3679,7 +3784,8 @@ Rules:\n\
     /// Context-window floor to hand the router for the next turn, so mesh auto-rotation never picks
     /// a window this turn will immediately overflow. See [`routing_min_context_tokens`].
     fn routing_min_context(&self) -> u32 {
-        let reserve = self.config.mesh.effective_max_output_tokens().max(1024);
+        let reserve =
+            output_planning_reserve_tokens(self.config.mesh.effective_max_output_tokens());
         let transcript = self.estimated_transcript_tokens().min(u32::MAX as u64) as u32;
         routing_min_context_tokens(transcript, reserve)
     }
@@ -3689,7 +3795,7 @@ Rules:\n\
     /// a model that fails this check triggers the consent prompt).
     fn transcript_fits(&self, model: &str) -> bool {
         let window = self.effective_context_window(model) as u64;
-        let reserve = self.config.mesh.max_output_tokens.max(1024) as u64;
+        let reserve = output_planning_reserve_tokens(self.config.mesh.max_output_tokens) as u64;
         let usable = window.saturating_sub(reserve) * 8 / 10;
         self.estimated_transcript_tokens() <= usable
     }
@@ -3770,6 +3876,10 @@ Rules:\n\
         self.presenter.emit(PresenterEvent::Cost {
             session_total_usd,
             session_in,
+            session_cached_in: self
+                .store
+                .session_cached_input_tokens(&self.id)
+                .unwrap_or(0),
             session_out,
             context_tokens: self.estimated_transcript_tokens(),
             // The gauge denominator is the model's REAL window, not the transient overflow cap.
@@ -3911,11 +4021,12 @@ Rules:\n\
             });
         let mut chain = candidates.into_iter();
         let mut model = chain.next().expect("compact_candidate_chain is non-empty");
+        let completion_opts = Self::auxiliary_completion_options(&self.id, "compact");
         let resp = loop {
             let mut sink = |_: StreamEvent| {};
             match self
                 .provider
-                .complete(&model, &messages, &[], &mut sink)
+                .complete_with(&model, &messages, &[], &completion_opts, &mut sink)
                 .await
             {
                 Ok(r) => break r,
@@ -4073,8 +4184,15 @@ prompt text, nothing else.";
                 )),
             ];
             let mut on_event = |_: StreamEvent| {};
+            let completion_opts = Session::auxiliary_completion_options(&id, "memory");
             let Ok(r) = provider
-                .complete(&decision.model, &messages, &[], &mut on_event)
+                .complete_with(
+                    &decision.model,
+                    &messages,
+                    &[],
+                    &completion_opts,
+                    &mut on_event,
+                )
                 .await
             else {
                 return;
@@ -4182,8 +4300,9 @@ prompt text, nothing else.";
             Some(mut sink) => {
                 tokio::spawn(async move {
                     let mut on_event = |_: StreamEvent| {};
+                    let completion_opts = Session::auxiliary_completion_options(&id, "recap");
                     if let Ok(r) = provider
-                        .complete(&model, &messages, &[], &mut on_event)
+                        .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                         .await
                     {
                         let _ = store.record_side_call_usage(&id, "recap", &r.usage);
@@ -4195,8 +4314,9 @@ prompt text, nothing else.";
             }
             None => {
                 let mut on_event = |_: StreamEvent| {};
+                let completion_opts = Session::auxiliary_completion_options(&id, "recap");
                 if let Ok(r) = provider
-                    .complete(&model, &messages, &[], &mut on_event)
+                    .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                     .await
                 {
                     let _ = store.record_side_call_usage(&id, "recap", &r.usage);
@@ -4275,8 +4395,9 @@ prompt text, nothing else.";
             Some(mut sink) => {
                 tokio::spawn(async move {
                     let mut on_event = |_: StreamEvent| {};
+                    let completion_opts = Session::auxiliary_completion_options(&id, "suggest");
                     if let Ok(r) = provider
-                        .complete(&model, &messages, &[], &mut on_event)
+                        .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                         .await
                     {
                         let _ = store.record_side_call_usage(&id, "suggest", &r.usage);
@@ -4288,8 +4409,9 @@ prompt text, nothing else.";
             }
             None => {
                 let mut on_event = |_: StreamEvent| {};
+                let completion_opts = Session::auxiliary_completion_options(&id, "suggest");
                 if let Ok(r) = provider
-                    .complete(&model, &messages, &[], &mut on_event)
+                    .complete_with(&model, &messages, &[], &completion_opts, &mut on_event)
                     .await
                 {
                     let _ = store.record_side_call_usage(&id, "suggest", &r.usage);
@@ -4354,12 +4476,38 @@ prompt text, nothing else.";
             Message::system(SHELL_DIAGNOSE_SYSTEM),
             Message::user(format!("Command:\n{command}\n\nResult:\n{result}")),
         ];
-        let mut sink = |_: StreamEvent| {};
-        if let Ok(r) = self
-            .provider
-            .complete(&model, &messages, &[], &mut sink)
-            .await
-        {
+        self.presenter.emit(PresenterEvent::AuxiliaryRequest {
+            model: model.clone(),
+            purpose: "diagnosing the failed shell command".to_string(),
+        });
+        let provider = self.provider.clone();
+        let completion_opts = Self::auxiliary_completion_options(&self.id, "shell-diagnose");
+        let presenter = &mut self.presenter;
+        let activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let activity_for_sink = std::sync::Arc::clone(&activity);
+        let mut sink = |event: StreamEvent| match event {
+            StreamEvent::Text(delta) | StreamEvent::Reasoning(delta) if !delta.is_empty() => {
+                activity_for_sink.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                presenter.emit(PresenterEvent::AuxiliaryProgress {
+                    chars: delta.chars().count(),
+                });
+            }
+            _ => {}
+        };
+        let configured_idle = self.config.mesh.stream_idle_timeout_secs;
+        let idle = std::time::Duration::from_secs(if configured_idle == 0 {
+            SHELL_DIAGNOSE_MAX_SECS
+        } else {
+            configured_idle.min(SHELL_DIAGNOSE_MAX_SECS)
+        });
+        let completion =
+            provider.complete_with(&model, &messages, &[], &completion_opts, &mut sink);
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(SHELL_DIAGNOSE_MAX_SECS),
+            stream_with_idle_timeout(completion, &activity, idle),
+        )
+        .await;
+        if let Ok(Ok(r)) = response {
             let _ = self
                 .store
                 .record_side_call_usage(&self.id, "shell/diagnose", &r.usage);
@@ -4393,6 +4541,15 @@ prompt text, nothing else.";
                     fix,
                 });
             }
+        } else {
+            let detail = if response.is_err() {
+                format!("timed out after {SHELL_DIAGNOSE_MAX_SECS}s")
+            } else {
+                "provider unavailable".to_string()
+            };
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "optional shell diagnosis {detail} — continuing without it"
+            )));
         }
     }
 
@@ -4592,6 +4749,10 @@ prompt text, nothing else.";
         // turn mid-task. `doom_nudged`: the doom-loop fires a "change approach" nudge BEFORE it
         // ever hard-stops, so a repeated call doesn't kill an otherwise-recoverable turn.
         let mut continue_nudges = 0usize;
+        // A model can mark every task done, pass the verification gate, then yield a sentence such
+        // as "Let me verify runtime issues:" with no tool call. That is explicit unfinished intent,
+        // not a final answer. Give it one bounded chance to perform the promised action.
+        let mut followup_intent_nudges = 0usize;
         let mut doom_nudged = false;
         // Failure-loop guard (complements the identical-call doom-loop): counts tool failures by
         // (tool name, error kind) ACROSS the turn, so a model retrying the same KIND of error with
@@ -4613,10 +4774,9 @@ prompt text, nothing else.";
         // `continue` would.
         let mut bridge_continue_nudges = 0usize;
         // Verification gate: when a bridge reports every task Done, completion is NOT accepted on
-        // its say-so — forge forces ONE tool-grounded verification turn (check the real state: git,
-        // gh, files) before the turn can end. Reset to false whenever work reopens, so each fresh
-        // "all done" claim is re-verified. This is the completion AUTHORITY: "done" means forge made
-        // the model prove it with tools, not that the model asserted it.
+        // its say-so. Fresh tool-grounded evidence newer than the last artifact mutation is enough;
+        // otherwise Forge requests a verification turn. This is the completion AUTHORITY: "done"
+        // means Forge observed proof, not merely that the model asserted it.
         // Verification attempts spent on the current "all done" claim. 0 = not yet verifying. The
         // gate forces the bridge to PROVE completion with a real inspection tool; a verification
         // turn that just re-marks `update_tasks` without inspecting doesn't count (the C8 hole — a
@@ -4738,6 +4898,10 @@ prompt text, nothing else.";
                         forge_config::provider_of(&active_model)
                     )))
                 } else {
+                    self.presenter.emit(PresenterEvent::ProviderRequest {
+                        model: active_model.clone(),
+                        step,
+                    });
                     let provider = &self.provider;
                     let presenter = &mut self.presenter;
                     // Bump on every stream event so the idle watchdog can distinguish a live
@@ -4755,6 +4919,9 @@ prompt text, nothing else.";
                     let mut sink = |ev: StreamEvent| {
                         act.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         match ev {
+                            StreamEvent::ProviderActivity => {
+                                presenter.emit(PresenterEvent::ProviderProgress)
+                            }
                             StreamEvent::Text(t) => {
                                 if !suppress_assistant_text {
                                     presenter.emit(PresenterEvent::AssistantDelta(t));
@@ -5454,6 +5621,28 @@ prompt text, nothing else.";
                         "model returned an empty response (no text, no tool call) — stopping the turn"
                             .to_string(),
                     ));
+                } else if completion_promises_followup(&resp.content) && followup_intent_nudges == 0
+                {
+                    followup_intent_nudges += 1;
+                    self.presenter.emit(PresenterEvent::Warning(
+                        "model promised another action but stopped before doing it — continuing once"
+                            .to_string(),
+                    ));
+                    const FOLLOWUP_INTENT_NUDGE: &str = "Your last response explicitly promised a \
+                        next action but ended before doing it. Do not narrate future work and stop. \
+                        Call the required tool now and complete/check the action, or, if nothing \
+                        remains, give a self-contained final answer stating exactly what already \
+                        passed.";
+                    let nseq = self.next_seq();
+                    let _ = self.store.add_message(
+                        &self.id,
+                        nseq,
+                        Role::System,
+                        FOLLOWUP_INTENT_NUDGE,
+                        None,
+                    );
+                    self.transcript.push(Message::system(FOLLOWUP_INTENT_NUDGE));
+                    continue;
                 } else if forge_provider::is_cli_bridge(&active_model) {
                     // Bridge cost ceiling (wave 5, fixes 1 + 2). This is the observation boundary a
                     // bridge turn actually has: its tools ran inside the subprocess and it has now
@@ -5602,11 +5791,11 @@ prompt text, nothing else.";
                     } else if !self.tasks.is_empty() {
                         // The bridge reports every task Done — but a self-reported status is exactly
                         // what produced the phantom release (claimed merged + tagged; nothing ran).
-                        // Force ONE tool-grounded verification turn when work changed external
-                        // state. A read-only completion is already evidenced by its inspection;
-                        // a reasoned no-op is accepted without demanding a meaningless edit.
-                        //   * If the turn ran an inspection, completion is accepted after the one
-                        //     verification turn also inspects.
+                        // Require fresh tool-grounded evidence when work changed external state.
+                        // A successful check newer than the last artifact mutation is accepted
+                        // immediately; otherwise the gate requests a verification turn.
+                        // A read-only completion is already evidenced by its inspection; a reasoned
+                        // no-op is accepted without demanding a meaningless edit.
                         //   * If the turn did NO inspectable work (a pure reasoning/analysis plan —
                         //     the deliverable is the answer text, there is no external state to
                         //     check), requiring a tool inspection would over-fire. Accept with a
@@ -5712,9 +5901,9 @@ prompt text, nothing else.";
                         )));
                     } else if !self.tasks.is_empty() {
                         // Every tracked task reported Done — same completion authority as the bridge:
-                        // don't accept the model's say-so, force ONE tool-grounded state check first.
-                        // A self-reported "done" without an inspection is exactly the phantom-completion
-                        // the bridge gate guards against; the direct path had no such guard before.
+                        // accept fresh evidence newer than the last mutation, otherwise request a
+                        // tool-grounded state check. A self-reported "done" without an inspection is
+                        // exactly the phantom-completion the bridge gate guards against.
                         let did_real_work =
                             inspect_ran.load(std::sync::atomic::Ordering::Relaxed) > 0;
                         // Unlike the bridge (which runs its whole tool loop INSIDE one `complete()`
@@ -6917,6 +7106,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.presenter.emit(PresenterEvent::Cost {
             session_total_usd: self.store.session_cost(&self.id)?,
             session_in,
+            session_cached_in: self.store.session_cached_input_tokens(&self.id)?,
             session_out,
             context_tokens,
             context_limit: Some(self.effective_context_window(&active_model)),
@@ -6929,13 +7119,22 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 StopReason::FinalAnswer
             },
         });
+        // A channel-backed interactive surface can keep receiving detached auxiliary results after
+        // the main turn is done. Remember that capability before launching the side calls so the
+        // input is never held hostage by recap/suggestion/memory provider latency.
+        let detach_post_turn_work = self.presenter.recap_sink().is_some();
         self.generate_recap(prompt, &final_text, &recap_tasks_before)
             .await;
         self.generate_suggestion(prompt, &final_text).await;
-        // Await the handle so one-shot (forge run) exits only after capture completes. In
-        // interactive mode the spinner is already cleared and this is a brief background wait.
+        // One-shot/headless mode must await memory persistence before the process exits. In the
+        // interactive TUI, dropping a Tokio JoinHandle detaches (does not cancel) the capture, so
+        // the completed answer and input become usable immediately while persistence finishes.
         if let Some(handle) = self.capture_memories(prompt, &final_text) {
-            let _ = handle.await;
+            if detach_post_turn_work {
+                drop(handle);
+            } else {
+                let _ = handle.await;
+            }
         }
         Ok(if hit_step_cap {
             LoopOutcome::max_steps(final_text)
@@ -7399,8 +7598,27 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         effective_args = subagent::rewrite_args_for_root(&effective_args, self.workspace.root());
         effective_args =
             add_workspace_default_path(&call.name, effective_args, self.workspace.root());
-        validate_workspace_args(&effective_args, &self.workspace)?;
         let mut args_json = serde_json::to_string(&effective_args)?;
+        if let Err(error) = validate_workspace_args(&effective_args, &self.workspace) {
+            let result = format!("error: {error}");
+            self.presenter.emit(PresenterEvent::ToolStart {
+                name: call.name.clone(),
+                args: args_json.clone(),
+            });
+            self.presenter.emit(PresenterEvent::ToolResult {
+                name: call.name.clone(),
+                ok: false,
+                summary: "path outside session workspace".to_string(),
+            });
+            self.store
+                .record_tool_call(msg_id, &call.name, &args_json, &result, "denied", "error")?;
+            if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
+                self.presenter
+                    .emit(PresenterEvent::Warning(warning.clone()));
+                self.pending_hints.push(warning);
+            }
+            return Ok(result);
+        }
 
         let Some(tool) = self.tools.get(&call.name) else {
             // Name the valid tools so the model can recover instead of guessing again.
@@ -7472,8 +7690,25 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 effective_args = subagent::rewrite_args_for_root(&new_args, self.workspace.root());
                 effective_args =
                     add_workspace_default_path(&call.name, effective_args, self.workspace.root());
-                validate_workspace_args(&effective_args, &self.workspace)?;
                 args_json = serde_json::to_string(&effective_args).unwrap_or_default();
+                if let Err(error) = validate_workspace_args(&effective_args, &self.workspace) {
+                    let result = format!("error: {error}");
+                    self.presenter.emit(PresenterEvent::ToolResult {
+                        name: call.name.clone(),
+                        ok: false,
+                        summary: "hook rewrote path outside session workspace".to_string(),
+                    });
+                    self.store.record_tool_call(
+                        msg_id, &call.name, &args_json, &result, "denied", "error",
+                    )?;
+                    if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result)
+                    {
+                        self.presenter
+                            .emit(PresenterEvent::Warning(warning.clone()));
+                        self.pending_hints.push(warning);
+                    }
+                    return Ok(result);
+                }
             }
         }
 
@@ -9450,6 +9685,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn output_planning_reserve_does_not_turn_unbounded_output_into_a_cap() {
+        assert_eq!(
+            output_planning_reserve_tokens(0),
+            UNBOUNDED_OUTPUT_PLANNING_RESERVE
+        );
+        assert_eq!(output_planning_reserve_tokens(256), 1_024);
+        assert_eq!(output_planning_reserve_tokens(12_345), 12_345);
+    }
+
     // ── Routing context floor — mesh auto-rotation must never pick a too-small window ──────────
     #[test]
     fn routing_min_context_floors_at_coding_baseline_when_transcript_is_small() {
@@ -9789,6 +10034,14 @@ mod tests {
         let err = validate_tool_args(&schema, &serde_json::json!({"path": "a"})).unwrap_err();
         assert!(err.contains("content"), "names the missing field: {err}");
         assert!(validate_tool_args(&schema, &serde_json::json!("nope")).is_err());
+        let truncated = serde_json::json!({
+            forge_provider::TRUNCATED_TOOL_ARGS_KEY: "native output limit interrupted the call"
+        });
+        let err = validate_tool_args(&schema, &truncated).unwrap_err();
+        assert!(
+            err.contains("output limit"),
+            "preserves actionable cause: {err}"
+        );
         // A schema with no `required` accepts any object.
         assert!(validate_tool_args(
             &serde_json::json!({"type": "object"}),
@@ -10221,6 +10474,10 @@ mod tests {
         assert!(names
             .iter()
             .all(|n| !n.starts_with("mcp_") && !n.contains("__")));
+        assert!(
+            names.windows(2).all(|pair| pair[0] <= pair[1]),
+            "advertised tools must be deterministic for cross-process prompt caching: {names:?}"
+        );
     }
 
     #[test]
@@ -11096,6 +11353,17 @@ mod tests {
     }
 
     #[test]
+    fn auxiliary_calls_use_low_effort_and_a_stable_cache_key() {
+        let opts = Session::auxiliary_completion_options("session-7", "shell-diagnose");
+        assert_eq!(opts.effort, Some(EffortLevel::Low));
+        assert_eq!(
+            opts.prompt_cache_key.as_deref(),
+            Some("session-7:shell-diagnose")
+        );
+        assert!(opts.response_format.is_none());
+    }
+
+    #[test]
     fn completion_verification_empty_only_accepts_completed_turn_with_prior_answer() {
         let done = vec![forge_types::TodoItem {
             title: "ship".into(),
@@ -11122,6 +11390,23 @@ mod tests {
         ));
         assert!(!completion_claims_no_change(
             "Goal complete: implemented the requested change."
+        ));
+    }
+
+    #[test]
+    fn completion_followup_intent_catches_open_ended_agent_promises_only() {
+        assert!(completion_promises_followup(
+            "Syntax passes. Let me verify a few runtime issues that syntax would not catch:"
+        ));
+        assert!(completion_promises_followup(
+            "The file is written. I'll now run the browser checks..."
+        ));
+        assert!(!completion_promises_followup(
+            "Implemented and verified the fix: all targeted tests pass."
+        ));
+        assert!(!completion_promises_followup("What changed:"));
+        assert!(!completion_promises_followup(
+            "I will keep this constraint in mind."
         ));
     }
 
@@ -12370,7 +12655,9 @@ mod tests {
                 tool_calls: vec![ToolCall {
                     id: new_id(),
                     name: "shell".into(),
-                    args: serde_json::json!({ "command": "definitelynotacommand_xyz" }),
+                    args: serde_json::json!({
+                        "command": "printf opaque_failure_xyz >&2; exit 9"
+                    }),
                 }],
                 usage,
                 quotas: Vec::new(),
@@ -12402,14 +12689,119 @@ mod tests {
 
         session.run_turn("build the project").await.unwrap();
 
-        let diagnosed = events.lock().unwrap().iter().any(|e| {
+        let events = events.lock().unwrap();
+        let started = events.iter().position(|event| {
+            matches!(event, PresenterEvent::AuxiliaryRequest { purpose, .. }
+                if purpose.contains("diagnosing"))
+        });
+        let diagnosed = events.iter().position(|e| {
             matches!(e, PresenterEvent::ShellDiagnosis { command, diagnosis, .. }
-                if command.contains("definitelynotacommand_xyz") && diagnosis.contains("install"))
+                if command.contains("opaque_failure_xyz") && diagnosis.contains("install"))
         });
         assert!(
-            diagnosed,
+            started.is_some(),
+            "the UI is told why an internal model call started"
+        );
+        assert!(
+            diagnosed.is_some(),
             "a ShellDiagnosis event was emitted for the failed command"
         );
+        assert!(
+            started < diagnosed,
+            "the start event precedes the completed diagnosis"
+        );
+    }
+
+    /// The main loop responds normally, but the optional shell-diagnosis request never emits an
+    /// event and never returns. This reproduces a real TUI run that remained stuck in
+    /// "auxiliary model work" for more than six minutes after a failing test command.
+    #[cfg(unix)]
+    struct StallingShellDiagnosisProvider;
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl Provider for StallingShellDiagnosisProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            messages: &[Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            use forge_provider::ModelResponse;
+            use forge_types::{new_id, ToolCall, Usage};
+            if messages
+                .iter()
+                .any(|m| m.role == Role::System && m.content.starts_with("A shell command run by"))
+            {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                unreachable!("the auxiliary watchdog must abort this request")
+            }
+            if messages.iter().any(|m| m.role == Role::Tool) {
+                return Ok(ModelResponse {
+                    content: "done".into(),
+                    tool_calls: vec![],
+                    usage: Usage::default(),
+                    quotas: Vec::new(),
+                });
+            }
+            Ok(ModelResponse {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: new_id(),
+                    name: "shell".into(),
+                    args: serde_json::json!({
+                        "command": "printf opaque_auxiliary_stall >&2; exit 23"
+                    }),
+                }],
+                usage: Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stalled_shell_diagnosis_times_out_and_main_turn_continues() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut config = Config {
+            permission_mode: forge_types::PermissionMode::Bypass,
+            ..Config::default()
+        };
+        config.mesh.stream_idle_timeout_secs = 1;
+        let presenter = CapturePresenter::default();
+        let events = presenter.events.clone();
+        let mut session = Session::start(
+            Arc::clone(&store),
+            Arc::new(StallingShellDiagnosisProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(presenter),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            session.run_turn("run the failing test and repair it"),
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "the optional diagnosis held the turn hostage"
+        );
+        assert_eq!(result.unwrap().unwrap(), "done");
+
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| {
+            matches!(event, PresenterEvent::AuxiliaryRequest { purpose, .. }
+                if purpose.contains("diagnosing"))
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(event, PresenterEvent::Warning(message)
+                if message.contains("optional shell diagnosis")
+                    && message.contains("continuing without it"))
+        }));
     }
 
     #[cfg(unix)]
@@ -12636,6 +13028,63 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[tokio::test]
+    async fn outside_workspace_write_is_a_recorded_tool_error_not_a_stalled_turn() {
+        let root =
+            std::env::temp_dir().join(format!("forge-workspace-reject-{}", forge_types::new_id()));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside.txt");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config = Config {
+            permission_mode: forge_types::PermissionMode::Bypass,
+            ..Config::default()
+        };
+        let mut session = Session::start(
+            Arc::new(Store::open_in_memory().unwrap()),
+            Arc::new(WriteFileProvider {
+                path: outside.to_string_lossy().to_string(),
+            }),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(&workspace),
+            Box::new(CapturePresenter::default()),
+            config,
+            workspace.to_str().unwrap(),
+        )
+        .unwrap();
+
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            session.run_turn("try an invalid write"),
+        )
+        .await
+        .expect("workspace rejection must not stall the turn")
+        .expect("workspace rejection must be returned as a tool result");
+        assert_eq!(answer, "done");
+        assert!(!outside.exists(), "outside path must remain untouched");
+
+        let envelope = session
+            .transcript
+            .iter()
+            .find_map(|message| message.tool_calls.first())
+            .expect("provider tool envelope is retained");
+        let result = session
+            .transcript
+            .iter()
+            .find(|message| {
+                message.role == Role::Tool
+                    && message.tool_call_id.as_deref() == Some(envelope.id.as_str())
+            })
+            .expect("rejected tool envelope receives a matching result");
+        assert!(
+            result.content.contains("escapes session workspace"),
+            "model receives an actionable confinement error: {}",
+            result.content
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Never streams an event and never returns — simulates a half-open / stalled connection.
     struct StallingProvider;
     #[async_trait::async_trait]
@@ -12649,6 +13098,30 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             unreachable!("the idle watchdog must abort this before it ever returns")
+        }
+    }
+
+    /// Emits content-free provider heartbeats while a buffered tool/result payload is arriving,
+    /// then completes. This models genai's OpenAI-compatible tool-call stream, where partial JSON
+    /// must not be surfaced as a ToolStarted event before the final envelope is valid.
+    struct HeartbeatThenFinishProvider;
+    #[async_trait::async_trait]
+    impl Provider for HeartbeatThenFinishProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSpec],
+            on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            for _ in 0..4 {
+                on_event(StreamEvent::ProviderActivity);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            Ok(forge_provider::ModelResponse {
+                content: "buffered stream completed".to_string(),
+                ..Default::default()
+            })
         }
     }
 
@@ -12685,6 +13158,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_activity_keeps_a_buffered_stream_alive() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let mut config = Config::default();
+        config.mesh.stream_idle_timeout_secs = 1;
+        config.mesh.failover = false;
+        let mut session = Session::start(
+            store,
+            Arc::new(HeartbeatThenFinishProvider),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(test_workspace()),
+            Box::new(HeadlessPresenter::new(false)),
+            config,
+            test_workspace().to_str().expect("workspace path is UTF-8"),
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            session.run_turn("wait for the buffered provider stream"),
+        )
+        .await
+        .expect("heartbeat stream should finish within the test bound")
+        .expect("provider heartbeats must prevent a false idle timeout");
+        assert_eq!(result, "buffered stream completed");
+    }
+
+    #[tokio::test]
     async fn turn_runs_unchanged_without_a_lattice() {
         // Additive guarantee: no index attached → no injection, turn proceeds as before.
         let store = Arc::new(Store::open_in_memory().unwrap());
@@ -12715,6 +13215,16 @@ mod tests {
         // A cap armed for a DIFFERENT model is ignored (failover to a larger-window model).
         session.overflow_window_cap = Some(("some::other-model".to_string(), base / 8));
         assert_eq!(session.effective_context_window(model), base);
+    }
+
+    #[test]
+    fn authoritative_context_window_beats_stale_cached_metadata() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let model = "qwencloud::qwen3.8-max-preview";
+        store.set_model_context(model, 32_000).unwrap();
+        let session = probe_session(store, Config::default());
+
+        assert_eq!(session.base_context_window(model), 1_000_000);
     }
 
     #[tokio::test]
@@ -16203,7 +16713,7 @@ mod tests {
         let answer = session.run_turn("finish it").await.unwrap();
 
         assert_eq!(answer, "finished and verified");
-        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 4);
         let events = events.lock().unwrap();
         assert!(events.iter().all(|event| {
             !matches!(event, PresenterEvent::Warning(message) | PresenterEvent::Error(message)
@@ -16254,10 +16764,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bridge_completion_accepted_when_verification_runs_a_real_inspection() {
-        // "All tasks Done" must pass a tool-grounded verification turn. Here the bridge runs an
-        // inspection tool (shell) on the verification turn → genuinely verified → accept after
-        // exactly 2 invocations (the claim + the verifying check).
+    async fn bridge_completion_accepts_fresh_inspection_without_a_redundant_turn() {
+        // "All tasks Done" must have fresh tool-grounded evidence. Here the bridge runs an
+        // inspection tool (shell) in the same turn as its completion claim, so the claim is already
+        // genuinely verified and no redundant second invocation is needed.
         let provider = Arc::new(BridgeProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
             inspect_calls: usize::MAX, // emits a `shell` ToolStarted each turn = a real inspection
@@ -16271,8 +16781,8 @@ mod tests {
         assert_eq!(answer, "working");
         assert_eq!(
             provider.calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "an inspected verification is accepted after exactly one verification turn"
+            1,
+            "fresh evidence in the completion turn must be accepted immediately"
         );
         assert_eq!(
             events
@@ -16337,12 +16847,46 @@ mod tests {
 
     #[tokio::test]
     async fn bridge_completion_flagged_unverified_when_work_done_but_never_re_checked() {
-        // The C8 hole, properly scoped: the turn DID real work (inspect_calls: 1 → a tool ran on the
-        // first turn), then claimed done but never re-inspected on verification. Forge forces the
-        // verification cap and ends LOUDLY flagging UNVERIFIED — never a silent success.
-        let provider = Arc::new(BridgeProvider {
+        // The C8 hole, properly scoped: the turn DID mutate an artifact, then claimed done but
+        // never inspected it. Forge forces the verification cap and ends LOUDLY flagging
+        // UNVERIFIED — never a silent success. A plain `git status` inspection is deliberately not
+        // used here: fresh inspection evidence should now be accepted without a redundant pass.
+        struct MutatingBridgeWithoutVerification {
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl Provider for MutatingBridgeWithoutVerification {
+            async fn complete(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolSpec],
+                on_event: &mut forge_provider::EventSink<'_>,
+            ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+                let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 0 {
+                    on_event(StreamEvent::ToolStarted {
+                        name: "write_file".into(),
+                        args: r#"{"path":"artifact.txt","content":"changed"}"#.into(),
+                    });
+                    on_event(StreamEvent::ToolFinished {
+                        name: "write_file".into(),
+                        ok: true,
+                        summary: "wrote artifact.txt".into(),
+                    });
+                }
+                on_event(StreamEvent::Text("working".into()));
+                Ok(forge_provider::ModelResponse {
+                    content: "working".into(),
+                    tool_calls: vec![],
+                    usage: forge_types::Usage::default(),
+                    quotas: Vec::new(),
+                })
+            }
+        }
+
+        let provider = Arc::new(MutatingBridgeWithoutVerification {
             calls: std::sync::atomic::AtomicUsize::new(0),
-            inspect_calls: 1, // real work on turn 1, no inspection on the verification turns
         });
         let (store, mut session) = bridge_session(provider.clone());
         let capture = CapturePresenter::default();
@@ -17775,9 +18319,11 @@ mod tests {
             completion_gate(1, MAX, false, false, false),
             CompletionGate::AcceptNoArtifacts
         );
+        // Fresh tool-grounded evidence newer than the last artifact mutation is already the proof
+        // the gate would request; do not force a redundant model pass after `update_tasks`.
         assert_eq!(
             completion_gate(0, MAX, true, false, true),
-            CompletionGate::Reverify
+            CompletionGate::AcceptClean
         );
         assert_eq!(
             completion_gate(1, MAX, true, false, true),

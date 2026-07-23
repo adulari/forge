@@ -102,7 +102,10 @@ impl Tool for ShellTool {
          long external job (CI run / release build that takes minutes), set \
          poll_until_exit_zero:true — the call re-runs `command` every poll_interval_secs until it \
          exits 0, yielding a resumable 'call again' result if still not ready; call it repeatedly \
-         until ready instead of one long blocking watch (which gets killed at the timeout)."
+         until ready instead of one long blocking watch (which gets killed at the timeout). \
+         Keep verification status trustworthy: run checks separately or join them with `&&`; avoid \
+         masking failures behind `;`, `||`, or a pipeline into head/tail/tee without explicit \
+         pipe-failure handling."
     }
     fn side_effect(&self) -> SideEffect {
         SideEffect::Shell

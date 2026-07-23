@@ -406,9 +406,21 @@ fn parse_stream_usage(mut value: Value) -> Usage {
 	let input_tokens: i32 = value.x_take("inputTokens").ok().unwrap_or(0);
 	let output_tokens: i32 = value.x_take("outputTokens").ok().unwrap_or(0);
 	let total_tokens: i32 = value.x_take("totalTokens").ok().unwrap_or(input_tokens + output_tokens);
+	let cache_read: Option<i32> = value.x_take("cacheReadInputTokens").ok();
+	let cache_write: Option<i32> = value.x_take("cacheWriteInputTokens").ok();
+	let prompt_tokens_details = if cache_read.is_some() || cache_write.is_some() {
+		Some(crate::chat::PromptTokensDetails {
+			cache_creation_tokens: cache_write,
+			cache_creation_details: None,
+			cached_tokens: cache_read,
+			audio_tokens: None,
+		})
+	} else {
+		None
+	};
 	Usage {
 		prompt_tokens: Some(input_tokens),
-		prompt_tokens_details: None,
+		prompt_tokens_details,
 		completion_tokens: Some(output_tokens),
 		completion_tokens_details: None,
 		total_tokens: Some(total_tokens),
@@ -477,5 +489,21 @@ mod tests {
 		let mut streamer = BedrockStreamer::new(inner, model_iden, Default::default());
 		streamer.buf.extend_from_slice(&[0u8; 10]); // <12, not enough for prelude
 		assert!(streamer.try_parse_frame().expect("ok").is_none());
+	}
+
+	#[test]
+	fn streaming_usage_preserves_prompt_cache_tokens() {
+		let usage = parse_stream_usage(serde_json::json!({
+			"inputTokens": 12_000,
+			"outputTokens": 32,
+			"totalTokens": 12_032,
+			"cacheReadInputTokens": 10_240,
+			"cacheWriteInputTokens": 1_024,
+		}));
+
+		assert_eq!(usage.prompt_tokens, Some(12_000));
+		let details = usage.prompt_tokens_details.expect("Bedrock cache usage details");
+		assert_eq!(details.cached_tokens, Some(10_240));
+		assert_eq!(details.cache_creation_tokens, Some(1_024));
 	}
 }

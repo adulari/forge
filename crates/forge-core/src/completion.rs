@@ -28,6 +28,7 @@ impl VerificationFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VerificationObservation {
     Ignore,
+    Mutation,
     Generic,
     Check(VerificationFamily),
 }
@@ -38,6 +39,9 @@ pub(crate) enum VerificationObservation {
 pub(crate) struct VerificationLedger {
     unresolved: std::collections::BTreeSet<VerificationFamily>,
     successful_observations: u64,
+    /// Observation counter at the most recent successful artifact mutation. Evidence at or before
+    /// this point is stale: a write after a passing check must be followed by another check.
+    last_mutation_checkpoint: u64,
 }
 
 impl VerificationLedger {
@@ -48,6 +52,11 @@ impl VerificationLedger {
     pub(crate) fn observe(&mut self, observation: VerificationObservation, ok: bool) {
         match observation {
             VerificationObservation::Ignore => {}
+            VerificationObservation::Mutation => {
+                if ok {
+                    self.last_mutation_checkpoint = self.successful_observations;
+                }
+            }
             VerificationObservation::Generic => {
                 if ok {
                     self.successful_observations = self.successful_observations.saturating_add(1);
@@ -65,7 +74,8 @@ impl VerificationLedger {
     }
 
     pub(crate) fn verified_since(&self, checkpoint: u64) -> bool {
-        self.unresolved.is_empty() && self.successful_observations > checkpoint
+        self.unresolved.is_empty()
+            && self.successful_observations > checkpoint.max(self.last_mutation_checkpoint)
     }
 
     pub(crate) fn unresolved_summary(&self) -> Option<String> {
@@ -80,18 +90,53 @@ impl VerificationLedger {
 }
 
 pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
-    if name.ends_with("update_tasks") || name.ends_with("present_plan") {
+    if [
+        "update_tasks",
+        "present_plan",
+        "use_skill",
+        "spawn_agents",
+        "ask_user",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+    {
         return VerificationObservation::Ignore;
+    }
+    if [
+        "write_file",
+        "append_file",
+        "edit_file",
+        "apply_patch",
+        "delete_file",
+        "move_file",
+        "copy_file",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+    {
+        return VerificationObservation::Mutation;
     }
     if !name.ends_with("shell") && !name.ends_with("exec_command") {
         return VerificationObservation::Generic;
     }
 
-    let command = args.to_ascii_lowercase();
+    let command = serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| args.to_owned())
+        .to_ascii_lowercase();
     let family = if command.contains("tsc")
         || command.contains("typecheck")
         || command.contains("type-check")
         || command.contains("cargo check")
+        || command.contains("node --check")
+        || command.contains("vm.script")
+        || command.contains("syntax")
     {
         Some(VerificationFamily::Typecheck)
     } else if command.contains("eslint")
@@ -105,6 +150,8 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
         || command.contains("vitest")
         || command.contains("jest")
         || command.contains("nextest")
+        || command.contains("self-check")
+        || command.contains("selfcheck")
     {
         Some(VerificationFamily::Test)
     } else if command.contains("build")
@@ -115,10 +162,26 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
     } else {
         None
     };
-    family.map_or(
-        VerificationObservation::Generic,
-        VerificationObservation::Check,
-    )
+    match family {
+        // POSIX pipelines report the final stage's status, and `;` / `||` chains can overwrite a
+        // failed check with a later successful command. Never accept masked status as proof.
+        Some(_) if has_untrustworthy_control_flow(&command) => VerificationObservation::Ignore,
+        Some(family) => VerificationObservation::Check(family),
+        None => VerificationObservation::Generic,
+    }
+}
+
+fn has_untrustworthy_control_flow(command: &str) -> bool {
+    if command.contains(';') || command.contains('\n') || command.contains("||") {
+        return true;
+    }
+    let bytes = command.as_bytes();
+    let has_pipeline = bytes.iter().enumerate().any(|(index, byte)| {
+        *byte == b'|'
+            && index.checked_sub(1).and_then(|i| bytes.get(i)) != Some(&b'|')
+            && bytes.get(index + 1) != Some(&b'|')
+    });
+    has_pipeline && !command.contains("pipefail")
 }
 
 /// Evidence observed while a model claims that every tracked task is complete.
@@ -184,12 +247,15 @@ impl CompletionContract {
             };
         }
 
-        if observation_requests > 0 && (evidence.inspected_this_turn || !evidence.did_real_work) {
-            return if evidence.inspected_this_turn {
-                CompletionDecision::AcceptClean
-            } else {
-                CompletionDecision::AcceptNoArtifacts
-            };
+        // A successful inspection that is newer than the last artifact mutation is already the
+        // proof we would ask the model to produce. Accept it immediately even when it happened
+        // just before `update_tasks` marked the plan Done; bookkeeping does not stale evidence.
+        if evidence.inspected_this_turn {
+            return CompletionDecision::AcceptClean;
+        }
+
+        if observation_requests > 0 && !evidence.did_real_work {
+            return CompletionDecision::AcceptNoArtifacts;
         }
 
         if observation_requests < self.max_observation_requests {
@@ -255,13 +321,112 @@ mod tests {
         assert_eq!(
             contract.decide(
                 TaskIntent::Mutating,
-                1,
+                0,
                 CompletionEvidence {
                     inspected_this_turn: true,
                     ..work
                 }
             ),
             CompletionDecision::AcceptClean
+        );
+    }
+
+    #[test]
+    fn artifact_mutation_stales_old_evidence_until_a_new_check_passes() {
+        let mut ledger = VerificationLedger::default();
+        ledger.observe(classify_tool("shell", r#"{"command":"npm test"}"#), true);
+        assert!(ledger.verified_since(0));
+
+        ledger.observe(
+            classify_tool("append_file", r#"{"path":"index.html","content":"x"}"#),
+            true,
+        );
+        assert!(
+            !ledger.verified_since(0),
+            "a write after the test must stale that test result"
+        );
+
+        ledger.observe(
+            classify_tool("shell", r#"{"command":"node --check extracted-script.js"}"#),
+            true,
+        );
+        assert!(ledger.verified_since(0));
+    }
+
+    #[test]
+    fn writes_and_orchestration_are_not_mistaken_for_inspection() {
+        for tool in [
+            "write_file",
+            "append_file",
+            "mcp__forge__edit_file",
+            "apply_patch",
+        ] {
+            assert_eq!(
+                classify_tool(tool, "{}"),
+                VerificationObservation::Mutation,
+                "{tool}"
+            );
+        }
+        for tool in ["use_skill", "spawn_agents", "update_tasks", "present_plan"] {
+            assert_eq!(
+                classify_tool(tool, "{}"),
+                VerificationObservation::Ignore,
+                "{tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn javascript_syntax_and_embedded_self_checks_are_verification_families() {
+        assert_eq!(
+            classify_tool("shell", r#"{"command":"node --check app.js"}"#),
+            VerificationObservation::Check(VerificationFamily::Typecheck)
+        );
+        assert_eq!(
+            classify_tool("shell", r#"{"command":"node -e 'window.runSelfCheck()'"}"#,),
+            VerificationObservation::Check(VerificationFamily::Test)
+        );
+    }
+
+    #[test]
+    fn piped_checks_are_not_trusted_without_failure_propagation() {
+        for command in [
+            "cargo test 2>&1 | tail -50",
+            "npm test | tee test.log",
+            "cargo clippy | head -40",
+            "tsc --noEmit | sed -n '1,80p'",
+        ] {
+            assert_eq!(
+                classify_tool(
+                    "shell",
+                    &serde_json::json!({ "command": command }).to_string()
+                ),
+                VerificationObservation::Ignore,
+                "unguarded pipeline was accepted: {command}"
+            );
+        }
+        assert_eq!(
+            classify_tool(
+                "shell",
+                r#"{"command":"bash -o pipefail -c 'cargo test 2>&1 | tail -50'"}"#,
+            ),
+            VerificationObservation::Check(VerificationFamily::Test)
+        );
+        assert_eq!(
+            classify_tool(
+                "shell",
+                r#"{"command":"cargo fmt --check; echo fmt=$?; cargo test | tail; echo test=${PIPESTATUS[0]}"}"#,
+            ),
+            VerificationObservation::Ignore,
+            "printing masked statuses does not preserve the shell exit status"
+        );
+        assert_eq!(
+            classify_tool(
+                "shell",
+                r#"{"command":"cargo fmt --check && cargo clippy -- -D warnings && cargo test"}"#,
+            ),
+            VerificationObservation::Check(VerificationFamily::Lint),
+            "a fail-fast AND chain preserves failure"
         );
     }
 

@@ -179,9 +179,16 @@ before relying on this table, which has fallen behind as providers were added):
 | `bedrock::` | Bedrock (`bedrock_api`) | default | `BEDROCK_API_KEY` |
 | `vertex::` | Vertex | default (needs `VERTEX_PROJECT_ID`) | `VERTEX_API_KEY` |
 | `azure::` | Azure OpenAI (custom endpoint, no native genai adapter) | per-resource | `AZURE_OPENAI_API_KEY` |
+| `qwencloud::` | OpenAI (compatible, custom endpoint) | `https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/` | `QWENCLOUD_API_KEY` (`forge auth qwencloud`) |
 | `cerebras::` | OpenAI (compatible, custom endpoint) | `https://api.cerebras.ai/v1/` | `CEREBRAS_API_KEY` |
 | *(more custom OpenAI-compatible gateways: NVIDIA, SambaNova, Mistral, Together, Fireworks, Perplexity, …)* | OpenAI (compatible) | per-provider | see `CUSTOM_OPENAI_PROVIDERS` |
 | *(no prefix)* | genai name-inference (back-compat) | default | best-effort |
+
+Qwen 3.8 Max Preview is thinking-only on the Token Plan endpoint: the API rejects
+`enable_thinking=false`. Forge therefore sends a separate native `thinking_budget` (4,096 tokens by
+default, adjusted by `/effort`) to bound pre-tool deliberation without setting `max_tokens` or
+shortening the answer/tool payload. `mesh.max_output_tokens = 0` means no Forge output cap; only an
+explicitly positive value adds one.
 
 ### Client construction — genai native namespaces (implementation note)
 

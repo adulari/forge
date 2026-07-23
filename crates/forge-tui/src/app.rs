@@ -365,6 +365,82 @@ pub struct CompactionState {
     pub auto: bool,
 }
 
+/// The most specific phase the TUI can prove from presenter events during a turn. This stays
+/// intentionally surface-local: providers already emit routing, reasoning, text, and tool events;
+/// the TUI turns those facts into a useful live heartbeat without persisting UI-only noise in the
+/// conversation transcript.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum TurnPhase {
+    #[default]
+    Preparing,
+    ContactingModel,
+    ReceivingProvider,
+    Reasoning,
+    Responding,
+    RunningTool,
+    ProcessingToolResult,
+    Auxiliary,
+    Recovering,
+    Coordinating,
+    Compacting,
+    Finalizing,
+}
+
+impl TurnPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing turn",
+            Self::ContactingModel => "waiting for model",
+            Self::ReceivingProvider => "receiving provider stream",
+            Self::Reasoning => "model reasoning",
+            Self::Responding => "streaming response",
+            Self::RunningTool => "running tool",
+            Self::ProcessingToolResult => "processing tool result",
+            Self::Auxiliary => "auxiliary model work",
+            Self::Recovering => "recovering provider",
+            Self::Coordinating => "coordinating work",
+            Self::Compacting => "compacting context",
+            Self::Finalizing => "finalizing turn",
+        }
+    }
+
+    const fn input_label(self) -> &'static str {
+        match self {
+            Self::Preparing => "preparing…",
+            Self::ContactingModel => "waiting for model…",
+            Self::ReceivingProvider => "receiving…",
+            Self::Reasoning => "reasoning…",
+            Self::Responding => "responding…",
+            Self::RunningTool => "running tool…",
+            Self::ProcessingToolResult => "processing result…",
+            Self::Auxiliary => "running side-call…",
+            Self::Recovering => "recovering…",
+            Self::Coordinating => "coordinating…",
+            Self::Compacting => "compacting…",
+            Self::Finalizing => "finalizing…",
+        }
+    }
+}
+
+/// Live, per-turn observability derived from real presenter events. The counters make hidden model
+/// reasoning visibly alive, while `last_event_tick` distinguishes an active stream from a request
+/// that has produced no UI events for a long time.
+#[derive(Debug, Clone, Default)]
+struct TurnActivity {
+    phase: TurnPhase,
+    detail: String,
+    /// The model at the actual provider-call boundary. This normally matches `routing`, but
+    /// keeping the request model here makes retries/planner calls accurate even if a routing
+    /// surface is delayed or omitted.
+    model: Option<String>,
+    last_event_tick: usize,
+    reasoning_chars: usize,
+    auxiliary_chars: usize,
+    response_chars: usize,
+    provider_events: usize,
+    tool_calls: usize,
+}
+
 /// All state the TUI needs to render the pinned live region, plus the scrollback outbox.
 #[derive(Debug, Clone, Default)]
 pub struct App {
@@ -378,6 +454,8 @@ pub struct App {
     pub cost_usd: f64,
     /// Live token counter (tui-token-counter.md): session totals + current context fill.
     pub session_in: u64,
+    /// Prompt tokens served from provider cache (subset of `session_in`).
+    pub session_cached_in: u64,
     pub session_out: u64,
     pub context_tokens: u64,
     pub context_limit: Option<u32>,
@@ -388,13 +466,17 @@ pub struct App {
     /// Input/output tokens attributed to the current/last turn (session totals minus the snapshot
     /// taken at turn start). Shown alongside the timer; the session totals stay on their own.
     pub turn_in: u64,
+    pub turn_cached_in: u64,
     pub turn_out: u64,
     /// Session in/out totals captured at turn start, so `turn_in/out` are deltas from here.
     turn_base_in: u64,
+    turn_base_cached_in: u64,
     turn_base_out: u64,
     /// True once at least one turn has started this session — so the turn timer/token segment shows
     /// the last turn's frozen stats even for a sub-second turn (where `turn_elapsed_secs` is 0).
     turn_ran: bool,
+    /// Current phase, recent-event heartbeat, and streamed-work counters for the live progress row.
+    turn_activity: TurnActivity,
     /// Set while compaction is running, driving the animated progress band. `None` otherwise.
     pub compaction: Option<CompactionState>,
     pub done: bool,
@@ -1761,6 +1843,26 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
 }
 
 impl App {
+    fn set_turn_activity(&mut self, phase: TurnPhase, detail: impl Into<String>) {
+        self.turn_activity.phase = phase;
+        self.turn_activity.detail = detail.into();
+        self.turn_activity.last_event_tick = self.tick;
+    }
+
+    fn touch_turn_activity(&mut self, phase: TurnPhase) {
+        self.turn_activity.phase = phase;
+        self.turn_activity.last_event_tick = self.tick;
+    }
+
+    /// Seconds since the last presenter event that proves progress. The main render loop advances
+    /// `tick` every ~60ms while busy, so this remains live even when a provider emits nothing.
+    fn turn_quiet_secs(&self) -> u64 {
+        self.tick
+            .saturating_sub(self.turn_activity.last_event_tick)
+            .saturating_mul(60)
+            .div_euclid(1_000) as u64
+    }
+
     /// Fold one presenter event into the view state, queueing any finalized scrollback.
     pub fn apply(&mut self, event: PresenterEvent) {
         match event {
@@ -1774,29 +1876,86 @@ impl App {
                     tier,
                     model,
                     rationale,
-                })
+                });
+                self.set_turn_activity(
+                    TurnPhase::ContactingModel,
+                    "request prepared; waiting for the first provider event",
+                );
+            }
+            PresenterEvent::ProviderRequest { model, step } => {
+                self.turn_activity.model = Some(model);
+                self.set_turn_activity(
+                    TurnPhase::ContactingModel,
+                    format!(
+                        "provider request for model-loop step {} sent; waiting for the first event",
+                        step + 1
+                    ),
+                );
+            }
+            PresenterEvent::ProviderProgress => {
+                self.model_search = None;
+                self.turn_activity.provider_events =
+                    self.turn_activity.provider_events.saturating_add(1);
+                self.set_turn_activity(
+                    TurnPhase::ReceivingProvider,
+                    format!(
+                        "provider stream active; {} buffered event(s) received",
+                        self.turn_activity.provider_events
+                    ),
+                );
+            }
+            PresenterEvent::AuxiliaryRequest { model, purpose } => {
+                self.turn_activity.model = Some(model);
+                self.turn_activity.auxiliary_chars = 0;
+                self.set_turn_activity(TurnPhase::Auxiliary, purpose);
+            }
+            PresenterEvent::AuxiliaryProgress { chars } => {
+                self.turn_activity.auxiliary_chars =
+                    self.turn_activity.auxiliary_chars.saturating_add(chars);
+                self.set_turn_activity(
+                    TurnPhase::Auxiliary,
+                    format!(
+                        "internal model streamed {} chars",
+                        human(self.turn_activity.auxiliary_chars as u64)
+                    ),
+                );
             }
             // Failover in progress: keep a single animated indicator instead of one warning per
             // hop. The model that just failed is recorded only for the (dim) hint; the status bar's
             // own routing line shows the model now being tried.
             PresenterEvent::ModelSearch { model, retrying } => {
                 self.model_search = Some((model, retrying));
+                self.set_turn_activity(
+                    TurnPhase::Recovering,
+                    if retrying {
+                        "backing off before retrying the same model"
+                    } else {
+                        "selecting and connecting to a fallback model"
+                    },
+                );
             }
             // A complete (non-streamed) assistant message: render markdown into scrollback.
             PresenterEvent::AssistantText(text) => {
                 let text = sanitize_terminal_text(&text);
                 self.model_search = None;
+                self.turn_activity.response_chars += text.chars().count();
+                self.set_turn_activity(TurnPhase::Finalizing, "complete response received");
                 self.flush.push(header_line("⚒ forge", ORANGE));
                 self.flush.extend(crate::render::markdown_to_lines(&text));
                 self.flush.push(TextLine::default());
             }
             PresenterEvent::Reasoning(delta) => {
                 self.model_search = None;
-                self.reasoning.push_str(&sanitize_terminal_text(&delta))
+                let delta = sanitize_terminal_text(&delta);
+                self.turn_activity.reasoning_chars += delta.chars().count();
+                self.touch_turn_activity(TurnPhase::Reasoning);
+                self.reasoning.push_str(&delta)
             }
             PresenterEvent::AssistantDelta(delta) => {
                 let delta = sanitize_terminal_text(&delta);
                 self.model_search = None;
+                self.turn_activity.response_chars += delta.chars().count();
+                self.touch_turn_activity(TurnPhase::Responding);
                 if !self.streaming_active {
                     self.flush_reasoning();
                     self.flush.push(header_line("⚒ forge", ORANGE));
@@ -1809,6 +1968,7 @@ impl App {
                 self.streaming_rev = self.streaming_rev.wrapping_add(1);
             }
             PresenterEvent::AssistantDone => {
+                self.set_turn_activity(TurnPhase::Finalizing, "response stream completed");
                 if self.streaming_active {
                     let rest = std::mem::take(&mut self.streaming);
                     self.streaming_rev = self.streaming_rev.wrapping_add(1);
@@ -1826,10 +1986,19 @@ impl App {
             PresenterEvent::Error(msg) => self.flush.push(error_line(&msg)),
             PresenterEvent::ToolStart { name, args } => {
                 self.model_search = None;
+                self.turn_activity.tool_calls += 1;
+                self.set_turn_activity(TurnPhase::RunningTool, format!("executing {name}"));
                 self.flush
                     .push(tool_start_line(&name, &args, self.last_width.get()))
             }
             PresenterEvent::ToolResult { name, ok, summary } => {
+                self.set_turn_activity(
+                    TurnPhase::ProcessingToolResult,
+                    format!(
+                        "{name} {}; sending the result back to the model",
+                        if ok { "finished" } else { "failed" }
+                    ),
+                );
                 // Resolve a pending write preview: the preview's tool ran to completion (the
                 // write path is synchronous between its Diff and its ToolResult), so ok means
                 // the change LANDED — promote it to the turn's diff card. A failed or denied
@@ -1846,12 +2015,22 @@ impl App {
                 symbols,
                 files,
                 tokens,
-            } => self.flush.push(lattice_line(symbols, files, tokens)),
+            } => {
+                self.set_turn_activity(
+                    TurnPhase::Preparing,
+                    format!("loaded {symbols} symbols from {files} files ({tokens} tokens)"),
+                );
+                self.flush.push(lattice_line(symbols, files, tokens));
+            }
             PresenterEvent::ShellDiagnosis {
                 command,
                 diagnosis,
                 fix,
             } => {
+                self.set_turn_activity(
+                    TurnPhase::ProcessingToolResult,
+                    "shell diagnosis ready; sending the result back to the model",
+                );
                 self.pending_shell_fix = fix.clone();
                 self.flush.extend(shell_diagnosis_lines(
                     &command,
@@ -1863,17 +2042,20 @@ impl App {
             PresenterEvent::Cost {
                 session_total_usd,
                 session_in,
+                session_cached_in,
                 session_out,
                 context_tokens,
                 context_limit,
             } => {
                 self.cost_usd = session_total_usd;
                 self.session_in = session_in;
+                self.session_cached_in = session_cached_in;
                 self.session_out = session_out;
                 self.context_tokens = context_tokens;
                 self.context_limit = context_limit;
                 // Per-turn token deltas from the baseline snapshotted in `on_turn_start`.
                 self.turn_in = session_in.saturating_sub(self.turn_base_in);
+                self.turn_cached_in = session_cached_in.saturating_sub(self.turn_base_cached_in);
                 self.turn_out = session_out.saturating_sub(self.turn_base_out);
             }
             PresenterEvent::SubagentStart {
@@ -1883,6 +2065,7 @@ impl App {
                 model,
                 phase,
             } => {
+                self.set_turn_activity(TurnPhase::Coordinating, "subagent work is running");
                 // A live workflow owns its agents: rows fold into the dedicated workflow view,
                 // never the sticky activity panel (its scrollback record is written by the
                 // WorkflowPhase/WorkflowFinished handlers instead of the batch header/footer).
@@ -1939,6 +2122,7 @@ impl App {
                 }
             }
             PresenterEvent::SubagentProgress { id, snippet } => {
+                self.set_turn_activity(TurnPhase::Coordinating, "subagent reported progress");
                 if self.workflow.active {
                     self.workflow.on_progress(&id, &snippet);
                     return;
@@ -1979,6 +2163,7 @@ impl App {
                 summary,
                 cost_usd,
             } => {
+                self.set_turn_activity(TurnPhase::Coordinating, "subagent result received");
                 if self.workflow.active {
                     // The row lives in the workflow view; a branch line still goes to scrollback
                     // so the run leaves a readable history after the view closes.
@@ -2042,12 +2227,14 @@ impl App {
                 self.flush.push(TextLine::default());
             }
             PresenterEvent::AssayProgress(msg) => {
+                self.set_turn_activity(TurnPhase::Coordinating, "analysis critics are running");
                 self.flush.push(TextLine::from(Span::styled(
                     format!("  {msg}"),
                     Style::default().fg(DIM),
                 )));
             }
             PresenterEvent::AssayCriticRow(row) => {
+                self.set_turn_activity(TurnPhase::Coordinating, "analysis critic updated");
                 // Update the live panel: insert on Queued, merge status+model+cost+output on Done/Skipped.
                 if let Some(existing) = self.assay_critics.iter_mut().find(|r| r.lens == row.lens) {
                     existing.status = row.status;
@@ -2063,6 +2250,10 @@ impl App {
                 }
             }
             PresenterEvent::AssayVerifying { candidates } => {
+                self.set_turn_activity(
+                    TurnPhase::Coordinating,
+                    format!("verifying {candidates} analysis candidates"),
+                );
                 self.assay_verifying = Some(candidates);
             }
             PresenterEvent::AssayReport(report) => {
@@ -2098,6 +2289,7 @@ impl App {
             }
             PresenterEvent::Done { stop_reason, .. } => {
                 self.model_search = None;
+                self.set_turn_activity(TurnPhase::Finalizing, "turn completed");
                 self.done = true;
                 self.last_stop_reason = Some(stop_reason);
             }
@@ -2154,6 +2346,14 @@ impl App {
                 self.custom_widget_cache.insert(id, text);
             }
             PresenterEvent::CompactionStarted { auto } => {
+                self.set_turn_activity(
+                    TurnPhase::Compacting,
+                    if auto {
+                        "summarizing older context automatically"
+                    } else {
+                        "summarizing older context"
+                    },
+                );
                 self.compaction = Some(CompactionState {
                     start_tick: self.tick,
                     auto,
@@ -2162,6 +2362,7 @@ impl App {
             PresenterEvent::CompactionFinished { .. } => {
                 // The band clears; the core also emits a "compacted N → M" warning into scrollback.
                 self.compaction = None;
+                self.set_turn_activity(TurnPhase::Preparing, "context compaction finished");
             }
             PresenterEvent::PlanProposed(plan) => {
                 self.flush.extend(plan_card_lines(&plan));
@@ -2172,14 +2373,17 @@ impl App {
             PresenterEvent::Temper(label) => self.temper = label,
             PresenterEvent::Effort(effort) => self.effort = effort,
             PresenterEvent::WorkflowStarted { name } => {
+                self.set_turn_activity(TurnPhase::Coordinating, "workflow started");
                 self.flush.push(workflow_started_line(name.as_deref()));
                 self.workflow.begin(name);
             }
             PresenterEvent::WorkflowPhase { title } => {
+                self.set_turn_activity(TurnPhase::Coordinating, format!("workflow phase: {title}"));
                 self.flush.push(workflow_phase_line(&title));
                 self.workflow.on_phase(title);
             }
             PresenterEvent::WorkflowLog(msg) => {
+                self.set_turn_activity(TurnPhase::Coordinating, "workflow reported progress");
                 // Scrollback gets a one-line note (a script can `log()` a whole report — the full
                 // text lives in the view's narration feed, not the transcript).
                 self.flush.push(workflow_log_line(
@@ -2189,6 +2393,7 @@ impl App {
                 self.workflow.on_log(msg);
             }
             PresenterEvent::WorkflowFinished { ok, summary } => {
+                self.set_turn_activity(TurnPhase::Finalizing, "workflow finished");
                 self.flush.push(workflow_finished_line(
                     ok,
                     &summary,
@@ -2295,6 +2500,10 @@ impl App {
     /// Called at the start of each new user turn. Collapses the "done" subagent batch that the
     /// panel was holding so it doesn't bleed into the new turn's live region.
     pub fn on_turn_start(&mut self) {
+        // `tick` is the current turn's ~60ms clock. Reset it here, before recording the first
+        // activity timestamp, so a long previous turn cannot suppress the silence warning on a
+        // new turn until its smaller fresh tick catches up.
+        self.tick = 0;
         if !self.subagents.is_empty() && self.subagents.iter().all(|r| r.done) {
             self.subagents.clear();
             self.subagent_batch_start = 0;
@@ -2311,10 +2520,18 @@ impl App {
         // turn's in/out are measured as a delta from here.
         self.turn_elapsed_secs = 0;
         self.turn_in = 0;
+        self.turn_cached_in = 0;
         self.turn_out = 0;
         self.turn_base_in = self.session_in;
+        self.turn_base_cached_in = self.session_cached_in;
         self.turn_base_out = self.session_out;
         self.turn_ran = true;
+        self.turn_activity = TurnActivity {
+            phase: TurnPhase::Preparing,
+            detail: "building context and selecting a provider route".to_string(),
+            last_event_tick: self.tick,
+            ..Default::default()
+        };
         // A suggestion predicted from the PREVIOUS turn's response is stale the moment a new
         // turn starts — never let it linger as ghost text for an unrelated prompt.
         self.suggested_prompt = None;
@@ -3033,6 +3250,7 @@ impl App {
         self.transcript_scroll = 0;
         self.transcript_follow = true;
         self.suggested_prompt = None; // stale once the session it was predicted for is gone
+        self.turn_activity = TurnActivity::default();
     }
 
     /// Wrapped-row metrics for the full-screen transcript: total rows at the given width, and the
@@ -3881,10 +4099,13 @@ pub fn render_live(frame: &mut Frame, app: &App) {
     let input_h = input_box_height(&app.input, frame.area().width);
     let permission_h = prompt_height(app);
     let status_h = statusline_height(app);
+    // Persistent event-backed heartbeat for the in-flight turn. Reserve it independently from the
+    // optional task/activity panels so a plain single-model request is never just "working…".
+    let turn_activity_h = u16::from(app.busy);
     // A one-row band between the input and the statusline: shows the animated compaction bar while
     // compacting, otherwise an "approaching auto-compact" hint when the context fills up.
     let band_h = compact_band_height(app);
-    let fixed = permission_h + input_h + band_h + status_h;
+    let fixed = permission_h + input_h + band_h + status_h + turn_activity_h;
     let avail = frame.area().height.saturating_sub(fixed);
     let panel_avail = avail.saturating_sub(MIN_STREAM);
 
@@ -3915,6 +4136,7 @@ pub fn render_live(frame: &mut Frame, app: &App) {
         Constraint::Length(work_summary_h),
         Constraint::Length(activity_h),
         Constraint::Length(task_h),
+        Constraint::Length(turn_activity_h),
         Constraint::Length(permission_h),
         Constraint::Length(input_h),
         Constraint::Length(band_h),
@@ -3986,20 +4208,130 @@ pub fn render_live(frame: &mut Frame, app: &App) {
             areas[4],
         );
     }
+    if turn_activity_h > 0 {
+        render_turn_activity(frame, areas[5], app);
+    }
     if permission_h > 0 {
-        render_permission(frame, areas[5], app);
+        render_permission(frame, areas[6], app);
     }
-    render_input(frame, areas[6], app);
+    render_input(frame, areas[7], app);
     if band_h > 0 {
-        render_compact_band(frame, areas[7], app);
+        render_compact_band(frame, areas[8], app);
     }
-    render_statusline(frame, areas[8], app);
+    render_statusline(frame, areas[9], app);
     // Usage overlay renders last so it appears on top of everything.
     render_usage_overlay(frame, app);
     render_mesh_overlay(frame, app);
     render_voice_overlay(frame, app);
     crate::config_editor::render_config_overlay(frame, &app.config_editor);
     render_command_center(frame, frame.area(), app);
+}
+
+/// One-row, always-visible heartbeat for a running turn. It reports only facts backed by presenter
+/// events: the phase, routed model, total elapsed time, streamed reasoning/answer volume, tool-call
+/// count, and the age of the last event. A long provider silence therefore looks materially
+/// different from hidden reasoning that is still streaming.
+fn render_turn_activity(frame: &mut Frame, area: Rect, app: &App) {
+    let spin = SPINNER[app.tick % SPINNER.len()];
+    let quiet = app.turn_quiet_secs();
+    let waiting_for_user = app.prompt.is_some() || app.awaiting_question();
+    let (phase, detail) = if app.prompt.is_some() {
+        ("waiting for permission", "your response is required")
+    } else if app.awaiting_question() {
+        ("waiting for your answer", "your response is required")
+    } else {
+        (
+            app.turn_activity.phase.label(),
+            app.turn_activity.detail.as_str(),
+        )
+    };
+    let stale = !waiting_for_user && quiet >= 60;
+    let phase_color = if waiting_for_user || stale {
+        WARNYEL
+    } else {
+        ACCENT
+    };
+    let model = truncate(
+        &model_short(
+            app.turn_activity
+                .model
+                .as_deref()
+                .or_else(|| app.routing.as_ref().map(|routing| routing.model.as_str())),
+        ),
+        28,
+    );
+
+    let mut spans = vec![
+        Span::styled(
+            format!(" {spin} {phase}"),
+            Style::default().fg(phase_color).bold(),
+        ),
+        Span::styled("  ·  ", Style::default().fg(SEPCOL)),
+        Span::styled(model, Style::default().fg(TEXT).bold()),
+    ];
+
+    // Show the strongest proof of otherwise-hidden progress first. These are character counts, not
+    // token estimates, so the UI never pretends to know usage before the provider reports it.
+    if area.width >= 82 {
+        if app.turn_activity.reasoning_chars > 0 {
+            spans.push(Span::styled("  ·  ", Style::default().fg(SEPCOL)));
+            spans.push(Span::styled(
+                format!(
+                    "thought {} chars",
+                    human(app.turn_activity.reasoning_chars as u64)
+                ),
+                Style::default().fg(DIM),
+            ));
+        }
+        if app.turn_activity.response_chars > 0 {
+            spans.push(Span::styled("  ·  ", Style::default().fg(SEPCOL)));
+            spans.push(Span::styled(
+                format!(
+                    "answer {} chars",
+                    human(app.turn_activity.response_chars as u64)
+                ),
+                Style::default().fg(DIM),
+            ));
+        }
+        if app.turn_activity.provider_events > 0 {
+            spans.push(Span::styled("  ·  ", Style::default().fg(SEPCOL)));
+            spans.push(Span::styled(
+                format!("{} buffered events", app.turn_activity.provider_events),
+                Style::default().fg(DIM),
+            ));
+        }
+        if app.turn_activity.tool_calls > 0 {
+            spans.push(Span::styled("  ·  ", Style::default().fg(SEPCOL)));
+            spans.push(Span::styled(
+                format!("{} tools", app.turn_activity.tool_calls),
+                Style::default().fg(TOOLCYAN),
+            ));
+        }
+    }
+
+    spans.push(Span::styled("  ·  ", Style::default().fg(SEPCOL)));
+    let heartbeat = if waiting_for_user {
+        "paused for input".to_string()
+    } else if quiet <= 1 {
+        "event now".to_string()
+    } else if quiet < 15 {
+        format!("event {quiet}s ago")
+    } else if quiet < 60 {
+        format!("quiet {quiet}s")
+    } else {
+        format!("⚠ no events for {}", fmt_dur(quiet))
+    };
+    spans.push(Span::styled(
+        heartbeat,
+        Style::default().fg(if stale { WARNYEL } else { OKGREEN }),
+    ));
+
+    if area.width >= 132 && !detail.is_empty() {
+        spans.push(Span::styled("  ·  ", Style::default().fg(SEPCOL)));
+        spans.push(Span::styled(truncate(detail, 54), Style::default().fg(DIM)));
+    }
+
+    frame.render_widget(Paragraph::new(TextLine::from(spans)), area);
 }
 
 fn render_work_summary(frame: &mut Frame, area: Rect, app: &App) {
@@ -4012,9 +4344,9 @@ fn render_work_summary(frame: &mut Frame, area: Rect, app: &App) {
     let critics = app.running_assay_critics();
     let mut parts = vec![Span::styled(
         if app.busy {
-            " Working"
+            format!(" {}", app.turn_activity.phase.label())
         } else {
-            " Work summary"
+            " Work summary".to_string()
         },
         Style::default().fg(ACCENT).bold(),
     )];
@@ -4839,13 +5171,16 @@ pub fn input_cursor_up(input: &str, cursor: usize) -> Option<usize> {
 
 fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     let (tone, title_text) = if app.awaiting_question() {
-        (surface::SurfaceTone::Warning, "◉ answer")
+        (surface::SurfaceTone::Warning, "◉ answer".to_string())
     } else if app.prompt.is_some() {
-        (surface::SurfaceTone::Warning, "◉ respond")
+        (surface::SurfaceTone::Warning, "◉ respond".to_string())
     } else if app.busy {
-        (surface::SurfaceTone::Accent, "▸ working…")
+        (
+            surface::SurfaceTone::Accent,
+            format!("▸ {}", app.turn_activity.phase.input_label()),
+        )
     } else {
-        (surface::SurfaceTone::Brand, "✦ message")
+        (surface::SurfaceTone::Brand, "✦ message".to_string())
     };
     let block =
         surface::panel(surface::title(title_text, tone), tone).padding(Padding::horizontal(1));
@@ -6115,7 +6450,7 @@ fn render_statusline_widget<'a>(
             } else if app.busy && w >= 40 {
                 let f = SPINNER[app.tick % SPINNER.len()];
                 spans.push(Span::styled(
-                    format!("{f} working"),
+                    format!("{f} {}", app.turn_activity.phase.label()),
                     Style::default().fg(ACCENT).bold().bg(STATUSBG),
                 ));
                 spans.push(Span::styled(
@@ -6520,12 +6855,22 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
             // suppress the ↑/↓ counts when both are zero to avoid showing stale "↑0 ↓0".
             let has_token_data = app.turn_in > 0 || app.turn_out > 0;
             let turn_label = if has_token_data {
-                format!(
-                    "⧖ {} ↑{} ↓{}",
-                    fmt_dur(app.turn_elapsed_secs),
-                    human(app.turn_in),
-                    human(app.turn_out)
-                )
+                if app.turn_cached_in > 0 {
+                    format!(
+                        "⧖ {} ↑{} (↻{}) ↓{}",
+                        fmt_dur(app.turn_elapsed_secs),
+                        human(app.turn_in),
+                        human(app.turn_cached_in),
+                        human(app.turn_out)
+                    )
+                } else {
+                    format!(
+                        "⧖ {} ↑{} ↓{}",
+                        fmt_dur(app.turn_elapsed_secs),
+                        human(app.turn_in),
+                        human(app.turn_out)
+                    )
+                }
             } else {
                 format!("⧖ {}", fmt_dur(app.turn_elapsed_secs))
             };
@@ -6548,13 +6893,25 @@ fn render_statusline(frame: &mut Frame, area: Rect, app: &App) {
         // is too narrow this is what gets clipped, not the gauge.
         // Only show when session differs from turn delta: on the first turn turn_base_in=0 so
         // turn_in == session_in — showing both would be identical, useless duplication.
-        let session_differs = app.session_in != app.turn_in || app.session_out != app.turn_out;
+        let session_differs = app.session_in != app.turn_in
+            || app.session_cached_in != app.turn_cached_in
+            || app.session_out != app.turn_out;
         if (app.session_in > 0 || app.session_out > 0) && (!show_turn || session_differs) {
             if line2.len() > 1 {
                 line2.push(sep("  │  "));
             }
+            let total_label = if app.session_cached_in > 0 {
+                format!(
+                    "Σ ↑{} (↻{}) ↓{}",
+                    human(app.session_in),
+                    human(app.session_cached_in),
+                    human(app.session_out)
+                )
+            } else {
+                format!("Σ ↑{} ↓{}", human(app.session_in), human(app.session_out))
+            };
             line2.push(Span::styled(
-                format!("Σ ↑{} ↓{}", human(app.session_in), human(app.session_out)),
+                total_label,
                 Style::default().fg(DIM).bg(STATUSBG),
             ));
         }
@@ -8211,6 +8568,7 @@ mod tests {
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.0033,
             session_in: 0,
+            session_cached_in: 0,
             session_out: 0,
             context_tokens: 0,
             context_limit: None,
@@ -8232,12 +8590,14 @@ mod tests {
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.01,
             session_in: 12_300,
+            session_cached_in: 6_000,
             session_out: 4_100,
             context_tokens: 18_200,
             context_limit: Some(200_000),
         });
         let wide = screen_wh(&app, 120, LIVE_H);
         assert!(wide.contains("↑12.3k"), "token counter shown: {wide}");
+        assert!(wide.contains("↻6.0k"), "cached input shown: {wide}");
         assert!(wide.contains("↓4.1k"));
         assert!(wide.contains("18.2k/200.0k"), "context gauge shown: {wide}");
         assert!(wide.contains("9%"), "context percentage: {wide}");
@@ -8247,6 +8607,7 @@ mod tests {
     fn statusline_shows_live_turn_timer_and_per_turn_tokens() {
         let mut app = App {
             session_in: 1_000,
+            session_cached_in: 400,
             session_out: 200,
             ..Default::default()
         };
@@ -8256,17 +8617,21 @@ mod tests {
         app.turn_elapsed_secs = 73; // 1m13s
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.02,
-            session_in: 2_200, // +1.2k this turn
-            session_out: 540,  // +340 this turn
+            session_in: 2_200,      // +1.2k this turn
+            session_cached_in: 700, // +300 cached this turn
+            session_out: 540,       // +340 this turn
             context_tokens: 0,
             context_limit: None,
         });
         let s = screen_wh(&app, 120, LIVE_H);
-        // The spinner says only "working" (no duration); the timer lives once in the ⧖ segment so
-        // there's no double clock.
-        assert!(s.contains("working"), "spinner shows working: {s}");
+        // The busy indicator names the actual phase; the duration still lives once in the ⧖
+        // segment so there is no double clock.
         assert!(
-            !s.contains("working 1m13s"),
+            s.contains("preparing turn"),
+            "spinner shows the concrete phase: {s}"
+        );
+        assert!(
+            !s.contains("preparing turn 1m13s"),
             "no duplicate timer on the spinner: {s}"
         );
         assert!(
@@ -8274,11 +8639,16 @@ mod tests {
             "single turn-timer segment on row 2: {s}"
         );
         assert!(
-            s.contains("↑1.2k") && s.contains("↓340"),
+            s.contains("↑1.2k") && s.contains("↻300") && s.contains("↓340"),
             "per-turn token deltas: {s}"
         );
+        app.on_turn_start();
+        assert_eq!(
+            app.turn_cached_in, 0,
+            "a new turn clears the prior cache delta"
+        );
         assert!(
-            s.contains("Σ ↑2.2k ↓540"),
+            s.contains("Σ ↑2.2k (↻700) ↓540"),
             "session totals relabeled Σ: {s}"
         );
     }
@@ -8321,6 +8691,7 @@ mod tests {
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.01,
             session_in: 5_000,
+            session_cached_in: 0,
             session_out: 1_000,
             context_tokens: 6_000,
             context_limit: None,
@@ -8420,6 +8791,7 @@ mod tests {
         app.apply(PresenterEvent::Cost {
             session_total_usd: 0.0033,
             session_in: 12_300,
+            session_cached_in: 0,
             session_out: 4_100,
             context_tokens: 18_200,
             context_limit: Some(200_000),
@@ -8451,6 +8823,120 @@ mod tests {
             ..Default::default()
         };
         assert!(screen(&app).contains('⠹'), "spinner frame shown when busy");
+    }
+
+    #[test]
+    fn busy_provider_wait_shows_model_phase_and_stale_heartbeat() {
+        let mut app = App::default();
+        app.on_turn_start();
+        app.busy = true;
+        app.apply(PresenterEvent::Routing {
+            tier: "complex".into(),
+            model: "qwencloud::qwen3.8-max-preview".into(),
+            rationale: "pinned".into(),
+        });
+        app.apply(PresenterEvent::ProviderRequest {
+            model: "qwencloud::qwen3.8-max-preview".into(),
+            step: 0,
+        });
+        // 1,100 render ticks × 60ms = 66s without a presenter event.
+        app.tick = 1_100;
+        app.turn_elapsed_secs = 66;
+
+        let text = screen_wh(&app, 150, LIVE_H);
+        assert!(
+            text.contains("waiting for model"),
+            "phase is explicit: {text}"
+        );
+        assert!(
+            text.contains("qwen3.8-max-preview"),
+            "model is visible: {text}"
+        );
+        assert!(
+            text.contains("no events for 1m06s"),
+            "provider silence is explicit: {text}"
+        );
+    }
+
+    #[test]
+    fn hidden_reasoning_reports_real_streamed_progress() {
+        let mut app = App::default();
+        app.on_turn_start();
+        app.busy = true;
+        app.apply(PresenterEvent::Routing {
+            tier: "complex".into(),
+            model: "qwencloud::qwen3.8-max-preview".into(),
+            rationale: "pinned".into(),
+        });
+        app.apply(PresenterEvent::Reasoning("abc".repeat(1_000)));
+
+        let text = screen_wh(&app, 150, LIVE_H);
+        assert!(text.contains("model reasoning"), "reasoning phase: {text}");
+        assert!(
+            text.contains("thought 3.0k chars"),
+            "hidden reasoning has a progress counter: {text}"
+        );
+        assert!(
+            text.contains("event now"),
+            "stream heartbeat is live: {text}"
+        );
+    }
+
+    #[test]
+    fn buffered_provider_events_keep_large_tool_stream_visibly_alive() {
+        let mut app = App::default();
+        app.on_turn_start();
+        app.busy = true;
+        app.apply(PresenterEvent::ProviderRequest {
+            model: "qwencloud::qwen3.8-max-preview".into(),
+            step: 1,
+        });
+        app.apply(PresenterEvent::ProviderProgress);
+        app.apply(PresenterEvent::ProviderProgress);
+
+        let text = screen_wh(&app, 150, LIVE_H);
+        assert!(
+            text.contains("receiving provider stream"),
+            "buffered stream phase: {text}"
+        );
+        assert!(
+            text.contains("2 buffered events"),
+            "provider heartbeat count: {text}"
+        );
+        assert!(text.contains("event now"), "stream is visibly live: {text}");
+    }
+
+    #[test]
+    fn auxiliary_model_work_replaces_the_stale_tool_result_phase() {
+        let mut app = App::default();
+        app.on_turn_start();
+        app.busy = true;
+        app.apply(PresenterEvent::ToolResult {
+            name: "shell".into(),
+            ok: false,
+            summary: "exit 1".into(),
+        });
+        app.apply(PresenterEvent::AuxiliaryRequest {
+            model: "codex-oauth::gpt-5.6-luna".into(),
+            purpose: "diagnosing the failed shell command".into(),
+        });
+        let started = screen_wh(&app, 150, LIVE_H);
+        assert!(started.contains("auxiliary model work"), "phase: {started}");
+        assert!(
+            started.contains("diagnosing the failed shell command"),
+            "purpose: {started}"
+        );
+        assert!(
+            started.contains("gpt-5.6-luna"),
+            "side-call model: {started}"
+        );
+
+        app.apply(PresenterEvent::AuxiliaryProgress { chars: 1_250 });
+        let progressing = screen_wh(&app, 150, LIVE_H);
+        assert!(
+            progressing.contains("internal model streamed 1.2k chars"),
+            "side-call heartbeat: {progressing}"
+        );
     }
 
     #[test]

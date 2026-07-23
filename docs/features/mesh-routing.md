@@ -398,7 +398,32 @@ OpenRouter) **<** explicit `[mesh.pricing]` config overrides
 `(in/1000)·rate_in + (out/1000)·rate_out`; **a model with no rate entry returns `0.0`** (never
 panics). `cost_for_usage` (`pricing.rs:154`) prices cache-read tokens at the discounted
 `cache_read_per_1k` when known (fresh input = `input_tokens − cached_input_tokens`); with no
-cache rate it equals `cost_for`. This is what actual spend accounting uses.
+cache rate it equals `cost_for`. This is what actual spend accounting uses. The shared genai path
+for native and custom OpenAI-compatible API-key providers forwards the stable Forge session as
+`prompt_cache_key` and preserves `prompt_tokens_details.cached_tokens` from streaming usage, so
+providers such as Qwen Cloud receive cache affinity and cache hits are accounted consistently.
+
+**Prompt caching is automatic and capability-aware.** Every main agent turn uses its stable Forge
+session id as the cache namespace; Architect uses a stable session-specific planner namespace, and
+`forge api` accepts the OpenAI `prompt_cache_key`/legacy `user` fields or derives a privacy-preserving
+SHA-256 key from the standing request prefix. The dispatch layer preserves that option across every
+API-key and OAuth backend:
+
+| Provider surface | Forge behavior |
+|---|---|
+| OpenAI and OpenAI-compatible APIs (Qwen Cloud, NVIDIA NIM, OpenRouter, custom endpoints, etc.) | Sends `prompt_cache_key`; a strict gateway that explicitly rejects the optional field is retried once without it. |
+| Anthropic-compatible APIs and Vertex Claude | Adds explicit ephemeral breakpoints to the stable system/conversation prefix; unsupported models retry without the breakpoints. |
+| AWS Bedrock Converse | Serializes the same breakpoints as `cachePoint` blocks and preserves streamed `cacheReadInputTokens` for accounting. |
+| Gemini API | With exactly one configured key, creates/reuses a five-minute `cachedContents` resource for stable system instructions and tools; otherwise retains Gemini's implicit prefix caching. Expired or rejected resources fall back to the complete normal request. |
+| xAI OAuth and Codex OAuth | Sends the same stable key on the Responses request and preserves `input_tokens_details.cached_tokens`; xAI deployments that reject the field retry without it. |
+| Claude/Codex/Antigravity CLI bridges | The official CLI's persistent/resumed session owns its provider cache; Forge preserves the bridge checkpoint/session identity. |
+| Native providers with automatic caching (for example Mistral) | Sends the unchanged stable prompt and preserves any cached-token usage the API reports. |
+
+This is universal *best-effort enablement*, not an emulated cache: Forge cannot force a provider to
+cache when that provider/model has no prompt-cache capability, has a minimum-prefix threshold, or
+does not report cache usage. Such providers continue normally and report zero cached tokens rather
+than failing the turn. `forge api` exposes cache hits in non-streaming usage and in the final
+usage-only SSE chunk when `stream_options.include_usage` is set.
 
 **The routing comparator.** `estimated_cost` (`pricing.rs:170`) prices a nominal turn of
 `NOMINAL_INPUT_TOKENS` = 1000 input and `NOMINAL_OUTPUT_TOKENS` = 500 output tokens
@@ -433,10 +458,10 @@ failover entirely (free + subscription only); an explicit `--model` pin still by
 
 ### 5.2 Subscriptions: which surfaces, and what "plan" means
 
-`catalog::is_subscription` (`crates/forge-mesh/src/catalog.rs:61`) names the five subscription
-surfaces: **`claude-cli::`**, **`codex-cli::`**, **`agy-cli::`** (CLI bridges) and
-**`codex-oauth::`**, **`xai-oauth::`** (subscription OAuth providers). $0 marginal cost, real
-plan burn.
+`catalog::is_subscription` (`crates/forge-mesh/src/catalog.rs:61`) names the six subscription
+surfaces: **`claude-cli::`**, **`codex-cli::`**, **`agy-cli::`** (CLI bridges),
+**`codex-oauth::`**, **`xai-oauth::`** (subscription OAuth providers), and **`qwencloud::`**
+(Token Plan API-key access). $0 marginal cost, real plan burn.
 
 The plan slug per provider (how much headroom the user pays for) comes from two sources, merged
 by `resolved_subscription_plans` (`crates/forge-core/src/lib.rs:1205`):
@@ -668,18 +693,21 @@ pressure, then candidate filtering and chain building.
   that failed with a retryable error is benched for the server's `Retry-After` when given, else
   `mesh.failover_cooldown_secs`, default 60 s, kept short because free-tier limits typically
   reset per minute), and it is not an exhausted-quota subscription (routed around entirely,
-  like a benched model), via `catalog::is_subscription` — all five surfaces (§13.6).
+  like a benched model), via `catalog::is_subscription` — all six surfaces (§13.6).
 - `allowed_under_credit_mode` (`lib.rs:753`): under `credit_mode = "strict"`, only free +
   subscription models pass (§5.1), same `catalog::is_subscription` predicate.
 - `context_fits` (`lib.rs:651`): the model's known context window must exceed the required
   minimum; models with no recorded window are assumed to fit (fail-open). The requirement is
   `effective_min_context` (`lib.rs:411`): the caller's `min_context_tokens` scaled ×1.5 at High
-  effort and ×2 at XHigh/WhiteHot. Windows come from the store (fetched from provider APIs);
-  the CLI bridges have no queryable API, so theirs are hardcoded in `context_limit`
-  (`crates/forge-mesh/src/pricing.rs:194`): `claude-cli` 1,000,000 tokens (200,000 for haiku),
-  `codex-cli` 272,000, `agy-cli` 1,000,000; every other provider returns `None` and the core
-  falls back to `CONSERVATIVE_CONTEXT_WINDOW` = 32,000 (`pricing.rs:184`) only when it must
-  bound a request.
+  effort and ×2 at XHigh/WhiteHot. Windows normally come from the store after provider API
+  discovery. OpenAI-compatible discovery recognizes `context_window`, `context_length`,
+  `max_context_length`, `max_model_len`, `max_input_tokens`, and `inputTokenLimit` (including
+  numeric strings). `authoritative_context_limit` covers the deliberately narrow cases where an
+  endpoint omits the field: Qwen 3.7 Max and Qwen 3.8 Max Preview are 1,000,000 tokens, and this
+  value repairs a missing/stale persisted row. The CLI bridges have no queryable API, so their
+  last-resort values remain in `context_limit`: `claude-cli` 1,000,000 tokens (200,000 for
+  haiku), `codex-cli` 272,000, `agy-cli` 1,000,000. Truly unknown models fall back to
+  `CONSERVATIVE_CONTEXT_WINDOW` = 32,000 only when the core must bound a request.
 
 Then: the vision preference (§3.3) when the turn has images; a **stable** demotion of
 `Warning`-pressured subscriptions to the back of the list (`quota.is_pressured`, `lib.rs:837`) —
@@ -782,6 +810,11 @@ binary fetches + caches them; `BenchmarkScores` is pure data + matching.
   with zero overlap): a brand-new `claude-sonnet-5` must not silently inherit Sonnet 4.6's
   stale score — which would also defeat the "no score yet → refetch" trigger. A versionless
   bridge alias (`claude-cli::opus`) is unaffected and maps to the best matching family row.
+- Product-reviewed successor rules bypass generic fuzzy matching. Until Artificial Analysis
+  publishes Qwen 3.8 Max Preview's own row, `qwen3.8-max-preview` inherits the exact Qwen3.7 Max
+  score; a published Qwen 3.8 row always wins afterward. `source_score_for` excludes inheritance,
+  so cache refresh and negative-cache bookkeeping continue to distinguish measured data from the
+  temporary prior.
 - `id_tokens` (`bench.rs:160`) injects a family token per bridge (`claude-cli`/`anthropic` →
   "claude", `codex-cli` → "gpt", `agy-cli` → "gemini") so bare aliases match at all.
 - `exact_score_for` (`bench.rs:82`) is the no-fuzzy variant for precisely-named local tags
@@ -869,6 +902,7 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 | `warn_threshold` | 0.8 | Budget warning fraction |
 | `budget.cap_overrides_pin` | `true` | Exhausted budget may override a pin (§8.4) (`lib.rs:1714-1721`) |
 | `credit_mode` | `normal` | `strict` = free + subscription only in auto-routing/failover (§5.1) |
+| `max_output_tokens` | `0` | No Forge cap; a positive value explicitly caps model output. Credit mode never changes it. |
 | `disabled` | `[]` | Models/providers excluded from discovery + routing |
 | `failover` | `true` | Bench + retry on retryable errors (`lib.rs` `default_failover`) |
 | `failover_cooldown_secs` | 60 | Default bench duration without a server `Retry-After` (`lib.rs:1308`) |
@@ -882,7 +916,9 @@ Multi-key rotation: every key-based provider accepts multiple API keys (repeat
 round-robins per request and a 429 retries on the next key
 (`crates/forge-provider/src/genai_provider.rs:239-273`). Adding an OpenAI-compatible provider is
 one `CustomProvider` row in `CUSTOM_OPENAI_PROVIDERS` (`forge-config`) — namespace, endpoint,
-env var, `free` flag (which is what `is_free` §4.2 consults), seed models.
+env var, `free` flag (which is what `is_free` §4.2 consults), and optional seed models. Qwen Cloud
+Token Plan intentionally has no seeds: its authenticated `/models` response is subscription-specific
+and remains authoritative.
 
 ## 13. Sharp edges and deliberate approximations
 
@@ -932,7 +968,7 @@ every metered catalog model a `DEFAULT_RATES` entry.
 ### 13.6 Two `is_subscription` predicates — FIXED (was: disagreed)
 
 Forge-mesh used to carry two separate `is_subscription` predicates: `catalog::is_subscription`
-(public, all five surfaces incl. `codex-oauth::`/`xai-oauth::`) and a *private* copy in
+(public, all six surfaces incl. `codex-oauth::`/`xai-oauth::`/`qwencloud::`) and a *private* copy in
 `crates/forge-mesh/src/lib.rs` that only recognized the three CLI bridges. The private copy has
 been deleted; every call site in `lib.rs` (`is_usable`, `allowed_under_credit_mode`, `cost_rank`,
 the `decide` "(paid subscription)" rationale label, and the tests) now calls the single public

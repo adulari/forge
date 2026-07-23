@@ -151,6 +151,11 @@ impl Presenter for HeadlessPresenter {
             } => {
                 println!("⚒ mesh → [{tier}] {model}  ({rationale})");
             }
+            // Interactive surfaces use this exact request boundary for their live heartbeat.
+            // Headless already printed the route and streams the next provider event directly.
+            PresenterEvent::ProviderRequest { .. } => {}
+            // Content-free heartbeat used only by interactive progress surfaces.
+            PresenterEvent::ProviderProgress => {}
             PresenterEvent::AssistantText(text) => {
                 println!("\n{text}");
             }
@@ -279,6 +284,10 @@ impl Presenter for HeadlessPresenter {
                     "  ⌬ lattice → injected {symbols} symbols · {files} files (~{tokens} tok)"
                 );
             }
+            PresenterEvent::AuxiliaryRequest { model, purpose } => {
+                println!("  ◇ {purpose} via {model}…");
+            }
+            PresenterEvent::AuxiliaryProgress { .. } => {}
             PresenterEvent::ShellDiagnosis {
                 command,
                 diagnosis,
@@ -495,12 +504,17 @@ impl Presenter for StreamJsonPresenter {
             PresenterEvent::Cost {
                 session_total_usd,
                 session_in,
+                session_cached_in,
                 session_out,
                 ..
             } => self.line(serde_json::json!({
                 "type": "system", "subtype": "usage", "session_id": sid,
                 "total_cost_usd": session_total_usd,
-                "usage": { "input_tokens": session_in, "output_tokens": session_out }
+                "usage": {
+                    "input_tokens": session_in,
+                    "cached_input_tokens": session_cached_in,
+                    "output_tokens": session_out
+                }
             })),
             PresenterEvent::Warning(msg) => self.line(serde_json::json!({
                 "type": "system", "subtype": "warning", "session_id": sid, "message": msg
@@ -608,5 +622,28 @@ mod stream_json_tests {
         // terminal result event.
         assert_eq!(parsed[5]["type"], "result");
         assert_eq!(parsed[5]["result"], "done");
+    }
+
+    #[test]
+    fn stream_json_preserves_cached_input_tokens() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut p = StreamJsonPresenter::with_writer(Box::new(SharedBuf(buf.clone())));
+        p.emit(PresenterEvent::SessionStarted {
+            id: "cache-session".into(),
+        });
+        p.emit(PresenterEvent::Cost {
+            session_total_usd: 0.01,
+            session_in: 1_200,
+            session_cached_in: 900,
+            session_out: 40,
+            context_tokens: 1_240,
+            context_limit: Some(128_000),
+        });
+
+        let raw = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let usage: serde_json::Value = serde_json::from_str(raw.lines().nth(1).unwrap()).unwrap();
+        assert_eq!(usage["usage"]["input_tokens"], 1_200);
+        assert_eq!(usage["usage"]["cached_input_tokens"], 900);
+        assert_eq!(usage["usage"]["output_tokens"], 40);
     }
 }

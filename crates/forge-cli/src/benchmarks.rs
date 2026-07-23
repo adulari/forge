@@ -204,7 +204,7 @@ pub async fn ensure(
                         !c.unrated.contains(m)
                             && cached_scores
                                 .as_ref()
-                                .is_none_or(|s| s.score_for(m).is_none())
+                                .is_none_or(|s| s.source_score_for(m).is_none())
                     })
             }
         };
@@ -216,7 +216,7 @@ pub async fn ensure(
                 // Record catalog models still unmatched after this fetch, so they don't re-trigger.
                 let unrated: Vec<String> = model_ids
                     .iter()
-                    .filter(|m| scores.score_for(m).is_none())
+                    .filter(|m| scores.source_score_for(m).is_none())
                     .cloned()
                     .collect();
                 save_cache(&rows, &unrated);

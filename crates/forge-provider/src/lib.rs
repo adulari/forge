@@ -493,6 +493,110 @@ impl ProviderError {
     }
 }
 
+/// True only when a provider rejected the optional OpenAI `prompt_cache_key` request field.
+///
+/// OpenAI-compatible gateways vary: some implement the field, some silently ignore it, and strict
+/// ones return a validation error. Callers use this narrow classifier to retry once without the
+/// hint, retaining the provider's automatic prefix cache (when it has one) without turning a cache
+/// optimization into a failed completion. It deliberately requires the field name plus a clear
+/// validation signal so unrelated request failures are never retried under a different payload.
+pub(crate) fn prompt_cache_key_unsupported(error: &ProviderError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("prompt_cache_key")
+        && [
+            "unsupported",
+            "not supported",
+            "unknown",
+            "unrecognized",
+            "not permitted",
+            "not allowed",
+            "extra inputs",
+            "extra_forbidden",
+            "invalid parameter",
+            "unexpected",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+/// True only for request validation failures that explicitly identify a message/cache-point hint.
+pub(crate) fn cache_control_unsupported(error: &ProviderError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    (text.contains("cache_control") || text.contains("cachepoint") || text.contains("cache point"))
+        && [
+            "unsupported",
+            "not supported",
+            "unknown",
+            "unrecognized",
+            "not permitted",
+            "not allowed",
+            "extra inputs",
+            "extra_forbidden",
+            "invalid",
+            "unexpected",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+/// Whether Gemini rejected an explicit `cachedContent` resource reference. The caller can safely
+/// retry with the original full prompt because this is detected before any successful stream data.
+pub(crate) fn gemini_cached_content_rejected(error: &ProviderError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    (text.contains("cachedcontent") || text.contains("cached content"))
+        && [
+            "invalid",
+            "not found",
+            "expired",
+            "unsupported",
+            "not supported",
+            "cannot",
+            "can not",
+            "not permitted",
+            "permission",
+            "mismatch",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+#[cfg(test)]
+mod prompt_cache_compat_tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_only_cache_key_validation_failures() {
+        assert!(prompt_cache_key_unsupported(&ProviderError::Request(
+            "Unsupported parameter: prompt_cache_key".into()
+        )));
+        assert!(prompt_cache_key_unsupported(&ProviderError::Capability(
+            "extra_forbidden at body.prompt_cache_key".into()
+        )));
+        assert!(!prompt_cache_key_unsupported(&ProviderError::Request(
+            "Unsupported parameter: temperature".into()
+        )));
+        assert!(!prompt_cache_key_unsupported(&ProviderError::Unavailable(
+            "prompt_cache_key request timed out".into()
+        )));
+
+        assert!(cache_control_unsupported(&ProviderError::Request(
+            "cachePoint is not supported by this model".into()
+        )));
+        assert!(cache_control_unsupported(&ProviderError::Capability(
+            "extra_forbidden: messages.0.content.1.cache_control".into()
+        )));
+        assert!(!cache_control_unsupported(&ProviderError::Request(
+            "cache lookup temporarily unavailable".into()
+        )));
+        assert!(gemini_cached_content_rejected(&ProviderError::Request(
+            "CachedContent cachedContents/123 not found".into()
+        )));
+        assert!(!gemini_cached_content_rejected(
+            &ProviderError::Unavailable("cached content backend temporarily unavailable".into())
+        ));
+    }
+}
+
 #[cfg(test)]
 mod error_tests {
     use super::*;
@@ -579,6 +683,11 @@ pub struct ToolSpec {
     pub schema: serde_json::Value,
 }
 
+/// Internal argument marker used when a provider reports that its native output limit cut a
+/// structured tool call off mid-JSON. Core turns this into an actionable tool result so the model
+/// can retry in smaller chunks; it must never execute the salvaged prefix as a real file write.
+pub const TRUNCATED_TOOL_ARGS_KEY: &str = "__forge_truncated_tool_arguments";
+
 /// The result of a single model completion: text, any requested tool calls, and usage.
 #[derive(Debug, Clone, Default)]
 pub struct ModelResponse {
@@ -601,6 +710,12 @@ impl ModelResponse {
 /// the answer but the model's *reasoning* and (for the agentic CLI bridge) its tool activity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StreamEvent {
+    /// A provider-native stream event arrived but does not yet form user-visible text, reasoning,
+    /// or a complete tool call. OpenAI-compatible adapters can stream a large function argument
+    /// through many such deltas while buffering it for safe end-of-stream JSON decoding. Keeping
+    /// this private heartbeat separate prevents the core idle watchdog from aborting healthy
+    /// large tool calls without ever exposing or executing partial arguments.
+    ProviderActivity,
     /// A delta of the assistant's answer text (accumulates into [`ModelResponse::content`]).
     Text(String),
     /// A delta of the model's reasoning/thinking — shown live but NOT part of the final answer.
@@ -705,8 +820,8 @@ pub struct CompletionOptions {
     /// the base `complete` path, which fall back to inherited process env for legacy compatibility.
     pub checkpoint: Option<CheckpointContext>,
     /// Stable conversation identity for provider-side prompt caching. Main turns populate this via
-    /// [`CheckpointContext::session`]; auxiliary calls leave it unset and therefore cannot consume
-    /// a pinned session's subscription cache namespace.
+    /// [`CheckpointContext::session`]; Forge's auxiliary calls use a purpose-scoped derivative so
+    /// compaction/recap/diagnosis prefixes cache automatically without colliding with the main loop.
     pub prompt_cache_key: Option<String>,
     /// Structured-output request (OpenAI `response_format`). `None` = provider default (free text).
     pub response_format: Option<ResponseFormat>,

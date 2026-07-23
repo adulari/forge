@@ -36,6 +36,9 @@ graphify-out/
 # E2E battery scratch output (scripts/e2e-battery.sh)
 scripts/.e2e-out/
 
+# Curated manual E2E run output (scripts/manual-e2e/run.sh)
+scripts/.manual-e2e-out/
+
 # Container-built E2E binary target dir (scripts/e2e-docker.sh)
 target-e2e/
 

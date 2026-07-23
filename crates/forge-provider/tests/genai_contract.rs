@@ -4,7 +4,9 @@
 //! leaves the machine. This exercises the streaming/usage/tool-call branches that the
 //! `MockProvider` tests cannot reach.
 
-use forge_provider::{GenAiProvider, Provider, ProviderError, StreamEvent, ToolSpec};
+use forge_provider::{
+    CompletionOptions, GenAiProvider, Provider, ProviderError, StreamEvent, ToolSpec,
+};
 use forge_types::Message;
 use genai::resolver::{AuthData, Endpoint};
 use genai::{Client, ServiceTarget};
@@ -66,7 +68,9 @@ async fn streaming_accumulates_deltas_and_usage() {
 async fn tool_call_is_translated() {
     let server = MockServer::start_async().await;
     let body = concat!(
-        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"Cargo.toml\"}}]},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
         "data: [DONE]\n\n",
     );
@@ -81,12 +85,17 @@ async fn tool_call_is_translated() {
         schema: json!({"type":"object","properties":{"path":{"type":"string"}}}),
     }];
     let provider = GenAiProvider::with_client(client_pointed_at(server.base_url()));
+    let mut provider_activity = 0usize;
     let res = provider
         .complete(
             "openai::gpt-4o-mini",
             &[Message::user("read it")],
             &tools,
-            &mut |_| {},
+            &mut |event| {
+                if event == StreamEvent::ProviderActivity {
+                    provider_activity += 1;
+                }
+            },
         )
         .await
         .expect("complete should succeed");
@@ -97,6 +106,10 @@ async fn tool_call_is_translated() {
     assert_eq!(call.id, "call_abc");
     assert_eq!(call.name, "read_file");
     assert_eq!(call.args["path"], "Cargo.toml");
+    assert!(
+        provider_activity >= 3,
+        "every buffered tool-argument delta should keep the caller's watchdog alive"
+    );
 }
 
 #[tokio::test]
@@ -121,4 +134,58 @@ async fn http_500_maps_to_unavailable_for_failover() {
         .expect_err("a 500 must surface as an error");
     assert!(err.is_retryable(), "5xx should be retryable: {err:?}");
     assert!(matches!(err, ProviderError::Unavailable(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn strict_openai_gateway_retries_without_prompt_cache_key() {
+    let server = MockServer::start_async().await;
+    let rejected = server.mock(|when, then| {
+        when.method(POST)
+            .path("/chat/completions")
+            .body_includes("prompt_cache_key");
+        then.status(400)
+            .header("content-type", "application/json")
+            .json_body(json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Unsupported parameter: prompt_cache_key"
+                }
+            }));
+    });
+    let accepted = server.mock(|when, then| {
+        when.method(POST)
+            .path("/chat/completions")
+            .body_excludes("prompt_cache_key");
+        then.status(200).header("content-type", SSE_CT).body(concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1,\"total_tokens\":6}}\n\n",
+            "data: [DONE]\n\n",
+        ));
+    });
+
+    let provider = GenAiProvider::with_client(client_pointed_at(server.base_url()));
+    let result = provider
+        .complete_with(
+            "openai::strict-compatible-model",
+            &[Message::user("hi")],
+            &[],
+            &CompletionOptions {
+                prompt_cache_key: Some("forge-session-1".into()),
+                ..Default::default()
+            },
+            &mut |_| {},
+        )
+        .await;
+    let response = result.unwrap_or_else(|error| {
+        panic!(
+            "unsupported cache field should degrade to the compatible request; error={error:?}, rejected_calls={}, accepted_calls={}",
+            rejected.calls(),
+            accepted.calls()
+        )
+    });
+
+    assert_eq!(response.content, "ok");
+    assert_eq!(rejected.calls(), 1);
+    assert_eq!(accepted.calls(), 1);
 }

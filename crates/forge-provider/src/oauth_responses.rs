@@ -169,6 +169,9 @@ pub fn build_responses_request(
     if let Some(temp) = opts.temperature {
         body["temperature"] = serde_json::json!(temp);
     }
+    if let Some(cache_key) = opts.prompt_cache_key.as_deref() {
+        body["prompt_cache_key"] = serde_json::json!(cache_key);
+    }
     body
 }
 

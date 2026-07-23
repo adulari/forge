@@ -265,34 +265,39 @@ struct ConverseRequestParts {
 /// Translate a genai `ChatRequest` into Converse's `{system, messages, toolConfig}` shape.
 fn into_converse_request_parts(chat_req: ChatRequest) -> Result<ConverseRequestParts> {
 	let mut messages: Vec<Value> = Vec::new();
-	let mut systems: Vec<String> = Vec::new();
+	let mut systems: Vec<(String, bool)> = Vec::new();
 
 	if let Some(system) = chat_req.system {
-		systems.push(system);
+		systems.push((system, false));
 	}
 
 	for msg in chat_req.messages {
+		let cache_point = msg
+			.options
+			.as_ref()
+			.and_then(|options| options.cache_control.as_ref())
+			.is_some();
 		match msg.role {
 			ChatRole::System => {
 				if let Some(text) = msg.content.joined_texts() {
-					systems.push(text);
+					systems.push((text, cache_point));
 				}
 			}
 			ChatRole::User => {
-				let blocks = user_content_to_converse_blocks(msg.content);
+				let blocks = with_cache_point(user_content_to_converse_blocks(msg.content), cache_point);
 				if !blocks.is_empty() {
 					messages.push(json!({ "role": "user", "content": blocks }));
 				}
 			}
 			ChatRole::Assistant => {
-				let blocks = assistant_content_to_converse_blocks(msg.content);
+				let blocks = with_cache_point(assistant_content_to_converse_blocks(msg.content), cache_point);
 				if !blocks.is_empty() {
 					messages.push(json!({ "role": "assistant", "content": blocks }));
 				}
 			}
 			ChatRole::Tool => {
 				// Tool responses become a user message whose content is tool_result blocks.
-				let blocks = tool_content_to_converse_blocks(msg.content);
+				let blocks = with_cache_point(tool_content_to_converse_blocks(msg.content), cache_point);
 				if !blocks.is_empty() {
 					messages.push(json!({ "role": "user", "content": blocks }));
 				}
@@ -303,8 +308,19 @@ fn into_converse_request_parts(chat_req: ChatRequest) -> Result<ConverseRequestP
 	let system = if systems.is_empty() {
 		None
 	} else {
-		// Converse expects system as an array of {text} blocks.
-		let parts: Vec<Value> = systems.into_iter().map(|s| json!({ "text": s })).collect();
+		// Converse accepts cachePoint blocks alongside system text blocks. The point caches every
+		// stable block before it. Callers retry without the optional points when an older model or
+		// endpoint explicitly reports that it does not support prompt caching.
+		let parts: Vec<Value> = systems
+			.into_iter()
+			.flat_map(|(text, cache_point)| {
+				let mut blocks = vec![json!({ "text": text })];
+				if cache_point {
+					blocks.push(json!({ "cachePoint": { "type": "default" } }));
+				}
+				blocks
+			})
+			.collect();
 		Some(Value::Array(parts))
 	};
 
@@ -318,6 +334,15 @@ fn into_converse_request_parts(chat_req: ChatRequest) -> Result<ConverseRequestP
 		messages,
 		tools,
 	})
+}
+
+/// Append an AWS Bedrock Converse cache point after a message's content. Forge marks only stable
+/// transcript boundaries, and Bedrock treats the point as a request hint rather than user content.
+fn with_cache_point(mut blocks: Vec<Value>, enabled: bool) -> Vec<Value> {
+	if enabled && !blocks.is_empty() {
+		blocks.push(json!({ "cachePoint": { "type": "default" } }));
+	}
+	blocks
 }
 
 fn user_content_to_converse_blocks(content: MessageContent) -> Vec<Value> {
@@ -488,4 +513,30 @@ fn tool_to_converse_tool(tool: Tool) -> Result<Value> {
 	}
 
 	Ok(json!({ "toolSpec": tool_spec }))
+}
+
+#[cfg(test)]
+mod cache_tests {
+	use super::*;
+	use crate::chat::{CacheControl, ChatMessage};
+
+	#[test]
+	fn message_cache_controls_become_converse_cache_points() {
+		let messages = vec![
+			ChatMessage::system("stable system").with_options(CacheControl::Ephemeral),
+			ChatMessage::user("stable user prefix").with_options(CacheControl::Ephemeral),
+		];
+		let parts = into_converse_request_parts(ChatRequest::new(messages)).unwrap();
+		let system = parts.system.unwrap();
+		assert_eq!(system[0]["text"], "stable system");
+		assert_eq!(system[1]["cachePoint"]["type"], "default");
+		assert_eq!(parts.messages[0]["content"][0]["text"], "stable user prefix");
+		assert_eq!(parts.messages[0]["content"][1]["cachePoint"]["type"], "default");
+	}
+
+	#[test]
+	fn unmarked_messages_do_not_gain_cache_points() {
+		let parts = into_converse_request_parts(ChatRequest::new(vec![ChatMessage::user("hi")])).unwrap();
+		assert_eq!(parts.messages[0]["content"].as_array().unwrap().len(), 1);
+	}
 }

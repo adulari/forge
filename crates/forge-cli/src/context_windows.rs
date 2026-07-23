@@ -211,9 +211,22 @@ pub async fn fetch_and_persist(models: &[String]) {
     // anthropic::claude-fable-5) and takes that model's fetched window. The hardcoded per-bridge
     // table in forge_mesh::pricing::context_limit is the last-resort fallback only.
     derive_cli_bridge_windows(models, &ctx_registry, &store);
+    // Product-verified values win last over absent native fields and provisional cross-catalog
+    // matches. This also repairs stale rows written by an earlier discovery run.
+    persist_authoritative_contexts(models, &store);
 }
 
 // ── CLI bridge derivation ─────────────────────────────────────────────────────────────────────────
+
+/// Persist narrowly scoped authoritative context windows after every discovery source. Most model
+/// windows remain API-derived; this covers compatible endpoints that expose only model IDs.
+fn persist_authoritative_contexts(models: &[String], store: &forge_store::Store) {
+    for model in models {
+        if let Some(window) = pricing::authoritative_context_limit(model) {
+            let _ = store.set_model_context(model, window);
+        }
+    }
+}
 
 /// Family word a bridge's bare tier aliases must share with a canonical candidate. claude-cli
 /// aliases (`opus`, `fable`) and codex-cli's don't always spell their family, so without this
@@ -337,8 +350,10 @@ fn gemini_windows(body: &serde_json::Value) -> Vec<(String, u32)> {
         .collect()
 }
 
-/// Extract `(<namespace>::<id>, window)` from an OpenAI-compatible `/v1/models` body.
-/// Tries `context_window` (Groq) then `context_length` (some custom providers).
+/// Extract `(<namespace>::<id>, window)` from an OpenAI-compatible `/v1/models` body. There is no
+/// standard context field, so accept the established names used by hosted gateways and local
+/// OpenAI-compatible servers. Numeric strings are accepted because several proxies serialize all
+/// model metadata as strings.
 fn openai_compatible_windows(body: &serde_json::Value, namespace: &str) -> Vec<(String, u32)> {
     let Some(data) = body["data"].as_array() else {
         return Vec::new();
@@ -346,10 +361,21 @@ fn openai_compatible_windows(body: &serde_json::Value, namespace: &str) -> Vec<(
     data.iter()
         .filter_map(|m| {
             let id = m["id"].as_str()?;
-            let window = m["context_window"]
-                .as_u64()
-                .or_else(|| m["context_length"].as_u64())
-                .filter(|w| *w > 0)?;
+            let window = [
+                "context_window",
+                "context_length",
+                "max_context_length",
+                "max_model_len",
+                "max_input_tokens",
+                "inputTokenLimit",
+            ]
+            .iter()
+            .find_map(|field| {
+                m[*field]
+                    .as_u64()
+                    .or_else(|| m[*field].as_str().and_then(|v| v.parse().ok()))
+            })
+            .filter(|w| *w > 0)?;
             Some((
                 format!("{namespace}::{id}"),
                 window.min(u32::MAX as u64) as u32,
@@ -574,6 +600,32 @@ mod tests {
         assert!(windows.contains(&("groq::gemma2-9b-it".to_string(), 8192)));
     }
 
+    #[test]
+    fn parses_common_openai_compatible_context_fields_for_custom_providers() {
+        let body = json!({
+            "data": [
+                { "id": "a", "context_length": 1_000_000 },
+                { "id": "b", "max_context_length": 262_144 },
+                { "id": "c", "max_model_len": 131_072 },
+                { "id": "d", "max_input_tokens": 65_536 },
+                { "id": "e", "inputTokenLimit": 32_768 },
+                { "id": "f", "context_window": "16384" },
+            ]
+        });
+        let windows = openai_compatible_windows(&body, "custom");
+        assert_eq!(
+            windows,
+            vec![
+                ("custom::a".to_string(), 1_000_000),
+                ("custom::b".to_string(), 262_144),
+                ("custom::c".to_string(), 131_072),
+                ("custom::d".to_string(), 65_536),
+                ("custom::e".to_string(), 32_768),
+                ("custom::f".to_string(), 16_384),
+            ]
+        );
+    }
+
     /// Registry shaped like real fetched data (OR windows + cross-mapped native namespaces).
     fn bridge_reg() -> HashMap<String, u32> {
         HashMap::from([
@@ -674,6 +726,43 @@ mod tests {
             pricing::context_limit("codex-cli::gpt-9.9")
         );
         assert_eq!(store.model_context("claude-cli::").unwrap(), None);
+    }
+
+    #[test]
+    fn authoritative_contexts_replace_stale_or_missing_api_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = forge_store::Store::open(dir.path().join("t.db")).unwrap();
+        store
+            .set_model_context("qwencloud::qwen3.8-max-preview", 32_000)
+            .unwrap();
+        store
+            .set_model_context("qwencloud::qwen3.7-plus", 128_000)
+            .unwrap();
+
+        persist_authoritative_contexts(
+            &[
+                "qwencloud::qwen3.7-max".to_string(),
+                "qwencloud::qwen3.8-max-preview".to_string(),
+                "qwencloud::qwen3.7-plus".to_string(),
+            ],
+            &store,
+        );
+
+        assert_eq!(
+            store
+                .model_context("qwencloud::qwen3.8-max-preview")
+                .unwrap(),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            store.model_context("qwencloud::qwen3.7-max").unwrap(),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            store.model_context("qwencloud::qwen3.7-plus").unwrap(),
+            Some(128_000),
+            "unrelated fetched metadata must remain untouched"
+        );
     }
 
     #[test]

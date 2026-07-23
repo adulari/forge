@@ -183,6 +183,26 @@ pub(crate) const NOMINAL_OUTPUT_TOKENS: u64 = 500;
 /// unknown model while still letting a real turn through. Used by the core to bound what it sends.
 pub const CONSERVATIVE_CONTEXT_WINDOW: u32 = 32_000;
 
+/// A provider-independent context window that Forge knows authoritatively and should prefer over
+/// missing or stale discovery metadata. Keep this deliberately narrow: most API models belong in
+/// the fetched `model_context` cache, while entries here cover documented models whose compatible
+/// `/models` endpoint omits the field (or a third-party catalog reports a provisional floor).
+pub fn authoritative_context_limit(model: &str) -> Option<u32> {
+    let model_id = model
+        .split_once("::")
+        .map_or(model, |(_, model_id)| model_id)
+        .rsplit('/')
+        .next()
+        .unwrap_or(model);
+    if model_id.eq_ignore_ascii_case("qwen3.7-max")
+        || model_id.eq_ignore_ascii_case("qwen3.8-max-preview")
+    {
+        Some(1_000_000)
+    } else {
+        None
+    }
+}
+
 /// The context-window size (in tokens) for a model id, or `None` when we don't have a
 /// well-established figure. Only used as a last-resort fallback for subscription CLI and OAuth
 /// bridges whose model lists can't be queried via an API; all other models should have their windows fetched from
@@ -262,6 +282,23 @@ mod tests {
         assert_eq!(context_limit("nvidia::meta/llama-3.1-405b-instruct"), None);
         assert_eq!(context_limit("groq::llama-3.3-70b-versatile"), None);
         assert_eq!(context_limit("ollama::some-local-model"), None);
+    }
+
+    #[test]
+    fn authoritative_context_limit_covers_qwen_max_upgrade_family() {
+        for model in [
+            "qwencloud::qwen3.7-max",
+            "qwencloud::qwen3.8-max-preview",
+            "openrouter::qwen/qwen3.8-max-preview",
+        ] {
+            assert_eq!(
+                authoritative_context_limit(model),
+                Some(1_000_000),
+                "{model} should use Qwen Max's documented 1M context"
+            );
+        }
+        assert_eq!(authoritative_context_limit("qwencloud::qwen3.7-plus"), None);
+        assert_eq!(authoritative_context_limit("qwencloud::qwen3.6-max"), None);
     }
 
     #[test]

@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS usage (
     provider      TEXT,
     model         TEXT,
     input_tokens  INTEGER NOT NULL,
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL,
     cost_usd      REAL NOT NULL,
     created_at    INTEGER NOT NULL DEFAULT (strftime('%s','now'))

@@ -593,10 +593,30 @@ impl Provider for XaiOauthProvider {
         let url = self.responses_url();
         self.ensure_pinned(&url);
 
-        let body = build_responses_request(model, messages, tools, opts, self.max_output_tokens);
+        let mut body =
+            build_responses_request(model, messages, tools, opts, self.max_output_tokens);
 
         // First attempt with the picked account.
-        let first = execute_responses_request(&self.http, &url, &token, &body, on_event).await;
+        let mut first = execute_responses_request(&self.http, &url, &token, &body, on_event).await;
+
+        // xAI's Responses surface has evolved independently of OpenAI's. Prefer the stable
+        // per-session `prompt_cache_key`, but if this deployment explicitly rejects that optional
+        // field, retry the same request once without it. The retry happens only for a request-body
+        // validation error and before any successful stream output, so it cannot duplicate a turn.
+        if body.get("prompt_cache_key").is_some()
+            && first
+                .as_ref()
+                .is_err_and(crate::prompt_cache_key_unsupported)
+        {
+            body.as_object_mut()
+                .expect("Responses request body is an object")
+                .remove("prompt_cache_key");
+            tracing::debug!(
+                provider = XAI_OAUTH_NAMESPACE,
+                "provider rejected prompt_cache_key; retrying with automatic prefix caching"
+            );
+            first = execute_responses_request(&self.http, &url, &token, &body, on_event).await;
+        }
 
         // On 429 or a connection-level Unavailable (connect timeout, stream stall/drop): if ≥2
         // accounts, retry ONCE with the next account (cursor already advanced by the first
@@ -806,6 +826,7 @@ mod tests {
         }];
         let opts = CompletionOptions {
             temperature: Some(0.2),
+            prompt_cache_key: Some("forge-session-123".into()),
             ..Default::default()
         };
         let body = build_responses_request("xai-oauth::grok-4", &messages, &tools, &opts, 512);
@@ -817,6 +838,7 @@ mod tests {
         assert_eq!(body["max_output_tokens"], 512);
         // `opts.temperature` is f32; compare against the same f32→f64 widening `json!` performs.
         assert_eq!(body["temperature"], serde_json::json!(0.2f32));
+        assert_eq!(body["prompt_cache_key"], "forge-session-123");
     }
 
     /// Minimal SSE body that a successful Responses stream produces.
@@ -851,6 +873,48 @@ mod tests {
         }
         store.switch(active).unwrap();
         store
+    }
+
+    #[tokio::test]
+    async fn unsupported_cache_key_falls_back_without_losing_the_turn() {
+        let server = httpmock::MockServer::start();
+        let rejected = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/v1/responses")
+                .body_includes("prompt_cache_key");
+            then.status(400)
+                .header("content-type", "application/json")
+                .body(r#"{"error":{"message":"Unsupported parameter: prompt_cache_key"}}"#);
+        });
+        let accepted = server.mock(|when, then| {
+            when.method(httpmock::Method::POST)
+                .path("/v1/responses")
+                .body_excludes("prompt_cache_key");
+            then.status(200)
+                .header("content-type", "text/event-stream")
+                .body(ok_sse());
+        });
+
+        let provider = XaiOauthProvider::new()
+            .with_api_base(server.base_url() + "/v1")
+            .with_accounts(memory_store(&[("only", "only")], "only"));
+        let response = provider
+            .complete_with(
+                "xai-oauth::grok-4",
+                &[Message::user("hi")],
+                &[],
+                &CompletionOptions {
+                    prompt_cache_key: Some("forge-session-1".into()),
+                    ..Default::default()
+                },
+                &mut |_| {},
+            )
+            .await
+            .expect("xAI OAuth should retry without an unsupported optional cache key");
+
+        assert_eq!(response.content, "hi");
+        assert_eq!(rejected.calls(), 1);
+        assert_eq!(accepted.calls(), 1);
     }
 
     #[tokio::test]

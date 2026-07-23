@@ -29,6 +29,29 @@ pub enum PresenterEvent {
         model: String,
         rationale: String,
     },
+    /// A concrete provider request is about to start. Unlike `Routing` (which can precede context
+    /// assembly), this marks the exact model-loop boundary used by live progress surfaces.
+    ProviderRequest {
+        model: String,
+        /// Zero-based agentic model/tool-loop step.
+        step: usize,
+    },
+    /// A provider stream is actively delivering non-text events (most importantly buffered
+    /// function-call argument deltas). Surfaces use this as a live heartbeat only; no partial
+    /// provider payload is exposed or persisted.
+    ProviderProgress,
+    /// A best-effort internal model call (for example shell-error diagnosis) has started. These
+    /// calls happen inside a tool-result boundary, so exposing their purpose prevents the UI from
+    /// appearing stuck on the completed tool while another model is genuinely working.
+    AuxiliaryRequest {
+        model: String,
+        purpose: String,
+    },
+    /// Characters streamed by the active auxiliary call. Kept separate from assistant reasoning
+    /// so internal diagnostics never leak into or pollute the conversation transcript.
+    AuxiliaryProgress {
+        chars: usize,
+    },
     AssistantText(String),
     AssistantDelta(String),
     Reasoning(String),
@@ -51,6 +74,8 @@ pub enum PresenterEvent {
     Cost {
         session_total_usd: f64,
         session_in: u64,
+        /// Provider-reported cached prompt-token reads (a subset of `session_in`).
+        session_cached_in: u64,
         session_out: u64,
         context_tokens: u64,
         context_limit: Option<u32>,

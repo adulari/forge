@@ -1,0 +1,13 @@
+[package]
+name = "transaction-ledger"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+# Keep this standalone fixture out of any enclosing Cargo workspace so it can be
+# copied or run in place during manual E2E testing.
+[workspace]
