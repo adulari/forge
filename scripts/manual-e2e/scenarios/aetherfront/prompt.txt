@@ -1,0 +1,25 @@
+Build and verify a complete, polished single-file browser strategy game in this empty workspace. Use Forge tools to create `index.html`; do not merely print code in chat.
+
+Title it **Aetherfront: Last Bastion**. It must be genuinely playable from title screen through victory or defeat, with no external assets or libraries. Use HTML, CSS, Canvas 2D, and Web Audio only. Aim for a substantial implementation (roughly 20–40 KB), not a toy demo.
+
+Required systems:
+
+- A responsive title screen, difficulty selector, tutorial overlay, pause/settings menu, restart flow, and detailed victory/defeat summary.
+- A scrolling battlefield larger than the viewport with keyboard/edge-pan camera, minimap navigation, fog of war, terrain obstacles, resource fields, two bases, and three capturable control points.
+- Drag-box and shift selection, control groups, right-click move/attack, attack-move, hold position, visible orders, health bars, selection rings, and useful hotkeys.
+- At least six meaningfully different player unit types, including a harvester, infantry, tank, artillery, anti-air, and aircraft. Units need acceleration, target acquisition, counters, projectiles, veterancy, collision avoidance, and readable combat effects.
+- A real economy: harvesters gather visible crystals and return cargo; buildings cost resources and power; production queues take time; power shortage has a gameplay consequence.
+- Building placement with a translucent preview, grid snap, collision/range validity, cancel/rotate controls, and at least five building types.
+- Enemy AI that gathers resources, constructs, produces mixed armies, captures nodes, attacks valuable targets, and scales its decision cadence/composition by difficulty without cheating unlimited units.
+- Three cooldown abilities with targeting or immediate effects, generated sound/music that starts only after interaction, screen shake toggle, FPS option, and persistent best-match statistics in localStorage.
+- Deterministic fixed-step simulation, spatially bounded searches, pooled particles/projectiles, capped pixel ratio, and no per-frame unbounded allocations.
+
+Quality constraints:
+
+- Everything must be implemented in the one `index.html`; no TODOs, placeholders, pseudocode, fake buttons, external fetches, or missing handlers.
+- Use large-file-safe Forge operations (`write_file` plus coherent `append_file` chunks if needed). Never use shell heredocs to write the game.
+- Track a concise task list while working.
+- Before finishing, extract the script and run a real JavaScript syntax check, run an embedded self-check that validates required DOM IDs and game-data counts, inspect the final file structure, and re-run relevant verification after every later mutation.
+- If a verification harness itself is wrong, correct the harness and repeat the check rather than rewriting valid game code.
+
+Finish only when `index.html` is complete and all checks pass. Summarize the implemented systems and exact verification performed.

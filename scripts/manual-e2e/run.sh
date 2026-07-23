@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SUITE="$ROOT/scripts/manual-e2e"
+
+usage() {
+  echo "usage: $0 <scenario> [--manual|--reference]"
+  echo "scenarios:"
+  find "$SUITE/scenarios" -mindepth 1 -maxdepth 1 -type d -printf '  %f\n' | sort
+}
+
+if [[ $# -lt 1 || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+SCENARIO="$1"
+MODE="${2:---auto}"
+SCENARIO_DIR="$SUITE/scenarios/$SCENARIO"
+if [[ ! -d "$SCENARIO_DIR" || ! -f "$SCENARIO_DIR/prompt.txt" ]]; then
+  echo "unknown scenario: $SCENARIO" >&2
+  usage >&2
+  exit 2
+fi
+
+if [[ "$MODE" == "--reference" ]]; then
+  if [[ ! -d "$SCENARIO_DIR/reference" ]]; then
+    echo "no saved reference for $SCENARIO" >&2
+    exit 2
+  fi
+  echo "$SCENARIO_DIR/reference"
+  exit 0
+fi
+
+OUT_ROOT="${FORGE_MANUAL_E2E_OUT:-$ROOT/scripts/.manual-e2e-out}"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_DIR="$OUT_ROOT/$SCENARIO-$STAMP-$$"
+WORKSPACE="$RUN_DIR/workspace"
+mkdir -p "$WORKSPACE"
+
+if [[ -d "$SCENARIO_DIR/fixture" ]]; then
+  cp -a "$SCENARIO_DIR/fixture/." "$WORKSPACE/"
+fi
+
+git -C "$WORKSPACE" init -q
+git -C "$WORKSPACE" config user.email fixture@local.test
+git -C "$WORKSPACE" config user.name "Forge Manual E2E"
+git -C "$WORKSPACE" add -A
+if ! git -C "$WORKSPACE" diff --cached --quiet; then
+  git -C "$WORKSPACE" commit -qm "manual E2E baseline"
+fi
+
+if [[ -n "${FORGE_BIN:-}" ]]; then
+  FORGE_COMMAND="$FORGE_BIN"
+elif [[ -x "$ROOT/target/debug/forge" ]]; then
+  FORGE_COMMAND="$ROOT/target/debug/forge"
+else
+  FORGE_COMMAND="$(command -v forge)"
+fi
+
+echo "scenario:  $SCENARIO"
+echo "workspace: $WORKSPACE"
+echo "prompt:    $SCENARIO_DIR/prompt.txt"
+echo "reference: $SCENARIO_DIR/reference"
+
+if [[ "$MODE" == "--manual" ]]; then
+  echo
+  echo "Paste this prompt into Forge:"
+  sed 's/^/  /' "$SCENARIO_DIR/prompt.txt"
+  cd "$WORKSPACE"
+  exec "$FORGE_COMMAND" chat
+fi
+
+if [[ "$MODE" != "--auto" ]]; then
+  echo "unknown mode: $MODE" >&2
+  exit 2
+fi
+
+python3 "$SUITE/pty_chat_harness.py" \
+  --cwd "$WORKSPACE" \
+  --prompt-file "$SCENARIO_DIR/prompt.txt" \
+  --log-prefix "$RUN_DIR/live" \
+  --timeout "${FORGE_E2E_TIMEOUT:-1500}" \
+  -- "$FORGE_COMMAND" chat
+
+case "$SCENARIO" in
+  aetherfront)
+    node "$SCENARIO_DIR/verify.js" "$WORKSPACE/index.html" "$RUN_DIR/screenshot.png"
+    ;;
+  multifile-reservations)
+    (cd "$WORKSPACE" && python3 -m unittest discover -v)
+    ;;
+  go-ordered-pipeline)
+    (cd "$WORKSPACE" && gofmt -d pipeline/pipeline.go && go vet ./... && go test -race ./...)
+    ;;
+  typescript-config-recovery)
+    (cd "$WORKSPACE" && npm test && npm run lint)
+    ;;
+  rust-transaction-ledger)
+    (cd "$WORKSPACE" && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test --all-targets)
+    ;;
+esac
+
+echo "saved run: $RUN_DIR"

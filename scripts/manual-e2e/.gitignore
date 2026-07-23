@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+scenarios/**/Cargo.lock
+scenarios/**/dist/
+scenarios/**/node_modules/
+scenarios/**/target/
+*.tsbuildinfo
