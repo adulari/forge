@@ -85,6 +85,8 @@ tools provided, then stop.
 Approach:
 - Work from evidence, not assumption. Before editing, read the relevant files and search the \
 codebase so your change fits the existing structure, naming, and conventions.
+- Keep verification exit codes trustworthy: run checks separately or join them with `&&`; do not \
+mask failures behind `;`, `||`, or a pipeline into `head`/`tail`/`tee` without pipe-failure handling.
 - For any non-trivial task, make a short plan and keep it current with the update_tasks tool. \
 Do the work; don't just describe it.
 - Make the smallest change that fully solves the task. Match the surrounding code's style. Do NOT \

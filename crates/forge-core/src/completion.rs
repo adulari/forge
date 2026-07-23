@@ -120,7 +120,16 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
         return VerificationObservation::Generic;
     }
 
-    let command = args.to_ascii_lowercase();
+    let command = serde_json::from_str::<serde_json::Value>(args)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| args.to_owned())
+        .to_ascii_lowercase();
     let family = if command.contains("tsc")
         || command.contains("typecheck")
         || command.contains("type-check")
@@ -153,10 +162,26 @@ pub(crate) fn classify_tool(name: &str, args: &str) -> VerificationObservation {
     } else {
         None
     };
-    family.map_or(
-        VerificationObservation::Generic,
-        VerificationObservation::Check,
-    )
+    match family {
+        // POSIX pipelines report the final stage's status, and `;` / `||` chains can overwrite a
+        // failed check with a later successful command. Never accept masked status as proof.
+        Some(_) if has_untrustworthy_control_flow(&command) => VerificationObservation::Ignore,
+        Some(family) => VerificationObservation::Check(family),
+        None => VerificationObservation::Generic,
+    }
+}
+
+fn has_untrustworthy_control_flow(command: &str) -> bool {
+    if command.contains(';') || command.contains('\n') || command.contains("||") {
+        return true;
+    }
+    let bytes = command.as_bytes();
+    let has_pipeline = bytes.iter().enumerate().any(|(index, byte)| {
+        *byte == b'|'
+            && index.checked_sub(1).and_then(|i| bytes.get(i)) != Some(&b'|')
+            && bytes.get(index + 1) != Some(&b'|')
+    });
+    has_pipeline && !command.contains("pipefail")
 }
 
 /// Evidence observed while a model claims that every tracked task is complete.
@@ -360,6 +385,48 @@ mod tests {
         assert_eq!(
             classify_tool("shell", r#"{"command":"node -e 'window.runSelfCheck()'"}"#,),
             VerificationObservation::Check(VerificationFamily::Test)
+        );
+    }
+
+    #[test]
+    fn piped_checks_are_not_trusted_without_failure_propagation() {
+        for command in [
+            "cargo test 2>&1 | tail -50",
+            "npm test | tee test.log",
+            "cargo clippy | head -40",
+            "tsc --noEmit | sed -n '1,80p'",
+        ] {
+            assert_eq!(
+                classify_tool(
+                    "shell",
+                    &serde_json::json!({ "command": command }).to_string()
+                ),
+                VerificationObservation::Ignore,
+                "unguarded pipeline was accepted: {command}"
+            );
+        }
+        assert_eq!(
+            classify_tool(
+                "shell",
+                r#"{"command":"bash -o pipefail -c 'cargo test 2>&1 | tail -50'"}"#,
+            ),
+            VerificationObservation::Check(VerificationFamily::Test)
+        );
+        assert_eq!(
+            classify_tool(
+                "shell",
+                r#"{"command":"cargo fmt --check; echo fmt=$?; cargo test | tail; echo test=${PIPESTATUS[0]}"}"#,
+            ),
+            VerificationObservation::Ignore,
+            "printing masked statuses does not preserve the shell exit status"
+        );
+        assert_eq!(
+            classify_tool(
+                "shell",
+                r#"{"command":"cargo fmt --check && cargo clippy -- -D warnings && cargo test"}"#,
+            ),
+            VerificationObservation::Check(VerificationFamily::Lint),
+            "a fail-fast AND chain preserves failure"
         );
     }
 
