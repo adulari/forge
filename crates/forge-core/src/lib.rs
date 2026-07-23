@@ -7598,8 +7598,27 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         effective_args = subagent::rewrite_args_for_root(&effective_args, self.workspace.root());
         effective_args =
             add_workspace_default_path(&call.name, effective_args, self.workspace.root());
-        validate_workspace_args(&effective_args, &self.workspace)?;
         let mut args_json = serde_json::to_string(&effective_args)?;
+        if let Err(error) = validate_workspace_args(&effective_args, &self.workspace) {
+            let result = format!("error: {error}");
+            self.presenter.emit(PresenterEvent::ToolStart {
+                name: call.name.clone(),
+                args: args_json.clone(),
+            });
+            self.presenter.emit(PresenterEvent::ToolResult {
+                name: call.name.clone(),
+                ok: false,
+                summary: "path outside session workspace".to_string(),
+            });
+            self.store
+                .record_tool_call(msg_id, &call.name, &args_json, &result, "denied", "error")?;
+            if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result) {
+                self.presenter
+                    .emit(PresenterEvent::Warning(warning.clone()));
+                self.pending_hints.push(warning);
+            }
+            return Ok(result);
+        }
 
         let Some(tool) = self.tools.get(&call.name) else {
             // Name the valid tools so the model can recover instead of guessing again.
@@ -7671,8 +7690,25 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 effective_args = subagent::rewrite_args_for_root(&new_args, self.workspace.root());
                 effective_args =
                     add_workspace_default_path(&call.name, effective_args, self.workspace.root());
-                validate_workspace_args(&effective_args, &self.workspace)?;
                 args_json = serde_json::to_string(&effective_args).unwrap_or_default();
+                if let Err(error) = validate_workspace_args(&effective_args, &self.workspace) {
+                    let result = format!("error: {error}");
+                    self.presenter.emit(PresenterEvent::ToolResult {
+                        name: call.name.clone(),
+                        ok: false,
+                        summary: "hook rewrote path outside session workspace".to_string(),
+                    });
+                    self.store.record_tool_call(
+                        msg_id, &call.name, &args_json, &result, "denied", "error",
+                    )?;
+                    if let Some(warning) = self.failure_tracker.record_failure(&call.name, &result)
+                    {
+                        self.presenter
+                            .emit(PresenterEvent::Warning(warning.clone()));
+                        self.pending_hints.push(warning);
+                    }
+                    return Ok(result);
+                }
             }
         }
 
@@ -12990,6 +13026,63 @@ mod tests {
             "auto-edit allowed the write without prompting"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn outside_workspace_write_is_a_recorded_tool_error_not_a_stalled_turn() {
+        let root =
+            std::env::temp_dir().join(format!("forge-workspace-reject-{}", forge_types::new_id()));
+        let workspace = root.join("workspace");
+        let outside = root.join("outside.txt");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let config = Config {
+            permission_mode: forge_types::PermissionMode::Bypass,
+            ..Config::default()
+        };
+        let mut session = Session::start(
+            Arc::new(Store::open_in_memory().unwrap()),
+            Arc::new(WriteFileProvider {
+                path: outside.to_string_lossy().to_string(),
+            }),
+            Arc::new(HeuristicRouter::new(config.clone())),
+            ToolRegistry::with_core_tools_in(&workspace),
+            Box::new(CapturePresenter::default()),
+            config,
+            workspace.to_str().unwrap(),
+        )
+        .unwrap();
+
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            session.run_turn("try an invalid write"),
+        )
+        .await
+        .expect("workspace rejection must not stall the turn")
+        .expect("workspace rejection must be returned as a tool result");
+        assert_eq!(answer, "done");
+        assert!(!outside.exists(), "outside path must remain untouched");
+
+        let envelope = session
+            .transcript
+            .iter()
+            .find_map(|message| message.tool_calls.first())
+            .expect("provider tool envelope is retained");
+        let result = session
+            .transcript
+            .iter()
+            .find(|message| {
+                message.role == Role::Tool
+                    && message.tool_call_id.as_deref() == Some(envelope.id.as_str())
+            })
+            .expect("rejected tool envelope receives a matching result");
+        assert!(
+            result.content.contains("escapes session workspace"),
+            "model receives an actionable confinement error: {}",
+            result.content
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Never streams an event and never returns — simulates a half-open / stalled connection.

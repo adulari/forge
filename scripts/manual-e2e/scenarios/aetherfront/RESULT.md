@@ -65,4 +65,7 @@ The complete playable result and fault evidence are retained in
 `aetherfront-20260723T042009Z-1957379`. The original pre-repair integrity report
 remains valid at 39/39. `repair-session-tool-integrity.json` intentionally records
 the one envelope left unmatched when the wedged repair turn was force-killed;
-`repair2.*` records the successful same-session recovery.
+`repair2.*` records the successful same-session recovery. The retained failure
+also led to a core fix: paths outside the immutable session workspace now become
+recorded, model-visible tool errors instead of aborting the turn before a matching
+tool result can be persisted.
