@@ -69,6 +69,12 @@ window.__FORGE_NATIVE_STATE__ ??= () => {
 };
 window.__FORGE_NATIVE_SELECT_MOVE__ ??= (unit, x, y) => {
   const native = window.__FORGE_NATIVE_STATE__?.();
+  if (native?.selected instanceof Set && typeof issueMove === 'function') {
+    native.selected.clear();
+    native.selected.add(unit.id);
+    issueMove(x, y);
+    return true;
+  }
   if (Array.isArray(native?.selection) && typeof setOrder === 'function') {
     for (const selected of native.selection) selected.selected = false;
     native.selection.splice(0, native.selection.length, unit);
@@ -105,17 +111,24 @@ window.__FORGE_NATIVE_SELECT_MOVE__ ??= (unit, x, y) => {
       ?? value('G', null);
     const currentUnits = native?.units ?? value('units', []);
     const currentBuildings = native?.buildings ?? value('buildings', []);
-    const currentFields = native?.crystals ?? value('resources', []);
+    const currentFields = native?.crystals ?? native?.resources ?? value('resources', []);
     const currentNodes = native?.nodes ?? value('nodes', []);
     const currentSelection = native?.selected ?? native?.selection ?? value('selection', []);
     const isPaused = Boolean(
       native?.mode === 'paused' || native?.paused || value('paused', false)
     );
     const isEnded = Boolean(
-      native?.mode === 'ended' || native?.ended || value('ended', false)
+      native?.mode === 'ended' || native?.ended || native?.over || value('ended', false)
     );
     const isRunning = Boolean(
-      native?.mode === 'play' || native?.running || value('running', false)
+      native?.mode === 'play'
+        || native?.running
+        || (native
+          && native.mode == null
+          && native.running == null
+          && !isPaused
+          && !isEnded)
+        || value('running', false)
     );
     const own = value('player', null);
     const enemy = value('enemy', null);
@@ -126,7 +139,7 @@ window.__FORGE_NATIVE_SELECT_MOVE__ ??= (unit, x, y) => {
       buildings: currentBuildings,
       fields: currentFields,
       nodes: currentNodes,
-      selectedCount: currentSelection.length,
+      selectedCount: currentSelection.size ?? currentSelection.length ?? 0,
       credits: native?.credits
         ?? native?.resources
         ?? [own?.credits ?? 0, enemy?.credits ?? 0],
@@ -151,6 +164,12 @@ window.__FORGE_NATIVE_SELECT_MOVE__ ??= (unit, x, y) => {
     }
     const currentSelection = value('selection', null);
     const issueMoveFn = value('issueMove', null);
+    if (currentSelection instanceof Set && typeof issueMoveFn === 'function') {
+      currentSelection.clear();
+      currentSelection.add(unit.id);
+      issueMoveFn(x, y);
+      return true;
+    }
     if (Array.isArray(currentSelection) && typeof issueMoveFn === 'function') {
       currentSelection.splice(0, currentSelection.length, unit);
       issueMoveFn(x, y);
@@ -171,8 +190,16 @@ window.__FORGE_NATIVE_SELECT_MOVE__ ??= (unit, x, y) => {
     const check = window.__AETHERFRONT_SELF_CHECK__
       ?? window.AETHERFRONT_SELF_CHECK
       ?? window.Aetherfront?.selfCheck;
-    if (typeof check === 'function') return check();
-    if (check && typeof check === 'object') return check;
+    const result = typeof check === 'function' ? check() : check;
+    if (result && typeof result === 'object') {
+      if ('ok' in result) return result;
+      const ok = Object.entries(result).every(([key, value]) => {
+        if (key === 'errors' && Array.isArray(value)) return value.length === 0;
+        if (typeof value === 'number') return value > 0;
+        return Boolean(value);
+      });
+      return { ...result, ok };
+    }
     return { ok: false, errors: ['missing embedded Aetherfront self-check'] };
   };
   window.__FORGE_AETHERFRONT_ADAPTER__ = { state, selectMove, selfCheck };
@@ -261,7 +288,7 @@ window.__FORGE_NATIVE_SELECT_MOVE__ ??= (unit, x, y) => {
     if (player) adapter.selectMove(player, player.x + 80, player.y + 40);
     state = adapter.state();
     const timeBeforePause = state.time;
-    const pauseButton = document.getElementById('menuBtn') ?? document.getElementById('pauseBtn');
+    const pauseButton = document.getElementById('pauseBtn') ?? document.getElementById('menuBtn');
     pauseButton?.click();
     state = adapter.state();
     const pauseScreen = document.getElementById('pause')
@@ -286,6 +313,8 @@ window.__FORGE_NATIVE_SELECT_MOVE__ ??= (unit, x, y) => {
       playerUnits: state.units.filter(unit => (unit.team ?? unit.side) === 0).length,
       enemyUnits: state.units.filter(unit => (unit.team ?? unit.side) === 1).length,
       buildings: state.buildings.length,
+      playerBuildings: state.buildings.filter(building => (building.team ?? building.side) === 0).length,
+      enemyBuildings: state.buildings.filter(building => (building.team ?? building.side) === 1).length,
       fields: state.fields.length,
       controlPoints: state.nodes.length,
       pausedRoundTrip: paused && state.mode === 'play',
@@ -325,7 +354,9 @@ window.__FORGE_NATIVE_SELECT_MOVE__ ??= (unit, x, y) => {
     && running.units >= 4
     && running.playerUnits > 0
     && running.enemyUnits > 0
-    && running.buildings >= 4
+    && running.buildings >= 2
+    && running.playerBuildings > 0
+    && running.enemyBuildings > 0
     && running.fields >= 3
     && running.controlPoints === 3
     && running.pausedRoundTrip

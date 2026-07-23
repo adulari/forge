@@ -40,3 +40,29 @@ live simulation advancement, both armies, 6 building types, 8 crystal fields, ex
 points, pause/resume, selection/movement, tutorial behavior, a 1440×757 Canvas, and zero browser
 exceptions. The playable result, screenshot, reports, session, and timeline are retained as
 `aetherfront-20260723T034609Z-1910381` in Forge's persistent `manual-e2e-runs/` directory.
+
+## Third verified Codex-OAuth result and repair (2026-07-23)
+
+A pinned `codex-oauth::gpt-5.6-sol` TUI run produced a third distinct 45.8 KB
+implementation with 39/39 persisted parent tool executions. Independent Chrome
+verification then found a real post-start runtime failure: `feed()` expanded a
+one-element array by assigning `game.feeds.length = 5`, leaving sparse
+`undefined` entries that `update()` dereferenced. The same Forge session repaired
+that defect by bounded truncation and completed its syntax/source checks after a
+forced interruption and resume.
+
+The implementation-neutral verifier now also supports IIFE-local `game` state,
+`Set` selection plus scoped `issueMove`, `resources` world fields, `over` end
+state, self-check objects without a precomputed `ok`, and games with a dedicated
+`pauseBtn`. Its base assertion follows the prompt directly: at least one player
+and one enemy structure, rather than assuming four initial buildings. Both this
+game and the committed reference independently pass live simulation advancement,
+opposing units and bases, resource fields, exactly three control points,
+pause/resume, selection/movement, tutorial behavior, visible HUD/canvas, and zero
+browser exceptions.
+
+The complete playable result and fault evidence are retained in
+`aetherfront-20260723T042009Z-1957379`. The original pre-repair integrity report
+remains valid at 39/39. `repair-session-tool-integrity.json` intentionally records
+the one envelope left unmatched when the wedged repair turn was force-killed;
+`repair2.*` records the successful same-session recovery.
