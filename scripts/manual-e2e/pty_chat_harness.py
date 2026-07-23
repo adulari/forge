@@ -23,9 +23,10 @@ from pathlib import Path
 CSI_RE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 OSC_RE = re.compile(rb"\x1b\][^\x07]*(?:\x07|\x1b\\)")
 INTERESTING = re.compile(
-    r"(?i)(working|thinking|routing|tool|writing|reading|running|verifying|retry|"
-    r"failover|complete|warning|error|interrupt|stopped|preparing turn|provider request|"
-    r"receiving provider stream|subagent|coordinating|no events|reported progress)"
+    r"(?i)(preparing turn|provider request|receiving provider stream|streaming response|"
+    r"running tool|processing tool result|auxiliary mode|finalizing turn|subagent|"
+    r"coordinating work|no events for|reported progress|failover|retrying provider|"
+    r"warning|error|interrupt|stopped responding|turn finished|turn completed|autofix|recap)"
 )
 
 
