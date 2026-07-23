@@ -401,13 +401,20 @@ fn scrape_key_value_fragments(s: &str) -> Map<String, Value> {
 /// Cheap detector for forge-core's honest-failure guard: does this text contain an un-executed
 /// tool call? (Same markers `recover_text_tool_calls` keys on, plus the bare `default_api:` form.)
 pub fn looks_like_unexecuted_tool_call(content: &str) -> bool {
-    content.contains("<invoke")
+    if content.contains("<invoke")
         || content.contains("<tool_call")
         || content.contains("<function=")
         || content.contains("default_api:")
         || content.contains("default_api.")
-        || content.contains("{\"name\"")
-        || content.contains("```json")
+    {
+        return true;
+    }
+
+    // A JSON fence by itself is ordinary answer content (package snippets, config examples, and
+    // verification summaries all use it). Only classify bare/fenced JSON when the recovery parser
+    // can prove it is a tool-call object. Explicit markup above remains suspicious even when
+    // malformed or truncated, because its intent is unambiguous and recovery may be impossible.
+    !recover_text_tool_calls(content).0.is_empty()
 }
 
 #[cfg(test)]
@@ -624,6 +631,17 @@ mod tests {
         // Because it's not *just* the JSON, it shouldn't be parsed as a tool call.
         assert!(calls.is_empty());
         assert_eq!(cleaned, text);
+        assert!(!looks_like_unexecuted_tool_call(text));
+    }
+
+    #[test]
+    fn detector_ignores_normal_fenced_json_in_a_completion_summary() {
+        let text = "Added the missing offline `lint` script to `package.json`:\n\n\
+                    ```json\n\
+                    \"lint\": \"tsc -p tsconfig.build.json --noEmit\"\n\
+                    ```\n\n\
+                    Verification passed:\n- `npm run lint`\n- `npm test`";
+        assert!(!looks_like_unexecuted_tool_call(text));
     }
 
     #[test]
