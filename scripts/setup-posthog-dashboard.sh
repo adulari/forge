@@ -124,6 +124,11 @@ create_insight \
   "Completed CLI/TUI runs by outcome. No error text or session identifier is collected." \
   "$reliability_query"
 
+create_insight \
+  "App render failures" \
+  "Caught root render failures by release. Events contain only a closed error code and release dimensions." \
+  "$(trend_query forge_app_error "Render failures" -30d day version ActionsLineGraph)"
+
 feature_query="$(jq -n '
   [
     ["forge_feature_mesh", "Mesh"],

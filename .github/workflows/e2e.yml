@@ -6,12 +6,17 @@ name: e2e
 # the probing `forge doctor` on each OS and uploads its output, so a maintainer with no Windows
 # machine can diagnose breakage from the logs.
 #
-# Manual (Actions tab → e2e → Run workflow), or weekly. The default uses GitHub Models with the
-# workflow's short-lived GITHUB_TOKEN (`models: read` only), so no long-lived provider secret is
-# required. E2E_MODEL and a matching provider secret can still override it when needed.
+# Manual (Actions tab → e2e → Run workflow), or weekly. The scheduled gate uses the repository's
+# dedicated Groq smoke credential. A manual run can select GitHub Models, which authenticates with
+# the workflow's short-lived GITHUB_TOKEN (`models: read` only).
 
 on:
   workflow_dispatch:
+    inputs:
+      model:
+        description: Real provider model to exercise
+        required: false
+        default: groq::llama-3.3-70b-versatile
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC — catch cross-platform drift weekly
 
@@ -41,10 +46,9 @@ jobs:
       run:
         shell: bash # bash is present on the Windows runner too — one script for all OSes
     env:
-      # GitHub Models has enough context/throughput for Forge's real system prompt. The former Groq
-      # 8B default rejected the turn before inference because its TPM limit was too small.
-      E2E_MODEL: ${{ vars.E2E_MODEL || 'github_copilot::openai/gpt-4.1-mini' }}
-      # GitHub Models authentication uses only this run's short-lived, read-only workflow token.
+      # The 70B model has enough TPM for Forge's full system prompt; the old 8B smoke model did not.
+      E2E_MODEL: ${{ inputs.model || 'groq::llama-3.3-70b-versatile' }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -57,6 +61,27 @@ jobs:
 
       - name: Build forge
         run: cargo build --release --locked --bin forge
+
+      - name: Validate provider configuration
+        run: |
+          case "$E2E_MODEL" in
+            groq::*)
+              test -n "$GROQ_API_KEY" || {
+                echo "::error::GROQ_API_KEY is required for $E2E_MODEL"
+                exit 1
+              }
+              ;;
+            github_copilot::*)
+              test -n "$GITHUB_TOKEN" || {
+                echo "::error::GITHUB_TOKEN is required for $E2E_MODEL"
+                exit 1
+              }
+              ;;
+            *)
+              echo "::error::unsupported E2E provider in model: $E2E_MODEL"
+              exit 1
+              ;;
+          esac
 
       - name: doctor (diagnostics — never fails the job)
         continue-on-error: true

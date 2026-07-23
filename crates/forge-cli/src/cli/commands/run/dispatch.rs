@@ -2,11 +2,26 @@ use super::*;
 
 pub(crate) fn project_setup_turn() -> (String, Vec<String>, Option<forge_types::TaskTier>) {
     (
-        "Set up Forge for this repository completely and safely. First inspect the real repository (README, manifests, CI, source layout, and existing conventions) with read-only tools; do not guess. Then create ONLY missing Forge setup files, never overwrite any existing file: (1) a concise, tailored root `AGENTS.md` covering overview, verified build/test/lint commands, architecture, and conventions; (2) one or more useful tailored custom agent definitions under `.forge/agents/`; and (3) a minimal `.forge/config.toml` only when it adds a verified project-specific setting. Create directories as needed. Do not modify product source, tests, dependencies, or existing guidance. Finish by reporting exactly what you created."
+        "Set up Forge for this repository completely and safely. First inspect the real repository (README, manifests, CI, source layout, and existing conventions) with non-mutating inspection tools; do not guess. Then create ONLY missing Forge setup files, never overwrite any existing file: (1) a concise, tailored root `AGENTS.md` covering overview, verified build/test/lint commands, architecture, and conventions; (2) one or more useful tailored custom agent definitions under `.forge/agents/`; and (3) a minimal `.forge/config.toml` only when it adds a verified project-specific setting. Create directories as needed. Do not modify product source, tests, dependencies, or existing guidance. Finish by reporting exactly what you created."
             .to_string(),
         Vec::new(),
         Some(forge_types::TaskTier::Complex),
     )
+}
+
+#[cfg(test)]
+mod project_setup_tests {
+    use super::project_setup_turn;
+    use forge_core::{turn_contract::TurnContract, TaskIntent};
+    use forge_types::PermissionMode;
+
+    #[test]
+    fn project_setup_turn_is_mutating() {
+        let (prompt, _, _) = project_setup_turn();
+        let contract = TurnContract::derive(&prompt, PermissionMode::AcceptEdits, false);
+
+        assert_eq!(contract.intent(), TaskIntent::Mutating);
+    }
 }
 
 /// The agentic project setup turn used by `/init`, the session banner, and the opt-in automatic
