@@ -6,6 +6,13 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.9.1] - 2026-07-24
+
+### Fixed
+
+- Forge Anywhere mobile and desktop now show encrypted storage usage together with the account cap and link directly to storage details and cleanup.
+- Managed hosts now report live online/offline presence in the Anywhere app instead of appearing unavailable while the connector is healthy.
+
 ## [2.9.0] - 2026-07-24
 
 ### Added
