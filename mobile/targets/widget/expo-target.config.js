@@ -9,8 +9,9 @@ module.exports = (config) => ({
   name: "ForgeWidget",
   displayName: "Forge",
   colors: {
-    // Emberline theme's ember500 (mobile/src/theme/tokens.ts) — the app's accent color.
-    $accent: "#F5761A",
+    // Machined theme's dark accent (`darkTokens.accent` in mobile/src/theme/tokens.ts) — the
+    // app's single ember accent, and the same value ForgeMachinedStyle.swift uses.
+    $accent: "#FF8A3D",
   },
   frameworks: ["SwiftUI", "WidgetKit", "ActivityKit", "AppIntents"],
   entitlements: {

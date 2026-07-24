@@ -65,7 +65,7 @@ impl ScheduleSpec {
     }
 
     /// Human summary for `add`'s confirmation line and `list`.
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self {
             ScheduleSpec::Every(d) => format!("every {}", fmt_duration_human(*d)),
             ScheduleSpec::Daily { hour, minute } => format!("daily at {hour:02}:{minute:02}"),
@@ -75,7 +75,7 @@ impl ScheduleSpec {
 }
 
 /// Parse `--every` shorthand: `<N><unit>` with unit s/m/h/d (e.g. `30m`, `1h`, `1d`).
-fn parse_every(spec: &str) -> Result<std::time::Duration> {
+pub(crate) fn parse_every(spec: &str) -> Result<std::time::Duration> {
     let trimmed = spec.trim();
     let bad =
         || anyhow::anyhow!("invalid --every value '{spec}' — expected e.g. `30m`, `1h`, `1d`");
@@ -98,7 +98,7 @@ fn parse_every(spec: &str) -> Result<std::time::Duration> {
 }
 
 /// Parse `--at "HH:MM"` into a 24h hour/minute pair.
-fn parse_at(spec: &str) -> Result<(u32, u32)> {
+pub(crate) fn parse_at(spec: &str) -> Result<(u32, u32)> {
     let (h, m) = spec
         .split_once(':')
         .ok_or_else(|| anyhow::anyhow!("--at must be HH:MM, got '{spec}'"))?;
@@ -271,7 +271,7 @@ fn launchd_agents_dir() -> Result<std::path::PathBuf> {
     Ok(home.join("Library/LaunchAgents"))
 }
 
-fn install_timer(
+pub(crate) fn install_timer(
     id: &str,
     spec: &ScheduleSpec,
     task: &str,
@@ -291,7 +291,7 @@ fn install_timer(
     }
 }
 
-fn uninstall_timer(id: &str) -> Result<()> {
+pub(crate) fn uninstall_timer(id: &str) -> Result<()> {
     if cfg!(target_os = "linux") {
         uninstall_systemd(id)
     } else if cfg!(target_os = "macos") {

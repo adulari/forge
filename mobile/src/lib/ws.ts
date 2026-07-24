@@ -1,4 +1,4 @@
-// WebSocket client for the Forge daemon session protocol v8. See protocol/remote-v8.json.
+// WebSocket client for the Forge daemon session protocol v9. See protocol/remote-v9.json.
 //
 // One `Snapshot` frame per server message (full state, not a delta). Client tracks the
 // last-seen `revision` and reconnects with `?rev=<revision>` for replay; `resync:true`
@@ -19,6 +19,24 @@ export { PROTOCOL_VERSION } from "./remoteProtocol";
 export interface SnapshotTask {
   title: string;
   status: "pending" | "in_progress" | "done";
+  /** v9 additive, reserved: the task machinery (`update_tasks`) tracks no owner, so the host
+   * always sends null. Render tasks as unassigned — never infer an owner from this. */
+  assignee?: string | null;
+}
+
+/** v9 additive: where one transcript line came from, so a tool result can render as a block
+ * instead of being guessed at from its text. */
+export type TranscriptKind = "user" | "assistant" | "tool" | "system";
+
+/** v9 additive: `Snapshot.transcript` with provenance — same lines, same order, one row per
+ * entry. Empty from a pre-v9 host, which is why `transcript` remains the fallback. */
+export interface TranscriptRow {
+  kind: TranscriptKind;
+  text: string;
+  /** Tool name on `kind: "tool"` rows. */
+  tool?: string | null;
+  /** "ok" | "failed" on a tool RESULT row; null on the call row that precedes it. */
+  meta?: string | null;
 }
 
 export interface SnapshotSubagent {
@@ -33,6 +51,10 @@ export interface SnapshotSubagent {
   done: boolean;
   ok: boolean;
   cost: number;
+  /** v9 additive, reserved: subagents run headless (a permission `Ask` resolves as Deny inside
+   * a child), so no child is ever blocked on its own prompt and the host always sends null.
+   * Session-level prompts live on `Snapshot.permission_prompt`. */
+  permission_prompt?: string | null;
 }
 
 /** v8.1 additive: workflow-run state. Absent/null when no workflow is active. Server
@@ -89,6 +111,11 @@ export interface Diff {
 export interface PlanStep {
   title: string;
   detail: string;
+  /** v9 additive: the status of the task an approved plan seeded from this step (approval is
+   * what gives a step execution state at all). "queued" whenever no task carries the step's
+   * title — an unapproved proposal, or a task list the model has rewritten. Absent from a
+   * pre-v9 host, which reads the same as "queued". */
+  status?: "queued" | "in_progress" | "done";
 }
 
 export interface Plan {
@@ -122,6 +149,9 @@ export interface Snapshot {
   context_limit: number | null;
   streaming: string;
   transcript: string[];
+  /** v9 additive: `transcript` with per-line provenance. Absent/empty from a pre-v9 host —
+   * fall back to `transcript` rather than rendering nothing. */
+  transcript_rows?: TranscriptRow[];
   tasks: SnapshotTask[];
   subagents: SnapshotSubagent[];
   // v8.1 additive: active workflow-run state, null when no workflow is running.

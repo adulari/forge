@@ -17,6 +17,17 @@ export function normalizeEntitlementState(value?: string): AnywhereAccount["enti
   }
 }
 
+/**
+ * Whole days remaining until an ISO deadline, or `undefined` when the service published
+ * none. Callers must not substitute 0 for "unknown" — a missing deadline is not "expired".
+ */
+export function daysUntilIso(iso: string | null | undefined, nowMs: number = Date.now()): number | undefined {
+  if (!iso) return undefined;
+  const deadline = Date.parse(iso);
+  if (!Number.isFinite(deadline)) return undefined;
+  return Math.max(0, Math.ceil((deadline - nowMs) / (24 * 60 * 60 * 1000)));
+}
+
 // Local copy of theme/typography.ts's formatRelativeTime — duplicated rather than
 // imported because typography.ts pulls in the real `react-native` package at
 // module-eval time (it uses `Platform`), and this project's vitest has no Flow/RN

@@ -83,9 +83,14 @@ export interface AnywhereHost {
   id: string;
   /** Renamable. */
   name: string;
-  /** SHA256 identity fingerprint — never changes, even across renames/reconnects. */
-  fingerprint: string;
-  connectorVersion: string;
+  /**
+   * SHA256 identity fingerprint — never changes, even across renames/reconnects.
+   * Optional: it is derived from the host device's enrolled signing key, which is
+   * unknown while the device list has not been fetched.
+   */
+  fingerprint?: string;
+  /** Optional: the managed service does not report a connector build yet. */
+  connectorVersion?: string;
   heartbeatAgeSec: number;
   state: HostState;
   reachableVia: HostReachability[];
@@ -103,7 +108,8 @@ export interface AnywhereDevice {
   id: string;
   name: string;
   kind: DeviceKind;
-  fingerprint: string;
+  /** SHA256 of the device's enrolled signing key. Optional: unknown until the key is fetched. */
+  fingerprint?: string;
   enrolledAt: number;
   lastSeenAt: number;
   isThisDevice: boolean;

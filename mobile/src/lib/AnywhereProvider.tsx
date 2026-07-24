@@ -105,6 +105,14 @@ import {
   type AnywherePushStatus,
 } from "./anywherePush";
 import type { AnywherePushApi } from "./anywherePushCore";
+import { buildAccountExport } from "./anywhere/accountExport";
+import { directServerForHost } from "./anywhere/hostIdentity";
+import {
+  readHostTransportPreferences,
+  writeHostTransportPreferences,
+  type HostTransportPreferences,
+} from "./anywhere/hostTransportStore";
+import type { TransportPreference } from "./anywhere/types";
 import { useAuth } from "./auth";
 import {
   AnywhereTransport,
@@ -201,6 +209,8 @@ export interface AnywhereContextValue {
   localHostApproval: AnywhereLocalHostApproval | null;
   pendingApprovals: AnywherePendingApproval[];
   passkeys: AnywherePasskey[];
+  /** Per-host transport preference for new sessions. Missing entries mean `auto`. */
+  hostTransportPreferences: HostTransportPreferences;
   approvalError: string | null;
   error: string | null;
   pushStatus: AnywherePushStatus;
@@ -225,6 +235,13 @@ export interface AnywhereContextValue {
   revokeDevice(deviceId: string, recoveryWords: string): Promise<void>;
   revokeHost(hostId: string): Promise<void>;
   renameHost(hostId: string, name: string): Promise<void>;
+  /** Suspend or resume managed access without revoking enrollment. Only call for a host
+   * whose `disabled` field the service actually returns — see `AnywhereHost.disabled`. */
+  setHostDisabled(hostId: string, disabled: boolean): Promise<void>;
+  /** Device-local transport preference honoured by `selectHost`. */
+  setHostTransportPreference(hostId: string, preference: TransportPreference): Promise<void>;
+  /** Device-local snapshot of the account metadata this client holds. No server export exists. */
+  exportAccountData(): string;
   approvePairing(challenge: string): Promise<void>;
   approvePendingDevice(pairingId: string): Promise<void>;
   denyPendingDevice(pairingId: string): Promise<void>;
@@ -263,6 +280,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
   const [claimantPairing, setClaimantPairing] = useState<PendingClaimantPairing | null>(null);
   const [pendingApprovalDetails, setPendingApprovalDetails] = useState<PairingDetails[]>([]);
   const [passkeys, setPasskeys] = useState<AnywherePasskey[]>([]);
+  const [hostTransportPreferences, setHostTransportPreferences] = useState<HostTransportPreferences>({});
   const [pendingLocalHost, setPendingLocalHost] = useState<PendingLocalHost | null>(null);
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const approvalRetryAtMs = useRef(0);
@@ -584,6 +602,21 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     });
     return () => { cancelled = true; };
   }, [refresh, syncAnywhereHosts]);
+
+  const preferenceAccountId = credentials?.accountIdHex;
+  useEffect(() => {
+    if (!preferenceAccountId) {
+      setHostTransportPreferences({});
+      return;
+    }
+    let cancelled = false;
+    void readHostTransportPreferences(preferenceAccountId).then((stored) => {
+      if (!cancelled) setHostTransportPreferences(stored);
+    }).catch(() => {
+      // A missing local preference file just means every host stays on `auto`.
+    });
+    return () => { cancelled = true; };
+  }, [preferenceAccountId]);
 
   const pushDeviceId = credentials?.deviceIdHex;
   useEffect(() => {
@@ -1138,7 +1171,28 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     ));
   }, [claimantPairing]);
 
-  const selectHost = useCallback((hostId: string) => setActive(`anywhere:${hostId}`), [setActive]);
+  // "Transport for new sessions": AUTO keeps the managed relay this device is enrolled for
+  // (unchanged behaviour), DIRECT activates the saved LAN target for the same daemon
+  // hostname when one exists, ANYWHERE always uses the relay.
+  const selectHost = useCallback((hostId: string) => {
+    if ((hostTransportPreferences[hostId] ?? "auto") === "direct") {
+      const host = hosts.find((candidate) => candidate.id === hostId);
+      const direct = host ? directServerForHost(auth.servers, host.name) : null;
+      if (direct) {
+        setActive(direct.id);
+        return;
+      }
+    }
+    setActive(`anywhere:${hostId}`);
+  }, [auth.servers, hostTransportPreferences, hosts, setActive]);
+
+  const setHostTransportPreference = useCallback(async (hostId: string, preference: TransportPreference) => {
+    const current = credentialsRef.current;
+    if (!current) throw new Error("Forge Anywhere is not signed in");
+    const next = { ...hostTransportPreferences, [hostId]: preference };
+    setHostTransportPreferences(next);
+    await writeHostTransportPreferences(current.accountIdHex, next);
+  }, [hostTransportPreferences]);
 
   const checkout = useCallback(async (period?: AnywhereBillingPeriod) => {
     try {
@@ -1219,6 +1273,37 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
       throw reason;
     }
   }, [accessToken, refresh]);
+
+  const setHostDisabled = useCallback(async (hostId: string, disabled: boolean) => {
+    try {
+      setError(null);
+      const token = await accessToken();
+      const current = credentialsRef.current;
+      if (!current) throw new Error("Forge Anywhere is not signed in");
+      await anywhereRequest(current.serviceUrl ?? SERVICE_URL, `/v1/hosts/${hostId}`, {
+        method: "PATCH",
+        headers: { "Idempotency-Key": idempotencyKey() },
+        body: JSON.stringify({ disabled }),
+      }, token);
+      await refresh();
+    } catch (reason) {
+      setError(message(reason));
+      throw reason;
+    }
+  }, [accessToken, refresh]);
+
+  const exportAccountData = useCallback((): string => {
+    const current = credentialsRef.current;
+    if (!current) throw new Error("Forge Anywhere is not signed in");
+    return buildAccountExport({
+      serviceUrl: current.serviceUrl ?? SERVICE_URL,
+      githubLogin: current.githubLogin,
+      accountIdHex: current.accountIdHex,
+      deviceIdHex: current.deviceIdHex,
+      keyEpoch: current.keyEpoch,
+      account, subscription, hosts, devices, passkeys,
+    });
+  }, [account, devices, hosts, passkeys, subscription]);
 
   const approvePairing = useCallback(async (encodedChallenge: string) => {
     const current = credentialsRef.current;
@@ -1519,9 +1604,10 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
         ? pairingSafetyCode(challengeFromDetails(details, credentials.serviceUrl ?? SERVICE_URL), details.signing_public_key, credentials.accountIdHex)
         : "",
     })),
+    hostTransportPreferences,
     approvalError, error, pushStatus, remoteJobs,
     accessToken, startLogin, openLoginPage, confirmNewRecovery, recoverExisting, scheduleCleanReset, cancelCleanReset, registerPasskey: registerRecoveryPasskey, recoverWithPasskey, renamePasskey: renameRecoveryPasskey, revokePasskey: revokeRecoveryPasskey, useRecoveryInstead, restartSetup, refresh, checkout, openBillingPortal,
-    revokeDevice, revokeHost, renameHost, selectHost, approvePairing, approvePendingDevice, denyPendingDevice, refreshPendingApprovals, prepareLocalHost, confirmLocalHost, cancelLocalHost, queueRemoteJob, refreshRemoteJobs,
+    revokeDevice, revokeHost, renameHost, setHostDisabled, setHostTransportPreference, exportAccountData, selectHost, approvePairing, approvePendingDevice, denyPendingDevice, refreshPendingApprovals, prepareLocalHost, confirmLocalHost, cancelLocalHost, queueRemoteJob, refreshRemoteJobs,
     enablePush, disablePush, logout,
   };
   const consumersReady = anywhereConsumersReady(phase, runtimeId, registeredRuntimeId);

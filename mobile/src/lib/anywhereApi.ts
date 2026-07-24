@@ -120,6 +120,18 @@ export interface AnywhereHost {
   created_at: string;
   last_heartbeat_at: string | null;
   online?: boolean;
+  /**
+   * Connector build reported by the host. Optional because `POST /v1/hosts` does not
+   * send it yet and `GET /v1/hosts` therefore never returns it — screens render the
+   * connector-version row only when the field is actually present.
+   */
+  connector_version?: string | null;
+  /**
+   * Whether managed access is suspended without revoking enrollment. Optional and used
+   * as a capability probe: the Disable action is offered only when the service returns
+   * this field, so it is never sent to a service that cannot honour it.
+   */
+  disabled?: boolean;
 }
 
 export interface AnywhereDevice {

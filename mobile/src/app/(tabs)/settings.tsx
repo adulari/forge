@@ -64,6 +64,7 @@ import {
 } from "../../lib/anonymousTelemetry";
 import { useHooks, useMcp, useModels, usePlans, useServerFleets, useSkills, useUsage } from "../../lib/queries";
 import { isIOS, isTauri, isWeb } from "../../lib/platform";
+import { persistTabBadge, publishTabBadge, useTabBadgePreference } from "../../lib/tabBadge";
 import { PROTOCOL_VERSION } from "../../lib/remoteProtocol";
 import { checkForDesktopUpdate, type DesktopUpdate } from "../../lib/updater";
 import { useStrike } from "../../theme/motion";
@@ -317,6 +318,10 @@ export default function SettingsScreen() {
   const [pushBusy, setPushBusy] = useState(false);
   const pushSupported = NOTIFICATIONS_SUPPORTED && isPushSupported();
 
+  const tabBadge = useTabBadgePreference();
+  // Runs here so the badge is live at least while Settings is mounted; the root layout should
+  // call the same hook so it survives navigation (see the export's doc comment).
+
   const [notifyPermission, setNotifyPermission] = useState<NotifyPermission>("default");
   const [notifyBusy, setNotifyBusy] = useState(false);
   const [desktopUpdate, setDesktopUpdate] = useState<DesktopUpdate | null>(null);
@@ -422,6 +427,15 @@ export default function SettingsScreen() {
     void AsyncStorage.setItem(APP_LOCK_KEY, value ? "true" : "false").catch(() => {
       setAppLock(previous);
       toast.show("couldn't save app lock preference.", { tone: "danger" });
+    });
+  };
+
+  const onTabBadgeChange = (value: boolean) => {
+    const previous = tabBadge;
+    publishTabBadge(value);
+    void persistTabBadge(value).catch(() => {
+      publishTabBadge(previous);
+      toast.show("couldn't save tab badge preference.", { tone: "danger" });
     });
   };
 
@@ -636,15 +650,11 @@ export default function SettingsScreen() {
 
         {/* W Settings BEHAVIOR (L180-183): browser notifications + tab badge. Browser
             notifications reuses the same web-push subscription this build already has
-            (enablePush/disablePush/getPushStatus) under its Machined label. Tab badge has
-            no backing implementation anywhere in the app (no needs-you-count -> document.title
-            wiring exists) — per this task's own instruction to skip rather than fake a toggle
-            with nothing behind it, that row is omitted; see the build report. */}
+            (enablePush/disablePush/getPushStatus) under its Machined label. */}
         {isWeb && !isTauri ? (
           <View>
             <SectionHeader>Behavior</SectionHeader>
             <DenseRow
-              showSeparator={false}
               accessibilityLabel="Browser notifications"
               trailing={
                 pushSupported && pushLoaded ? (
@@ -659,6 +669,14 @@ export default function SettingsScreen() {
             >
               <Text style={[type.body, { color: tokens.ink }]}>Browser notifications</Text>
               <Text style={[type.sub, { color: tokens.ink3 }]}>Forge notifies this tab when a session needs you.</Text>
+            </DenseRow>
+            <DenseRow
+              showSeparator={false}
+              accessibilityLabel="Tab badge"
+              trailing={<Switch value={tabBadge} onValueChange={onTabBadgeChange} accessibilityLabel="Tab badge" />}
+            >
+              <Text style={[type.body, { color: tokens.ink }]}>Tab badge</Text>
+              <Text style={[type.sub, { color: tokens.ink3 }]}>Show needs-you count in the tab title.</Text>
             </DenseRow>
           </View>
         ) : null}

@@ -1,5 +1,5 @@
-// Allow/Deny buttons on the Hearth "NEEDS YOU" Live Activity card and Dynamic Island expanded
-// view (mobile.dc.html's "Mobile Live Activity" / "Mobile Dynamic Island" screens) resolve
+// Allow/Deny buttons on the Machined "NEEDS YOU" permission card and its Dynamic Island
+// mini-card (docs/design/machined/"Forge Machined - Mobile.dc.html" L610-627) resolve
 // without opening the app — that's what `LiveActivityIntent` (iOS 17+) is for. They POST the
 // same decision the in-app UI sends (`answer()` in mobile/src/lib/api.ts, backed by
 // `POST /<token>/api/answer` in crates/forge-cli/src/serve.rs). `attributes.baseUrl` already

@@ -1,17 +1,20 @@
 // Forge desktop shell (ARCHITECTURE.md §6.1). The webview owns the integrated title bar:
 // macOS keeps its native menu for standard editing bindings, while Windows/Linux hide native
 // decorations and use the React Native Web chrome.
-#[cfg(all(debug_assertions, target_os = "macos"))]
-use tauri::menu::MenuItemBuilder;
-#[cfg(target_os = "macos")]
-use tauri::menu::{Menu, PredefinedMenuItem, SubmenuBuilder};
-// `Manager::get_webview_window` is used in the non-macOS setup hook (any profile) and in the
-// debug-only reload menu event, so the import must cover both — gating on debug_assertions alone
-// dropped it from release Linux/Windows builds.
-#[cfg(any(not(target_os = "macos"), debug_assertions))]
+//
+// Native surfaces (docs/design/machined INVENTORY.md § 08): `menu.rs` (application menu bar,
+// macOS only), `tray.rs` (menu-bar extra, all desktops), `about.rs` (About panel). All three
+// are thin — they hold no daemon state and defer every real action to the webview.
+//
+// `Manager::get_webview_window` is used in the non-macOS setup hook; `menu.rs` and `about.rs`
+// bring their own imports.
+#[cfg(not(target_os = "macos"))]
 use tauri::Manager;
 
+mod about;
+mod menu;
 mod serve_discovery;
+mod tray;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -23,6 +26,8 @@ pub fn run() {
         .plugin(tauri_plugin_websocket::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .manage(about::AboutState::default())
+        .register_uri_scheme_protocol(about::URI_SCHEME, about::serve)
         .invoke_handler(tauri::generate_handler![
             serve_discovery::detect_forge_serve,
             serve_discovery::forge_binary_available,
@@ -31,6 +36,9 @@ pub fn run() {
             serve_discovery::forge_anywhere_host_enrolled,
             serve_discovery::install_forge_anywhere_host,
             serve_discovery::activate_forge_anywhere_host,
+            tray::set_tray_summary,
+            about::set_about_info,
+            about::open_about_window,
         ])
         .setup(|app| {
             #[cfg(not(target_os = "macos"))]
@@ -44,19 +52,22 @@ pub fn run() {
                 install_linux_microphone_permission(&main_window)?;
             }
 
+            // macOS-only: Windows/Linux run with `set_decorations(false)` and draw the Machined
+            // chrome in the webview, so attaching a native menu bar there would stack a second,
+            // un-themed strip above it. Those platforms reach the same actions through the
+            // in-webview hotkey registry (src/lib/shortcuts/) and the tray.
             #[cfg(target_os = "macos")]
-            install_macos_menu(app)?;
+            menu::install(app.handle())?;
+
+            // A tray failure (no StatusNotifier host on a bare Linux session, say) must not take
+            // the whole app down with it — the window is the primary surface.
+            if let Err(error) = tray::install(app.handle()) {
+                eprintln!("forge: tray unavailable: {error}");
+            }
 
             Ok(())
         })
-        .on_menu_event(|_app, _event| {
-            #[cfg(debug_assertions)]
-            if _event.id() == "reload" {
-                if let Some(window) = _app.get_webview_window("main") {
-                    let _ = window.eval("window.location.reload()");
-                }
-            }
-        })
+        .on_menu_event(|app, event| menu::handle_event(app, event.id().as_ref()))
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -84,37 +95,5 @@ fn install_linux_microphone_permission(window: &tauri::WebviewWindow) -> tauri::
             true
         });
     })?;
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn install_macos_menu(app: &mut tauri::App) -> tauri::Result<()> {
-    let handle = app.handle();
-    let about = PredefinedMenuItem::about(handle, Some("About Forge"), None)?;
-    let quit = PredefinedMenuItem::quit(handle, Some("Quit Forge"))?;
-    let app_menu_builder = SubmenuBuilder::new(handle, "Forge")
-        .item(&about)
-        .separator();
-
-    #[cfg(debug_assertions)]
-    let app_menu_builder = {
-        let reload = MenuItemBuilder::with_id("reload", "Reload")
-            .accelerator("CmdOrCtrl+R")
-            .build(handle)?;
-        app_menu_builder.item(&reload).separator()
-    };
-
-    let app_menu = app_menu_builder.item(&quit).build()?;
-    let edit_menu = SubmenuBuilder::new(handle, "Edit")
-        .undo()
-        .redo()
-        .separator()
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
-        .build()?;
-    let menu = Menu::with_items(handle, &[&app_menu, &edit_menu])?;
-    app.set_menu(menu)?;
     Ok(())
 }

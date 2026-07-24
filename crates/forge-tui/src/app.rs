@@ -520,6 +520,11 @@ pub struct App {
     pub tick: usize,
     /// Finalized scrollback lines, in arrival order; drained by the I/O shell.
     flush: Vec<TextLine<'static>>,
+    /// Provenance for `flush`, index-aligned and never longer than it. Emitters that know where
+    /// their lines came from record it through [`App::tag_flush`]; anything pushed directly is
+    /// sealed as [`TranscriptKind::System`] when the next tagged emitter runs or on drain, so a
+    /// missing tag degrades to "system note" instead of misattributing a line.
+    flush_origins: Vec<LineOrigin>,
     /// Subagents in the current `spawn_agents` batch (RFC subagent-orchestration). Running rows
     /// animate with a spinner in the live preview; on completion each becomes a scrollback
     /// branch line, and the whole group folds (header + branches + footer) when all finish.
@@ -623,10 +628,10 @@ pub struct App {
     /// which is harmless). Populated by a periodic background refresh in the render loop, never
     /// blocking it: rendering only ever reads this cache.
     pub custom_widget_cache: std::collections::HashMap<String, String>,
-    /// A bounded plain-text ring buffer of the most recent finalized scrollback lines, so a
-    /// remote-control snapshot can show the phone the tail of the conversation. Kept small (the
-    /// full transcript lives in the terminal's native scrollback); newest is last.
-    pub recent_transcript: std::collections::VecDeque<String>,
+    /// A bounded ring buffer of the most recent finalized scrollback lines (text + provenance),
+    /// so a remote-control snapshot can show the phone the tail of the conversation. Kept small
+    /// (the full transcript lives in the terminal's native scrollback); newest is last.
+    pub recent_transcript: std::collections::VecDeque<TranscriptRow>,
     /// When true, model reasoning/thinking blocks are shown in scrollback. Default false (hidden).
     /// Toggled by `/thinking`.
     pub show_thinking: bool,
@@ -758,7 +763,12 @@ impl App {
             context_tokens: self.context_tokens,
             context_limit: self.context_limit,
             streaming: self.streaming.clone(),
-            transcript: self.recent_transcript.iter().cloned().collect(),
+            transcript: self
+                .recent_transcript
+                .iter()
+                .map(|r| r.text.clone())
+                .collect(),
+            transcript_rows: self.recent_transcript.iter().cloned().collect(),
             tasks: self.tasks.clone(),
             // `log` is left empty — the remote wire type (`remote::SnapSubagent`) never reads
             // it, so cloning the real (unbounded-growing) log buffer here on every dirty/busy
@@ -1366,6 +1376,9 @@ pub struct RemoteSnapshot {
     pub context_limit: Option<u32>,
     pub streaming: String,
     pub transcript: Vec<String>,
+    /// The same lines as `transcript`, each carrying the provenance its emitter recorded (v9) —
+    /// see [`TranscriptRow`]. Same length and order.
+    pub transcript_rows: Vec<TranscriptRow>,
     pub tasks: Vec<forge_types::TodoItem>,
     pub subagents: Vec<SubagentSnapshot>,
     pub queued: Vec<String>,
@@ -1400,6 +1413,84 @@ pub struct WorkflowRemote {
 /// How many trailing `log()` lines ride in each remote frame — enough for a live narration
 /// feed without recloning the whole bounded buffer every broadcast.
 const WORKFLOW_REMOTE_LOG_TAIL: usize = 30;
+
+/// Where a finalized scrollback line came from. Scrollback is a flat list of styled lines by the
+/// time it reaches the remote ring, so the emitter records this as it pushes — a remote client
+/// can't recover "this was a tool result, not the model talking" from the text afterwards.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TranscriptKind {
+    /// Anything that is neither a user echo, model prose, nor tool activity: warnings, errors,
+    /// command feedback, banners. The default, so an untagged emitter can never masquerade as
+    /// the model or a tool.
+    #[default]
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+impl TranscriptKind {
+    /// The stable wire word (see `remote::SnapTranscriptRow::kind`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Tool => "tool",
+        }
+    }
+}
+
+/// The provenance of one flushed line, recorded next to it as it is emitted.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct LineOrigin {
+    kind: TranscriptKind,
+    /// The tool name, on `Tool` lines.
+    tool: Option<String>,
+    /// `"ok"` / `"failed"` on a tool RESULT line; `None` on the call line that precedes it.
+    meta: Option<String>,
+}
+
+impl LineOrigin {
+    fn user() -> Self {
+        Self {
+            kind: TranscriptKind::User,
+            ..Self::default()
+        }
+    }
+
+    fn assistant() -> Self {
+        Self {
+            kind: TranscriptKind::Assistant,
+            ..Self::default()
+        }
+    }
+
+    fn tool_call(name: &str) -> Self {
+        Self {
+            kind: TranscriptKind::Tool,
+            tool: Some(name.to_string()),
+            meta: None,
+        }
+    }
+
+    fn tool_result(name: &str, ok: bool) -> Self {
+        Self {
+            kind: TranscriptKind::Tool,
+            tool: Some(name.to_string()),
+            meta: Some(if ok { "ok" } else { "failed" }.to_string()),
+        }
+    }
+}
+
+/// One finalized scrollback line with its provenance, for the remote transcript ring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptRow {
+    pub kind: TranscriptKind,
+    pub text: String,
+    pub tool: Option<String>,
+    pub meta: Option<String>,
+}
 
 /// One subagent's live row in the TUI.
 #[derive(Debug, Clone)]
@@ -1940,9 +2031,11 @@ impl App {
                 self.model_search = None;
                 self.turn_activity.response_chars += text.chars().count();
                 self.set_turn_activity(TurnPhase::Finalizing, "complete response received");
-                self.flush.push(header_line("⚒ forge", ORANGE));
-                self.flush.extend(crate::render::markdown_to_lines(&text));
-                self.flush.push(TextLine::default());
+                self.tag_flush(LineOrigin::assistant(), |s| {
+                    s.flush.push(header_line("⚒ forge", ORANGE));
+                    s.flush.extend(crate::render::markdown_to_lines(&text));
+                    s.flush.push(TextLine::default());
+                });
             }
             PresenterEvent::Reasoning(delta) => {
                 self.model_search = None;
@@ -1958,7 +2051,9 @@ impl App {
                 self.touch_turn_activity(TurnPhase::Responding);
                 if !self.streaming_active {
                     self.flush_reasoning();
-                    self.flush.push(header_line("⚒ forge", ORANGE));
+                    self.tag_flush(LineOrigin::assistant(), |s| {
+                        s.flush.push(header_line("⚒ forge", ORANGE))
+                    });
                     self.streaming_active = true;
                 }
                 // Accumulate the whole reply; it's rendered as markdown on AssistantDone so
@@ -1972,10 +2067,12 @@ impl App {
                 if self.streaming_active {
                     let rest = std::mem::take(&mut self.streaming);
                     self.streaming_rev = self.streaming_rev.wrapping_add(1);
-                    if !rest.is_empty() {
-                        self.flush.extend(crate::render::markdown_to_lines(&rest));
-                    }
-                    self.flush.push(TextLine::default());
+                    self.tag_flush(LineOrigin::assistant(), |s| {
+                        if !rest.is_empty() {
+                            s.flush.extend(crate::render::markdown_to_lines(&rest));
+                        }
+                        s.flush.push(TextLine::default());
+                    });
                     self.streaming_active = false;
                 } else {
                     // Reasoning arrived but no answer text streamed — still show the thinking.
@@ -1988,8 +2085,10 @@ impl App {
                 self.model_search = None;
                 self.turn_activity.tool_calls += 1;
                 self.set_turn_activity(TurnPhase::RunningTool, format!("executing {name}"));
-                self.flush
-                    .push(tool_start_line(&name, &args, self.last_width.get()))
+                self.tag_flush(LineOrigin::tool_call(&name), |s| {
+                    s.flush
+                        .push(tool_start_line(&name, &args, s.last_width.get()))
+                })
             }
             PresenterEvent::ToolResult { name, ok, summary } => {
                 self.set_turn_activity(
@@ -2008,8 +2107,10 @@ impl App {
                         self.push_turn_diff(d);
                     }
                 }
-                self.flush
-                    .push(tool_result_line(&name, ok, &summary, self.last_width.get()))
+                self.tag_flush(LineOrigin::tool_result(&name, ok), |s| {
+                    s.flush
+                        .push(tool_result_line(&name, ok, &summary, s.last_width.get()))
+                })
             }
             PresenterEvent::ContextInjected {
                 symbols,
@@ -2805,23 +2906,27 @@ impl App {
             return;
         }
         let text = std::mem::take(&mut self.reasoning);
-        if !self.show_thinking {
-            // Collapsed-by-default: a one-line marker so the user knows reasoning happened and is
-            // toggleable, instead of silently discarding it (undiscoverable).
-            self.flush.push(TextLine::from(Span::styled(
-                "  💭 thinking… (/thinking to expand)",
-                Style::default().fg(DIM),
-            )));
-            return;
-        }
-        let dim = Style::default().fg(DIM);
-        self.flush
-            .push(TextLine::from(Span::styled("✱ thinking", dim)));
-        for l in text.lines() {
-            self.flush
-                .push(TextLine::from(Span::styled(l.to_string(), dim)));
-        }
-        self.flush.push(TextLine::default());
+        // Reasoning is the model talking, so it rides the wire as assistant provenance — a
+        // remote client renders it under the same speaker, dimmed, exactly like the TUI does.
+        self.tag_flush(LineOrigin::assistant(), |s| {
+            if !s.show_thinking {
+                // Collapsed-by-default: a one-line marker so the user knows reasoning happened and
+                // is toggleable, instead of silently discarding it (undiscoverable).
+                s.flush.push(TextLine::from(Span::styled(
+                    "  💭 thinking… (/thinking to expand)",
+                    Style::default().fg(DIM),
+                )));
+                return;
+            }
+            let dim = Style::default().fg(DIM);
+            s.flush
+                .push(TextLine::from(Span::styled("✱ thinking", dim)));
+            for l in text.lines() {
+                s.flush
+                    .push(TextLine::from(Span::styled(l.to_string(), dim)));
+            }
+            s.flush.push(TextLine::default());
+        });
     }
 
     /// Clamp `input_cursor` into a valid byte index: never past the end, and always on a UTF-8
@@ -2951,18 +3056,20 @@ impl App {
         self.turn_diffs.clear();
         self.turn_diffs_skipped = 0;
         self.plan = None;
-        self.flush.push(header_line("you", USER));
-        for l in line.lines() {
-            self.flush.push(body_line(l));
-        }
-        for img in std::mem::take(&mut self.last_submit_images) {
-            let kb = (img.data_base64.len() * 3 / 4).div_ceil(1024);
-            self.flush.push(body_line(&format!(
-                "🖼 image attached ({}, ~{kb} KB)",
-                img.media_type
-            )));
-        }
-        self.flush.push(TextLine::default());
+        self.tag_flush(LineOrigin::user(), |s| {
+            s.flush.push(header_line("you", USER));
+            for l in line.lines() {
+                s.flush.push(body_line(l));
+            }
+            for img in std::mem::take(&mut s.last_submit_images) {
+                let kb = (img.data_base64.len() * 3 / 4).div_ceil(1024);
+                s.flush.push(body_line(&format!(
+                    "🖼 image attached ({}, ~{kb} KB)",
+                    img.media_type
+                )));
+            }
+            s.flush.push(TextLine::default());
+        });
     }
 
     /// Render a resumed session's prior transcript into scrollback (after a `/resume` swap), so the
@@ -2974,17 +3081,23 @@ impl App {
             match item {
                 ReplayItem::User(content) => self.submit_user(content),
                 ReplayItem::Assistant(content) => {
-                    self.flush.push(header_line("⚒ forge", ORANGE));
-                    self.flush.extend(crate::render::markdown_to_lines(content));
-                    self.flush.push(TextLine::default());
+                    self.tag_flush(LineOrigin::assistant(), |s| {
+                        s.flush.push(header_line("⚒ forge", ORANGE));
+                        s.flush.extend(crate::render::markdown_to_lines(content));
+                        s.flush.push(TextLine::default());
+                    });
                 }
                 ReplayItem::Tool { name, args } => {
-                    self.flush
-                        .push(tool_start_line(name, args, self.last_width.get()));
+                    self.tag_flush(LineOrigin::tool_call(name), |s| {
+                        s.flush
+                            .push(tool_start_line(name, args, s.last_width.get()));
+                    });
                 }
                 ReplayItem::ToolResult { name, ok, summary } => {
-                    self.flush
-                        .push(tool_result_line(name, *ok, summary, self.last_width.get()));
+                    self.tag_flush(LineOrigin::tool_result(name, *ok), |s| {
+                        s.flush
+                            .push(tool_result_line(name, *ok, summary, s.last_width.get()));
+                    });
                 }
                 ReplayItem::Note(text) => self.flush.push(warning_line(text)),
             }
@@ -3023,21 +3136,41 @@ impl App {
         }
     }
 
+    /// Emit scrollback whose provenance the caller knows: everything `push` queues is tagged
+    /// `origin`. Lines already queued untagged are sealed as system notes first, so a later tag
+    /// can never reach back and reclassify an unrelated warning that landed before it.
+    fn tag_flush(&mut self, origin: LineOrigin, push: impl FnOnce(&mut Self)) {
+        self.seal_flush_origins(&LineOrigin::default());
+        push(self);
+        self.seal_flush_origins(&origin);
+    }
+
+    /// Give every still-untagged queued line the provenance `origin`.
+    fn seal_flush_origins(&mut self, origin: &LineOrigin) {
+        while self.flush_origins.len() < self.flush.len() {
+            self.flush_origins.push(origin.clone());
+        }
+    }
+
     /// Take the finalized scrollback lines queued since the last call. Each line is also mirrored
     /// into [`main_log`] so the activity viewer can show the full "main chat" transcript.
     pub fn drain_flush(&mut self) -> Vec<TextLine<'static>> {
         let lines = std::mem::take(&mut self.flush);
+        self.flush_origins.clear();
         self.fold_main_log(&lines);
         lines
     }
 
-    /// Like [`drain_flush`], but also folds each line's plain text into the remote transcript ring
-    /// buffer so the remote-control snapshot mirrors the conversation tail. Use this when remote
-    /// control is active; otherwise [`drain_flush`] is cheaper.
+    /// Like [`drain_flush`], but also folds each line's plain text (and the provenance the
+    /// emitter recorded) into the remote transcript ring buffer so the remote-control snapshot
+    /// mirrors the conversation tail. Use this when remote control is active; otherwise
+    /// [`drain_flush`] is cheaper.
     pub fn drain_flush_remote(&mut self) -> Vec<TextLine<'static>> {
+        self.seal_flush_origins(&LineOrigin::default());
         let lines = std::mem::take(&mut self.flush);
-        for l in &lines {
-            self.push_remote_transcript_line(l);
+        let origins = std::mem::take(&mut self.flush_origins);
+        for (l, origin) in lines.iter().zip(origins.iter()) {
+            self.push_remote_transcript_line(l, origin);
         }
         self.fold_main_log(&lines);
         lines
@@ -3510,12 +3643,17 @@ impl App {
         self.main_log_rev += 1;
     }
 
-    fn push_remote_transcript_line(&mut self, line: &TextLine<'static>) {
+    fn push_remote_transcript_line(&mut self, line: &TextLine<'static>, origin: &LineOrigin) {
         let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         if plain.trim().is_empty() {
             return;
         }
-        self.recent_transcript.push_back(plain);
+        self.recent_transcript.push_back(TranscriptRow {
+            kind: origin.kind,
+            text: plain,
+            tool: origin.tool.clone(),
+            meta: origin.meta.clone(),
+        });
         while self.recent_transcript.len() > REMOTE_TRANSCRIPT_MAX {
             self.recent_transcript.pop_front();
         }
@@ -5021,8 +5159,24 @@ fn tasks_panel_lines(tasks: &[forge_types::TodoItem], height: u16) -> Vec<TextLi
             TodoStatus::InProgress => ("◼", Style::default().fg(ACCENT).bold()),
             TodoStatus::Pending => ("○", Style::default().fg(TEXT)),
         };
+        // A delegated task names its owner inline — the panel is one line per task, so an
+        // `@assignee` suffix is the only place it fits. Budgeted out of the same 62 columns the
+        // title had, so an owner can never push the row past the panel width.
+        let label = match t
+            .assignee
+            .as_deref()
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+        {
+            Some(who) => format!(
+                "{} @{}",
+                truncate(&t.title, 62usize.saturating_sub(who.chars().count() + 2)),
+                truncate(who, 24)
+            ),
+            None => truncate(&t.title, 62),
+        };
         lines.push(TextLine::from(Span::styled(
-            format!("  {glyph} {}", truncate(&t.title, 62)),
+            format!("  {glyph} {label}"),
             style,
         )));
     }
@@ -8219,6 +8373,54 @@ mod tests {
     }
 
     #[test]
+    fn remote_transcript_rows_carry_the_provenance_of_each_line() {
+        let mut app = App::default();
+        app.submit_user("read Cargo.toml");
+        app.apply(PresenterEvent::ToolStart {
+            name: "read_file".into(),
+            args: "{\"path\":\"Cargo.toml\"}".into(),
+        });
+        app.apply(PresenterEvent::ToolResult {
+            name: "read_file".into(),
+            ok: false,
+            summary: "no such file".into(),
+        });
+        // An untagged emitter between tool activity and the reply must NOT inherit either.
+        app.apply(PresenterEvent::Warning("retrying".into()));
+        app.apply(PresenterEvent::AssistantText("it isn't there".into()));
+        let _ = app.drain_flush_remote();
+
+        let view = app.remote_snapshot();
+        assert_eq!(
+            view.transcript.len(),
+            view.transcript_rows.len(),
+            "the tagged twin must stay index-aligned with the flat transcript"
+        );
+        for (text, row) in view.transcript.iter().zip(view.transcript_rows.iter()) {
+            assert_eq!(text, &row.text);
+        }
+        let kind_of = |needle: &str| {
+            view.transcript_rows
+                .iter()
+                .find(|r| r.text.contains(needle))
+                .unwrap_or_else(|| panic!("no transcript row for {needle:?}"))
+        };
+        assert_eq!(kind_of("read Cargo.toml").kind, TranscriptKind::User);
+        assert_eq!(kind_of("it isn't there").kind, TranscriptKind::Assistant);
+        assert_eq!(kind_of("retrying").kind, TranscriptKind::System);
+
+        let call = kind_of("Cargo.toml\"}");
+        assert_eq!(call.kind, TranscriptKind::Tool);
+        assert_eq!(call.tool.as_deref(), Some("read_file"));
+        assert_eq!(call.meta, None, "the call row has no outcome yet");
+
+        let result = kind_of("no such file");
+        assert_eq!(result.kind, TranscriptKind::Tool);
+        assert_eq!(result.tool.as_deref(), Some("read_file"));
+        assert_eq!(result.meta.as_deref(), Some("failed"));
+    }
+
+    #[test]
     fn budget_warning_is_queued_to_scrollback() {
         let mut app = App::default();
         app.apply(PresenterEvent::Warning(
@@ -9042,6 +9244,7 @@ mod tests {
         forge_types::TodoItem {
             title: title.into(),
             status,
+            assignee: None,
         }
     }
 
@@ -9075,6 +9278,34 @@ mod tests {
         assert!(
             !screen(&app).contains("tasks ("),
             "panel collapses when the list empties"
+        );
+    }
+
+    #[test]
+    fn tasks_panel_names_the_assignee_of_a_delegated_task() {
+        use forge_types::TodoStatus;
+        let mut app = App {
+            activity_focused: true,
+            ..Default::default()
+        };
+        let delegated = forge_types::TodoItem {
+            title: "port the store layer".into(),
+            status: TodoStatus::InProgress,
+            assignee: Some("builder-a3".into()),
+        };
+        app.apply(PresenterEvent::Tasks(vec![
+            delegated,
+            todo("review the diff", TodoStatus::Pending),
+        ]));
+        let s = screen(&app);
+        assert!(
+            s.contains("port the store layer @builder-a3"),
+            "delegated task names its owner: {s}"
+        );
+        // A task the model kept gets no owner suffix invented for it.
+        assert!(
+            !s.contains("review the diff @"),
+            "unassigned task stays bare: {s}"
         );
     }
 

@@ -7,10 +7,12 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 
 import { useAnywhere as useEncryptedAnywhere } from "../AnywhereProvider";
 import { managedHostPresence } from "../anywhereHostPresence";
+import { useAuth } from "../auth";
 import type { AnywhereClient } from "./client";
+import { deviceIdentityFingerprint, hostIdentityFingerprint, hostReachability } from "./hostIdentity";
 import { MockAnywhereClient } from "./mockClient";
 import type { AnywhereAccount, AnywhereDevice, AnywhereHost, RemoteJob, StorageInfo } from "./types";
-import { normalizeEntitlementState } from "./format";
+import { daysUntilIso, normalizeEntitlementState } from "./format";
 
 /** Module-level singleton mock backend — every consumer shares one in-memory instance. */
 export const anywhereClient: AnywhereClient = new MockAnywhereClient();
@@ -32,9 +34,14 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     if (encrypted.phase !== "ready" || !encrypted.credentials) return null;
     const quota = encrypted.account?.storage_limit_bytes ?? 0;
     const used = encrypted.account?.storage_used_bytes ?? 0;
+    // Only the trial window has an unambiguous deadline on the wire (`trial_ends_at`, ISO).
+    // Grace/read-only/suspended countdowns are deliberately left undefined rather than
+    // guessed from `subscription`'s unit-less epoch numbers.
+    const trialDaysLeft = daysUntilIso(encrypted.account?.trial_ends_at);
     return {
       githubLogin: encrypted.credentials.githubLogin ?? "signed-in account",
       entitlement: normalizeEntitlementState(encrypted.account?.entitlement),
+      ...(trialDaysLeft === undefined ? {} : { trialDaysLeft }),
       relayConnected: true,
       lastSyncAt: null,
       storage: { usedBytes: used, quotaBytes: quota, state: quota > 0 && used >= quota ? "full" : "ok" },
@@ -61,33 +68,40 @@ export function useAnywhere(): AnywhereContextValue {
 
 export function useAnywhereHosts() {
   const encrypted = useEncryptedAnywhere();
+  const { servers } = useAuth();
+  const signingPublicKeys = encrypted.credentials?.signingPublicKeys;
   const hosts = useMemo<AnywhereHost[]>(() => encrypted.hosts.map((host) => {
     const presence = managedHostPresence(host);
+    const fingerprint = hostIdentityFingerprint(signingPublicKeys?.[host.device_id]);
     return {
       id: host.id,
       name: host.name,
-      fingerprint: "",
-      connectorVersion: "managed",
+      // Omitted rather than stubbed when unknown — the design type marks both optional.
+      ...(fingerprint ? { fingerprint } : {}),
+      ...(host.connector_version ? { connectorVersion: host.connector_version } : {}),
       heartbeatAgeSec: presence.heartbeatAgeSec,
-      state: presence.state,
-      reachableVia: ["anywhere-relay"],
-      transportPreference: "auto",
+      state: host.disabled === true ? { kind: "disabled" } : presence.state,
+      reachableVia: hostReachability(servers, host.name),
+      transportPreference: encrypted.hostTransportPreferences[host.id] ?? "auto",
     };
-  }), [encrypted.hosts]);
+  }), [encrypted.hostTransportPreferences, encrypted.hosts, servers, signingPublicKeys]);
   return { hosts, loading: encrypted.phase === "loading", refresh: encrypted.refresh };
 }
 
 export function useAnywhereDevices() {
   const encrypted = useEncryptedAnywhere();
-  const devices = useMemo<AnywhereDevice[]>(() => encrypted.devices.map((device) => ({
-    id: device.id,
-    name: device.name,
-    kind: /phone|iphone|android/i.test(device.name) ? "phone" : "laptop",
-    fingerprint: "",
-    enrolledAt: Date.parse(device.created_at),
-    lastSeenAt: device.last_seen_at ? Date.parse(device.last_seen_at) : Date.parse(device.created_at),
-    isThisDevice: device.id === encrypted.credentials?.deviceIdHex,
-  })), [encrypted.credentials?.deviceIdHex, encrypted.devices]);
+  const devices = useMemo<AnywhereDevice[]>(() => encrypted.devices.map((device) => {
+    const fingerprint = deviceIdentityFingerprint(device.signing_public_key);
+    return {
+      id: device.id,
+      name: device.name,
+      kind: /phone|iphone|android/i.test(device.name) ? "phone" : "laptop",
+      ...(fingerprint ? { fingerprint } : {}),
+      enrolledAt: Date.parse(device.created_at),
+      lastSeenAt: device.last_seen_at ? Date.parse(device.last_seen_at) : Date.parse(device.created_at),
+      isThisDevice: device.id === encrypted.credentials?.deviceIdHex,
+    } satisfies AnywhereDevice;
+  }), [encrypted.credentials?.deviceIdHex, encrypted.devices]);
   return { devices, loading: encrypted.phase === "loading", refresh: encrypted.refresh };
 }
 

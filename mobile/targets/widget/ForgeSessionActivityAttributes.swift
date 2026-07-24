@@ -16,8 +16,8 @@
 // mobile/src/lib/api.ts's `request()`), which is what lets `ForgeActivityIntents.swift`'s
 // Allow/Deny buttons POST a decision straight from the widget extension without a separate
 // credential store. `question`/`promptSeq`/`tasksDone`/`tasksTotal`/`stateSinceEpoch` on
-// `ContentState` back the Hearth "NEEDS YOU" and forging cards — see mobile.dc.html's "Mobile
-// Live Activity" / "Mobile Dynamic Island" screens.
+// `ContentState` back the Machined "NEEDS YOU" permission card and forging card — see
+// docs/design/machined/"Forge Machined - Mobile.dc.html" L610-627 ("M Native Surfaces").
 import ActivityKit
 
 struct ForgeSessionActivityAttributes: ActivityAttributes {

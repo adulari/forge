@@ -34,6 +34,32 @@ import {
   createMcpServer,
   type McpResponse,
   getMcp,
+  type UpdateMcpServerRequest,
+  updateMcpServer,
+
+  type GitStatusResponse,
+  getGitStatus,
+  type GitDiffResponse,
+  getGitDiff,
+  type GitPathsRequest,
+  type GitCommitRequest,
+  type GitCommitResponse,
+  stagePaths,
+  unstagePaths,
+  commitStaged,
+  type SessionDiffResponse,
+  getSessionDiff,
+
+  type ScheduleRow,
+  type CreateScheduleRequest,
+  getSchedules,
+  createSchedule,
+  pauseSchedule,
+  resumeSchedule,
+  deleteSchedule,
+
+  type ChangelogRelease,
+  getChangelog,
 
   type ForkSessionRequest,
   forkSession,
@@ -97,6 +123,12 @@ function keys(baseUrl: string | null) {
     plans: ["plans", baseUrl] as const,
 
     mcp: ["mcp", baseUrl] as const,
+    gitStatus: (sessionId: string) => ["git", "status", baseUrl, sessionId] as const,
+    gitDiff: (sessionId: string, path: string, staged: boolean) =>
+      ["git", "diff", baseUrl, sessionId, path, staged] as const,
+    sessionDiff: (sessionId: string) => ["sessions", "diff", baseUrl, sessionId] as const,
+    schedules: ["schedules", baseUrl] as const,
+    changelog: (limit?: number) => ["changelog", baseUrl, limit ?? null] as const,
   };
 }
 
@@ -215,6 +247,150 @@ export function useMcp() {
     queryKey: keys(baseUrl).mcp,
     queryFn: () => getMcp(baseUrl as string),
     enabled: baseUrl != null,
+  });
+}
+
+/** Enable/disable a configured MCP server. The daemon returns the full refreshed list, so the
+ * cache is seeded from the response rather than re-fetched. */
+export function useUpdateMcpServer() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: UpdateMcpServerRequest) => updateMcpServer(baseUrl as string, body),
+    onSuccess: (data) => queryClient.setQueryData(keys(baseUrl).mcp, data),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Git review dock
+// ---------------------------------------------------------------------------
+
+/** The session's working-tree status. Refetched on focus because the agent edits files between
+ * renders — there is no push channel for the index. */
+export function useGitStatus(sessionId: string | null) {
+  const { baseUrl } = useAuth();
+  return useQuery<GitStatusResponse>({
+    queryKey: keys(baseUrl).gitStatus(sessionId ?? ""),
+    queryFn: () => getGitStatus(baseUrl as string, sessionId as string),
+    enabled: baseUrl != null && sessionId != null,
+    refetchOnWindowFocus: true,
+  });
+}
+
+export function useGitDiff(sessionId: string | null, path: string | null, staged = false) {
+  const { baseUrl } = useAuth();
+  return useQuery<GitDiffResponse>({
+    queryKey: keys(baseUrl).gitDiff(sessionId ?? "", path ?? "", staged),
+    queryFn: () =>
+      getGitDiff(baseUrl as string, { session: sessionId as string, path: path as string, staged }),
+    enabled: baseUrl != null && sessionId != null && path != null && path !== "",
+  });
+}
+
+/** Staging changes the index AND every open diff view of the affected files, so both are
+ * invalidated for the session. */
+function useIndexMutation<T>(run: (baseUrl: string, body: GitPathsRequest) => Promise<T>) {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: GitPathsRequest) => run(baseUrl as string, body),
+    onSuccess: (_data, body) => {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).gitStatus(body.session) });
+      queryClient.invalidateQueries({ queryKey: ["git", "diff", baseUrl, body.session] });
+    },
+  });
+}
+
+export function useStagePaths() {
+  return useIndexMutation(stagePaths);
+}
+
+export function useUnstagePaths() {
+  return useIndexMutation(unstagePaths);
+}
+
+export function useCommitStaged() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation<GitCommitResponse, Error, GitCommitRequest>({
+    mutationFn: (body: GitCommitRequest) => commitStaged(baseUrl as string, body),
+    onSuccess: (_data, body) => {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).gitStatus(body.session) });
+      queryClient.invalidateQueries({ queryKey: ["git", "diff", baseUrl, body.session] });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).sessionDiff(body.session) });
+    },
+  });
+}
+
+/** A fork's whole diff against its base — powers the "Diff" action on session-tree rows. Only
+ * enabled explicitly, since it 400s for a session that has no worktree. */
+export function useSessionDiff(sessionId: string | null, enabled = true) {
+  const { baseUrl } = useAuth();
+  return useQuery<SessionDiffResponse>({
+    queryKey: keys(baseUrl).sessionDiff(sessionId ?? ""),
+    queryFn: () => getSessionDiff(baseUrl as string, sessionId as string),
+    enabled: enabled && baseUrl != null && sessionId != null,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Schedules
+// ---------------------------------------------------------------------------
+
+export function useSchedules() {
+  const { baseUrl } = useAuth();
+  return useQuery<ScheduleRow[]>({
+    queryKey: keys(baseUrl).schedules,
+    queryFn: () => getSchedules(baseUrl as string),
+    enabled: baseUrl != null,
+  });
+}
+
+export function useCreateSchedule() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateScheduleRequest) => createSchedule(baseUrl as string, body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys(baseUrl).schedules }),
+  });
+}
+
+/** Pause/resume/delete all install or uninstall a real OS timer server-side, so the list is
+ * refetched rather than patched optimistically. */
+function useScheduleMutation<T>(run: (baseUrl: string, id: string) => Promise<T>) {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => run(baseUrl as string, id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys(baseUrl).schedules }),
+  });
+}
+
+export function usePauseSchedule() {
+  return useScheduleMutation(pauseSchedule);
+}
+
+export function useResumeSchedule() {
+  return useScheduleMutation(resumeSchedule);
+}
+
+export function useDeleteSchedule() {
+  return useScheduleMutation(deleteSchedule);
+}
+
+// ---------------------------------------------------------------------------
+// What's New
+// ---------------------------------------------------------------------------
+
+/** The changelog is compiled into the daemon binary — it only changes when the daemon is
+ * upgraded, so it never goes stale within a session. */
+export function useChangelog(limit?: number) {
+  const { baseUrl } = useAuth();
+  return useQuery<ChangelogRelease[]>({
+    queryKey: keys(baseUrl).changelog(limit),
+    queryFn: () => getChangelog(baseUrl as string, limit),
+    enabled: baseUrl != null,
+    staleTime: Infinity,
   });
 }
 

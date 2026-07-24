@@ -779,6 +779,12 @@ pub struct McpServerLine {
 pub struct TodoItem {
     pub title: String,
     pub status: TodoStatus,
+    /// The subagent or worker responsible for this task, when the model is delegating. `None`
+    /// for work the model is doing itself — which is every task written before this field
+    /// existed, hence `serde(default)`: persisted `session_tasks` rows from older builds are
+    /// `[{"title":…,"status":…}]` and must still load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
 }
 
 /// One step of a proposed plan (the `present_plan` tool). `detail` is an optional one-line

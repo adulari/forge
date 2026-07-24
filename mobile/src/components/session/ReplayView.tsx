@@ -1,14 +1,21 @@
 // Machined Replay (Mobile/Desktop "Session Review Replay"/"Session Replay" frames):
-// chronological log rows (sys/you/forge, fixed-width mono timestamp column) + a scrub bar
-// with a thumb and a clock-time counter. Presentational — no wire coupling: the caller
-// fetches `HistoryRow[]` via `useHistory(sessionId)` (see `app/session/[id]/replay.tsx` for
-// the live wiring pattern) and hands the resolved rows + loading/error state to this view.
+// chronological log rows (fixed-width mono timestamp + role columns) + a scrub bar with a
+// thumb and an elapsed counter. Presentational — no wire coupling: the caller fetches
+// `HistoryRow[]` via `useHistory(sessionId)` (see `app/session/[id]/replay.tsx` for the live
+// wiring pattern) and hands the resolved rows + loading/error state to this view.
 //
-// Honesty: `HistoryRow.role` is only "user" | "assistant" | "system" — there is no distinct
-// "tool" row on the wire, so this renders three kinds (you/forge/sys), not four. Timestamps
-// are the row's real `created_at` (epoch seconds) rendered as local HH:MM — the design frame
-// shows the same wall-clock format for its scrub counter ("09:13/09:41"), so the scrub bar
-// mirrors that rather than inventing an elapsed mm:ss with no defined zero point.
+// Protocol v9 gave `/api/history` rows two fields this view now runs on:
+//   `kind`       — the row's real provenance in the transcript vocabulary, so the role column
+//                  shows sys/you/forge/tool instead of being inferred from `role`. `kind` is
+//                  never "tool" today (the store's history query leaves tool activity out of
+//                  the stream), but the column and the tool body render generically so those
+//                  rows come out right the moment they start appearing.
+//   `elapsed_ms` — offset from the session's FIRST visible row, i.e. a real zero point. The
+//                  scrub counter reads mm:ss elapsed off it instead of the wall-clock
+//                  approximation it used before.
+// Both are absent from a pre-v9 daemon: `kind` falls back to `role`, and the scrub counter
+// falls back to the old HH:MM/HH:MM clock pair. The per-row timestamp column stays wall-clock
+// either way — it is the row's real `created_at`, and useful independently of the scrubber.
 import { Clock, Route as RouteIcon } from "lucide-react-native";
 import React, { useCallback, useRef, useState } from "react";
 import {
@@ -24,30 +31,40 @@ import {
   View,
 } from "react-native";
 
-import type { HistoryRow } from "../../lib/api";
+import type { HistoryRow, TranscriptKind } from "../../lib/api";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
-import { tabularNums, type as typeScale } from "../../theme/typography";
+import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
 import { EmptyState } from "../ds/EmptyState";
 import { Markdown } from "../chat/Markdown";
 import { SystemOutput } from "../chat/SystemOutput";
 
 const TIMESTAMP_COL_WIDTH = 46;
+// Fits the longest label ("forge") at the mono meta size, so every body below lines up on the
+// same left edge regardless of which kind the row is.
+const ROLE_COL_WIDTH = 38;
 
 // How close to the bottom of the currently-loaded log (in px) before requesting the next
 // (older) page — mirrors BoundedList's onEndReachedThreshold, just measured in pixels since
 // this view drives its own ScrollView instead of a FlatList.
 const LOAD_MORE_THRESHOLD_PX = 200;
 
-function roleLabel(role: HistoryRow["role"]): string {
-  if (role === "user") return "you";
-  if (role === "assistant") return "forge";
+/** The row's v9 `kind`, or the pre-v9 derivation from `role` (which has no "tool" member). */
+export function kindOf(row: HistoryRow): TranscriptKind {
+  return row.kind ?? row.role;
+}
+
+function kindLabel(kind: TranscriptKind): string {
+  if (kind === "user") return "you";
+  if (kind === "assistant") return "forge";
+  if (kind === "tool") return "tool";
   return "sys";
 }
 
-function roleColor(role: HistoryRow["role"], tokens: ReturnType<typeof useTokens>): string {
-  if (role === "user") return tokens.accent;
-  if (role === "assistant") return tokens.ink2;
+function kindColor(kind: TranscriptKind, tokens: ReturnType<typeof useTokens>): string {
+  if (kind === "user") return tokens.accent;
+  if (kind === "assistant") return tokens.ink2;
+  if (kind === "tool") return tokens.ink3;
   return tokens.ink4;
 }
 
@@ -57,6 +74,17 @@ function formatClock(epochSeconds: number): string {
     minute: "2-digit",
     hour12: false,
   });
+}
+
+/** `elapsed_ms` as `mm:ss`, or `h:mm:ss` past an hour. Second-resolution by construction — the
+ * daemon derives it from whole-second `created_at` values. */
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const seconds = String(total % 60).padStart(2, "0");
+  const minutes = Math.floor(total / 60) % 60;
+  const hours = Math.floor(total / 3600);
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${seconds}`;
+  return `${String(minutes).padStart(2, "0")}:${seconds}`;
 }
 
 export interface ReplayViewProps {
@@ -124,8 +152,16 @@ export function ReplayView({
   );
 
   const currentIndex = rows.length > 0 ? Math.min(rows.length - 1, Math.round(progress * (rows.length - 1))) : 0;
-  const endClock = rows.length > 0 ? formatClock(rows[rows.length - 1].created_at) : null;
-  const currentClock = rows.length > 0 ? formatClock(rows[currentIndex].created_at) : null;
+  // Elapsed is the real counter whenever the daemon supplies it for BOTH ends of the range —
+  // a v8 host (no field) or an unreadable epoch (null) falls back to the wall-clock pair.
+  const endElapsed = rows.length > 0 ? rows[rows.length - 1].elapsed_ms : null;
+  const currentElapsed = rows.length > 0 ? rows[currentIndex].elapsed_ms : null;
+  const scrubCounter =
+    endElapsed != null && currentElapsed != null
+      ? `${formatElapsed(currentElapsed)}/${formatElapsed(endElapsed)}`
+      : rows.length > 0
+        ? `${formatClock(rows[currentIndex].created_at)}/${formatClock(rows[rows.length - 1].created_at)}`
+        : "";
 
   if (loading) {
     return (
@@ -193,7 +229,7 @@ export function ReplayView({
             />
           </View>
           <Text style={[typeScale.monoMeta, tabularNums, styles.scrubClock, { color: tokens.ink4 }]}>
-            {`${currentClock}/${endClock}`}
+            {scrubCounter}
           </Text>
         </View>
       ) : null}
@@ -212,8 +248,11 @@ function RetryLink({ onPress }: { onPress: () => void }) {
 
 const ReplayRow = React.memo(function ReplayRow({ row, showSeparator }: { row: HistoryRow; showSeparator: boolean }) {
   const tokens = useTokens();
-  const color = roleColor(row.role, tokens);
-  const multiline = row.role === "system" && row.content.includes("\n");
+  const kind = kindOf(row);
+  const color = kindColor(kind, tokens);
+  // A tool row is machine output by definition, so it always takes the boxed mono body; a system
+  // row only does once it spans lines (a one-line notice reads better as plain sub text).
+  const boxed = kind === "tool" || (kind === "system" && row.content.includes("\n"));
 
   return (
     <View style={styles.entry}>
@@ -221,13 +260,15 @@ const ReplayRow = React.memo(function ReplayRow({ row, showSeparator }: { row: H
         <Text style={[typeScale.monoMeta, tabularNums, styles.timestamp, { color: tokens.ink4 }]}>
           {formatClock(row.created_at)}
         </Text>
-        <Text style={[typeScale.section, { color }]}>{roleLabel(row.role)}</Text>
+        <Text style={[typeScale.monoMeta, styles.role, { color }]} numberOfLines={1}>
+          {kindLabel(kind)}
+        </Text>
       </View>
-      {multiline ? (
+      {boxed ? (
         <View style={styles.entryBody}>
           <SystemOutput content={row.content} />
         </View>
-      ) : row.role === "system" ? (
+      ) : kind === "system" ? (
         <Text style={[typeScale.sub, styles.entryBody, { color: tokens.ink3 }]}>{row.content}</Text>
       ) : (
         <View style={styles.entryBody}>
@@ -248,6 +289,7 @@ const styles = StyleSheet.create({
   entry: { paddingTop: space.space16 },
   entryHead: { flexDirection: "row", alignItems: "baseline", gap: space.space8 },
   timestamp: { width: TIMESTAMP_COL_WIDTH },
+  role: { width: ROLE_COL_WIDTH, fontFamily: monoFamily.bold },
   entryBody: { marginTop: space.space8, marginLeft: TIMESTAMP_COL_WIDTH + space.space8 },
   separator: { height: StyleSheet.hairlineWidth, marginTop: space.space16 },
   scrubWrap: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingTop: space.space8 },

@@ -2,13 +2,17 @@
 // 596-602, desktop.dc.html "D AW Settings" account row lines 1019). Real data only:
 // sign-out and the clean-reset ("delete account") flow both call the actual
 // AnywhereProvider methods already used by recovery-phrase.tsx's reset panel — this
-// screen just gives that same real flow its own dedicated route. "Export account
-// data" appears in the comp but AnywhereContextValue has no export endpoint yet, so
-// it is intentionally omitted rather than wired to a fake result.
+// screen just gives that same real flow its own dedicated route.
+//
+// "Export account data": the service has no export endpoint, so the comp's server-side
+// job ("preparing… 62% · link 24h") cannot be honoured. Rather than fake progress or
+// disable the action, this exports what the client genuinely holds — the account,
+// subscription, host, device and passkey metadata already on screen — and says exactly
+// that in the row caption. No session content and no key material leave the device.
 import { Redirect, router } from "expo-router";
 import { Trash2 } from "lucide-react-native";
 import React, { useCallback, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Platform, Pressable, Share, StyleSheet, Text, View } from "react-native";
 
 import { BackLink } from "../../components/ds/BackLink";
 import { Banner } from "../../components/ds/Banner";
@@ -27,6 +31,7 @@ export default function AnywhereAccountScreen() {
   const tokens = useTokens();
   const toast = useToast();
   const [signingOut, setSigningOut] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const [showReset, setShowReset] = useState(false);
   const [resetConfirmation, setResetConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
@@ -39,6 +44,28 @@ export default function AnywhereAccountScreen() {
       setSigningOut(false);
     }
   }, [anywhere]);
+
+  const exportData = useCallback(async () => {
+    setExporting(true);
+    try {
+      const payload = anywhere.exportAccountData();
+      if (Platform.OS === "web") {
+        const url = URL.createObjectURL(new Blob([payload], { type: "application/json" }));
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "forge-anywhere-account.json";
+        anchor.click();
+        URL.revokeObjectURL(url);
+      } else {
+        await Share.share({ title: "Forge Anywhere account export", message: payload });
+      }
+      toast.show("Exported the account metadata held on this device.", { tone: "neutral" });
+    } catch (reason) {
+      toast.show(reason instanceof Error ? reason.message : "Export could not be prepared.", { tone: "danger" });
+    } finally {
+      setExporting(false);
+    }
+  }, [anywhere, toast]);
 
   const scheduleReset = useCallback(async () => {
     setBusy(true);
@@ -99,6 +126,19 @@ export default function AnywhereAccountScreen() {
         >
           <Text style={[typeScale.body, styles.rowLabel, { color: tokens.ink2 }]}>Sign out on this device</Text>
           <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>keys removed · local data stays</Text>
+        </Pressable>
+
+        <Pressable
+          onPress={() => void exportData()}
+          disabled={exporting}
+          accessibilityRole="button"
+          accessibilityLabel="Export account data held on this device"
+          style={[styles.row, { borderColor: tokens.border }]}
+        >
+          <Text style={[typeScale.body, styles.rowLabel, { color: tokens.ink2 }]}>Export account data</Text>
+          <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>
+            {exporting ? "preparing…" : "this device · metadata only"}
+          </Text>
         </Pressable>
 
         {!showReset ? (

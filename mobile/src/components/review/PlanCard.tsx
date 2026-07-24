@@ -26,12 +26,12 @@ import { Input } from "../ds/Input";
 import { useToast } from "../ds/ToastHost";
 import { haptics } from "../../lib/haptics";
 import { resolvePlanDecision } from "../../lib/planDecision";
-import { type Plan, type QuestionOption, type RemoteInput } from "../../lib/ws";
-import { durations, easings } from "../../theme/motion";
+import { type Plan, type PlanStep, type QuestionOption, type RemoteInput } from "../../lib/ws";
+import { durations, easings, useEmberdot } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { tabularNums, type as typeScale } from "../../theme/typography";
-import { ChevronDown, ChevronRight, Send } from "lucide-react-native";
+import { Check, ChevronDown, ChevronRight, Send } from "lucide-react-native";
 
 export interface PlanCardProps {
   plan: Plan;
@@ -54,10 +54,12 @@ export function PlanCard({ plan, question, questionOptions, promptSeq, send, onQ
   // free-text row instead of resolving the prompt, so it never sets this.
   const [committed, setCommitted] = useState<"approve" | "cancel" | null>(null);
   const [queued, setQueued] = useState(false);
-  // Machined "Plan n/m" header + chevron collapse. PlanStep carries no per-step status field
-  // (no done/in-progress/queued data from the daemon), so — unlike the design comp's
-  // checkmark/pulsing-dot/circle step states — this shows a plain step count and a real
-  // collapse toggle instead of fabricating progress that isn't there.
+  // Machined "Plan n/m" header + chevron collapse. Protocol v9 gave `PlanStep` a real `status`
+  // (the status of the task an approved plan seeded from that step — see SnapPlanStep on the
+  // wire), so the design comp's checkmark / pulsing-dot / hollow-circle step states are now
+  // backed by data instead of fabricated. A pre-v9 host sends no `status` at all: the header
+  // falls back to the plain step count and every step renders with its number, exactly as
+  // before.
   const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
@@ -67,6 +69,12 @@ export function PlanCard({ plan, question, questionOptions, promptSeq, send, onQ
     setCommitted(null);
     setQueued(false);
   }, [promptSeq]);
+
+  const tracked = plan.steps.some((step) => step.status != null);
+  const doneCount = plan.steps.filter((step) => step.status === "done").length;
+  const stepSummary = tracked
+    ? `${doneCount}/${plan.steps.length} done`
+    : `${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}`;
 
   const decision = resolvePlanDecision(plan.title, question, questionOptions, promptSeq);
   const locked = decision != null && lockedSeq === decision.promptSeq;
@@ -109,7 +117,7 @@ export function PlanCard({ plan, question, questionOptions, promptSeq, send, onQ
             <View style={[styles.sectionDash, { backgroundColor: tokens.accent }]} />
             <Text style={[typeScale.section, { color: tokens.accent }]}>Plan</Text>
             <Text style={[typeScale.monoMeta, tabularNums, styles.stepCount, { color: tokens.ink3 }]}>
-              {`${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}`}
+              {stepSummary}
             </Text>
             {collapsed ? (
               <ChevronRight size={14} strokeWidth={1.75} color={tokens.ink3} />
@@ -122,15 +130,7 @@ export function PlanCard({ plan, question, questionOptions, promptSeq, send, onQ
           {!collapsed ? (
             <View style={styles.steps}>
               {plan.steps.map((step, idx) => (
-                <View key={idx} style={styles.step}>
-                  <Text style={[typeScale.bodyBold, { color: tokens.ink3 }, styles.stepNumber]}>{idx + 1}</Text>
-                  <View style={styles.stepBody}>
-                    <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>{step.title}</Text>
-                    {step.detail ? (
-                      <Text style={[typeScale.sub, { color: tokens.ink2 }, styles.stepDetail]}>{step.detail}</Text>
-                    ) : null}
-                  </View>
-                </View>
+                <PlanStepRow key={idx} step={step} index={idx} />
               ))}
             </View>
           ) : null}
@@ -195,6 +195,47 @@ export function PlanCard({ plan, question, questionOptions, promptSeq, send, onQ
   );
 }
 
+/**
+ * One numbered/marked plan step. The marker column carries the v9 `status`: ✓ for done (with an
+ * ink3 strikethrough title), a pulsing accent dot for in_progress, a hollow ring for queued.
+ * A step with no `status` (pre-v9 host) keeps its plain ordinal — the number is the honest
+ * marker when there is no execution state to show.
+ */
+export function PlanStepRow({ step, index }: { step: PlanStep; index: number }) {
+  const tokens = useTokens();
+  const { dotStyle } = useEmberdot(step.status === "in_progress" ? "busy" : "idle");
+  const done = step.status === "done";
+
+  return (
+    <View style={styles.step}>
+      <View style={styles.stepMarker}>
+        {step.status == null ? (
+          <Text style={[typeScale.bodyBold, styles.stepNumber, { color: tokens.ink3 }]}>{index + 1}</Text>
+        ) : done ? (
+          <Check size={13} strokeWidth={2.5} color={tokens.ink3} />
+        ) : step.status === "in_progress" ? (
+          <Animated.View style={[styles.stepDot, { backgroundColor: tokens.accent }, dotStyle]} />
+        ) : (
+          <View style={[styles.stepRing, { borderColor: tokens.ink4 }]} />
+        )}
+      </View>
+      <View style={styles.stepBody}>
+        <Text
+          style={[
+            typeScale.bodyBold,
+            done ? { color: tokens.ink3, textDecorationLine: "line-through" } : { color: tokens.ink },
+          ]}
+        >
+          {step.title}
+        </Text>
+        {step.detail ? (
+          <Text style={[typeScale.sub, { color: done ? tokens.ink3 : tokens.ink2 }, styles.stepDetail]}>{step.detail}</Text>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   card: { gap: space.space8 },
   sectionLabel: { flexDirection: "row", alignItems: "center", gap: space.space8, minHeight: 24 },
@@ -203,7 +244,14 @@ const styles = StyleSheet.create({
   title: { marginBottom: space.space4 },
   steps: { gap: space.space12 },
   step: { flexDirection: "row", gap: space.space12 },
-  stepNumber: { width: 20, textAlign: "right" },
+  // Fixed marker column so number / check / dot / ring all sit on the same left edge, and the
+  // step bodies stay aligned as statuses change mid-run.
+  // `paddingTop` optically centers a glyph against the step title's 21px line box; the ordinal
+  // is real text with its own line box, so it cancels that offset back out.
+  stepMarker: { width: 20, alignItems: "center", justifyContent: "flex-start", paddingTop: 6 },
+  stepNumber: { width: 20, marginTop: -6, textAlign: "right" },
+  stepDot: { width: 6, height: 6, borderRadius: 3 },
+  stepRing: { width: 9, height: 9, borderRadius: 4.5, borderWidth: 1.5 },
   stepBody: { flex: 1 },
   stepDetail: { marginTop: space.space2 },
   notes: { borderRadius: 8, padding: space.space12 },

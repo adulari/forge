@@ -4,10 +4,11 @@
 // model are joined from `useSessions()` (real, not fabricated). Two-column on medium+ (tree
 // left, selected-node detail right) per the desktop prototype; single column stacks on
 // compact. "Merge back" wires the real `useMergeSession()` mutation (same one `SessionCard`
-// uses) for any forked node with a worktree; "Diff" from the design frame has no backing
-// endpoint (no cross-session diff REST route exists), so it is omitted rather than faked.
+// uses) for any forked node with a worktree; "Diff" opens `GET /api/sessions/{id}/diff` (the
+// fork's worktree against its merge-base, uncommitted edits included) in a sheet, rendered by
+// the shared read-only DiffCard.
 import { router } from "expo-router";
-import { ExternalLink, GitBranch, GitMerge } from "lucide-react-native";
+import { ExternalLink, FileDiff, GitBranch, GitMerge } from "lucide-react-native";
 import React, { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 
@@ -18,12 +19,15 @@ import { Card } from "../components/ds/Card";
 import { ConfirmDialog } from "../components/ds/ConfirmDialog";
 import { EmptyState } from "../components/ds/EmptyState";
 import { Screen } from "../components/ds/Screen";
+import { Sheet } from "../components/ds/Sheet";
 import { StatusDot } from "../components/ds/StatusDot";
 import { useToast } from "../components/ds/ToastHost";
+import { DiffCard } from "../components/review/DiffCard";
 import { ForkSheet } from "../components/session/ForkSheet";
-import { ApiError, type SessionRow, type SessionTreeRow } from "../lib/api";
+import { ApiError, type SessionDiffResponse, type SessionRow, type SessionTreeRow } from "../lib/api";
 import { useAuth } from "../lib/auth";
-import { useMergeSession, useSessions, useSessionTree } from "../lib/queries";
+import { useMergeSession, useSessions, useSessionDiff, useSessionTree } from "../lib/queries";
+import { type Diff } from "../lib/ws";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space, type ColorTokens } from "../theme/tokens";
 import { formatCost, formatRelativeTime, monoFamily, tabularNums, type as typeScale } from "../theme/typography";
@@ -69,6 +73,32 @@ const shortId = (id: string) => id.slice(0, 8);
 const titleFor = (node: SessionTreeRow) => node.title?.trim() || `Untitled session · ${shortId(node.id)}`;
 const worktreeSeg = (path: string) => path.replace(/\/+$/, "").split("/").pop() ?? path;
 
+/** `DiffCard` consumes the WS snapshot's `Diff`, whose file `kind` has no "renamed" case — a
+ * rename is shown as a modification of `old → new`, which is what the rename actually is. */
+function toSnapshotDiff(response: SessionDiffResponse): Diff {
+  return {
+    pending: false,
+    skipped_files: 0,
+    files: response.files.map((file) => ({
+      path: file.kind === "renamed" && file.orig_path ? `${file.orig_path} → ${file.path}` : file.path,
+      kind: file.kind === "renamed" ? "modified" : file.kind,
+      binary: file.binary,
+      adds: file.adds,
+      dels: file.dels,
+      hunks: file.hunks,
+      skipped_lines: file.skipped_lines,
+    })),
+  };
+}
+
+/** `request()` rewrites every 404 message to the pairing-invalid copy, so the daemon's own reason
+ * ("session has no worktree to diff", "no such session") is only readable from the body. */
+function diffErrorMessage(error: unknown): string {
+  if (!(error instanceof ApiError)) return "could not load the fork diff.";
+  const body = error.body as { error?: string } | undefined;
+  return body?.error ?? error.message;
+}
+
 /** The busy session and its ancestor chain — the "current path" the prototype heat-edges. */
 function livePath(nodes: SessionTreeRow[], live: Map<string, LiveState>): Set<string> {
   const byId = new Map(nodes.map((node) => [node.id, node] as const));
@@ -92,6 +122,8 @@ export default function SessionTreeScreen() {
   const merge = useMergeSession();
   const { isCompact } = useBreakpoint();
   const [mergeTarget, setMergeTarget] = useState<string | null>(null);
+  const [diffTarget, setDiffTarget] = useState<string | null>(null);
+  const diff = useSessionDiff(diffTarget, diffTarget != null);
 
   const runMerge = useCallback(
     (id: string) => {
@@ -200,7 +232,10 @@ export default function SessionTreeScreen() {
                           <Pressable onPress={() => openNode(node.id)} accessibilityRole="button" accessibilityLabel={`Open ${titleFor(node)}`} hitSlop={8}><Text style={[typeScale.meta, { color: tokens.accent }]}>Open</Text></Pressable>
                           <Pressable onPress={() => setForkTarget(node.id)} accessibilityRole="button" accessibilityLabel={`Fork from ${titleFor(node)}`} hitSlop={8}><Text style={[typeScale.meta, { color: tokens.ink2 }]}>Fork here</Text></Pressable>
                           {isFork && session?.worktree ? (
-                            <Pressable onPress={() => setMergeTarget(node.id)} accessibilityRole="button" accessibilityLabel={`Merge ${titleFor(node)} back`} hitSlop={8}><Text style={[typeScale.meta, { color: tokens.ink2 }]}>Merge back</Text></Pressable>
+                            <>
+                              <Pressable onPress={() => setDiffTarget(node.id)} accessibilityRole="button" accessibilityLabel={`Diff ${titleFor(node)}`} hitSlop={8}><Text style={[typeScale.meta, { color: tokens.ink2 }]}>Diff</Text></Pressable>
+                              <Pressable onPress={() => setMergeTarget(node.id)} accessibilityRole="button" accessibilityLabel={`Merge ${titleFor(node)} back`} hitSlop={8}><Text style={[typeScale.meta, { color: tokens.ink2 }]}>Merge back</Text></Pressable>
+                            </>
                           ) : null}
                         </View>
                       ) : null}
@@ -235,6 +270,7 @@ export default function SessionTreeScreen() {
                 onOpen={() => openNode(selectedRow.node.id)}
                 onFork={() => setForkTarget(selectedRow.node.id)}
                 onMerge={() => setMergeTarget(selectedRow.node.id)}
+                onDiff={() => setDiffTarget(selectedRow.node.id)}
               />
             </View>
           ) : null}
@@ -242,6 +278,27 @@ export default function SessionTreeScreen() {
       </Screen>
 
       {forkTarget ? <ForkSheet visible onClose={() => setForkTarget(null)} sessionId={forkTarget} /> : null}
+      {diffTarget ? (
+        <Sheet visible onClose={() => setDiffTarget(null)} accessibilityLabel="Fork diff" snapPoints={[0.9]}>
+          <View style={styles.diffSheet}>
+            <Text accessibilityRole="header" style={[typeScale.heading, { color: tokens.ink }]}>Fork diff</Text>
+            {diff.data ? (
+              <Text style={[styles.mono, tabularNums, { color: tokens.ink4 }]} numberOfLines={1}>
+                {`${diff.data.branch} vs ${shortId(diff.data.base)} · ${worktreeSeg(diff.data.worktree)}`}
+              </Text>
+            ) : null}
+            {diff.isLoading ? (
+              <View style={styles.loading}><ActivityIndicator color={tokens.accent} /><Text style={[typeScale.sub, { color: tokens.ink3 }]}>Diffing the fork against its base…</Text></View>
+            ) : diff.isError ? (
+              <Text style={[typeScale.body, { color: tokens.danger }]}>{diffErrorMessage(diff.error)}</Text>
+            ) : diff.data && diff.data.files.length === 0 ? (
+              <Text style={[typeScale.sub, { color: tokens.ink3 }]}>This fork has changed nothing since it branched.</Text>
+            ) : diff.data ? (
+              <DiffCard diff={toSnapshotDiff(diff.data)} />
+            ) : null}
+          </View>
+        </Sheet>
+      ) : null}
       <ConfirmDialog
         visible={mergeTarget != null}
         title="Merge this fork back?"
@@ -255,7 +312,7 @@ export default function SessionTreeScreen() {
   );
 }
 
-function NodeDetail({ node, orphaned, live, session, tokens, merging, onOpen, onFork, onMerge }: {
+function NodeDetail({ node, orphaned, live, session, tokens, merging, onOpen, onFork, onMerge, onDiff }: {
   node: SessionTreeRow;
   orphaned: boolean;
   live: LiveState;
@@ -265,6 +322,7 @@ function NodeDetail({ node, orphaned, live, session, tokens, merging, onOpen, on
   onOpen: () => void;
   onFork: () => void;
   onMerge: () => void;
+  onDiff: () => void;
 }) {
   const isFork = node.forked_from != null && !orphaned;
   const relation = orphaned ? "original parent unavailable" : isFork ? `forked at message ${node.forked_at_seq ?? "—"}` : "session root";
@@ -288,6 +346,15 @@ function NodeDetail({ node, orphaned, live, session, tokens, merging, onOpen, on
       <View style={styles.detailActions}>
         <Button label="Open session" onPress={onOpen} fullWidth icon={<ExternalLink size={16} strokeWidth={2} color={tokens.bg2} />} />
         <Button label="Fork from here" variant="secondary" onPress={onFork} fullWidth icon={<GitBranch size={16} strokeWidth={2} color={tokens.accent} />} />
+        {isFork && session?.worktree ? (
+          <Button
+            label="Diff vs base"
+            variant="secondary"
+            onPress={onDiff}
+            fullWidth
+            icon={<FileDiff size={16} strokeWidth={2} color={tokens.accent} />}
+          />
+        ) : null}
         {isFork && session?.worktree ? (
           <Button
             label="Merge back"
@@ -341,4 +408,5 @@ const styles = StyleSheet.create({
   metaValue: { flexShrink: 1, textAlign: "right" },
   detailActions: { marginTop: space.space12, gap: space.space8 },
   mono: { fontFamily: monoFamily.regular, fontSize: 11, lineHeight: 15 },
+  diffSheet: { paddingHorizontal: space.space16, paddingBottom: space.space24, gap: space.space8 },
 });

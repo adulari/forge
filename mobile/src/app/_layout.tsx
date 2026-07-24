@@ -26,10 +26,12 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 import { Screen } from "../components/ds/Screen";
 import { MasterDetail } from "../components/ds/MasterDetail";
 import { ToastHost } from "../components/ds/ToastHost";
-import { DockHost } from "../components/shell/DockHost";
+import { useActiveSessionId } from "../components/shell/activeSession";
+import { DockHost, type DockKind } from "../components/shell/DockHost";
 import { IconRail } from "../components/shell/IconRail";
 import { QuickComposer } from "../components/shell/QuickComposer";
 import { Sidebar } from "../components/shell/Sidebar";
+import { SplitPanes, useSplitPanes } from "../components/shell/SplitPanes";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { WebTopBar } from "../components/WebTopBar";
 import { AnywhereProvider as RealAnywhereProvider } from "../lib/AnywhereProvider";
@@ -39,12 +41,15 @@ import { initHaptics } from "../lib/haptics";
 import { isTauri, isWeb } from "../lib/platform";
 import { checkForDesktopUpdate } from "../lib/updater";
 import { useOtaUpdates } from "../lib/useOtaUpdates";
+import { useDesktopMenuAction } from "../lib/desktopMenu";
 import {
   useGlobalShortcuts,
+  useHotkey,
   useQuickComposerHotkey,
   useSidebarCollapseHotkey,
   useUsageDockHotkey,
 } from "../lib/shortcuts";
+import { useTabBadgeTitle } from "../lib/tabBadge";
 import { ThemeProvider, useTokens } from "../theme/ThemeProvider";
 import { monoFamily } from "../theme/typography";
 import { useBreakpoint } from "../theme/useBreakpoint";
@@ -91,6 +96,10 @@ function RootNavigator() {
   const pathname = usePathname();
   const railless = RAILLESS_ROUTES.test(pathname);
 
+  // Browser tab badge — mounted here (inside the providers, since it reads the fleet) so the
+  // waiting count keeps tracking after the user navigates away from Settings. No-op off web.
+  useTabBadgeTitle();
+
   // Machined wave 2 shell chrome — sidebar collapse (persisted), the usage dock, and
   // the quick composer all live here (not in Sidebar/IconRail/DockHost themselves)
   // because MasterDetail needs `collapsed` to size its rail BEFORE it renders either
@@ -98,8 +107,16 @@ function RootNavigator() {
   // hotkeys unconditionally is harmless — the chrome they toggle only ever renders
   // below, gated on `isPaired && isExpanded`.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [dockOpen, setDockOpen] = useState(false);
+  // The right-edge dock is one slot: usage (⌘U) and git review (⌘G) take turns in it, null =
+  // closed. The terminal is a bottom dock (⌘J) and stacks with whichever right dock is open.
+  const [rightDock, setRightDock] = useState<DockKind | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
   const [quickComposerOpen, setQuickComposerOpen] = useState(false);
+  const dockOpen = rightDock != null;
+
+  const activeSessionId = useActiveSessionId();
+  // Desktop-only: on compact/medium the split reports inactive and nothing extra renders.
+  const split = useSplitPanes(isPaired && isExpanded && !railless);
 
   useEffect(() => {
     void AsyncStorage.getItem(SIDEBAR_COLLAPSED_KEY).then((raw) => {
@@ -114,9 +131,30 @@ function RootNavigator() {
       return next;
     });
   };
+  const toggleRightDock = (kind: DockKind) => setRightDock((current) => (current === kind ? null : kind));
   useSidebarCollapseHotkey(toggleSidebarCollapsed);
-  useUsageDockHotkey(() => setDockOpen((open) => !open));
+  useUsageDockHotkey(() => toggleRightDock("usage"));
   useQuickComposerHotkey(() => setQuickComposerOpen(true));
+
+  // ⌘D split · ⌘J terminal · ⌘G git review. Each claims the matching Tauri menu item as well
+  // (`useShellHotkeys.ts` explains why: a macOS menu key equivalent never reaches the webview).
+  // Guarded on `isExpanded` so the accelerators are inert on a compact window, where none of
+  // this chrome renders.
+  const toggleSplit = () => {
+    if (isExpanded) split.toggle();
+  };
+  const toggleTerminal = () => {
+    if (isExpanded) setTerminalOpen((open) => !open);
+  };
+  const openGitReview = () => {
+    if (isExpanded) toggleRightDock("git");
+  };
+  useHotkey("d", toggleSplit, { meta: true });
+  useDesktopMenuAction("view:split-pane", toggleSplit);
+  useHotkey("j", toggleTerminal, { meta: true });
+  useDesktopMenuAction("view:terminal", toggleTerminal);
+  useHotkey("g", openGitReview, { meta: true });
+  useDesktopMenuAction("view:git-review", openGitReview);
 
   useEffect(() => {
     if (!isLoading) {
@@ -161,19 +199,49 @@ function RootNavigator() {
   );
 
   const rail = railless ? null : sidebarCollapsed ? (
-    <IconRail onExpand={toggleSidebarCollapsed} onToggleDock={() => setDockOpen((open) => !open)} />
+    <IconRail onExpand={toggleSidebarCollapsed} onToggleDock={() => toggleRightDock("usage")} />
   ) : (
-    <Sidebar onCollapse={toggleSidebarCollapsed} onToggleDock={() => setDockOpen((open) => !open)} />
+    <Sidebar onCollapse={toggleSidebarCollapsed} onToggleDock={() => toggleRightDock("usage")} />
+  );
+
+  // The split wraps the live route stack rather than replacing it (see SplitPanes.tsx), and the
+  // terminal dock sits under the content column — beside the rail, per D Rail + Terminal, not
+  // spanning the whole window.
+  const detail = (
+    <View style={styles.detailColumn}>
+      {split.active && split.panes[0] ? (
+        <SplitPanes
+          primaryId={split.panes[0]}
+          secondaryId={split.panes[1]}
+          primary={appStack}
+          onSwap={split.swap}
+          onClosePane={split.closePane}
+        />
+      ) : (
+        appStack
+      )}
+      <DockHost
+        open={terminalOpen && !railless}
+        dock="terminal"
+        sessionId={activeSessionId}
+        onClose={() => setTerminalOpen(false)}
+      />
+    </View>
   );
 
   return (
     <>
       {isPaired && isExpanded ? (
         <>
-          {isWeb && !isTauri ? <WebTopBar onToggleDock={() => setDockOpen((open) => !open)} dockOpen={dockOpen} /> : null}
+          {isWeb && !isTauri ? <WebTopBar onToggleDock={() => toggleRightDock("usage")} dockOpen={dockOpen} /> : null}
           <View style={styles.shellRow}>
-            <MasterDetail master={rail} detail={appStack} railWidth={sidebarCollapsed ? ICON_RAIL_WIDTH : SIDEBAR_WIDTH} />
-            <DockHost open={dockOpen && !railless} onClose={() => setDockOpen(false)} />
+            <MasterDetail master={rail} detail={detail} railWidth={sidebarCollapsed ? ICON_RAIL_WIDTH : SIDEBAR_WIDTH} />
+            <DockHost
+              open={dockOpen && !railless}
+              dock={rightDock ?? "usage"}
+              sessionId={activeSessionId}
+              onClose={() => setRightDock(null)}
+            />
           </View>
           <QuickComposer visible={quickComposerOpen} onClose={() => setQuickComposerOpen(false)} />
         </>
@@ -190,6 +258,7 @@ function RootNavigator() {
 
 const styles = StyleSheet.create({
   shellRow: { flex: 1, flexDirection: "row" },
+  detailColumn: { flex: 1, minHeight: 0 },
 });
 
 export default function RootLayout() {

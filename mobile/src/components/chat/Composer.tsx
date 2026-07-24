@@ -8,10 +8,19 @@
 // Mic input: DESIGN.md "Mobile/desktop (V3)" — press mic, the input row morphs into
 // VoiceRecordingPill (lib/voice/ start/stop/cancel + POST /api/voice/transcribe), which
 // appends the transcript to the draft and morphs back. Never auto-sends.
-import { ArrowUp, Clock, FileText, Image as ImageIcon, Mic, RotateCcw, Sparkles, Square } from "lucide-react-native";
+//
+// Model/effort chips (D Main / M Session Chat control row) are real pickers, driven entirely by
+// the mid-session switch path that already exists — no new wire message was invented:
+//   model  → `{kind:"prompt", text:"/model"}`, the daemon's own command (commands.rs
+//            `PinModel(None)`). The TUI opens its model picker, that overlay is mirrored back on
+//            `Snapshot.overlay`, and OverlayHost (mounted by the session shell) renders it. Same
+//            call TelemetrySheet's "Model" row already makes.
+//   effort → the existing EffortPicker, mounted headless (`showTrigger={false}`), which commits
+//            `/effort <level>` (or bare `/effort` to reset) over the same prompt path.
+import { ArrowUp, ChevronDown, Clock, FileText, Image as ImageIcon, Mic, RotateCcw, Sparkles, Square } from "lucide-react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import React, { useEffect, useRef, useState } from "react";
-import { type ColorValue, Image, Platform, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { type ColorValue, Image, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { haptics } from "../../lib/haptics";
@@ -50,6 +59,7 @@ import {
   COMPOSER_MIN_HEIGHT as MIN_HEIGHT,
   nativeComposerMirrorText,
 } from "./composerSizing";
+import { EffortPicker } from "../session/EffortPicker";
 import { GoalSheet } from "./GoalSheet";
 import { VoiceRecordingPill } from "./VoiceRecordingPill";
 
@@ -108,14 +118,15 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
     suppressedSuggestion,
     setSuppressedSuggestion,
     composerFocusSignal,
-    // Read-only display only (D Main / M Session Chat control row: model + effort chip) — no
-    // new picker interaction is wired here, since there's no existing mid-session model/effort
-    // switch behavior to preserve ("restyle only, keep ALL existing behavior").
     snapshot,
+    // The session socket's own sender — the model/effort chips are pickers over the existing
+    // slash-command path (see file header), which is a `RemoteInput`, not an `onSend` prompt.
+    send,
   } = useSessionCtx();
   const toast = useToast();
   const [recording, setRecording] = useState(false);
   const [goalVisible, setGoalVisible] = useState(false);
+  const [effortVisible, setEffortVisible] = useState(false);
   const [height, setHeight] = useState(MIN_HEIGHT);
   const [nativeText, setNativeText] = useState(text);
   const [focused, setFocused] = useState(false);
@@ -209,6 +220,14 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
   const insertCommand = (command: string) => {
     setText(command);
     setCommandFocusSignal((signal) => signal + 1);
+  };
+
+  // Bare `/model` is the daemon's own "open the picker" command — the resulting overlay comes
+  // back on `Snapshot.overlay` and OverlayHost renders it, so nothing has to be replicated here.
+  const openModelPicker = () => {
+    if (!send({ kind: "prompt", text: "/model" })) {
+      toast.show("not sent — reconnect and try again", { tone: "danger" });
+    }
   };
 
   // `suggestedPrompt` keeps echoing the STALE pre-send value for a beat after a send clears the
@@ -540,15 +559,24 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
           {snapshot?.model || snapshot?.effort ? (
             <View style={styles.metaRow}>
               {snapshot?.model ? (
-                <View style={[styles.metaChip, { borderColor: tokens.border }]}>
-                  <Text style={[type.monoMeta, { color: tokens.ink2 }]} numberOfLines={1}>{snapshot.model}</Text>
-                </View>
+                <MetaChip
+                  label={snapshot.model}
+                  color={tokens.ink2}
+                  accessibilityLabel={`model: ${snapshot.model} — change model`}
+                  testID="composer-model-chip"
+                  onPress={openModelPicker}
+                />
               ) : null}
-              {snapshot?.effort ? (
-                <View style={[styles.metaChip, { borderColor: tokens.border }]}>
-                  <Text style={[type.monoMeta, { color: tokens.ink3 }]} numberOfLines={1}>{`effort · ${snapshot.effort}`}</Text>
-                </View>
-              ) : null}
+              {/* Absent `effort` is not missing data — it IS the session default ("auto", what
+                  EffortPicker calls the default detent), so the chip stays reachable either
+                  way rather than hiding the only way to open the picker. */}
+              <MetaChip
+                label={`effort · ${snapshot?.effort ?? "auto"}`}
+                color={tokens.ink3}
+                accessibilityLabel={`reasoning effort: ${snapshot?.effort ?? "auto"} — change effort`}
+                testID="composer-effort-chip"
+                onPress={() => setEffortVisible(true)}
+              />
             </View>
           ) : null}
           <View
@@ -664,7 +692,46 @@ export function Composer({ sessionId, busy, online, suggestedPrompt, onSend, onI
         <Text style={[type.meta, styles.offlineHint, { color: tokens.ink3 }]}>will send on reconnect</Text>
       ) : null}
       <GoalSheet visible={goalVisible} onClose={() => setGoalVisible(false)} onSubmit={commit} />
+      {/* Headless: the composer's own chip is the trigger, so the picker contributes only its
+          sheet/popover. Commits `/effort <level>` over the same prompt path. */}
+      <EffortPicker
+        effort={snapshot?.effort}
+        send={send}
+        visible={effortVisible}
+        onClose={() => setEffortVisible(false)}
+        showTrigger={false}
+      />
     </View>
+  );
+}
+
+/** One control-row chip: mono value + a chevron marking it as a picker, not a readout. */
+function MetaChip({
+  label,
+  color,
+  accessibilityLabel,
+  testID,
+  onPress,
+}: {
+  label: string;
+  color: string;
+  accessibilityLabel: string;
+  testID: string;
+  onPress: () => void;
+}) {
+  const { tokens } = useTheme();
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={8}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      testID={testID}
+      style={[styles.metaChip, { borderColor: tokens.border }]}
+    >
+      <Text style={[type.monoMeta, styles.metaChipLabel, { color }]} numberOfLines={1}>{label}</Text>
+      <ChevronDown size={11} strokeWidth={1.75} color={tokens.ink4} />
+    </Pressable>
   );
 }
 
@@ -694,11 +761,17 @@ const styles = StyleSheet.create({
     paddingTop: space.space8,
   },
   metaChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: space.space4,
+    minWidth: 0,
+    flexShrink: 1,
     borderWidth: StyleSheet.hairlineWidth,
     borderRadius: radii.radius4,
     paddingHorizontal: space.space8,
     paddingVertical: 3,
   },
+  metaChipLabel: { flexShrink: 1, minWidth: 0 },
   row: {
     position: "relative",
     flexDirection: "row",

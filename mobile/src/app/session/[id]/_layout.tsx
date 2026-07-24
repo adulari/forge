@@ -366,7 +366,12 @@ function SessionShell({ sessionId }: { sessionId: string }) {
           </View>
 
         <DuelSheet visible={duelVisible} onClose={() => setDuelVisible(false)} send={sendWithFeedback} />
-        <PlanSheet visible={planVisible} onClose={() => setPlanVisible(false)} send={sendWithFeedback} />
+        <PlanSheet
+          visible={planVisible}
+          onClose={() => setPlanVisible(false)}
+          send={sendWithFeedback}
+          plan={snapshot?.plan}
+        />
 
         <ForkSheet visible={forkVisible} onClose={() => setForkVisible(false)} sessionId={sessionId} />
 

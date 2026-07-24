@@ -35,12 +35,17 @@ function AgentsSkeleton() {
 }
 
 export default function SessionAgents() {
-  const { snapshot, snapshotTimedOut } = useSessionCtx();
+  const { snapshot, snapshotTimedOut, send } = useSessionCtx();
   const agents = snapshot?.subagents ?? [];
+  const promptSeq = snapshot?.prompt_seq;
 
+  // A child agent never parks on a permission prompt today (a child resolves `Ask` as deny), so
+  // `permission_prompt` is always null and these props stay inert — they are passed so the inline
+  // Allow/Deny answers through the same `allow` message the session-level card uses if that
+  // changes, rather than needing a call-site edit then.
   const renderItem = useCallback(
-    ({ item }: { item: SnapshotSubagent }) => <AgentRow agent={item} />,
-    [],
+    ({ item }: { item: SnapshotSubagent }) => <AgentRow agent={item} send={send} promptSeq={promptSeq} />,
+    [send, promptSeq],
   );
   // Snapshot.subagents has no stable id — index+agent name is stable enough for this
   // read-only, effectively-append-only list.

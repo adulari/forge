@@ -10,7 +10,7 @@
 > live notifications, and a **PWA** (token-scoped manifest + service worker + icon) so it
 > adds to a phone home screen and runs standalone; a `◉ remote` statusline segment; a QR
 > code printed into the TUI scrollback. The wire is a versioned `Snapshot`/`RemoteInput`
-> protocol (`PROTOCOL_VERSION`, currently **8**); the page shows a "refresh to update" banner
+> protocol (`PROTOCOL_VERSION`, currently **9**); the page shows a "refresh to update" banner
 > on a mismatch. Auto-start is configurable (`[remote] auto`). The server reuses the running
 > session's presenter channel — no second process, no IPC, no keys to configure.
 >
@@ -181,6 +181,13 @@ disconnects a non-event:
   store handle, so `remote.rs` never depends on `forge-store` — and the session id comes from
   the latest snapshot, so history follows `/new`/resume automatically. The service worker
   never caches `/api/` responses.
+  **`?include_tools=1`** (v9, opt-in) widens the page to the persisted `role='tool'` rows so a
+  replay can render tool blocks; they come back as `kind: "tool"` with `tool` naming the tool,
+  resolved from the assistant carrier's `tool_calls_json` by `tool_call_id` (`null` when that
+  carrier is unrecoverable — never guessed from the result text). Omitting the parameter serves
+  exactly the row set above, so every existing client is unaffected. `elapsed_ms` is measured
+  against `Store::history_epoch_with` for the SAME flag, so the scrubber's zero point is always
+  the first row of the set the request actually returned.
 - **Rich transcript.** History messages and the live streaming edge render through a minimal
   markdown renderer written into the page (headings, lists, paragraphs, inline `code` /
   **bold** / *italic*, links as plain text — never live anchors) plus a self-contained
@@ -371,7 +378,7 @@ death timeout, and per-session URLs.
    GET  /<t>/api/sessions         list (id, title, cwd, busy, cost, activity)
    POST /<t>/api/sessions         create {cwd, worktree, title?, model?, resume?}
    POST /<t>/api/sessions/{id}/archive
-   GET  /<t>/api/history?session=<id>&before&limit
+   GET  /<t>/api/history?session=<id>&before&limit&include_tools
 ```
 
 - **The SessionDriver seam.** `run/driver.rs` runs one session as a plain tokio task using
@@ -621,7 +628,7 @@ available?") rather than a bare exit code.
 
 | Layer | Change |
 |---|---|
-| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (8), `SnapOverlay`/`SnapRow` + `named_key`, v5 `EventLog` + `?rev=` replay + `Snapshot.resync`, `GET /api/history` (`HistoryRow`/`HistoryProvider` seam), v7 `SnapDiff`/`SnapPlan` + `RemoteInput::Attach` + `POST /api/upload` (`store_upload`/`sanitize_upload_name`, 10 MB cap), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
+| `forge-cli/src/remote.rs` | Server, `Snapshot`/`RemoteInput` types + `PROTOCOL_VERSION` (9), `SnapOverlay`/`SnapRow` + `named_key`, v5 `EventLog` + `?rev=` replay + `Snapshot.resync`, `GET /api/history` (`HistoryRow`/`HistoryProvider` seam), v7 `SnapDiff`/`SnapPlan` + `RemoteInput::Attach` + `POST /api/upload` (`store_upload`/`sanitize_upload_name`, 10 MB cap), PWA manifest + service worker + icon, TLS, tunnels, QR renderer, `MAX_INPUT_BYTES` cap, `Exposure: From<RemoteAuto>` |
 | `forge-cli/src/remote_assets/` | The control page split into `page.html` / `app.js` / `styles.css` / `sw.js` (served via `include_str!` as token-scoped routes; enables the no-`unsafe-inline` CSP); the page's generic overlay renderer + copy-here button; v5: `?rev=` reconnect + sessionStorage revision + replay dedup, scroll-up history pagination (`#hist` above the live `#tail`), markdown renderer + syntax highlighter + fenced-block copy buttons; v7: fleet dashboard (waiting-first list, needs-decision badge, token gauge), plan + diff cards, 📎 upload button + paste-an-image + chips, 🎤 voice input |
 | `forge-config/src/lib.rs` | `[remote]` block: exposure/tunnel settings plus `project_roots` for the remote folder-browser allowlist |
 | `forge-store/src/lib.rs` | v5: `Store::load_history_page` + `HistoryRow` (user-facing transcript pages, newest first, `before`/`limit` windowed); Phase 5: `PushSubscription` + `upsert/delete/list_push_subscriptions` (endpoint-deduped) |

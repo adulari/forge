@@ -685,7 +685,24 @@ pub struct RemoteUrl {
 /// `workflow` (the live workflow-run projection — see [`SnapWorkflow`]) and `SnapSubagent`
 /// gained `id`/`phase`/`ok`, so a client can render the dedicated workflow view (phase
 /// timeline + grouped agent rows + failed-agent state) instead of a flat activity list.
-pub const PROTOCOL_VERSION: u32 = 8;
+///
+/// v9: per-line provenance + step/row detail the redesigned screens need. `Snapshot` gained
+/// `transcript_rows` — the SAME tail as `transcript`, but each line tagged with where it came
+/// from (user echo / assistant prose / tool call+result / system note), so a client can render a
+/// tool block instead of guessing from prose. `transcript` is unchanged and still authoritative
+/// for clients that only want lines. `SnapPlanStep` gained `status` (correlated with the live
+/// task list an approved plan seeds — see [`SnapPlanStep::status`]), `SnapTask` gained
+/// `assignee` (the optional owner the model now passes to `update_tasks` when it delegates;
+/// `null` when it kept the work) and `SnapSubagent` gained `permission_prompt` (still reserved:
+/// the child machinery tracks no per-child prompt today, so it always emits `null` — see its
+/// field doc). `GET /<token>/api/history` rows gained `kind` (same vocabulary as
+/// `transcript_rows`) and `elapsed_ms` (offset from the session's first visible row, giving a
+/// replay scrubber a real zero point), plus an opt-in `?include_tools=1` that widens the page to
+/// persisted tool rows (`kind == "tool"`); omitting it serves exactly the pre-v9 row set.
+/// Every added field carries `#[serde(default)]` and every client treats it as
+/// optional, so a v8 host ↔ v9 client (missing fields) and a v9 host ↔ v8 client (unknown
+/// fields ignored) both degrade to exactly the v8 experience instead of breaking.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// How many broadcast snapshots the per-server [`EventLog`] retains for reconnect replay. One
 /// entry per *changed* frame covers minutes of activity; a client that was away longer gets a
@@ -788,6 +805,12 @@ pub struct SnapTask {
     pub title: String,
     /// "pending" | "in_progress" | "done".
     pub status: String,
+    /// The subagent/worker this task is assigned to (v9), straight from the optional `assignee`
+    /// the model passed to `update_tasks` — never inferred. `None` whenever the model kept the
+    /// work itself (the common case) or omitted the field, so a client renders the task as
+    /// unassigned rather than inventing an owner.
+    #[serde(default)]
+    pub assignee: Option<String>,
 }
 
 /// One live subagent row, projected for the wire.
@@ -811,6 +834,12 @@ pub struct SnapSubagent {
     /// running — no news isn't bad news.
     pub ok: bool,
     pub cost: f64,
+    /// A permission prompt this CHILD is blocked on (v9). Reserved and always `None` today:
+    /// subagents run headless through `run_subagent_tool`, where the gate resolves `Ask` as
+    /// Deny rather than asking anyone — a child can never be parked on a prompt. Every
+    /// interactive prompt is session-level and rides in [`Snapshot::permission_prompt`].
+    #[serde(default)]
+    pub permission_prompt: Option<String>,
 }
 
 /// The live workflow-run projection (v8.1) — phases + narration + finish state. Agent rows ride
@@ -829,6 +858,24 @@ pub struct SnapWorkflow {
     pub finished_ok: Option<bool>,
     /// One-line finish summary (or interrupt reason), once finished.
     pub summary: Option<String>,
+}
+
+/// One finalized scrollback line with the provenance the render loop knew when it emitted it
+/// (v9) — the structured twin of a [`Snapshot::transcript`] entry, at the same index.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapTranscriptRow {
+    /// "user" | "assistant" | "tool" | "system". `system` covers everything that is neither a
+    /// user echo, model prose, nor tool activity: warnings, errors, command feedback, banners.
+    pub kind: String,
+    /// The line's plain text — identical to the `transcript` entry at this index.
+    pub text: String,
+    /// The tool name, on `kind == "tool"` rows only.
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// Kind-specific detail: `"ok"` / `"failed"` on a tool RESULT row (the call row leaves it
+    /// `None`, so a client can pair a call with its outcome). Unused by other kinds.
+    #[serde(default)]
+    pub meta: Option<String>,
 }
 
 /// One selectable option of a pending AskUserQuestion, so the page can render tappable buttons
@@ -891,6 +938,14 @@ pub struct SnapDiff {
 pub struct SnapPlanStep {
     pub title: String,
     pub detail: String,
+    /// "queued" | "in_progress" | "done" (v9). A `PlanStep` itself has no execution state —
+    /// approving a plan is what gives it one: `activate_plan_tasks` seeds the live task list
+    /// with one task per step (same trimmed title), and the model then drives those through
+    /// `update_tasks`. So this is the matching task's status, not an invented one, and stays
+    /// "queued" for every step with no task behind it yet (an unapproved proposal, or a task
+    /// list the model has since rewritten past recognition).
+    #[serde(default)]
+    pub status: String,
 }
 
 /// The `present_plan` proposal projected as a card (v7). While the turn-end approval question
@@ -972,6 +1027,12 @@ pub struct Snapshot {
     pub streaming: String,
     /// Recent finalized scrollback lines (plain text, newest last; bounded).
     pub transcript: Vec<String>,
+    /// The same lines, each tagged with its provenance (v9) — see [`SnapTranscriptRow`]. Rides
+    /// alongside `transcript` rather than replacing it: clients that only render text keep
+    /// working, clients that want a tool-output block read this instead. Same length and order
+    /// as `transcript`; empty from a pre-v9 host.
+    #[serde(default)]
+    pub transcript_rows: Vec<SnapTranscriptRow>,
     /// The live task list (`update_tasks`) — drives the remote task panel.
     pub tasks: Vec<SnapTask>,
     /// Live subagents in the current `spawn_agents` batch.
@@ -1046,6 +1107,7 @@ impl Default for Snapshot {
             context_limit: None,
             streaming: String::new(),
             transcript: Vec::new(),
+            transcript_rows: Vec::new(),
             tasks: Vec::new(),
             subagents: Vec::new(),
             queued: Vec::new(),
@@ -1080,12 +1142,32 @@ pub struct HistoryRow {
     pub model: Option<String>,
     pub created_at: i64,
     pub visibility: String,
+    /// The row's provenance in the same vocabulary as [`SnapTranscriptRow::kind`] (v9), so a
+    /// replay renders a paged-in row exactly like a live one. Derived from `role` + `visibility`.
+    /// `"tool"` appears ONLY on a page requested with `?include_tools=1`; without it the store
+    /// selects just user/assistant turns and `visibility='ui'` notes, exactly as before.
+    #[serde(default)]
+    pub kind: String,
+    /// Milliseconds from the session's FIRST visible row to this one (v9) — the zero point a
+    /// replay scrubber needs, which raw `created_at` epochs don't give. `None` when the epoch
+    /// couldn't be read. Measured over the SAME row set the request returns, so the zero point
+    /// is stable across pages (but does differ between an `include_tools` page and a plain one,
+    /// which is the honest answer: they are different transcripts).
+    #[serde(default)]
+    pub elapsed_ms: Option<i64>,
+    /// The tool name on `kind == "tool"` rows — same field as [`SnapTranscriptRow::tool`], so a
+    /// paged-in tool row renders like a live one. `None` on every other kind, and on a tool row
+    /// whose call carrier is no longer recoverable from the store.
+    #[serde(default)]
+    pub tool: Option<String>,
 }
 
 /// The seam through which the server reads persisted transcript pages WITHOUT depending on
-/// `forge-store`: `(session_id, before_seq, limit)` → rows newest first. Built by the caller
-/// (run.rs) over the session's open store handle.
-pub type HistoryProvider = Arc<dyn Fn(&str, Option<i64>, usize) -> Vec<HistoryRow> + Send + Sync>;
+/// `forge-store`: `(session_id, before_seq, limit, include_tools)` → rows newest first. Built by
+/// the caller (run.rs) over the session's open store handle. `include_tools` is the opt-in behind
+/// `?include_tools=1`; `false` is the historical page.
+pub type HistoryProvider =
+    Arc<dyn Fn(&str, Option<i64>, usize, bool) -> Vec<HistoryRow> + Send + Sync>;
 
 /// An input from a remote browser, drained by the render loop and injected like a local
 /// keystroke / command. `Interrupt` maps to Esc-while-busy; `Answer` resolves a permission
@@ -1656,6 +1738,24 @@ struct HistoryParams {
     before: Option<i64>,
     /// Page size (clamped — see [`history_page_limit`]).
     limit: Option<usize>,
+    /// Opt in to tool rows (`?include_tools=1`). Omitted → the historical page. Kept as a raw
+    /// string rather than `Option<bool>` because axum's query decoder rejects `=1` for a bool and
+    /// a 400 here would break the very clients this stays compatible with — see
+    /// [`history_include_tools`].
+    include_tools: Option<String>,
+}
+
+/// Whether a `?include_tools=` value asks for tool rows. Accepts the usual truthy spellings
+/// (`1`/`true`/`yes`/`on`, any case) and treats everything else — including an absent parameter —
+/// as the default page, so a malformed value degrades to today's behaviour instead of erroring.
+pub(crate) fn history_include_tools(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(str::trim)
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
 }
 
 async fn usage_page() -> Response {
@@ -1669,15 +1769,19 @@ async fn usage_page() -> Response {
 /// snapshot (this server drives ONE session; the multi-session daemon is Phase 4). Serves `[]`
 /// before the first broadcast or when no store seam was provided. The store read runs on the
 /// blocking pool — rusqlite is synchronous and this is the async accept path.
+///
+/// `?include_tools=1` widens the page to persisted tool rows; without it the response is exactly
+/// what pre-v9 clients (the bundled PWA included) have always received.
 async fn history_page(
     State(state): State<Arc<ServerState>>,
     axum::extract::Query(params): axum::extract::Query<HistoryParams>,
 ) -> Response {
     let (before, limit) = (params.before, history_page_limit(params.limit));
+    let include_tools = history_include_tools(params.include_tools.as_deref());
     let sid = state.snapshot_rx.borrow().snapshot.session_id.clone();
     let rows: Vec<HistoryRow> = match (state.history.clone(), sid.is_empty()) {
         (Some(provider), false) => {
-            tokio::task::spawn_blocking(move || provider(&sid, before, limit))
+            tokio::task::spawn_blocking(move || provider(&sid, before, limit, include_tools))
                 .await
                 .unwrap_or_default()
         }
@@ -2228,9 +2332,24 @@ mod tests {
             context_limit: Some(200_000),
             streaming: "thinking…".into(),
             transcript: vec!["you: hi".into(), "forge: hello".into()],
+            transcript_rows: vec![
+                SnapTranscriptRow {
+                    kind: "user".into(),
+                    text: "you: hi".into(),
+                    tool: None,
+                    meta: None,
+                },
+                SnapTranscriptRow {
+                    kind: "assistant".into(),
+                    text: "forge: hello".into(),
+                    tool: None,
+                    meta: None,
+                },
+            ],
             tasks: vec![SnapTask {
                 title: "build it".into(),
                 status: "in_progress".into(),
+                assignee: None,
             }],
             subagents: vec![SnapSubagent {
                 id: "a-1".into(),
@@ -2242,6 +2361,7 @@ mod tests {
                 done: false,
                 ok: true,
                 cost: 0.001,
+                permission_prompt: None,
             }],
             queued: vec!["next thing".into()],
             permission_prompt: Some("allow write_file".into()),
@@ -2287,6 +2407,7 @@ mod tests {
                 steps: vec![SnapPlanStep {
                     title: "step 1".into(),
                     detail: "do the thing".into(),
+                    status: "in_progress".into(),
                 }],
                 notes: Some("risky".into()),
             }),
@@ -2358,6 +2479,19 @@ mod tests {
         assert_eq!(v["copy_text"], "fn main() {}");
         // v8: the next-prompt suggestion rides in the snapshot for the page's composer placeholder.
         assert_eq!(v["suggested_prompt"], "add a test for this");
+        // v9: the tagged transcript rides ALONGSIDE the flat one (same lines, same order), and
+        // the reserved per-row fields serialize as explicit nulls rather than vanishing — a
+        // client can tell "no owner" from "field not in this build".
+        assert_eq!(v["transcript_rows"][0]["kind"], "user");
+        assert_eq!(v["transcript_rows"][0]["text"], v["transcript"][0]);
+        assert_eq!(v["transcript_rows"][1]["kind"], "assistant");
+        assert_eq!(v["transcript_rows"][0]["tool"], serde_json::Value::Null);
+        assert_eq!(v["tasks"][0]["assignee"], serde_json::Value::Null);
+        assert_eq!(
+            v["subagents"][0]["permission_prompt"],
+            serde_json::Value::Null
+        );
+        assert_eq!(v["plan"]["steps"][0]["status"], "in_progress");
         assert_eq!(v["prompt_seq"], 7);
         assert_eq!(v["notes"][0], "⚠ /remote can only be toggled from the TUI");
         assert_eq!(v["revision"], 42);
@@ -2460,6 +2594,9 @@ mod tests {
             model: Some("groq::llama-3.3-70b".into()),
             created_at: 1_770_000_000,
             visibility: "llm".into(),
+            kind: "assistant".into(),
+            elapsed_ms: Some(4_500),
+            tool: None,
         };
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&row).unwrap()).unwrap();
@@ -2469,6 +2606,45 @@ mod tests {
         assert_eq!(v["model"], "groq::llama-3.3-70b");
         assert_eq!(v["created_at"], 1_770_000_000_i64);
         assert_eq!(v["visibility"], "llm");
+        // v9: the replay fields — a kind in the transcript vocabulary and a scrubber offset.
+        assert_eq!(v["kind"], "assistant");
+        assert_eq!(v["elapsed_ms"], 4_500_i64);
+        assert_eq!(v["tool"], serde_json::Value::Null, "no tool on prose rows");
+
+        // A tool row (only ever served with `?include_tools=1`) carries its name in the same
+        // field the live `transcript_rows` use, so one renderer handles both.
+        let tool_row = HistoryRow {
+            seq: 13,
+            role: "tool".into(),
+            content: "ok".into(),
+            model: None,
+            created_at: 1_770_000_001,
+            visibility: "llm".into(),
+            kind: "tool".into(),
+            elapsed_ms: Some(5_500),
+            tool: Some("read_file".into()),
+        };
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&tool_row).unwrap()).unwrap();
+        assert_eq!(v["kind"], "tool");
+        assert_eq!(v["tool"], "read_file");
+    }
+
+    #[test]
+    fn history_tool_rows_are_opt_in_and_never_the_default() {
+        // The whole point of the flag: absent (or junk) means exactly the pre-v9 page, so the
+        // bundled PWA and every existing client keep seeing user/assistant rows only.
+        assert!(!history_include_tools(None));
+        assert!(!history_include_tools(Some("")));
+        assert!(!history_include_tools(Some("0")));
+        assert!(!history_include_tools(Some("false")));
+        assert!(!history_include_tools(Some("banana")));
+        // The truthy spellings a client might reasonably send.
+        assert!(history_include_tools(Some("1")));
+        assert!(history_include_tools(Some("true")));
+        assert!(history_include_tools(Some("TRUE")));
+        assert!(history_include_tools(Some(" yes ")));
+        assert!(history_include_tools(Some("on")));
     }
 
     /// A snapshot whose only distinguishing field is its revision, for event-log tests.
@@ -2949,7 +3125,7 @@ mod tests {
     #[test]
     fn every_remote_adapter_shares_the_golden_protocol_contract() {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../../protocol/remote-v8.json"))
+            serde_json::from_str(include_str!("../../../protocol/remote-v9.json"))
                 .expect("golden remote protocol fixture is valid JSON");
         assert_eq!(fixture["protocol"], PROTOCOL_VERSION);
 
@@ -3441,15 +3617,19 @@ mod tests {
             use futures::StreamExt;
 
             // A canned history provider that echoes its inputs so the handler's passthrough
-            // (session id from the snapshot, before/limit from the query) is observable.
-            let provider: HistoryProvider = Arc::new(|sid, before, limit| {
+            // (session id from the snapshot, before/limit/include_tools from the query) is
+            // observable.
+            let provider: HistoryProvider = Arc::new(|sid, before, limit, include_tools| {
                 vec![HistoryRow {
                     seq: before.unwrap_or(-1),
                     role: "assistant".into(),
-                    content: format!("sid={sid} limit={limit}"),
+                    content: format!("sid={sid} limit={limit} tools={include_tools}"),
                     model: None,
                     created_at: 1,
                     visibility: "llm".into(),
+                    kind: "assistant".into(),
+                    elapsed_ms: Some(0),
+                    tool: None,
                 }]
             });
             let rc =
@@ -3551,8 +3731,8 @@ mod tests {
             );
             let rows: serde_json::Value = res.json().await.expect("history is JSON");
             assert_eq!(rows[0]["seq"], 42, "`before` reached the provider");
-            assert_eq!(rows[0]["content"], "sid=sess-e2e limit=5");
-            // Omitted params → newest page at the default limit.
+            assert_eq!(rows[0]["content"], "sid=sess-e2e limit=5 tools=false");
+            // Omitted params → newest page at the default limit, tools still off.
             let rows: serde_json::Value = http
                 .get(format!("http://127.0.0.1:{port}/{token}/api/history"))
                 .send()
@@ -3564,7 +3744,22 @@ mod tests {
             assert_eq!(rows[0]["seq"], -1, "no `before` = newest page");
             assert_eq!(
                 rows[0]["content"],
-                format!("sid=sess-e2e limit={HISTORY_PAGE_DEFAULT}")
+                format!("sid=sess-e2e limit={HISTORY_PAGE_DEFAULT} tools=false")
+            );
+            // …and `?include_tools=1` is the only thing that flips it.
+            let rows: serde_json::Value = http
+                .get(format!(
+                    "http://127.0.0.1:{port}/{token}/api/history?include_tools=1"
+                ))
+                .send()
+                .await
+                .expect("GET history with tools")
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(
+                rows[0]["content"],
+                format!("sid=sess-e2e limit={HISTORY_PAGE_DEFAULT} tools=true")
             );
 
             // 7. The history route is token-gated like everything else.

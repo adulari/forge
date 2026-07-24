@@ -1433,21 +1433,23 @@ pub(crate) async fn run_chat_tui(
     // closure so `remote.rs` needn't depend on forge-store.
     let remote_history: remote::HistoryProvider = {
         let store = session.lock().await.store.clone();
-        std::sync::Arc::new(move |sid: &str, before: Option<i64>, limit: usize| {
-            store
-                .load_history_page(sid, before, limit)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| remote::HistoryRow {
-                    seq: r.seq,
-                    role: r.role.as_str().to_string(),
-                    content: r.content,
-                    model: r.model,
-                    created_at: r.created_at,
-                    visibility: r.visibility.as_str().to_string(),
-                })
-                .collect()
-        })
+        std::sync::Arc::new(
+            move |sid: &str, before: Option<i64>, limit: usize, include_tools: bool| {
+                // Every page measures `elapsed_ms` from the SAME zero point (the session's first
+                // visible row), so a scrubber's timeline doesn't shift as older pages load — and
+                // the epoch is computed over the same row set the page returns, so opting into
+                // tool rows can't slide it either.
+                let epoch = store
+                    .history_epoch_with(sid, include_tools)
+                    .unwrap_or_default();
+                store
+                    .load_history_page_with(sid, before, limit, include_tools)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| map_history_row(r, epoch))
+                    .collect()
+            },
+        )
     };
     // Mirrors `Session::pinned_tier` so tier_up/tier_down can read + update it WITHOUT the session
     // lock — `spawn_turn_with`'s task holds that lock for the entire turn (every provider
@@ -5284,7 +5286,22 @@ pub(crate) fn build_snapshot_frame(
     notes: Vec<String>,
     revision: u64,
 ) -> remote::Snapshot {
-    let view = app.remote_snapshot();
+    let mut view = app.remote_snapshot();
+    // Build the plan card first, while `view` is still whole: each step's status is read off the
+    // live task list (see `plan_step_status`), which the literal below also consumes.
+    let plan = view.plan.take().map(|p| remote::SnapPlan {
+        title: p.title,
+        steps: p
+            .steps
+            .into_iter()
+            .map(|s| remote::SnapPlanStep {
+                status: plan_step_status(&view.tasks, &s.title),
+                title: s.title,
+                detail: s.detail,
+            })
+            .collect(),
+        notes: p.notes,
+    });
     remote::Snapshot {
         protocol: remote::PROTOCOL_VERSION,
         session_id: ident.session_id.to_string(),
@@ -5309,6 +5326,16 @@ pub(crate) fn build_snapshot_frame(
         context_limit: view.context_limit,
         streaming: view.streaming,
         transcript: view.transcript,
+        transcript_rows: view
+            .transcript_rows
+            .into_iter()
+            .map(|r| remote::SnapTranscriptRow {
+                kind: r.kind.as_str().to_string(),
+                text: r.text,
+                tool: r.tool,
+                meta: r.meta,
+            })
+            .collect(),
         tasks: view
             .tasks
             .iter()
@@ -5320,6 +5347,8 @@ pub(crate) fn build_snapshot_frame(
                     forge_types::TodoStatus::Done => "done",
                 }
                 .to_string(),
+                // Whoever the model named in `update_tasks` — `None` for work it kept itself.
+                assignee: t.assignee.clone(),
             })
             .collect(),
         subagents: view
@@ -5335,6 +5364,10 @@ pub(crate) fn build_snapshot_frame(
                 done: s.done,
                 ok: s.ok,
                 cost: s.cost,
+                // Reserved: children run headless (an `Ask` resolves as Deny inside a subagent),
+                // so no child is ever parked on its own prompt — every prompt is session-level
+                // and rides in `permission_prompt` below.
+                permission_prompt: None,
             })
             .collect(),
         queued: view.queued,
@@ -5353,18 +5386,7 @@ pub(crate) fn build_snapshot_frame(
         // (palette / any picker / config / usage / mesh / workflow).
         overlay: app.remote_overlay().map(map_overlay_snapshot),
         diff: view.diff.map(map_diff_snapshot),
-        plan: view.plan.map(|p| remote::SnapPlan {
-            title: p.title,
-            steps: p
-                .steps
-                .into_iter()
-                .map(|s| remote::SnapPlanStep {
-                    title: s.title,
-                    detail: s.detail,
-                })
-                .collect(),
-            notes: p.notes,
-        }),
+        plan,
         workflow: view.workflow.map(|w| remote::SnapWorkflow {
             active: w.active,
             name: w.name,
@@ -5381,6 +5403,71 @@ pub(crate) fn build_snapshot_frame(
         resync: false,
         closed: false,
     }
+}
+
+/// Map one persisted transcript row into the wire type. Shared by the TUI's `/remote` provider
+/// and the daemon's `/api/history` route so both serve the identical shape, including the v9
+/// replay fields: `kind` in the same vocabulary as the live transcript, and `elapsed_ms`, the
+/// offset from `epoch` (the session's first visible row).
+///
+/// `kind == "tool"` only ever appears on a page the caller asked for with `include_tools` —
+/// otherwise `Store::load_history_page` selects only user/assistant turns plus `ui` notes and no
+/// tool row reaches here at all. `epoch` MUST come from `Store::history_epoch_with` for the same
+/// flag, or the offsets would be measured against rows the page doesn't contain.
+pub(crate) fn map_history_row(
+    row: forge_store::HistoryRow,
+    epoch: Option<i64>,
+) -> remote::HistoryRow {
+    let visibility = row.visibility.as_str().to_string();
+    let role = row.role.as_str().to_string();
+    // `ui` rows are Forge talking to the user (notices, command feedback), not a turn of the
+    // conversation — they carry role='assistant' in the store but read as system lines.
+    let kind = if visibility == "ui" {
+        "system"
+    } else {
+        match role.as_str() {
+            "user" => "user",
+            "assistant" => "assistant",
+            "tool" => "tool",
+            _ => "system",
+        }
+    };
+    remote::HistoryRow {
+        seq: row.seq,
+        role,
+        content: row.content,
+        model: row.model,
+        created_at: row.created_at,
+        visibility,
+        kind: kind.to_string(),
+        // Milliseconds on the wire (what a scrubber wants) but SECOND resolution in fact:
+        // `message.created_at` is stored as unix seconds, so this is exact to the second, not
+        // finer. Clamped at 0 because a row can share the epoch's second.
+        elapsed_ms: epoch.map(|e| (row.created_at - e).max(0) * 1_000),
+        // Only the store can say which tool a result row came from; it stays `None` rather than
+        // being inferred from the result prose when the carrier is unrecoverable.
+        tool: row.tool_name,
+    }
+}
+
+/// A plan step's execution state (v9), correlated with the live task list rather than invented:
+/// a `PlanStep` has no state of its own, but approving a plan seeds one task per step with that
+/// step's trimmed title (`Session::activate_plan_tasks`), and the model then drives those through
+/// `update_tasks`. So a step is exactly as far along as the task carrying its title — and
+/// "queued" whenever no such task exists (an unapproved proposal, or a list the model has since
+/// rewritten past recognition), never a guess at progress.
+fn plan_step_status(tasks: &[forge_types::TodoItem], step_title: &str) -> String {
+    let step_title = step_title.trim();
+    tasks
+        .iter()
+        .find(|t| t.title.trim() == step_title)
+        .map(|t| match t.status {
+            forge_types::TodoStatus::InProgress => "in_progress",
+            forge_types::TodoStatus::Done => "done",
+            forge_types::TodoStatus::Pending => "queued",
+        })
+        .unwrap_or("queued")
+        .to_string()
 }
 
 /// Map the TUI-side diff projection into the remote wire type (same split as the overlay).
@@ -5928,6 +6015,193 @@ mod tests {
         ));
         assert!(!should_refresh_codex_quota(false, Some("openai::gpt-5.4")));
         assert!(!should_refresh_codex_quota(true, None));
+    }
+
+    #[test]
+    fn plan_step_status_follows_the_task_the_step_seeded() {
+        let tasks = vec![
+            forge_types::TodoItem {
+                title: "wire the protocol".into(),
+                status: forge_types::TodoStatus::Done,
+                assignee: None,
+            },
+            forge_types::TodoItem {
+                title: "mirror the types".into(),
+                status: forge_types::TodoStatus::InProgress,
+                assignee: None,
+            },
+            forge_types::TodoItem {
+                title: "ship it".into(),
+                status: forge_types::TodoStatus::Pending,
+                assignee: None,
+            },
+        ];
+        assert_eq!(plan_step_status(&tasks, "wire the protocol"), "done");
+        assert_eq!(plan_step_status(&tasks, "mirror the types"), "in_progress");
+        // A seeded-but-untouched task is "queued", not "pending" — the plan card's vocabulary.
+        assert_eq!(plan_step_status(&tasks, "ship it"), "queued");
+        // `activate_plan_tasks` trims the step title, so the match must trim on both sides.
+        assert_eq!(plan_step_status(&tasks, "  ship it  "), "queued");
+        // No task carries this step (unapproved plan, or a rewritten list): stay honest —
+        // "queued", never a guess at progress.
+        assert_eq!(plan_step_status(&tasks, "something else"), "queued");
+        assert_eq!(plan_step_status(&[], "wire the protocol"), "queued");
+    }
+
+    #[test]
+    fn history_rows_carry_a_kind_and_an_offset_from_the_session_epoch() {
+        let row = |seq: i64, role: forge_types::Role, vis, at: i64| forge_store::HistoryRow {
+            seq,
+            role,
+            content: "…".into(),
+            model: None,
+            created_at: at,
+            visibility: vis,
+            tool_name: None,
+        };
+        let epoch = Some(1_000);
+
+        let user = map_history_row(
+            row(
+                1,
+                forge_types::Role::User,
+                forge_types::Visibility::Llm,
+                1_000,
+            ),
+            epoch,
+        );
+        assert_eq!(user.kind, "user");
+        assert_eq!(user.elapsed_ms, Some(0), "the first row IS the zero point");
+
+        let assistant = map_history_row(
+            row(
+                2,
+                forge_types::Role::Assistant,
+                forge_types::Visibility::Llm,
+                1_012,
+            ),
+            epoch,
+        );
+        assert_eq!(assistant.kind, "assistant");
+        assert_eq!(assistant.elapsed_ms, Some(12_000));
+
+        // A `ui` note is Forge talking to the user, not a turn — it reads as a system line even
+        // though the store row's role says assistant.
+        let note = map_history_row(
+            row(
+                3,
+                forge_types::Role::Assistant,
+                forge_types::Visibility::UiOnly,
+                1_020,
+            ),
+            epoch,
+        );
+        assert_eq!(note.kind, "system");
+        assert_eq!(note.role, "assistant", "the raw role still rides the wire");
+
+        // No epoch (a session with nothing visible yet) means no offset — not a fake zero.
+        assert_eq!(
+            map_history_row(
+                row(4, forge_types::Role::User, forge_types::Visibility::Llm, 9),
+                None
+            )
+            .elapsed_ms,
+            None
+        );
+
+        // A tool row (only reachable on an `include_tools` page) maps to the `"tool"` kind and
+        // carries whatever name the store recovered — and nothing when it recovered none.
+        let tool = map_history_row(
+            forge_store::HistoryRow {
+                seq: 5,
+                role: forge_types::Role::Tool,
+                content: "read 40 lines".into(),
+                model: None,
+                created_at: 1_030,
+                visibility: forge_types::Visibility::Llm,
+                tool_name: Some("read_file".into()),
+            },
+            epoch,
+        );
+        assert_eq!(tool.kind, "tool");
+        assert_eq!(tool.tool.as_deref(), Some("read_file"));
+        assert_eq!(tool.elapsed_ms, Some(30_000));
+        assert_eq!(
+            map_history_row(
+                row(
+                    6,
+                    forge_types::Role::Tool,
+                    forge_types::Visibility::Llm,
+                    1_030
+                ),
+                epoch
+            )
+            .tool,
+            None,
+            "an unrecoverable tool name stays absent rather than guessed"
+        );
+    }
+
+    /// A snapshot frame built over `app` with placeholder identity — the tasks projection is the
+    /// only thing under test here.
+    fn frame_of(app: &forge_tui::App) -> remote::Snapshot {
+        build_snapshot_frame(
+            app,
+            SnapshotIdentity {
+                session_id: "sess-test",
+                title: "",
+                cwd: "/tmp",
+                worktree: None,
+                project_initialized: true,
+                project_init_hint: None,
+                exposure: "loopback".into(),
+            },
+            None,
+            0,
+            Vec::new(),
+            1,
+        )
+    }
+
+    #[test]
+    fn task_assignee_reaches_the_wire() {
+        let mut app = forge_tui::App::default();
+        app.apply(forge_tui::PresenterEvent::Tasks(vec![
+            forge_types::TodoItem {
+                title: "port the store layer".into(),
+                status: forge_types::TodoStatus::InProgress,
+                assignee: Some("builder-a3".into()),
+            },
+        ]));
+        let snap = frame_of(&app);
+        assert_eq!(
+            snap.tasks[0].assignee.as_deref(),
+            Some("builder-a3"),
+            "the owner the model named must survive to the snapshot"
+        );
+        assert_eq!(snap.tasks[0].status, "in_progress");
+    }
+
+    #[test]
+    fn task_assignee_is_optional_and_never_invented() {
+        // `assignee` is opt-in: a task written the old way (title + status) projects as
+        // unassigned, exactly as every pre-v9 task did.
+        let mut app = forge_tui::App::default();
+        app.apply(forge_tui::PresenterEvent::Tasks(forge_core::parse_tasks(
+            &serde_json::json!({
+                "tasks": [
+                    {"title": "run the tests", "status": "pending"},
+                    // An explicitly blank owner is not an owner either.
+                    {"title": "write the report", "status": "pending", "assignee": "  "},
+                ]
+            }),
+        )));
+        let snap = frame_of(&app);
+        assert!(
+            snap.tasks.iter().all(|t| t.assignee.is_none()),
+            "no owner is invented for undelegated work: {:?}",
+            snap.tasks
+        );
     }
 
     fn picker_rows(ids: &[&str]) -> Vec<forge_tui::PickerRow> {
