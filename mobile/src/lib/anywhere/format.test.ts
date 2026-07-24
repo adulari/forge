@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { entitlementBadge, formatBytes, hostStateText, normalizeEntitlementState, syncGlyph } from "./format";
+import {
+  entitlementBadge,
+  formatBytes,
+  formatStorageUsage,
+  hostStateText,
+  normalizeEntitlementState,
+  syncGlyph,
+} from "./format";
 import type { AnywhereHost, SyncStatus } from "./types";
 
 describe("formatBytes", () => {
@@ -18,6 +25,22 @@ describe("formatBytes", () => {
 
   it("formats GB with one decimal", () => {
     expect(formatBytes(Math.round(1.2 * 1024 ** 3))).toBe("1.2 GB");
+  });
+});
+
+describe("formatStorageUsage", () => {
+  it("includes encrypted usage and the account cap", () => {
+    expect(formatStorageUsage(Math.round(12.4 * 1024 ** 2), 5 * 1024 ** 3)).toBe(
+      "12.4 MB of 5.0 GB used",
+    );
+  });
+
+  it("shows usage without inventing a cap when the service has not supplied one", () => {
+    expect(formatStorageUsage(4096, 0)).toBe("4 KB used");
+  });
+
+  it("does not display negative service values", () => {
+    expect(formatStorageUsage(-1, -1)).toBe("0 B used");
   });
 });
 

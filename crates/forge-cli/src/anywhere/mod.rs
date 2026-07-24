@@ -1651,10 +1651,7 @@ async fn doctor() -> Result<()> {
         }
     );
 
-    let health_url = format!(
-        "{}/health",
-        config.anywhere.service_url().trim_end_matches('/')
-    );
+    let health_url = service_health_url(config.anywhere.service_url());
     let service_ready = match client()?.get(health_url).send().await {
         Ok(response) => response.status().is_success(),
         Err(_) => false,
@@ -1681,6 +1678,10 @@ async fn doctor() -> Result<()> {
     };
     println!("  next action: {next_action}");
     Ok(())
+}
+
+fn service_health_url(service_url: &str) -> String {
+    format!("{}/health/ready", service_url.trim_end_matches('/'))
 }
 
 async fn share(session: &str, expires: ShareExpiry) -> Result<()> {
@@ -2568,6 +2569,14 @@ mod tests {
         );
         assert!(service_error(StatusCode::SERVICE_UNAVAILABLE, b"")
             .starts_with("service dependency unavailable"));
+    }
+
+    #[test]
+    fn doctor_checks_the_readiness_endpoint() {
+        assert_eq!(
+            service_health_url("https://app.forge.test/"),
+            "https://app.forge.test/health/ready"
+        );
     }
 
     #[test]

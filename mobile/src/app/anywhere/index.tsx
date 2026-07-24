@@ -26,6 +26,7 @@ import { Input } from "../../components/ds/Input";
 import { Screen } from "../../components/ds/Screen";
 import { useToast } from "../../components/ds/ToastHost";
 import { useAnywhere, type AnywherePendingApproval } from "../../lib/AnywhereProvider";
+import { formatBytes, formatStorageUsage } from "../../lib/anywhere/format";
 import { hostFleetSummary, hostStatusText } from "../../lib/anywhereHostPresence";
 import { goBackOr } from "../../lib/nav";
 import { isTauri } from "../../lib/platform";
@@ -354,6 +355,8 @@ function ReadyCenter() {
   const tokens = useTokens();
   const toast = useToast();
   const [actingId, setActingId] = useState<string | null>(null);
+  const storageUsedBytes = anywhere.account?.storage_used_bytes ?? 0;
+  const storageLimitBytes = anywhere.account?.storage_limit_bytes ?? 0;
 
   const decide = useCallback(async (request: AnywherePendingApproval, approve: boolean) => {
     setActingId(request.id);
@@ -407,6 +410,22 @@ function ReadyCenter() {
       </Section>
 
       <HubOverview anywhere={anywhere} trialBadge={trialBadge} login={login} />
+
+      <Section title="Storage" meta={storageLimitBytes > 0 ? `${formatBytes(storageLimitBytes)} cap` : "Encrypted"}>
+        <Pressable
+          onPress={() => router.push("/anywhere/storage")}
+          accessibilityRole="button"
+          accessibilityLabel={`Encrypted storage, ${formatStorageUsage(storageUsedBytes, storageLimitBytes)}`}
+          style={({ pressed }) => [styles.resourceRow, { borderBottomColor: tokens.hairline, opacity: pressed ? 0.7 : 1 }]}
+        >
+          <Cloud size={18} color={tokens.info} />
+          <View style={styles.resourceCopy}>
+            <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>Encrypted storage</Text>
+            <Text style={[typeScale.meta, tabularNums, { color: tokens.ink3 }]}>{formatStorageUsage(storageUsedBytes, storageLimitBytes)}</Text>
+          </View>
+          <ChevronRight size={15} strokeWidth={1.75} color={tokens.ink4} />
+        </Pressable>
+      </Section>
 
       <Section title="Recovery" meta="Protected">
         <Pressable onPress={() => router.push("/anywhere/recovery-phrase")} accessibilityRole="button" style={({ pressed }) => [styles.resourceRow, { borderBottomColor: tokens.hairline, opacity: pressed ? 0.7 : 1 }]}><KeyRound size={18} color={tokens.success} /><View style={styles.resourceCopy}><Text style={[typeScale.bodyBold, { color: tokens.ink }]}>Recovery Center</Text><Text style={[typeScale.meta, { color: tokens.ink3 }]}>Recovery Kit, passkeys, and device access</Text></View></Pressable>
