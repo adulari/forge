@@ -31,7 +31,6 @@ import { hostFleetSummary, hostStatusText } from "../../lib/anywhereHostPresence
 import { goBackOr } from "../../lib/nav";
 import { isTauri } from "../../lib/platform";
 import { MAX_ACTIVE_HOSTS } from "../../lib/anywhere/types";
-import { formatBytes } from "../../lib/anywhere/format";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, radii, space } from "../../theme/tokens";
 import { useBreakpoint } from "../../theme/useBreakpoint";
