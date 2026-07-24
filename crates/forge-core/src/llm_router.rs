@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use forge_mesh::{
     max_tier, BudgetState, HeuristicRouter, RouteHints, Router, RoutingContext, RoutingDecision,
 };
-use forge_provider::Provider;
+use forge_provider::{CompletionOptions, Provider};
 use forge_types::{EffortLevel, Message, ModelHealth, ProjectContext, SubscriptionQuota, TaskTier};
 
 /// Hard ceiling on the classification call so a slow/hung model degrades to the heuristic.
@@ -155,16 +155,17 @@ impl LlmRouter {
         project: &ProjectContext,
         context: &RoutingContext,
     ) -> RoutingDecision {
-        let hints = RouteHints::from_context(prompt, context);
+        let activity = self.fallback.classification_activity(prompt);
+        let hints = RouteHints::from_context(activity, context);
         let mut deterministic = self
             .fallback
             .route_contextual(
-                prompt, has_images, budget, health, quota, None, effort, project, context,
+                activity, has_images, budget, health, quota, None, effort, project, context,
             )
             .await;
         let deterministic_tier = deterministic.tier;
-        let classifier_prompt = context.classifier_prompt(prompt);
-        let key = prompt_hash(prompt, &classifier_prompt);
+        let classifier_prompt = context.classifier_prompt(activity);
+        let key = prompt_hash(activity, &classifier_prompt);
         if let Some(llm_tier) = self.cached(key) {
             let tier = guard_tier(llm_tier, deterministic_tier, hints.code_heavy);
             return self.fallback.decide(
@@ -198,7 +199,16 @@ impl LlmRouter {
             let mut sink = |_: forge_provider::StreamEvent| {};
             let result = tokio::time::timeout(
                 timeout,
-                self.provider.complete(model, &messages, &[], &mut sink),
+                self.provider.complete_with(
+                    model,
+                    &messages,
+                    &[],
+                    &CompletionOptions {
+                        temperature: Some(0.0),
+                        ..CompletionOptions::default()
+                    },
+                    &mut sink,
+                ),
             )
             .await;
             if let Ok(Ok(resp)) = result {
@@ -281,7 +291,7 @@ impl Router for LlmRouter {
                 format!("tier hint: {}", tier.as_str()),
                 budget,
                 health,
-                RouteHints::from_prompt(prompt),
+                RouteHints::from_prompt(self.fallback.classification_activity(prompt)),
                 quota,
                 effort,
                 has_images,
@@ -399,6 +409,7 @@ mod tests {
     struct ContextProvider {
         responses: Mutex<Vec<String>>,
         prompts: Mutex<Vec<String>>,
+        temperatures: Mutex<Vec<Option<f32>>>,
     }
 
     #[async_trait]
@@ -420,6 +431,18 @@ mod tests {
                 usage: Default::default(),
                 quotas: Vec::new(),
             })
+        }
+
+        async fn complete_with(
+            &self,
+            model: &str,
+            messages: &[Message],
+            tools: &[ToolSpec],
+            opts: &CompletionOptions,
+            on_event: &mut EventSink<'_>,
+        ) -> Result<ModelResponse, ProviderError> {
+            self.temperatures.lock().unwrap().push(opts.temperature);
+            self.complete(model, messages, tools, on_event).await
         }
     }
 
@@ -541,6 +564,7 @@ mod tests {
         let provider = Arc::new(ContextProvider {
             responses: Mutex::new(vec!["complex".into(), "standard".into()]),
             prompts: Mutex::new(Vec::new()),
+            temperatures: Mutex::new(Vec::new()),
         });
         let router = LlmRouter::new(
             provider.clone(),
@@ -584,6 +608,7 @@ mod tests {
         let provider = Arc::new(ContextProvider {
             responses: Mutex::new(vec!["complex".into()]),
             prompts: Mutex::new(Vec::new()),
+            temperatures: Mutex::new(Vec::new()),
         });
         let router = LlmRouter::new(
             provider.clone(),
@@ -614,6 +639,84 @@ mod tests {
         assert!(prompts[0].contains("LAST ASSISTANT STATUS"));
         assert!(prompts[0].contains("CURRENT USER TURN TO CLASSIFY"));
         assert!(prompts[0].chars().count() < 7_000);
+    }
+
+    #[tokio::test]
+    async fn classifier_excludes_prior_context_for_independent_user_task() {
+        let provider = Arc::new(ContextProvider {
+            responses: Mutex::new(vec!["trivial".into()]),
+            prompts: Mutex::new(Vec::new()),
+            temperatures: Mutex::new(Vec::new()),
+        });
+        let router = LlmRouter::new(
+            provider.clone(),
+            vec!["context::model".into()],
+            HeuristicRouter::new(forge_config::Config::default()),
+        );
+        let context = RoutingContext::from_messages(&[
+            Message::system("comprehensive analyse review understand integrate audit ".repeat(500)),
+            Message::user("design a distributed scheduler and prove its correctness"),
+            Message::assistant("The architecture is complete."),
+        ]);
+
+        let decision = router
+            .route_contextual(
+                "How many tasks are due today?",
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                None,
+                &ProjectContext::default(),
+                &context,
+            )
+            .await;
+
+        assert_eq!(decision.tier, TaskTier::Trivial, "{}", decision.rationale);
+        assert_eq!(
+            provider.prompts.lock().unwrap().as_slice(),
+            ["TASK TO CLASSIFY:\nHow many tasks are due today?"]
+        );
+        assert_eq!(
+            provider.temperatures.lock().unwrap().as_slice(),
+            [Some(0.0)]
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_focused_classifier_receives_only_trailing_task() {
+        let provider = Arc::new(ContextProvider {
+            responses: Mutex::new(vec!["trivial".into()]),
+            prompts: Mutex::new(Vec::new()),
+            temperatures: Mutex::new(Vec::new()),
+        });
+        let mut config = forge_config::Config::default();
+        config.mesh.classifier_activity_focused = true;
+        let router = LlmRouter::new(
+            provider.clone(),
+            vec!["context::model".into()],
+            HeuristicRouter::new(config),
+        );
+        let injected = "comprehensive analyse review understand integrate audit ".repeat(500);
+
+        let decision = router
+            .route(
+                &format!("{injected}\n\nHow many tasks are due today?"),
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+
+        assert_eq!(decision.tier, TaskTier::Trivial, "{}", decision.rationale);
+        assert_eq!(
+            provider.prompts.lock().unwrap().as_slice(),
+            ["TASK TO CLASSIFY:\nHow many tasks are due today?"]
+        );
     }
 
     #[tokio::test]

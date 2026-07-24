@@ -122,6 +122,7 @@ const ROUTING_SUMMARY_CHARS: usize = 4_000;
 const ROUTING_CURRENT_TURN_CHARS: usize = 8_000;
 const ROUTING_REFINEMENT_TURNS: usize = 3;
 const COMPACTION_SUMMARY_PREFIX: &str = "[Earlier conversation summarized to save context]";
+const ROUTING_TOOL_RESULT_MARKER: &str = "\nTOOL RESULT:\n";
 
 /// Bounded prior-turn material used to classify referential follow-ups such as "continue" without
 /// feeding the entire transcript into the mesh classifier. UI-only chrome and tool messages are
@@ -194,7 +195,11 @@ impl RoutingContext {
     /// Whether `prompt` depends on earlier turns rather than introducing a standalone task.
     pub fn is_dependent_turn(&self, prompt: &str) -> bool {
         (self.task_anchor.is_some() || self.compaction_summary.is_some())
-            && is_contextual_followup(prompt)
+            && is_contextual_followup(
+                prompt
+                    .split_once(ROUTING_TOOL_RESULT_MARKER)
+                    .map_or(prompt, |(user_task, _)| user_task),
+            )
     }
 
     /// Active task material for deterministic classification and code-heavy routing hints.
@@ -215,11 +220,9 @@ impl RoutingContext {
     /// Bounded, role-labelled classifier input. Prior text is explicitly marked untrusted so
     /// instructions inside a task or compaction summary cannot override the classifier contract.
     pub fn classifier_prompt(&self, prompt: &str) -> String {
-        if self.task_anchor.is_none()
-            && self.recent_refinements.is_empty()
-            && self.last_assistant.is_none()
-            && self.compaction_summary.is_none()
-        {
+        // Standalone work must be classified in isolation. Including the earlier task merely
+        // because a transcript exists lets unrelated complex history pollute a simple new ask.
+        if !self.is_dependent_turn(prompt) {
             return format!(
                 "TASK TO CLASSIFY:\n{}",
                 bounded_excerpt(prompt, ROUTING_CURRENT_TURN_CHARS)
@@ -1156,6 +1159,19 @@ impl HeuristicRouter {
         )
     }
 
+    /// Return the active portion of an unstructured prompt for classification. Role-aware callers
+    /// should keep this compatibility switch off and pass the user task directly.
+    pub fn classification_activity<'a>(&self, prompt: &'a str) -> &'a str {
+        if !self.config.mesh.classifier_activity_focused {
+            return prompt;
+        }
+        prompt
+            .rsplit("\n\n")
+            .map(str::trim)
+            .find(|part| !part.is_empty())
+            .unwrap_or(prompt)
+    }
+
     /// Like [`classify`] but also reports whether the heuristic is confident enough that an
     /// LLM second-opinion would add little value. High confidence means the score is far from
     /// both tier boundaries (≤−4 for Trivial, ≥8 for Complex) OR a COMPLEX_HINTS hard-override
@@ -1541,13 +1557,14 @@ impl Router for HeuristicRouter {
         effort: Option<EffortLevel>,
         project: &ProjectContext,
     ) -> RoutingDecision {
-        let (tier, reason) = Self::classify(prompt, project);
+        let activity = self.classification_activity(prompt);
+        let (tier, reason) = Self::classify(activity, project);
         self.decide(
             tier,
             reason,
             budget,
             health,
-            RouteHints::from_prompt(prompt),
+            RouteHints::from_prompt(activity),
             quota,
             effort,
             has_images,
@@ -1565,6 +1582,7 @@ impl Router for HeuristicRouter {
         effort: Option<EffortLevel>,
         project: &ProjectContext,
     ) -> RoutingDecision {
+        let activity = self.classification_activity(prompt);
         match tier_override {
             // A command/skill tier hint replaces classification but goes through the same
             // selection path (pin, budget pressure, cost-aware candidates all still apply).
@@ -1573,7 +1591,7 @@ impl Router for HeuristicRouter {
                 format!("tier hint: {}", tier.as_str()),
                 budget,
                 health,
-                RouteHints::from_prompt(prompt),
+                RouteHints::from_prompt(activity),
                 quota,
                 effort,
                 has_images,
@@ -1597,7 +1615,8 @@ impl Router for HeuristicRouter {
         project: &ProjectContext,
         context: &RoutingContext,
     ) -> RoutingDecision {
-        let hints = RouteHints::from_context(prompt, context);
+        let activity = self.classification_activity(prompt);
+        let hints = RouteHints::from_context(activity, context);
         match tier_override {
             Some(tier) => self.decide(
                 tier,
@@ -1610,7 +1629,7 @@ impl Router for HeuristicRouter {
                 has_images,
             ),
             None => {
-                let (tier, reason) = Self::classify_contextual(prompt, project, context);
+                let (tier, reason) = Self::classify_contextual(activity, project, context);
                 self.decide(
                     tier, reason, budget, health, hints, quota, effort, has_images,
                 )
@@ -1629,8 +1648,9 @@ impl Router for HeuristicRouter {
         project: &ProjectContext,
         n: usize,
     ) -> Vec<RoutingDecision> {
-        let (tier, reason) = Self::classify(prompt, project);
-        let hints = RouteHints::from_prompt(prompt);
+        let activity = self.classification_activity(prompt);
+        let (tier, reason) = Self::classify(activity, project);
+        let hints = RouteHints::from_prompt(activity);
         let ranked = self.ordered_usable_for_tier(
             tier,
             health,
@@ -2147,7 +2167,7 @@ mod tests {
             Message::assistant(&huge),
         ];
         let context = RoutingContext::from_messages(&history);
-        let rendered = context.classifier_prompt(&huge);
+        let rendered = context.classifier_prompt("continue");
 
         assert!(rendered.contains("ACTIVE USER TASK"));
         assert!(rendered.contains("CURRENT USER TURN TO CLASSIFY"));
@@ -2157,6 +2177,63 @@ mod tests {
             "classifier prompt was not bounded: {} chars",
             rendered.chars().count()
         );
+    }
+
+    #[test]
+    fn independent_turn_classifier_prompt_excludes_prior_task_context() {
+        let injected_system =
+            "comprehensive analyse review understand integrate audit ".repeat(500);
+        let history = [
+            Message::system(injected_system),
+            Message::user("design a distributed scheduler and prove its correctness"),
+            Message::assistant("The architecture is complete."),
+        ];
+        let context = RoutingContext::from_messages(&history);
+        let rendered = context.classifier_prompt("How many tasks are due today?");
+
+        assert_eq!(
+            rendered, "TASK TO CLASSIFY:\nHow many tasks are due today?",
+            "an independent user task must not carry prior or system context into classification"
+        );
+    }
+
+    #[test]
+    fn current_tool_results_do_not_hide_a_referential_user_turn() {
+        let context = RoutingContext::from_messages(&[Message::user(
+            "debug the intermittent race condition in the scheduler",
+        )]);
+        let rendered = context.classifier_prompt(
+            "continue\nTOOL RESULT:\nThe scheduler trace contains many detailed events.",
+        );
+
+        assert!(rendered.contains("ACTIVE USER TASK"));
+        assert!(rendered.contains("CURRENT USER TURN TO CLASSIFY"));
+    }
+
+    #[tokio::test]
+    async fn activity_focused_compatibility_ignores_prepended_system_context() {
+        let mut config = Config::default();
+        config.mesh.classifier = forge_config::ClassifierKind::Heuristic;
+        config.mesh.classifier_activity_focused = true;
+        let router = HeuristicRouter::new(config).with_availability(|_| true);
+        let injected = "comprehensive analyse review understand integrate audit ".repeat(500);
+        let prompt = format!("{injected}\n\nHow many tasks are due today?");
+
+        let decision = router
+            .route(
+                &prompt,
+                false,
+                BudgetState::default(),
+                &ModelHealth::default(),
+                &SubscriptionQuota::default(),
+                None,
+                &ProjectContext::default(),
+            )
+            .await;
+
+        assert_eq!(decision.tier, TaskTier::Trivial, "{}", decision.rationale);
+        assert!(!decision.rationale.contains("long prompt"));
+        assert!(!decision.rationale.contains("reasoning/algorithmic term"));
     }
 
     #[test]

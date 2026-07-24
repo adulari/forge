@@ -77,7 +77,9 @@ All under the server's origin; the OpenAI base URL is `http://<host>:<port>/v1`.
 ### Request fields (an OpenAI-compatible subset)
 
 - `messages` (**required**) — `system` / `user` / `assistant` / `tool` roles. `content` may be a
-  string or an array of content parts (only text parts are used today).
+  string or an array of content parts (only text parts are used today). Mesh classification uses
+  the last `user` message plus bounded tool results from that turn; `system`/`developer` content
+  still reaches the provider but is never scored as task complexity.
 - `model` — `auto`/`mesh`/omitted for mesh routing, or a concrete Forge id (from `/v1/models`) to
   pin (see above). An unknown id is a `404`.
 - `stream` — `true` to receive `text/event-stream` `chat.completion.chunk` frames ending in
@@ -145,10 +147,10 @@ Standard OpenAI `chat.completion` (or `chat.completion.chunk` when streaming), p
 - On startup it calls `forge_config::inject_provider_keys()` (as `forge run` does) so keyring-stored
   keys for single-key native-adapter providers (gemini/openai/anthropic) resolve — without it a pin
   to one would fail with a provider resolver error.
-- Routing reuses the production wiring: `build_provider_and_router` (the same
-  `DispatchProvider` + `HeuristicRouter` `forge run` builds). Unpinned (`auto`) requests go through
-  `HeuristicRouter::route`; a pin bypasses the classifier and is served directly with an
-  in-provider failover chain, so behavior matches an interactive `--model` pin.
+- Routing reuses the production wiring: `build_provider_and_router` (the same provider + mesh
+  router `forge run` builds). Unpinned (`auto`) requests call `route_contextual` with the role-aware
+  active task and bounded prior user/assistant context; a pin bypasses the classifier and is served
+  directly with an in-provider failover chain, so behavior matches an interactive `--model` pin.
 - Task-specific-model exclusion lives in `forge_mesh::catalog::is_routable` (translation, rerank,
   embedding, TTS/image/audio, guard, …), shared by mesh routing and `/v1/models`.
 - CLI: `forge api [--host] [--port] [--api-key] [--mock]`.

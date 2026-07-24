@@ -113,6 +113,15 @@ their own; terminal acknowledgements (`thanks`, `got it`, `great`) remain Trivia
 `[Earlier conversation summarized to save context]` system message can anchor the tier after
 compaction even when the original user task is no longer present.
 
+The OpenAI-compatible `forge api` surface preserves those roles when it builds the routing input:
+classification sees the **last user message** plus up to three bounded tool results produced after
+it. Ordinary `system`/`developer` messages and older independent user turns are excluded. Prior
+user/assistant history is supplied only for a referential current turn such as `continue`.
+
+For one-shot automation, `forge run --system <TEXT> <task>` (visible alias:
+`--append-system-prompt`) sends standing instructions to the provider as system messages while
+classifying only `<task>`. Repeat `--system` to append multiple standing messages.
+
 The same active-task material drives `RouteHints`, so a coding task followed by `continue` remains
 `code_heavy` and uses a seed derived from the active task plus the current turn, rather than every
 unrelated `continue` sharing one seed.
@@ -122,20 +131,23 @@ unrelated `continue` sharing one seed.
 `mesh.classifier` (`crates/forge-config/src/lib.rs:1698`) selects:
 
 - `heuristic` — explicit opt-in, `score_prompt` only, zero added cost/latency.
-- `llm` (default) — `LlmRouter` tries the explicit override first, then up to three fast, capable,
-  free Standard-tier catalog choices, finally the configured trivial model. A benchmarked
-  classifier must meet `CAPABLE_BENCH_THRESHOLD` (8.0 intelligence); an unbenchmarked candidate
-  must meet the capable family prior. Weak free candidates are used only when no capable free
-  classifier exists. Health is checked per turn;
-  benched models are skipped. Each candidate has a 5-second timeout and the total classification
-  budget is 15 seconds. The first parseable answer wins. Only when every candidate fails, times
-  out, or returns an unparseable reply does the mesh fall back to the heuristic. The LLM can
-  upgrade the deterministic contextual tier but cannot downgrade it; this prevents a weak
-  classifier from turning a known Complex task's `continue` into Trivial. Its cache key covers the
-  bounded prior context as well as the full current prompt.
+- `llm` (default) — `LlmRouter` calls one fixed capable model
+  (`mesh.classifier_model`, default `groq::llama-3.3-70b-versatile`) at temperature zero. The
+  classifier is not itself mesh-routed, so catalog discovery order cannot make identical input
+  bounce between classifier models. The configured model has a 5-second attempt within the
+  15-second classification budget; an unavailable, benched, timed-out, or unparseable classifier
+  falls back to the deterministic heuristic. The LLM can upgrade the deterministic contextual tier
+  but cannot downgrade it; this prevents a weak classifier from turning a known Complex task's
+  `continue` into Trivial. Its in-session cache key covers the bounded relevant context and active
+  task.
 - `hybrid` — legacy alias for `llm`; it no longer skips LLM classification on any normal turn.
 
 All classifiers feed the same `HeuristicRouter::decide` selection path.
+
+`mesh.classifier_activity_focused = true` is an opt-in compatibility mode for legacy callers that
+still concatenate standing context and the task into one string: only the final non-empty paragraph
+is classified. Role-separated API messages or `forge run --system` are preferred because they are
+unambiguous. The compatibility mode is off by default.
 
 ### 2.4 RouteHints: code-heaviness and the per-prompt seed
 
@@ -923,7 +935,8 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 | `models` | shipped free-first lists | Per-tier candidate lists; used verbatim when auto-discovery is off/empty (§3.1) |
 | `auto_discover` | `true` | Rank the discovered catalog instead of `[mesh.models]` (`lib.rs:1279`) |
 | `benchmark_ranking` | `true` | Use AA indices when cached (`lib.rs:1336`) |
-| `classifier` / `classifier_model` | `llm` / unset | §2.3 |
+| `classifier` / `classifier_model` | `llm` / `groq::llama-3.3-70b-versatile` | Fixed task classifier; §2.3 |
+| `classifier_activity_focused` | `false` | Legacy unstructured-prompt compatibility: classify the final non-empty paragraph; §2.3 |
 | `prefer_subscription` | `true` | Configured-path ordering: subscriptions before metered (`lib.rs:1221`) |
 | `subscriptions` | `{}` | Plan slug per provider, captured by `forge init` (`lib.rs:1400`) |
 | `subscription_conserve` | `true` | Enable conservation spreading (§6) (`lib.rs:1331`) |

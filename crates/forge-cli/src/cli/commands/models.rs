@@ -18,6 +18,24 @@ pub(crate) fn build_dispatch_provider(config: &forge_config::Config) -> Dispatch
     DispatchProvider::new(cli_bridge_harness_enabled(config))
 }
 
+/// Resolve the classifier once at composition time. Classification must not recursively mesh-route
+/// across whichever free models discovery happened to return on this launch: that made identical
+/// input change tier when a different classifier answered first.
+fn classifier_candidates(config: &forge_config::Config, mock: bool) -> Vec<String> {
+    config
+        .mesh
+        .classifier_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| {
+            !model.is_empty()
+                && (mock || forge_config::has_api_key(forge_config::provider_of(model)))
+        })
+        .map(str::to_string)
+        .into_iter()
+        .collect()
+}
+
 /// Apply the local, privacy-preserving outcome ledger to a freshly discovered catalog.  The Mesh
 /// itself enforces the sample gate and score bound; keeping this transformation at composition
 /// roots makes interactive runs, `forge mesh`, API requests and daemon sessions share one score.
@@ -287,18 +305,9 @@ pub(crate) fn build_provider_and_router(
                     .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
             )
         };
-        let mut classifier_candidates = Vec::new();
-        if let Some(model) = config.mesh.classifier_model.clone() {
-            classifier_candidates.push(model);
-        }
-        classifier_candidates.extend(heuristic.classifier_candidates());
-        if let Some(model) = config.model_for(TaskTier::Trivial).map(String::from) {
-            classifier_candidates.push(model);
-        }
-        classifier_candidates.dedup();
         Arc::new(LlmRouter::new(
             classify_provider,
-            classifier_candidates,
+            classifier_candidates(config, mock),
             heuristic,
         ))
     } else {
@@ -897,21 +906,12 @@ pub(crate) async fn mesh_explain(prompt: String, json: bool, smoke: bool) -> Res
         ClassifierKind::Llm | ClassifierKind::Hybrid => {
             // `forge mesh <prompt>` must describe the same LLM classification that a real turn
             // uses, rather than rendering a heuristic preview that can disagree with routing.
-            let mut candidates = Vec::new();
-            if let Some(model) = config.mesh.classifier_model.clone() {
-                candidates.push(model);
-            }
-            candidates.extend(router.classifier_candidates());
-            if let Some(model) = config.model_for(TaskTier::Trivial).map(String::from) {
-                candidates.push(model);
-            }
-            candidates.dedup();
             let classifier: Arc<dyn Router> = Arc::new(LlmRouter::new(
                 Arc::new(
                     DispatchProvider::new(false)
                         .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
                 ),
-                candidates,
+                classifier_candidates(&config, false),
                 HeuristicRouter::new(config.clone()).with_catalog(cat.clone()),
             ));
             let decision = classifier
@@ -1378,6 +1378,14 @@ pub(crate) async fn probe_models(
 #[cfg(test)]
 mod bridge_harness_tests {
     use super::*;
+
+    #[test]
+    fn default_classifier_uses_one_fixed_capable_model() {
+        assert_eq!(
+            classifier_candidates(&forge_config::Config::default(), true),
+            ["groq::llama-3.3-70b-versatile"]
+        );
+    }
 
     #[test]
     fn serve_dispatch_provider_uses_configured_bridge_mode() {

@@ -652,6 +652,8 @@ bias the routing tier up/down, re-running immediately if mid-turn · `Ctrl+O` ac
 forge run "add tests for the payment service"
 forge run --tui "debug the startup crash"      # with live TUI
 forge run --mode bypass "apply all the diffs"  # no prompts
+forge run --system "$ASSISTANT_CONTEXT" "How many tasks are due today?"
+# --system reaches the model but is excluded from mesh task classification
 ```
 
 ### Complete command map

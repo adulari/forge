@@ -30,7 +30,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use forge_mesh::{BudgetState, Router as MeshRouter};
+use forge_mesh::{BudgetState, Router as MeshRouter, RoutingContext};
 use forge_provider::{CompletionOptions, Provider, ResponseFormat, StreamEvent, ToolSpec};
 use forge_types::{EffortLevel, Message, ProjectContext, Role};
 use serde::Deserialize;
@@ -397,18 +397,63 @@ fn to_tool_specs(tools: &[serde_json::Value]) -> Vec<ToolSpec> {
         .collect()
 }
 
-/// The routing prompt: the concatenation of the user turns (what the mesh classifies difficulty on).
-fn routing_prompt(msgs: &[Message]) -> String {
-    let user: Vec<&str> = msgs
-        .iter()
-        .filter(|m| m.role == Role::User)
-        .map(|m| m.content.as_str())
-        .collect();
-    if user.is_empty() {
-        msgs.last().map(|m| m.content.clone()).unwrap_or_default()
-    } else {
-        user.join("\n")
+const ROUTING_TOOL_RESULT_CHARS: usize = 2_000;
+const ROUTING_TOOL_RESULTS: usize = 3;
+
+fn bounded_routing_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.trim().chars();
+    let mut bounded: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        bounded.push('…');
     }
+    bounded
+}
+
+fn structured_routing_text(text: &str) -> String {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Role-aware activity for mesh classification: the last user task plus bounded tool results
+/// produced after it. Standing system/developer instructions and older independent user turns are
+/// intentionally excluded.
+fn routing_prompt(msgs: &[Message]) -> String {
+    let Some(user_index) = msgs.iter().rposition(|message| message.role == Role::User) else {
+        return msgs
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Tool)
+            .map(|message| bounded_routing_text(&message.content, ROUTING_TOOL_RESULT_CHARS))
+            .unwrap_or_default();
+    };
+
+    // Remove paragraph separators after role extraction so the opt-in legacy
+    // `classifier_activity_focused` compatibility mode cannot re-split structured API input.
+    let mut prompt = structured_routing_text(&msgs[user_index].content);
+    for result in msgs[user_index + 1..]
+        .iter()
+        .filter(|message| message.role == Role::Tool)
+        .take(ROUTING_TOOL_RESULTS)
+    {
+        prompt.push_str("\nTOOL RESULT:\n");
+        prompt.push_str(&bounded_routing_text(
+            &result.content,
+            ROUTING_TOOL_RESULT_CHARS,
+        ));
+    }
+    prompt
+}
+
+/// Bounded prior user/assistant context for genuinely referential turns such as "continue".
+/// [`RoutingContext`] excludes ordinary system messages and only uses this history when the last
+/// user turn actually depends on it.
+fn routing_context(msgs: &[Message]) -> RoutingContext {
+    msgs.iter()
+        .rposition(|message| message.role == Role::User)
+        .map(|user_index| RoutingContext::from_messages(&msgs[..user_index]))
+        .unwrap_or_default()
 }
 
 /// `"auto"` / `"mesh"` / empty / missing ⇒ no pin (mesh routes). Anything else pins that model.
@@ -600,10 +645,11 @@ async fn chat_completions(
         // Unpinned ("auto"): ask the mesh which model to use and its ordered failover chain.
         None => {
             let prompt = routing_prompt(&messages);
+            let context = routing_context(&messages);
             let readiness = state.readiness();
             let router = state
                 .router
-                .route(
+                .route_contextual(
                     &prompt,
                     // This OpenAI-compatible surface doesn't parse `image_url` content parts yet
                     // (`to_forge_messages` is text-only), so there's no image signal to pass.
@@ -611,8 +657,10 @@ async fn chat_completions(
                     BudgetState::default(),
                     &readiness.health,
                     &readiness.quota,
+                    None,
                     effort,
                     &ProjectContext::default(),
+                    &context,
                 )
                 .await;
             std::iter::once(router.model.clone())
@@ -1160,6 +1208,33 @@ mod tests {
         assert_eq!(content_text(&v), "hello world");
         assert_eq!(content_text(&serde_json::json!("plain")), "plain");
         assert_eq!(content_text(&serde_json::Value::Null), "");
+    }
+
+    #[test]
+    fn routing_prompt_uses_last_user_task_and_current_tool_results_only() {
+        let messages = vec![
+            Message::system("comprehensive analyse review understand integrate audit ".repeat(500)),
+            Message::user("design a distributed scheduler and prove its correctness"),
+            Message::assistant("The architecture is complete."),
+            Message::user("How many tasks are due today?"),
+            Message::assistant_tool_calls(
+                "",
+                vec![forge_types::ToolCall {
+                    id: "call-1".into(),
+                    name: "list_tasks".into(),
+                    args: serde_json::json!({"due": "today"}),
+                }],
+            ),
+            Message::tool_result("call-1", "3 tasks are due today"),
+        ];
+
+        let prompt = routing_prompt(&messages);
+        assert_eq!(
+            prompt,
+            "How many tasks are due today?\nTOOL RESULT:\n3 tasks are due today"
+        );
+        assert!(!prompt.contains("comprehensive"));
+        assert!(!prompt.contains("distributed scheduler"));
     }
 
     #[test]
